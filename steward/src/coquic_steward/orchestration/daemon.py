@@ -24,7 +24,11 @@ from ..storage import (
     scheduler_state,
     store_is_idle_for_signal_fetch,
 )
-from ..signals import collect_signal_items, project_signals_from_items
+from ..signals import (
+    collect_signal_items,
+    project_signals_from_items,
+    revalidate_signal_items,
+)
 from .preflight import preflight_remote_push
 
 DAEMON_EVENT_TASK_ID = "daemon"
@@ -334,7 +338,21 @@ class StewardDaemon:
                 return
             turns += 1
             before_pending = {item.id for item in pending}
-            self._plan(result, pending)
+            actionable, stale_reasons = revalidate_signal_items(self.config, pending)
+            if stale_reasons:
+                superseded = self.store.supersede_signal_items(
+                    list(stale_reasons), planner_run_id="source-revalidation"
+                )
+                if superseded:
+                    self.store.add_event(
+                        DAEMON_EVENT_TASK_ID,
+                        "signals.superseded_stale",
+                        f"superseded {superseded} stale signal item(s)",
+                        {"count": superseded, "reasons": stale_reasons},
+                    )
+                    self._log(f"superseded stale signals count={superseded}")
+            if actionable:
+                self._plan(result, actionable)
             after_pending = {
                 item.id
                 for item in self.store.pending_signal_items(

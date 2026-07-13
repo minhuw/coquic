@@ -59,6 +59,33 @@ def signal_providers(names: tuple[str, ...]) -> list[SignalProvider]:
     return providers
 
 
+def revalidate_signal_items(
+    config: StewardConfig, items: list[SignalItem]
+) -> tuple[list[SignalItem], dict[str, str]]:
+    providers: dict[str, object] = {}
+    actionable: list[SignalItem] = []
+    stale_reasons: dict[str, str] = {}
+    for item in items:
+        provider_type = PROVIDER_TYPES.get(item.provider)
+        if provider_type is None:
+            actionable.append(item)
+            continue
+        provider = providers.setdefault(item.provider, provider_type())
+        stale_signal_reason = getattr(provider, "stale_signal_reason", None)
+        if not callable(stale_signal_reason):
+            actionable.append(item)
+            continue
+        try:
+            reason = stale_signal_reason(config, item)
+        except Exception:  # pragma: no cover - revalidation must fail open.
+            reason = None
+        if reason is None:
+            actionable.append(item)
+        else:
+            stale_reasons[item.id] = reason
+    return actionable, stale_reasons
+
+
 def gather_signals(
     config: StewardConfig,
     providers: list[SignalProvider] | None = None,

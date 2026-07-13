@@ -66,6 +66,71 @@ class GitHubActionsProvider:
     def collect(
         self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
     ) -> ProviderSignalResult:
+        latest, error = self._latest_run(config)
+        if error:
+            return ProviderSignalResult(error=error, summary=error)
+        if latest is None:
+            return ProviderSignalResult(summary=f"No {self._label()} runs found")
+        status = _str_or_none(latest.get("status"))
+        conclusion = _str_or_none(latest.get("conclusion"))
+        if status != "completed":
+            return ProviderSignalResult(
+                summary=f"Latest {self._label()} run is {status or 'not completed'}"
+            )
+        if conclusion != "failure":
+            return ProviderSignalResult(
+                summary=f"Latest {self._label()} run concluded {conclusion or 'unknown'}"
+            )
+        workflow_name = str(latest.get("workflowName") or "workflow")
+        run_id = str(latest.get("databaseId") or "")
+        if not run_id:
+            return ProviderSignalResult(summary=f"Latest {self._label()} run has no id")
+        item = _workflow_item(
+            provider=self.name,
+            repository=config.github_repository,
+            workflow_name=workflow_name,
+            run_id=run_id,
+            run_attempt=_int_or_none(latest.get("attempt")),
+            kind=self._signal_kind(workflow_name),
+            workflow_file=self.workflow_file,
+            worker_context=self._worker_context(),
+        )
+        return ProviderSignalResult(
+            items=[item],
+            summary=_summary_from_workflow_items(self._label(), [item]),
+        )
+
+    def stale_signal_reason(
+        self, config: StewardConfig, item: SignalItem
+    ) -> str | None:
+        selected_run_id = _str_or_none(item.payload.get("run_id"))
+        if selected_run_id is None:
+            return None
+        latest, error = self._latest_run(config)
+        if error:
+            return None
+        if latest is None:
+            return "workflow_run_missing"
+        latest_run_id = _str_or_none(latest.get("databaseId"))
+        if latest_run_id is None:
+            return None
+        if latest_run_id != selected_run_id:
+            return "superseded_by_newer_run"
+        selected_attempt = _int_or_none(item.payload.get("run_attempt"))
+        if selected_attempt is None:
+            selected_attempt = 1
+        latest_attempt = _int_or_none(latest.get("attempt"))
+        if latest_attempt != selected_attempt:
+            return "superseded_by_newer_run"
+        if _str_or_none(latest.get("status")) != "completed":
+            return "workflow_run_not_completed"
+        if _str_or_none(latest.get("conclusion")) != "failure":
+            return "workflow_run_no_longer_failed"
+        return None
+
+    def _latest_run(
+        self, config: StewardConfig
+    ) -> tuple[dict[str, Any] | None, str | None]:
         command = [
             "gh",
             "run",
@@ -75,45 +140,23 @@ class GitHubActionsProvider:
             "--branch",
             config.main_branch,
             "--limit",
-            str(max_items),
+            "1",
             "--json",
-            "databaseId,workflowName,conclusion",
+            "databaseId,workflowName,status,conclusion,attempt",
         ]
         if self.workflow_file:
-            command.extend(["--workflow", self.workflow_file, "--status", "failure"])
+            command.extend(["--workflow", self.workflow_file])
         runs = run_command(command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS)
         if not runs.ok:
-            return ProviderSignalResult(error=runs.stderr, summary=runs.stderr)
+            return None, runs.stderr
         try:
             decoded = json.loads(runs.stdout)
         except json.JSONDecodeError:
-            decoded = []
-        items: list[SignalItem] = []
-        for run in decoded:
-            if run.get("conclusion") != "failure":
-                continue
-            workflow_name = str(run.get("workflowName") or "workflow")
-            run_id = str(run.get("databaseId") or "")
-            if not run_id:
-                continue
-            items.append(
-                _workflow_item(
-                    provider=self.name,
-                    repository=config.github_repository,
-                    workflow_name=workflow_name,
-                    run_id=run_id,
-                    kind=self._signal_kind(workflow_name),
-                    workflow_file=self.workflow_file,
-                    worker_context=self._worker_context(),
-                )
-            )
-        if not items:
-            return ProviderSignalResult(summary=f"No failed {self._label()} runs found")
-        return ProviderSignalResult(
-            items=items,
-            summary=_summary_from_workflow_items(self._label(), items),
-            has_more=len(decoded) > len(items),
-        )
+            return None, "GitHub Actions response was not valid JSON"
+        if not isinstance(decoded, list):
+            return None, "GitHub Actions response was not a list"
+        latest = decoded[0] if decoded and isinstance(decoded[0], dict) else None
+        return latest, None
 
     def _signal_kind(self, workflow_name: str) -> str:
         return self.signal_kind
@@ -410,6 +453,40 @@ class GitHubFeatureIssuesProvider:
             }
         )
 
+    def stale_signal_reason(
+        self, config: StewardConfig, item: SignalItem
+    ) -> str | None:
+        issue_number = _int_or_none(item.payload.get("issue_number"))
+        if issue_number is None:
+            return None
+        command = [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "-R",
+            config.github_repository,
+            "--json",
+            "state,labels",
+        ]
+        result = run_command(
+            command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+        )
+        if not result.ok:
+            return None
+        try:
+            decoded = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        if str(decoded.get("state") or "").lower() != "open":
+            return "source_closed"
+        labels = set(_label_names(decoded.get("labels")))
+        if labels.isdisjoint(GITHUB_FEATURE_ISSUE_LABELS):
+            return "required_label_removed"
+        return None
+
 
 class CodeScanningProvider:
     name = "code-scanning"
@@ -440,6 +517,32 @@ class CodeScanningProvider:
             summary=_summary_from_items("CodeQL", items),
             has_more=len(payload) > len(items),
         )
+
+    def stale_signal_reason(
+        self, config: StewardConfig, item: SignalItem
+    ) -> str | None:
+        alert_number = _code_scanning_alert_number(item)
+        if alert_number is None:
+            return None
+        command = [
+            "gh",
+            "api",
+            "-X",
+            "GET",
+            f"repos/{config.github_repository}/code-scanning/alerts/{alert_number}",
+        ]
+        result = run_command(
+            command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+        )
+        if not result.ok:
+            return None
+        try:
+            decoded = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        return None if decoded.get("state") == "open" else "source_not_open"
 
 
 class CodacyProvider:
@@ -565,6 +668,7 @@ def _workflow_item(
     repository: str,
     workflow_name: str,
     run_id: str,
+    run_attempt: int | None,
     kind: str,
     workflow_file: str | None = None,
     worker_context: dict[str, Any] | None = None,
@@ -573,6 +677,7 @@ def _workflow_item(
     summary = f"{workflow_name} run {run_id} failed"
     payload = {
         "run_id": run_id,
+        "run_attempt": run_attempt,
         "workflow_name": workflow_name,
         "conclusion": "failure",
     }
@@ -593,6 +698,7 @@ def _workflow_item(
             }
         ],
         payload=payload,
+        identity_payload={"run_id": run_id, "run_attempt": run_attempt},
     )
 
 
@@ -687,6 +793,21 @@ def _code_scanning_item(item: object) -> SignalItem:
         links=_links("Open alert", data.get("html_url")),
         payload=payload,
     )
+
+
+def _code_scanning_alert_number(item: SignalItem) -> int | None:
+    number = _int_or_none(item.payload.get("alert_number"))
+    if number is not None:
+        return number
+    for link in item.links:
+        value = _str_or_none(link.get("url"))
+        if value is None:
+            continue
+        candidate = urlparse(value).path.rstrip("/").rsplit("/", 1)[-1]
+        number = _int_or_none(candidate)
+        if number is not None:
+            return number
+    return None
 
 
 def _codacy_item(item: object) -> SignalItem:

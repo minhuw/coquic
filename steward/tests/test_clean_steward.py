@@ -111,6 +111,7 @@ from coquic_steward.signals import (
     GitHubFeatureIssuesProvider,
     collect_signal_items,
     gather_signals,
+    revalidate_signal_items,
 )
 from coquic_steward.signals.collector import PROVIDER_TYPES
 from coquic_steward.storage import TaskStore, due_provider_names, scheduler_state
@@ -1412,6 +1413,50 @@ def test_store_supersedes_consumed_signal_items_without_tasks(
     assert item.status == SignalItemStatus.superseded
     assert item.planner_run_id == "planner-1"
     assert store.pending_signal_items() == []
+
+
+def test_daemon_supersedes_stale_signals_before_planning(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    signal, _ = store.add_signal_item(
+        SignalItem(
+            id="wi-codeql-42",
+            provider="code-scanning",
+            kind="code-scanning.alert",
+            fingerprint="wi-codeql-42",
+            title="CodeQL alert 42",
+            payload={"alert_number": 42},
+        )
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        lambda _config: [],
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.revalidate_signal_items",
+        lambda _config, _items: ([], {signal.id: "source_not_open"}),
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args: pytest.fail("planner should not run for stale signals"),
+    )
+
+    result = StewardDaemon(config, store).tick(dispatch=False)
+
+    assert result.enqueued == 0
+    saved = store.list_signal_items()[0]
+    assert saved.status == SignalItemStatus.superseded
+    assert saved.planner_run_id == "source-revalidation"
+    event = next(
+        event
+        for event in store.events(DAEMON_EVENT_TASK_ID)
+        if event.kind == "signals.superseded_stale"
+    )
+    assert event.data == {
+        "count": 1,
+        "reasons": {signal.id: "source_not_open"},
+    }
 
 
 def test_daemon_tick_recovers_stale_task_before_planning(
@@ -4780,7 +4825,9 @@ def test_collect_signal_items_fetches_github_actions_alias_by_name(
                     {
                         "databaseId": 789,
                         "workflowName": "Per-Commit CI",
+                        "status": "completed",
                         "conclusion": "failure",
+                        "attempt": 2,
                     }
                 ]
             ),
@@ -4799,13 +4846,247 @@ def test_collect_signal_items_fetches_github_actions_alias_by_name(
     args = captured["args"]
     assert isinstance(args, list)
     assert args[args.index("--workflow") + 1] == "ci.yml"
-    assert args[args.index("--status") + 1] == "failure"
+    assert "--status" not in args
+    assert args[args.index("--limit") + 1] == "1"
     assert captured["cwd"] == config.repo_root
     assert collection.provider == "github-actions:ci"
     assert collection.fetch.provider == "github-actions:ci"
     assert collection.fetch.item_count == 1
     assert collection.items[0].provider == "github-actions:ci"
     assert collection.items[0].kind == "github-actions.ci-failure"
+    assert collection.items[0].payload["run_attempt"] == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion"),
+    [("completed", "success"), ("in_progress", "")],
+)
+def test_github_actions_signal_ignores_latest_non_failure(
+    config: StewardConfig, monkeypatch, status: str, conclusion: str
+) -> None:
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 790,
+                        "workflowName": "Per-Commit CI",
+                        "status": status,
+                        "conclusion": conclusion,
+                        "attempt": 1,
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    signals = gather_signals(config, providers=[GitHubActionsCiProvider()])
+
+    assert signals.items == []
+
+
+def test_revalidate_signal_items_filters_stale_sources(
+    config: StewardConfig, monkeypatch
+) -> None:
+    workflow = SignalItem(
+        id="wi-ci-100",
+        provider="github-actions:ci",
+        kind="github-actions.ci-failure",
+        fingerprint="wi-ci-100",
+        title="CI run 100 failed",
+        payload={"run_id": "100", "run_attempt": 1},
+    )
+    current_workflow = workflow.model_copy(
+        update={
+            "id": "wi-ci-101",
+            "fingerprint": "wi-ci-101",
+            "title": "CI run 101 failed",
+            "payload": {"run_id": "101", "run_attempt": 1},
+        }
+    )
+    codeql = SignalItem(
+        id="wi-codeql-5954",
+        provider="code-scanning",
+        kind="code-scanning.alert",
+        fingerprint="wi-codeql-5954",
+        title="CodeQL alert 5954",
+        links=[
+            {
+                "label": "Open alert",
+                "url": "https://github.com/minhuw/coquic/security/code-scanning/5954",
+            }
+        ],
+    )
+    current_codeql = codeql.model_copy(
+        update={
+            "id": "wi-codeql-5955",
+            "fingerprint": "wi-codeql-5955",
+            "title": "CodeQL alert 5955",
+            "links": [
+                {
+                    "label": "Open alert",
+                    "url": "https://github.com/minhuw/coquic/security/code-scanning/5955",
+                }
+            ],
+        }
+    )
+    feature = SignalItem(
+        id="wi-feature-7",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-7",
+        title="Issue #7",
+        payload={"issue_number": 7},
+    )
+    current_feature = feature.model_copy(
+        update={
+            "id": "wi-feature-8",
+            "fingerprint": "wi-feature-8",
+            "title": "Issue #8",
+            "payload": {"issue_number": 8},
+        }
+    )
+    codacy = SignalItem(
+        id="wi-codacy-1",
+        provider="codacy",
+        kind="codacy.issue",
+        fingerprint="wi-codacy-1",
+        title="Codacy issue",
+    )
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        if args[:3] == ["gh", "run", "list"]:
+            payload = [
+                {
+                    "databaseId": 101,
+                    "workflowName": "Per-Commit CI",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "attempt": 1,
+                }
+            ]
+        elif args[:3] == ["gh", "api", "-X"]:
+            payload = {
+                "state": "open" if args[-1].endswith("/5955") else "fixed"
+            }
+        elif args[:3] == ["gh", "issue", "view"]:
+            payload = (
+                {"state": "OPEN", "labels": [{"name": "steward:feature"}]}
+                if args[3] == "8"
+                else {"state": "CLOSED", "labels": []}
+            )
+        else:  # pragma: no cover - protects the command contract.
+            raise AssertionError(args)
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    actionable, stale = revalidate_signal_items(
+        config,
+        [
+            workflow,
+            current_workflow,
+            codeql,
+            current_codeql,
+            feature,
+            current_feature,
+            codacy,
+        ],
+    )
+
+    assert actionable == [current_workflow, current_codeql, current_feature, codacy]
+    assert stale == {
+        workflow.id: "superseded_by_newer_run",
+        codeql.id: "source_not_open",
+        feature.id: "source_closed",
+    }
+
+
+def test_revalidate_signal_items_treats_legacy_workflow_as_attempt_one(
+    config: StewardConfig, monkeypatch
+) -> None:
+    item = SignalItem(
+        id="wi-ci-100",
+        provider="github-actions:ci",
+        kind="github-actions.ci-failure",
+        fingerprint="wi-ci-100",
+        title="CI run 100 failed",
+        payload={"run_id": "100"},
+    )
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 100,
+                        "workflowName": "Per-Commit CI",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "attempt": 2,
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    actionable, stale = revalidate_signal_items(config, [item])
+
+    assert actionable == []
+    assert stale == {item.id: "superseded_by_newer_run"}
+
+
+def test_revalidate_signal_items_fails_open(
+    config: StewardConfig, monkeypatch
+) -> None:
+    item = SignalItem(
+        id="wi-ci-100",
+        provider="github-actions:ci",
+        kind="github-actions.ci-failure",
+        fingerprint="wi-ci-100",
+        title="CI run 100 failed",
+        payload={"run_id": "100", "run_attempt": 1},
+    )
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=1,
+            stdout="",
+            stderr="GitHub unavailable",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command", fake_run_command
+    )
+
+    actionable, stale = revalidate_signal_items(config, [item])
+
+    assert actionable == [item]
+    assert stale == {}
 
 
 def test_github_actions_interop_signal_filters_workflow(
@@ -4826,7 +5107,9 @@ def test_github_actions_interop_signal_filters_workflow(
                     {
                         "databaseId": 123,
                         "workflowName": "Interop",
+                        "status": "completed",
                         "conclusion": "failure",
+                        "attempt": 1,
                     }
                 ]
             ),
@@ -4843,7 +5126,7 @@ def test_github_actions_interop_signal_filters_workflow(
     args = captured["args"]
     assert isinstance(args, list)
     assert args[args.index("--workflow") + 1] == "interop.yml"
-    assert args[args.index("--status") + 1] == "failure"
+    assert "--status" not in args
     assert captured["cwd"] == config.repo_root
     assert len(signals.items) == 1
     item = signals.items[0]
@@ -4851,6 +5134,7 @@ def test_github_actions_interop_signal_filters_workflow(
     assert item.id.startswith("wi-github-actions-interop-interop-failure-")
     assert item.kind == "github-actions.interop-failure"
     assert item.payload["run_id"] == "123"
+    assert item.payload["run_attempt"] == 1
     assert item.payload["workflow_name"] == "Interop"
     assert item.payload["conclusion"] == "failure"
     assert item.payload["workflow_file"] == "interop.yml"
@@ -4877,7 +5161,9 @@ def test_github_actions_ci_signal_includes_worker_context(
                     {
                         "databaseId": 789,
                         "workflowName": "Per-Commit CI",
+                        "status": "completed",
                         "conclusion": "failure",
+                        "attempt": 1,
                     }
                 ]
             ),
@@ -4921,7 +5207,9 @@ def test_github_actions_perf_signal_is_separate_provider(
                     {
                         "databaseId": 456,
                         "workflowName": "Perf",
+                        "status": "completed",
                         "conclusion": "failure",
+                        "attempt": 1,
                     }
                 ]
             ),

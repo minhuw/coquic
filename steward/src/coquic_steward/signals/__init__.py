@@ -2,6 +2,7 @@ from .collector import (
     collect_signal_items,
     gather_signals,
     project_signals_from_items,
+    revalidate_signal_items,
 )
 from .providers import (
     CodacyProvider,
@@ -34,4 +35,5 @@ __all__ = [
     "collect_signal_items",
     "gather_signals",
     "project_signals_from_items",
+    "revalidate_signal_items",
 ]

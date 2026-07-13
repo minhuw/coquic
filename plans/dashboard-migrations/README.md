@@ -77,6 +77,30 @@ publication, and a second dashboard remain out of scope.
 6. A shadow run proves monitoring parity before local web code is removed.
 7. Steward continues executing when the site or publisher is unavailable.
 
+## Release Evidence
+
+Local verification completed on 2026-07-13 after subplan 19:
+
+- Steward retained suite: `221 passed`; public schema and mirror contract:
+  `20 passed`.
+- `coquic-steward --help` and `daemon --once --no-plan --no-dispatch` ran with
+  a Node-free `PATH`; the daemon reported a headless cycle and exited cleanly.
+- Site typecheck, Vitest, and production build passed; Vitest reported `45`
+  tests and Playwright reported `8` desktop/mobile monitor flows.
+- `zig build` and `zig build test` passed; the native suite reported `1,757`
+  tests passed. `goodput` and `crosstraffic` were not run.
+- Schema generation check, local redaction scan, and repository pre-commit
+  hooks passed. No tracked local dashboard files or generated build state
+  remain in the worktree.
+
+The deployed target still needs a deployment update before the final migration
+gate can be closed: on 2026-07-13, `/steward/status` returned `404`, while the
+legacy `/steward/status.json` returned `200` with `schema_version = 2` and
+`cache-control: public, max-age=0`. No remote deployment state was changed by
+this local implementation. The follow-up is to deploy the committed site and
+mirror, then verify the canonical route, v3 payload, freshness headers, and
+redaction scan against the deployed files.
+
 ## Dependency Graph
 
 ```mermaid

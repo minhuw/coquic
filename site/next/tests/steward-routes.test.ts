@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET as getTaskData } from '@app/steward/data/tasks/[taskId]/route';
 import { GET as getArtifact } from '@app/steward/data/tasks/[taskId]/runs/[runName]/codex.jsonl/route';
 import { GET as getStatus } from '@app/steward/status/route';
+import { GET as getStatusAlias } from '@app/steward/status.json/route';
 import {
   parsePublicStewardStatus,
   readPublicStewardStatus,
@@ -65,7 +66,7 @@ describe('public Steward status route', () => {
     await expect(readPublicStewardStatus(root)).resolves.toEqual({ status: 'unavailable', reason });
   });
 
-  it('returns a no-store v3 response for a published fixture', async () => {
+  it('returns a no-store v3 response with explicit data headers', async () => {
     const root = await siteRoot();
     await writeFile(path.join(root, 'public', 'steward', 'status.json'), producerFixtureText('idle'), 'utf8');
     vi.spyOn(process, 'cwd').mockReturnValue(root);
@@ -73,7 +74,18 @@ describe('public Steward status route', () => {
     const response = await getStatus();
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     expect((await response.json()).schema_version).toBe(3);
+  });
+
+  it('redirects the legacy status file to the canonical route', async () => {
+    const response = await getStatusAlias();
+
+    expect(response.status).toBe(308);
+    expect(response.headers.get('location')).toBe('/steward/status');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
   });
 
   it('returns 503 with the reason when the publication is unavailable', async () => {
@@ -102,8 +114,17 @@ describe('public Steward data routes', () => {
       params: Promise.resolve({ taskId: `${task.id}.json` }),
     });
     expect(response.status).toBe(200);
-    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     await expect(response.text()).resolves.toBe(expected);
+
+    const replacement = '{"schema_version":3}\n';
+    await writeFile(path.join(taskDirectory, `${task.id}.json`), replacement, 'utf8');
+    const refreshed = await getTaskData(new Request('http://site.test'), {
+      params: Promise.resolve({ taskId: `${task.id}.json` }),
+    });
+    await expect(refreshed.text()).resolves.toBe(replacement);
   });
 
   it('rejects unsafe task ids and missing task files', async () => {
@@ -118,6 +139,9 @@ describe('public Steward data routes', () => {
     });
     expect(unsafe.status).toBe(404);
     expect(missing.status).toBe(404);
+    expect(await unsafe.text()).toBe(await missing.text());
+    expect(unsafe.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(missing.headers.get('x-content-type-options')).toBe('nosniff');
   });
 
   it('loads text-only codex JSONL artifacts and rejects unsafe run names', async () => {
@@ -133,7 +157,9 @@ describe('public Steward data routes', () => {
       params: Promise.resolve({ taskId, runName: 'worker-1' }),
     });
     expect(response.status).toBe(200);
-    expect(response.headers.get('content-type')).toContain('application/x-ndjson');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('content-type')).toBe('application/x-ndjson; charset=utf-8');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     await expect(response.text()).resolves.toBe(expected);
 
     const unsafe = await getArtifact(new Request('http://site.test'), {

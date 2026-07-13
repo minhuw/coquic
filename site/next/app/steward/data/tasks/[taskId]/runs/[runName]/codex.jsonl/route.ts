@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { stewardNdjsonHeaders, stewardNotFoundResponse } from '../../../../../../route-headers';
+
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
@@ -17,7 +19,7 @@ const taskIdPattern = /^task-\d{14}-[a-f0-9]{8}$/;
 export async function GET(_request: Request, context: RouteContext) {
   const { runName, taskId } = await context.params;
   if (!taskIdPattern.test(taskId) || !publicSegmentPattern.test(runName)) {
-    return Response.json({ detail: 'not found' }, { status: 404 });
+    return stewardNotFoundResponse();
   }
 
   const filePath = path.join(
@@ -35,12 +37,9 @@ export async function GET(_request: Request, context: RouteContext) {
   try {
     const body = await readFile(filePath);
     return new Response(body, {
-      headers: {
-        'cache-control': 'public, max-age=0',
-        'content-type': 'application/x-ndjson; charset=UTF-8',
-      },
+      headers: stewardNdjsonHeaders,
     });
   } catch {
-    return Response.json({ detail: 'not found' }, { status: 404 });
+    return stewardNotFoundResponse();
   }
 }

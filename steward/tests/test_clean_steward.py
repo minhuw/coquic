@@ -928,14 +928,17 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
     assert len(store.pending_signal_items()) == 1
 
 
-def test_store_requeues_planned_signal_after_recent_fetch_refresh(
-    config: StewardConfig,
+@pytest.mark.parametrize(
+    "terminal_status",
+    [TaskStatus.no_changes, TaskStatus.pushed, TaskStatus.succeeded],
+)
+def test_store_permanently_suppresses_resolved_planned_signal(
+    config: StewardConfig, terminal_status: TaskStatus
 ) -> None:
     store = TaskStore(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    store.finish_task(task.id, TaskStatus.pushed, "pushed")
     first, created = store.add_signal_item(
         SignalItem(
             id="wi-codacy-1",
@@ -949,13 +952,13 @@ def test_store_requeues_planned_signal_after_recent_fetch_refresh(
     store.mark_signal_items_planned(
         [first.id], planner_run_id="planner-1", task_id=task.id
     )
+    store.finish_task(task.id, terminal_status, str(terminal_status))
     old = utc_now() - timedelta(hours=25)
-    recent = utc_now() - timedelta(minutes=5)
     with Session(store.engine) as session, session.begin():
         row = session.get(SignalItemRow, first.id)
         assert row is not None
         row.planned_at = old.isoformat()
-        row.updated_at = recent.isoformat()
+        row.updated_at = old.isoformat()
 
     second, duplicate_created = store.add_signal_item(
         SignalItem(
@@ -967,11 +970,60 @@ def test_store_requeues_planned_signal_after_recent_fetch_refresh(
         )
     )
 
-    assert duplicate_created
-    assert second.id != first.id
-    assert [item.id for item in store.pending_signal_items()] == [second.id]
-    refreshed = store.list_signal_items(status=SignalItemStatus.planned)[0]
-    assert refreshed.id == first.id
+    assert not duplicate_created
+    assert second.id == first.id
+    assert store.pending_signal_items() == []
+    assert [item.id for item in store.list_signal_items()] == [first.id]
+
+
+def test_store_matches_legacy_workflow_signal_by_run_attempt(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.ci, worker=WorkerKind.ci_doctor, title="T", prompt="P")
+    )
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-ci-legacy",
+            provider="github-actions:ci",
+            kind="github-actions.ci-failure",
+            fingerprint="legacy-fingerprint",
+            title="CI run 100 failed",
+            payload={"run_id": "100"},
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=task.id
+    )
+    store.finish_task(task.id, TaskStatus.no_changes, "no changes")
+
+    same_attempt, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-ci-stable",
+            provider="github-actions:ci",
+            kind="github-actions.ci-failure",
+            fingerprint="stable-fingerprint",
+            title="CI run 100 failed",
+            payload={"run_id": "100", "run_attempt": 1},
+        )
+    )
+    next_attempt, next_attempt_created = store.add_signal_item(
+        SignalItem(
+            id="wi-ci-attempt-2",
+            provider="github-actions:ci",
+            kind="github-actions.ci-failure",
+            fingerprint="attempt-2-fingerprint",
+            title="CI run 100 failed",
+            payload={"run_id": "100", "run_attempt": 2},
+        )
+    )
+
+    assert not duplicate_created
+    assert same_attempt.id == first.id
+    assert next_attempt_created
+    assert next_attempt.id == "wi-ci-attempt-2"
 
 
 def test_store_requeues_planned_signal_after_configured_suppression(

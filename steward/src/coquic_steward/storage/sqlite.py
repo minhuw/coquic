@@ -287,15 +287,7 @@ class SQLiteTaskStore:
         saved_item: SignalItem | None = None
         was_created = False
         with Session(self.engine) as session, session.begin():
-            existing = session.scalar(
-                select(SignalItemRow)
-                .where(
-                    SignalItemRow.provider == item.provider,
-                    SignalItemRow.fingerprint == item.fingerprint,
-                )
-                .order_by(SignalItemRow.updated_at.desc())
-                .limit(1)
-            )
+            existing = _matching_signal_row(session, item)
             if existing is not None:
                 if _signal_row_suppressed(
                     session,
@@ -1234,13 +1226,60 @@ def _signal_row_suppressed(
         return False
     if row.planned_task_id:
         task = session.get(TaskRow, row.planned_task_id)
-        if task is not None and task.status in {
-            status.value for status in ACTIVE_STATUSES
-        }:
-            return True
+        if task is not None:
+            if task.status in {status.value for status in ACTIVE_STATUSES}:
+                return True
+            if task.status in {
+                TaskStatus.no_changes.value,
+                TaskStatus.pushed.value,
+                TaskStatus.succeeded.value,
+            }:
+                return True
     cutoff = utc_now() - timedelta(hours=suppression_hours)
     planned_at = row.planned_at or row.updated_at
     return datetime.fromisoformat(planned_at) >= cutoff
+
+
+def _matching_signal_row(session: Session, item: SignalItem) -> SignalItemRow | None:
+    exact = session.scalar(
+        select(SignalItemRow)
+        .where(
+            SignalItemRow.provider == item.provider,
+            SignalItemRow.fingerprint == item.fingerprint,
+        )
+        .order_by(SignalItemRow.updated_at.desc())
+        .limit(1)
+    )
+    if exact is not None:
+        return exact
+    if not item.provider.startswith("github-actions:"):
+        return None
+    run_id = str(item.payload.get("run_id") or "")
+    if not run_id:
+        return None
+    run_attempt = _workflow_run_attempt(item.payload)
+    rows = session.scalars(
+        select(SignalItemRow)
+        .where(SignalItemRow.provider == item.provider)
+        .order_by(SignalItemRow.updated_at.desc())
+    ).all()
+    for row in rows:
+        try:
+            payload = json.loads(row.payload_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("run_id") or "") != run_id:
+            continue
+        if _workflow_run_attempt(payload) == run_attempt:
+            return row
+    return None
+
+
+def _workflow_run_attempt(payload: dict[str, object]) -> int:
+    value = payload.get("run_attempt")
+    return value if isinstance(value, int) and value > 0 else 1
 
 
 def _signal_duplicate_blocks_requeue(

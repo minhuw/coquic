@@ -165,7 +165,23 @@ describe('public Steward data routes', () => {
     const unsafe = await getArtifact(new Request('http://site.test'), {
       params: Promise.resolve({ taskId, runName: '../../status' }),
     });
+    const encodedDot = await getArtifact(
+      new Request(`http://site.test/steward/data/tasks/${taskId}/runs/%2e%2e/codex.jsonl`),
+      { params: Promise.resolve({ taskId, runName: '..' }) },
+    );
     expect(unsafe.status).toBe(404);
+    expect(encodedDot.status).toBe(404);
+  });
+
+  it.each(['.', '..'])('rejects exact dot run segment %s', async (runName) => {
+    const response = await getArtifact(new Request('http://site.test'), {
+      params: Promise.resolve({
+        taskId: 'task-20260713115945-a1b2c3d4',
+        runName,
+      }),
+    });
+
+    expect(response.status).toBe(404);
   });
 
   it('returns 404 for an invalid task id before touching the filesystem', async () => {

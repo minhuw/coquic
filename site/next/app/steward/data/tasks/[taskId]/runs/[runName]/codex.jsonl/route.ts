@@ -16,23 +16,46 @@ type RouteContext = {
 const publicSegmentPattern = /^[A-Za-z0-9._-]+$/;
 const taskIdPattern = /^task-\d{14}-[a-f0-9]{8}$/;
 
-export async function GET(_request: Request, context: RouteContext) {
-  const { runName, taskId } = await context.params;
-  if (!taskIdPattern.test(taskId) || !publicSegmentPattern.test(runName)) {
-    return stewardNotFoundResponse();
-  }
+function isWithin(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative !== ''
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
 
-  const filePath = path.join(
-    process.env.COQUIC_STEWARD_PUBLIC_ROOT ?? process.cwd(),
+function resolvePublicArtifactPath(siteRoot: string, taskId: string, runName: string): string | null {
+  if (runName === '.' || runName === '..') return null;
+
+  const runsDirectory = path.resolve(
+    siteRoot,
     'public',
     'steward',
     'data',
     'tasks',
     taskId,
     'runs',
-    runName,
-    'codex.jsonl',
   );
+  const runDirectory = path.resolve(runsDirectory, runName);
+  const artifactPath = path.resolve(runDirectory, 'codex.jsonl');
+  if (!isWithin(runsDirectory, runDirectory) || !isWithin(runDirectory, artifactPath)) {
+    return null;
+  }
+  return artifactPath;
+}
+
+export async function GET(_request: Request, context: RouteContext) {
+  const { runName, taskId } = await context.params;
+  if (!taskIdPattern.test(taskId) || !publicSegmentPattern.test(runName)) {
+    return stewardNotFoundResponse();
+  }
+
+  const filePath = resolvePublicArtifactPath(
+    process.env.COQUIC_STEWARD_PUBLIC_ROOT ?? process.cwd(),
+    taskId,
+    runName,
+  );
+  if (!filePath) return stewardNotFoundResponse();
 
   try {
     const body = await readFile(filePath);

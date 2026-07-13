@@ -398,7 +398,7 @@ const STEWARD_MIRROR_TAB_COPY: Record<StewardMirrorTab, { description: string; e
 
 export async function loadPublicStewardState(): Promise<PublicStewardState | null> {
   try {
-    const response = await fetch('/steward/status.json', {
+    const response = await fetch('/steward/status', {
       cache: 'no-store',
     });
     if (!response.ok) return null;

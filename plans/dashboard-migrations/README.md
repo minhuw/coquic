@@ -4,10 +4,11 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00 through 16 are complete locally on
-`main`; Wave 6 is active for the independent Python web-runtime and local UI
-removals. The local shadow gate passes, and the exit report records the
-remaining deployed-target route follow-up. The capability matrix is checked in at
+Current execution state: subplans 00 through 19 are complete locally on
+`main`; Wave 8 is active for final verification and release evidence. The
+local shadow gate passes, and the exit report records the remaining deployed-
+target route follow-up. Round 2 is defined below; subplans 21 through 24 are
+ready to start. The capability matrix is checked in at
 [00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
 checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
@@ -55,6 +56,14 @@ control channel back to the daemon as part of this migration.
 - Replacing SQLite or the scheduler wakeup mechanism.
 - Reworking unrelated site pages or the Steward task execution pipeline.
 - Preserving every local debugger convenience when it is unsafe to publish.
+
+## Round 2 Scope
+
+Round 2 hardens the migrated architecture rather than reopening local dashboard
+functionality. It adds continuous deletion guards, explicit HTTP behavior for
+public artifacts, a repeatable schema-evolution gate, keyboard and accessibility
+coverage, and deployed synthetic checks. Remote control, private artifact
+publication, and a second dashboard remain out of scope.
 
 ## Migration Gates
 
@@ -127,7 +136,29 @@ flowchart LR
     P19 --> P20[20 Final verification]
 ```
 
-## Parallel Execution Waves
+## Round 2 Dependency Graph
+
+```mermaid
+flowchart LR
+    P19[19 Dependency cleanup] --> P21[21 Migration regression guard]
+    P14[14 Site monitor tests] --> P22[22 Artifact HTTP contract]
+    P05[05 Schema ownership] --> P23[23 Schema evolution gate]
+    P13[13 Producer contracts] --> P23
+    P14 --> P23
+    P14 --> P24[24 Accessibility and keyboard]
+
+    P20[20 Final verification] --> P25[25 Deployed synthetic monitor]
+    P22 --> P25
+    P23 --> P25
+
+    P21 --> P26[26 Round 2 verification]
+    P22 --> P26
+    P23 --> P26
+    P24 --> P26
+    P25 --> P26
+```
+
+## Round 1 Execution Waves
 
 | Wave | Subplans | Parallel Opportunity |
 | --- | --- | --- |
@@ -139,6 +170,15 @@ flowchart LR
 | 5 | 16 | Switch the daemon entrypoint only after the gate passes. |
 | 6 | 17, 18 | Python web removal and local Next.js removal can run in parallel branches. |
 | 7 | 19, then 20 | Consolidate dependencies, then perform final verification. |
+
+## Round 2 Execution Waves
+
+| Wave | Subplans | Start Condition |
+| --- | --- | --- |
+| A | 22, 23, 24 | Ready now; route, schema, and UI ownership are separate. |
+| B | 21 | Start after 19 removes the final web-only dependencies and documentation. |
+| C | 25 | Start after 20, 22, and 23 so the deployed check enforces the final contract. |
+| D | 26 | Start after all Round 2 implementation tasks pass their local gates. |
 
 ## Subplan Index
 
@@ -161,10 +201,25 @@ flowchart LR
 | 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | Complete |
 | 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | Complete |
 | 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | Complete |
-| 17 | [Remove Python web runtime](17-remove-python-web-runtime.md) | 16 | In Progress |
-| 18 | [Remove local Next.js UI](18-remove-local-next-ui.md) | 16 | In Progress |
-| 19 | [Dependency and documentation cleanup](19-dependency-cleanup.md) | 17, 18 | Pending |
-| 20 | [Final verification and release](20-final-verification.md) | 19 | Pending |
+| 17 | [Remove Python web runtime](17-remove-python-web-runtime.md) | 16 | Complete |
+| 18 | [Remove local Next.js UI](18-remove-local-next-ui.md) | 16 | Complete |
+| 19 | [Dependency and documentation cleanup](19-dependency-cleanup.md) | 17, 18 | Complete |
+| 20 | [Final verification and release](20-final-verification.md) | 19 | In Progress |
+
+## Round 2 Task Tracker
+
+This table is the live source of truth for Round 2. `Ready` means dependencies
+are complete and an implementer can claim the task. `Pending` means at least
+one dependency is still open.
+
+| ID | Subplan | Depends On | Status | Owner | Implementation Evidence |
+| --- | --- | --- | --- | --- | --- |
+| 21 | [Continuous migration regression guard](21-continuous-migration-guard.md) | 19 | Ready | Unassigned | - |
+| 22 | [Public artifact HTTP contract](22-public-artifact-http-contract.md) | 14 | Ready | Unassigned | - |
+| 23 | [Schema evolution and compatibility gate](23-schema-evolution-gate.md) | 05, 13, 14 | Ready | Unassigned | - |
+| 24 | [Monitor accessibility and keyboard behavior](24-monitor-accessibility-keyboard.md) | 14 | Ready | Unassigned | - |
+| 25 | [Deployed synthetic monitor](25-deployed-synthetic-monitor.md) | 20, 22, 23 | Pending | Unassigned | - |
+| 26 | [Round 2 verification](26-round-two-verification.md) | 21-25 | Pending | Unassigned | - |
 
 ## Coordination Rules
 
@@ -175,5 +230,9 @@ flowchart LR
   without coordinating through subplan 05.
 - Subplans 17 and 18 must not edit `steward/README.md`; subplan 19 owns the
   final dependency and documentation consolidation.
-- Update this index as subplans move through Pending, In Progress, Blocked, and
-  Complete.
+- Update this index as subplans move through Pending, Ready, In Progress,
+  Blocked, and Complete.
+- For Round 2, set the tracker owner and change `Ready` to `In Progress` before
+  implementation. Record commit and validation evidence only after checks pass.
+- Keep implementation commits self-contained and exclude
+  `plans/dashboard-migrations`; land task-tracking updates separately.

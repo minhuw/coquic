@@ -65,11 +65,18 @@ def status(limit: int = typer.Option(20, help="Maximum tasks to show.")) -> None
 @app.command()
 def run(task_id: str) -> None:
     store, config = _context()
-    ok = StewardExecutor(config, store).run_task(task_id)
-    task = store.get(task_id)
-    typer.echo(f"{'ran' if ok else 'failed'} {task.id} status={task.status}")
-    if not ok and TaskStatus(task.status) != TaskStatus.blocked:
-        raise typer.Exit(1)
+    try:
+        with acquire_daemon_lock(config):
+            ok = StewardExecutor(config, store).run_task(task_id)
+            task = store.get(task_id)
+            typer.echo(f"{'ran' if ok else 'failed'} {task.id} status={task.status}")
+            if not ok and TaskStatus(task.status) != TaskStatus.blocked:
+                raise typer.Exit(1)
+    except DaemonAlreadyRunning as exc:
+        typer.echo(f"Steward daemon already running: {exc.lock_path}", err=True)
+        if exc.owner:
+            typer.echo(exc.owner, err=True)
+        raise typer.Exit(1) from exc
 
 
 @app.command()

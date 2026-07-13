@@ -981,6 +981,274 @@
     color: var(--danger);
   }
 
+  .steward-planner-page {
+    display: grid;
+    max-width: 1080px;
+    margin: 24px auto 0;
+    gap: 16px;
+  }
+
+  .steward-planner-header {
+    display: flex;
+    min-width: 0;
+    align-items: end;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 14px;
+  }
+
+  .steward-planner-header h1 {
+    margin-top: 4px;
+    font-size: 26px;
+    font-weight: 650;
+  }
+
+  .steward-planner-header p {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .steward-planner-summary {
+    display: grid;
+    min-width: 150px;
+    gap: 4px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-align: right;
+  }
+
+  .steward-planner-summary strong {
+    color: var(--warning);
+    font-weight: 600;
+  }
+
+  .steward-planner-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .steward-planner-run {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--surface);
+    padding: 14px;
+  }
+
+  .steward-planner-run.planner-status-succeeded {
+    border-left-color: var(--ok);
+  }
+
+  .steward-planner-run.planner-status-failed,
+  .steward-planner-run.planner-status-invalid {
+    border-left-color: var(--danger);
+  }
+
+  .steward-planner-run-header {
+    display: flex;
+    min-width: 0;
+    align-items: start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .steward-planner-run-title {
+    display: flex;
+    min-width: 0;
+    align-items: start;
+    gap: 9px;
+  }
+
+  .steward-planner-run-title > svg {
+    flex: 0 0 auto;
+    margin-top: 2px;
+    color: var(--primary);
+  }
+
+  .planner-status-succeeded .steward-planner-run-title > svg {
+    color: var(--ok);
+  }
+
+  .planner-status-failed .steward-planner-run-title > svg,
+  .planner-status-invalid .steward-planner-run-title > svg {
+    color: var(--danger);
+  }
+
+  .steward-planner-run-title h2 {
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  .steward-planner-run-title p,
+  .steward-planner-diagnostic,
+  .steward-planner-signals {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .steward-planner-status {
+    flex: 0 0 auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 3px 7px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+
+  .steward-planner-metrics {
+    display: grid;
+    margin: 14px 0 0;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .steward-planner-metrics > div {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    padding: 9px 10px;
+    border-right: 1px solid var(--line);
+  }
+
+  .steward-planner-metrics > div:last-child {
+    border-right: 0;
+  }
+
+  .steward-planner-metrics dt {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .steward-planner-metrics dd {
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 650;
+  }
+
+  .steward-planner-artifacts {
+    margin-top: 12px;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .steward-planner-artifacts summary {
+    display: inline-flex;
+    min-height: 34px;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .steward-planner-artifact-grid {
+    display: grid;
+    margin-top: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .steward-planner-artifact {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    padding: 10px;
+  }
+
+  .steward-planner-artifact b,
+  .steward-planner-artifact span {
+    display: block;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .steward-planner-artifact b {
+    margin-bottom: 4px;
+    color: var(--ink);
+  }
+
+  .steward-planner-artifact pre {
+    max-height: 260px;
+    margin-top: 8px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .steward-planner-state {
+    display: grid;
+    min-height: 180px;
+    place-items: center;
+    align-content: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  .steward-planner-state svg {
+    color: var(--primary);
+  }
+
+  .steward-planner-state span {
+    max-width: 540px;
+    padding-inline: 16px;
+    font-size: 12px;
+  }
+
+  .steward-planner-pagination {
+    display: flex;
+    min-height: 42px;
+    align-items: center;
+    justify-content: end;
+    gap: 8px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .steward-planner-pagination button {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--ink);
+  }
+
+  .steward-planner-pagination button:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .steward-planner-pagination button:disabled {
+    opacity: 0.45;
+  }
+
   .steward-mirror-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.72fr);
@@ -8625,6 +8893,36 @@
 
     .steward-mirror-main {
       padding: 10px;
+    }
+
+    .steward-planner-page {
+      margin-top: 14px;
+    }
+
+    .steward-planner-header {
+      align-items: start;
+      flex-direction: column;
+    }
+
+    .steward-planner-summary {
+      min-width: 0;
+      text-align: left;
+    }
+
+    .steward-planner-metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .steward-planner-metrics > div:nth-child(2) {
+      border-right: 0;
+    }
+
+    .steward-planner-metrics > div:nth-child(-n + 2) {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .steward-planner-artifact-grid {
+      grid-template-columns: 1fr;
     }
 
     .steward-mirror-kpis,

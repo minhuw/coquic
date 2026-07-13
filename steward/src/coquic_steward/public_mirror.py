@@ -94,6 +94,7 @@ def public_mirror_payload(
     signal_items = store.list_signal_items(limit=signal_limit)
     fetch_runs = store.list_signal_fetch_runs(limit=fetch_limit)
     signals = project_signals_from_items(config, signal_items, fetches=fetch_runs)
+    planner_runs, planner_runs_truncated = _public_planner_runs(config, store)
     return {
         "schema_version": PUBLIC_MIRROR_SCHEMA_VERSION,
         "compatibility_state": "compatible",
@@ -124,6 +125,8 @@ def public_mirror_payload(
             "fetches": [_public_fetch_run(config, run) for run in fetch_runs],
         },
         "scheduler": _public_scheduler_state(scheduler_state(config, store)),
+        "planner_runs_truncated": planner_runs_truncated,
+        "planner_runs": planner_runs,
         "integration": _integration_summary(config, tasks),
     }
 
@@ -1454,6 +1457,132 @@ def _public_configuration(config: StewardConfig) -> dict[str, object]:
     }
 
 
+def _public_planner_runs(
+    config: StewardConfig, store: TaskStore
+) -> tuple[list[dict[str, object]], bool]:
+    run_ids = {
+        path.name
+        for root in (config.prompts_dir, config.transcripts_dir)
+        for path in root.glob("planner-task-*")
+        if path.is_dir() and re.fullmatch(r"planner-task-\d{14}-[a-f0-9]{8}", path.name)
+    }
+    finished_by_id: dict[str, Any] = {}
+    for event in store.events("daemon", limit=400):
+        if event.kind != "planner.finished":
+            continue
+        run_id = event.data.get("run_id")
+        if isinstance(run_id, str) and re.fullmatch(
+            r"planner-task-\d{14}-[a-f0-9]{8}", run_id
+        ):
+            finished_by_id[run_id] = event
+            run_ids.add(run_id)
+
+    records: list[dict[str, object]] = []
+    for run_id in run_ids:
+        prompt_path = config.prompts_dir / run_id / "planner.md"
+        transcript_path = config.transcripts_dir / run_id / "planner" / "codex.jsonl"
+        last_message_path = config.transcripts_dir / run_id / "planner" / "last-message.md"
+        event = finished_by_id.get(run_id)
+        data = event.data if event is not None else {}
+        completed = data.get("completed") if isinstance(data.get("completed"), bool) else None
+        exit_code = data.get("exit_code") if isinstance(data.get("exit_code"), int) else None
+        status = _planner_public_status(completed, exit_code)
+        diagnostics = _planner_public_diagnostics(
+            config,
+            transcript_path,
+            last_message_path,
+            completed=completed,
+            exit_code=exit_code,
+        )
+        started_at = _path_timestamp(prompt_path, transcript_path)
+        completed_at = _path_timestamp(transcript_path, last_message_path) if completed is not None else None
+        records.append(
+            {
+                "id": run_id,
+                "status": status,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "accepted_count": _nonnegative_int(data.get("accepted_count")),
+                "proposed_count": _nonnegative_int(data.get("proposed_count")),
+                "consumed_signal_ids": [
+                    item
+                    for item in data.get("consumed_item_ids", [])[:40]
+                    if isinstance(item, str)
+                ],
+                "diagnostics": diagnostics,
+                "artifacts": {
+                    "transcript": _public_text_artifact(
+                        config,
+                        transcript_path,
+                        root=config.state_dir,
+                        max_bytes=MIRROR_TRANSCRIPT_BYTES,
+                        line_aligned=True,
+                        transcript=True,
+                    ),
+                    "last_message": _public_text_artifact(
+                        config,
+                        last_message_path,
+                        root=config.state_dir,
+                        max_bytes=MIRROR_LAST_MESSAGE_BYTES,
+                        line_aligned=False,
+                    ),
+                },
+            }
+        )
+    records.sort(key=lambda item: str(item["started_at"]), reverse=True)
+    return records[:40], len(records) > 40
+
+
+def _planner_public_status(completed: bool | None, exit_code: int | None) -> str:
+    if completed is None:
+        return "running"
+    if completed and exit_code == 0:
+        return "succeeded"
+    return "failed"
+
+
+def _planner_public_diagnostics(
+    config: StewardConfig,
+    transcript_path: Path,
+    last_message_path: Path,
+    *,
+    completed: bool | None,
+    exit_code: int | None,
+) -> dict[str, object]:
+    if completed is True and exit_code == 0:
+        category = "none"
+    elif exit_code == 124:
+        category = "timeout"
+    elif completed is False:
+        category = "execution_error"
+    else:
+        category = "invalid_output"
+    diagnostics = diagnostics_for_paths(
+        transcript_path=transcript_path,
+        last_message_path=last_message_path,
+        exit_code=exit_code,
+        completed=completed,
+    ).model_dump(mode="json")
+    return {
+        "summary": _public_text(config, str(diagnostics.get("summary") or "")),
+        "exit_code": exit_code,
+        "error_category": category,
+        "last_message_present": last_message_path.is_file(),
+    }
+
+
+def _path_timestamp(*paths: Path) -> str:
+    existing = [path for path in paths if path.is_file()]
+    timestamp = max((path.stat().st_mtime for path in existing), default=0)
+    if timestamp <= 0:
+        return _public_timestamp(utc_now())
+    return _public_timestamp(datetime.fromtimestamp(timestamp, timezone.utc))
+
+
+def _nonnegative_int(value: object) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
 def _integration_summary(
     config: StewardConfig, tasks: list[TaskRecord]
 ) -> dict[str, object]:
@@ -1716,7 +1845,7 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
 
 def _looks_like_link(key: str) -> bool:
     lowered = key.lower()
-    return lowered in {"url", "href", "link", "detail_url", "detail_json", "commit_url"}
+    return lowered in {"url", "href", "link", "detail_url", "detail_json", "commit_url"} or lowered.endswith("_url")
 
 
 def _safe_public_link(config: StewardConfig, value: str) -> str | None:

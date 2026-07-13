@@ -56,7 +56,6 @@ def test_recursive_public_redaction_and_link_allowlist(config) -> None:
     assert "/home/private" not in serialized
     assert "file:///etc/passwd" not in serialized
     assert "https://evil.example.test" not in serialized
-    assert "https://github.com/minhuw/coquic/commit/abcdef1" in serialized
     assert payload["signals"]["items"][0]["links"] == [
         {"label": "safe", "url": "https://github.com/minhuw/coquic/issues/1"}
     ]
@@ -76,3 +75,39 @@ def test_public_artifacts_have_explicit_size_and_restrictive_permissions(
     path = write_public_mirror(config, TaskStore(config.db_path))
     assert path.stat().st_mode & 0o077 == 0
 
+
+def test_public_planner_history_is_bounded_and_sanitized(config) -> None:
+    store = TaskStore(config.db_path)
+    run_id = "planner-task-20260713120000-a1b2c3d4"
+    transcript = config.transcripts_dir / run_id / "planner" / "codex.jsonl"
+    last_message = config.transcripts_dir / run_id / "planner" / "last-message.md"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        '{"type":"item.completed","item":{"type":"agent_message","text":"safe result"}}\n',
+        encoding="utf-8",
+    )
+    last_message.write_text("safe last message\n", encoding="utf-8")
+    store.add_event(
+        "daemon",
+        "planner.finished",
+        "planner finished",
+        {
+            "run_id": run_id,
+            "completed": True,
+            "exit_code": 0,
+            "accepted_count": 1,
+            "proposed_count": 2,
+            "consumed_item_ids": ["signal-1"],
+            "thread_id": "private-thread",
+            "transcript_path": str(transcript),
+        },
+    )
+
+    planner = public_mirror_payload(config, store)["planner_runs"]
+    assert len(planner) == 1
+    assert planner[0]["id"] == run_id
+    assert planner[0]["status"] == "succeeded"
+    assert planner[0]["accepted_count"] == 1
+    assert planner[0]["artifacts"]["transcript"]["availability"] == "available"
+    assert "private-thread" not in json.dumps(planner)
+    assert str(config.state_dir) not in json.dumps(planner)

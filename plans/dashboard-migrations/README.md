@@ -4,9 +4,9 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00 through 11 are complete on `main` except
-for no outstanding dependency in that range; Wave 3 is active for operator
-docs, producer contract tests, and site monitor tests. The capability matrix is checked in at
+Current execution state: subplans 00 through 12 are complete on `main`; Wave 3
+remains active for producer contract tests and site monitor tests. The
+capability matrix is checked in at
 [00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
 checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
@@ -155,7 +155,7 @@ flowchart LR
 | 09 | [Public data hardening](09-public-data-hardening.md) | 01 | Complete |
 | 10 | [CLI scheduler tick](10-cli-scheduler-tick.md) | 00 | Complete |
 | 11 | [CLI direct-run locking](11-cli-run-locking.md) | 00 | Complete |
-| 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | In Progress |
+| 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | Complete |
 | 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | In Progress |
 | 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | In Progress |
 | 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | Pending |

@@ -1,5 +1,7 @@
 [steward]
-daemon_poll_interval_sec = 300
+# The daemon checks SQLite for CLI wakeups at this interval. Signal polling
+# intervals are configured per provider below.
+scheduler_wait_interval_sec = 1.0
 codex_bin = "codex"
 # codex_model = "gpt-5.6-terra"
 # codex_reasoning_effort = "medium"
@@ -9,6 +11,24 @@ local_only = false
 git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"
+
+# The daemon writes a sanitized v3 snapshot locally and publishes it to the
+# read-only site with an atomic SSH/rsync mirror. Keep transcript_mode=redacted
+# for any public target; raw transcripts are rejected when publish=true.
+[steward.public_mirror]
+enabled = true
+publish = false
+output_path = "public/steward/status.json"
+transcript_mode = "redacted"
+remote_user = "minhuw"
+remote_host = "coquic.minhuw.dev"
+remote_port = 22
+remote_path = "/opt/coquic-demo/current/app/public/steward/status.json"
+ssh_key_path = "~/.ssh/coquic-demo.key"
+known_hosts_path = "~/.ssh/known_hosts"
+connect_timeout_seconds = 10
+retry_initial_seconds = 30
+retry_max_seconds = 300
 
 # Stage settings override the global model/reasoning settings above. Omitted
 # values fall back independently to codex_model and codex_reasoning_effort.
@@ -51,6 +71,8 @@ max_active_tasks = 4
 max_main_pushes_per_day = 10
 plan_timeout_minutes = 30
 worker_timeout_minutes = 120
+review_timeout_minutes = 20
+validation_timeout_minutes = 30
 
 [steward.path_policy]
 # Frozen paths are repository-relative. Matching patches are blocked before

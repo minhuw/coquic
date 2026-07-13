@@ -9033,6 +9033,7 @@
     .steward-mirror-nav-tabs {
       display: flex;
       min-width: 0;
+      flex: 0 0 auto;
       gap: 4px;
     }
 

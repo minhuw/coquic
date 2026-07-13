@@ -99,6 +99,9 @@ test.describe('Steward public monitor', () => {
     ]) {
       await page.goto(route);
       await expect(page.locator(stewardViewSelector(page))).toBeVisible();
+      if (route.startsWith('/steward/tasks/')) {
+        await expect(page.getByRole('heading', { name: 'Implement dashboard contract' })).toBeVisible();
+      }
       await expectNoSeriousAccessibilityViolations(page);
     }
   });

@@ -1481,7 +1481,7 @@ function TaskFlowPanel({ flow }: { flow: PublicTaskFlow }) {
   return (
     <section className="panel task-flow-panel" aria-label="Task iteration flow">
       <PanelTitle icon={<GitBranch size={17} />} title="Current Iteration" />
-      <div className="pipeline-graph" aria-label="Task pipeline graph">
+      <div className="pipeline-graph" aria-label="Task pipeline graph" role="region" tabIndex={0}>
         <ReactFlow
           defaultViewport={{ x: 34, y: 18, zoom: 1 }}
           edges={graph.edges}
@@ -1579,7 +1579,6 @@ function publicPipelineGraph(flow: PublicTaskFlow): { nodes: PublicPipelineNode[
       focusable: false,
       connectable: false,
       className: 'pipeline-bound-node',
-      ariaLabel: 'Pipeline fit boundary',
     })),
     ...flow.stages.map((stage) => ({
       id: stage.key,
@@ -2597,12 +2596,12 @@ function publicEventStage(event?: PublicStewardEvent): PublicTaskStageKey | null
 function stageIcon(state: PublicTaskStageState) {
   if (state === 'complete') return <CheckCircle2 size={15} />;
   if (state === 'blocked') return <XCircle size={15} />;
-  if (state === 'active') return <span className="live-spinner" aria-label="active" />;
+  if (state === 'active') return <span className="live-spinner" aria-hidden="true" />;
   return <Circle size={12} />;
 }
 
 function Spinner() {
-  return <span className="live-spinner" aria-label="active" />;
+  return <span className="live-spinner" aria-hidden="true" />;
 }
 
 function defaultAttemptTab(stage: PublicTaskStageKey): PublicAttemptTab {

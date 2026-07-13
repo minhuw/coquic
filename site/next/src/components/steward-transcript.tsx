@@ -90,7 +90,7 @@ export function TranscriptView({
 }) {
   if (!text) {
     return (
-      <div className="chat-transcript" aria-label="Agent transcript">
+      <div className="chat-transcript" aria-label="Agent transcript" tabIndex={0}>
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
         <div className="empty-state">No transcript captured for the selected task.</div>
       </div>
@@ -100,7 +100,7 @@ export function TranscriptView({
   const records = parseCodexTranscriptText(text);
   if (!records.length) {
     return (
-      <div className="chat-transcript" aria-label="Agent transcript">
+      <div className="chat-transcript" aria-label="Agent transcript" tabIndex={0}>
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
         {promptParts.boilerplate && <CollapsedPrompt text={promptParts.boilerplate} />}
         {promptParts.visible && (
@@ -119,7 +119,7 @@ export function TranscriptView({
     );
   }
   return (
-    <div className="chat-transcript" aria-label="Agent transcript">
+    <div className="chat-transcript" aria-label="Agent transcript" tabIndex={0}>
       <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
       {promptParts.boilerplate && <CollapsedPrompt text={promptParts.boilerplate} />}
       {promptParts.visible && (

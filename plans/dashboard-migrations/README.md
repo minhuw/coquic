@@ -106,7 +106,9 @@ dashboard at `200`, `/steward/status` at `404`, and the legacy
 `/steward/status.json` at `200` with `schema_version = 2`; no remote deployment
 state was changed. The follow-up is to deploy the committed site and mirror,
 then verify the canonical route, v3 payload, freshness headers, task artifact,
-latency, and redaction scan against the deployed files.
+latency, and redaction scan against the deployed files. The latest probe at
+05:28 UTC measured dashboard latency at `1700.866 ms` and the failed canonical
+status request at `2443.502 ms`, over the `2000 ms` threshold.
 
 ## Round 2 Release Evidence
 
@@ -130,8 +132,10 @@ artifact-path containment and mixed future timestamps are now fixed:
   for the final implementation.
 - The production synthetic command was run read-only with
   `--base-url https://coquic.minhuw.dev`; the result was sanitized and showed
-  dashboard success plus the expected canonical-route `404`. No secret or
-  response body was printed, and no daemon or remote deployment state changed.
+  dashboard success plus the expected canonical-route `404`; the latest run
+  measured `1700.866 ms` dashboard latency and `2443.502 ms` status latency.
+  No secret or response body was printed, and no daemon or remote deployment
+  state changed.
 
 Subplan 26 is blocked until subplans 20 and 25 complete. After deployment,
 rerun the synthetic command and archive its JSON artifact, then record the
@@ -140,14 +144,15 @@ result here before closing the gate.
 
 ## Latest Progress Review
 
-Review snapshot: 2026-07-13 after `50e7ed45`; the only worktree change is this
-tracker update.
+Review snapshot: 2026-07-13 05:28 UTC after `0951b00d`; the only worktree
+change is this tracker update.
 
 - A fresh read-only production synthetic run returned `200` for the dashboard;
-  dashboard headers, privacy, and latency passed (`1412.857 ms` against the
-  `2000 ms` limit).
-- The canonical `/steward/status` route still returned `404`, so schema,
-  freshness, privacy, and task-artifact checks could not run against production.
+  dashboard headers and privacy passed; dashboard latency was `1700.866 ms`
+  against the `2000 ms` limit.
+- The canonical `/steward/status` route still returned `404` and its request
+  took `2443.502 ms`, so status headers, schema, freshness, privacy, and
+  task-artifact checks could not run against production.
 - Subplan 22 is complete locally in `d9f2cd81`; exact dot segments, encoded dot
   requests, and resolved artifact containment are covered by route tests.
 - Subplan 25's mixed future-clock case is complete locally in `50e7ed45`; each

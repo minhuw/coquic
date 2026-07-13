@@ -36,8 +36,9 @@ from .core.models import (
 from .core.subprocesses import CommandResult, run_command
 from .signals import project_signals_from_items
 from .storage import TaskStore, scheduler_state
+from .public_schema import PUBLIC_STEWARD_SCHEMA_VERSION
 
-PUBLIC_MIRROR_SCHEMA_VERSION = 3
+PUBLIC_MIRROR_SCHEMA_VERSION = PUBLIC_STEWARD_SCHEMA_VERSION
 PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 2
 DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80

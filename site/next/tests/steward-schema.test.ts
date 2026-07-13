@@ -6,7 +6,13 @@ import {
   PUBLIC_STEWARD_SCHEMA_VERSION,
 } from '@/lib/steward-schema';
 
-import { PRODUCER_FIXTURE_NAMES, producerFixture, producerFixtureText } from './fixtures';
+import {
+  COMPATIBILITY_FIXTURE_NAMES,
+  compatibilityFixture,
+  PRODUCER_FIXTURE_NAMES,
+  producerFixture,
+  producerFixtureText,
+} from './fixtures';
 
 describe('public Steward schema v3 decoder', () => {
   it.each(PRODUCER_FIXTURE_NAMES)('accepts the producer %s snapshot', (name) => {
@@ -40,5 +46,11 @@ describe('public Steward schema v3 decoder', () => {
 
     expect(decoded.ok).toBe(true);
     if (decoded.ok) expect((decoded.data as Record<string, unknown>).future_field).toEqual({ retained: true });
+  });
+
+  it.each(COMPATIBILITY_FIXTURE_NAMES)('matches the shared %s compatibility fixture', (name) => {
+    const fixture = compatibilityFixture(name);
+    const decoded = decodePublicStewardJson(fixture.text);
+    expect(decoded.ok ? 'compatible' : decoded.reason).toBe(fixture.expected);
   });
 });

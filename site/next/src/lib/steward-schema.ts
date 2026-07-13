@@ -1,6 +1,9 @@
-import type { PublicStewardMonitor } from '@/generated/steward-public';
+import {
+  PUBLIC_STEWARD_SCHEMA_VERSION,
+  type PublicStewardMonitor,
+} from '@/generated/steward-public';
 
-export const PUBLIC_STEWARD_SCHEMA_VERSION = 3;
+export { PUBLIC_STEWARD_SCHEMA_VERSION } from '@/generated/steward-public';
 
 export type StewardSchemaDecode =
   | { ok: true; data: PublicStewardMonitor }

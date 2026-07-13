@@ -16,6 +16,14 @@ def load_schema() -> dict[str, Any]:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+def load_public_monitor_schema_version() -> int:
+    properties = load_schema().get("properties", {})
+    version = properties.get("schema_version", {}).get("const")
+    if type(version) is not int or version < 1:
+        raise SchemaValidationError("schema_version must have a positive integer const")
+    return version
+
+
 def validate_public_monitor(value: object) -> None:
     schema = load_schema()
     _validate(value, schema, schema, "$", set())

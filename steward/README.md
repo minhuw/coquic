@@ -337,6 +337,15 @@ Do not hand-edit a production snapshot. Deploy a site build that understands
 the producer schema, or keep the producer and site on the same migration
 revision until both sides are compatible.
 
+Schema changes start at `steward/schema/public-monitor-v3.json`. Additive
+fields may remain on v3 because the producer and site tolerate unknown fields.
+Removing or changing a required field requires a new schema version. Run
+`uv run --project steward python steward/schema/generate_types.py` to refresh
+the generated Python and TypeScript contract constants and types, then update
+the compatibility fixtures and run the producer and site tests. Deploy the
+site decoder before publishing a breaking producer version; rollback means
+restoring the previous producer snapshot until the compatible site is live.
+
 ### Public data contains unexpected text
 
 Use `transcript_mode = "redacted"` or `"none"`; never publish `raw`. Public

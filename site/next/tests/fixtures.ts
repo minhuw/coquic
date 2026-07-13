@@ -5,6 +5,13 @@ import type { PublicArtifact, PublicPlannerRun, PublicStewardMonitor } from '../
 import type { PublicStewardState, PublicStewardTaskDetail } from '../src/components/steward-public';
 
 const repositoryRoot = path.resolve(process.cwd(), '../..');
+const compatibilityFixturePath = path.join(
+  repositoryRoot,
+  'steward',
+  'schema',
+  'fixtures',
+  'public-monitor-compatibility.json',
+);
 export const monitorFixtureDirectory = path.join(
   repositoryRoot,
   'steward',
@@ -21,6 +28,23 @@ export function loadMonitorFixture(name: string): Record<string, unknown> {
 
 export function loadMonitorFixtureText(name: string): string {
   return readFileSync(path.join(monitorFixtureDirectory, `${name}.json`), 'utf8');
+}
+
+export const COMPATIBILITY_FIXTURE_NAMES = ['previous', 'current', 'future', 'malformed', 'additive'] as const;
+export type CompatibilityFixtureName = (typeof COMPATIBILITY_FIXTURE_NAMES)[number];
+
+export function compatibilityFixture(name: CompatibilityFixtureName): { expected: string; text: string } {
+  const manifest = JSON.parse(readFileSync(compatibilityFixturePath, 'utf8')) as {
+    base_fixture: string;
+    cases: Record<string, { expected: string; fields?: Record<string, unknown>; schema_version?: number; text?: string }>;
+  };
+  const fixture = manifest.cases[name];
+  if (!fixture) throw new Error(`missing compatibility fixture ${name}`);
+  if (fixture.text !== undefined) return { expected: fixture.expected, text: fixture.text };
+  const base = JSON.parse(readFileSync(path.join(repositoryRoot, 'steward', 'schema', 'fixtures', manifest.base_fixture), 'utf8')) as Record<string, unknown>;
+  if (fixture.schema_version !== undefined) base.schema_version = fixture.schema_version;
+  Object.assign(base, fixture.fields);
+  return { expected: fixture.expected, text: JSON.stringify(base) };
 }
 
 export const PRODUCER_FIXTURE_NAMES = [

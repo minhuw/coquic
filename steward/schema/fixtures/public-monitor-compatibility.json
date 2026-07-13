@@ -1,0 +1,29 @@
+{
+  "base_fixture": "public-monitor-v3/idle.json",
+  "cases": {
+    "previous": {
+      "schema_version": 2,
+      "expected": "incompatible"
+    },
+    "current": {
+      "schema_version": 3,
+      "expected": "compatible"
+    },
+    "future": {
+      "schema_version": 4,
+      "expected": "incompatible"
+    },
+    "malformed": {
+      "text": "{",
+      "expected": "malformed"
+    },
+    "additive": {
+      "fields": {
+        "future_field": {
+          "retained": true
+        }
+      },
+      "expected": "compatible"
+    }
+  }
+}

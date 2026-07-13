@@ -4,13 +4,13 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00 through 19 are complete locally on
-`main`; Wave 8 is active for final verification and release evidence. The
-local shadow gate passes, and the exit report records the remaining deployed-
-target route follow-up. Round 2 is defined below; subplans 21 through 24 are
-ready to start. The capability matrix is checked in at
-[00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
-checked in at `steward/schema/fixtures/public-monitor-v3/`.
+Current execution state: subplans 00 through 19 and Round 2 subplans 21
+through 25 are complete locally on `main`. Subplans 20 and 26 remain in
+progress because the deployed target has not yet received the committed v3
+site and mirror. The local release gate passes, and the synthetic monitor now
+records that external deployment gap without mutating the target. The
+capability matrix is checked in at [00-capability-matrix.md](00-capability-matrix.md),
+and the v3 contract is checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
 ## Objective
 
@@ -101,12 +101,42 @@ Local verification completed on 2026-07-13 after subplan 19:
   stop public generation and upload without stopping local task execution.
 
 The deployed target still needs a deployment update before the final migration
-gate can be closed: on 2026-07-13, `/steward/status` returned `404`, while the
-legacy `/steward/status.json` returned `200` with `schema_version = 2` and
-`cache-control: public, max-age=0`. No remote deployment state was changed by
-this local implementation. The follow-up is to deploy the committed site and
-mirror, then verify the canonical route, v3 payload, freshness headers, and
-redaction scan against the deployed files.
+gate can be closed. The read-only synthetic run on 2026-07-13 observed the
+dashboard at `200`, `/steward/status` at `404`, and the legacy
+`/steward/status.json` at `200` with `schema_version = 2`; no remote deployment
+state was changed. The follow-up is to deploy the committed site and mirror,
+then verify the canonical route, v3 payload, freshness headers, task artifact,
+latency, and redaction scan against the deployed files.
+
+## Round 2 Release Evidence
+
+Local verification completed on 2026-07-13 for subplans 21 through 25 and the
+local portion of subplan 26:
+
+- Implementation commits: `15042338`, `e258a6cd`, `efa51579`, `33d6c7bc`,
+  `c45627b6`, and `0d340fc8`. The last commit adds the deployed synthetic
+  monitor, fixture server tests, scheduled CI, post-deploy CI, and the
+  operator runbook.
+- `nix develop -c uv run --project steward python -m pytest steward/tests -q`:
+  `287 passed`, including `9` synthetic monitor fixture tests.
+- `nix develop -c uv run --project steward python steward/schema/generate_types.py --check`,
+  the migration guard, and the isolated no-Node smoke test passed.
+- In `site/next`: `npm run typecheck`, `npm test -- --reporter=dot`,
+  `npm run build`, and `npm run test:e2e -- --reporter=line` passed; Vitest
+  reported `53 passed` and Playwright reported `12 passed` across desktop and
+  mobile projects, including serious axe checks and keyboard-only flows.
+- `nix develop -c zig build` and `nix develop -c zig build test` passed;
+  `goodput` and `crosstraffic` were not run. Repository pre-commit hooks passed
+  for the final implementation.
+- The production synthetic command was run read-only with
+  `--base-url https://coquic.minhuw.dev`; the result was sanitized and showed
+  dashboard success plus the expected canonical-route `404`. No secret or
+  response body was printed, and no daemon or remote deployment state changed.
+
+Subplan 26 remains in progress until a deployment serves v3 at
+`/steward/status`. After deployment, rerun the synthetic command and archive
+its JSON artifact, then record the response age, latency, canonical headers,
+task artifact result, and redaction result here before closing the gate.
 
 ## Dependency Graph
 
@@ -241,16 +271,17 @@ flowchart LR
 
 This table is the live source of truth for Round 2. `Ready` means dependencies
 are complete and an implementer can claim the task. `Pending` means at least
-one dependency is still open.
+one dependency is still open. `In Progress` and `Complete` include evidence
+only after the corresponding local checks pass.
 
 | ID | Subplan | Depends On | Status | Owner | Implementation Evidence |
 | --- | --- | --- | --- | --- | --- |
-| 21 | [Continuous migration regression guard](21-continuous-migration-guard.md) | 19 | Ready | Unassigned | - |
-| 22 | [Public artifact HTTP contract](22-public-artifact-http-contract.md) | 14 | Ready | Unassigned | - |
-| 23 | [Schema evolution and compatibility gate](23-schema-evolution-gate.md) | 05, 13, 14 | Ready | Unassigned | - |
-| 24 | [Monitor accessibility and keyboard behavior](24-monitor-accessibility-keyboard.md) | 14 | Ready | Unassigned | - |
-| 25 | [Deployed synthetic monitor](25-deployed-synthetic-monitor.md) | 20, 22, 23 | Pending | Unassigned | - |
-| 26 | [Round 2 verification](26-round-two-verification.md) | 21-25 | Pending | Unassigned | - |
+| 21 | [Continuous migration regression guard](21-continuous-migration-guard.md) | 19 | Complete | Codex | `33d6c7bc`; guard, negative self-tests, and no-Node smoke passed. |
+| 22 | [Public artifact HTTP contract](22-public-artifact-http-contract.md) | 14 | Complete | Codex | `15042338`; JSON/NDJSON route headers, redirects, 404s, and route tests passed. |
+| 23 | [Schema evolution and compatibility gate](23-schema-evolution-gate.md) | 05, 13, 14 | Complete | Codex | `e258a6cd`; generated drift, compatibility fixtures, and deliberate bump gate passed. |
+| 24 | [Monitor accessibility and keyboard behavior](24-monitor-accessibility-keyboard.md) | 14 | Complete | Codex | `efa51579`, `c45627b6`; axe, keyboard, focus, and 12 desktop/mobile flows passed. |
+| 25 | [Deployed synthetic monitor](25-deployed-synthetic-monitor.md) | 20, 22, 23 | Complete | Codex | `0d340fc8`; 9 fixture cases passed; scheduled/post-deploy CI and runbook added. |
+| 26 | [Round 2 verification](26-round-two-verification.md) | 21-25 | In Progress | Codex | Local matrix passes; production remains open because `/steward/status` is `404`. |
 
 ## Coordination Rules
 

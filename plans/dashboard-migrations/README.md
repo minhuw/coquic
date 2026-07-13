@@ -4,8 +4,9 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00 and 01 are complete on `main`; Wave 1 is
-active. The capability matrix is checked in at
+Current execution state: subplans 00, 01, 02, 04, 05, and 10 are complete on
+`main`; Wave 1 remains active for publisher health, public hardening, and
+direct-run locking. The capability matrix is checked in at
 [00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
 checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
@@ -144,15 +145,15 @@ flowchart LR
 | --- | --- | --- | --- |
 | 00 | [Current-state inventory](00-current-state-inventory.md) | None | Complete |
 | 01 | [Public monitoring contract](01-public-monitoring-contract.md) | 00 | Complete |
-| 02 | [Daemon runtime heartbeat](02-daemon-runtime-heartbeat.md) | 01 | In Progress |
+| 02 | [Daemon runtime heartbeat](02-daemon-runtime-heartbeat.md) | 01 | Complete |
 | 03 | [Publisher health and retry state](03-publisher-health.md) | 01 | In Progress |
-| 04 | [Cache-safe site status endpoint](04-cache-safe-status-endpoint.md) | 01 | In Progress |
-| 05 | [Schema and TypeScript ownership](05-schema-and-types.md) | 01 | In Progress |
+| 04 | [Cache-safe site status endpoint](04-cache-safe-status-endpoint.md) | 01 | Complete |
+| 05 | [Schema and TypeScript ownership](05-schema-and-types.md) | 01 | Complete |
 | 06 | [Freshness and offline UI](06-site-freshness-ui.md) | 02, 04, 05 | Pending |
 | 07 | [Standalone planner history](07-site-planner-history.md) | 01, 05 | Pending |
 | 08 | [Read-view parity](08-site-read-view-parity.md) | 00, 05 | Pending |
 | 09 | [Public data hardening](09-public-data-hardening.md) | 01 | In Progress |
-| 10 | [CLI scheduler tick](10-cli-scheduler-tick.md) | 00 | In Progress |
+| 10 | [CLI scheduler tick](10-cli-scheduler-tick.md) | 00 | Complete |
 | 11 | [CLI direct-run locking](11-cli-run-locking.md) | 00 | In Progress |
 | 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | Pending |
 | 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | Pending |

@@ -156,7 +156,7 @@ flowchart LR
 | 10 | [CLI scheduler tick](10-cli-scheduler-tick.md) | 00 | Complete |
 | 11 | [CLI direct-run locking](11-cli-run-locking.md) | 00 | Complete |
 | 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | Complete |
-| 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | In Progress |
+| 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | Complete |
 | 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | In Progress |
 | 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | Pending |
 | 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | Pending |

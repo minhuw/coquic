@@ -40,6 +40,7 @@ PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 2
 DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80
 DEFAULT_MIRROR_FETCH_LIMIT = 40
+DEFAULT_MIRROR_WAKEUP_LIMIT = 20
 PUBLIC_TASK_DATA_PREFIX = "/steward/data/tasks"
 REMOTE_MIRROR_ROOT = ".cache/coquic-steward/public-mirror"
 REMOTE_MIRROR_HELPER = f"{REMOTE_MIRROR_ROOT}/publish-helper-v1"
@@ -90,15 +91,24 @@ def public_mirror_payload(
 ) -> dict[str, object]:
     runtime = runtime or _DEFAULT_RUNTIME
     generated_at = utc_now()
-    tasks = store.list_tasks(limit=task_limit)
-    signal_items = store.list_signal_items(limit=signal_limit)
-    fetch_runs = store.list_signal_fetch_runs(limit=fetch_limit)
+    task_window = store.list_tasks(limit=task_limit + 1)
+    signal_window = store.list_signal_items(limit=signal_limit + 1)
+    fetch_window = store.list_signal_fetch_runs(limit=fetch_limit + 1)
+    tasks_truncated = len(task_window) > task_limit
+    signal_items_truncated = len(signal_window) > signal_limit
+    fetches_truncated = len(fetch_window) > fetch_limit
+    tasks = task_window[:task_limit]
+    signal_items = signal_window[:signal_limit]
+    fetch_runs = fetch_window[:fetch_limit]
     signals = project_signals_from_items(config, signal_items, fetches=fetch_runs)
     planner_runs, planner_runs_truncated = _public_planner_runs(config, store)
+    scheduler = scheduler_state(config, store)
+    pending_wakeups = store.pending_wakeups(limit=DEFAULT_MIRROR_WAKEUP_LIMIT + 1)
+    recent_wakeups = store.recent_wakeups(limit=DEFAULT_MIRROR_WAKEUP_LIMIT + 1)
     return {
         "schema_version": PUBLIC_MIRROR_SCHEMA_VERSION,
         "compatibility_state": "compatible",
-        "generated_at": generated_at.isoformat(),
+        "generated_at": _public_timestamp(generated_at),
         "repository": config.github_repository,
         "main_branch": config.main_branch,
         "state": _public_state(tasks),
@@ -107,6 +117,7 @@ def public_mirror_payload(
         "publication": _public_publication(config, generated_at, publication),
         "audit": [_public_text(config, finding) for finding in store.audit()],
         "configuration": _public_configuration(config),
+        "tasks_truncated": tasks_truncated,
         "tasks": [
             {
                 **_public_task(config, task),
@@ -119,12 +130,18 @@ def public_mirror_payload(
             "schema_version": signals.schema_version,
             "repository": signals.repository,
             "enabled_signals": list(config.enabled_signals),
-            "generated_at": signals.generated_at.isoformat(),
+            "generated_at": _public_timestamp(signals.generated_at),
+            "items_truncated": signal_items_truncated,
+            "fetches_truncated": fetches_truncated,
             "summary": _public_signals_summary(signal_items, fetch_runs),
             "items": [_public_signal_item(config, item) for item in signal_items],
             "fetches": [_public_fetch_run(config, run) for run in fetch_runs],
         },
-        "scheduler": _public_scheduler_state(scheduler_state(config, store)),
+        "scheduler": _public_scheduler_state(
+            scheduler,
+            pending_wakeups=pending_wakeups,
+            recent_wakeups=recent_wakeups,
+        ),
         "planner_runs_truncated": planner_runs_truncated,
         "planner_runs": planner_runs,
         "integration": _integration_summary(config, tasks),
@@ -189,7 +206,7 @@ def write_public_mirror(
                 "id": task.id,
                 "title": _public_text(config, task.spec.title),
                 "status": str(task.status),
-                "updated_at": task.updated_at.isoformat(),
+                "updated_at": _public_timestamp(task.updated_at),
                 "detail_json": _public_task_detail_url(task.id),
             }
         )
@@ -247,7 +264,7 @@ def public_task_detail_payload(
     )
     return {
         "schema_version": PUBLIC_TASK_DETAIL_SCHEMA_VERSION,
-        "generated_at": utc_now().isoformat(),
+        "generated_at": _public_timestamp(utc_now()),
         "repository": config.github_repository,
         "main_branch": config.main_branch,
         "task": _public_task_detail_record(config, record),
@@ -642,16 +659,16 @@ def _public_task(config: StewardConfig, task: TaskRecord) -> dict[str, object]:
         "status": str(task.status),
         "summary": _public_text(config, task.summary),
         "source": task.spec.source,
-        "created_at": task.created_at.isoformat(),
-        "updated_at": task.updated_at.isoformat(),
+        "created_at": _public_timestamp(task.created_at),
+        "updated_at": _public_timestamp(task.updated_at),
         "validations": [
             {
                 "passed": validation.passed,
                 "exit_code": validation.exit_code,
                 "summary": _public_text(config, validation.summary),
                 "iteration": validation.iteration,
-                "started_at": validation.started_at.isoformat(),
-                "completed_at": validation.completed_at.isoformat(),
+                "started_at": _public_timestamp(validation.started_at),
+                "completed_at": _public_timestamp(validation.completed_at),
             }
             for validation in task.validations[-5:]
         ],
@@ -750,8 +767,8 @@ def _public_plan_runs(
             "reasoning_effort": _public_text(config, item.reasoning_effort),
             "exit_code": item.exit_code,
             "completed": item.completed,
-            "started_at": item.started_at.isoformat(),
-            "updated_at": item.updated_at.isoformat(),
+            "started_at": _public_timestamp(item.started_at),
+            "updated_at": _public_timestamp(item.updated_at),
             "plan": _public_json(config, item.plan_json),
             "planner": _public_run_artifact(
                 config,
@@ -782,8 +799,8 @@ def _public_iteration_attempt(
     return {
         "attempt": item.iteration,
         "label": _public_text(config, item.label),
-        "started_at": item.started_at.isoformat(),
-        "updated_at": item.updated_at.isoformat(),
+        "started_at": _public_timestamp(item.started_at),
+        "updated_at": _public_timestamp(item.updated_at),
         "worker": _public_run_artifact(
             config,
             item.worker_transcript_path,
@@ -907,8 +924,8 @@ def _public_validation(
         "exit_code": validation.exit_code,
         "summary": _public_text(config, validation.summary),
         "iteration": validation.iteration,
-        "started_at": validation.started_at.isoformat(),
-        "completed_at": validation.completed_at.isoformat(),
+        "started_at": _public_timestamp(validation.started_at),
+        "completed_at": _public_timestamp(validation.completed_at),
         "log": log,
     }
 
@@ -1268,7 +1285,7 @@ def _public_event(config: StewardConfig, event: Event) -> dict[str, object]:
         "task_id": event.task_id,
         "kind": event.kind,
         "message": _public_text(config, event.message),
-        "created_at": event.created_at.isoformat(),
+        "created_at": _public_timestamp(event.created_at),
         "data": _public_event_data(config, event.data),
     }
 
@@ -1330,9 +1347,9 @@ def _public_signal_item(
         "summary": _public_text(config, item.summary),
         "severity": item.severity,
         "status": item.status,
-        "created_at": item.created_at.isoformat(),
-        "updated_at": item.updated_at.isoformat(),
-        "planned_at": item.planned_at.isoformat() if item.planned_at else None,
+        "created_at": _public_timestamp(item.created_at),
+        "updated_at": _public_timestamp(item.updated_at),
+        "planned_at": _public_timestamp(item.planned_at) if item.planned_at else None,
         "planned_task_id": item.planned_task_id,
         "links": [
             {**link, "url": safe_url}
@@ -1348,8 +1365,8 @@ def _public_fetch_run(config: StewardConfig, run: SignalFetchRun) -> dict[str, o
         "id": run.id,
         "provider": run.provider,
         "status": run.status,
-        "started_at": run.started_at.isoformat(),
-        "completed_at": run.completed_at.isoformat(),
+        "started_at": _public_timestamp(run.started_at),
+        "completed_at": _public_timestamp(run.completed_at),
         "item_count": run.item_count,
         "new_item_count": run.new_item_count,
         "has_more": run.has_more,
@@ -1379,26 +1396,60 @@ def _public_signals_summary(
     return f"{len(items)} signal item(s), {errors} provider error(s)"
 
 
-def _public_scheduler_state(state: SchedulerState) -> dict[str, object]:
+def _public_scheduler_state(
+    state: SchedulerState,
+    *,
+    pending_wakeups: list[Any] | None = None,
+    recent_wakeups: list[Any] | None = None,
+) -> dict[str, object]:
+    pending = state.pending_wakeups if pending_wakeups is None else pending_wakeups
+    recent = state.recent_wakeups if recent_wakeups is None else recent_wakeups
     return {
         "source_active": state.source_active,
         "source_capacity": state.source_capacity,
         "source_queued": state.source_queued,
         "integration_active": state.integration_active,
         "integration_queued": state.integration_queued,
+        "pending_wakeups_truncated": len(pending) > DEFAULT_MIRROR_WAKEUP_LIMIT,
+        "recent_wakeups_truncated": len(recent) > DEFAULT_MIRROR_WAKEUP_LIMIT,
         "pending_wakeups": [
-            _public_wakeup(wakeup) for wakeup in state.pending_wakeups
+            _public_wakeup(wakeup) for wakeup in pending[:DEFAULT_MIRROR_WAKEUP_LIMIT]
         ],
         "recent_wakeups": [
-            _public_wakeup(wakeup) for wakeup in state.recent_wakeups
+            _public_wakeup(wakeup) for wakeup in recent[:DEFAULT_MIRROR_WAKEUP_LIMIT]
         ],
         "providers": [
-            {
-                **provider.model_dump(mode="json"),
-                "last_error": _public_error(provider.last_error),
-            }
+            _public_provider(provider)
             for provider in state.providers
         ],
+    }
+
+
+def _public_provider(provider: Any) -> dict[str, object]:
+    return {
+        "provider": provider.provider,
+        "poll_interval_minutes": provider.poll_interval_minutes,
+        "error_retry_minutes": provider.error_retry_minutes,
+        "idle_poll_interval_minutes": provider.idle_poll_interval_minutes,
+        "suppression_hours": provider.suppression_hours,
+        "max_items": provider.max_items,
+        "last_fetch_at": (
+            _public_timestamp(provider.last_fetch_at)
+            if provider.last_fetch_at is not None
+            else None
+        ),
+        "last_status": (
+            str(provider.last_status) if provider.last_status is not None else None
+        ),
+        "last_error": _public_error(provider.last_error),
+        "next_due_at": _public_timestamp(provider.next_due_at),
+        "idle_next_due_at": (
+            _public_timestamp(provider.idle_next_due_at)
+            if provider.idle_next_due_at is not None
+            else None
+        ),
+        "due": provider.due,
+        "idle_due": provider.idle_due,
     }
 
 
@@ -1407,8 +1458,10 @@ def _public_wakeup(wakeup: Any) -> dict[str, object]:
         "id": wakeup.id,
         "reason": wakeup.reason,
         "status": str(wakeup.status),
-        "created_at": wakeup.created_at.isoformat(),
-        "consumed_at": wakeup.consumed_at.isoformat() if wakeup.consumed_at else None,
+        "created_at": _public_timestamp(wakeup.created_at),
+        "consumed_at": (
+            _public_timestamp(wakeup.consumed_at) if wakeup.consumed_at else None
+        ),
         "data": _public_json_for_scheduler(wakeup.data),
     }
 
@@ -1604,7 +1657,7 @@ def _integration_summary(
                 "summary": _public_text(config, task.summary),
                 "commit": commit,
                 "commit_url": f"https://github.com/{config.github_repository}/commit/{commit}",
-                "updated_at": task.updated_at.isoformat(),
+                "updated_at": _public_timestamp(task.updated_at),
             }
         )
     return {
@@ -1833,12 +1886,12 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
         "[redacted-secret]",
         text,
     )
+    text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted-secret]", text)
     text = re.sub(
         r"(?i)\b(?:api[_-]?key|access[_-]?token|secret|password|authorization)\s*[:=]\s*[^\s,;]+",
         "[redacted-secret]",
         text,
     )
-    text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted-secret]", text)
     text = re.sub(r"(?i)\bthread[_-][A-Za-z0-9._-]+", "[redacted-thread]", text)
     return text
 

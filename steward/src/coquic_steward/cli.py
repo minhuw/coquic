@@ -195,6 +195,38 @@ def fetch_signals(
     typer.echo(f"requested {wakeup.id} providers={','.join(selected)}")
 
 
+@app.command()
+def tick(
+    plan: bool = typer.Option(
+        True,
+        "--plan/--no-plan",
+        help="Include signal planning in the requested scheduler tick.",
+    ),
+    dispatch: bool = typer.Option(
+        True,
+        "--dispatch/--no-dispatch",
+        help="Include queued task dispatch in the requested scheduler tick.",
+    ),
+    max_dispatch: int | None = typer.Option(
+        None,
+        "--max-dispatch",
+        min=1,
+        help="Maximum tasks to dispatch in the requested scheduler tick.",
+    ),
+) -> None:
+    store, _ = _context()
+    wakeup = store.request_wakeup(
+        "scheduler.manual",
+        {"plan": plan, "dispatch": dispatch, "max_dispatch": max_dispatch},
+    )
+    typer.echo(
+        f"requested {wakeup.id} "
+        f"plan={str(plan).lower()} "
+        f"dispatch={str(dispatch).lower()} "
+        f"max_dispatch={max_dispatch if max_dispatch is not None else '-'}"
+    )
+
+
 @app.command("publish-public-state")
 def publish_public_state(
     publish: bool = typer.Option(

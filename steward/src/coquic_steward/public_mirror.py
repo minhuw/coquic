@@ -4,6 +4,7 @@ import json
 import re
 import shlex
 import shutil
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from .core.config import (
     StewardConfig,
 )
 from .core.models import (
+    DaemonRuntime,
     Event,
     SignalFetchRun,
     SignalItem,
@@ -30,7 +32,7 @@ from .core.subprocesses import CommandResult, run_command
 from .signals import project_signals_from_items
 from .storage import TaskStore, scheduler_state
 
-PUBLIC_MIRROR_SCHEMA_VERSION = 2
+PUBLIC_MIRROR_SCHEMA_VERSION = 3
 PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 2
 DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80
@@ -60,6 +62,7 @@ PRIVATE_DATA_KEY_PARTS = (
     "token",
     "key",
 )
+_DEFAULT_RUNTIME = DaemonRuntime()
 PUBLIC_METADATA_KEYS = {
     "source_task_id",
     "main_commit",
@@ -79,18 +82,22 @@ def public_mirror_payload(
     task_limit: int = DEFAULT_MIRROR_TASK_LIMIT,
     signal_limit: int = DEFAULT_MIRROR_SIGNAL_LIMIT,
     fetch_limit: int = DEFAULT_MIRROR_FETCH_LIMIT,
+    runtime: DaemonRuntime | None = None,
 ) -> dict[str, object]:
+    runtime = runtime or _DEFAULT_RUNTIME
     tasks = store.list_tasks(limit=task_limit)
     signal_items = store.list_signal_items(limit=signal_limit)
     fetch_runs = store.list_signal_fetch_runs(limit=fetch_limit)
     signals = project_signals_from_items(config, signal_items, fetches=fetch_runs)
     return {
         "schema_version": PUBLIC_MIRROR_SCHEMA_VERSION,
+        "compatibility_state": "compatible",
         "generated_at": utc_now().isoformat(),
         "repository": config.github_repository,
         "main_branch": config.main_branch,
         "state": _public_state(tasks),
         "counts": _counts(tasks, signal_items),
+        "runtime": _public_runtime(runtime),
         "audit": [_public_text(config, finding) for finding in store.audit()],
         "configuration": _public_configuration(config),
         "tasks": [
@@ -119,9 +126,11 @@ def write_public_mirror(
     config: StewardConfig,
     store: TaskStore,
     output_path: Path | None = None,
+    *,
+    runtime: DaemonRuntime | None = None,
 ) -> Path:
     path = _mirror_output_path(config, output_path)
-    payload = public_mirror_payload(config, store)
+    payload = public_mirror_payload(config, store, runtime=runtime)
     tasks = store.list_tasks(limit=DEFAULT_MIRROR_TASK_LIMIT)
     mirror_dir = path.parent
     tasks_dir = mirror_dir / "data" / "tasks"
@@ -193,8 +202,9 @@ def publish_public_mirror(
     publisher: PublicMirrorPublisher | None = None,
     force: bool = False,
     publish: bool | None = None,
+    runtime: DaemonRuntime | None = None,
 ) -> tuple[Path, CommandResult | None]:
-    path = write_public_mirror(config, store)
+    path = write_public_mirror(config, store, runtime=runtime)
     should_publish = config.public_mirror.publish if publish is None else publish
     if not force and not should_publish:
         return path, None
@@ -266,8 +276,13 @@ def public_task_detail_payload(
     }
 
 
-def public_mirror_digest(config: StewardConfig, store: TaskStore) -> str:
-    payload = public_mirror_payload(config, store)
+def public_mirror_digest(
+    config: StewardConfig,
+    store: TaskStore,
+    *,
+    runtime: DaemonRuntime | None = None,
+) -> str:
+    payload = public_mirror_payload(config, store, runtime=runtime)
     task_details = [
         public_task_detail_payload(config, store, task)
         for task in store.list_tasks(limit=DEFAULT_MIRROR_TASK_LIMIT)
@@ -453,6 +468,38 @@ def _mirror_output_path(config: StewardConfig, output_path: Path | None) -> Path
 def _is_default_mirror_output(config: StewardConfig, path: Path) -> bool:
     default_path = config.state_dir / DEFAULT_PUBLIC_MIRROR_OUTPUT
     return path.resolve() == default_path.resolve()
+
+
+def _public_runtime(runtime: DaemonRuntime) -> dict[str, object]:
+    last_completed = runtime.last_completed_cycle
+    return {
+        "instance_id": runtime.instance_id,
+        "started_at": _public_timestamp(runtime.started_at),
+        "heartbeat_at": _public_timestamp(runtime.heartbeat_at),
+        "state": runtime.state.value,
+        "current_cycle_started_at": (
+            _public_timestamp(runtime.current_cycle_started_at)
+            if runtime.current_cycle_started_at is not None
+            else None
+        ),
+        "current_cycle_reason": runtime.current_cycle_reason,
+        "last_completed_cycle": (
+            {
+                "completed_at": _public_timestamp(last_completed.completed_at),
+                "reason": last_completed.reason,
+                "result": last_completed.result.model_dump(mode="json"),
+            }
+            if last_completed is not None
+            else None
+        ),
+        "heartbeat_interval_seconds": runtime.heartbeat_interval_seconds,
+    }
+
+
+def _public_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _public_state(tasks: list[TaskRecord]) -> str:

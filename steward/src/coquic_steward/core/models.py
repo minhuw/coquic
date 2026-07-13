@@ -36,6 +36,11 @@ def new_signal_item_id() -> str:
     return f"wi-signal-item-{uuid4().hex[:12]}"
 
 
+def new_daemon_instance_id() -> str:
+    timestamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    return f"steward-{timestamp}-{uuid4().hex[:8]}"
+
+
 class TaskKind(StrEnum):
     code_quality = "code-quality"
     feature = "feature"
@@ -132,6 +137,13 @@ class SignalFetchStatus(StrEnum):
 class SchedulerWakeupStatus(StrEnum):
     pending = "pending"
     consumed = "consumed"
+
+
+class DaemonRuntimeState(StrEnum):
+    starting = "starting"
+    idle = "idle"
+    active = "active"
+    stopping = "stopping"
 
 
 TERMINAL_STATUSES = {
@@ -324,6 +336,36 @@ class SchedulerState(BaseModel):
     pending_wakeups: list[SchedulerWakeup] = Field(default_factory=list)
     recent_wakeups: list[SchedulerWakeup] = Field(default_factory=list)
     providers: list[SchedulerProviderState] = Field(default_factory=list)
+
+
+class DaemonCycleResult(BaseModel):
+    recovered: int = Field(default=0, ge=0)
+    signal_fetches: int = Field(default=0, ge=0)
+    signal_items: int = Field(default=0, ge=0)
+    new_signal_items: int = Field(default=0, ge=0)
+    planned: int = Field(default=0, ge=0)
+    enqueued: int = Field(default=0, ge=0)
+    dispatched: int = Field(default=0, ge=0)
+    skipped: int = Field(default=0, ge=0)
+
+
+class DaemonCycleSummary(BaseModel):
+    completed_at: datetime
+    reason: str = Field(max_length=64)
+    result: DaemonCycleResult
+
+
+class DaemonRuntime(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
+    instance_id: str = Field(default_factory=new_daemon_instance_id)
+    started_at: datetime = Field(default_factory=utc_now)
+    heartbeat_at: datetime = Field(default_factory=utc_now)
+    state: DaemonRuntimeState = DaemonRuntimeState.starting
+    current_cycle_started_at: datetime | None = None
+    current_cycle_reason: str | None = Field(default=None, max_length=64)
+    last_completed_cycle: DaemonCycleSummary | None = None
+    heartbeat_interval_seconds: int = Field(default=30, ge=5, le=60)
 
 
 class ProjectSignals(BaseModel):

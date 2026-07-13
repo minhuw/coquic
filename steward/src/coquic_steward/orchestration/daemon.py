@@ -9,10 +9,15 @@ from datetime import datetime, timedelta, timezone
 from ..core.config import StewardConfig
 from ..core.lifecycle import TaskPhase
 from ..core.models import (
+    DaemonCycleResult,
+    DaemonCycleSummary,
+    DaemonRuntime,
+    DaemonRuntimeState,
     SignalFetchStatus,
     SignalItem,
     TaskRecord,
     TaskStatus,
+    utc_now,
     WorkerKind,
 )
 from ..execution.executor import StewardExecutor
@@ -32,6 +37,7 @@ from ..signals import (
 from .preflight import preflight_remote_push
 
 DAEMON_EVENT_TASK_ID = "daemon"
+DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 PUBLIC_MIRROR_DEBOUNCE_SECONDS = 1.0
 PUBLIC_MIRROR_RETRY_SECONDS = 30.0
 
@@ -71,6 +77,10 @@ class StewardDaemon:
                 f"remote={config.git_remote} branch={config.main_branch}"
             )
         self.executor = StewardExecutor(config, store)
+        self.runtime = DaemonRuntime(
+            heartbeat_interval_seconds=DAEMON_HEARTBEAT_INTERVAL_SECONDS
+        )
+        self._runtime_lock = threading.Lock()
         self._public_mirror_local_digest: str | None = None
         self._public_mirror_remote_digest: str | None = None
         self._public_mirror_update_lock = threading.Lock()
@@ -106,67 +116,72 @@ class StewardDaemon:
         reason: str = "scheduled",
     ) -> TickResult:
         result = TickResult()
-        wakeups = self.store.pending_wakeups(limit=200)
-        if wakeups:
-            self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
-        explicit_fetch_providers = _fetch_providers_from_wakeups(
-            self.config, wakeups
-        )
-        if explicit_fetch_providers:
-            fetch_providers = explicit_fetch_providers
-        self._log(
-            "cycle start "
-            f"reason={reason} "
-            f"wakeups={len(wakeups)} "
-            f"plan={str(plan).lower()} "
-            f"dispatch={str(dispatch).lower()} "
-            f"max_dispatch={max_dispatch or '-'}"
-        )
-        for task_id in self.store.recover_stale_active_tasks(
-            stale_after_minutes=stale_task_minutes(self.config),
-            status_stale_after_minutes=status_stale_minutes(self.config),
-        ):
-            result.recovered += 1
-            self.executor.clean_finished_task_worktree(self.store.get(task_id))
-            self.store.add_event(
-                task_id, "daemon.recovered_stale", "released stale active task"
-            )
-            self._log(f"recovered stale task {task_id}")
-        if plan:
-            requeued = self.store.requeue_failed_signal_items()
-            if requeued:
-                self.store.add_event(
-                    DAEMON_EVENT_TASK_ID,
-                    "signals.requeued_failed",
-                    f"requeued {requeued} failed signal item(s)",
-                    {"count": requeued, "retry_after_hours": 24},
-                )
-                self._log(f"requeued failed signals count={requeued}")
-            if fetch_providers:
-                self._fetch_signals(result, fetch_providers)
-            else:
-                idle_providers = self._idle_fetch_provider_names()
-                if idle_providers:
-                    self._log(
-                        "signals idle fetch providers="
-                        + ",".join(idle_providers)
-                    )
-                    self._fetch_signals(result, idle_providers)
-            self._plan_until_idle(result)
-        if dispatch:
-            self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
-        self._log(
-            "cycle finish "
-            f"recovered={result.recovered} "
-            f"signal_fetches={result.signal_fetches} "
-            f"signal_items={result.signal_items} "
-            f"new_signal_items={result.new_signal_items} "
-            f"planned={result.planned} "
-            f"enqueued={result.enqueued} "
-            f"dispatched={result.dispatched} "
-            f"skipped={result.skipped}"
-        )
+        self._begin_cycle(reason)
         self._publish_public_mirror_if_changed()
+        try:
+            wakeups = self.store.pending_wakeups(limit=200)
+            if wakeups:
+                self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
+            explicit_fetch_providers = _fetch_providers_from_wakeups(
+                self.config, wakeups
+            )
+            if explicit_fetch_providers:
+                fetch_providers = explicit_fetch_providers
+            self._log(
+                "cycle start "
+                f"reason={reason} "
+                f"wakeups={len(wakeups)} "
+                f"plan={str(plan).lower()} "
+                f"dispatch={str(dispatch).lower()} "
+                f"max_dispatch={max_dispatch or '-'}"
+            )
+            for task_id in self.store.recover_stale_active_tasks(
+                stale_after_minutes=stale_task_minutes(self.config),
+                status_stale_after_minutes=status_stale_minutes(self.config),
+            ):
+                result.recovered += 1
+                self.executor.clean_finished_task_worktree(self.store.get(task_id))
+                self.store.add_event(
+                    task_id, "daemon.recovered_stale", "released stale active task"
+                )
+                self._log(f"recovered stale task {task_id}")
+            if plan:
+                requeued = self.store.requeue_failed_signal_items()
+                if requeued:
+                    self.store.add_event(
+                        DAEMON_EVENT_TASK_ID,
+                        "signals.requeued_failed",
+                        f"requeued {requeued} failed signal item(s)",
+                        {"count": requeued, "retry_after_hours": 24},
+                    )
+                    self._log(f"requeued failed signals count={requeued}")
+                if fetch_providers:
+                    self._fetch_signals(result, fetch_providers)
+                else:
+                    idle_providers = self._idle_fetch_provider_names()
+                    if idle_providers:
+                        self._log(
+                            "signals idle fetch providers="
+                            + ",".join(idle_providers)
+                        )
+                        self._fetch_signals(result, idle_providers)
+                self._plan_until_idle(result)
+            if dispatch:
+                self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
+            self._log(
+                "cycle finish "
+                f"recovered={result.recovered} "
+                f"signal_fetches={result.signal_fetches} "
+                f"signal_items={result.signal_items} "
+                f"new_signal_items={result.new_signal_items} "
+                f"planned={result.planned} "
+                f"enqueued={result.enqueued} "
+                f"dispatched={result.dispatched} "
+                f"skipped={result.skipped}"
+            )
+        finally:
+            self._complete_cycle(result, reason)
+            self._publish_public_mirror_if_changed()
         return result
 
     def _dispatch_queued(
@@ -466,11 +481,42 @@ class StewardDaemon:
         if self.logger is not None:
             self.logger(f"[steward] {message}")
 
+    def _begin_cycle(self, reason: str) -> None:
+        started_at = utc_now()
+        with self._runtime_lock:
+            self.runtime.heartbeat_at = started_at
+            self.runtime.state = DaemonRuntimeState.active
+            self.runtime.current_cycle_started_at = started_at
+            self.runtime.current_cycle_reason = _bounded_cycle_reason(reason)
+
+    def _complete_cycle(self, result: TickResult, reason: str) -> None:
+        completed_at = utc_now()
+        summary = DaemonCycleSummary(
+            completed_at=completed_at,
+            reason=_bounded_cycle_reason(reason),
+            result=DaemonCycleResult.model_validate(vars(result)),
+        )
+        with self._runtime_lock:
+            self.runtime.heartbeat_at = completed_at
+            self.runtime.state = DaemonRuntimeState.idle
+            self.runtime.current_cycle_started_at = None
+            self.runtime.current_cycle_reason = None
+            self.runtime.last_completed_cycle = summary
+
+    def _touch_heartbeat(self) -> None:
+        with self._runtime_lock:
+            self.runtime.heartbeat_at = utc_now()
+
+    def _runtime_snapshot(self) -> DaemonRuntime:
+        with self._runtime_lock:
+            return self.runtime.model_copy(deep=True)
+
+    def _heartbeat_interval_seconds(self) -> int:
+        with self._runtime_lock:
+            return self.runtime.heartbeat_interval_seconds
+
     def _start_public_mirror_sync(self) -> None:
-        if (
-            not self.config.public_mirror.enabled
-            or not self.config.public_mirror.publish
-        ):
+        if not self.config.public_mirror.enabled:
             return
         with self._public_mirror_thread_lock:
             if self._public_mirror_thread is not None or self._public_mirror_stopping:
@@ -486,6 +532,11 @@ class StewardDaemon:
             thread.start()
 
     def _stop_public_mirror_sync(self) -> None:
+        with self._runtime_lock:
+            self.runtime.heartbeat_at = utc_now()
+            self.runtime.state = DaemonRuntimeState.stopping
+            self.runtime.current_cycle_started_at = None
+            self.runtime.current_cycle_reason = None
         with self._public_mirror_thread_lock:
             thread = self._public_mirror_thread
             if thread is None:
@@ -504,9 +555,13 @@ class StewardDaemon:
 
     def _run_public_mirror_sync(self) -> None:
         while True:
-            self._public_mirror_dirty.wait()
+            dirty = self._public_mirror_dirty.wait(
+                timeout=self._heartbeat_interval_seconds()
+            )
+            if not dirty:
+                self._touch_heartbeat()
             stopping = self._public_mirror_stop.is_set()
-            if not stopping and self._public_mirror_stop.wait(
+            if not stopping and dirty and self._public_mirror_stop.wait(
                 PUBLIC_MIRROR_DEBOUNCE_SECONDS
             ):
                 stopping = True
@@ -551,7 +606,10 @@ class StewardDaemon:
             return True
         with self._public_mirror_update_lock:
             try:
-                digest = public_mirror_digest(self.config, self.store)
+                runtime = self._runtime_snapshot()
+                digest = public_mirror_digest(
+                    self.config, self.store, runtime=runtime
+                )
                 current_digest = (
                     self._public_mirror_remote_digest
                     if publish and self.config.public_mirror.publish
@@ -563,6 +621,7 @@ class StewardDaemon:
                 path, result = publish_public_mirror(
                     self.config,
                     self.store,
+                    runtime=runtime,
                     publish=should_publish,
                 )
                 self._public_mirror_local_digest = digest
@@ -652,6 +711,19 @@ def _fetch_providers_from_wakeups(config: StewardConfig, wakeups) -> list[str]:
             if value not in requested:
                 requested.append(value)
     return requested
+
+
+def _bounded_cycle_reason(reason: str) -> str:
+    value = reason.strip()
+    if not value or len(value) > 64:
+        return "other"
+    if any(
+        character
+        not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in value
+    ):
+        return "other"
+    return value
 
 
 def _task_label(task: TaskRecord) -> str:

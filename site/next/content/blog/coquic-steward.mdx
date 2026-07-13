@@ -107,7 +107,7 @@ One more switch matters day to day: `local_only = true` stops integration after 
 
 ## You can watch it work
 
-Every step leaves an artifact: prompts, transcripts, patches, per-gate validation logs, review JSON, and an append-only event log in SQLite. A loopback-only FastAPI server and a Next.js dashboard render the loop live — scheduler lanes, the task graph, planner iterations, integration runs with per-run patch and validation tabs, and the signal inbox.
+Every step leaves an artifact: prompts, transcripts, patches, per-gate validation logs, review JSON, and an append-only event log in SQLite. Steward publishes a redacted static mirror over outbound SSH, and the public Next.js site renders it — scheduler lanes, the task graph, planner iterations, integration runs with per-run patch and validation tabs, and the signal inbox. The daemon has no inbound HTTP API; private execution artifacts remain local.
 
 There is also a public mirror: a redacted static snapshot published to this site. The redaction strips filesystem paths, prompts, thread IDs, and anything secret-shaped. The principle behind it: "an agent maintains this repository" should be a claim outsiders can audit, not one they have to take on faith.
 
@@ -220,7 +220,7 @@ LLM 评审者是正确性证明吗？不是，我也不打算假装它是。它�
 
 ## 你可以看着它干活
 
-每一步都留下工件：prompt、transcript、补丁、每道关卡的验证日志、评审 JSON，以及 SQLite 中只增不改的事件日志。一个只监听本机回环的 FastAPI 服务和一个 Next.js 仪表盘实时渲染整个循环——调度泳道、任务图、规划器的每轮迭代、带补丁和验证标签页的集成运行记录，以及信号收件箱。
+每一步都留下工件：prompt、transcript、补丁、每道关卡的验证日志、评审 JSON，以及 SQLite 中只增不改的事件日志。Steward 通过出站 SSH 发布一份脱敏的静态镜像，公开的 Next.js 站点负责渲染它——调度泳道、任务图、规划器的每轮迭代、带补丁和验证标签页的集成运行记录，以及信号收件箱。守护进程没有入站 HTTP API；私人工件留在本机。
 
 还有一个公开镜像：一份脱敏后的静态快照，发布到这个站点上。脱敏会去掉文件系统路径、prompt、线程 ID 和任何形似密钥的内容。背后的原则是："一个 agent 在维护这个仓库"应当是外部可以审计的断言，而不是只能凭信任接受的说法。
 

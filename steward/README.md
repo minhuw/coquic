@@ -40,10 +40,10 @@ uv run --project steward coquic-steward publish-public-state
 uv run --project steward coquic-steward status
 ```
 
-Run the long-lived scheduler without starting any local HTTP service:
+Run the long-lived outbound-only scheduler:
 
 ```bash
-uv run --project steward coquic-steward daemon --no-web
+uv run --project steward coquic-steward daemon
 ```
 
 For a single deterministic cycle, use `daemon --once`. It consumes pending
@@ -158,8 +158,8 @@ uses the configured output path. Do not combine it with `--output`; use
 
 ## CLI Workflows
 
-All commands below operate on the state selected by `$COQUIC_HOME` and do not
-need the local FastAPI service or the local Next.js application.
+All commands below operate on the state selected by `$COQUIC_HOME`. Steward
+control remains local to this CLI; the public dashboard only reads the mirror.
 
 ### Enqueue work
 
@@ -321,7 +321,7 @@ uv run --project steward coquic-steward publish-public-state --publish
 Inspect `runtime.heartbeat_at`, `publication.state`,
 `publication.last_success_at`, and `publication.last_failure_category` in the
 snapshot. If the local file is not changing, check that the daemon is running
-with `--no-web` and that `public_mirror.enabled = true`.
+and that `public_mirror.enabled = true`.
 
 ### The site reports a schema mismatch
 
@@ -398,7 +398,7 @@ uv run --project steward coquic-steward publish-public-state --publish
 ```
 
 If the daemon itself stopped, inspect its terminal/service logs and restart it
-with `daemon --no-web`. A local UI is not required for recovery.
+with `daemon`. A local UI is not required for recovery.
 
 ### Remote push preflight fails
 
@@ -408,18 +408,13 @@ divergence error must be resolved by synchronizing and pushing `main` through
 the repository's normal release process. Set `local_only = true` while
 debugging a local workflow that must not mutate the remote.
 
-## No Inbound HTTP API
+## Outbound-only daemon
 
-During the dashboard migration, use `daemon --no-web` and do not run
-`coquic-steward web` or the legacy `steward/web-ui`. The public Next.js site
-only reads the published files and cannot enqueue tasks, wake the scheduler,
-or execute work.
-
-After the daemon cutover, Steward has no inbound HTTP API at all: the daemon
-only reads local SQLite/CLI wakeups and makes outbound signal, Git, Codex, and
-mirror connections. The legacy `--web` compatibility option and Python web
-runtime are removed by the later migration subplans; operator control remains
-the CLI surface documented here.
+Steward has no inbound HTTP API. The daemon reads local SQLite and CLI wakeups,
+then makes outbound signal, Git, Codex, and mirror connections. The public
+Next.js site only reads the published files; it cannot enqueue tasks, wake the
+scheduler, or execute work. Operator control remains the CLI surface
+documented here.
 
 ## Task Workflows and Integration
 

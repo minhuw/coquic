@@ -8,16 +8,13 @@ version = "0.1.0"
 description = "Local autonomous maintenance manager for CoQUIC"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi",
   "pydantic>=2",
   "SQLAlchemy>=2",
   "typer",
-  "uvicorn[standard]",
 ]
 
 [dependency-groups]
 dev = [
-  "httpx",
   "pytest",
 ]
 

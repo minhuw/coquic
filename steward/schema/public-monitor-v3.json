@@ -1,0 +1,324 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.minhuw.dev/schemas/steward/public-monitor-v3.json",
+  "title": "CoQUIC Steward public monitor v3",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "compatibility_state",
+    "generated_at",
+    "repository",
+    "main_branch",
+    "state",
+    "counts",
+    "runtime",
+    "publication",
+    "tasks",
+    "tasks_truncated",
+    "signals",
+    "scheduler",
+    "planner_runs",
+    "planner_runs_truncated",
+    "audit",
+    "configuration",
+    "integration"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "compatibility_state": {"$ref": "#/$defs/CompatibilityState"},
+    "generated_at": {"$ref": "#/$defs/Timestamp"},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 200},
+    "main_branch": {"type": "string", "minLength": 1, "maxLength": 200},
+    "state": {"$ref": "#/$defs/AggregateState"},
+    "counts": {"$ref": "#/$defs/Counts"},
+    "runtime": {"$ref": "#/$defs/Runtime"},
+    "publication": {"$ref": "#/$defs/Publication"},
+    "tasks": {"type": "array", "maxItems": 80, "items": {"$ref": "#/$defs/TaskSummary"}},
+    "tasks_truncated": {"type": "boolean"},
+    "signals": {"$ref": "#/$defs/Signals"},
+    "scheduler": {"$ref": "#/$defs/Scheduler"},
+    "planner_runs": {"type": "array", "maxItems": 40, "items": {"$ref": "#/$defs/PlannerRun"}},
+    "planner_runs_truncated": {"type": "boolean"},
+    "audit": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 2000}},
+    "configuration": {"$ref": "#/$defs/Configuration"},
+    "integration": {"$ref": "#/$defs/Integration"}
+  },
+  "$defs": {
+    "Timestamp": {"type": "string", "minLength": 20, "maxLength": 40},
+    "HexDigest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "CompatibilityState": {"type": "string", "enum": ["compatible", "unknown_additive", "incompatible"]},
+    "AggregateState": {"type": "string", "enum": ["idle", "queued", "working", "attention"]},
+    "RuntimeState": {"type": "string", "enum": ["starting", "idle", "active", "stopping"]},
+    "PublicationState": {"type": "string", "enum": ["disabled", "pending", "published", "failed"]},
+    "Counts": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["tasks", "active", "queued", "attention", "completed", "signals", "pending_signals"],
+      "properties": {
+        "tasks": {"type": "integer", "minimum": 0},
+        "active": {"type": "integer", "minimum": 0},
+        "queued": {"type": "integer", "minimum": 0},
+        "attention": {"type": "integer", "minimum": 0},
+        "completed": {"type": "integer", "minimum": 0},
+        "signals": {"type": "integer", "minimum": 0},
+        "pending_signals": {"type": "integer", "minimum": 0}
+      }
+    },
+    "CycleResult": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["recovered", "signal_fetches", "signal_items", "new_signal_items", "planned", "enqueued", "dispatched", "skipped"],
+      "properties": {
+        "recovered": {"type": "integer", "minimum": 0},
+        "signal_fetches": {"type": "integer", "minimum": 0},
+        "signal_items": {"type": "integer", "minimum": 0},
+        "new_signal_items": {"type": "integer", "minimum": 0},
+        "planned": {"type": "integer", "minimum": 0},
+        "enqueued": {"type": "integer", "minimum": 0},
+        "dispatched": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0}
+      }
+    },
+    "CycleSummary": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["completed_at", "reason", "result"],
+      "properties": {
+        "completed_at": {"$ref": "#/$defs/Timestamp"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 64},
+        "result": {"$ref": "#/$defs/CycleResult"}
+      }
+    },
+    "Runtime": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["instance_id", "started_at", "heartbeat_at", "state", "current_cycle_started_at", "current_cycle_reason", "last_completed_cycle", "heartbeat_interval_seconds"],
+      "properties": {
+        "instance_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+        "started_at": {"$ref": "#/$defs/Timestamp"},
+        "heartbeat_at": {"$ref": "#/$defs/Timestamp"},
+        "state": {"$ref": "#/$defs/RuntimeState"},
+        "current_cycle_started_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "current_cycle_reason": {"type": ["string", "null"], "maxLength": 64},
+        "last_completed_cycle": {"anyOf": [{"$ref": "#/$defs/CycleSummary"}, {"type": "null"}]},
+        "heartbeat_interval_seconds": {"type": "integer", "minimum": 5, "maximum": 60}
+      }
+    },
+    "Publication": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["state", "snapshot_id", "generated_at", "last_attempt_at", "last_success_at", "last_failure_at", "last_failure_category", "retry_count", "last_accepted_digest"],
+      "properties": {
+        "state": {"$ref": "#/$defs/PublicationState"},
+        "snapshot_id": {"$ref": "#/$defs/HexDigest"},
+        "generated_at": {"$ref": "#/$defs/Timestamp"},
+        "last_attempt_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "last_success_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "last_failure_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "last_failure_category": {"type": ["string", "null"], "enum": ["ssh_preparation", "rsync_transfer", "timeout", "serialization", "permissions", "unknown", null]},
+        "retry_count": {"type": "integer", "minimum": 0, "maximum": 10},
+        "last_accepted_digest": {"$ref": "#/$defs/HexDigest"}
+      }
+    },
+    "ValidationSummary": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["passed", "exit_code", "summary", "iteration", "started_at", "completed_at"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "exit_code": {"type": "integer"},
+        "summary": {"type": "string", "maxLength": 4000},
+        "iteration": {"type": ["integer", "null"], "minimum": 0},
+        "started_at": {"$ref": "#/$defs/Timestamp"},
+        "completed_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "TaskSummary": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "title", "kind", "workflow", "worker", "priority", "risk", "status", "summary", "source", "created_at", "updated_at", "validations"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "title": {"type": "string", "maxLength": 400},
+        "kind": {"type": "string", "maxLength": 80},
+        "workflow": {"type": "string", "maxLength": 80},
+        "worker": {"type": "string", "maxLength": 120},
+        "priority": {"type": "string", "maxLength": 40},
+        "risk": {"type": "string", "maxLength": 40},
+        "status": {"type": "string", "maxLength": 80},
+        "summary": {"type": "string", "maxLength": 4000},
+        "source": {"type": "string", "maxLength": 120},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"},
+        "validations": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/ValidationSummary"}}
+      }
+    },
+    "SignalItem": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "provider", "kind", "title", "summary", "severity", "status", "created_at", "updated_at", "planned_at", "planned_task_id", "links"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "provider": {"type": "string", "maxLength": 120},
+        "kind": {"type": "string", "maxLength": 120},
+        "title": {"type": "string", "maxLength": 400},
+        "summary": {"type": "string", "maxLength": 4000},
+        "severity": {"type": ["string", "null"], "maxLength": 40},
+        "status": {"type": "string", "maxLength": 40},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "updated_at": {"$ref": "#/$defs/Timestamp"},
+        "planned_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "planned_task_id": {"type": ["string", "null"], "maxLength": 128},
+        "links": {"type": "array", "maxItems": 8, "items": {"type": "object", "additionalProperties": true}}
+      }
+    },
+    "SignalFetch": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "provider", "status", "started_at", "completed_at", "item_count", "new_item_count", "has_more", "summary", "error"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 128},
+        "provider": {"type": "string", "maxLength": 120},
+        "status": {"type": "string", "enum": ["ok", "error"]},
+        "started_at": {"$ref": "#/$defs/Timestamp"},
+        "completed_at": {"$ref": "#/$defs/Timestamp"},
+        "item_count": {"type": "integer", "minimum": 0},
+        "new_item_count": {"type": "integer", "minimum": 0},
+        "has_more": {"type": "boolean"},
+        "summary": {"type": "string", "maxLength": 4000},
+        "error": {"type": ["string", "null"], "maxLength": 120}
+      }
+    },
+    "Signals": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["items_truncated", "fetches_truncated", "items", "fetches", "summary", "enabled_signals"],
+      "properties": {
+        "items_truncated": {"type": "boolean"},
+        "fetches_truncated": {"type": "boolean"},
+        "items": {"type": "array", "maxItems": 80, "items": {"$ref": "#/$defs/SignalItem"}},
+        "fetches": {"type": "array", "maxItems": 40, "items": {"$ref": "#/$defs/SignalFetch"}},
+        "summary": {"type": "string", "maxLength": 4000},
+        "enabled_signals": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 120}}
+      }
+    },
+    "Wakeup": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "reason", "status", "created_at", "consumed_at", "data"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 128},
+        "reason": {"type": "string", "maxLength": 80},
+        "status": {"type": "string", "maxLength": 40},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "consumed_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "data": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "Provider": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["provider", "poll_interval_minutes", "error_retry_minutes", "idle_poll_interval_minutes", "suppression_hours", "max_items", "last_fetch_at", "last_status", "last_error", "next_due_at", "idle_next_due_at", "due", "idle_due"],
+      "properties": {
+        "provider": {"type": "string", "maxLength": 120},
+        "poll_interval_minutes": {"type": "integer", "minimum": 0},
+        "error_retry_minutes": {"type": "integer", "minimum": 0},
+        "idle_poll_interval_minutes": {"type": "integer", "minimum": 0},
+        "suppression_hours": {"type": "integer", "minimum": 0},
+        "max_items": {"type": "integer", "minimum": 0},
+        "last_fetch_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "last_status": {"type": ["string", "null"], "maxLength": 40},
+        "last_error": {"type": ["string", "null"], "maxLength": 120},
+        "next_due_at": {"$ref": "#/$defs/Timestamp"},
+        "idle_next_due_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "due": {"type": "boolean"},
+        "idle_due": {"type": "boolean"}
+      }
+    },
+    "Scheduler": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source_active", "source_capacity", "source_queued", "integration_active", "integration_queued", "pending_wakeups_truncated", "recent_wakeups_truncated", "pending_wakeups", "recent_wakeups", "providers"],
+      "properties": {
+        "source_active": {"type": "integer", "minimum": 0},
+        "source_capacity": {"type": "integer", "minimum": 0},
+        "source_queued": {"type": "integer", "minimum": 0},
+        "integration_active": {"type": "integer", "minimum": 0},
+        "integration_queued": {"type": "integer", "minimum": 0},
+        "pending_wakeups_truncated": {"type": "boolean"},
+        "recent_wakeups_truncated": {"type": "boolean"},
+        "pending_wakeups": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/Wakeup"}},
+        "recent_wakeups": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/Wakeup"}},
+        "providers": {"type": "array", "maxItems": 40, "items": {"$ref": "#/$defs/Provider"}}
+      }
+    },
+    "Artifact": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "required": ["availability", "mode", "text", "size_bytes", "original_size_bytes", "truncated"],
+      "properties": {
+        "availability": {"type": "string", "enum": ["available", "not_produced", "unavailable", "redacted"]},
+        "mode": {"type": "string", "enum": ["none", "redacted"]},
+        "text": {"type": "string", "maxLength": 131072},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "original_size_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "url": {"type": ["string", "null"], "maxLength": 500}
+      }
+    },
+    "PlannerDiagnostics": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["summary", "exit_code", "error_category", "last_message_present"],
+      "properties": {
+        "summary": {"type": "string", "maxLength": 4000},
+        "exit_code": {"type": ["integer", "null"]},
+        "error_category": {"type": "string", "enum": ["none", "timeout", "invalid_output", "provider_error", "execution_error"]},
+        "last_message_present": {"type": "boolean"}
+      }
+    },
+    "PlannerRun": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "status", "started_at", "completed_at", "accepted_count", "proposed_count", "consumed_signal_ids", "diagnostics", "artifacts"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 128},
+        "status": {"type": "string", "enum": ["running", "succeeded", "failed", "invalid"]},
+        "started_at": {"$ref": "#/$defs/Timestamp"},
+        "completed_at": {"anyOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "accepted_count": {"type": "integer", "minimum": 0},
+        "proposed_count": {"type": "integer", "minimum": 0},
+        "consumed_signal_ids": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 128}},
+        "diagnostics": {"$ref": "#/$defs/PlannerDiagnostics"},
+        "artifacts": {"type": "object", "additionalProperties": true, "properties": {"transcript": {"$ref": "#/$defs/Artifact"}, "last_message": {"$ref": "#/$defs/Artifact"}}}
+      }
+    },
+    "Configuration": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["repository", "main_branch", "integration_mode", "local_only", "enabled_signals", "scheduler_wait_interval_sec", "limits", "signal_providers"],
+      "properties": {
+        "repository": {"type": "string", "maxLength": 200},
+        "main_branch": {"type": "string", "maxLength": 200},
+        "integration_mode": {"type": "string", "maxLength": 40},
+        "local_only": {"type": "boolean"},
+        "enabled_signals": {"type": "array", "maxItems": 40, "items": {"type": "string", "maxLength": 120}},
+        "scheduler_wait_interval_sec": {"type": "number", "minimum": 0},
+        "limits": {"type": "object", "additionalProperties": true},
+        "signal_providers": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "Integration": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["active", "queue", "commits"],
+      "properties": {
+        "active": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/TaskSummary"}},
+        "queue": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/TaskSummary"}},
+        "commits": {"type": "array", "maxItems": 20, "items": {"type": "object", "additionalProperties": true}}
+      }
+    }
+  }
+}

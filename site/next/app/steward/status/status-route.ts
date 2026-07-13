@@ -1,17 +1,21 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export const PUBLIC_STEWARD_STATUS_SCHEMA_VERSION = 3;
+import {
+  decodePublicStewardJson,
+  PUBLIC_STEWARD_SCHEMA_VERSION,
+} from '@/lib/steward-schema';
+import type { PublicStewardMonitor } from '@/generated/steward-public';
 
-export type PublicStewardStatus = Record<string, unknown> & {
-  schema_version: typeof PUBLIC_STEWARD_STATUS_SCHEMA_VERSION;
-};
+export const PUBLIC_STEWARD_STATUS_SCHEMA_VERSION = PUBLIC_STEWARD_SCHEMA_VERSION;
+export type PublicStewardStatus = PublicStewardMonitor;
 
 export type StewardStatusUnavailableReason =
   | 'missing'
   | 'unreadable'
   | 'malformed'
-  | 'incompatible';
+  | 'incompatible'
+  | 'invalid';
 
 export type StewardStatusUnavailable = {
   status: 'unavailable';
@@ -23,22 +27,8 @@ export type StewardStatusReadResult =
   | StewardStatusUnavailable;
 
 export function parsePublicStewardStatus(text: string): StewardStatusReadResult {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return unavailable('malformed');
-  }
-
-  if (!isObject(value)) return unavailable('malformed');
-  if (value.schema_version !== PUBLIC_STEWARD_STATUS_SCHEMA_VERSION) {
-    return unavailable('incompatible');
-  }
-
-  return {
-    status: 'ok',
-    data: value as PublicStewardStatus,
-  };
+  const decoded = decodePublicStewardJson(text);
+  return decoded.ok ? { status: 'ok', data: decoded.data } : unavailable(decoded.reason);
 }
 
 export async function readPublicStewardStatus(siteRoot: string): Promise<StewardStatusReadResult> {
@@ -51,10 +41,6 @@ export async function readPublicStewardStatus(siteRoot: string): Promise<Steward
   }
 
   return parsePublicStewardStatus(text);
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isMissingFile(error: unknown): boolean {

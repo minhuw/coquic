@@ -92,6 +92,13 @@ Local verification completed on 2026-07-13 after subplan 19:
 - Schema generation check, local redaction scan, and repository pre-commit
   hooks passed. No tracked local dashboard files or generated build state
   remain in the worktree.
+- Toolchain versions: Zig `0.16.0`, Python `3.13.13`, uv `0.8.5`, Node
+  `v25.2.1`, and npm `11.6.2`. The local atomic writer race check passed 10
+  consecutive times; remote publish latency remains unmeasured until deploy.
+- Cutover commit range: `216018d9..166df7b2`. The immediate rollback point is
+  `7eea3ec5` (`docs(steward): record dashboard shadow rollout`); disable
+  `public_mirror.enabled` and `public_mirror.publish`, then restart Steward to
+  stop public generation and upload without stopping local task execution.
 
 The deployed target still needs a deployment update before the final migration
 gate can be closed: on 2026-07-13, `/steward/status` returned `404`, while the

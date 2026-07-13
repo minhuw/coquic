@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 10;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 11;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -238,6 +238,7 @@ pub struct coquic_transport_config_t {
     pub enable_optimistic_ack_mitigation: u8,
     pub underfilled_packet_coalescing_delay_us: coquic_time_us_t,
     pub ecn_policy: coquic_ecn_policy_t,
+    pub pmtud_provisional_icmp_reductions: u8,
 }
 
 #[repr(C)]
@@ -321,6 +322,7 @@ pub struct coquic_path_mtu_update_t {
     pub size: usize,
     pub route_handle: coquic_optional_route_handle_t,
     pub max_udp_payload_size: usize,
+    pub quoted_packet: coquic_bytes_t,
 }
 
 #[repr(C)]

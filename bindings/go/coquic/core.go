@@ -338,6 +338,7 @@ type TransportConfig struct {
 	MaxIdleTimeout                 uint64
 	MaxUDPPayloadSize              uint64
 	PMTUDEnabled                   bool
+	PMTUDProvisionalICMPReductions bool
 	PMTUDBaseDatagramSize          int
 	PMTUDMaxDatagramSize           int
 	ActiveConnectionIDLimit        uint64
@@ -375,6 +376,7 @@ func transportConfigFromRaw(raw C.coquic_transport_config_t) TransportConfig {
 		MaxIdleTimeout:                 uint64(raw.max_idle_timeout),
 		MaxUDPPayloadSize:              uint64(raw.max_udp_payload_size),
 		PMTUDEnabled:                   raw.pmtud_enabled != 0,
+		PMTUDProvisionalICMPReductions: raw.pmtud_provisional_icmp_reductions != 0,
 		PMTUDBaseDatagramSize:          int(raw.pmtud_base_datagram_size),
 		PMTUDMaxDatagramSize:           int(raw.pmtud_max_datagram_size),
 		ActiveConnectionIDLimit:        uint64(raw.active_connection_id_limit),
@@ -407,6 +409,7 @@ func (c TransportConfig) raw() C.coquic_transport_config_t {
 		max_idle_timeout:                       C.uint64_t(c.MaxIdleTimeout),
 		max_udp_payload_size:                   C.uint64_t(c.MaxUDPPayloadSize),
 		pmtud_enabled:                          cBool(c.PMTUDEnabled),
+		pmtud_provisional_icmp_reductions:      cBool(c.PMTUDProvisionalICMPReductions),
 		pmtud_base_datagram_size:               C.size_t(c.PMTUDBaseDatagramSize),
 		pmtud_max_datagram_size:                C.size_t(c.PMTUDMaxDatagramSize),
 		active_connection_id_limit:             C.uint64_t(c.ActiveConnectionIDLimit),

@@ -4543,7 +4543,11 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             if (!path_mtu_update_matches_connection(entry, *mtu)) {
                 continue;
             }
-            entry.connection->apply_path_mtu_update(*path_id, mtu->max_udp_payload_size);
+            if (mtu->max_udp_payload_size < kMinimumClientInitialDatagramBytes) {
+                continue;
+            }
+            entry.connection->apply_path_mtu_update(*path_id, mtu->max_udp_payload_size,
+                                                    mtu->quoted_packet);
             auto drained = drain_connection_effects(
                 entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
                 *entry.connection, now, take_send_continuation_drain(entry), send_sink);
@@ -4994,7 +4998,11 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 if (!path_mtu_update_matches_connection(entry, in)) {
                     return;
                 }
-                connection->apply_path_mtu_update(path_it->second, in.max_udp_payload_size);
+                if (in.max_udp_payload_size < kMinimumClientInitialDatagramBytes) {
+                    return;
+                }
+                connection->apply_path_mtu_update(path_it->second, in.max_udp_payload_size,
+                                                  in.quoted_packet);
             },
             [&](const QuicCoreSendStreamData &in) {
                 const auto queued =

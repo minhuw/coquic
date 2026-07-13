@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 10u
+#define COQUIC_FFI_ABI_VERSION 11u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -211,6 +211,7 @@ typedef struct coquic_transport_config {
     uint8_t enable_optimistic_ack_mitigation;
     coquic_time_us_t underfilled_packet_coalescing_delay_us;
     coquic_ecn_policy_t ecn_policy;
+    uint8_t pmtud_provisional_icmp_reductions;
 } coquic_transport_config_t;
 
 typedef struct coquic_endpoint_config {
@@ -283,6 +284,7 @@ typedef struct coquic_path_mtu_update {
     size_t size;
     coquic_optional_route_handle_t route_handle;
     size_t max_udp_payload_size;
+    coquic_bytes_t quoted_packet;
 } coquic_path_mtu_update_t;
 
 typedef struct coquic_send_stream_data {

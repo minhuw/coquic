@@ -1352,6 +1352,12 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
             newly_lost_packets,
             mark_lost_packet(packet_space, handle, /*already_marked_in_recovery=*/true, now));
     }
+    for (const auto &packet : acked_packets) {
+        note_provisional_path_mtu_update_acked(packet_space, packet);
+    }
+    for (const auto &packet : late_acked_packets) {
+        note_provisional_path_mtu_update_acked(packet_space, packet);
+    }
     if (send_profile_enabled()) {
         auto &profile = send_profile_counters();
         profile.acked_packets += acked_packets.size();
@@ -2730,6 +2736,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     // # reliable indication of congestion and SHOULD NOT trigger a congestion
     // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
     note_pmtu_probe_lost(packet, now.value_or(packet.sent_time));
+    note_provisional_path_mtu_update_lost(packet_space, packet);
     if (packet_space_is_application(packet_space, application_space_) &&
         current_send_path_id_.has_value()) {
         auto &path = ensure_path_state(*current_send_path_id_);

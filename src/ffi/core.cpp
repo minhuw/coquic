@@ -62,6 +62,8 @@ constexpr std::size_t kInboundDatagramSizeV1 =
 constexpr std::size_t kPathMtuUpdateSizeV1 =
     offsetof(coquic_path_mtu_update_t, max_udp_payload_size) +
     sizeof(coquic_path_mtu_update_t::max_udp_payload_size);
+constexpr std::size_t kPathMtuUpdateSizeV2 = offsetof(coquic_path_mtu_update_t, quoted_packet) +
+                                             sizeof(coquic_path_mtu_update_t::quoted_packet);
 constexpr std::size_t kSendStreamDataSizeV1 =
     offsetof(coquic_send_stream_data_t, fin) + sizeof(coquic_send_stream_data_t::fin);
 constexpr std::size_t kSendStreamDataSizeV2 =
@@ -397,6 +399,7 @@ coquic::core::TransportConfig to_cpp(const coquic_transport_config_t &config) {
         .max_idle_timeout = config.max_idle_timeout,
         .max_udp_payload_size = config.max_udp_payload_size,
         .pmtud_enabled = config.pmtud_enabled != 0,
+        .pmtud_provisional_icmp_reductions = config.pmtud_provisional_icmp_reductions != 0,
         .pmtud_base_datagram_size = config.pmtud_base_datagram_size,
         .pmtud_max_datagram_size = config.pmtud_max_datagram_size,
         .active_connection_id_limit = config.active_connection_id_limit,
@@ -878,6 +881,8 @@ void coquic_transport_config_init(coquic_transport_config_t *config) {
         .grease_quic_bit = static_cast<std::uint8_t>(defaults.grease_quic_bit ? 1 : 0),
         .enable_optimistic_ack_mitigation =
             static_cast<std::uint8_t>(defaults.enable_optimistic_ack_mitigation ? 1 : 0),
+        .pmtud_provisional_icmp_reductions =
+            static_cast<std::uint8_t>(defaults.pmtud_provisional_icmp_reductions ? 1 : 0),
         .ecn_policy = ecn_policy_from_cpp(defaults.ecn_policy),
     };
 }
@@ -1019,6 +1024,9 @@ coquic_status_t coquic_endpoint_update_path_mtu(coquic_endpoint_t *endpoint,
             coquic::core::PathMtuUpdate{
                 .route_handle = to_optional(input->route_handle),
                 .max_udp_payload_size = input->max_udp_payload_size,
+                .quoted_packet = input->size >= kPathMtuUpdateSizeV2
+                                     ? to_vector(input->quoted_packet)
+                                     : std::vector<std::byte>{},
             },
             to_time_point(now));
         *out_result = new coquic_result(std::move(result));

@@ -127,6 +127,7 @@ struct TransportConfig {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
     bool pmtud_enabled = true;
+    bool pmtud_provisional_icmp_reductions = false;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14.3
     // # Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of
     // # [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum
@@ -253,6 +254,7 @@ struct InboundDatagram {
 struct PathMtuUpdate {
     std::optional<RouteHandle> route_handle;
     std::size_t max_udp_payload_size = 0;
+    std::vector<std::byte> quoted_packet;
 };
 
 struct SendStreamData {
@@ -429,6 +431,10 @@ struct ConnectionDiagnostics {
     std::size_t active_paths = 0;
     std::size_t active_streams = 0;
     std::size_t retired_streams = 0;
+    std::uint64_t provisional_pmtu_reductions_received = 0;
+    std::uint64_t provisional_pmtu_reductions_committed = 0;
+    std::uint64_t provisional_pmtu_reductions_discarded = 0;
+    std::uint64_t provisional_pmtu_reductions_expired = 0;
 };
 
 class Endpoint {

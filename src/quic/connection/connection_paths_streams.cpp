@@ -14,6 +14,18 @@ bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t ver
     return std::find(versions.begin(), versions.end(), version) != versions.end();
 }
 
+bool quoted_packet_matches_prefix(std::span<const std::byte> quoted_packet,
+                                  const SentPacketRecord &packet) {
+    if (quoted_packet.empty() || packet.quoted_packet_prefix.empty()) {
+        return false;
+    }
+    const auto compared_size = std::min(quoted_packet.size(), packet.quoted_packet_prefix.size());
+    return std::equal(packet.quoted_packet_prefix.begin(),
+                      packet.quoted_packet_prefix.begin() +
+                          static_cast<std::ptrdiff_t>(compared_size),
+                      quoted_packet.begin());
+}
+
 std::uint16_t read_u16_be(std::span<const std::byte> bytes) {
     return static_cast<std::uint16_t>(
         (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[0])) << 8) |
@@ -616,7 +628,101 @@ void QuicConnection::set_path_default_pmtud_search_ceiling(QuicPathId path_id,
         path.mtu.failed_probe_sizes.end());
 }
 
+QuicPacketSpace QuicConnection::packet_space_id(const PacketSpaceState &packet_space) const {
+    if (&packet_space == &initial_space_) {
+        return QuicPacketSpace::initial;
+    }
+    if (&packet_space == &handshake_space_) {
+        return QuicPacketSpace::handshake;
+    }
+    if (&packet_space == &zero_rtt_space_) {
+        return QuicPacketSpace::zero_rtt;
+    }
+    return QuicPacketSpace::application;
+}
+
 void QuicConnection::apply_path_mtu_update(
+    QuicPathId path_id, // NOLINT(bugprone-easily-swappable-parameters)
+    std::size_t max_udp_payload_size, std::span<const std::byte> quoted_packet) {
+    if (!config_.transport.pmtud_provisional_icmp_reductions) {
+        apply_path_mtu_update_immediately(path_id, max_udp_payload_size);
+        return;
+    }
+    if (max_udp_payload_size < kMinimumInitialDatagramSize || quoted_packet.empty()) {
+        return;
+    }
+
+    auto &path = ensure_path_state(path_id);
+    if (max_udp_payload_size >= path.mtu.validated_datagram_size) {
+        return;
+    }
+
+    struct MatchedPacket {
+        QuicPacketSpace packet_space;
+        std::uint64_t packet_number;
+        bool declared_lost;
+    };
+    std::optional<MatchedPacket> matched_packet;
+    const std::array packet_spaces = {
+        std::pair{QuicPacketSpace::initial, &initial_space_},
+        std::pair{QuicPacketSpace::handshake, &handshake_space_},
+        std::pair{QuicPacketSpace::zero_rtt, &zero_rtt_space_},
+        std::pair{QuicPacketSpace::application, &application_space_},
+    };
+    for (const auto &[space_id, packet_space] : packet_spaces) {
+        for (const auto handle : packet_space->recovery.tracked_packets()) {
+            const auto *packet = packet_space->recovery.packet_for_handle(handle);
+            if (packet == nullptr || packet->path_id != path_id || !packet->ack_eliciting ||
+                (!packet->in_flight && !packet->declared_lost) ||
+                !quoted_packet_matches_prefix(quoted_packet, *packet)) {
+                continue;
+            }
+            if (matched_packet.has_value()) {
+                return;
+            }
+            matched_packet = MatchedPacket{
+                .packet_space = space_id,
+                .packet_number = packet->packet_number,
+                .declared_lost = packet->declared_lost,
+            };
+        }
+    }
+    if (!matched_packet.has_value()) {
+        return;
+    }
+
+    const auto pending = std::find_if(
+        path.mtu.provisional_icmp_reductions.begin(), path.mtu.provisional_icmp_reductions.end(),
+        [&](const ProvisionalPathMtuUpdate &update) {
+            return update.packet_space == matched_packet->packet_space &&
+                   update.packet_number == matched_packet->packet_number;
+        });
+    if (pending != path.mtu.provisional_icmp_reductions.end() &&
+        max_udp_payload_size >= pending->max_udp_payload_size) {
+        return;
+    }
+    ++provisional_pmtu_reductions_received_;
+    if (matched_packet->declared_lost) {
+        if (pending != path.mtu.provisional_icmp_reductions.end()) {
+            path.mtu.provisional_icmp_reductions.erase(pending);
+        }
+        ++provisional_pmtu_reductions_committed_;
+        apply_path_mtu_update_immediately(path_id, max_udp_payload_size);
+        return;
+    }
+
+    if (pending != path.mtu.provisional_icmp_reductions.end()) {
+        pending->max_udp_payload_size = max_udp_payload_size;
+    } else {
+        path.mtu.provisional_icmp_reductions.push_back(ProvisionalPathMtuUpdate{
+            .max_udp_payload_size = max_udp_payload_size,
+            .packet_space = matched_packet->packet_space,
+            .packet_number = matched_packet->packet_number,
+        });
+    }
+}
+
+void QuicConnection::apply_path_mtu_update_immediately(
     QuicPathId path_id, // NOLINT(bugprone-easily-swappable-parameters)
     std::size_t max_udp_payload_size) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
@@ -691,6 +797,63 @@ void QuicConnection::apply_path_mtu_update(
         path.mtu.failed_probe_sizes.end());
     path.mtu.next_probe_time =
         pmtud_next_probe_time(path.mtu, QuicCoreClock::now(), QuicCoreDuration{1000000});
+}
+
+void QuicConnection::note_provisional_path_mtu_update_acked(const PacketSpaceState &packet_space,
+                                                            const SentPacketRecord &packet) {
+    const auto path = paths_.find(packet.path_id);
+    if (path == paths_.end()) {
+        return;
+    }
+    auto &provisional = path->second.mtu.provisional_icmp_reductions;
+    const auto candidate = std::find_if(
+        provisional.begin(), provisional.end(), [&](const ProvisionalPathMtuUpdate &update) {
+            return update.packet_space == packet_space_id(packet_space) &&
+                   update.packet_number == packet.packet_number;
+        });
+    if (candidate != provisional.end()) {
+        provisional.erase(candidate);
+        ++provisional_pmtu_reductions_discarded_;
+    }
+}
+
+void QuicConnection::note_provisional_path_mtu_update_lost(const PacketSpaceState &packet_space,
+                                                           const SentPacketRecord &packet) {
+    const auto path = paths_.find(packet.path_id);
+    if (path == paths_.end()) {
+        return;
+    }
+    auto &provisional = path->second.mtu.provisional_icmp_reductions;
+    const auto candidate = std::find_if(
+        provisional.begin(), provisional.end(), [&](const ProvisionalPathMtuUpdate &update) {
+            return update.packet_space == packet_space_id(packet_space) &&
+                   update.packet_number == packet.packet_number;
+        });
+    if (candidate == provisional.end()) {
+        return;
+    }
+    const auto max_udp_payload_size = candidate->max_udp_payload_size;
+    provisional.erase(candidate);
+    ++provisional_pmtu_reductions_committed_;
+    apply_path_mtu_update_immediately(packet.path_id, max_udp_payload_size);
+}
+
+void QuicConnection::discard_provisional_path_mtu_update(const PacketSpaceState &packet_space) {
+    const auto space_id = packet_space_id(packet_space);
+    for (auto &[path_id, path] : paths_) {
+        static_cast<void>(path_id);
+        const auto first = path.mtu.provisional_icmp_reductions.begin();
+        const auto last = std::remove_if(first, path.mtu.provisional_icmp_reductions.end(),
+                                         [&](const ProvisionalPathMtuUpdate &update) {
+                                             if (update.packet_space != space_id) {
+                                                 return false;
+                                             }
+                                             ++provisional_pmtu_reductions_expired_;
+                                             return true;
+                                         });
+        path.mtu.provisional_icmp_reductions.erase(last,
+                                                   path.mtu.provisional_icmp_reductions.end());
+    }
 }
 
 void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_locally,
@@ -1742,6 +1905,7 @@ void QuicConnection::discard_packet_space_state(PacketSpaceState &packet_space) 
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.4
     // # The sender MUST discard all recovery state associated with those
     // # packets and MUST remove them from the count of bytes in flight.
+    discard_provisional_path_mtu_update(packet_space);
     reset_discarded_packet_space_state(packet_space);
 }
 

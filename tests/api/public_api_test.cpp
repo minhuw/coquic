@@ -342,7 +342,12 @@ TEST(CoquicPublicApiTest, QuicFacadeForwardsEndpointAndConnectionMethods) {
 
     ASSERT_TRUE(connected.connection);
     EXPECT_EQ(endpoint.connection_count(), 1u);
-    EXPECT_FALSE(endpoint.connection_diagnostics().empty());
+    const auto diagnostics = endpoint.connection_diagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().provisional_pmtu_reductions_received, 0u);
+    EXPECT_EQ(diagnostics.front().provisional_pmtu_reductions_committed, 0u);
+    EXPECT_EQ(diagnostics.front().provisional_pmtu_reductions_discarded, 0u);
+    EXPECT_EQ(diagnostics.front().provisional_pmtu_reductions_expired, 0u);
     EXPECT_TRUE(endpoint.next_wakeup().has_value());
 
     auto result = endpoint.receive_datagram(

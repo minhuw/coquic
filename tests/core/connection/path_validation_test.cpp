@@ -72,6 +72,46 @@ void install_spare_peer_connection_id(coquic::quic::QuicConnection &quic_connect
     }
 }
 
+coquic::quic::QuicConnection make_provisional_pmtu_test_connection() {
+    auto connection = make_connected_client_connection();
+    connection.config_.max_outbound_datagram_size = 4096;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).max_udp_payload_size = 4096;
+    connection.config_.transport.pmtud_provisional_icmp_reductions = true;
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = true;
+    path.is_current_send_path = true;
+    path.mtu.viable = true;
+    path.mtu.enabled = true;
+    path.mtu.validated_datagram_size = 1500;
+    path.mtu.probe_ceiling = 1500;
+    path.mtu.search_low = 1500;
+    return connection;
+}
+
+std::vector<std::byte> provisional_pmtu_quote(std::uint8_t marker = 0x01) {
+    return {std::byte{0x40}, std::byte{marker}, std::byte{0x02}, std::byte{0x03}};
+}
+
+void seed_provisional_pmtu_packet(coquic::quic::PacketSpaceState &packet_space,
+                                  std::uint64_t packet_number, std::uint8_t marker) {
+    packet_space.recovery.on_packet_sent(coquic::quic::SentPacketRecord{
+        .packet_number = packet_number,
+        .sent_time = coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)),
+        .ack_eliciting = true,
+        .in_flight = true,
+        .path_id = 7,
+        .quoted_packet_prefix = provisional_pmtu_quote(marker),
+        .is_pmtu_probe = true,
+    });
+}
+
+void seed_provisional_pmtu_packet(coquic::quic::QuicConnection &connection,
+                                  std::uint64_t packet_number, std::uint8_t marker) {
+    seed_provisional_pmtu_packet(connection.application_space_, packet_number, marker);
+}
+
 coquic::quic::CodecResult<bool> process_one_rtt_ping_with_destination_connection_id(
     coquic::quic::QuicConnection &connection,
     const coquic::quic::ConnectionId &destination_connection_id, std::uint64_t packet_number) {
@@ -785,6 +825,242 @@ TEST(QuicCoreTest, PathChallengeQueuesMatchingPathResponseOnSamePath) {
                                     frame);
                             }),
               1);
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionWaitsForQuotedPacketLoss) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+
+    const auto quote = provisional_pmtu_quote();
+    connection.apply_path_mtu_update(7, 1400, quote);
+
+    const auto &path = connection.paths_.at(7);
+    EXPECT_EQ(path.mtu.validated_datagram_size, 1500u);
+    ASSERT_FALSE(path.mtu.provisional_icmp_reductions.empty());
+    EXPECT_EQ(path.mtu.provisional_icmp_reductions.front().max_udp_payload_size, 1400u);
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionAppliesAfterQuotedPacketLoss) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+    connection.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+
+    const auto handle = connection.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(handle.has_value());
+    const auto packet_handle = optional_value_or_terminate(handle);
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(connection.application_space_, packet_handle,
+                                      /*already_marked_in_recovery=*/false,
+                                      coquic::quic::test::test_time(2))
+                    .has_value());
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1400u);
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionIsDiscardedOnAcknowledgment) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+    connection.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+
+    const auto handle = connection.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(handle.has_value());
+    const auto packet = *connection.application_space_.recovery.packet_for_handle(
+        optional_value_or_terminate(handle));
+    connection.note_provisional_path_mtu_update_acked(connection.application_space_, packet);
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1500u);
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionIgnoresUnrelatedLoss) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+    seed_provisional_pmtu_packet(connection, 2, 0x02);
+    connection.apply_path_mtu_update(7, 1400, provisional_pmtu_quote(0x01));
+
+    const auto handle = connection.application_space_.recovery.handle_for_packet_number(2);
+    ASSERT_TRUE(handle.has_value());
+    const auto packet_handle = optional_value_or_terminate(handle);
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(connection.application_space_, packet_handle,
+                                      /*already_marked_in_recovery=*/false,
+                                      coquic::quic::test::test_time(3))
+                    .has_value());
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1500u);
+    ASSERT_FALSE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+    EXPECT_EQ(connection.paths_.at(7).mtu.provisional_icmp_reductions.front().packet_number, 1u);
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionRetainsOverlappingReports) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+    seed_provisional_pmtu_packet(connection, 2, 0x02);
+    connection.apply_path_mtu_update(7, 1400, provisional_pmtu_quote(0x01));
+    connection.apply_path_mtu_update(7, 1300, provisional_pmtu_quote(0x02));
+
+    ASSERT_EQ(connection.paths_.at(7).mtu.provisional_icmp_reductions.size(), 2u);
+
+    const auto first_handle = connection.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(first_handle.has_value());
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(
+                        connection.application_space_, optional_value_or_terminate(first_handle),
+                        /*already_marked_in_recovery=*/false, coquic::quic::test::test_time(3))
+                    .has_value());
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1400u);
+    ASSERT_EQ(connection.paths_.at(7).mtu.provisional_icmp_reductions.size(), 1u);
+    EXPECT_EQ(connection.paths_.at(7).mtu.provisional_icmp_reductions.front().packet_number, 2u);
+
+    const auto second_handle = connection.application_space_.recovery.handle_for_packet_number(2);
+    ASSERT_TRUE(second_handle.has_value());
+    const auto second_packet = *connection.application_space_.recovery.packet_for_handle(
+        optional_value_or_terminate(second_handle));
+    connection.note_provisional_path_mtu_update_acked(connection.application_space_, second_packet);
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1400u);
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionIgnoresAmbiguousShortQuote) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+    seed_provisional_pmtu_packet(connection, 2, 0x01);
+
+    const auto non_quoted_handle =
+        connection.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(non_quoted_handle.has_value());
+    auto *non_quoted_packet = connection.application_space_.recovery.packet_for_handle(
+        optional_value_or_terminate(non_quoted_handle));
+    ASSERT_NE(non_quoted_packet, nullptr);
+    non_quoted_packet->quoted_packet_prefix[2] = std::byte{0x04};
+
+    const std::array short_quote = {std::byte{0x40}, std::byte{0x01}};
+    connection.apply_path_mtu_update(7, 1400, short_quote);
+
+    const auto packet_handle = optional_value_or_terminate(non_quoted_handle);
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(connection.application_space_, packet_handle,
+                                      /*already_marked_in_recovery=*/false,
+                                      coquic::quic::test::test_time(3))
+                    .has_value());
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1500u);
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+}
+
+TEST(QuicCoreTest, DisabledProvisionalIcmpPmtuPolicyReducesImmediately) {
+    auto connection = make_provisional_pmtu_test_connection();
+    connection.config_.transport.pmtud_provisional_icmp_reductions = false;
+    const std::array unrelated_quote = {std::byte{0xff}};
+
+    connection.apply_path_mtu_update(7, 1400, unrelated_quote);
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1400u);
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuPolicyRejectsBelowMinimum) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+
+    connection.apply_path_mtu_update(7, 1199, provisional_pmtu_quote());
+
+    EXPECT_TRUE(connection.paths_.at(7).mtu.viable);
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1500u);
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuPolicyAcceptsMinimum) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection, 1, 0x01);
+    connection.apply_path_mtu_update(7, 1200, provisional_pmtu_quote());
+
+    const auto handle = connection.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(handle.has_value());
+    const auto packet_handle = optional_value_or_terminate(handle);
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(connection.application_space_, packet_handle,
+                                      /*already_marked_in_recovery=*/false,
+                                      coquic::quic::test::test_time(2))
+                    .has_value());
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1200u);
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuDiagnosticsTrackTransitions) {
+    auto received = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(received, 1, 0x01);
+    received.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+    auto diagnostics = received.diagnostics(1);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_received, 1u);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_committed, 0u);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_discarded, 0u);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_expired, 0u);
+
+    auto acknowledged = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(acknowledged, 1, 0x01);
+    acknowledged.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+    const auto acknowledged_handle =
+        acknowledged.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(acknowledged_handle.has_value());
+    const auto acknowledged_packet = *acknowledged.application_space_.recovery.packet_for_handle(
+        optional_value_or_terminate(acknowledged_handle));
+    acknowledged.note_provisional_path_mtu_update_acked(acknowledged.application_space_,
+                                                        acknowledged_packet);
+    diagnostics = acknowledged.diagnostics(1);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_discarded, 1u);
+
+    auto expired = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(expired, 1, 0x01);
+    expired.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+    expired.discard_packet_space_state(expired.application_space_);
+    diagnostics = expired.diagnostics(1);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_expired, 1u);
+
+    auto committed = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(committed, 1, 0x01);
+    committed.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+    const auto committed_handle = committed.application_space_.recovery.handle_for_packet_number(1);
+    ASSERT_TRUE(committed_handle.has_value());
+    ASSERT_TRUE(committed
+                    .mark_lost_packet(
+                        committed.application_space_, optional_value_or_terminate(committed_handle),
+                        /*already_marked_in_recovery=*/false, coquic::quic::test::test_time(2))
+                    .has_value());
+    diagnostics = committed.diagnostics(1);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_committed, 1u);
+}
+
+TEST(QuicCoreTest, ProvisionalIcmpPmtuReductionIsClearedByClientRetry) {
+    auto connection = make_provisional_pmtu_test_connection();
+    seed_provisional_pmtu_packet(connection.initial_space_, 1, 0x01);
+    connection.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+    ASSERT_FALSE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+
+    connection.apply_client_retry(coquic::quic::ConnectionId{},
+                                  coquic::quic::ConnectionId{std::byte{0x09}}, {});
+
+    EXPECT_TRUE(connection.paths_.at(7).mtu.provisional_icmp_reductions.empty());
+    auto diagnostics = connection.diagnostics(1);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_expired, 1u);
+
+    seed_provisional_pmtu_packet(connection.initial_space_, 2, 0x01);
+    connection.apply_path_mtu_update(7, 1400, provisional_pmtu_quote());
+    const auto handle = connection.initial_space_.recovery.handle_for_packet_number(2);
+    ASSERT_TRUE(handle.has_value());
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(
+                        connection.initial_space_, optional_value_or_terminate(handle),
+                        /*already_marked_in_recovery=*/false, coquic::quic::test::test_time(3))
+                    .has_value());
+
+    EXPECT_EQ(connection.paths_.at(7).mtu.validated_datagram_size, 1400u);
+    diagnostics = connection.diagnostics(1);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_received, 2u);
+    EXPECT_EQ(diagnostics.provisional_pmtu_reductions_committed, 1u);
 }
 
 TEST(QuicCoreTest, PathMtuUpdateBelowMinimumMarksPathNotViableAndBlocksSend) {

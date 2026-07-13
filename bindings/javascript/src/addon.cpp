@@ -471,6 +471,8 @@ coquic_transport_config_t transport_from_object(napi_env env, napi_value value,
         get_u64(env, value, "maxUdpPayloadSize", fallback.max_udp_payload_size);
     fallback.pmtud_enabled =
         static_cast<std::uint8_t>(get_bool(env, value, "pmtudEnabled", fallback.pmtud_enabled));
+    fallback.pmtud_provisional_icmp_reductions = static_cast<std::uint8_t>(get_bool(
+        env, value, "pmtudProvisionalIcmpReductions", fallback.pmtud_provisional_icmp_reductions));
     fallback.pmtud_base_datagram_size =
         get_size(env, value, "pmtudBaseDatagramSize", fallback.pmtud_base_datagram_size);
     fallback.pmtud_max_datagram_size =
@@ -526,6 +528,8 @@ napi_value transport_to_js(napi_env env, const coquic_transport_config_t &raw) {
     set_u64(env, out, "maxIdleTimeout", raw.max_idle_timeout);
     set_u64(env, out, "maxUdpPayloadSize", raw.max_udp_payload_size);
     set_bool(env, out, "pmtudEnabled", raw.pmtud_enabled != 0);
+    set_bool(env, out, "pmtudProvisionalIcmpReductions",
+             raw.pmtud_provisional_icmp_reductions != 0);
     set_u64(env, out, "pmtudBaseDatagramSize", raw.pmtud_base_datagram_size);
     set_u64(env, out, "pmtudMaxDatagramSize", raw.pmtud_max_datagram_size);
     set_u64(env, out, "activeConnectionIdLimit", raw.active_connection_id_limit);

@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 10
+FFI_ABI_VERSION = 11
 
 coquic_time_us_t = C.c_uint64
 
@@ -194,6 +194,7 @@ class coquic_transport_config_t(C.Structure):
         ("enable_optimistic_ack_mitigation", C.c_uint8),
         ("underfilled_packet_coalescing_delay_us", coquic_time_us_t),
         ("ecn_policy", C.c_uint8),
+        ("pmtud_provisional_icmp_reductions", C.c_uint8),
     ]
 
 
@@ -275,6 +276,7 @@ class coquic_path_mtu_update_t(C.Structure):
         ("size", C.c_size_t),
         ("route_handle", coquic_optional_route_handle_t),
         ("max_udp_payload_size", C.c_size_t),
+        ("quoted_packet", coquic_bytes_t),
     ]
 
 

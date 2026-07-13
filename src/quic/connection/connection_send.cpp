@@ -378,6 +378,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
         pending_application_close_.has_value() || !pending_new_token_frames_.empty() ||
         !pending_new_connection_id_frames_.empty() ||
         !pending_retire_connection_id_frames_.empty() || !pending_datagram_send_queue_.empty() ||
+        config_.transport.pmtud_provisional_icmp_reductions ||
         handshake_done_state_ == StreamControlFrameState::pending ||
         connection_flow_control_.max_data_state == StreamControlFrameState::pending ||
         connection_flow_control_.data_blocked_state == StreamControlFrameState::pending ||
@@ -1041,6 +1042,22 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     };
     const auto track_pending_packets_from_datagram =
         [&](const SerializedProtectedDatagram &tracked_datagram) -> bool {
+        if (config_.transport.pmtud_provisional_icmp_reductions) {
+            for (auto &pending : pending_tracked_packets) {
+                if (!pending.packet.ack_eliciting || !pending.packet.in_flight ||
+                    pending.packet_index >= tracked_datagram.packet_metadata.size()) {
+                    continue;
+                }
+                const auto &metadata = tracked_datagram.packet_metadata[pending.packet_index];
+                const auto packet_bytes =
+                    tracked_datagram.bytes.span().subspan(metadata.offset, metadata.length);
+                const auto prefix_length =
+                    std::min(packet_bytes.size(), kMaxIcmpQuotedPacketPrefixSize);
+                pending.packet.quoted_packet_prefix.assign(
+                    packet_bytes.begin(),
+                    packet_bytes.begin() + static_cast<std::ptrdiff_t>(prefix_length));
+            }
+        }
         return track_pending_packets(
             [&](const auto &pending) {
                 if (connection_drain_test_hooks().force_missing_packet_metadata |
@@ -5322,6 +5339,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 const auto selected_ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
                 const bool can_queue_simple_stream_packet =
                     use_fast_serialized_one_rtt_commit && has_stream_fragments &&
+                    !config_.transport.pmtud_provisional_icmp_reductions &&
                     application_candidate_crypto_ranges.empty() && new_token_frames.empty() &&
                     reset_stream_frames.empty() && stop_sending_frames.empty() &&
                     new_connection_id_frames.empty() && retire_connection_id_frames.empty() &&

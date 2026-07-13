@@ -59,6 +59,10 @@ QuicCoreConnectionDiagnostics QuicConnection::diagnostics(QuicConnectionHandle h
         .active_streams = streams_.size(),
         .retired_streams =
             retired_streams_.size() + retired_peer_stream_count() + retired_local_stream_count(),
+        .provisional_pmtu_reductions_received = provisional_pmtu_reductions_received_,
+        .provisional_pmtu_reductions_committed = provisional_pmtu_reductions_committed_,
+        .provisional_pmtu_reductions_discarded = provisional_pmtu_reductions_discarded_,
+        .provisional_pmtu_reductions_expired = provisional_pmtu_reductions_expired_,
         .initial_space = packet_space_diagnostics(initial_space_),
         .handshake_space = packet_space_diagnostics(handshake_space_),
         .zero_rtt_space = packet_space_diagnostics(zero_rtt_space_),

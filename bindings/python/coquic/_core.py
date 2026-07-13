@@ -145,6 +145,7 @@ class TransportConfig:
     max_idle_timeout: int
     max_udp_payload_size: int
     pmtud_enabled: bool
+    pmtud_provisional_icmp_reductions: bool
     pmtud_base_datagram_size: int
     pmtud_max_datagram_size: int
     active_connection_id_limit: int
@@ -182,6 +183,7 @@ class TransportConfig:
             max_idle_timeout=raw.max_idle_timeout,
             max_udp_payload_size=raw.max_udp_payload_size,
             pmtud_enabled=bool(raw.pmtud_enabled),
+            pmtud_provisional_icmp_reductions=bool(raw.pmtud_provisional_icmp_reductions),
             pmtud_base_datagram_size=raw.pmtud_base_datagram_size,
             pmtud_max_datagram_size=raw.pmtud_max_datagram_size,
             active_connection_id_limit=raw.active_connection_id_limit,
@@ -217,6 +219,7 @@ class TransportConfig:
             max_idle_timeout=self.max_idle_timeout,
             max_udp_payload_size=self.max_udp_payload_size,
             pmtud_enabled=int(self.pmtud_enabled),
+            pmtud_provisional_icmp_reductions=int(self.pmtud_provisional_icmp_reductions),
             pmtud_base_datagram_size=self.pmtud_base_datagram_size,
             pmtud_max_datagram_size=self.pmtud_max_datagram_size,
             active_connection_id_limit=self.active_connection_id_limit,
@@ -384,12 +387,14 @@ class InboundDatagram:
 class PathMtuUpdate:
     route_handle: RouteHandle | None
     max_udp_payload_size: int
+    quoted_packet: bytes = b""
 
-    def to_raw(self) -> ffi.coquic_path_mtu_update_t:
+    def to_raw(self, arena: "_CallArena") -> ffi.coquic_path_mtu_update_t:
         return ffi.coquic_path_mtu_update_t(
             size=C.sizeof(ffi.coquic_path_mtu_update_t),
             route_handle=_optional_route(self.route_handle),
             max_udp_payload_size=self.max_udp_payload_size,
+            quoted_packet=arena.bytes(self.quoted_packet),
         )
 
 
@@ -647,7 +652,8 @@ class Endpoint:
         )
 
     def update_path_mtu(self, update: PathMtuUpdate, now: TimeUs) -> QueryResult:
-        raw = update.to_raw()
+        arena = _CallArena()
+        raw = update.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_endpoint_update_path_mtu(
                 self._checked_ptr(), C.byref(raw), now, out
@@ -780,7 +786,8 @@ class Endpoint:
         )
 
     def quic_update_path_mtu(self, update: PathMtuUpdate, now: TimeUs) -> QueryResult:
-        raw = update.to_raw()
+        arena = _CallArena()
+        raw = update.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_quic_update_path_mtu(
                 self._checked_ptr(), C.byref(raw), now, out

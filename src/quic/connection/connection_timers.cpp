@@ -1571,6 +1571,7 @@ void QuicConnection::restore_zero_rtt_stream_data_after_retry() {
 void QuicConnection::apply_client_retry(const ConnectionId &original_destination_connection_id,
                                         const ConnectionId &retry_source_connection_id,
                                         std::vector<std::byte> retry_token) {
+    discard_provisional_path_mtu_update(initial_space_);
     std::vector<SentPacketRecord> discarded_packets;
     const auto handles = initial_space_.recovery.tracked_packets();
     discarded_packets.reserve(handles.size());

@@ -78,6 +78,7 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     bool force_ack = false;
     std::optional<std::uint64_t> largest_received_packet_number_acked;
     QuicPathId path_id = 0;
+    std::vector<std::byte> quoted_packet_prefix;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
     std::uint64_t delivered = 0;
     QuicCoreTimePoint delivered_time{};

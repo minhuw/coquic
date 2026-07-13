@@ -493,6 +493,21 @@ struct PathSpinState {
     std::optional<std::uint64_t> largest_peer_packet_number;
 };
 
+enum class QuicPacketSpace : std::uint8_t {
+    initial,
+    handshake,
+    zero_rtt,
+    application,
+};
+
+inline constexpr std::size_t kMaxIcmpQuotedPacketPrefixSize = 256;
+
+struct ProvisionalPathMtuUpdate {
+    std::size_t max_udp_payload_size = 0;
+    QuicPacketSpace packet_space = QuicPacketSpace::application;
+    std::uint64_t packet_number = 0;
+};
+
 struct PathMtuState {
     bool enabled = true;
     bool viable = true;
@@ -503,6 +518,7 @@ struct PathMtuState {
     std::size_t search_low = 1200;
     std::optional<std::size_t> outstanding_probe_size;
     std::optional<std::uint64_t> outstanding_probe_packet_number;
+    std::vector<ProvisionalPathMtuUpdate> provisional_icmp_reductions;
     std::optional<QuicCoreTimePoint> next_probe_time;
     std::vector<std::size_t> failed_probe_sizes;
 };
@@ -574,7 +590,8 @@ class QuicConnection {
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
                                                    QuicMigrationRequestReason reason,
                                                    QuicCoreTimePoint now = QuicCoreClock::now());
-    void apply_path_mtu_update(QuicPathId path_id, std::size_t max_udp_payload_size);
+    void apply_path_mtu_update(QuicPathId path_id, std::size_t max_udp_payload_size,
+                               std::span<const std::byte> quoted_packet = {});
     StreamStateResult<bool> queue_application_close(const LocalApplicationCloseCommand &command);
     void queue_new_token(std::vector<std::byte> token);
     void request_key_update();
@@ -1056,6 +1073,13 @@ class QuicConnection {
                                                  const SentPacketRecord &packet);
     void note_pmtu_probe_acked(const SentPacketRecord &packet, QuicCoreTimePoint now);
     void note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCoreTimePoint now);
+    void note_provisional_path_mtu_update_acked(const PacketSpaceState &packet_space,
+                                                const SentPacketRecord &packet);
+    void note_provisional_path_mtu_update_lost(const PacketSpaceState &packet_space,
+                                               const SentPacketRecord &packet);
+    void discard_provisional_path_mtu_update(const PacketSpaceState &packet_space);
+    void apply_path_mtu_update_immediately(QuicPathId path_id, std::size_t max_udp_payload_size);
+    QuicPacketSpace packet_space_id(const PacketSpaceState &packet_space) const;
     void note_inbound_datagram_bytes(std::size_t bytes);
     void note_outbound_datagram_bytes(std::size_t bytes,
                                       std::optional<QuicPathId> path_id = std::nullopt,
@@ -1280,6 +1304,10 @@ class QuicConnection {
     std::uint64_t active_queued_stream_bytes_ = 0;
     std::uint64_t fresh_sendable_stream_bytes_ = 0;
     std::uint64_t streams_with_lost_send_data_ = 0;
+    std::uint64_t provisional_pmtu_reductions_received_ = 0;
+    std::uint64_t provisional_pmtu_reductions_committed_ = 0;
+    std::uint64_t provisional_pmtu_reductions_discarded_ = 0;
+    std::uint64_t provisional_pmtu_reductions_expired_ = 0;
     std::vector<PendingTrackedPacketScratch> pending_tracked_packet_scratch_;
     std::vector<PendingSimpleStreamPacketScratch> pending_simple_stream_packet_scratch_;
     std::vector<SimpleStreamSentPacketRecord> simple_stream_sent_packet_scratch_;

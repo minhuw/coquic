@@ -6,7 +6,7 @@ from coquic import _ffi as ffi
 
 class EcnPolicyTest(unittest.TestCase):
     def test_default_and_alternate_policy_round_trip(self) -> None:
-        self.assertEqual(ffi.FFI_ABI_VERSION, 10)
+        self.assertEqual(ffi.FFI_ABI_VERSION, 11)
 
         raw = ffi.coquic_transport_config_t()
         raw.ecn_policy = ffi.COQUIC_ECN_POLICY_RFC8311_ECT1

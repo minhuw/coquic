@@ -230,6 +230,7 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .max_idle_timeout = config.max_idle_timeout,
         .max_udp_payload_size = config.max_udp_payload_size,
         .pmtud_enabled = config.pmtud_enabled,
+        .pmtud_provisional_icmp_reductions = config.pmtud_provisional_icmp_reductions,
         .pmtud_base_datagram_size = config.pmtud_base_datagram_size,
         .pmtud_max_datagram_size = config.pmtud_max_datagram_size,
         .active_connection_id_limit = config.active_connection_id_limit,
@@ -405,6 +406,7 @@ quic::QuicCoreEndpointInput to_internal(EndpointInput input) {
                 return quic::QuicCorePathMtuUpdate{
                     .route_handle = value.route_handle,
                     .max_udp_payload_size = value.max_udp_payload_size,
+                    .quoted_packet = std::move(value.quoted_packet),
                 };
             } else if constexpr (std::is_same_v<T, ConnectionCommand>) {
                 return quic::QuicCoreConnectionCommand{
@@ -570,6 +572,10 @@ ConnectionDiagnostics from_internal(const quic::QuicCoreConnectionDiagnostics &d
         .active_paths = diagnostics.active_paths,
         .active_streams = diagnostics.active_streams,
         .retired_streams = diagnostics.retired_streams,
+        .provisional_pmtu_reductions_received = diagnostics.provisional_pmtu_reductions_received,
+        .provisional_pmtu_reductions_committed = diagnostics.provisional_pmtu_reductions_committed,
+        .provisional_pmtu_reductions_discarded = diagnostics.provisional_pmtu_reductions_discarded,
+        .provisional_pmtu_reductions_expired = diagnostics.provisional_pmtu_reductions_expired,
     };
 }
 

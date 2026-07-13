@@ -381,6 +381,7 @@ pub struct TransportConfig {
     pub max_idle_timeout: u64,
     pub max_udp_payload_size: u64,
     pub pmtud_enabled: bool,
+    pub pmtud_provisional_icmp_reductions: bool,
     pub pmtud_base_datagram_size: usize,
     pub pmtud_max_datagram_size: usize,
     pub active_connection_id_limit: u64,
@@ -413,6 +414,7 @@ impl TransportConfig {
             max_idle_timeout: raw.max_idle_timeout,
             max_udp_payload_size: raw.max_udp_payload_size,
             pmtud_enabled: raw.pmtud_enabled != 0,
+            pmtud_provisional_icmp_reductions: raw.pmtud_provisional_icmp_reductions != 0,
             pmtud_base_datagram_size: raw.pmtud_base_datagram_size,
             pmtud_max_datagram_size: raw.pmtud_max_datagram_size,
             active_connection_id_limit: raw.active_connection_id_limit,
@@ -445,6 +447,7 @@ impl TransportConfig {
             max_idle_timeout: self.max_idle_timeout,
             max_udp_payload_size: self.max_udp_payload_size,
             pmtud_enabled: self.pmtud_enabled as u8,
+            pmtud_provisional_icmp_reductions: self.pmtud_provisional_icmp_reductions as u8,
             pmtud_base_datagram_size: self.pmtud_base_datagram_size,
             pmtud_max_datagram_size: self.pmtud_max_datagram_size,
             active_connection_id_limit: self.active_connection_id_limit,
@@ -812,6 +815,7 @@ impl<'a> InboundDatagram<'a> {
 pub struct PathMtuUpdate {
     pub route_handle: Option<RouteHandle>,
     pub max_udp_payload_size: usize,
+    pub quoted_packet: Vec<u8>,
 }
 
 impl PathMtuUpdate {
@@ -820,6 +824,10 @@ impl PathMtuUpdate {
             size: std::mem::size_of::<ffi::coquic_path_mtu_update_t>(),
             route_handle: optional_route(self.route_handle),
             max_udp_payload_size: self.max_udp_payload_size,
+            quoted_packet: ffi::coquic_bytes_t {
+                data: self.quoted_packet.as_ptr(),
+                length: self.quoted_packet.len(),
+            },
         }
     }
 }

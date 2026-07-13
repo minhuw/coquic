@@ -266,19 +266,6 @@ def audit_invariants() -> None:
     raise typer.Exit(1)
 
 
-@app.command()
-def web(host: str = "127.0.0.1", port: int = 8765) -> None:
-    import uvicorn
-
-    uvicorn.run(
-        "coquic_steward.web.app:create_app",
-        factory=True,
-        host=host,
-        port=port,
-        reload=False,
-    )
-
-
 def _run_until_stopped(daemon_: StewardDaemon) -> None:
     try:
         daemon_.run_forever()

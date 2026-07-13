@@ -5,12 +5,12 @@ Date: 2026-07-13
 Last updated: 2026-07-13
 
 Current execution state: subplans 00 through 19 and Round 2 subplans 21
-through 25 are complete locally on `main`. Subplans 20 and 26 remain in
-progress because the deployed target has not yet received the committed v3
-site and mirror. The local release gate passes, and the synthetic monitor now
-records that external deployment gap without mutating the target. The
-capability matrix is checked in at [00-capability-matrix.md](00-capability-matrix.md),
-and the v3 contract is checked in at `steward/schema/fixtures/public-monitor-v3/`.
+through 24 are complete locally on `main`. Subplans 20 and 25 are in progress;
+subplan 26 is blocked on them. The deployed target has not yet received the
+committed v3 site and mirror. The latest local artifact-path and clock-skew
+review findings are fixed and covered by regression tests. The capability
+matrix is checked in at [00-capability-matrix.md](00-capability-matrix.md), and
+the v3 contract is checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
 ## Objective
 
@@ -110,20 +110,20 @@ latency, and redaction scan against the deployed files.
 
 ## Round 2 Release Evidence
 
-Local verification completed on 2026-07-13 for subplans 21 through 25 and the
-local portion of subplan 26:
+Local implementation evidence was recorded on 2026-07-13 for subplans 21
+through 25 and the local portion of subplan 26. The latest review findings for
+artifact-path containment and mixed future timestamps are now fixed:
 
 - Implementation commits: `15042338`, `e258a6cd`, `efa51579`, `33d6c7bc`,
-  `c45627b6`, and `0d340fc8`. The last commit adds the deployed synthetic
-  monitor, fixture server tests, scheduled CI, post-deploy CI, and the
-  operator runbook.
+  `c45627b6`, `0d340fc8`, `d9f2cd81`, and `50e7ed45`. The last two commits
+  close the artifact-path and clock-skew review findings.
 - `nix develop -c uv run --project steward python -m pytest steward/tests -q`:
-  `287 passed`, including `9` synthetic monitor fixture tests.
+  `288 passed`, including `10` synthetic monitor fixture tests.
 - `nix develop -c uv run --project steward python steward/schema/generate_types.py --check`,
   the migration guard, and the isolated no-Node smoke test passed.
 - In `site/next`: `npm run typecheck`, `npm test -- --reporter=dot`,
   `npm run build`, and `npm run test:e2e -- --reporter=line` passed; Vitest
-  reported `53 passed` and Playwright reported `12 passed` across desktop and
+  reported `55 passed` and Playwright reported `12 passed` across desktop and
   mobile projects, including serious axe checks and keyboard-only flows.
 - `nix develop -c zig build` and `nix develop -c zig build test` passed;
   `goodput` and `crosstraffic` were not run. Repository pre-commit hooks passed
@@ -133,10 +133,27 @@ local portion of subplan 26:
   dashboard success plus the expected canonical-route `404`. No secret or
   response body was printed, and no daemon or remote deployment state changed.
 
-Subplan 26 remains in progress until a deployment serves v3 at
-`/steward/status`. After deployment, rerun the synthetic command and archive
-its JSON artifact, then record the response age, latency, canonical headers,
-task artifact result, and redaction result here before closing the gate.
+Subplan 26 is blocked until subplans 20 and 25 complete. After deployment,
+rerun the synthetic command and archive its JSON artifact, then record the
+response age, latency, canonical headers, task artifact result, and redaction
+result here before closing the gate.
+
+## Latest Progress Review
+
+Review snapshot: 2026-07-13 after `50e7ed45`; the only worktree change is this
+tracker update.
+
+- A fresh read-only production synthetic run returned `200` for the dashboard;
+  dashboard headers, privacy, and latency passed (`1412.857 ms` against the
+  `2000 ms` limit).
+- The canonical `/steward/status` route still returned `404`, so schema,
+  freshness, privacy, and task-artifact checks could not run against production.
+- Subplan 22 is complete locally in `d9f2cd81`; exact dot segments, encoded dot
+  requests, and resolved artifact containment are covered by route tests.
+- Subplan 25's mixed future-clock case is complete locally in `50e7ed45`; each
+  timestamp is checked independently before stale-age calculation.
+- Subplan 26 is blocked until subplans 20 and 25 complete and a sanitized
+  passing production artifact is recorded.
 
 ## Dependency Graph
 
@@ -236,10 +253,10 @@ flowchart LR
 
 | Wave | Subplans | Start Condition |
 | --- | --- | --- |
-| A | 22, 23, 24 | Ready now; route, schema, and UI ownership are separate. |
-| B | 21 | Start after 19 removes the final web-only dependencies and documentation. |
-| C | 25 | Start after 20, 22, and 23 so the deployed check enforces the final contract. |
-| D | 26 | Start after all Round 2 implementation tasks pass their local gates. |
+| A | 22, 23, 24 | Complete locally; route, schema, and accessibility gates pass. |
+| B | 21 | Complete after subplan 19 removed the final web-only dependencies. |
+| C | 25 | In progress; local clock-skew coverage passes and the deployed v3 route remains open. |
+| D | 26 | Blocked until 20 and 25 pass. |
 
 ## Subplan Index
 
@@ -277,11 +294,11 @@ only after the corresponding local checks pass.
 | ID | Subplan | Depends On | Status | Owner | Implementation Evidence |
 | --- | --- | --- | --- | --- | --- |
 | 21 | [Continuous migration regression guard](21-continuous-migration-guard.md) | 19 | Complete | Codex | `33d6c7bc`; guard, negative self-tests, and no-Node smoke passed. |
-| 22 | [Public artifact HTTP contract](22-public-artifact-http-contract.md) | 14 | Complete | Codex | `15042338`; JSON/NDJSON route headers, redirects, 404s, and route tests passed. |
+| 22 | [Public artifact HTTP contract](22-public-artifact-http-contract.md) | 14 | Complete | Codex | `15042338`, `d9f2cd81`; headers, dot segments, encoded requests, and containment tests pass. |
 | 23 | [Schema evolution and compatibility gate](23-schema-evolution-gate.md) | 05, 13, 14 | Complete | Codex | `e258a6cd`; generated drift, compatibility fixtures, and deliberate bump gate passed. |
 | 24 | [Monitor accessibility and keyboard behavior](24-monitor-accessibility-keyboard.md) | 14 | Complete | Codex | `efa51579`, `c45627b6`; axe, keyboard, focus, and 12 desktop/mobile flows passed. |
-| 25 | [Deployed synthetic monitor](25-deployed-synthetic-monitor.md) | 20, 22, 23 | Complete | Codex | `0d340fc8`; 9 fixture cases passed; scheduled/post-deploy CI and runbook added. |
-| 26 | [Round 2 verification](26-round-two-verification.md) | 21-25 | In Progress | Codex | Local matrix passes; production remains open because `/steward/status` is `404`. |
+| 25 | [Deployed synthetic monitor](25-deployed-synthetic-monitor.md) | 20, 22, 23 | In Progress | Codex | `0d340fc8`, `50e7ed45`; fixture suite and mixed future-skew gate pass; production v3 remains open. |
+| 26 | [Round 2 verification](26-round-two-verification.md) | 21-25 | Blocked | Codex | Local matrix passes; waiting for 20, 25, and a passing production artifact. |
 
 ## Coordination Rules
 

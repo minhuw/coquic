@@ -1,4 +1,4 @@
-import { cp, mkdir, rm } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,7 +16,16 @@ const detailFixture = path.join(
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(path.join(outputRoot, 'public/steward/data/tasks'), { recursive: true });
 await cp(monitorFixture, path.join(outputRoot, 'public/steward/status.json'));
-await cp(
-  detailFixture,
+const detail = JSON.parse(await readFile(detailFixture, 'utf8'));
+detail.attempts[0].patch = {
+  availability: 'available',
+  mode: 'redacted',
+  text: 'diff --git a/monitor.ts b/monitor.ts\n@@ -1 +1 @@\n-old\n+new\n',
+  size: 65,
+  truncated: false,
+  tail_bytes: 65,
+};
+await writeFile(
   path.join(outputRoot, 'public/steward/data/tasks/task-20260713115945-a1b2c3d4.json'),
+  JSON.stringify(detail),
 );

@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Copy, Maximize2, X } from "lucide-react";
-import { Fragment, type CSSProperties, useEffect, useMemo, useState } from "react";
+import { Fragment, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import type { HighlighterCore, LanguageRegistration, ThemedToken, ThemeRegistrationRaw } from "shiki";
 
 type HighlightLanguage =
@@ -53,6 +53,9 @@ export function CodeBlock({
   const [copied, setCopied] = useState(false);
   const [expandedDiff, setExpandedDiff] = useState(false);
   const [tokens, setTokens] = useState<{ key: string; tokens: CodeToken[][] } | null>(null);
+  const diffDialogRef = useRef<HTMLDivElement>(null);
+  const diffTriggerRef = useRef<HTMLButtonElement>(null);
+  const wasExpandedRef = useRef(false);
   const normalizedLanguage = normalizeLanguage(language);
   const highlightKey = `${normalizedLanguage || "text"}\n${text}`;
   const sourceLines = useMemo(() => splitLines(text), [text]);
@@ -92,12 +95,32 @@ export function CodeBlock({
   }, [highlightKey, normalizedLanguage, text]);
 
   useEffect(() => {
-    if (!expandedDiff) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setExpandedDiff(false);
+    if (!expandedDiff) {
+      if (wasExpandedRef.current) diffTriggerRef.current?.focus();
+      wasExpandedRef.current = false;
+      return;
     }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    wasExpandedRef.current = true;
+    const dialog = diffDialogRef.current;
+    if (!dialog) return;
+    const focusable = dialogFocusableElements(dialog);
+    focusable[0]?.focus();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setExpandedDiff(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length < 1) return;
+      const currentIndex = focusable.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+        : (currentIndex === focusable.length - 1 ? 0 : currentIndex + 1);
+      event.preventDefault();
+      focusable[nextIndex]?.focus();
+    }
+    dialog.addEventListener("keydown", onKeyDown);
+    return () => dialog.removeEventListener("keydown", onKeyDown);
   }, [expandedDiff]);
 
   async function copyCode() {
@@ -123,6 +146,7 @@ export function CodeBlock({
               aria-label="Open side-by-side diff"
               className="code-copy-button"
               onClick={() => setExpandedDiff(true)}
+              ref={diffTriggerRef}
               title="Open side-by-side diff"
               type="button"
             >
@@ -173,6 +197,7 @@ export function CodeBlock({
       )}
       {expandableDiff && expandedDiff && (
         <DiffSplitModal
+          dialogRef={diffDialogRef}
           label={label}
           onClose={() => setExpandedDiff(false)}
           rows={splitDiffRows}
@@ -299,11 +324,13 @@ function UnifiedDiffLine({
 }
 
 function DiffSplitModal({
+  dialogRef,
   label,
   onClose,
   rows,
   showLineNumbers,
 }: {
+  dialogRef: React.RefObject<HTMLDivElement | null>;
   label: string;
   onClose: () => void;
   rows: DiffSplitRow[];
@@ -312,14 +339,15 @@ function DiffSplitModal({
   return (
     <div className="diff-modal-backdrop" onClick={onClose}>
       <div
-        aria-label={`${label} side-by-side diff`}
+        aria-labelledby={`${label.replace(/[^A-Za-z0-9_-]+/g, "-")}-diff-title`}
         aria-modal="true"
         className="diff-modal"
         onClick={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <div className="diff-modal-toolbar">
-          <span className="diff-modal-title">{label} side-by-side</span>
+          <h2 className="diff-modal-title" id={`${label.replace(/[^A-Za-z0-9_-]+/g, "-")}-diff-title`}>{label} side-by-side</h2>
           <button
             aria-label="Close side-by-side diff"
             className="code-copy-button"
@@ -336,6 +364,12 @@ function DiffSplitModal({
       </div>
     </div>
   );
+}
+
+function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  ));
 }
 
 function getHighlighter() {

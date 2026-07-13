@@ -7,6 +7,7 @@ import {
   StewardFreshness,
   StewardTaskDetail,
 } from '@/components/steward-public';
+import { CodeBlock } from '@/components/steward-code-block';
 import { StewardPlannerLive } from '@/components/steward-planner';
 
 import {
@@ -57,6 +58,20 @@ describe('Steward retained read views', () => {
     fireEvent.click(screen.getByRole('tab', { name: /^Config/ }));
     expect(screen.getByRole('heading', { level: 3, name: 'Public configuration' })).toBeInTheDocument();
     expect(screen.getByText('Integration mode')).toBeInTheDocument();
+  });
+
+  it('moves monitor tabs with keyboard navigation and keeps selection synchronized', () => {
+    render(<StewardDashboard state={asLegacyStewardState(signalMonitor())} />);
+
+    const tasks = screen.getByRole('tab', { name: /^Tasks/ });
+    const state = screen.getByRole('tab', { name: /^State/ });
+    tasks.focus();
+    fireEvent.keyDown(tasks, { key: 'ArrowLeft' });
+    expect(document.activeElement).toBe(state);
+    expect(state).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(state, { key: 'End' });
+    expect(screen.getByRole('tab', { name: /^Config/ })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('paginates the task queue from producer-derived full task summaries', () => {
@@ -122,6 +137,25 @@ describe('Steward planner history and artifact loading', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('not found')));
     await expect(loadPublicStewardTaskDetail('missing')).resolves.toBeNull();
+  });
+});
+
+describe('Steward diff dialog accessibility', () => {
+  it('traps focus, closes on Escape, and restores the trigger focus', () => {
+    render(<CodeBlock diffDisplay="unified-with-split-modal" language="diff" text="@@ -1 +1 @@\n-old\n+new\n" title="Patch" />);
+
+    const trigger = screen.getByRole('button', { name: 'Open side-by-side diff' });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Patch side-by-side' });
+    const close = screen.getByRole('button', { name: 'Close side-by-side diff' });
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
   });
 });
 

@@ -113,7 +113,7 @@ export function SiteSearch() {
 
   return (
     <span className="site-search">
-      <button ref={triggerRef} className="site-search-trigger" type="button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <button ref={triggerRef} aria-label="Search" aria-haspopup="dialog" className="site-search-trigger" type="button" onClick={() => setOpen(true)}>
         <Search aria-hidden="true" />
         <span className="site-search-trigger-label">Search</span>
         <kbd>Ctrl K</kbd>

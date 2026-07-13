@@ -15,7 +15,7 @@ import {
   type SmoothStepPathOptions,
 } from '@xyflow/react';
 import { Activity, AlertTriangle, ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, Circle, ExternalLink, FileText, GitBranch, Inbox, ListChecks, RadioTower, Route, Settings2, ShieldCheck, XCircle } from 'lucide-react';
-import { type ReactNode, useEffect, useState } from 'react';
+import { type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -654,17 +654,19 @@ export function StewardDashboard({
           <div>
             <div className="brand-title">
               <h2>CoQUIC Steward</h2>
-              <span className={`stream-dot ${freshness === 'live' ? 'live' : ''}`} aria-label={`Monitor state ${stewardFreshnessLabel(freshness)}`} title={`Monitor state ${stewardFreshnessLabel(freshness)}`} />
+              <span aria-hidden="true" className={`stream-dot ${freshness === 'live' ? 'live' : ''}`} />
             </div>
             <p>{state.repository} / {state.main_branch}</p>
           </div>
         </div>
-        <nav className="steward-mirror-nav" aria-label="Steward mirror sections" role="tablist">
-          <MirrorNavItem active={activeTab === 'overview'} icon={<Activity />} label="State" onSelect={() => setActiveTab('overview')} tab="overview" value={state.state} />
-          <MirrorNavItem active={activeTab === 'tasks'} icon={<ListChecks />} label="Tasks" onSelect={() => setActiveTab('tasks')} tab="tasks" value={String(counts.tasks)} />
-          <MirrorNavItem active={activeTab === 'signals'} icon={<Inbox />} label="Signals" onSelect={() => setActiveTab('signals')} tab="signals" value={String(state.counts.signals)} />
-          <MirrorNavItem active={activeTab === 'audit'} icon={<ShieldCheck />} label="Audit" onSelect={() => setActiveTab('audit')} tab="audit" value={String(state.audit.length)} />
-          <MirrorNavItem active={activeTab === 'configuration'} icon={<Settings2 />} label="Config" onSelect={() => setActiveTab('configuration')} tab="configuration" value={String(state.configuration.enabled_signals.length)} />
+        <nav className="steward-mirror-nav" aria-label="Steward mirror sections">
+          <div className="steward-mirror-nav-tabs" role="tablist" aria-label="Steward mirror sections">
+            <MirrorNavItem active={activeTab === 'overview'} icon={<Activity />} label="State" onSelect={() => setActiveTab('overview')} tab="overview" value={state.state} />
+            <MirrorNavItem active={activeTab === 'tasks'} icon={<ListChecks />} label="Tasks" onSelect={() => setActiveTab('tasks')} tab="tasks" value={String(counts.tasks)} />
+            <MirrorNavItem active={activeTab === 'signals'} icon={<Inbox />} label="Signals" onSelect={() => setActiveTab('signals')} tab="signals" value={String(state.counts.signals)} />
+            <MirrorNavItem active={activeTab === 'audit'} icon={<ShieldCheck />} label="Audit" onSelect={() => setActiveTab('audit')} tab="audit" value={String(state.audit.length)} />
+            <MirrorNavItem active={activeTab === 'configuration'} icon={<Settings2 />} label="Config" onSelect={() => setActiveTab('configuration')} tab="configuration" value={String(state.configuration.enabled_signals.length)} />
+          </div>
           <MirrorNavLink href="/steward/planner" icon={<FileText />} label="Planner" value={String(state.planner_runs?.length ?? 0)} />
         </nav>
       </aside>
@@ -1120,7 +1122,12 @@ function StewardSignalsTab({ state }: { state: PublicStewardState }) {
           {!state.scheduler.providers.length && <div className="steward-empty">No signal providers</div>}
         </div>
 
-        <div className="steward-provider-detail">
+        <div
+          aria-labelledby={activeProvider ? providerTabId(activeProvider) : undefined}
+          className="steward-provider-detail"
+          id="steward-provider-panel"
+          role="tabpanel"
+        >
           <div className="steward-provider-detail-head">
             <div>
               <b>{activeProvider ?? 'No provider selected'}</b>
@@ -1208,6 +1215,8 @@ function MirrorNavItem({
       className={`steward-mirror-nav-item ${active ? 'active' : ''}`}
       id={`steward-tab-${tab}`}
       onClick={onSelect}
+      onKeyDown={handleTabKeyDown}
+      tabIndex={active ? 0 : -1}
       role="tab"
       type="button"
     >
@@ -1238,6 +1247,31 @@ function MirrorNavLink({
   );
 }
 
+function providerTabId(provider: string) {
+  return `steward-provider-tab-${provider.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+}
+
+function handleTabKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+  const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown'
+    ? 1
+    : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+      ? -1
+      : 0;
+  const tablist = event.currentTarget.closest('[role="tablist"]');
+  const tabs = tablist ? Array.from(tablist.querySelectorAll<HTMLElement>('[role="tab"]')) : [];
+  const currentIndex = tabs.indexOf(event.currentTarget);
+  if (!tabs.length || currentIndex < 0 || (!direction && event.key !== 'Home' && event.key !== 'End')) return;
+
+  const nextIndex = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? tabs.length - 1
+      : (currentIndex + direction + tabs.length) % tabs.length;
+  event.preventDefault();
+  tabs[nextIndex]?.focus();
+  tabs[nextIndex]?.click();
+}
+
 function SchedulerLane({ active, capacity, icon, label, queued }: { active: number; capacity: number; icon: ReactNode; label: string; queued: number }) {
   const slots = Math.max(capacity, active, 1);
   return (
@@ -1262,9 +1296,13 @@ function SchedulerLane({ active, capacity, icon, label, queued }: { active: numb
 function ProviderTab({ active, onSelect, provider }: { active: boolean; onSelect: () => void; provider: PublicStewardProvider }) {
   return (
     <button
+      aria-controls="steward-provider-panel"
       aria-selected={active}
       className={`steward-provider-tab ${active ? 'active' : ''}`}
+      id={providerTabId(provider.provider)}
       onClick={onSelect}
+      onKeyDown={handleTabKeyDown}
+      tabIndex={active ? 0 : -1}
       role="tab"
       type="button"
     >
@@ -1690,11 +1728,13 @@ function AttemptCard({
     { key: 'validation', label: 'Validation', meta: attempt.validations.length },
     { key: 'review', label: 'Review', meta: hasReview ? 'ready' : undefined },
   ];
+  const attemptId = `steward-attempt-${attempt.attempt}`;
   return (
     <article className={`attempt-card ${isActiveAttempt ? 'active-run' : ''}`}>
       <button
         className="attempt-head"
         aria-expanded={visibleOpen}
+        aria-controls={`${attemptId}-body`}
         onClick={() => {
           const nextOpen = !visibleOpen;
           setOpen(nextOpen);
@@ -1716,17 +1756,21 @@ function AttemptCard({
         </div>
       </button>
       {visibleOpen && (
-        <div className="attempt-body">
+        <div className="attempt-body" id={`${attemptId}-body`}>
           <div className="attempt-tabs" role="tablist" aria-label={`${attempt.label} run views`}>
             {tabs.map((tab) => (
               <button
+                aria-controls={`${attemptId}-panel`}
                 aria-selected={active === tab.key}
                 className={active === tab.key ? 'active' : ''}
+                id={`${attemptId}-tab-${tab.key}`}
                 key={tab.key}
                 onClick={() => {
                   setSelectedTab(tab.key);
                   setUserSelectedTab(true);
                 }}
+                onKeyDown={handleTabKeyDown}
+                tabIndex={active === tab.key ? 0 : -1}
                 role="tab"
                 type="button"
               >
@@ -1735,7 +1779,13 @@ function AttemptCard({
               </button>
             ))}
           </div>
-          <div className="attempt-panel">
+          <div
+            aria-labelledby={`${attemptId}-tab-${active}`}
+            className="attempt-panel"
+            id={`${attemptId}-panel`}
+            role="tabpanel"
+            tabIndex={0}
+          >
             {active === 'transcript' && (
               <RunSection
                 artifact={attempt.worker?.transcript ?? attempt.worker?.last_message ?? null}

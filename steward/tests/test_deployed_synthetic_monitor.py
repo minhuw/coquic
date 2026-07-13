@@ -202,6 +202,23 @@ def test_task_artifact_redaction_and_latency_are_enforced(tmp_path: Path) -> Non
     assert _statuses(result, "task_artifact_privacy") == ["fail"]
 
 
+def test_mixed_timestamp_future_skew_fails_independently(tmp_path: Path) -> None:
+    status = _json_fixture("active")
+    status["runtime"]["heartbeat_at"] = "2026-07-13T12:01:31Z"
+
+    with FixtureServer(_responses(status)) as server:
+        completed, result = _run_check(server.base_url, tmp_path)
+
+    assert completed.returncode == 1
+    freshness = next(check for check in result["checks"] if check["name"] == "status_freshness")
+    assert freshness == {
+        "detail": "clock_skew",
+        "fields": ["runtime.heartbeat_at"],
+        "name": "status_freshness",
+        "status": "fail",
+    }
+
+
 def test_publish_outage_then_recovery_is_read_only(tmp_path: Path) -> None:
     detail = json.loads((FIXTURE_DIR / "public-task-v2" / "feature.json").read_text())
     responses = _responses(_json_fixture("active"), detail)

@@ -357,24 +357,25 @@ def run_monitor(
         _add_check(result, "status_latency", "pass", latency_ms=status_response.latency_ms)
 
     if isinstance(document, dict) and document.get("schema_version") == expected_schema_version:
-        timestamps: list[datetime] = []
+        timestamp_ages: list[tuple[str, float]] = []
         timestamp_error = False
         runtime = document.get("runtime")
         heartbeat_at = runtime.get("heartbeat_at") if isinstance(runtime, dict) else None
-        for value in (document.get("generated_at"), heartbeat_at):
+        for label, value in (("generated_at", document.get("generated_at")), ("runtime.heartbeat_at", heartbeat_at)):
             if not isinstance(value, str):
                 timestamp_error = True
                 continue
             try:
-                timestamps.append(_parse_timestamp(value))
+                timestamp_ages.append((label, (now - _parse_timestamp(value)).total_seconds()))
             except ValueError:
                 timestamp_error = True
-        if timestamp_error or len(timestamps) != 2:
+        if timestamp_error or len(timestamp_ages) != 2:
             _add_check(result, "status_freshness", "fail", detail="invalid_timestamp")
         else:
-            age_seconds = max((now - timestamp).total_seconds() for timestamp in timestamps)
-            if age_seconds < -DEFAULT_CLOCK_SKEW_SECONDS:
-                _add_check(result, "status_freshness", "fail", detail="clock_skew", age_seconds=round(age_seconds, 3))
+            future_fields = [label for label, age in timestamp_ages if age < -DEFAULT_CLOCK_SKEW_SECONDS]
+            age_seconds = max(age for _, age in timestamp_ages)
+            if future_fields:
+                _add_check(result, "status_freshness", "fail", detail="clock_skew", fields=future_fields)
             elif age_seconds > max_age_seconds:
                 _add_check(result, "status_freshness", "fail", detail="stale", age_seconds=round(age_seconds, 3))
             else:

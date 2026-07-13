@@ -123,6 +123,45 @@ remote destination's parent must therefore be writable by the deployment
 account through that sudo policy. The site only needs read access to the
 resulting `public/steward/` tree.
 
+### Deployed synthetic monitor
+
+The deployed check is read-only. It fetches the dashboard, canonical v3 status
+route, and one task detail when the status snapshot advertises a task. It
+validates schema, JSON no-store/nosniff headers, freshness, latency,
+task-detail shape, and the public redaction denylist. It never calls Steward,
+changes publication state, or prints matched response values.
+
+Run it locally against an explicitly selected target and keep the result as
+sanitized evidence:
+
+```bash
+uv run --project steward python scripts/check-steward-deployment.py \
+  --base-url https://coquic.minhuw.dev \
+  --output /tmp/steward-monitor-result.json
+```
+
+The default thresholds are a 120-second maximum status age and a 2-second
+maximum request latency. Use `--max-age-seconds` and `--max-latency-ms` for an
+approved target-specific threshold; `--now` is reserved for deterministic
+fixture checks. CI runs the check after deployment and every 15 minutes, then
+uploads only the JSON result as an artifact.
+
+Failure ownership is split by the first failed check:
+
+| Check | Owner and first action |
+| --- | --- |
+| Dashboard route, status route, headers, or task route | Site/deployment owner: inspect the deployed build and route files, then roll back the site release if the route is unavailable or cached. |
+| Schema or task-detail compatibility | Site and Steward release owners: deploy the compatible decoder first, then restore the producer snapshot or roll back the producer revision. |
+| Freshness or publication evidence | Steward operator: inspect the daemon heartbeat and `publication` fields locally, then force a publication after fixing the outbound path. |
+| Privacy or raw-transcript finding | Steward operator and security owner: disable public publishing, rotate exposed credentials if any, remove the affected public artifact, and redeploy the sanitized mirror. |
+| Latency or network failure | Deployment/hosting owner: inspect the origin, proxy, and SSH publication path; do not retry by mutating daemon state. |
+
+Rollback preserves local task execution. Set both `public_mirror.enabled = false`
+and `public_mirror.publish = false` in the global configuration, restart the
+daemon, and restore the last compatible site deployment through the normal
+deployment process. Re-enable publication only after the synthetic check passes
+against the canonical `/steward/status` route.
+
 The daemon heartbeat is emitted every 30 seconds while it is running. The
 site classifies a heartbeat up to 60 seconds old as live, up to 120 seconds as
 delayed, and older data as stale. Publication retry state is included in the

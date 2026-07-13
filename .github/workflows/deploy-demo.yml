@@ -23,6 +23,7 @@ on:
       - scripts/build-boringssl-wasm.sh
       - scripts/wasm-quic-smoke.mjs
       - .github/workflows/deploy-demo.yml
+      - scripts/check-steward-deployment.py
   workflow_dispatch:
 
 permissions:
@@ -119,3 +120,20 @@ jobs:
           COQUIC_QDRANT_URL: ${{ secrets.COQUIC_QDRANT_URL }}
           COQUIC_QDRANT_API_KEY: ${{ secrets.COQUIC_QDRANT_API_KEY }}
         run: site/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"
+
+      - name: Check deployed Steward monitor
+        run: |
+          mkdir -p "${RUNNER_TEMP}/steward-monitor"
+          nix develop -c uv run --project steward python scripts/check-steward-deployment.py \
+            --base-url https://coquic.minhuw.dev \
+            --max-age-seconds 120 \
+            --max-latency-ms 2000 \
+            --output "${RUNNER_TEMP}/steward-monitor/result.json"
+
+      - name: Upload Steward monitor evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steward-deployment-monitor-${{ github.run_id }}
+          path: ${{ runner.temp }}/steward-monitor/result.json
+          if-no-files-found: warn

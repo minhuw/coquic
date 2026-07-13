@@ -889,6 +889,98 @@
     white-space: nowrap;
   }
 
+  .steward-runtime-strip {
+    display: grid;
+    min-height: 64px;
+    grid-template-columns: minmax(180px, 1.3fr) repeat(4, minmax(112px, 1fr));
+    gap: 8px;
+    align-items: stretch;
+  }
+
+  .steward-runtime-fact,
+  .steward-freshness {
+    display: flex;
+    min-width: 0;
+    min-height: 54px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 9px 10px;
+  }
+
+  .steward-runtime-fact > span,
+  .steward-freshness-detail {
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .steward-runtime-fact > b {
+    overflow: hidden;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .steward-runtime-fact.tone-danger {
+    border-color: var(--danger-border-strong);
+    background: var(--danger-soft);
+  }
+
+  .steward-freshness {
+    min-width: 0;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .steward-freshness > svg {
+    flex: 0 0 auto;
+    color: var(--ok);
+  }
+
+  .steward-freshness > span:not(.steward-freshness-detail) {
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 650;
+  }
+
+  .steward-freshness-detail {
+    margin-left: auto;
+  }
+
+  .steward-freshness.freshness-delayed,
+  .steward-freshness.freshness-stale {
+    border-color: var(--warning-border-subtle);
+    background: var(--warning-soft);
+  }
+
+  .steward-freshness.freshness-delayed > svg,
+  .steward-freshness.freshness-stale > svg {
+    color: var(--warning);
+  }
+
+  .steward-freshness.freshness-offline,
+  .steward-freshness.freshness-incompatible {
+    border-color: var(--danger-border-subtle);
+    background: var(--danger-soft);
+  }
+
+  .steward-freshness.freshness-offline > svg,
+  .steward-freshness.freshness-incompatible > svg {
+    color: var(--danger);
+  }
+
   .steward-mirror-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.72fr);
@@ -8536,8 +8628,13 @@
     }
 
     .steward-mirror-kpis,
-    .steward-scheduler-lanes {
+    .steward-scheduler-lanes,
+    .steward-runtime-strip {
       grid-template-columns: 1fr;
+    }
+
+    .steward-runtime-strip {
+      min-height: 0;
     }
 
     .steward-task-page-frame {

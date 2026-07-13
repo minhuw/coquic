@@ -22,6 +22,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { CodeBlock } from '@/components/steward-code-block';
 import { TranscriptView } from '@/components/steward-transcript';
 import type { PublicCodexRunDiagnostics } from '@/components/steward-transcript';
+import {
+  classifyStewardFreshness,
+  stewardFreshnessLabel,
+  stewardPollIntervalMs,
+} from '@/lib/steward-freshness';
+import { decodePublicStewardJson } from '@/lib/steward-schema';
 
 export type PublicStewardTask = {
   id: string;
@@ -232,6 +238,7 @@ export type PublicStewardWakeup = {
 
 export type PublicStewardState = {
   schema_version: number;
+  compatibility_state?: 'compatible' | 'unknown_additive' | 'incompatible' | string;
   generated_at: string;
   repository: string;
   main_branch: string;
@@ -295,6 +302,33 @@ export type PublicStewardState = {
       updated_at: string;
     }>;
   };
+  runtime?: {
+    instance_id: string;
+    started_at: string;
+    heartbeat_at: string;
+    state: 'starting' | 'idle' | 'active' | 'stopping' | string;
+    current_cycle_started_at: string | null;
+    current_cycle_reason: string | null;
+    last_completed_cycle: {
+      completed_at: string;
+      reason: string;
+      result: Record<string, number>;
+    } | null;
+    heartbeat_interval_seconds: number;
+  };
+  publication?: {
+    state: 'disabled' | 'pending' | 'published' | 'failed' | string;
+    generated_at: string;
+    last_attempt_at: string | null;
+    last_success_at: string | null;
+    last_failure_at: string | null;
+    last_failure_category: string | null;
+    retry_count: number;
+    last_accepted_digest: string | null;
+  };
+  tasks_truncated?: boolean;
+  planner_runs?: unknown[];
+  planner_runs_truncated?: boolean;
 };
 
 type StewardMirrorTab = 'overview' | 'tasks' | 'signals';
@@ -397,14 +431,36 @@ const STEWARD_MIRROR_TAB_COPY: Record<StewardMirrorTab, { description: string; e
 };
 
 export async function loadPublicStewardState(): Promise<PublicStewardState | null> {
+  return (await loadPublicStewardStateResult()).state;
+}
+
+type PublicStewardStateResult = {
+  state: PublicStewardState | null;
+  error: 'unavailable' | 'incompatible' | 'invalid' | null;
+};
+
+async function loadPublicStewardStateResult(): Promise<PublicStewardStateResult> {
   try {
     const response = await fetch('/steward/status', {
       cache: 'no-store',
     });
-    if (!response.ok) return null;
-    return response.json() as Promise<PublicStewardState>;
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { reason?: string } | null;
+      return {
+        state: null,
+        error: body?.reason === 'incompatible' ? 'incompatible' : 'unavailable',
+      };
+    }
+    const decoded = decodePublicStewardJson(await response.text());
+    if (!decoded.ok) {
+      return {
+        state: null,
+        error: decoded.reason === 'incompatible' ? 'incompatible' : 'invalid',
+      };
+    }
+    return { state: decoded.data as unknown as PublicStewardState, error: null };
   } catch {
-    return null;
+    return { state: null, error: 'unavailable' };
   }
 }
 
@@ -421,42 +477,50 @@ export async function loadPublicStewardTaskDetail(taskId: string, detailJson?: s
 }
 
 export function StewardSnapshotCardLive() {
-  const state = usePublicStewardState();
-  return <StewardSnapshotCard state={state} />;
+  const monitor = usePublicStewardState();
+  return <StewardSnapshotCard state={monitor.state} fetchError={monitor.error} />;
 }
 
 export function StewardDashboardLive() {
-  const state = usePublicStewardState();
+  const monitor = usePublicStewardState();
   return (
     <div className="grid gap-4 steward-public-live">
-      <StewardDashboard state={state} />
+      <StewardDashboard state={monitor.state} fetchError={monitor.error} loading={monitor.loading} />
     </div>
   );
 }
 
 export function StewardTaskDetailLive({ taskId }: { taskId: string }) {
-  const state = usePublicStewardState();
-  const task = state?.tasks.find((item) => item.id === taskId) ?? null;
+  const monitor = usePublicStewardState();
+  const task = monitor.state?.tasks.find((item) => item.id === taskId) ?? null;
   const { detail, loaded } = usePublicStewardTaskDetail(taskId, task?.detail_json);
   return <StewardTaskDetail detail={detail} loaded={loaded} taskId={taskId} />;
 }
 
 function usePublicStewardState() {
   const [state, setState] = useState<PublicStewardState | null>(null);
+  const [error, setError] = useState<PublicStewardStateResult['error']>(null);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
-      const next = await loadPublicStewardState();
-      if (!cancelled) setState(next);
+      const result = await loadPublicStewardStateResult();
+      if (cancelled) return;
+      setLoading(false);
+      setError(result.error);
+      if (result.state) setState(result.state);
+      window.setTimeout(() => {
+        if (!cancelled) void refresh();
+      }, stewardPollIntervalMs(result.state ?? state));
     }
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 30_000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
-  }, []);
-  return state;
+  // Polling is scheduled after each response so active daemons update faster
+  // without creating overlapping requests during a slow mirror fetch.
+  }, [state?.runtime?.state]);
+  return { error, loading, state };
 }
 
 function usePublicStewardTaskDetail(taskId: string, detailJson?: string) {
@@ -482,7 +546,13 @@ function usePublicStewardTaskDetail(taskId: string, detailJson?: string) {
   return { detail, loaded };
 }
 
-export function StewardSnapshotCard({ state }: { state: PublicStewardState | null }) {
+export function StewardSnapshotCard({
+  state,
+  fetchError = null,
+}: {
+  state: PublicStewardState | null;
+  fetchError?: PublicStewardStateResult['error'];
+}) {
   const updated = state ? relativeTime(state.generated_at) : 'not published';
   const activeTask = state?.tasks.find((task) => !isPublicIntegrationTask(task) && ['running', 'reviewing', 'integrating'].includes(task.status));
   const counts = state ? publicTaskCounts(state.tasks) : null;
@@ -498,6 +568,7 @@ export function StewardSnapshotCard({ state }: { state: PublicStewardState | nul
       <CardContent className="grid gap-4">
         {state ? (
           <>
+            <StewardFreshness state={state} fetchError={Boolean(fetchError)} />
             <div className="grid gap-2 sm:grid-cols-4">
               <Metric label="Active" value={counts?.active ?? 0} />
               <Metric label="Queued" value={counts?.queued ?? 0} />
@@ -530,14 +601,29 @@ export function StewardSnapshotCard({ state }: { state: PublicStewardState | nul
   );
 }
 
-export function StewardDashboard({ state }: { state: PublicStewardState | null }) {
+export function StewardDashboard({
+  state,
+  fetchError = null,
+  loading = false,
+}: {
+  state: PublicStewardState | null;
+  fetchError?: PublicStewardStateResult['error'];
+  loading?: boolean;
+}) {
   const [activeTab, setActiveTab] = useState<StewardMirrorTab>('tasks');
   if (!state) {
     return (
       <div className="steward-mirror-shell">
         <Card className="mt-5">
           <CardContent className="p-6 text-sm text-[var(--muted)]">
-          Steward has not published a public snapshot yet.
+            <StewardFreshness state={null} />
+            <p className="mt-3">
+              {loading
+                ? 'Loading the latest Steward snapshot.'
+                : fetchError === 'incompatible'
+                  ? 'The published Steward schema is incompatible with this monitor.'
+                  : 'Steward has not published a public snapshot yet.'}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -546,6 +632,9 @@ export function StewardDashboard({ state }: { state: PublicStewardState | null }
   const counts = publicTaskCounts(state.tasks);
   const activeTask = state.tasks.find((task) => !isPublicIntegrationTask(task) && ['running', 'reviewing', 'integrating'].includes(task.status));
   const tabCopy = STEWARD_MIRROR_TAB_COPY[activeTab];
+  const freshness = classifyStewardFreshness(state, Date.now(), Boolean(fetchError));
+  const runtime = state.runtime;
+  const publication = state.publication;
   return (
     <div className="steward-mirror-shell">
       <aside className="steward-mirror-sidebar" aria-label="Steward public mirror summary">
@@ -554,7 +643,7 @@ export function StewardDashboard({ state }: { state: PublicStewardState | null }
           <div>
             <div className="brand-title">
               <h2>CoQUIC Steward</h2>
-              <span className={`stream-dot ${state.state === 'working' ? 'live' : ''}`} aria-label={`Mirror state ${state.state}`} title={`Mirror state ${state.state}`} />
+              <span className={`stream-dot ${freshness === 'live' ? 'live' : ''}`} aria-label={`Monitor state ${stewardFreshnessLabel(freshness)}`} title={`Monitor state ${stewardFreshnessLabel(freshness)}`} />
             </div>
             <p>{state.repository} / {state.main_branch}</p>
           </div>
@@ -574,10 +663,19 @@ export function StewardDashboard({ state }: { state: PublicStewardState | null }
             <p>{activeTab === 'overview' ? (activeTask ? activeTask.title : 'No active task in the public snapshot') : tabCopy.description}</p>
           </div>
           <div className="steward-mirror-kpis" aria-label="Steward totals">
-            <Metric label="Updated" value={relativeTime(state.generated_at)} />
+            <Metric label="Monitor" value={stewardFreshnessLabel(freshness)} />
             <Metric label="Pending" value={state.counts.pending_signals} />
           </div>
         </header>
+
+        <section className="steward-runtime-strip" aria-label="Steward runtime status">
+          <StewardFreshness state={state} fetchError={Boolean(fetchError)} />
+          <RuntimeFact label="Daemon" value={runtime?.state ?? 'unknown'} />
+          <RuntimeFact label="Heartbeat" value={runtime ? relativeTime(runtime.heartbeat_at) : 'unknown'} />
+          <RuntimeFact label="Cycle" value={runtime?.current_cycle_reason ?? 'idle'} />
+          <RuntimeFact label="Published" value={publication?.last_success_at ? relativeTime(publication.last_success_at) : 'not yet'} />
+          {publication?.state === 'failed' && <RuntimeFact label="Publish" value={`failed (${publication.last_failure_category ?? 'unknown'})`} tone="danger" />}
+        </section>
 
         <div
           aria-labelledby={`steward-tab-${activeTab}`}
@@ -2422,12 +2520,39 @@ export function StewardUnavailableNotice() {
   );
 }
 
-export function StewardFreshness({ state }: { state: PublicStewardState | null }) {
-  const stale = state ? Date.now() - new Date(state.generated_at).getTime() > 15 * 60_000 : true;
+export function StewardFreshness({
+  state,
+  fetchError = false,
+}: {
+  state: PublicStewardState | null;
+  fetchError?: boolean;
+}) {
+  const freshness = classifyStewardFreshness(state, Date.now(), fetchError);
+  const Icon = freshness === 'live' ? CheckCircle2 : freshness === 'incompatible' || freshness === 'offline' ? XCircle : AlertTriangle;
   return (
-    <div className="flex items-center gap-2 font-mono text-xs text-[var(--muted)]">
-      {stale ? <AlertTriangle className="size-4 text-[var(--warning)]" /> : <CheckCircle2 className="size-4 text-[var(--ok)]" />}
-      <span>{state ? `snapshot ${relativeTime(state.generated_at)}` : 'waiting for snapshot'}</span>
+    <div className={`steward-freshness freshness-${freshness}`} role="status" aria-live="polite">
+      <Icon className="size-4" />
+      <span>{stewardFreshnessLabel(freshness)}</span>
+      <span className="steward-freshness-detail">
+        {state ? `heartbeat ${relativeTime(state.runtime?.heartbeat_at ?? state.generated_at)}` : 'waiting for snapshot'}
+      </span>
+    </div>
+  );
+}
+
+function RuntimeFact({
+  label,
+  tone = 'neutral',
+  value,
+}: {
+  label: string;
+  tone?: 'neutral' | 'danger';
+  value: string;
+}) {
+  return (
+    <div className={`steward-runtime-fact tone-${tone}`}>
+      <span>{label}</span>
+      <b>{value}</b>
     </div>
   );
 }

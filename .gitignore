@@ -13,6 +13,7 @@ coverage/
 .coquic/
 .coquic-steward/
 vibe-references/
+design-reference/
 .fuzz/
 .envrc.local
 .github/perf-runner/.env

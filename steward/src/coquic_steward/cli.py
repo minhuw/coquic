@@ -29,6 +29,7 @@ from .public_mirror import publish_public_mirror, write_public_mirror
 from .signals import (
     collect_signal_items,
     project_signals_from_items,
+    revalidate_signal_items,
 )
 from .storage import TaskStore
 from .web.runtime import StewardWebRuntime
@@ -133,9 +134,16 @@ def plan(enqueue: bool = False) -> None:
             )
         )
     pending = store.pending_signal_items(limit=config.limits.max_active_tasks)
+    actionable, stale_reasons = revalidate_signal_items(config, pending)
+    if stale_reasons:
+        store.supersede_signal_items(
+            list(stale_reasons), planner_run_id="source-revalidation"
+        )
+    if not actionable:
+        return
     planner_run = run_planner(
         config,
-        project_signals_from_items(config, pending),
+        project_signals_from_items(config, actionable),
         store.list_tasks(limit=200),
     )
     planned_item_ids: set[str] = set()

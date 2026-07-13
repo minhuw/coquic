@@ -9486,6 +9486,41 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     assert task_id in status.output
 
 
+def test_cli_plan_supersedes_stale_signals_before_planning(
+    repo: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(repo)
+    store = TaskStore(load_config().db_path)
+    signal, _ = store.add_signal_item(
+        SignalItem(
+            id="wi-codeql-42",
+            provider="code-scanning",
+            kind="code-scanning.alert",
+            fingerprint="wi-codeql-42",
+            title="CodeQL alert 42",
+            payload={"alert_number": 42},
+        )
+    )
+    monkeypatch.setattr(
+        "coquic_steward.cli.collect_signal_items", lambda _config: []
+    )
+    monkeypatch.setattr(
+        "coquic_steward.cli.revalidate_signal_items",
+        lambda _config, _items: ([], {signal.id: "source_not_open"}),
+    )
+    monkeypatch.setattr(
+        "coquic_steward.cli.run_planner",
+        lambda *_args: pytest.fail("planner should not run for stale signals"),
+    )
+
+    result = CliRunner().invoke(app, ["plan"])
+
+    assert result.exit_code == 0
+    saved = store.list_signal_items()[0]
+    assert saved.status == SignalItemStatus.superseded
+    assert saved.planner_run_id == "source-revalidation"
+
+
 def test_cli_publish_public_state_writes_output(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     store = TaskStore(load_config().db_path)

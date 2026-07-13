@@ -1,0 +1,29 @@
+{
+  "schema_version": 3,
+  "compatibility_state": "compatible",
+  "generated_at": "2026-07-13T12:00:00Z",
+  "repository": "minhuw/coquic",
+  "main_branch": "main",
+  "state": "working",
+  "counts": {"tasks": 1, "active": 1, "queued": 0, "attention": 0, "completed": 0, "signals": 1, "pending_signals": 0},
+  "runtime": {
+    "instance_id": "steward-20260713T115500Z-a1b2c3d4",
+    "started_at": "2026-07-13T11:55:00Z",
+    "heartbeat_at": "2026-07-13T12:00:00Z",
+    "state": "active",
+    "current_cycle_started_at": "2026-07-13T11:59:45Z",
+    "current_cycle_reason": "scheduler_wakeup",
+    "last_completed_cycle": null,
+    "heartbeat_interval_seconds": 30
+  },
+  "publication": {"state": "published", "snapshot_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "generated_at": "2026-07-13T12:00:00Z", "last_attempt_at": "2026-07-13T12:00:01Z", "last_success_at": "2026-07-13T12:00:02Z", "last_failure_at": null, "last_failure_category": null, "retry_count": 0, "last_accepted_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "tasks_truncated": false,
+  "tasks": [{"id": "task-20260713115945-a1b2c3d4", "title": "Run focused checks", "kind": "ci", "workflow": "fix", "worker": "ci-doctor", "priority": "high", "risk": "low", "status": "running", "summary": "Validation is in progress", "source": "manual", "created_at": "2026-07-13T11:59:45Z", "updated_at": "2026-07-13T12:00:00Z", "validations": []}],
+  "signals": {"items_truncated": false, "fetches_truncated": false, "items": [{"id": "wi-signal-item-a1b2c3d4", "provider": "github-actions:ci", "kind": "workflow", "title": "CI is running", "summary": "The latest check is active", "severity": "info", "status": "planned", "created_at": "2026-07-13T11:58:00Z", "updated_at": "2026-07-13T11:59:00Z", "planned_at": "2026-07-13T11:59:00Z", "planned_task_id": "task-20260713115945-a1b2c3d4", "links": []}], "fetches": [], "summary": "1 signal item, 0 provider errors", "enabled_signals": ["github-actions:ci"]},
+  "scheduler": {"source_active": 1, "source_capacity": 4, "source_queued": 0, "integration_active": 0, "integration_queued": 0, "pending_wakeups_truncated": false, "recent_wakeups_truncated": false, "pending_wakeups": [], "recent_wakeups": [], "providers": []},
+  "planner_runs_truncated": false,
+  "planner_runs": [],
+  "audit": [],
+  "configuration": {"repository": "minhuw/coquic", "main_branch": "main", "integration_mode": "local-only", "local_only": true, "enabled_signals": ["github-actions:ci"], "scheduler_wait_interval_sec": 1.0, "limits": {"max_active_tasks": 4}, "signal_providers": {}},
+  "integration": {"active": [], "queue": [], "commits": []}
+}

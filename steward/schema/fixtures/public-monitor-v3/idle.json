@@ -1,0 +1,39 @@
+{
+  "schema_version": 3,
+  "compatibility_state": "compatible",
+  "generated_at": "2026-07-13T12:00:00Z",
+  "repository": "minhuw/coquic",
+  "main_branch": "main",
+  "state": "idle",
+  "counts": {"tasks": 0, "active": 0, "queued": 0, "attention": 0, "completed": 0, "signals": 0, "pending_signals": 0},
+  "runtime": {
+    "instance_id": "steward-20260713T115500Z-a1b2c3d4",
+    "started_at": "2026-07-13T11:55:00Z",
+    "heartbeat_at": "2026-07-13T12:00:00Z",
+    "state": "idle",
+    "current_cycle_started_at": null,
+    "current_cycle_reason": null,
+    "last_completed_cycle": {"completed_at": "2026-07-13T11:59:30Z", "reason": "scheduled", "result": {"recovered": 0, "signal_fetches": 1, "signal_items": 0, "new_signal_items": 0, "planned": 0, "enqueued": 0, "dispatched": 0, "skipped": 0}},
+    "heartbeat_interval_seconds": 30
+  },
+  "publication": {
+    "state": "published",
+    "snapshot_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "generated_at": "2026-07-13T12:00:00Z",
+    "last_attempt_at": "2026-07-13T12:00:01Z",
+    "last_success_at": "2026-07-13T12:00:02Z",
+    "last_failure_at": null,
+    "last_failure_category": null,
+    "retry_count": 0,
+    "last_accepted_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "tasks_truncated": false,
+  "tasks": [],
+  "signals": {"items_truncated": false, "fetches_truncated": false, "items": [], "fetches": [], "summary": "0 signal items, 0 provider errors", "enabled_signals": []},
+  "scheduler": {"source_active": 0, "source_capacity": 4, "source_queued": 0, "integration_active": 0, "integration_queued": 0, "pending_wakeups_truncated": false, "recent_wakeups_truncated": false, "pending_wakeups": [], "recent_wakeups": [], "providers": []},
+  "planner_runs_truncated": false,
+  "planner_runs": [],
+  "audit": [],
+  "configuration": {"repository": "minhuw/coquic", "main_branch": "main", "integration_mode": "local-only", "local_only": true, "enabled_signals": [], "scheduler_wait_interval_sec": 1.0, "limits": {"max_active_tasks": 4}, "signal_providers": {}},
+  "integration": {"active": [], "queue": [], "commits": []}
+}

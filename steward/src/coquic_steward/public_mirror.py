@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .agents.diagnostics import diagnostics_for_paths
 from .core.config import (
@@ -154,6 +155,7 @@ def write_public_mirror(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+    _restrictive_file_permissions(path)
     tasks_dir.mkdir(parents=True, exist_ok=True)
     _remove_stale_task_details(
         tasks_dir,
@@ -178,6 +180,7 @@ def write_public_mirror(
             json.dumps(detail, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        _restrictive_file_permissions(detail_path)
         task_index.append(
             {
                 "id": task.id,
@@ -200,6 +203,7 @@ def write_public_mirror(
         + "\n",
         encoding="utf-8",
     )
+    _restrictive_file_permissions(tasks_dir / "index.json")
     return path
 
 
@@ -982,8 +986,12 @@ def _public_text_artifact(
     return {
         "text": text,
         "size": size,
+        "size_bytes": len(text.encode("utf-8")),
+        "original_size_bytes": size,
         "truncated": size > max_bytes,
         "tail_bytes": min(size, max_bytes),
+        "availability": "available",
+        "mode": "redacted",
     }
 
 
@@ -998,8 +1006,11 @@ def _public_raw_transcript_artifact(
     return {
         "text": "",
         "size": size,
+        "size_bytes": size,
+        "original_size_bytes": size,
         "truncated": False,
         "tail_bytes": 0,
+        "availability": "available",
         "mode": "raw",
         "url": _public_raw_transcript_url(task_id, run_name),
         "sha256": digest,
@@ -1094,6 +1105,7 @@ def _copy_public_raw_transcript(
         unchanged = False
     if not unchanged:
         shutil.copyfile(source, destination)
+        _restrictive_file_permissions(destination)
     return run_segment, destination
 
 
@@ -1278,6 +1290,12 @@ def _public_json(config: StewardConfig, value: Any) -> Any:
             key_text = str(key)
             if _private_key(key_text):
                 continue
+            if _looks_like_link(key_text) and isinstance(item, str):
+                safe_link = _safe_public_link(config, item)
+                if safe_link is None:
+                    continue
+                cleaned[key_text] = safe_link
+                continue
             cleaned[key_text] = _public_json(config, item)
         return cleaned
     if isinstance(value, list):
@@ -1314,10 +1332,10 @@ def _public_signal_item(
         "planned_at": item.planned_at.isoformat() if item.planned_at else None,
         "planned_task_id": item.planned_task_id,
         "links": [
-            link
+            {**link, "url": safe_url}
             for link in item.links
             if isinstance(link.get("url"), str)
-            and str(link.get("url")).startswith("https://github.com/")
+            and (safe_url := _safe_public_link(config, str(link["url"])))
         ],
     }
 
@@ -1681,4 +1699,42 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
     for original, replacement in generated_state_replacements.items():
         text = text.replace(original, replacement)
     text = re.sub(r"/(?:home|media|tmp|var|opt)/[^\s'\"`),;]+", "[local-path]", text)
+    text = re.sub(
+        r"(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
+        "[redacted-secret]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|secret|password|authorization)\s*[:=]\s*[^\s,;]+",
+        "[redacted-secret]",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted-secret]", text)
+    text = re.sub(r"(?i)\bthread[_-][A-Za-z0-9._-]+", "[redacted-thread]", text)
     return text
+
+
+def _looks_like_link(key: str) -> bool:
+    lowered = key.lower()
+    return lowered in {"url", "href", "link", "detail_url", "detail_json", "commit_url"}
+
+
+def _safe_public_link(config: StewardConfig, value: str) -> str | None:
+    if value.startswith("/steward/"):
+        return value if ".." not in value.split("?")[0].split("#")[0] else None
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or parsed.hostname != "github.com":
+        return None
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    expected_prefix = f"/{config.github_repository}/"
+    if not parsed.path.startswith(expected_prefix):
+        return None
+    return value
+
+
+def _restrictive_file_permissions(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        return

@@ -234,7 +234,7 @@ github_repository = "minhuw/coquic"
 enabled = true
 output_path = "public/steward/status.json"
 publish = true
-transcript_mode = "raw"
+transcript_mode = "redacted"
 remote_user = "deploy"
 remote_host = "example.test"
 remote_port = 2222
@@ -252,7 +252,7 @@ connect_timeout_seconds = 7
     assert mirror.enabled is True
     assert mirror.output_path == Path("public/steward/status.json")
     assert mirror.publish is True
-    assert mirror.transcript_mode == "raw"
+    assert mirror.transcript_mode == "redacted"
     assert mirror.remote_user == "deploy"
     assert mirror.remote_host == "example.test"
     assert mirror.remote_port == 2222

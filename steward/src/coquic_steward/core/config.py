@@ -85,6 +85,12 @@ class PublicMirrorConfig:
     retry_initial_seconds: int = 30
     retry_max_seconds: int = 300
 
+    def __post_init__(self) -> None:
+        if self.publish and self.transcript_mode == "raw":
+            raise ValueError(
+                "public_mirror.transcript_mode=raw cannot be used with publish=true"
+            )
+
 
 @dataclass(frozen=True)
 class PathPolicyConfig:

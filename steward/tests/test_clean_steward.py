@@ -33,6 +33,7 @@ from coquic_steward.core.config import (
 )
 from coquic_steward.core.lifecycle import InvalidTaskTransition
 from coquic_steward.core.models import (
+    DaemonRuntime,
     IntegrationMode,
     Priority,
     ProjectSignals,
@@ -2556,6 +2557,40 @@ def test_public_mirror_force_publish_ignores_disabled_upload(
     assert result.ok
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["tasks"][0]["id"] == task.id
+
+
+def test_public_mirror_refreshes_heartbeat_after_rendering(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    runtime = DaemonRuntime(
+        heartbeat_at=datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc)
+    )
+    published_heartbeat: list[datetime] = []
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        payload = json.loads(local_path.read_text(encoding="utf-8"))
+        published_heartbeat.append(
+            datetime.fromisoformat(payload["runtime"]["heartbeat_at"])
+        )
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+
+    _, result = publish_public_mirror(config, store, force=True, runtime=runtime)
+
+    assert result is not None
+    assert result.ok
+    assert published_heartbeat == [runtime.heartbeat_at]
+    assert runtime.heartbeat_at > datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc)
 
 
 def test_public_mirror_publish_flag_can_skip_configured_upload(

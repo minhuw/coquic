@@ -227,6 +227,26 @@ def write_public_mirror(
     return path
 
 
+def write_public_mirror_status(
+    config: StewardConfig,
+    store: TaskStore,
+    output_path: Path | None = None,
+    *,
+    runtime: DaemonRuntime | None = None,
+    publication: PublicMirrorHealth | None = None,
+) -> Path:
+    path = _mirror_output_path(config, output_path)
+    payload = public_mirror_payload(
+        config, store, runtime=runtime, publication=publication
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(
+        path,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+    )
+    return path
+
+
 def publish_public_mirror(
     config: StewardConfig,
     store: TaskStore,
@@ -239,6 +259,15 @@ def publish_public_mirror(
 ) -> tuple[Path, CommandResult | None]:
     path = write_public_mirror(
         config, store, runtime=runtime, publication=publication
+    )
+    refreshed_runtime = runtime or DaemonRuntime()
+    refreshed_runtime.heartbeat_at = utc_now()
+    write_public_mirror_status(
+        config,
+        store,
+        output_path=path,
+        runtime=refreshed_runtime,
+        publication=publication,
     )
     should_publish = config.public_mirror.publish if publish is None else publish
     if not force and not should_publish:

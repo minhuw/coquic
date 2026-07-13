@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 from ..core.config import StewardConfig
 from ..core.lifecycle import TaskPhase
@@ -27,9 +28,8 @@ from ..execution.executor import StewardExecutor
 from ..planning import run_planner
 from ..public_mirror import (
     classify_publish_failure,
-    public_mirror_digest,
     publish_public_mirror,
-    write_public_mirror,
+    write_public_mirror_status,
 )
 from ..storage import (
     TaskStore,
@@ -635,26 +635,6 @@ class StewardDaemon:
                     self._record_publish_attempt()
                 runtime = self._runtime_snapshot()
                 health = self._public_mirror_health.model_copy(deep=True)
-                digest = public_mirror_digest(
-                    self.config,
-                    self.store,
-                    runtime=runtime,
-                    publication=health,
-                )
-                current_digest = (
-                    self._public_mirror_remote_digest
-                    if publish and self.config.public_mirror.publish
-                    else self._public_mirror_local_digest
-                )
-                if digest == current_digest and not (
-                    should_publish
-                    and self._public_mirror_health.state
-                    in {
-                        PublicMirrorPublishState.pending,
-                        PublicMirrorPublishState.failed,
-                    }
-                ):
-                    return True
                 path, result = publish_public_mirror(
                     self.config,
                     self.store,
@@ -662,11 +642,10 @@ class StewardDaemon:
                     publication=health,
                     publish=should_publish,
                 )
-                self._public_mirror_local_digest = digest
                 if result is not None and not result.ok:
                     category = classify_publish_failure(result)
                     self._record_publish_failure(category)
-                    write_public_mirror(
+                    status_path = write_public_mirror_status(
                         self.config,
                         self.store,
                         runtime=runtime,
@@ -674,11 +653,22 @@ class StewardDaemon:
                             deep=True
                         ),
                     )
+                    self._public_mirror_local_digest = sha256(
+                        status_path.read_bytes()
+                    ).hexdigest()
                     self._log(f"public mirror publish failed category={category}")
                     return False
+                status_path = write_public_mirror_status(
+                    self.config,
+                    self.store,
+                    runtime=runtime,
+                    publication=health,
+                )
+                digest = sha256(status_path.read_bytes()).hexdigest()
+                self._public_mirror_local_digest = digest
                 if result is not None:
                     self._record_publish_success(digest)
-                    write_public_mirror(
+                    write_public_mirror_status(
                         self.config,
                         self.store,
                         runtime=runtime,

@@ -1,1 +1,1595 @@
-/* Plan 010 owns performance route styles. */
+/* Plan 010 owns the performance route surface. */
+
+.performance-page {
+  --chart-1: var(--primary);
+  --chart-2: var(--ok);
+  --chart-3: var(--warning);
+  --chart-4: var(--danger);
+  --chart-5: var(--server);
+  --chart-6: var(--known-peer-broken);
+  min-width: 0;
+  overflow-x: clip;
+}
+
+.performance-page .page-header {
+  padding-bottom: 18px;
+}
+
+.performance-page .page-header__description {
+  max-width: 66ch;
+}
+
+.performance-page .performance-kicker {
+  color: var(--primary-active);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.performance-page .performance-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+  gap: 24px;
+  margin-top: 4px;
+  padding: 16px 0;
+  border-block: 1px solid var(--line);
+}
+
+.performance-page .performance-summary__scope {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.performance-page .performance-summary__scope p {
+  max-width: 48ch;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.performance-page .performance-summary__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  margin: 0;
+  border-left: 1px solid var(--line);
+}
+
+.performance-page .performance-summary__facts > div {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 14px;
+}
+
+.performance-page .performance-summary__facts > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.performance-page .performance-summary__facts dt {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.performance-page .performance-summary__facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+
+.performance-page .performance-workspace {
+  margin-top: 18px;
+}
+
+.performance-page #plot-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.performance-page .performance-controls,
+.performance-page .performance-result {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.performance-page .performance-controls {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.performance-page .performance-controls__head,
+.performance-page .performance-result__heading,
+.performance-page .performance-panel-heading,
+.performance-page .plot-filter-head,
+.performance-page .trend-head,
+.performance-page .performance-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.performance-page .performance-controls h2,
+.performance-page .performance-result h2 {
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.performance-page .performance-result__unit {
+  flex: 0 0 auto;
+  padding-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.performance-page #performance-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.performance-page .plot-tab {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--soft);
+  background: var(--surface-2);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+.performance-page .plot-tab:hover,
+.performance-page .plot-tab:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .plot-tab[aria-selected="true"] {
+  border-color: var(--primary);
+  color: var(--ink);
+  background: var(--primary-soft);
+  box-shadow: inset 3px 0 var(--primary);
+}
+
+.performance-page .plot-tab span,
+.performance-page .plot-tab small {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.1;
+}
+
+.performance-page .plot-tab span {
+  color: var(--primary-active);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.performance-page .plot-tab strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.performance-page .performance-filter-toggle {
+  display: none;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--soft);
+  background: var(--surface-2);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.performance-page .performance-filter-toggle:hover,
+.performance-page .performance-filter-toggle:focus-visible,
+.performance-page .plot-filter-reset:hover:not(:disabled),
+.performance-page .plot-filter-reset:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .performance-filter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  min-width: 0;
+  padding-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-page #performance-filter-count {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.performance-page .performance-filter-panel {
+  min-width: 0;
+}
+
+.performance-page .performance-filter-panel[hidden] {
+  display: none;
+}
+
+.performance-page #performance-filters {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.performance-page .plot-filter-reset {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--soft);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.performance-page .plot-filter-reset:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.performance-page .plot-filter-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.performance-page .plot-filter-group-title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 12px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.performance-page .plot-filter-group-title:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.performance-page .plot-filter-group-title small {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-page .plot-filter-group-title i {
+  position: relative;
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid currentcolor;
+  border-bottom: 1px solid currentcolor;
+  transform: rotate(45deg) translateY(-2px);
+}
+
+.performance-page .plot-filter-group-title[aria-expanded="false"] i {
+  transform: rotate(-45deg) translateY(2px);
+}
+
+.performance-page .plot-filter-options {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.performance-page .filter-choice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--soft);
+  background: var(--surface);
+  cursor: pointer;
+  text-align: left;
+}
+
+.performance-page .filter-choice:hover,
+.performance-page .filter-choice:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .filter-choice[aria-pressed="true"] {
+  border-color: var(--primary);
+  color: var(--ink);
+  background: var(--primary-soft);
+}
+
+.performance-page .filter-choice__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.performance-page .filter-choice__count {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-page .performance-result {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 16px;
+}
+
+.performance-page .performance-result--ranking {
+  min-height: 320px;
+}
+
+.performance-page .performance-result--history {
+  min-height: 410px;
+}
+
+.performance-page .performance-result__heading {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.performance-page #performance-current-state,
+.performance-page #performance-history-state {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.performance-page #performance-current-state strong,
+.performance-page #performance-history-state strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.performance-page #performance-current-state[data-state="error"] strong,
+.performance-page #performance-history-state[data-state="error"] strong {
+  color: var(--warning);
+}
+
+.performance-page #performance-ranking-content[hidden] {
+  display: none;
+}
+
+.performance-page #plot-panel:focus-visible,
+.performance-page .performance-trend-chart:focus-visible,
+.performance-page .performance-data-table__scroll:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+.performance-page .plot,
+.performance-page .plot-panel-active {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.performance-page .performance-panel-heading {
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.performance-page .performance-panel-heading h3,
+.performance-page .trend-head h3 {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.performance-page .performance-panel-heading p,
+.performance-page .trend-head p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-page .performance-bar-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.performance-page .performance-bar-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 8px 32px minmax(180px, 250px) minmax(120px, 1fr) minmax(130px, auto);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.performance-page .performance-bar-row.coquic-family {
+  border-color: var(--primary-border-subtle);
+  background: var(--primary-soft);
+  box-shadow: inset 3px 0 var(--primary);
+}
+
+.performance-page .performance-bar-row.coquic-family::before,
+.performance-page .performance-bar-row.coquic-family::after {
+  display: none;
+}
+
+.performance-page .performance-family-marker {
+  display: block;
+  width: 6px;
+  height: 24px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.performance-page .performance-bar-row.coquic-family .performance-family-marker {
+  background: var(--primary);
+}
+
+.performance-page .rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.performance-page .bar-label,
+.performance-page .bar-identity,
+.performance-page .bar-identity-text,
+.performance-page .bar-name-row {
+  min-width: 0;
+}
+
+.performance-page .bar-label {
+  width: 100%;
+}
+
+.performance-page .bar-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+}
+
+.performance-page .bar-identity-text {
+  display: grid;
+  gap: 3px;
+}
+
+.performance-page .bar-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.performance-page .identity-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.performance-page .identity-name:hover,
+.performance-page .identity-name:focus-visible,
+.performance-page .identity-icon:hover,
+.performance-page .identity-icon:focus-visible {
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .coquic-family-chip,
+.performance-page .trend-family-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--primary-border-subtle);
+  border-radius: 3px;
+  color: var(--primary-active);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.performance-page .bar-version,
+.performance-page .identity-separator {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.performance-page .bar-version {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-page .bar-identity-icons {
+  display: grid;
+  grid-template-columns: repeat(2, 30px);
+  justify-content: end;
+  gap: 6px;
+}
+
+.performance-page .identity-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--surface);
+  text-decoration: none;
+}
+
+.performance-page .identity-icon img {
+  width: 21px;
+  height: 21px;
+  object-fit: contain;
+}
+
+.performance-page .identity-icon.vendor img {
+  width: 25px;
+  height: 25px;
+}
+
+.performance-page .identity-icon.has-image .identity-fallback {
+  display: none;
+}
+
+.performance-page .identity-fallback {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.performance-page .bar-track {
+  position: relative;
+  min-width: 0;
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  background: var(--surface-3);
+}
+
+.performance-page .bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--bar-width, 0%);
+  background: var(--line-strong);
+}
+
+.performance-page .performance-bar-row.coquic-family .bar-fill {
+  background: var(--primary);
+  opacity: 0.72;
+}
+
+.performance-page .bar-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-align: right;
+}
+
+.performance-page .bar-value > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-page .bar-detail-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--soft);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.performance-page .bar-detail-button:hover,
+.performance-page .bar-detail-button:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .bar-detail-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.performance-page .bar-detail-button .meta-icon-svg,
+.performance-page .performance-dialog__close .meta-icon-svg,
+.performance-page .detail-flamegraph-fullscreen-button .meta-icon-svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.performance-page .empty-state {
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  padding: 16px;
+  border: 1px dashed var(--line-strong);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.performance-page .performance-skeleton {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.performance-page .performance-skeleton span {
+  display: block;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.performance-page .performance-skeleton--ranking {
+  min-height: 230px;
+}
+
+.performance-page .performance-skeleton--history {
+  min-height: 250px;
+  grid-template-rows: repeat(5, minmax(0, 1fr));
+}
+
+.performance-page .performance-trend-chart {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.performance-page .trend-head {
+  align-items: baseline;
+}
+
+.performance-page .trend-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 240px;
+  overflow: visible;
+}
+
+.performance-page .trend-grid-line {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.performance-page .trend-axis-label {
+  fill: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-page .trend-line {
+  fill: none;
+  stroke: var(--series-color, var(--line-strong));
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.performance-page .trend-line.coquic-family {
+  stroke-width: 3;
+}
+
+.performance-page .trend-line.performance-series-secondary {
+  stroke: var(--muted);
+  stroke-dasharray: 5 4;
+  stroke-width: 1.7;
+}
+
+.performance-page .trend-point {
+  fill: var(--series-color, var(--line-strong));
+  stroke: var(--surface);
+  stroke-width: 1.2;
+}
+
+.performance-page .trend-point.trend-point-ring {
+  fill: var(--surface);
+  stroke: var(--series-color, var(--line-strong));
+  stroke-width: 2;
+}
+
+.performance-page .trend-point.performance-series-secondary {
+  fill: var(--muted);
+  stroke: var(--surface);
+}
+
+.performance-page .trend-hit-point {
+  fill: transparent;
+  cursor: pointer;
+  outline: none;
+  pointer-events: all;
+}
+
+.performance-page .trend-hit-point:focus-visible {
+  stroke: var(--primary);
+  stroke-width: 2;
+}
+
+.performance-page .trend-tooltip {
+  position: absolute;
+  z-index: 2;
+  display: none;
+  gap: 3px;
+  min-width: max-content;
+  max-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 10px 26px var(--shadow-popover);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
+.performance-page .trend-tooltip.visible {
+  display: grid;
+}
+
+.performance-page .trend-tooltip strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.performance-page .trend-tooltip span {
+  color: var(--muted);
+}
+
+.performance-page .trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.performance-page .trend-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.performance-page .trend-legend > span.coquic-family {
+  border-color: var(--primary-border-subtle);
+  background: var(--primary-soft);
+}
+
+.performance-page .trend-legend b,
+.performance-page .trend-legend small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-page .trend-legend b {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.performance-page .trend-legend small {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.performance-page .trend-marker {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  color: var(--series-color, var(--muted));
+  background: var(--series-color, var(--muted));
+}
+
+.performance-page .trend-marker--circle {
+  border-radius: 50%;
+}
+
+.performance-page .trend-marker--square {
+  border-radius: 1px;
+}
+
+.performance-page .trend-marker--diamond {
+  transform: rotate(45deg) scale(0.78);
+}
+
+.performance-page .trend-marker--triangle {
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.performance-page .trend-marker--cross {
+  width: 12px;
+  height: 12px;
+  background: transparent;
+}
+
+.performance-page .trend-marker--cross::before,
+.performance-page .trend-marker--cross::after {
+  position: absolute;
+  inset: 1px 5px;
+  content: "";
+  background: currentcolor;
+  transform: rotate(45deg);
+}
+
+.performance-page .trend-marker--cross::after {
+  transform: rotate(-45deg);
+}
+
+.performance-page .trend-marker--ring {
+  border: 2px solid currentcolor;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.performance-page .performance-series-secondary {
+  --series-color: var(--muted);
+}
+
+.performance-page .performance-data-table {
+  border-top: 1px solid var(--line);
+}
+
+.performance-page .performance-data-table summary {
+  padding: 10px 0;
+  color: var(--primary-active);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.performance-page .performance-data-table summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.performance-page .performance-data-table__scroll {
+  max-width: 100%;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+}
+
+.performance-page .performance-data-table table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  color: var(--soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.performance-page .performance-data-table caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.performance-page .performance-data-table th,
+.performance-page .performance-data-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.performance-page .performance-data-table th:first-child,
+.performance-page .performance-data-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 150px;
+  color: var(--ink);
+  background: var(--surface);
+  text-align: left;
+}
+
+.performance-page .performance-data-table thead th {
+  color: var(--muted);
+  background: var(--surface-2);
+  font-weight: 800;
+}
+
+.performance-page dialog.performance-dialog {
+  width: min(840px, calc(100vw - 24px));
+  max-width: 840px;
+  max-height: min(90vh, 840px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--bg);
+  box-shadow: 0 24px 80px var(--shadow-modal);
+}
+
+.performance-page dialog.performance-dialog::backdrop {
+  background: var(--modal-backdrop);
+}
+
+.performance-page .performance-dialog__surface {
+  display: flex;
+  flex-direction: column;
+  max-height: min(90vh, 840px);
+  min-height: 0;
+}
+
+.performance-page .performance-dialog__head {
+  flex: 0 0 auto;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.performance-page .performance-dialog__head h2 {
+  margin-top: 4px;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.performance-page .performance-dialog__close {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--soft);
+  background: var(--surface-2);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.performance-page .performance-dialog__close:hover,
+.performance-page .performance-dialog__close:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .performance-dialog__body {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.performance-page .perf-detail-summary,
+.performance-page .perf-detail-utilization,
+.performance-page .perf-detail-profiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.performance-page .perf-detail-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.performance-page .perf-detail-section {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.performance-page .perf-detail-section h3,
+.performance-page .perf-detail-endpoint h4,
+.performance-page .detail-profile-title strong {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.performance-page .perf-detail-stat {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.performance-page .perf-detail-stat small,
+.performance-page .perf-detail-stat em {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.performance-page .perf-detail-stat strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-page .perf-detail-endpoint,
+.performance-page .detail-profile-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.performance-page .perf-detail-endpoint {
+  display: grid;
+  gap: 8px;
+}
+
+.performance-page .perf-detail-metrics {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.performance-page .utilization-metric-row {
+  display: grid;
+  grid-template-columns: 72px repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.performance-page .utilization-metric-row + .utilization-metric-row {
+  border-top: 1px solid var(--line);
+}
+
+.performance-page .utilization-metric-row-label {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.performance-page .utilization-metric-row .perf-detail-stat {
+  min-height: 44px;
+  padding: 8px;
+}
+
+.performance-page .utilization-metric-row .perf-detail-stat + .perf-detail-stat {
+  border-left: 1px solid var(--line);
+}
+
+.performance-page .detail-profile-card {
+  display: grid;
+  grid-template-rows: auto minmax(220px, auto) auto;
+  gap: 10px;
+}
+
+.performance-page .detail-profile-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.performance-page .detail-profile-title span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-page .detail-flamegraph {
+  position: relative;
+  min-width: 0;
+  height: clamp(220px, 34vh, 360px);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.performance-page .detail-flamegraph-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--surface);
+}
+
+.performance-page .detail-flamegraph-frame--fullscreen {
+  min-height: min(62vh, 520px);
+}
+
+.performance-page .detail-flamegraph-fullscreen-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 8px 20px var(--shadow-popover);
+  cursor: pointer;
+}
+
+.performance-page .detail-flamegraph-fullscreen-button:hover,
+.performance-page .detail-flamegraph-fullscreen-button:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary-active);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.performance-page .detail-profile-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+}
+
+.performance-page .detail-profile-links a,
+.performance-page .detail-profile-links span {
+  min-width: 0;
+  color: var(--primary-active);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.3;
+  text-decoration: none;
+}
+
+.performance-page .detail-profile-links span {
+  color: var(--muted);
+}
+
+.performance-page .detail-profile-links a:hover,
+.performance-page .detail-profile-links a:focus-visible {
+  text-decoration: underline;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+html:has(.performance-page dialog[open]) {
+  scrollbar-gutter: stable;
+}
+
+body:has(.performance-page dialog[open]) {
+  overflow: hidden;
+}
+
+@media (width <= 1080px) {
+  .performance-page .performance-summary {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .performance-page .performance-summary__facts {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+    padding-top: 14px;
+  }
+
+  .performance-page .performance-bar-row {
+    grid-template-columns: 8px 30px minmax(160px, 220px) minmax(100px, 1fr) minmax(120px, auto);
+  }
+}
+
+@media (width <= 680px) {
+  .performance-page .performance-summary__facts {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .performance-page .performance-summary__facts > div {
+    padding: 0;
+  }
+
+  .performance-page .performance-summary__facts > div + div {
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .performance-page .performance-controls,
+  .performance-page .performance-result {
+    padding: 12px;
+  }
+
+  .performance-page .performance-controls__head {
+    align-items: center;
+  }
+
+  .performance-page .performance-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .performance-page #performance-mode-tabs {
+    display: flex;
+    max-width: 100%;
+    overflow-x: auto;
+    padding-bottom: 3px;
+    scrollbar-width: thin;
+  }
+
+  .performance-page .plot-tab {
+    flex: 0 0 148px;
+    min-height: 62px;
+  }
+
+  .performance-page #performance-filters {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding-top: 12px;
+  }
+
+  .performance-page .plot-filter-reset {
+    min-height: 42px;
+  }
+
+  .performance-page .filter-choice {
+    min-height: 42px;
+  }
+
+  .performance-page .performance-bar-row {
+    grid-template-columns: 8px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "marker label value"
+      "marker track track";
+    gap: 8px 10px;
+    min-height: 0;
+    padding: 10px;
+  }
+
+  .performance-page .performance-family-marker {
+    grid-area: marker;
+    align-self: stretch;
+    height: auto;
+  }
+
+  .performance-page .performance-bar-row .rank-badge {
+    display: none;
+  }
+
+  .performance-page .performance-bar-row .bar-label {
+    grid-area: label;
+  }
+
+  .performance-page .performance-bar-row .bar-track {
+    grid-area: track;
+  }
+
+  .performance-page .performance-bar-row .bar-value {
+    grid-area: value;
+  }
+
+  .performance-page .bar-identity {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 38px;
+  }
+
+  .performance-page .bar-identity-icons {
+    display: none;
+  }
+
+  .performance-page .bar-value {
+    gap: 6px;
+  }
+
+  .performance-page .bar-value > span {
+    max-width: 120px;
+    white-space: normal;
+  }
+
+  .performance-page .trend-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .performance-page .trend-svg {
+    min-width: 560px;
+    min-height: 214px;
+  }
+
+  .performance-page .performance-trend-chart {
+    overflow-x: auto;
+    padding-bottom: 3px;
+  }
+
+  .performance-page .trend-legend {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .performance-page .trend-legend > span {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+  }
+
+  .performance-page .trend-legend small {
+    grid-column: 2;
+  }
+
+  .performance-page .perf-detail-summary,
+  .performance-page .perf-detail-utilization,
+  .performance-page .perf-detail-profiles {
+    grid-template-columns: 1fr;
+  }
+
+  .performance-page .perf-detail-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .performance-page .detail-profile-card {
+    grid-template-rows: auto minmax(180px, auto) auto;
+  }
+}
+
+@media (width <= 430px) {
+  .performance-page .performance-summary__scope p {
+    font-size: 12px;
+  }
+
+  .performance-page .performance-result__heading {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .performance-page .performance-bar-row {
+    grid-template-columns: 8px minmax(0, 1fr) auto;
+  }
+
+  .performance-page .bar-value > span {
+    max-width: 104px;
+  }
+
+  .performance-page .performance-dialog__head {
+    padding: 12px;
+  }
+
+  .performance-page .performance-dialog__body {
+    padding: 12px;
+  }
+
+  .performance-page .utilization-metric-row {
+    grid-template-columns: 56px repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (forced-colors: active) {
+  .performance-page {
+    --chart-1: CanvasText;
+    --chart-2: CanvasText;
+    --chart-3: CanvasText;
+    --chart-4: CanvasText;
+    --chart-5: CanvasText;
+    --chart-6: CanvasText;
+  }
+
+  .performance-page .performance-bar-row.coquic-family,
+  .performance-page .filter-choice[aria-pressed="true"],
+  .performance-page .plot-tab[aria-selected="true"] {
+    forced-color-adjust: none;
+    border-color: Highlight;
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .performance-page .trend-line,
+  .performance-page .trend-point,
+  .performance-page .trend-point.trend-point-ring {
+    stroke: CanvasText;
+  }
+
+  .performance-page .trend-point,
+  .performance-page .trend-marker {
+    background: CanvasText;
+    color: CanvasText;
+  }
+
+  .performance-page .trend-point.trend-point-ring,
+  .performance-page .trend-marker--ring {
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .performance-page *,
+  .performance-page *::before,
+  .performance-page *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

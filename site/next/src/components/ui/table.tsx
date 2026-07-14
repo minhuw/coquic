@@ -1,46 +1,55 @@
+'use client';
+
 import * as React from 'react';
 
+import { useOverflow } from '@/components/ui/scroll-region';
 import { cn } from '@/lib/utils';
 
-const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(
-  ({ className, ...props }, ref) => (
-    <div className="w-full overflow-auto">
-      <table ref={ref} className={cn('w-full caption-bottom border-collapse text-sm', className)} {...props} />
-    </div>
-  ),
+export interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> {
+  scrollLabel?: string;
+}
+
+const Table = React.forwardRef<HTMLTableElement, TableProps>(
+  ({ className, scrollLabel = 'Data table', ...props }, ref) => {
+    const { ref: scrollRef, overflowing } = useOverflow<HTMLDivElement>('horizontal');
+    return (
+      <div
+        ref={scrollRef}
+        className="table-scroll-region"
+        aria-label={scrollLabel}
+        data-overflow={overflowing || undefined}
+        role={overflowing ? 'region' : undefined}
+        tabIndex={overflowing ? 0 : undefined}
+      >
+        <table ref={ref} className={cn('ui-table', className)} {...props} />
+      </div>
+    );
+  },
 );
 Table.displayName = 'Table';
 
 const TableHeader = React.forwardRef<HTMLTableSectionElement, React.HTMLAttributes<HTMLTableSectionElement>>(
-  ({ className, ...props }, ref) => <thead ref={ref} className={cn('[&_tr]:border-b', className)} {...props} />,
+  ({ className, ...props }, ref) => <thead ref={ref} className={cn('ui-table__header', className)} {...props} />,
 );
 TableHeader.displayName = 'TableHeader';
 
 const TableBody = React.forwardRef<HTMLTableSectionElement, React.HTMLAttributes<HTMLTableSectionElement>>(
-  ({ className, ...props }, ref) => <tbody ref={ref} className={cn('[&_tr:last-child]:border-0', className)} {...props} />,
+  ({ className, ...props }, ref) => <tbody ref={ref} className={cn('ui-table__body', className)} {...props} />,
 );
 TableBody.displayName = 'TableBody';
 
 const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTMLTableRowElement>>(
-  ({ className, ...props }, ref) => (
-    <tr ref={ref} className={cn('border-b border-[var(--line)] transition-colors hover:bg-[var(--surface-2)]', className)} {...props} />
-  ),
+  ({ className, ...props }, ref) => <tr ref={ref} className={cn('ui-table__row', className)} {...props} />,
 );
 TableRow.displayName = 'TableRow';
 
 const TableHead = React.forwardRef<HTMLTableCellElement, React.ThHTMLAttributes<HTMLTableCellElement>>(
-  ({ className, ...props }, ref) => (
-    <th
-      ref={ref}
-      className={cn('h-10 px-3 text-left align-middle font-mono text-[11px] font-semibold uppercase text-[var(--muted)]', className)}
-      {...props}
-    />
-  ),
+  ({ className, ...props }, ref) => <th ref={ref} className={cn('ui-table__head', className)} {...props} />,
 );
 TableHead.displayName = 'TableHead';
 
 const TableCell = React.forwardRef<HTMLTableCellElement, React.TdHTMLAttributes<HTMLTableCellElement>>(
-  ({ className, ...props }, ref) => <td ref={ref} className={cn('px-3 py-3 align-middle text-[var(--soft)]', className)} {...props} />,
+  ({ className, ...props }, ref) => <td ref={ref} className={cn('ui-table__cell', className)} {...props} />,
 );
 TableCell.displayName = 'TableCell';
 

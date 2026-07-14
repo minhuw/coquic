@@ -3,6 +3,7 @@ import './globals.css';
 import type { Metadata } from 'next';
 
 import { ThemeScript } from '@/components/theme-script';
+import { googleSansCode, hostGrotesk } from '@/lib/fonts';
 
 export const metadata: Metadata = {
   title: 'CoQUIC: AI-Generated QUIC, From Prompt to Packet',
@@ -14,11 +15,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" data-scroll-behavior="smooth" suppressHydrationWarning>
       <head>
         <ThemeScript />
       </head>
-      <body>{children}</body>
+      <body className={`${hostGrotesk.variable} ${googleSansCode.variable}`}>{children}</body>
     </html>
   );
 }

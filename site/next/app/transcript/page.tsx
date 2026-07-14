@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 
-import { DemoNav } from '@/components/demo-nav';
 import { TranscriptDataset } from './transcript-dataset';
 
 export const metadata: Metadata = {
@@ -14,7 +13,6 @@ export const metadata: Metadata = {
 export default function TranscriptPage() {
   return (
     <main className="coquic-page transcript-page">
-      <DemoNav active="dataset" />
       <TranscriptDataset />
     </main>
   );

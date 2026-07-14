@@ -1,4 +1,3 @@
-import { DemoNav } from '@/components/demo-nav';
 import { CoquicLogoIcon } from '@/components/icons';
 
 export default function Home() {
@@ -6,7 +5,6 @@ export default function Home() {
     <main className="coquic-page flex min-h-screen flex-col">
       <meta name="coquic-demo-marker" content="coquic-wasm-demo-v1" />
       <meta name="coquic-home-marker" content="coquic-demo-home-v1" />
-      <DemoNav active="home" />
 
       <section className="grid flex-1 place-items-center content-center py-16 text-center sm:py-20 lg:py-24" aria-label="coquic slogan">
         <CoquicLogoIcon className="h-auto w-[clamp(72px,12vw,116px)] text-[var(--ink)]" />

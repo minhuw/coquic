@@ -2,6 +2,8 @@ import './globals.css';
 
 import type { Metadata } from 'next';
 
+import { DemoNav } from '@/components/demo-nav';
+import { ProjectFooter } from '@/components/project-footer';
 import { ThemeScript } from '@/components/theme-script';
 import { googleSansCode, hostGrotesk } from '@/lib/fonts';
 
@@ -19,7 +21,17 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <head>
         <ThemeScript />
       </head>
-      <body className={`${hostGrotesk.variable} ${googleSansCode.variable}`}>{children}</body>
+      <body className={`${hostGrotesk.variable} ${googleSansCode.variable}`}>
+        <a className="skip-link" href="#shell-main">
+          Skip to content
+        </a>
+        <DemoNav />
+        <div className="shell-main" id="shell-main" tabIndex={-1}>
+          {children}
+        </div>
+        <ProjectFooter />
+        <div id="overlay-root" />
+      </body>
     </html>
   );
 }

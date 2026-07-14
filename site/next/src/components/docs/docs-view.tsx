@@ -1,7 +1,6 @@
 import Link from 'next/link';
 import { Fragment } from 'react';
 
-import { DemoNav } from '@/components/demo-nav';
 import { Markdown } from '@/components/docs/markdown';
 import { PageHeader } from '@/components/page-header';
 import { getDocNavItems, type DocPage } from '@/lib/docs';
@@ -15,7 +14,6 @@ export async function DocsView({ page }: DocsViewProps) {
 
   return (
     <main className="coquic-page">
-      <DemoNav active="docs" />
       <PageHeader eyebrow="project documentation" title={page.title} />
 
       <section className="docs-layout" aria-label="CoQUIC documentation">

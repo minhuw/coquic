@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ArrowRight } from 'lucide-react';
 
-import { DemoNav } from '@/components/demo-nav';
 import { PageHeader } from '@/components/page-header';
 import { formatBlogDate, getBlogPosts } from '@/lib/blog';
 
@@ -16,7 +15,6 @@ export default function BlogIndexPage() {
 
   return (
     <main className="coquic-page">
-      <DemoNav active="blog" />
       <PageHeader eyebrow="project blog" title="CoQUIC Blog" />
 
       <section className="blog-list" aria-label="Blog posts">

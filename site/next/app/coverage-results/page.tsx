@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Script from 'next/script';
 import Link from 'next/link';
 
-import { DemoNav } from '@/components/demo-nav';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -16,8 +15,6 @@ export const metadata: Metadata = {
 export default function CoveragePage() {
   return (
     <main className="coquic-page">
-      <DemoNav active="coverage" />
-
       <section className="grid gap-5 border-b border-[var(--line)] py-7 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div>
           <span className="eyebrow">LLVM source coverage</span>

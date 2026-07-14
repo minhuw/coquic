@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 
-import { DemoNav } from '@/components/demo-nav';
 import { StewardTaskDetailLive } from '@/components/steward-public';
 
 type StewardTaskPageProps = {
@@ -20,7 +19,6 @@ export default async function StewardTaskPage({ params }: StewardTaskPageProps) 
   if (!/^task-\d{14}-[a-f0-9]{8}$/.test(taskId)) notFound();
   return (
     <main className="coquic-page steward-public-page">
-      <DemoNav active="steward" />
       <StewardTaskDetailLive taskId={taskId} />
     </main>
   );

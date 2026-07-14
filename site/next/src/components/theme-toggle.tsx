@@ -12,9 +12,10 @@ function preferredTheme(): Theme {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
-function applyTheme(theme: Theme) {
+function applyTheme(theme: Theme, persist: boolean) {
   document.documentElement.dataset.theme = theme;
-  window.localStorage.setItem('coquic-theme', theme);
+  document.documentElement.style.colorScheme = theme;
+  if (persist) window.localStorage.setItem('coquic-theme', theme);
 }
 
 export function ThemeToggle() {
@@ -22,12 +23,22 @@ export function ThemeToggle() {
 
   useEffect(() => {
     setTheme(preferredTheme());
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => {
+      if (!window.localStorage.getItem('coquic-theme')) {
+        const next = media.matches ? 'dark' : 'light';
+        setTheme(next);
+        applyTheme(next, false);
+      }
+    };
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
   }, []);
 
   function toggleTheme() {
     const next = theme === 'dark' ? 'light' : 'dark';
     setTheme(next);
-    applyTheme(next);
+    applyTheme(next, true);
   }
 
   const dark = theme === 'dark';

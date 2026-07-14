@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
 
-import { DemoNav } from '@/components/demo-nav';
 import { Card } from '@/components/ui/card';
 
 export const metadata: Metadata = {
@@ -14,8 +13,6 @@ export const metadata: Metadata = {
 export default function InteropPage() {
   return (
     <main className="coquic-page">
-      <DemoNav active="interop" />
-
       <Card className="interop-shell mt-5" aria-label="CoQUIC interop test-case matrix">
         <div className="interop-head">
           <div>

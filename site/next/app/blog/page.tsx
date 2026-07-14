@@ -20,25 +20,32 @@ export default function BlogIndexPage() {
       <section className="blog-list" aria-label="Blog posts">
         {posts.length ? (
           posts.map((post) => (
-            <article className="blog-card" key={post.slug}>
-              <Link className="blog-card-link" href={`/blog/${post.slug}`}>
-                <span className="blog-card-meta">
-                  <time dateTime={post.date}>{formatBlogDate(post.date)}</time>
-                  <span>{post.readingMinutes} min read</span>
-                  <span>{post.author}</span>
-                  {post.writtenBy ? <span className="blog-polish-badge">Written by {post.writtenBy}</span> : null}
-                  {post.polishedBy ? <span className="blog-polish-badge">Polished by {post.polishedBy}</span> : null}
-                </span>
-                <h2>{post.title}</h2>
-                <p>{post.description}</p>
-                <span className="blog-card-foot">
-                  <span className="blog-tags">
-                    {post.tags.map((tag) => (
-                      <span key={tag}>{tag}</span>
-                    ))}
+            <article className="blog-row" key={post.slug}>
+              <Link className="blog-row-link" href={`/blog/${post.slug}`}>
+                <div className="blog-row-main">
+                  <div className="blog-row-meta">
+                    <time className="blog-meta-date" dateTime={post.date}>
+                      {formatBlogDate(post.date)}
+                    </time>
+                    <span className="blog-meta-unit">{post.readingMinutes} min read</span>
+                    <span className="blog-meta-person">{post.author}</span>
+                    {post.writtenBy ? <span className="blog-meta-attribution">Written by {post.writtenBy}</span> : null}
+                    {post.polishedBy ? <span className="blog-meta-attribution">Polished by {post.polishedBy}</span> : null}
+                  </div>
+                  <h2>{post.title}</h2>
+                  <p>{post.description}</p>
+                  <span className="blog-row-foot">
+                    <span className="blog-tags">
+                      {post.tags.map((tag) => (
+                        <span key={tag}>{tag}</span>
+                      ))}
+                    </span>
+                    <span className="blog-row-cta">
+                      Read article
+                      <ArrowRight aria-hidden="true" />
+                    </span>
                   </span>
-                  <ArrowRight aria-hidden="true" />
-                </span>
+                </div>
               </Link>
             </article>
           ))

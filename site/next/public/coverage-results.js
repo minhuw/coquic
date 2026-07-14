@@ -1,171 +1,283 @@
-const fallbackCoverageSnapshot = {
-  schema_version: 1,
-  generated_at: "unavailable",
-  event_name: "local",
-  commit: "awaiting-ci-results",
-  report_url: "./coverage/index.html",
-  totals: {
-    functions: { covered: 0, total: 0, percent: 0 },
-    lines: { covered: 0, total: 0, percent: 0 },
-    branches: { covered: 0, total: 0, percent: 0 },
-  },
-  components: [],
-  least_covered_files: [],
+const metricKeys = ["functions", "lines", "branches"];
+const metricLabels = {
+  functions: "Functions",
+  lines: "Lines",
+  branches: "Branches",
 };
 
-let activeSnapshot = fallbackCoverageSnapshot;
-let dataSource = "waiting for coverage-results.json";
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isMetric(value) {
+  return (
+    isRecord(value) &&
+    Number.isFinite(value.covered) &&
+    Number.isFinite(value.total) &&
+    Number.isFinite(value.percent) &&
+    value.covered >= 0 &&
+    value.total >= 0 &&
+    value.covered <= value.total &&
+    value.percent >= 0 &&
+    value.percent <= 100
+  );
+}
+
+function hasMetrics(value) {
+  return isRecord(value) && metricKeys.every((key) => isMetric(value[key]));
+}
+
+function isCoverageSnapshot(value) {
+  return (
+    isRecord(value) &&
+    value.schema_version === 1 &&
+    typeof value.generated_at === "string" &&
+    typeof value.event_name === "string" &&
+    typeof value.commit === "string" &&
+    typeof value.report_url === "string" &&
+    hasMetrics(value.totals) &&
+    Array.isArray(value.components) &&
+    value.components.every(
+      (component) => isRecord(component) && typeof component.name === "string" && hasMetrics(component.metrics),
+    ) &&
+    Array.isArray(value.files) &&
+    value.files.every(
+      (file) => isRecord(file) && typeof file.path === "string" && typeof file.component === "string" && hasMetrics(file.metrics),
+    ) &&
+    Array.isArray(value.least_covered_files) &&
+    value.least_covered_files.every(
+      (file) => isRecord(file) && typeof file.path === "string" && typeof file.component === "string" && hasMetrics(file.metrics),
+    )
+  );
+}
 
 function formatPercent(value) {
-  return `${Number(value || 0).toFixed(2)}%`;
+  return `${value.toFixed(2)}%`;
 }
 
 function formatCount(value) {
-  return Number(value || 0).toLocaleString("en-US");
+  return value.toLocaleString("en-US");
 }
 
-function metricLabel(key) {
-  const labels = {
-    functions: "Function Coverage",
-    lines: "Line Coverage",
-    branches: "Branch Coverage",
-  };
-  return labels[key] || key;
+function metricCount(metric) {
+  return `${formatCount(metric.covered)} / ${formatCount(metric.total)}`;
 }
 
-function metricCard(key, metric) {
-  const card = document.createElement("article");
-  card.className = "metric-card";
-  const label = document.createElement("span");
-  label.textContent = metricLabel(key);
-  const value = document.createElement("strong");
-  value.textContent = formatPercent(metric.percent);
-  const bar = document.createElement("div");
-  bar.className = "metric-bar";
-  bar.style.setProperty("--coverage-width", formatPercent(metric.percent));
-  const fill = document.createElement("i");
-  const count = document.createElement("span");
-  count.textContent = `${formatCount(metric.covered)} / ${formatCount(metric.total)} covered`;
-  bar.append(fill);
-  card.append(label, value, bar, count);
-  return card;
+function coverageMeter(metric) {
+  const meter = document.createElement("div");
+  meter.className = "coverage-meter";
+  meter.setAttribute("aria-hidden", "true");
+  const fill = document.createElement("span");
+  fill.style.width = formatPercent(metric.percent);
+  meter.append(fill);
+  return meter;
 }
 
-function rowBar(metric) {
-  const bar = document.createElement("div");
-  bar.className = "metric-bar";
-  bar.style.setProperty("--coverage-width", formatPercent(metric.percent));
-  const fill = document.createElement("i");
-  bar.append(fill);
-  return bar;
+function metricEvidence(key, metric) {
+  const evidence = document.createElement("article");
+  evidence.className = "coverage-metric";
+  evidence.dataset.coverageMetric = key;
+  evidence.dataset.metric = key;
+
+  const heading = document.createElement("div");
+  heading.className = "coverage-metric-heading";
+  const label = document.createElement("h3");
+  label.textContent = metricLabels[key];
+  const percent = document.createElement("strong");
+  percent.className = "coverage-metric-percent";
+  percent.textContent = formatPercent(metric.percent);
+  heading.append(label, percent);
+
+  const count = document.createElement("p");
+  count.className = "coverage-metric-count";
+  count.textContent = `${metricCount(metric)} covered`;
+
+  evidence.append(heading, count, coverageMeter(metric));
+  return evidence;
 }
 
-function metricChip(label, metric) {
-  const chip = document.createElement("span");
-  chip.textContent = `${label} ${formatPercent(metric.percent)}`;
-  return chip;
+function rowMetric(label, metric) {
+  const item = document.createElement("div");
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const value = document.createElement("dd");
+  value.textContent = `${metricCount(metric)} (${formatPercent(metric.percent)})`;
+  item.append(term, value);
+  return item;
 }
 
 function componentRow(component) {
-  const row = document.createElement("div");
-  row.className = "component-row";
-  const lineMetric = component.metrics?.lines || { covered: 0, total: 0, percent: 0 };
-  const functionMetric = component.metrics?.functions || { covered: 0, total: 0, percent: 0 };
-  const branchMetric = component.metrics?.branches || { covered: 0, total: 0, percent: 0 };
+  const row = document.createElement("article");
+  row.className = "coverage-list-row";
+  row.dataset.componentName = component.name;
 
-  const top = document.createElement("div");
-  top.className = "row-top";
+  const heading = document.createElement("div");
+  heading.className = "coverage-row-heading";
   const name = document.createElement("strong");
   name.textContent = component.name;
-  const percent = document.createElement("span");
-  percent.textContent = formatPercent(lineMetric.percent);
-  top.append(name, percent);
+  const linePercent = document.createElement("span");
+  linePercent.className = "coverage-row-percent";
+  linePercent.textContent = formatPercent(component.metrics.lines.percent);
+  heading.append(name, linePercent);
 
-  const meta = document.createElement("div");
-  meta.className = "row-meta";
-  meta.append(
-    metricChip("fn", functionMetric),
-    metricChip("line", lineMetric),
-    metricChip("branch", branchMetric),
+  const details = document.createElement("dl");
+  details.className = "coverage-row-metrics";
+  details.append(
+    rowMetric("Functions", component.metrics.functions),
+    rowMetric("Lines", component.metrics.lines),
+    rowMetric("Branches", component.metrics.branches),
   );
-  row.append(top, rowBar(lineMetric), meta);
+
+  row.append(heading, coverageMeter(component.metrics.lines), details);
   return row;
 }
 
 function fileRow(file) {
-  const row = document.createElement("div");
-  row.className = "file-row";
-  const lineMetric = file.metrics?.lines || { covered: 0, total: 0, percent: 0 };
-  const functionMetric = file.metrics?.functions || { covered: 0, total: 0, percent: 0 };
-  const branchMetric = file.metrics?.branches || { covered: 0, total: 0, percent: 0 };
+  const row = document.createElement("article");
+  row.className = "coverage-list-row coverage-file-row";
+  row.dataset.filePath = file.path;
 
-  const top = document.createElement("div");
-  top.className = "row-top";
+  const heading = document.createElement("div");
+  heading.className = "coverage-row-heading";
   const name = document.createElement("strong");
   name.textContent = file.path;
   name.title = file.path;
-  const percent = document.createElement("span");
-  percent.textContent = formatPercent(lineMetric.percent);
-  top.append(name, percent);
+  const linePercent = document.createElement("span");
+  linePercent.className = "coverage-row-percent";
+  linePercent.textContent = formatPercent(file.metrics.lines.percent);
+  heading.append(name, linePercent);
 
-  const meta = document.createElement("div");
-  meta.className = "row-meta";
-  meta.append(
-    metricChip("fn", functionMetric),
-    metricChip("line", lineMetric),
-    metricChip("branch", branchMetric),
+  const details = document.createElement("dl");
+  details.className = "coverage-row-metrics";
+  details.append(
+    rowMetric("Functions", file.metrics.functions),
+    rowMetric("Lines", file.metrics.lines),
+    rowMetric("Branches", file.metrics.branches),
   );
-  row.append(top, rowBar(lineMetric), meta);
+
+  row.append(heading, coverageMeter(file.metrics.lines), details);
   return row;
 }
 
 function emptyState(text) {
-  const node = document.createElement("div");
-  node.className = "empty-state";
+  const node = document.createElement("p");
+  node.className = "coverage-empty-state";
   node.textContent = text;
   return node;
 }
 
-function renderAll() {
-  document.getElementById("coverage-source-label").textContent = dataSource;
-  document.getElementById("summary-grid").replaceChildren(
-    metricCard("functions", activeSnapshot.totals.functions),
-    metricCard("lines", activeSnapshot.totals.lines),
-    metricCard("branches", activeSnapshot.totals.branches),
-  );
+function loadingRow() {
+  const row = document.createElement("div");
+  row.className = "coverage-loading-row";
+  row.dataset.coverageLoadingRow = "true";
+  row.setAttribute("aria-hidden", "true");
+  return row;
+}
 
-  const components = [...(activeSnapshot.components || [])].sort((left, right) => {
-    const leftPercent = left.metrics?.lines?.percent ?? 0;
-    const rightPercent = right.metrics?.lines?.percent ?? 0;
-    return leftPercent - rightPercent || left.name.localeCompare(right.name);
+function renderLoading() {
+  document.getElementById("summary-grid").replaceChildren(loadingRow(), loadingRow(), loadingRow());
+  document.getElementById("component-list").replaceChildren(loadingRow(), loadingRow());
+  document.getElementById("file-list").replaceChildren(loadingRow(), loadingRow(), loadingRow());
+}
+
+function renderUnavailable() {
+  const unavailable = () => {
+    const row = document.createElement("div");
+    row.className = "coverage-unavailable-row";
+    row.textContent = "Coverage metric unavailable.";
+    return row;
+  };
+  document.getElementById("summary-grid").replaceChildren(unavailable(), unavailable(), unavailable());
+  document.getElementById("component-list").replaceChildren(emptyState("No component coverage loaded."));
+  document.getElementById("file-list").replaceChildren(emptyState("No file coverage loaded."));
+}
+
+function setSourceMetadata(snapshot) {
+  document.getElementById("coverage-generated-at").textContent = snapshot?.generated_at || "unavailable";
+  document.getElementById("coverage-event").textContent = snapshot?.event_name || "unavailable";
+  document.getElementById("coverage-commit").textContent = snapshot?.commit || "unavailable";
+}
+
+function renderLoaded(snapshot) {
+  const components = [...snapshot.components].sort((left, right) => {
+    const lineDifference = left.metrics.lines.percent - right.metrics.lines.percent;
+    return lineDifference || left.name.localeCompare(right.name);
   });
+
+  document.getElementById("summary-grid").replaceChildren(
+    ...metricKeys.map((key) => metricEvidence(key, snapshot.totals[key])),
+  );
   document.getElementById("component-list").replaceChildren(
     ...(components.length ? components.map(componentRow) : [emptyState("No component coverage loaded.")]),
   );
   document.getElementById("file-list").replaceChildren(
-    ...((activeSnapshot.least_covered_files || []).length
-      ? activeSnapshot.least_covered_files.map(fileRow)
+    ...(snapshot.least_covered_files.length
+      ? snapshot.least_covered_files.map(fileRow)
       : [emptyState("No file coverage loaded.")]),
   );
 }
 
+function setState(state, statusText, sourceText) {
+  const report = document.getElementById("coverage-evidence");
+  report.dataset.coverageState = state;
+  report.setAttribute("aria-busy", state === "loading" ? "true" : "false");
+  document.getElementById("coverage-source-label").textContent = sourceText;
+  const status = document.getElementById("coverage-status");
+  status.textContent = statusText;
+  status.setAttribute("aria-live", state === "unavailable" || state === "malformed" ? "assertive" : "polite");
+}
+
+function addRetryAction(status, onRetry) {
+  const retry = document.createElement("button");
+  retry.className = "coverage-inline-action";
+  retry.type = "button";
+  retry.textContent = "Retry";
+  retry.setAttribute("aria-label", "Retry coverage results");
+  retry.addEventListener("click", onRetry, { once: true });
+  status.append(" ", retry);
+}
+
 async function loadCoverageSnapshot() {
+  renderLoading();
+  setState("loading", "Loading coverage-results.json.", "waiting for coverage-results.json");
+  setSourceMetadata(null);
+
   try {
     const response = await fetch("./coverage-results.json", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const snapshot = await response.json();
-    if (!snapshot.totals || !Array.isArray(snapshot.components)) {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    let snapshot;
+    try {
+      snapshot = await response.json();
+    } catch {
       throw new Error("invalid coverage-results.json");
     }
-    activeSnapshot = snapshot;
-    dataSource = `coverage-results.json from ${snapshot.generated_at || "latest workflow"}`;
-  } catch {
-    activeSnapshot = fallbackCoverageSnapshot;
-    dataSource = "coverage-results.json not available yet";
+    if (!isCoverageSnapshot(snapshot)) throw new Error("invalid coverage-results.json");
+
+    renderLoaded(snapshot);
+    setSourceMetadata(snapshot);
+    setState(
+      snapshot.components.length || snapshot.least_covered_files.length ? "loaded" : "loaded-empty",
+      snapshot.components.length || snapshot.least_covered_files.length
+        ? "Coverage results loaded."
+        : "Coverage results loaded; no components or files were reported.",
+      `coverage-results.json from ${snapshot.generated_at}`,
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "request failed";
+    setSourceMetadata(null);
+    renderUnavailable();
+    setState(
+      reason === "invalid coverage-results.json" ? "malformed" : "unavailable",
+      reason === "invalid coverage-results.json"
+        ? "Coverage results could not be read: invalid coverage-results.json."
+        : `Coverage results unavailable: ${reason}.`,
+      reason === "invalid coverage-results.json"
+        ? "coverage-results.json is malformed"
+        : "coverage-results.json not available yet",
+    );
+    const status = document.getElementById("coverage-status");
+    addRetryAction(status, loadCoverageSnapshot);
   }
-  renderAll();
 }
 
 loadCoverageSnapshot();

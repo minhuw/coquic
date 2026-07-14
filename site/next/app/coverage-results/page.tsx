@@ -1,9 +1,10 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
 import Link from 'next/link';
+import { ExternalLink, FileJson } from 'lucide-react';
 
+import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
-import { Card, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const metadata: Metadata = {
   title: 'CoQUIC Coverage Results',
@@ -14,47 +15,83 @@ export const metadata: Metadata = {
 
 export default function CoveragePage() {
   return (
-    <main className="coquic-page">
-      <section className="grid gap-5 border-b border-[var(--line)] py-7 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-        <div>
-          <span className="eyebrow">LLVM source coverage</span>
-          <h1 className="page-title">CoQUIC Coverage Report</h1>
-          <p className="mt-2 max-w-[760px] text-[15px] leading-relaxed text-[var(--soft)]" id="coverage-source-label">
-            waiting for coverage-results.json
-          </p>
+    <main className="coquic-page compliance-page">
+      <PageHeader
+        eyebrow="LLVM source coverage"
+        title="CoQUIC Coverage Report"
+        description={
+          <div className="coverage-source-block">
+            <p id="coverage-source-label" aria-live="polite">
+              waiting for coverage-results.json
+            </p>
+            <dl className="coverage-source-meta" aria-label="Coverage source metadata">
+              <div>
+                <dt>Generated</dt>
+                <dd id="coverage-generated-at">awaiting</dd>
+              </div>
+              <div>
+                <dt>Event</dt>
+                <dd id="coverage-event">awaiting</dd>
+              </div>
+              <div>
+                <dt>Commit</dt>
+                <dd id="coverage-commit">awaiting</dd>
+              </div>
+            </dl>
+          </div>
+        }
+        actions={
+          <div className="compliance-actions">
+            <Button asChild variant="outline" size="sm">
+              <Link href="/coverage/index.html">
+                <ExternalLink aria-hidden="true" />
+                Open LLVM HTML
+              </Link>
+            </Button>
+            <Button asChild variant="outline" size="sm">
+              <Link href="./coverage-results.json">
+                <FileJson aria-hidden="true" />
+                Download JSON
+              </Link>
+            </Button>
+          </div>
+        }
+      />
+
+      <section
+        className="coverage-evidence"
+        id="coverage-evidence"
+        data-coverage-state="loading"
+        aria-busy="true"
+        aria-label="Coverage evidence"
+      >
+        <div id="coverage-status" className="coverage-status" role="status" aria-live="polite">
+          Loading coverage-results.json.
         </div>
-        <div className="flex flex-wrap justify-start gap-2 md:justify-end">
-          <Button asChild variant="outline" size="sm">
-            <Link href="/coverage/index.html">Open LLVM HTML</Link>
-          </Button>
-          <Button asChild variant="outline" size="sm">
-            <Link href="./coverage-results.json">Download JSON</Link>
-          </Button>
+
+        <section className="coverage-summary" id="summary-grid" aria-label="Coverage totals" />
+
+        <div className="coverage-detail-grid" aria-label="Coverage details">
+          <section className="coverage-evidence-panel" aria-labelledby="components-heading">
+            <header className="coverage-panel-heading">
+              <div>
+                <h2 id="components-heading">Components</h2>
+                <p>Line coverage by source area</p>
+              </div>
+            </header>
+            <div id="component-list" />
+          </section>
+
+          <section className="coverage-evidence-panel" aria-labelledby="files-heading">
+            <header className="coverage-panel-heading">
+              <div>
+                <h2 id="files-heading">Lowest Files</h2>
+                <p>Files kept in report order</p>
+              </div>
+            </header>
+            <div id="file-list" />
+          </section>
         </div>
-      </section>
-
-      <section className="mt-5 grid gap-3 md:grid-cols-3" id="summary-grid" aria-label="Coverage totals" />
-
-      <section className="coverage-grid md:grid-cols-2" aria-label="Coverage details">
-        <Card className="component-panel">
-          <CardHeader className="panel-head">
-            <div>
-              <CardTitle>Components</CardTitle>
-              <p>Line coverage by source area</p>
-            </div>
-          </CardHeader>
-          <div id="component-list" />
-        </Card>
-
-        <Card className="file-panel">
-          <CardHeader className="panel-head">
-            <div>
-              <CardTitle>Lowest Files</CardTitle>
-              <p>Files sorted by line coverage</p>
-            </div>
-          </CardHeader>
-          <div id="file-list" />
-        </Card>
       </section>
 
       <Script src="/coverage-results.js" strategy="afterInteractive" type="module" />

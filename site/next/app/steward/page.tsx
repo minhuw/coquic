@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 
-import { StewardDashboardLive } from '@/components/steward-public';
+import { PageHeader } from '@/components/page-header';
+import { StewardDashboardLive } from '@/components/steward/dashboard';
 
 export const metadata: Metadata = {
   title: 'CoQUIC Steward',
@@ -11,8 +12,13 @@ export const metadata: Metadata = {
 
 export default function StewardPage() {
   return (
-    <main className="coquic-page steward-public-page">
-      <section className="mt-4">
+    <main className="coquic-page steward-dashboard-page">
+      <PageHeader
+        description="A read-only public publication of Steward runtime state, work evidence, and current freshness."
+        eyebrow="public operations"
+        title="CoQUIC Steward"
+      />
+      <section aria-label="Steward dashboard" className="steward-dashboard-page-content">
         <StewardDashboardLive />
       </section>
     </main>

@@ -71,6 +71,13 @@ test.describe('performance evidence contracts', () => {
     await expect(page.locator('#plot-panel')).toHaveAttribute('role', 'tabpanel');
     await expect(page.locator('#performance-ranking')).toContainText('req/s');
 
+    const filterPanel = page.locator('#performance-filter-panel');
+    if (await filterPanel.isHidden()) {
+      const filterToggle = page.locator('#performance-filter-toggle');
+      await filterToggle.focus();
+      await page.keyboard.press('Enter');
+      await expect(filterPanel).toBeVisible();
+    }
     const rust = page.locator('[data-filter-group="languages"] button[data-filter-value="Rust"]');
     await rust.focus();
     const rustButton = rust;
@@ -164,14 +171,14 @@ test.describe('performance evidence contracts', () => {
     const detailDialog = page.locator('#perf-detail-dialog');
     await expect(detailDialog).toBeVisible();
     await expect(detailDialog.getByRole('heading', { name: /coquic\[cubic\] details/i })).toBeVisible();
-    await expect(detailDialog.getByRole('link', { name: /open svg/i })).toHaveAttribute('href', './perf-artifacts/coquic-client.svg');
+    await expect(detailDialog.getByRole('link', { name: 'coquic client flamegraph', exact: true })).toHaveAttribute('href', './perf-artifacts/coquic-client.svg');
 
     const fullscreenTrigger = detailDialog.getByRole('button', { name: /expand .*flamegraph/i }).first();
     await fullscreenTrigger.click();
     const flamegraphDialog = page.locator('#perf-flamegraph-dialog');
     await expect(flamegraphDialog).toBeVisible();
     await expect(flamegraphDialog.locator('iframe')).toHaveAttribute('title', /flamegraph/i);
-    await expect(flamegraphDialog.getByRole('link', { name: /open svg/i })).toHaveAttribute('href', './perf-artifacts/coquic-client.svg');
+    await expect(flamegraphDialog.getByRole('link', { name: 'coquic client flamegraph', exact: true })).toHaveAttribute('href', './perf-artifacts/coquic-client.svg');
     await flamegraphDialog.locator('#perf-flamegraph-close').click();
     await expect(flamegraphDialog).toBeHidden();
     await expect(fullscreenTrigger).toBeFocused();
@@ -193,7 +200,7 @@ test.describe('performance evidence contracts', () => {
     await page.goto('/perf-comparison');
 
     await expect(page.locator('#performance-current-state')).toHaveAttribute('data-state', 'ready');
-    await expect(page.locator('#performance-ranking')).toContainText('No completed benchmark rows loaded.');
+    await expect(page.locator('#performance-current-state strong')).toHaveText('No completed benchmark rows loaded');
     await expect(page.locator('#performance-ranking .performance-bar-row')).toHaveCount(0);
     await expectNoGlobalOverflow(page);
     await expectNoSeriousAxeViolations(page, '#performance-page');

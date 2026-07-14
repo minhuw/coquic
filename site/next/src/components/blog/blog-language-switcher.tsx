@@ -3,6 +3,8 @@
 import type { ReactNode } from 'react';
 import { createContext, useContext, useState } from 'react';
 
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+
 type BlogLanguage = 'en' | 'zh';
 
 type BlogLanguageProviderProps = {
@@ -20,54 +22,63 @@ const languages: { label: string; value: BlogLanguage }[] = [
 ];
 
 const BlogLanguageContext = createContext<BlogLanguage>('en');
-const BlogLanguageUpdateContext = createContext<(language: BlogLanguage) => void>(() => {});
+const BlogLanguageTabsContext = createContext(false);
 
 export function BlogLanguageProvider({ children }: BlogLanguageProviderProps) {
   const [language, setLanguage] = useState<BlogLanguage>('en');
+  const handleLanguageChange = (value: string) => {
+    if (value === 'en' || value === 'zh') setLanguage(value);
+  };
 
   return (
     <section className="blog-language-shell" data-blog-language={language}>
       <BlogLanguageContext.Provider value={language}>
-        <BlogLanguageUpdateContext.Provider value={setLanguage}>{children}</BlogLanguageUpdateContext.Provider>
+        <BlogLanguageTabsContext.Provider value>
+          <Tabs className="blog-language-root" value={language} onValueChange={handleLanguageChange}>
+            {children}
+          </Tabs>
+        </BlogLanguageTabsContext.Provider>
       </BlogLanguageContext.Provider>
     </section>
   );
 }
 
 export function BlogLanguageTabs() {
-  const language = useContext(BlogLanguageContext);
-  const setLanguage = useContext(BlogLanguageUpdateContext);
-
   return (
-    <div className="blog-language-tabs" role="group" aria-label="Select article language">
+    <TabsList className="blog-language-tabs" aria-label="Article language">
       {languages.map((item) => (
-        <button
-          aria-pressed={language === item.value}
+        <TabsTrigger
           className="blog-language-tab"
           key={item.value}
-          onClick={() => setLanguage(item.value)}
-          type="button"
+          value={item.value}
         >
           {item.label}
-        </button>
+        </TabsTrigger>
       ))}
-    </div>
+    </TabsList>
   );
 }
 
 export function BlogLanguagePanel({ children, language }: BlogLanguagePanelProps) {
-  const activeLanguage = useContext(BlogLanguageContext);
-  const active = activeLanguage === language;
+  const active = useContext(BlogLanguageContext) === language;
+  const insideTabs = useContext(BlogLanguageTabsContext);
+  const panelProps = {
+    'aria-hidden': !active,
+    className: 'blog-language-panel',
+    'data-blog-language-panel': language,
+    hidden: !active,
+    lang: language === 'zh' ? 'zh-CN' : 'en',
+  } as const;
+
+  if (!insideTabs) return <div {...panelProps}>{children}</div>;
 
   return (
-    <div
-      aria-hidden={!active}
-      className="blog-language-panel"
-      data-blog-language-panel={language}
-      hidden={!active}
-      lang={language === 'zh' ? 'zh-CN' : 'en'}
+    <TabsContent
+      {...panelProps}
+      forceMount
+      value={language}
     >
       {children}
-    </div>
+    </TabsContent>
   );
 }

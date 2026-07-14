@@ -44,13 +44,15 @@ export default async function BlogPostPage({ params }: BlogPostPageProps) {
             Blog
           </Link>
           <header className="blog-post-header">
-            <span className="blog-card-meta">
-              <time dateTime={post.date}>{formatBlogDate(post.date)}</time>
-              <span>{post.readingMinutes} min read</span>
-              <span>{post.author}</span>
-              {post.writtenBy ? <span className="blog-polish-badge">Written by {post.writtenBy}</span> : null}
-              {post.polishedBy ? <span className="blog-polish-badge">Polished by {post.polishedBy}</span> : null}
-            </span>
+            <div className="blog-post-meta">
+              <time className="blog-post-meta-date" dateTime={post.date}>
+                {formatBlogDate(post.date)}
+              </time>
+              <span className="blog-post-meta-unit">{post.readingMinutes} min read</span>
+              <span className="blog-post-meta-person">{post.author}</span>
+              {post.writtenBy ? <span className="blog-post-meta-attribution">Written by {post.writtenBy}</span> : null}
+              {post.polishedBy ? <span className="blog-post-meta-attribution">Polished by {post.polishedBy}</span> : null}
+            </div>
             <h1>{post.title}</h1>
             <p>{post.description}</p>
             <div className="blog-post-actions">
@@ -64,9 +66,7 @@ export default async function BlogPostPage({ params }: BlogPostPageProps) {
               <BlogLanguageTabs />
             </div>
           </header>
-          <div className="blog-post-body">
-            <BlogPostContent post={post} />
-          </div>
+          <BlogPostContent post={post} />
         </article>
       </BlogLanguageProvider>
     </main>

@@ -361,43 +361,28 @@
     line-height: 1.4;
   }
 
-  .qa-markdown pre {
-    max-width: 100%;
-    overflow: auto;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-panel);
-    background: var(--code-surface);
-    padding: var(--space-3);
-    font-family: var(--font-google-sans-code), ui-monospace, monospace;
-    font-size: 13px;
-    line-height: 1.55;
-  }
-
-  .qa-markdown pre code {
-    border: 0;
-    background: transparent;
-    padding: 0;
-    font: inherit;
-    white-space: pre;
-  }
-
-  .qa-markdown table {
+  .qa-markdown .editorial-table-region > table {
     display: table;
-    width: 100%;
-    max-width: 100%;
-    border-collapse: collapse;
+    max-width: none;
     overflow: visible;
+    border: 0;
     border-radius: 0;
-    font-size: 14px;
+    background: transparent;
   }
 
-  .qa-markdown th,
-  .qa-markdown td {
-    border: 1px solid var(--border);
-    padding: var(--space-2);
-    color: var(--text);
-    text-align: left;
-    vertical-align: top;
+  .qa-markdown .editorial-table-region th,
+  .qa-markdown .editorial-table-region td {
+    border-top: 0;
+    border-right: 0;
+    border-left: 0;
+  }
+
+  .qa-markdown .editorial-code-scroll pre {
+    max-width: none;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
   }
 
   .qa-answer-placeholder {

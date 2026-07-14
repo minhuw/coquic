@@ -1,11 +1,16 @@
 'use client';
 
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { isValidElement, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Check, Copy, RotateCcw, ShieldAlert } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
+import { CopyCodeButton } from '@/components/docs/copy-code-button';
+import { TableRegion } from '@/components/editorial/table-region';
+import { ScrollRegion } from '@/components/ui/scroll-region';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 interface Usage {
@@ -805,7 +810,39 @@ function CopyAnswerButton({ answer, disabled, label }: { answer: string; disable
 function MarkdownAnswer({ children }: { children: string }) {
   return (
     <div className="article-content qa-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+      <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+    </div>
+  );
+}
+
+const markdownComponents: Components = {
+  pre: MarkdownCodeBlock,
+  table: MarkdownTable,
+};
+
+function MarkdownTable({ children }: { children?: ReactNode }) {
+  return (
+    <TableRegion label="Answer data table">
+      <table>{children}</table>
+    </TableRegion>
+  );
+}
+
+function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
+  const codeElement = isValidElement<{ children?: ReactNode; className?: string }>(children) ? children : null;
+  const language = codeElement?.props.className?.match(/language-([^\s]+)/)?.at(1) ?? 'text';
+  const code = String(codeElement?.props.children ?? '').replace(/\n$/, '');
+  return (
+    <div className="editorial-code-block" data-editorial-code-block="true">
+      <div className="editorial-code-toolbar">
+        <span className="editorial-code-language">{language}</span>
+        <CopyCodeButton code={code} />
+      </div>
+      <ScrollRegion aria-label={`${language} answer code`} axis="horizontal" className="editorial-code-scroll">
+        <pre>
+          <code data-language={language}>{code}</code>
+        </pre>
+      </ScrollRegion>
     </div>
   );
 }

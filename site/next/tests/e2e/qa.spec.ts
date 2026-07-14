@@ -1,7 +1,13 @@
 import { expect, test } from '@playwright/test';
 
 import { expectLocalScrollRegion, expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
-import { installQaFixture, qaRequests, rejectedQaEvents, successfulQaEvents } from './fixtures/qa';
+import {
+  installQaFixture,
+  qaRequests,
+  rejectedQaEvents,
+  successfulQaEvents,
+  wideMarkdownQaEvents,
+} from './fixtures/qa';
 
 test.describe('QUIC specification QA', () => {
   test('streams both channels, preserves the wire contract, and renders final evidence', async ({ page }) => {
@@ -124,6 +130,31 @@ test.describe('QUIC specification QA', () => {
     const geometry = await excerpt.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
     expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
     await expectNoGlobalOverflow(page);
+  });
+
+  test('keeps wide Markdown tables and code in named keyboard-scrollable regions', async ({ page }) => {
+    await installQaFixture(page, { events: wideMarkdownQaEvents() });
+
+    for (const width of [320, 375]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/qa');
+      await ask(page);
+
+      const codeSelector = '.qa-results-mobile [data-channel="direct"] .editorial-code-scroll';
+      const codeRegion = page.locator(codeSelector);
+      await expect(codeRegion).toHaveAttribute('data-overflow', 'true');
+      await expect(codeRegion).toHaveAccessibleName('typescript answer code');
+      await expectLocalScrollRegion(page, codeSelector);
+
+      const tabs = page.getByRole('tablist', { name: 'Answer comparison' });
+      await tabs.getByRole('tab', { name: 'With RAG' }).click();
+      const tableSelector = '.qa-results-mobile [data-channel="rag"] .editorial-table-region';
+      const tableRegion = page.locator(tableSelector);
+      await expect(tableRegion).toHaveAttribute('data-overflow', 'true');
+      await expect(tableRegion).toHaveAccessibleName('Answer data table');
+      await expectLocalScrollRegion(page, tableSelector);
+      await expectNoGlobalOverflow(page);
+    }
   });
 
   test('supports suggestion, Ctrl+Enter, privacy touch, and answer copy', async ({ page }) => {

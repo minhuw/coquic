@@ -66,6 +66,25 @@ export function rejectedQaEvents(reason: string) {
   ];
 }
 
+export function wideMarkdownQaEvents() {
+  const longCodeLine = `const packet = "${'c'.repeat(420)}";`;
+  const longCellA = `transport-${'a'.repeat(180)}`;
+  const longCellB = `recovery-${'b'.repeat(180)}`;
+  return [
+    {
+      event: 'done',
+      data: {
+        answer: `| Field | Value |\n| --- | --- |\n| ${longCellA} | ${longCellB} |`,
+        accepted: true,
+        reason: 'answered',
+        direct_answer: `\`\`\`typescript\n${longCodeLine}\n\`\`\``,
+        rag_answer: `| Field | Value |\n| --- | --- |\n| ${longCellA} | ${longCellB} |`,
+        citations: [],
+      },
+    },
+  ];
+}
+
 export async function installQaFixture(page: Page, scenario: QaScenario = {}) {
   await page.addInitScript((fixture) => {
     const nativeFetch = window.fetch.bind(window);

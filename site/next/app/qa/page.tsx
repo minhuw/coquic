@@ -13,11 +13,8 @@ export const metadata: Metadata = {
 
 export default function QaPage() {
   return (
-    <main className="coquic-page">
-      <section className="py-6 lg:py-7">
-        <PageHeader eyebrow="QUIC RAG" title="CoQUIC Specification QA" />
-      </section>
-
+    <main className="coquic-page qa-page">
+      <PageHeader className="qa-page-header" eyebrow="QUIC RAG" title="CoQUIC Specification QA" />
       <QaClient />
     </main>
   );

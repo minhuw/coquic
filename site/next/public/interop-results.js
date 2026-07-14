@@ -40,6 +40,34 @@ const caseOrder = [
 
 let activeSnapshot = fallbackInteropSnapshot;
 let dataSource = "waiting for interop-results.json";
+let interopState = "loading";
+
+function setInteropState(state, message) {
+  interopState = state;
+  const page = document.querySelector(".interop-page");
+  const stateLabel = document.getElementById("interop-state");
+  const matrixRegion = document.getElementById("interop-matrix-region");
+  page?.setAttribute("data-interop-state", state);
+  page?.setAttribute("aria-busy", state === "loading" ? "true" : "false");
+  stateLabel?.replaceChildren(document.createTextNode(message));
+  matrixRegion?.setAttribute("aria-busy", state === "loading" ? "true" : "false");
+}
+
+function updateSnapshotContext(snapshot, available) {
+  const values = available
+    ? {
+        generated: snapshot.generated_at || "not reported",
+        event: snapshot.event_name || "not reported",
+        commit: snapshot.commit || "not reported",
+      }
+    : { generated: "not available", event: "not available", commit: "not available" };
+  const generated = document.querySelector("[data-interop-generated]");
+  const event = document.querySelector("[data-interop-event]");
+  const commit = document.querySelector("[data-interop-commit]");
+  generated?.replaceChildren(document.createTextNode(values.generated));
+  event?.replaceChildren(document.createTextNode(values.event));
+  commit?.replaceChildren(document.createTextNode(values.commit));
+}
 
 function githubAvatar(owner) {
   return `https://github.com/${owner}.png?size=64`;
@@ -114,41 +142,44 @@ function laneSortKey(source) {
 
 function resultToken(result) {
   if (result === "succeeded") {
-    return "pass";
+    return "PASS";
   }
   if (isKnownPeerBrokenResult(result)) {
-    return "kpb";
+    return "KNOWN";
   }
   if (isPeerBrokenResult(result)) {
-    return "pb";
+    return "PEER";
   }
   if (result === "failed") {
-    return "fail";
+    return "FAIL";
   }
   if (isSkippedResult(result)) {
-    return "unsup";
+    return "UNSUP";
   }
-  return "?";
+  return "N/R";
 }
 
 function resultTokenForRow(row, result) {
   if (isKnownBrokenFailure(row, result)) {
-    return "kpb";
+    return "KNOWN";
   }
   return resultToken(result);
 }
 
 function rowResultToken(result) {
   if (result === "succeeded") {
-    return "pass";
+    return "PASS";
   }
   if (isPeerBrokenResult(result)) {
-    return "pb";
+    return "PEER";
   }
   if (isSkippedResult(result)) {
-    return "n/a";
+    return "UNSUP";
   }
-  return "?";
+  if (result === "failed") {
+    return "FAIL";
+  }
+  return "N/R";
 }
 
 function isKnownBrokenFailure(row, result) {
@@ -214,21 +245,21 @@ function implementationDisplayName(name) {
 
 function resultLabel(result, row) {
   if (result === "succeeded") {
-    return "pass";
+    return "PASS";
   }
   if (isKnownPeerBrokenResult(result) || isKnownBrokenFailure(row, result)) {
-    return "known peer-broken";
+    return "KNOWN PEER ISSUE";
   }
   if (isPeerBrokenResult(result)) {
-    return "peer-broken";
+    return "PEER BROKEN";
   }
   if (isSkippedResult(result)) {
-    return "unsupported";
+    return "UNSUPPORTED";
   }
   if (result === "failed") {
-    return "failed";
+    return "FAIL";
   }
-  return "not reported";
+  return "NOT REPORTED";
 }
 
 function resultDetails(source, test, row, result) {
@@ -243,29 +274,84 @@ function resultDetails(source, test, row, result) {
   };
 }
 
+let activeTooltipTarget = null;
+let pinnedTooltipTarget = null;
+let focusedTooltipTarget = null;
+let restoringFocusTarget = null;
+let tooltipTargetSequence = 0;
+let tooltipDocumentListenersAttached = false;
+let focusScrollTarget = null;
+let focusScrollTimer = 0;
+let focusScrollBehavior = null;
+
+function settleFocusScrollGuard() {
+  focusScrollTimer = 0;
+  focusScrollTarget = null;
+  document.documentElement.style.scrollBehavior = focusScrollBehavior;
+  focusScrollBehavior = null;
+}
+
+function isAuthoritativeTooltipTarget(target) {
+  return focusedTooltipTarget === target || pinnedTooltipTarget === target;
+}
+
+function markFocusScrollTarget(target) {
+  focusScrollTarget = target;
+  if (focusScrollBehavior === null) {
+    focusScrollBehavior = document.documentElement.style.scrollBehavior;
+  }
+  document.documentElement.style.scrollBehavior = "auto";
+  if (focusScrollTimer) {
+    window.clearTimeout(focusScrollTimer);
+  }
+  focusScrollTimer = window.setTimeout(settleFocusScrollGuard, 200);
+}
+
+function consumeFocusScroll() {
+  if (!focusScrollTarget || document.activeElement !== focusScrollTarget) {
+    return false;
+  }
+  if (activeTooltipTarget === focusScrollTarget) {
+    positionInteropTooltip(activeTooltipTarget);
+  }
+  if (focusScrollTimer) {
+    window.clearTimeout(focusScrollTimer);
+  }
+  focusScrollTimer = window.setTimeout(settleFocusScrollGuard, 200);
+  return true;
+}
+
 function ensureInteropTooltip() {
   let tooltip = document.querySelector(".interop-tooltip");
-  if (tooltip) {
-    return tooltip;
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.className = "interop-tooltip";
+    tooltip.id = "interop-tooltip";
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.setAttribute("aria-hidden", "true");
+    tooltip.hidden = true;
+    (document.querySelector(".interop-page") || document.body).append(tooltip);
   }
-
-  tooltip = document.createElement("div");
-  tooltip.className = "interop-tooltip";
-  tooltip.setAttribute("role", "tooltip");
-  document.body.append(tooltip);
-  document.addEventListener("pointerdown", (event) => {
-    const target = event.target;
-    if (target instanceof Element && (target.closest(".test-cell") || target.closest(".interop-tooltip"))) {
-      return;
-    }
-    hideInteropTooltip();
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      hideInteropTooltip();
-    }
-  });
-  document.addEventListener("scroll", hideInteropTooltip, true);
+  if (!tooltipDocumentListenersAttached) {
+    tooltipDocumentListenersAttached = true;
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (target instanceof Element && (target.closest(".test-cell") || target.closest(".interop-tooltip"))) {
+        return;
+      }
+      hideInteropTooltip(true);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        hideInteropTooltip(true);
+      }
+    });
+    document.addEventListener("scroll", () => {
+      if (!consumeFocusScroll()) {
+        hideInteropTooltip(true);
+      }
+    }, true);
+  }
   return tooltip;
 }
 
@@ -293,6 +379,13 @@ function positionInteropTooltip(target, event) {
 
 function showInteropTooltip(target, details, event) {
   const tooltip = ensureInteropTooltip();
+  if (activeTooltipTarget && activeTooltipTarget !== target) {
+    if (isAuthoritativeTooltipTarget(activeTooltipTarget)) {
+      return;
+    }
+    hideInteropTooltip(false);
+  }
+  activeTooltipTarget = target;
   const title = document.createElement("strong");
   title.textContent = details.title;
 
@@ -308,7 +401,10 @@ function showInteropTooltip(target, details, event) {
   }
 
   tooltip.replaceChildren(...children);
+  tooltip.hidden = false;
+  tooltip.setAttribute("aria-hidden", "false");
   tooltip.classList.add("visible");
+  target.setAttribute("aria-expanded", "true");
   positionInteropTooltip(target, event);
 }
 
@@ -320,30 +416,88 @@ function tooltipLine(label, value) {
   return line;
 }
 
-function hideInteropTooltip() {
+function hideInteropTooltip(restoreFocus = false) {
   const tooltip = document.querySelector(".interop-tooltip");
+  const target = activeTooltipTarget;
+  const returnFocus = restoreFocus && pinnedTooltipTarget === target;
+  const targetsToCollapse = new Set([target]);
+  if (restoreFocus) {
+    targetsToCollapse.add(pinnedTooltipTarget);
+    targetsToCollapse.add(focusedTooltipTarget);
+  }
+  activeTooltipTarget = null;
+  if (restoreFocus || pinnedTooltipTarget === target) {
+    pinnedTooltipTarget = null;
+  }
+  if (restoreFocus || focusedTooltipTarget === target) {
+    focusedTooltipTarget = null;
+  }
   if (tooltip) {
     tooltip.classList.remove("visible");
+    tooltip.setAttribute("aria-hidden", "true");
+    tooltip.hidden = true;
+  }
+  for (const collapsedTarget of targetsToCollapse) {
+    collapsedTarget?.setAttribute("aria-expanded", "false");
+  }
+  if (returnFocus && target && document.contains(target)) {
+    restoringFocusTarget = target;
+    if (document.activeElement === target) {
+      restoringFocusTarget = null;
+    }
+    target.focus({ preventScroll: true });
   }
 }
 
 function attachResultTooltip(cell, details) {
   const label = `${details.title}: client ${details.client}, server ${details.server}, result ${details.result}${details.details ? `. ${details.details}` : ""}`;
+  cell.id = `interop-result-${tooltipTargetSequence += 1}`;
   cell.tabIndex = 0;
   cell.setAttribute("aria-label", label);
+  cell.setAttribute("aria-controls", "interop-tooltip");
+  cell.setAttribute("aria-describedby", "interop-tooltip");
+  cell.setAttribute("aria-expanded", "false");
   cell.addEventListener("pointerenter", (event) => {
     showInteropTooltip(cell, details, event);
   });
   cell.addEventListener("pointermove", (event) => {
-    positionInteropTooltip(cell, event);
+    if (activeTooltipTarget === cell) {
+      positionInteropTooltip(cell, event);
+    }
   });
-  cell.addEventListener("pointerleave", hideInteropTooltip);
+  cell.addEventListener("pointerleave", () => {
+    if (activeTooltipTarget === cell && !isAuthoritativeTooltipTarget(cell)) {
+      hideInteropTooltip();
+    }
+  });
   cell.addEventListener("focus", () => {
+    if (restoringFocusTarget === cell) {
+      restoringFocusTarget = null;
+      return;
+    }
+    if (pinnedTooltipTarget && pinnedTooltipTarget !== cell) {
+      pinnedTooltipTarget = null;
+    }
+    focusedTooltipTarget = cell;
+    markFocusScrollTarget(cell);
     showInteropTooltip(cell, details);
   });
-  cell.addEventListener("blur", hideInteropTooltip);
+  cell.addEventListener("blur", () => {
+    if (focusedTooltipTarget === cell) {
+      focusedTooltipTarget = null;
+    }
+    if (activeTooltipTarget === cell && !isAuthoritativeTooltipTarget(cell)) {
+      hideInteropTooltip();
+    }
+  });
   cell.addEventListener("click", (event) => {
     event.stopPropagation();
+    if (pinnedTooltipTarget && pinnedTooltipTarget !== cell) {
+      pinnedTooltipTarget = null;
+    }
+    pinnedTooltipTarget = cell;
+    focusedTooltipTarget = cell;
+    markFocusScrollTarget(cell);
     showInteropTooltip(cell, details, event);
   });
 }
@@ -430,9 +584,74 @@ function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
   }
 }
 
+function clearLegendCounts() {
+  for (const category of ["pass", "unsupported", "peer-broken", "known-peer-broken", "failed", "not-reported"]) {
+    const target = document.querySelector(`[data-interop-count="${category}"]`);
+    if (target) {
+      target.textContent = "-";
+    }
+  }
+}
+
+function updateInteropConclusion(lanes, tests, rowByLaneAndTest) {
+  const conclusion = document.getElementById("interop-conclusion");
+  if (!conclusion) {
+    return;
+  }
+  if (interopState === "unavailable") {
+    conclusion.textContent = "Interop evidence is unavailable; no conclusion can be drawn until interop-results.json is published.";
+    return;
+  }
+  if (!lanes.length || !tests.length) {
+    conclusion.textContent = "No CoQUIC interop lanes are reported in this snapshot.";
+    return;
+  }
+
+  let missing = 0;
+  for (const source of lanes) {
+    const laneKey = sourceKey(source.server, source.client);
+    for (const test of tests) {
+      if (!rowByLaneAndTest.has(`${laneKey}:${test}`)) {
+        missing += 1;
+      }
+    }
+  }
+  const hasUnannotatedFailure = [...rowByLaneAndTest.values()].some(
+    (row) => row.result === "failed" && !row.known_broken,
+  );
+  if (hasUnannotatedFailure) {
+    conclusion.textContent = `Conclusion: unannotated CoQUIC failure${missing ? `; ${missing} cell${missing === 1 ? " is" : "s are"} not reported` : " requires attention"}.`;
+  } else if (missing) {
+    conclusion.textContent = `Conclusion: reported results are accepted or passing; ${missing} cell${missing === 1 ? " is" : "s are"} not reported.`;
+  } else {
+    conclusion.textContent = "Conclusion: every reported CoQUIC result is passing or an explicitly accepted exception.";
+  }
+}
+
+function updateMatrixRegionFocus() {
+  const region = document.getElementById("interop-matrix-region");
+  if (!region) {
+    return;
+  }
+  const horizontalOverflow = region.scrollWidth > region.clientWidth + 1;
+  const verticalOverflow = region.scrollHeight > region.clientHeight + 1;
+  region.dataset.overflow = horizontalOverflow || verticalOverflow ? "true" : "false";
+  if (horizontalOverflow) {
+    region.dataset.horizontalOverflow = "true";
+  } else {
+    delete region.dataset.horizontalOverflow;
+  }
+  if (horizontalOverflow || verticalOverflow) {
+    region.tabIndex = 0;
+  } else {
+    region.removeAttribute("tabindex");
+  }
+}
+
 function renderParticipantIcon(kind, iconUrl, code, label) {
   const badge = document.createElement("span");
   badge.className = `participant-identity-icon ${kind}`;
+  badge.setAttribute("role", "img");
   badge.title = label;
   badge.setAttribute("aria-label", label);
 
@@ -493,24 +712,32 @@ function renderMatrix() {
     const rightKey = laneSortKey(right);
     return leftKey[0] - rightKey[0] || leftKey[1] - rightKey[1] || leftKey[2].localeCompare(rightKey[2]);
   });
-  updateLegendCounts(lanes, tests, rowByLaneAndTest);
+  if (interopState === "ready") {
+    updateLegendCounts(lanes, tests, rowByLaneAndTest);
+  } else {
+    clearLegendCounts();
+  }
 
   const headRow = document.createElement("tr");
   const rowHeader = document.createElement("th");
   rowHeader.className = "row-status-column";
+  rowHeader.scope = "col";
   rowHeader.title = "Overall result across every testcase in this row";
   rowHeader.textContent = "All";
   headRow.append(rowHeader);
   const clientHeader = document.createElement("th");
   clientHeader.className = "corner";
+  clientHeader.scope = "col";
   clientHeader.textContent = "Client";
   headRow.append(clientHeader);
   const serverHeader = document.createElement("th");
   serverHeader.className = "server-column";
+  serverHeader.scope = "col";
   serverHeader.textContent = "Server";
   headRow.append(serverHeader);
   for (const test of tests) {
     const th = document.createElement("th");
+    th.scope = "col";
     th.title = test;
     th.textContent = test;
     headRow.append(th);
@@ -525,31 +752,40 @@ function renderMatrix() {
     td.textContent = "No CoQUIC interop rows loaded.";
     tr.append(td);
     body.replaceChildren(tr);
+    updateInteropConclusion(lanes, tests, rowByLaneAndTest);
+    updateMatrixRegionFocus();
     return;
   }
 
+  ensureInteropTooltip();
   body.replaceChildren(
     ...lanes.map((source) => {
       const tr = document.createElement("tr");
       const laneKey = sourceKey(source.server, source.client);
+      tr.dataset.client = source.client;
+      tr.dataset.server = source.server;
       const rowStatusCell = document.createElement("td");
-      rowStatusCell.className = "row-status-column";
       const rowStatus = rowResultForTests(laneKey, tests, rowByLaneAndTest);
-      const rowStatusPill = document.createElement("span");
-      rowStatusPill.className = `test-cell row-status ${resultClass(rowStatus)}`;
-      rowStatusPill.textContent = rowResultToken(rowStatus);
-      attachResultTooltip(rowStatusPill, resultDetails(source, "all", null, rowStatus));
-      rowStatusCell.append(rowStatusPill);
+      rowStatusCell.className = `row-status-column result-cell ${resultClass(rowStatus)}`;
+      rowStatusCell.dataset.result = rowStatus;
+      const rowStatusControl = document.createElement("button");
+      rowStatusControl.type = "button";
+      rowStatusControl.className = "test-cell";
+      rowStatusControl.textContent = rowResultToken(rowStatus);
+      attachResultTooltip(rowStatusControl, resultDetails(source, "all", null, rowStatus));
+      rowStatusCell.append(rowStatusControl);
       tr.append(rowStatusCell);
 
       const clientCell = document.createElement("th");
       clientCell.className = "participant-name";
       clientCell.scope = "row";
+      clientCell.dataset.participant = source.client;
       clientCell.append(renderParticipant(source.client));
       tr.append(clientCell);
 
       const serverCell = document.createElement("td");
       serverCell.className = "server-column";
+      serverCell.dataset.participant = source.server;
       serverCell.append(renderParticipant(source.server));
       tr.append(serverCell);
 
@@ -557,8 +793,12 @@ function renderMatrix() {
         const td = document.createElement("td");
         const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
         const result = row ? row.result : "unknown";
-        const cell = document.createElement("span");
-        cell.className = `test-cell ${resultClass(result, row)}`;
+        td.className = `result-cell ${resultClass(result, row)}`;
+        td.dataset.case = test;
+        td.dataset.result = result;
+        const cell = document.createElement("button");
+        cell.type = "button";
+        cell.className = "test-cell";
         cell.textContent = resultTokenForRow(row, result);
         attachResultTooltip(cell, resultDetails(source, test, row, result));
         td.append(cell);
@@ -567,6 +807,8 @@ function renderMatrix() {
       return tr;
     }),
   );
+  updateInteropConclusion(lanes, tests, rowByLaneAndTest);
+  updateMatrixRegionFocus();
 }
 
 function renderAll() {
@@ -585,11 +827,16 @@ async function loadLiveSnapshot() {
     }
     activeSnapshot = snapshot;
     dataSource = `interop-results.json from ${snapshot.generated_at || "latest workflow"}`;
+    updateSnapshotContext(snapshot, true);
+    setInteropState("ready", "Interop evidence loaded.");
   } catch {
     activeSnapshot = fallbackInteropSnapshot;
     dataSource = "interop-results.json not available yet";
+    updateSnapshotContext(fallbackInteropSnapshot, false);
+    setInteropState("unavailable", "Interop evidence unavailable. interop-results.json is not present yet; retry after the next workflow run.");
   }
   renderAll();
 }
 
+window.addEventListener("resize", updateMatrixRegionFocus);
 loadLiveSnapshot();

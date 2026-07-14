@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { Suspense } from 'react';
 
 import { TranscriptDataset } from './transcript-dataset';
 
@@ -13,7 +14,9 @@ export const metadata: Metadata = {
 export default function TranscriptPage() {
   return (
     <main className="coquic-page transcript-page">
-      <TranscriptDataset />
+      <Suspense fallback={<div className="transcript-route-loading">Loading transcript dataset</div>}>
+        <TranscriptDataset />
+      </Suspense>
     </main>
   );
 }

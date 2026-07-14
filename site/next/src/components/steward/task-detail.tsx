@@ -1,22 +1,34 @@
 'use client';
 
 import Link from 'next/link';
-import { Activity, ArrowLeft, CheckCircle2, ChevronRight, Circle, FileText, GitBranch, ListChecks, XCircle } from 'lucide-react';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  ChevronRight,
+  Circle,
+  Clock3,
+  ExternalLink,
+  FileText,
+  GitBranch,
+  ListChecks,
+  ShieldAlert,
+  XCircle,
+} from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 
 import { CodeBlock } from '@/components/steward-code-block';
 import { TranscriptView } from '@/components/steward-transcript';
 import type { PublicCodexRunDiagnostics } from '@/components/steward-transcript';
 
-import { usePublicStewardState, usePublicStewardTaskDetail } from './data';
+import { usePublicStewardState, usePublicStewardTaskDetail, type StewardRequestStatus } from './data';
 import {
   handleTabKeyDown,
-  PanelTitle,
   relativeTime,
   shortDate,
   shortSha,
-  StatusBadge,
-  StatusPill,
+  stewardStatusTone,
 } from './shared';
 import { defaultAttemptTab, publicTaskFlow, TaskFlowPanel } from './task-flow';
 import type {
@@ -39,74 +51,111 @@ import type {
 export function StewardTaskDetailLive({ taskId }: { taskId: string }) {
   const monitor = usePublicStewardState();
   const task = monitor.state?.tasks.find((item) => item.id === taskId) ?? null;
-  const { detail, loaded } = usePublicStewardTaskDetail(taskId, task?.detail_json);
-  return <StewardTaskDetail detail={detail} loaded={loaded} taskId={taskId} />;
+  const detailState = usePublicStewardTaskDetail(taskId, task?.detail_json);
+  return (
+    <StewardTaskDetail
+      detail={detailState.detail}
+      loaded={detailState.loaded}
+      requestStatus={detailState.result.status}
+      taskId={taskId}
+    />
+  );
 }
 
-export function StewardTaskDetail({ detail, loaded, taskId }: { detail: PublicStewardTaskDetail | null; loaded: boolean; taskId: string }) {
+export function StewardTaskDetail({
+  detail,
+  loaded,
+  requestStatus,
+  taskId,
+}: {
+  detail: PublicStewardTaskDetail | null;
+  loaded: boolean;
+  requestStatus?: StewardRequestStatus;
+  taskId: string;
+}) {
   if (!detail) {
     return (
-      <main className="task-page-frame">
-        <section className="task-page-shell">
-          <div className="empty-state">
-            {loaded ? (
-              <>Public detail for <span className="font-mono">{taskId}</span> has not been published yet.</>
-            ) : (
-              'Loading task detail.'
-            )}
-          </div>
-        </section>
-      </main>
+      <TaskPageState loaded={loaded} requestStatus={requestStatus} taskId={taskId} />
     );
   }
   const task = detail.task;
   const flow = publicTaskFlow(detail);
   const latestAttemptNumber = detail.attempts.at(-1)?.attempt ?? null;
   const timelineEvents = [...detail.events].reverse();
+  const featureWorkflow = isFeatureWorkflow(task);
+  const currentStage = flow.stages.find((stage) => stage.key === flow.activeKey);
+  const blockedStage = flow.stages.find((stage) => stage.state === 'blocked');
   return (
-    <main className="task-page-frame">
+    <div className="task-page-frame">
       <section className="task-page-shell">
         <header className="task-page-topbar">
           <Link className="task-back-link" href="/steward">
             <ArrowLeft className="size-4" />
-            Back to dashboard
+            Back to Steward
           </Link>
-          <span className="font-mono text-xs text-[var(--muted)]">snapshot {relativeTime(detail.generated_at)}</span>
+          <span className="task-snapshot font-mono">snapshot {relativeTime(detail.generated_at)}</span>
         </header>
 
-        <section className="panel task-overview-card" aria-label="Task overview">
-          <PanelTitle icon={<Activity size={17} />} title="Overview" />
-          <div className="task-overview-head">
+        {requestStatus && requestStatus !== 'ready' && requestStatus !== 'loading' && (
+          <div className={`task-refresh-note ${requestStatus}`} role="status">
+            <AlertTriangle size={16} aria-hidden="true" />
+            <span>Showing the last published task detail; the latest refresh is {requestStatus.replace('-', ' ')}.</span>
+          </div>
+        )}
+
+        <header className="task-page-header">
+          <div className="task-page-header-main">
+            <span className="task-section-kicker">Steward task evidence</span>
             <div className="task-title-row">
               <h1>{task.title}</h1>
-              <StatusBadge status={task.status} />
+              <TaskStatus status={task.status} />
             </div>
-            <p>{task.summary || `${task.kind} / ${task.worker}`}</p>
-            <div className="task-overview-meta" aria-label="Task facts">
-              <FactPill label="Task" mono value={task.id} />
-              <FactPill label="Type" value={task.kind} />
-              <FactPill label="Workflow" value={task.workflow || task.spec.workflow || (task.kind === 'feature' ? 'feature' : 'fix')} />
-              <FactPill label="Agent" value={task.worker} />
-              <FactPill label="Updated" mono value={shortDate(task.updated_at)} />
-              <FactPill label="Attempts" mono value={String(detail.attempts.length)} />
-              <FactPill label="Validations" mono value={String(detail.validations.length)} />
-              {detail.remote.commit && detail.remote.commit_url && (
-                <a className="steward-commit-link" href={detail.remote.commit_url} rel="noreferrer" target="_blank">
-                  <GitBranch className="size-4" />
-                  <span>{shortSha(detail.remote.commit)}</span>
-                </a>
-              )}
-            </div>
+            <p className="task-summary">{task.summary || `${task.kind} / ${task.worker}`}</p>
           </div>
-        </section>
+          <div className={`task-conclusion ${blockedStage ? 'blocked' : ''}`}>
+            <span className="task-conclusion-label">Current conclusion</span>
+            <strong>{blockedStage ? `${task.status} at ${blockedStage.label}` : currentStage?.label ?? task.status}</strong>
+            <span>{blockedStage ? blockedStage.detail : currentStage?.detail ?? 'No stage activity recorded yet.'}</span>
+          </div>
+        </header>
+
+        <dl className="task-facts" aria-label="Task facts">
+          <Fact label="Task ID" value={<code>{task.id}</code>} />
+          <Fact label="Kind" value={task.kind} />
+          <Fact label="Workflow" value={task.workflow || task.spec.workflow || (task.kind === 'feature' ? 'feature' : 'fix')} />
+          <Fact label="Worker" value={task.worker || '-'} />
+          <Fact label="Priority" value={task.priority || '-'} />
+          <Fact label="Risk" value={task.risk || '-'} />
+          <Fact label="Updated" value={<time dateTime={task.updated_at}>{shortDate(task.updated_at)}</time>} />
+          <Fact label="Attempts" value={String(detail.attempts.length)} />
+          <Fact label="Validations" value={String(detail.validations.length)} />
+          <Fact label="Branch" value={<code className="task-breakable">{task.branch_name || '-'}</code>} />
+          <Fact
+            label="Commit"
+            value={detail.remote.commit && detail.remote.commit_url ? (
+              <a className="task-inline-link" href={detail.remote.commit_url} rel="noreferrer" target="_blank">
+                <GitBranch size={15} aria-hidden="true" />
+                <code>{shortSha(detail.remote.commit)}</code>
+                <ExternalLink size={13} aria-hidden="true" />
+              </a>
+            ) : <code>{detail.remote.commit ? shortSha(detail.remote.commit) : 'Not published'}</code>}
+          />
+        </dl>
 
         <div className="task-detail-layout">
-          <main className="task-detail-main">
+          <div className="task-detail-main">
             <TaskFlowPanel flow={flow} />
-            {(task.workflow === 'feature' || task.spec.workflow === 'feature' || task.kind === 'feature') && (
+            {featureWorkflow && (
               <PublicPlanRuns planRuns={detail.plan_runs ?? []} />
             )}
-            {detail.integration.runs.length > 0 && <IntegrationDetailRuns runs={detail.integration.runs} />}
+            <section className="task-section attempts-section" aria-labelledby="attempts-heading">
+              <header className="task-section-heading">
+                <div>
+                  <span className="task-section-kicker">Revision loop</span>
+                  <h2 id="attempts-heading">Attempts</h2>
+                </div>
+                <span className="task-section-count">{detail.attempts.length} recorded</span>
+              </header>
             <div className="attempt-stack page-stack">
               {detail.attempts.length ? (
                 [...detail.attempts].reverse().map((attempt) => (
@@ -119,37 +168,135 @@ export function StewardTaskDetail({ detail, loaded, taskId }: { detail: PublicSt
                   />
                 ))
               ) : (
-                <section className="steward-panel">
-                  <div className="steward-empty">No worker, validation, or reviewer run has been captured yet.</div>
-                </section>
+                <div className="empty-state compact">No worker, validation, or reviewer run has been captured yet.</div>
               )}
             </div>
-          </main>
+            </section>
+
+            {detail.integration.runs.length > 0 && <IntegrationDetailRuns runs={detail.integration.runs} />}
+
+            <TaskTimeline events={timelineEvents} />
+          </div>
 
           <aside className="task-detail-aside">
-            <section className="panel task-timeline-panel">
-              <PanelTitle icon={<ListChecks size={17} />} title="Timeline" />
-              <ol className="timeline compact">
-                {timelineEvents.map((event) => (
-                  <PublicTimelineEvent event={event} key={`${event.kind}-${event.created_at}`} />
-                ))}
-                {!timelineEvents.length && <li className="muted">No events recorded</li>}
-              </ol>
+            <section className="task-context-panel" aria-labelledby="task-context-heading">
+              <header className="task-section-heading compact">
+                <div>
+                  <span className="task-section-kicker">At a glance</span>
+                  <h2 id="task-context-heading">Task context</h2>
+                </div>
+              </header>
+              <dl className="task-context-facts">
+                <Fact label="Published" value={<time dateTime={detail.generated_at}>{shortDate(detail.generated_at)}</time>} />
+                <Fact label="Schema" value={String(detail.schema_version)} />
+                <Fact label="Source" value={<code className="task-breakable">{task.source || '-'}</code>} />
+                <Fact label="Events" value={String(detail.events.length)} />
+                <Fact label="Artifacts" value={String(countArtifacts(detail))} />
+              </dl>
             </section>
+            {task.spec.prompt && (
+              <details className="task-prompt">
+                <summary>Task prompt</summary>
+                <p>{task.spec.prompt}</p>
+              </details>
+            )}
           </aside>
         </div>
       </section>
-    </main>
+    </div>
   );
 }
 
-function FactPill({ label, mono = false, value }: { label: string; mono?: boolean; value: string }) {
+function TaskPageState({ loaded, requestStatus, taskId }: { loaded: boolean; requestStatus?: StewardRequestStatus; taskId: string }) {
+  const state = requestStatus ?? (loaded ? 'not-published' : 'loading');
+  const title = state === 'loading'
+    ? 'Loading task detail'
+    : state === 'not-published'
+      ? 'Task detail is not published'
+      : state === 'incompatible'
+        ? 'Task detail schema is incompatible'
+        : state === 'invalid'
+          ? 'Task detail is invalid'
+          : 'Task detail is unavailable';
+  const message = state === 'loading'
+    ? 'Loading task detail.'
+    : state === 'not-published'
+      ? <>Public detail for <span className="font-mono">{taskId}</span> has not been published yet.</>
+      : state === 'incompatible'
+        ? 'The published task detail cannot be read by this monitor.'
+        : state === 'invalid'
+          ? 'The published task detail did not match the expected JSON shape.'
+          : 'The public Steward mirror could not be reached. Try again after the next publication.';
   return (
-    <span className="fact-pill">
-      <b>{label}</b>
-      <span className={mono ? 'mono' : ''}>{value || '-'}</span>
+    <div className="task-page-frame">
+      <section className="task-page-shell">
+        <header className="task-page-topbar">
+          <Link className="task-back-link" href="/steward">
+            <ArrowLeft className="size-4" />
+            Back to Steward
+          </Link>
+        </header>
+        <section className={`task-state task-state-${state}`} aria-live="polite">
+          <span className="task-state-icon" aria-hidden="true">
+            {state === 'loading' ? <Clock3 size={22} /> : state === 'not-published' ? <Circle size={22} /> : <AlertTriangle size={22} />}
+          </span>
+          <span className="task-section-kicker">Public task evidence</span>
+          <h1>{title}</h1>
+          <p>{message}</p>
+          {state !== 'loading' && <code>{taskId}</code>}
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function Fact({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function TaskStatus({ status }: { status: string }) {
+  const tone = stewardStatusTone(status);
+  const Icon = tone === 'success' ? CheckCircle2 : tone === 'danger' ? ShieldAlert : tone === 'warning' ? AlertTriangle : Activity;
+  return (
+    <span className={`task-status task-status-${tone}`} data-status={status}>
+      <Icon size={16} aria-hidden="true" />
+      <span>{status}</span>
     </span>
   );
+}
+
+function TaskTimeline({ events }: { events: PublicStewardEvent[] }) {
+  return (
+    <section className="task-section task-timeline-panel" aria-labelledby="timeline-heading">
+      <header className="task-section-heading">
+        <div>
+          <span className="task-section-kicker">Event history</span>
+          <h2 id="timeline-heading">Timeline</h2>
+        </div>
+        <span className="task-section-count">Newest first</span>
+      </header>
+      <ol className="timeline compact task-timeline" aria-label="Task timeline, newest first" tabIndex={0}>
+        {events.map((event, index) => (
+          <PublicTimelineEvent event={event} index={index} key={`${event.kind}-${event.created_at}-${index}`} />
+        ))}
+        {!events.length && <li className="muted">No events recorded</li>}
+      </ol>
+    </section>
+  );
+}
+
+function isFeatureWorkflow(task: PublicStewardTaskDetail['task']) {
+  return task.workflow === 'feature' || task.spec.workflow === 'feature' || task.kind === 'feature';
+}
+
+function countArtifacts(detail: PublicStewardTaskDetail) {
+  const attemptArtifacts = detail.attempts.reduce((count, attempt) => count + Number(Boolean(attempt.patch || attempt.worker?.transcript || attempt.worker?.last_message || attempt.reviewer?.transcript || attempt.reviewer?.last_message)), 0);
+  return attemptArtifacts + Number(Boolean(detail.artifacts.patch || detail.artifacts.transcript || detail.artifacts.last_message));
 }
 
 function IntegrationDetailRuns({
@@ -158,8 +305,14 @@ function IntegrationDetailRuns({
   runs: PublicStewardTaskDetail['integration']['runs'];
 }) {
   return (
-    <section className="panel steward-integration-detail-panel">
-      <PanelTitle icon={<GitBranch size={17} />} title="Integration runs" description="Sanitized integration artifacts and remote outcomes." />
+    <section className="task-section steward-integration-detail-panel" aria-labelledby="integration-heading">
+      <header className="task-section-heading">
+        <div>
+          <span className="task-section-kicker">Main branch evidence</span>
+          <h2 id="integration-heading">Integration runs</h2>
+        </div>
+        <span className="task-section-count">{runs.length} recorded</span>
+      </header>
       <div className="steward-integration-runs">
         {runs.map((run) => (
           <article className="steward-integration-run" key={run.task.id}>
@@ -193,8 +346,14 @@ function IntegrationDetailRuns({
 
 function PublicPlanRuns({ planRuns }: { planRuns: PublicStewardPlanRun[] }) {
   return (
-    <section className="panel">
-      <PanelTitle icon={<FileText size={17} />} title="Implementation Plan" />
+    <section className="task-section plan-runs-section" aria-labelledby="plan-runs-heading">
+      <header className="task-section-heading">
+        <div>
+          <span className="task-section-kicker">Feature workflow</span>
+          <h2 id="plan-runs-heading">Implementation plan</h2>
+        </div>
+        <span className="task-section-count">{planRuns.length} recorded</span>
+      </header>
       {!planRuns.length && <div className="empty-state compact">No implementation plan run has been published yet.</div>}
       {[...planRuns].reverse().map((planRun) => (
         <article className="attempt-card" key={planRun.run}>
@@ -203,10 +362,10 @@ function PublicPlanRuns({ planRuns }: { planRuns: PublicStewardPlanRun[] }) {
               <h3>Plan run {planRun.run}</h3>
               <span className="font-mono text-xs">{planRun.name}</span>
             </div>
-            <div className="attempt-card-meta">
+            <div className="attempt-card-meta plan-run-meta">
               <span>{planRun.model || 'default model'}</span>
               <span>{planRun.reasoning_effort || 'default reasoning'}</span>
-              <StatusBadge status={planRun.completed && planRun.plan ? 'succeeded' : planRun.completed === false ? 'running' : 'failed'} />
+              <TaskStatus status={planRun.completed && planRun.plan ? 'succeeded' : planRun.completed === false ? 'running' : 'failed'} />
             </div>
           </div>
           {planRun.plan ? (
@@ -244,7 +403,7 @@ function AttemptCard({
   const visibleOpen = open || (isActiveAttempt && !userCollapsed);
   const active = isActiveAttempt && !userSelectedTab ? stageTab : selectedTab;
   const hasPatch = Boolean(attempt.patch?.text || attempt.patch?.url);
-  const hasReview = Boolean(attempt.review || attempt.reviewer?.transcript?.text || attempt.reviewer?.last_message?.text || attempt.reviewer?.transcript?.url);
+  const hasReview = Boolean(attempt.review || attempt.reviewer?.transcript?.text || attempt.reviewer?.last_message?.text || attempt.reviewer?.transcript?.url || attempt.reviewer?.last_message?.url);
   const tabs: Array<{ key: PublicAttemptTab; label: string; meta?: string | number }> = [
     { key: 'transcript', label: 'Transcript', meta: attempt.worker?.transcript || attempt.worker?.last_message ? 'captured' : undefined },
     { key: 'patch', label: 'Patch', meta: hasPatch ? 'saved' : undefined },
@@ -383,23 +542,29 @@ function ArtifactContent({
 }) {
   const [remoteText, setRemoteText] = useState<string | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remoteLoaded, setRemoteLoaded] = useState(false);
   const artifactUrl = artifact?.url;
   useEffect(() => {
     if (!artifactUrl || artifact?.text) {
       setRemoteText(null);
       setRemoteError(null);
+      setRemoteLoaded(false);
       return;
     }
     const url = artifactUrl;
     let cancelled = false;
     setRemoteText(null);
     setRemoteError(null);
+    setRemoteLoaded(false);
     async function loadArtifact() {
       try {
         const response = await fetch(url, { cache: 'no-store' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const text = await response.text();
-        if (!cancelled) setRemoteText(text);
+        if (!cancelled) {
+          setRemoteText(text);
+          setRemoteLoaded(true);
+        }
       } catch (error) {
         if (!cancelled) setRemoteError(error instanceof Error ? error.message : 'Unable to load artifact');
       }
@@ -411,17 +576,31 @@ function ArtifactContent({
   }, [artifact?.text, artifactUrl]);
 
   const text = artifact?.text || remoteText || '';
+  const metadata = artifact && <ArtifactMetadata artifact={artifact} />;
   if (text) {
-    return <>{children(text)}</>;
+    return <div className="artifact-content">{metadata}{children(text)}</div>;
   }
   if (artifact?.url) {
     return (
-      <>
-        <div className="empty-state compact">{remoteError ? `Unable to load artifact: ${remoteError}` : 'Loading artifact.'}</div>
-      </>
+      <div className="artifact-content">
+        {metadata}
+        <div className={`empty-state compact ${remoteError ? 'artifact-error' : ''}`} role={remoteError ? 'alert' : 'status'}>
+          {remoteError ? `Unable to load artifact: ${remoteError}` : remoteLoaded ? 'The remote artifact is empty.' : 'Loading artifact.'}
+        </div>
+      </div>
     );
   }
-  return <div className="empty-state compact">{empty}</div>;
+  return <div className="artifact-content">{metadata}<div className="empty-state compact">{empty}</div></div>;
+}
+
+function ArtifactMetadata({ artifact }: { artifact: NonNullable<PublicStewardArtifact> }) {
+  const notes = [
+    artifact.mode && artifact.mode !== 'raw' ? `mode: ${artifact.mode}` : '',
+    artifact.truncated ? `truncated${artifact.tail_bytes ? `; showing tail (${artifact.tail_bytes} bytes)` : ''}` : '',
+    artifact.size > 0 ? `${artifact.size} bytes` : '',
+  ].filter(Boolean);
+  if (!notes.length) return null;
+  return <p className="artifact-metadata">{notes.join(' / ')}</p>;
 }
 
 function ReviewSection({ attempt }: { attempt: PublicStewardAttempt }) {
@@ -437,35 +616,59 @@ function ReviewSection({ attempt }: { attempt: PublicStewardAttempt }) {
 
 function ValidationList({ validations }: { validations: PublicStewardTaskDetail['validations'] }) {
   const [activeIndex, setActiveIndex] = useState(validations[0]?.index ?? null);
+  useEffect(() => {
+    setActiveIndex(validations[0]?.index ?? null);
+  }, [validations]);
   const activeValidation = validations.find((validation) => validation.index === activeIndex);
   if (!validations.length) return <div className="empty-state compact">No validations for this attempt</div>;
   return (
     <div className="attempt-validation-list">
-      {validations.map((validation) => (
-        <button
-          className={`validation-row ${activeIndex === validation.index ? 'active' : ''}`}
-          key={validation.index}
-          onClick={() => setActiveIndex(validation.index)}
-          type="button"
-        >
-          {validation.passed ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
-          <span className="mono">{validation.command.join(' ')}</span>
-          <StatusPill status={validation.passed ? 'succeeded' : 'failed'} />
-        </button>
-      ))}
-      {activeValidation?.log && (
-        <ArtifactContent artifact={activeValidation.log} empty="No validation log was published">
-          {(text) => <CodeBlock compact text={text} title="Validation log" />}
-        </ArtifactContent>
+      <ul className="validation-list">
+        {validations.map((validation) => (
+          <li key={validation.index}>
+            <button
+              aria-pressed={activeIndex === validation.index}
+              className={`validation-row ${activeIndex === validation.index ? 'active' : ''}`}
+              onClick={() => setActiveIndex(validation.index)}
+              type="button"
+            >
+              <span className={`validation-result ${validation.passed ? 'passed' : 'failed'}`}>
+                {validation.passed ? <CheckCircle2 size={16} aria-hidden="true" /> : <XCircle size={16} aria-hidden="true" />}
+                <b>{validation.passed ? 'Pass' : 'Fail'}</b>
+              </span>
+              <code>{validation.command.join(' ') || 'No command recorded'}</code>
+              <span className="validation-summary">{validation.summary || 'No summary recorded'}</span>
+              <span className="validation-time">
+                {validation.iteration !== null ? `iteration ${validation.iteration}` : 'iteration -'}
+                {validation.completed_at && <time dateTime={validation.completed_at}> · {shortDate(validation.completed_at)}</time>}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {activeValidation && (
+        <section className="validation-detail" aria-label="Selected validation">
+          <h4>Selected validation</h4>
+          <dl className="validation-facts">
+            <div><dt>Result</dt><dd>{activeValidation.passed ? 'Pass' : 'Fail'}</dd></div>
+            <div><dt>Exit</dt><dd>{activeValidation.exit_code}</dd></div>
+            <div><dt>Started</dt><dd><time dateTime={activeValidation.started_at}>{shortDate(activeValidation.started_at)}</time></dd></div>
+            <div><dt>Completed</dt><dd><time dateTime={activeValidation.completed_at}>{shortDate(activeValidation.completed_at)}</time></dd></div>
+          </dl>
+          <p>{activeValidation.summary || 'No validation summary recorded.'}</p>
+          <ArtifactContent artifact={activeValidation.log} empty="No validation log was published">
+            {(text) => <CodeBlock compact text={text} title="Validation log" />}
+          </ArtifactContent>
+        </section>
       )}
     </div>
   );
 }
 
-function PublicTimelineEvent({ event }: { event: PublicStewardEvent }) {
+function PublicTimelineEvent({ event, index }: { event: PublicStewardEvent; index: number }) {
   const model = publicTimelineModel(event);
   return (
-    <li className={`timeline-item ${model.tone}`}>
+    <li className={`timeline-item ${model.tone}`} id={`task-event-${index}`}>
       <div className="timeline-marker" aria-hidden="true">
         {timelineIcon(event.kind)}
       </div>

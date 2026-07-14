@@ -15,7 +15,7 @@ import {
 } from '@xyflow/react';
 import { Circle, CheckCircle2, GitBranch, XCircle } from 'lucide-react';
 
-import { PanelTitle, shortSha } from './shared';
+import { shortSha } from './shared';
 import type {
   PublicStewardEvent,
   PublicStewardTaskDetail,
@@ -33,14 +33,38 @@ type PublicPipelineEdge = Edge<Record<string, never>, 'smoothstep'> & {
   pathOptions?: SmoothStepPathOptions;
 };
 
+const PUBLIC_PIPELINE_NODE_WIDTH = 120;
+const PUBLIC_PIPELINE_NODE_HEIGHT = 82;
+const PUBLIC_PIPELINE_BOUND_SIZE = 1;
+const PUBLIC_PIPELINE_WIDTH = 684;
+
+const publicPipelineNodeTypes = {
+  pipeline: PublicPipelineNodeCard,
+};
+
 export function TaskFlowPanel({ flow }: { flow: PublicTaskFlow }) {
   const graph = publicPipelineGraph(flow);
+  const activeStage = flow.stages.find((stage) => stage.key === flow.activeKey);
   return (
-    <section className="panel task-flow-panel" aria-label="Task iteration flow">
-      <PanelTitle icon={<GitBranch size={17} />} title="Current Iteration" />
-      <div className="pipeline-graph" aria-label="Task pipeline graph" role="region" tabIndex={0}>
+    <section className="task-section task-flow-panel" aria-labelledby="task-flow-heading">
+      <header className="task-section-heading">
+        <GitBranch className="task-section-icon" size={18} aria-hidden="true" />
+        <div>
+          <span className="task-section-kicker">Evidence figure</span>
+          <h2 id="task-flow-heading">Current iteration</h2>
+        </div>
+        <span className="task-flow-current">
+          Current: <b>{activeStage?.label ?? flow.activeKey}</b>
+        </span>
+      </header>
+
+      <div
+        className="pipeline-graph"
+        aria-label="Visual task pipeline graph"
+        role="img"
+      >
         <ReactFlow
-          defaultViewport={{ x: 34, y: 18, zoom: 1 }}
+          defaultViewport={{ x: 12, y: 18, zoom: 1 }}
           edges={graph.edges}
           edgesFocusable={false}
           elementsSelectable={false}
@@ -56,25 +80,36 @@ export function TaskFlowPanel({ flow }: { flow: PublicTaskFlow }) {
           panOnScroll={false}
           preventScrolling={false}
           proOptions={{ hideAttribution: true }}
-          style={{ width: '760px', height: '206px' }}
+          style={{ width: `${PUBLIC_PIPELINE_WIDTH}px`, height: '220px' }}
           zoomOnDoubleClick={false}
           zoomOnPinch={false}
           zoomOnScroll={false}
         >
-          <Background color="#e0e0e0" gap={18} size={1} />
+          <Background color="var(--task-flow-grid)" gap={18} size={1} />
         </ReactFlow>
       </div>
+
+      <ol className="pipeline-equivalent" aria-label="Task pipeline stages and feedback loops">
+        {flow.stages.map((stage) => (
+          <li className={`pipeline-equivalent-stage ${stage.state}`} key={stage.key}>
+            <span className="pipeline-equivalent-stage-label">
+              <span className="pipeline-equivalent-marker" aria-hidden="true">{stageIcon(stage.state)}</span>
+              <b>{stage.label}</b>
+              <span className="pipeline-equivalent-state">{stage.state}</span>
+            </span>
+            <span>{stage.detail}</span>
+          </li>
+        ))}
+        {(['validation', 'review', 'integration'] as const).map((kind) => (
+          <li className="pipeline-equivalent-loop" key={`${kind}-loop`}>
+            <b>{kind} feedback</b>
+            <span>{flow.loops[kind] > 0 ? `${kind} x${flow.loops[kind]}` : 'No revisions recorded'}</span>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
-
-const PUBLIC_PIPELINE_NODE_WIDTH = 150;
-const PUBLIC_PIPELINE_NODE_HEIGHT = 76;
-const PUBLIC_PIPELINE_BOUND_SIZE = 1;
-
-const publicPipelineNodeTypes = {
-  pipeline: PublicPipelineNodeCard,
-};
 
 function PublicPipelineNodeCard({ data }: NodeProps<PublicPipelineNode>) {
   if (!data.stage) {
@@ -82,7 +117,7 @@ function PublicPipelineNodeCard({ data }: NodeProps<PublicPipelineNode>) {
   }
   const stage = data.stage;
   return (
-    <article className={`pipeline-node ${stage.state}`}>
+    <article className={`pipeline-node ${stage.state}`} data-state={stage.state}>
       <Handle className="pipeline-node-handle" id="left" position={Position.Left} type="target" />
       <Handle className="pipeline-node-handle" id="right" position={Position.Right} type="source" />
       <Handle className="pipeline-node-handle" id="top-source" position={Position.Top} type="source" />
@@ -94,6 +129,7 @@ function PublicPipelineNodeCard({ data }: NodeProps<PublicPipelineNode>) {
         <b>{stage.label}</b>
       </div>
       <p>{stage.detail}</p>
+      <span className="pipeline-node-state">{stage.state}</span>
     </article>
   );
 }
@@ -103,25 +139,25 @@ export function publicPipelineGraph(flow: PublicTaskFlow): { nodes: PublicPipeli
   const hasPlan = flow.stages.some((stage) => stage.key === 'plan');
   const positions: Record<PublicTaskStageKey, { x: number; y: number }> = hasPlan
     ? {
-        plan: { x: 0, y: 52 },
-        code: { x: 142, y: 52 },
-        validation: { x: 284, y: 52 },
-        review: { x: 426, y: 52 },
-        integration: { x: 568, y: 52 },
+        plan: { x: 0, y: 60 },
+        code: { x: 132, y: 60 },
+        validation: { x: 264, y: 60 },
+        review: { x: 396, y: 60 },
+        integration: { x: 528, y: 60 },
       }
     : {
-        plan: { x: 0, y: 52 },
-        code: { x: 0, y: 52 },
-        validation: { x: 178, y: 52 },
-        review: { x: 356, y: 52 },
-        integration: { x: 534, y: 52 },
+        plan: { x: 0, y: 60 },
+        code: { x: 0, y: 60 },
+        validation: { x: 176, y: 60 },
+        review: { x: 352, y: 60 },
+        integration: { x: 528, y: 60 },
       };
   const stages = Object.fromEntries(flow.stages.map((stage) => [stage.key, stage])) as Record<PublicTaskStageKey, PublicTaskStage>;
   const nodes: PublicPipelineNode[] = [
     ...fitBoundIds.map((id, index) => ({
       id,
       type: 'pipeline' as const,
-      position: { x: index % 2 === 0 ? -8 : 684, y: index < 2 ? -8 : 176 },
+      position: { x: index % 2 === 0 ? -8 : PUBLIC_PIPELINE_WIDTH, y: index < 2 ? -8 : 212 },
       data: {},
       width: PUBLIC_PIPELINE_BOUND_SIZE,
       height: PUBLIC_PIPELINE_BOUND_SIZE,
@@ -182,7 +218,7 @@ function publicForwardEdge(
     targetHandle: 'left',
     type: 'smoothstep',
     className: `pipeline-edge ${state}`,
-    markerEnd: { type: MarkerType.ArrowClosed, color: state === 'complete' || state === 'active' ? '#0f62fe' : '#c6c6c6' },
+    markerEnd: { type: MarkerType.ArrowClosed, color: state === 'complete' || state === 'active' ? 'var(--task-flow-complete)' : 'var(--task-flow-pending)' },
     selectable: false,
   };
 }
@@ -209,13 +245,13 @@ function publicFeedbackEdge(
     pathOptions: { borderRadius: 18, offset },
     labelBgPadding: [6, 3],
     labelBgBorderRadius: 4,
-    labelBgStyle: { fill: active ? '#edf5ff' : '#f4f4f4' },
+    labelBgStyle: { fill: active ? 'var(--task-flow-loop-surface)' : 'var(--task-flow-label-surface)' },
     labelStyle: {
-      fill: active ? '#002d9c' : '#6f6f6f',
+      fill: active ? 'var(--task-flow-loop)' : 'var(--task-flow-muted)',
       fontSize: 11,
       fontWeight: 700,
     },
-    markerEnd: { type: MarkerType.ArrowClosed, color: active ? '#0f62fe' : '#c6c6c6' },
+    markerEnd: { type: MarkerType.ArrowClosed, color: active ? 'var(--task-flow-loop)' : 'var(--task-flow-pending)' },
     selectable: false,
   };
 }
@@ -355,10 +391,10 @@ function publicEventStage(event?: PublicStewardEvent): PublicTaskStageKey | null
 }
 
 function stageIcon(state: PublicTaskStageState) {
-  if (state === 'complete') return <CheckCircle2 size={15} />;
-  if (state === 'blocked') return <XCircle size={15} />;
+  if (state === 'complete') return <CheckCircle2 size={15} aria-hidden="true" />;
+  if (state === 'blocked') return <XCircle size={15} aria-hidden="true" />;
   if (state === 'active') return <span className="live-spinner" aria-hidden="true" />;
-  return <Circle size={12} />;
+  return <Circle size={12} aria-hidden="true" />;
 }
 
 function Spinner() {

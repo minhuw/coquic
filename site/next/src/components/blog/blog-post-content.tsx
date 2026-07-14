@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { BlogLanguagePanel } from '@/components/blog/blog-language-switcher';
 import { Markdown } from '@/components/docs/markdown';
 import { hrefForBlogLink, type BlogPost } from '@/lib/blog';
+import { useMDXComponents } from '../../../mdx-components';
 
 type BlogPostContentProps = {
   post: BlogPost;
@@ -19,12 +20,10 @@ export async function BlogPostContent({ post }: BlogPostContentProps) {
         },
         parseFrontmatter: true,
       },
-      components: {
-        BlogLanguagePanel,
-      },
+      components: useMDXComponents({ BlogLanguagePanel }),
     });
 
-    return <div className="docs-markdown">{content}</div>;
+    return content;
   }
 
   return (

@@ -1,9 +1,10 @@
 import Link from 'next/link';
 import type React from 'react';
-import { codeToTokens } from 'shiki';
-import type { BundledLanguage } from 'shiki';
 
-import { CopyCodeButton } from '@/components/docs/copy-code-button';
+import { AnchoredHeading } from '@/components/editorial/anchored-heading';
+import { ArticleContent } from '@/components/editorial/article-content';
+import { CodeBlock } from '@/components/editorial/code-block';
+import { TableRegion } from '@/components/editorial/table-region';
 import { hrefForDocLink } from '@/lib/docs';
 
 type MarkdownBlock =
@@ -34,9 +35,9 @@ export async function Markdown({ markdown, currentSlug, skipFirstH1 = false, res
   const blocks = groupFunctionDocumentation(parsedBlocks);
 
   return (
-    <div className="docs-markdown">
+    <ArticleContent>
       {blocks.map((block, index) => renderBlock(block, index, currentSlug, { resolveHref }))}
-    </div>
+    </ArticleContent>
   );
 }
 
@@ -50,10 +51,9 @@ function renderBlock(
     return (
       <section className="docs-function-card" key={index}>
         <header className="docs-function-card-header">
-          <a className="docs-function-permalink" href={`#${block.id}`} aria-label={`Permalink to ${block.title}`}>
-            #
-          </a>
-          <h3 id={block.id}>{renderInline(block.title, currentSlug, options.resolveHref)}</h3>
+          <AnchoredHeading className="docs-function-heading" id={block.id} label={block.title} level={3}>
+            {renderInline(block.title, currentSlug, options.resolveHref)}
+          </AnchoredHeading>
         </header>
         <div className="docs-function-card-body">
           {block.blocks.map((child, childIndex) =>
@@ -66,18 +66,10 @@ function renderBlock(
 
   if (block.type === 'heading') {
     const id = slugify(block.text);
-    if (block.depth === 1) return <h1 key={index}>{renderInline(block.text, currentSlug, options.resolveHref)}</h1>;
-    if (block.depth === 2) {
-      return (
-        <h2 id={id} key={index}>
-          {renderInline(block.text, currentSlug, options.resolveHref)}
-        </h2>
-      );
-    }
     return (
-      <h3 id={id} key={index}>
+      <AnchoredHeading id={block.depth === 1 ? undefined : id} key={index} level={block.depth as 1 | 2 | 3} label={block.text}>
         {renderInline(block.text, currentSlug, options.resolveHref)}
-      </h3>
+      </AnchoredHeading>
     );
   }
 
@@ -103,62 +95,30 @@ function renderBlock(
 
   if (block.type === 'table') {
     return (
-      <table key={index}>
-        <thead>
-          <tr>
-            {block.headers.map((header, headerIndex) => (
-              <th key={headerIndex}>{renderInline(header, currentSlug, options.resolveHref)}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {block.rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
-              {block.headers.map((_, cellIndex) => (
-                <td key={cellIndex}>{renderInline(row[cellIndex] ?? '', currentSlug, options.resolveHref)}</td>
+      <TableRegion key={index}>
+        <table>
+          <thead>
+            <tr>
+              {block.headers.map((header, headerIndex) => (
+                <th key={headerIndex}>{renderInline(header, currentSlug, options.resolveHref)}</th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {block.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {block.headers.map((_, cellIndex) => (
+                  <td key={cellIndex}>{renderInline(row[cellIndex] ?? '', currentSlug, options.resolveHref)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableRegion>
     );
   }
 
-  return <HighlightedCode code={block.code} language={block.language} key={index} />;
-}
-
-async function HighlightedCode({ code, language }: { code: string; language: string }) {
-  const { tokens } = await codeToTokens(code, {
-    lang: normalizeLanguage(language),
-    themes: {
-      light: 'github-light',
-      dark: 'github-dark',
-    },
-    defaultColor: false,
-  });
-
-  return (
-    <div className="docs-code-block">
-      <div className="docs-code-toolbar">
-        <span>{language || 'text'}</span>
-        <CopyCodeButton code={code} />
-      </div>
-      <pre className="docs-code-scroll">
-        <code>
-          {tokens.map((line, lineIndex) => (
-            <span className="docs-code-line" key={lineIndex}>
-              {line.map((token, tokenIndex) => (
-                <span key={tokenIndex} style={token.htmlStyle ?? { color: token.color }}>
-                  {token.content}
-                </span>
-              ))}
-              {lineIndex < tokens.length - 1 ? '\n' : null}
-            </span>
-          ))}
-        </code>
-      </pre>
-    </div>
-  );
+  return <CodeBlock code={block.code} language={block.language} key={index} />;
 }
 
 function parseMarkdown(markdown: string) {
@@ -376,20 +336,4 @@ function slugify(text: string) {
     .replace(/`/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
-}
-
-type HighlightLanguage = BundledLanguage | 'text';
-
-function normalizeLanguage(language: string): HighlightLanguage {
-  if (!language) return 'text';
-  if (language === 'sh') return 'bash';
-  if (language === 'c++') return 'cpp';
-  if (isBundledLanguage(language)) return language;
-  return 'text';
-}
-
-function isBundledLanguage(language: string): language is BundledLanguage {
-  return ['bash', 'c', 'cpp', 'css', 'html', 'javascript', 'json', 'markdown', 'rust', 'typescript', 'zig'].includes(
-    language,
-  );
 }

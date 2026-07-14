@@ -16,6 +16,17 @@ function stewardViewSelector(page: Page) {
       : '.task-page-frame';
 }
 
+async function selectDashboardView(page: Page, view: 'tasks' | 'signals') {
+  const mobileViewSelector = page.locator('#steward-view-select');
+  if ((page.viewportSize()?.width ?? 1440) < 1024) {
+    await expect(mobileViewSelector).toBeVisible();
+    await mobileViewSelector.selectOption(view);
+    return;
+  }
+
+  await page.getByRole('tab', { name: new RegExp(view, 'i') }).click();
+}
+
 test.describe('Steward public monitor', () => {
   test('renders the active overview and runtime state', async ({ page }) => {
     await page.goto('/steward');
@@ -27,9 +38,9 @@ test.describe('Steward public monitor', () => {
 
   test('switches between task and signal views', async ({ page }) => {
     await page.goto('/steward');
-    await page.getByRole('tab', { name: /Tasks/ }).click();
+    await selectDashboardView(page, 'tasks');
     await expect(page.getByRole('link', { name: 'Implement dashboard contract', exact: true })).toBeVisible();
-    await page.getByRole('tab', { name: /Signals/ }).click();
+    await selectDashboardView(page, 'signals');
     await expect(page.getByText('Contract checks are running')).toBeVisible();
     await expect(page.getByRole('tablist', { name: 'Signal providers' }).getByRole('tab', { name: /github-actions:ci/ })).toBeVisible();
   });
@@ -45,16 +56,12 @@ test.describe('Steward public monitor', () => {
     await expect(page.getByText('Timeline')).toBeVisible();
   });
 
-  test('keeps operational controls inside the viewport', async ({ page }, testInfo) => {
-    test.fixme(
-      testInfo.project.name === 'mobile',
-      'Known 375px operational-control clipping defect; plan 016 restores the mobile layout.',
-    );
+  test('keeps operational controls inside the viewport', async ({ page }) => {
     await page.goto('/steward');
     const overflow = await page.evaluate(() => ({
       document: document.documentElement.scrollWidth,
       viewport: window.innerWidth,
-      controls: [...document.querySelectorAll('.steward-mirror-shell button, .steward-mirror-shell a, .steward-mirror-shell input')]
+      controls: [...document.querySelectorAll('.steward-mirror-shell button, .steward-mirror-shell a, .steward-mirror-shell input, .steward-mirror-shell select')]
         .filter((element) => element.getBoundingClientRect().right > window.innerWidth + 1)
         .map((element) => element.textContent?.trim() || element.getAttribute('aria-label') || element.tagName),
     }));
@@ -64,12 +71,22 @@ test.describe('Steward public monitor', () => {
 
   test('supports keyboard-only monitor, task, and diff workflows', async ({ page }) => {
     await page.goto('/steward');
-    const tasksTab = page.getByRole('tab', { name: /Tasks/ });
-    await tasksTab.focus();
-    await tasksTab.press('ArrowLeft');
-    await expect(page.getByRole('tab', { name: /State/ })).toHaveAttribute('aria-selected', 'true');
-    await page.getByRole('tab', { name: /State/ }).press('End');
-    await expect(page.getByRole('tab', { name: /Config/ })).toHaveAttribute('aria-selected', 'true');
+    const mobileViewSelector = page.locator('#steward-view-select');
+    if ((page.viewportSize()?.width ?? 1440) < 1024) {
+      await expect(mobileViewSelector).toBeVisible();
+      await mobileViewSelector.focus();
+      await mobileViewSelector.press('ArrowUp');
+      await expect(mobileViewSelector).toHaveValue('overview');
+      await mobileViewSelector.press('End');
+      await expect(mobileViewSelector).toHaveValue('configuration');
+    } else {
+      const tasksTab = page.getByRole('tab', { name: /Tasks/ });
+      await tasksTab.focus();
+      await tasksTab.press('ArrowLeft');
+      await expect(page.getByRole('tab', { name: /State/ })).toHaveAttribute('aria-selected', 'true');
+      await page.getByRole('tab', { name: /State/ }).press('End');
+      await expect(page.getByRole('tab', { name: /Config/ })).toHaveAttribute('aria-selected', 'true');
+    }
 
     await page.goto('/steward/planner');
     await expect(page.getByRole('heading', { name: 'Planner history' })).toBeVisible();

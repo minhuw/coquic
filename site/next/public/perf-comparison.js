@@ -1,141 +1,37 @@
+const implementationOrder = [
+  "coquic",
+  "coquic-rust",
+  "coquic-python",
+  "coquic-go",
+  "coquic-js",
+  "quic-go",
+  "quinn",
+  "picoquic",
+  "msquic",
+  "quiche",
+  "quicly",
+  "google-quiche",
+  "tquic",
+  "mvfst",
+  "s2n-quic",
+  "xquic",
+  "aioquic",
+  "ngtcp2",
+  "lsquic",
+  "neqo",
+];
+
+const coquicFamily = new Set(["coquic", "coquic-rust", "coquic-python", "coquic-go", "coquic-js"]);
 const fallbackPerfSnapshot = {
   schema_version: 1,
   generated_at: "unavailable",
   event_name: "local",
   commit: "awaiting-ci-results",
-  sources: [
-    {
-      label: "coquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "coquic-rust",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "coquic-python",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "coquic-go",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "coquic-js",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "quic-go",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "quinn",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "picoquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "msquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "quiche",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "quicly",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "google-quiche",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "tquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "mvfst",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "s2n-quic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "xquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "aioquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "ngtcp2",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "lsquic",
-      path: "perf-results.json",
-      missing: true,
-    },
-    {
-      label: "neqo",
-      path: "perf-results.json",
-      missing: true,
-    },
-  ],
+  sources: implementationOrder.map((label) => ({ label, path: "perf-results.json", missing: true })),
   rows: [],
 };
 
-const colors = {
-  coquic: "#24b5a6",
-  "coquic-rust": "#ce8cff",
-  "coquic-python": "#ffd166",
-  "coquic-go": "#70d6ff",
-  "coquic-js": "#f7df1e",
-  "quic-go": "#63a6ff",
-  quinn: "#e39a3b",
-  picoquic: "#f5c451",
-  msquic: "#b56cff",
-  quiche: "#ea6a7a",
-  quicly: "#47c1a8",
-  "google-quiche": "#4f8df7",
-  tquic: "#f08b44",
-  mvfst: "#57c785",
-  "s2n-quic": "#9b8cff",
-  xquic: "#f47f42",
-  aioquic: "#4db7e5",
-  ngtcp2: "#d979a8",
-  lsquic: "#6f9d55",
-  neqo: "#c59b72",
-};
-
-const implementationOrder = ["coquic", "coquic-rust", "coquic-python", "coquic-go", "coquic-js", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
-const coquicFamily = new Set(["coquic", "coquic-rust", "coquic-python", "coquic-go", "coquic-js"]);
-
 const deviconBase = "https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/";
-
 const languageIconSources = {
   C: `${deviconBase}c/c-original.svg`,
   "C++": `${deviconBase}cplusplus/cplusplus-original.svg`,
@@ -186,31 +82,6 @@ const iconPaths = {
     { name: "path", attrs: { d: "M12 10v6" } },
     { name: "path", attrs: { d: "M12 7.5h.01" } },
   ],
-  maximize: [
-    { name: "path", attrs: { d: "M8 3H3v5" } },
-    { name: "path", attrs: { d: "M3 3l6.5 6.5" } },
-    { name: "path", attrs: { d: "M16 3h5v5" } },
-    { name: "path", attrs: { d: "M21 3l-6.5 6.5" } },
-    { name: "path", attrs: { d: "M8 21H3v-5" } },
-    { name: "path", attrs: { d: "M3 21l6.5-6.5" } },
-    { name: "path", attrs: { d: "M16 21h5v-5" } },
-    { name: "path", attrs: { d: "M21 21l-6.5-6.5" } },
-  ],
-  minimize: [
-    { name: "path", attrs: { d: "M4 14h6v6" } },
-    { name: "path", attrs: { d: "M10 20 3.5 13.5" } },
-    { name: "path", attrs: { d: "M20 14h-6v6" } },
-    { name: "path", attrs: { d: "m14 20 6.5-6.5" } },
-    { name: "path", attrs: { d: "M4 10h6V4" } },
-    { name: "path", attrs: { d: "M10 4 3.5 10.5" } },
-    { name: "path", attrs: { d: "M20 10h-6V4" } },
-    { name: "path", attrs: { d: "m14 4 6.5 6.5" } },
-  ],
-  warning: [
-    { name: "path", attrs: { d: "M12 3 2.8 19h18.4L12 3Z" } },
-    { name: "path", attrs: { d: "M12 8v5" } },
-    { name: "path", attrs: { d: "M12 16.5h.01" } },
-  ],
   x: [
     { name: "path", attrs: { d: "M6 6l12 12" } },
     { name: "path", attrs: { d: "M18 6 6 18" } },
@@ -219,7 +90,8 @@ const iconPaths = {
 
 const modeConfig = {
   bulk: {
-    title: "Bulk Download",
+    label: "Bulk",
+    title: "Bulk download",
     metric: "throughput_mib_per_s",
     metricLabel: "Throughput",
     metricDetail: "MiB/s",
@@ -227,48 +99,70 @@ const modeConfig = {
     decimals: 3,
   },
   rr: {
-    title: "Request/Response",
+    label: "Stream",
+    title: "Stream request/response",
     metric: "requests_per_s",
     metricLabel: "Requests",
-    metricDetail: "Reqs/s",
+    metricDetail: "req/s",
     unit: "req/s",
     decimals: 0,
   },
   "persistent-rr": {
-    title: "Persistent Request/Response",
+    label: "RPS",
+    title: "Persistent request/response",
     metric: "requests_per_s",
     metricLabel: "Requests",
-    metricDetail: "Reqs/s",
+    metricDetail: "req/s",
     unit: "req/s",
     decimals: 0,
   },
   crr: {
-    title: "Connection Request/Response",
+    label: "CRR",
+    title: "Connection request/response",
     metric: "requests_per_s",
     metricLabel: "Connection requests",
-    metricDetail: "Reqs/s",
+    metricDetail: "req/s",
     unit: "req/s",
     decimals: 0,
   },
 };
 
+const filterOrder = {
+  languages: ["C", "C++", "Go", "JavaScript", "Python", "Rust"],
+  vendors: ["CoQUIC"],
+};
+
 let activeSnapshot = fallbackPerfSnapshot;
 let activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
+let currentState = "loading";
+let historyState = "loading";
 let activePlotMode = "bulk";
-const perfHistorySnapshotLimit = 180;
 let perfDetailTrigger = null;
-let perfFlamegraphFullscreenButton = null;
+let perfFlamegraphTrigger = null;
+let filterTrigger = null;
+let controlsReady = false;
+let dialogListenersReady = false;
+let loadToken = 0;
+const perfHistorySnapshotLimit = 180;
 const activePlotFilters = {
   languages: new Set(),
   vendors: new Set(),
 };
-const plotFilterGroupsOpen = {
+const filterGroupsOpen = {
   languages: true,
-  vendors: !(typeof window !== "undefined" && window.matchMedia("(max-width: 680px)").matches),
+  vendors: true,
 };
 
+function byId(id) {
+  return document.getElementById(id);
+}
+
 function formatNumber(value, decimals = 3) {
-  return Number(value).toLocaleString("en-US", {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  return number.toLocaleString("en-US", {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
@@ -304,7 +198,15 @@ function formatBytes(value) {
 }
 
 function implementationInfo(implementation) {
-  return implementationMeta[implementation] || { company: "unknown", companyCode: "?", companyIcon: "", companyUrl: "", sourceUrl: "", language: "unknown", languageCode: "?" };
+  return implementationMeta[implementation] || {
+    company: "unknown",
+    companyCode: "?",
+    companyIcon: "",
+    companyUrl: "",
+    sourceUrl: "",
+    language: "unknown",
+    languageCode: "?",
+  };
 }
 
 function implementationVendor(info) {
@@ -373,7 +275,6 @@ function renderIdentityIcon(kind, iconUrl, code, label, url) {
   const fallback = document.createElement("span");
   fallback.className = "identity-fallback";
   fallback.textContent = code;
-
   badge.append(fallback);
   return badge;
 }
@@ -391,44 +292,19 @@ function renderImplementationName(implementation, info) {
   return name;
 }
 
-function renderImplementationIdentity(implementation, info) {
-  const group = document.createElement("span");
-  group.className = "identity-group";
-  group.setAttribute("aria-label", `${implementation}, ${info.company}, ${info.language}`);
-
-  const name = renderImplementationName(implementation, info);
-
-  const separatorA = document.createElement("span");
-  separatorA.className = "identity-separator";
-  separatorA.setAttribute("aria-hidden", "true");
-  separatorA.textContent = "|";
-
-  const separatorB = document.createElement("span");
-  separatorB.className = "identity-separator";
-  separatorB.setAttribute("aria-hidden", "true");
-  separatorB.textContent = "|";
-
-  group.append(
-    name,
-    separatorA,
-    renderIdentityIcon("vendor", info.companyIcon, info.companyCode, info.company, info.companyUrl),
-    separatorB,
-    renderIdentityIcon("language", languageIconSources[info.language], info.languageCode, info.language),
-  );
-
-  return group;
-}
-
-function renderBarImplementationIdentity(implementation, info, versionLabel) {
+function renderBarImplementationIdentity(implementation, info, versionLabel, displayName = implementation) {
   const group = document.createElement("span");
   group.className = "bar-identity";
-  group.setAttribute("aria-label", `${implementation}, ${versionLabel}, ${info.company}, ${info.language}`);
+  group.setAttribute("aria-label", `${displayName}, ${versionLabel}, ${info.company}, ${info.language}`);
 
   const text = document.createElement("span");
   text.className = "bar-identity-text";
   const nameRow = document.createElement("span");
   nameRow.className = "bar-name-row";
-  nameRow.append(renderImplementationName(implementation, info));
+  const name = renderImplementationName(implementation, info);
+  name.textContent = displayName;
+  name.setAttribute("aria-label", displayName);
+  nameRow.append(name);
   if (info.familyLabel) {
     const family = document.createElement("span");
     family.className = "coquic-family-chip";
@@ -447,10 +323,12 @@ function renderBarImplementationIdentity(implementation, info, versionLabel) {
     renderIdentityIcon("vendor", info.companyIcon, info.companyCode, info.company, info.companyUrl),
     renderIdentityIcon("language", languageIconSources[info.language], info.languageCode, info.language),
   );
-
   group.append(text, icons);
-
   return group;
+}
+
+function makeSvgElement(name) {
+  return document.createElementNS("http://www.w3.org/2000/svg", name);
 }
 
 function makeIcon(name) {
@@ -508,35 +386,6 @@ function leaderboardRows(mode, { applyFilters = true } = {}) {
   return applyFilters ? rows.filter(rowPassesPlotFilters) : rows;
 }
 
-function renderPlotTabs() {
-  const tabs = document.createElement("div");
-  tabs.className = "plot-tabs";
-  tabs.setAttribute("role", "tablist");
-  tabs.setAttribute("aria-label", "Benchmark mode");
-  tabs.replaceChildren(
-    ...Object.entries(modeConfig).map(([mode, config]) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "plot-tab";
-      button.id = `plot-tab-${mode}`;
-      button.setAttribute("role", "tab");
-      button.setAttribute("aria-selected", mode === activePlotMode ? "true" : "false");
-      button.setAttribute("aria-controls", "plot-panel");
-      button.addEventListener("click", () => selectPlotMode(mode));
-
-      const label = document.createElement("span");
-      label.textContent = mode.toUpperCase();
-      const title = document.createElement("strong");
-      title.textContent = config.title;
-      const metric = document.createElement("small");
-      metric.textContent = config.metricDetail;
-      button.append(label, title, metric);
-      return button;
-    }),
-  );
-  return tabs;
-}
-
 function sortedFilterEntries(counts, preferredOrder = []) {
   const order = new Map(preferredOrder.map((item, index) => [item, index]));
   return [...counts.entries()].sort(([left], [right]) => {
@@ -549,9 +398,136 @@ function sortedFilterEntries(counts, preferredOrder = []) {
   });
 }
 
+function makeFilterChoice(kind, value, count, selected) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "filter-choice";
+  button.dataset.filterKind = kind;
+  button.dataset.filterValue = value;
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  button.addEventListener("click", () => togglePlotFilter(kind, value));
+  const label = document.createElement("span");
+  label.className = "filter-choice__label";
+  label.textContent = value;
+  const tally = document.createElement("small");
+  tally.className = "filter-choice__count";
+  tally.textContent = String(count);
+  button.append(label, tally);
+  return button;
+}
+
+function updateFilterChoice(button, count, selected) {
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  const tally = button.querySelector(".filter-choice__count");
+  if (tally) {
+    tally.textContent = String(count);
+  }
+}
+
+function createFilterGroup(title, kind) {
+  const group = document.createElement("section");
+  group.className = "plot-filter-group";
+  group.dataset.filterGroup = kind;
+  const optionsId = `plot-filter-options-${kind}`;
+  const heading = document.createElement("button");
+  heading.type = "button";
+  heading.className = "plot-filter-group-title";
+  heading.setAttribute("aria-expanded", filterGroupsOpen[kind] ? "true" : "false");
+  heading.setAttribute("aria-controls", optionsId);
+  heading.addEventListener("click", () => togglePlotFilterGroup(kind));
+  const label = document.createElement("span");
+  label.textContent = title;
+  const count = document.createElement("small");
+  count.className = "plot-filter-group-count";
+  const chevron = document.createElement("i");
+  chevron.setAttribute("aria-hidden", "true");
+  heading.append(label, count, chevron);
+
+  const options = document.createElement("div");
+  options.id = optionsId;
+  options.className = `plot-filter-options ${kind === "vendors" ? "vendor-options" : ""}`;
+  options.hidden = !filterGroupsOpen[kind];
+  group.append(heading, options);
+  return group;
+}
+
+function ensureFilterChoice(group, kind, value, count, selected) {
+  const options = group.querySelector(".plot-filter-options");
+  const existing = options.querySelector(`[data-filter-value="${CSS.escape(value)}"]`);
+  if (existing) {
+    updateFilterChoice(existing, count, selected);
+    return existing;
+  }
+  const choice = makeFilterChoice(kind, value, count, selected);
+  options.append(choice);
+  return choice;
+}
+
+function syncFilterGroup(title, kind, entries, totalCount) {
+  const filters = byId("performance-filters");
+  let group = filters.querySelector(`[data-filter-group="${CSS.escape(kind)}"]`);
+  if (!group) {
+    group = createFilterGroup(title, kind);
+    filters.append(group);
+  }
+  const headingCount = group.querySelector(".plot-filter-group-count");
+  if (headingCount) {
+    headingCount.textContent = String(totalCount);
+  }
+  const options = group.querySelector(".plot-filter-options");
+  const wanted = new Set(["__all__", ...entries.map(([value]) => value)]);
+  const allChoice = options.querySelector('[data-filter-value="__all__"]') || makeFilterChoice(kind, "__all__", totalCount, !activePlotFilters[kind].size);
+  allChoice.classList.add("filter-choice-all");
+  allChoice.querySelector(".filter-choice__label").textContent = "All";
+  allChoice.addEventListener("click", () => clearPlotFilter(kind));
+  updateFilterChoice(allChoice, totalCount, !activePlotFilters[kind].size);
+  if (!allChoice.parentElement) {
+    options.prepend(allChoice);
+  }
+  for (const [value, count] of entries) {
+    ensureFilterChoice(group, kind, value, count, activePlotFilters[kind].has(value));
+  }
+  for (const choice of [...options.querySelectorAll("[data-filter-value]")]) {
+    if (!wanted.has(choice.dataset.filterValue)) {
+      choice.remove();
+    }
+  }
+  options.hidden = !filterGroupsOpen[kind];
+  group.querySelector(".plot-filter-group-title").setAttribute("aria-expanded", filterGroupsOpen[kind] ? "true" : "false");
+}
+
+function updateFilterControls() {
+  const allRows = currentState === "ready" ? leaderboardRows(activePlotMode, { applyFilters: false }) : [];
+  const languageCounts = new Map();
+  const vendorCounts = new Map();
+  for (const row of allRows) {
+    const info = implementationInfo(row.implementation);
+    languageCounts.set(info.language, (languageCounts.get(info.language) || 0) + 1);
+    const vendor = implementationVendor(info);
+    vendorCounts.set(vendor, (vendorCounts.get(vendor) || 0) + 1);
+  }
+  syncFilterGroup("Language", "languages", sortedFilterEntries(languageCounts, filterOrder.languages), allRows.length);
+  syncFilterGroup("Vendor", "vendors", sortedFilterEntries(vendorCounts, filterOrder.vendors), allRows.length);
+
+  const activeCount = activePlotFilters.languages.size + activePlotFilters.vendors.size;
+  const countLabel = byId("performance-filter-count");
+  if (countLabel) {
+    countLabel.textContent = `${activeCount} filter${activeCount === 1 ? "" : "s"} active`;
+  }
+  const selection = byId("performance-filter-selection");
+  if (selection) {
+    const values = [...activePlotFilters.languages, ...activePlotFilters.vendors];
+    selection.textContent = values.length ? values.join(" / ") : "All implementations";
+  }
+  const reset = byId("performance-filter-reset");
+  if (reset) {
+    reset.disabled = activeCount === 0;
+  }
+}
+
 function togglePlotFilter(kind, value) {
   const selected = activePlotFilters[kind];
-  if (!selected) {
+  if (!selected || value === "__all__") {
     return;
   }
   if (selected.has(value)) {
@@ -559,7 +535,9 @@ function togglePlotFilter(kind, value) {
   } else {
     selected.add(value);
   }
-  renderPlots();
+  updateFilterControls();
+  renderCurrentRanking();
+  renderHistoryChart();
 }
 
 function clearPlotFilter(kind) {
@@ -568,7 +546,9 @@ function clearPlotFilter(kind) {
     return;
   }
   selected.clear();
-  renderPlots();
+  updateFilterControls();
+  renderCurrentRanking();
+  renderHistoryChart();
 }
 
 function clearAllPlotFilters() {
@@ -577,128 +557,158 @@ function clearAllPlotFilters() {
   }
   activePlotFilters.languages.clear();
   activePlotFilters.vendors.clear();
-  renderPlots();
+  updateFilterControls();
+  renderCurrentRanking();
+  renderHistoryChart();
 }
 
 function togglePlotFilterGroup(kind) {
-  if (!(kind in plotFilterGroupsOpen)) {
+  filterGroupsOpen[kind] = !filterGroupsOpen[kind];
+  updateFilterControls();
+}
+
+function createModeTabs() {
+  const tablist = byId("performance-mode-tabs");
+  if (tablist.children.length) {
     return;
   }
-  plotFilterGroupsOpen[kind] = !plotFilterGroupsOpen[kind];
-  renderPlots();
-}
-
-function makeFilterChoice(kind, value, count, selected) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "filter-choice";
-  button.setAttribute("aria-pressed", selected ? "true" : "false");
-  button.addEventListener("click", () => togglePlotFilter(kind, value));
-
-  const label = document.createElement("span");
-  label.textContent = value;
-  const tally = document.createElement("small");
-  tally.textContent = String(count);
-  button.append(label, tally);
-  return button;
-}
-
-function makeAllFilterChoice(label, count, selected, onClick) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "filter-choice filter-choice-all";
-  button.setAttribute("aria-pressed", selected ? "true" : "false");
-  button.addEventListener("click", onClick);
-
-  const text = document.createElement("span");
-  text.textContent = label;
-  const tally = document.createElement("small");
-  tally.textContent = String(count);
-  button.append(text, tally);
-  return button;
-}
-
-function renderFilterGroup(title, kind, entries, totalCount) {
-  const group = document.createElement("section");
-  group.className = "plot-filter-group";
-  const optionsId = `plot-filter-options-${kind}`;
-  const isOpen = plotFilterGroupsOpen[kind] !== false;
-
-  const heading = document.createElement("button");
-  heading.type = "button";
-  heading.className = "plot-filter-group-title";
-  heading.setAttribute("aria-expanded", isOpen ? "true" : "false");
-  heading.setAttribute("aria-controls", optionsId);
-  heading.addEventListener("click", () => togglePlotFilterGroup(kind));
-  const label = document.createElement("span");
-  label.textContent = title;
-  const count = document.createElement("small");
-  count.textContent = String(totalCount);
-  const chevron = document.createElement("i");
-  chevron.setAttribute("aria-hidden", "true");
-  heading.append(label, count, chevron);
-
-  const options = document.createElement("div");
-  options.id = optionsId;
-  options.className = `plot-filter-options ${kind === "vendors" ? "vendor-options" : ""}`;
-  options.hidden = !isOpen;
-  options.append(makeAllFilterChoice("All", totalCount, activePlotFilters[kind].size === 0, () => clearPlotFilter(kind)));
-  options.append(
-    ...entries.map(([value, count]) => makeFilterChoice(kind, value, count, activePlotFilters[kind].has(value))),
-  );
-
-  if (!entries.length) {
-    const empty = document.createElement("div");
-    empty.className = "plot-filter-empty";
-    empty.textContent = "No options";
-    options.replaceChildren(empty);
+  tablist.setAttribute("role", "tablist");
+  tablist.setAttribute("aria-label", "Benchmark mode");
+  for (const [mode, config] of Object.entries(modeConfig)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "plot-tab";
+    button.id = `plot-tab-${mode}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", "plot-panel");
+    button.addEventListener("click", () => selectPlotMode(mode));
+    button.addEventListener("keydown", (event) => {
+      const modes = Object.keys(modeConfig);
+      const currentIndex = modes.indexOf(activePlotMode);
+      let nextIndex = currentIndex;
+      if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % modes.length;
+      if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + modes.length) % modes.length;
+      if (event.key === "Home") nextIndex = 0;
+      if (event.key === "End") nextIndex = modes.length - 1;
+      if (nextIndex !== currentIndex) {
+        event.preventDefault();
+        selectPlotMode(modes[nextIndex], true);
+      }
+    });
+    const label = document.createElement("span");
+    label.textContent = config.label;
+    const title = document.createElement("strong");
+    title.textContent = config.title;
+    const metric = document.createElement("small");
+    metric.textContent = config.metricDetail;
+    button.append(label, title, metric);
+    tablist.append(button);
   }
-
-  group.append(heading, options);
-  return group;
+  updateModeTabs();
 }
 
-function renderPlotFilters(mode) {
-  const allRows = leaderboardRows(mode, { applyFilters: false });
-  const filteredRows = leaderboardRows(mode);
-  const languageCounts = new Map();
-  const vendorCounts = new Map();
-
-  for (const row of allRows) {
-    const info = implementationInfo(row.implementation);
-    languageCounts.set(info.language, (languageCounts.get(info.language) || 0) + 1);
-    const vendor = implementationVendor(info);
-    vendorCounts.set(vendor, (vendorCounts.get(vendor) || 0) + 1);
+function updateModeTabs() {
+  for (const [mode] of Object.entries(modeConfig)) {
+    const button = byId(`plot-tab-${mode}`);
+    const selected = mode === activePlotMode;
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.tabIndex = selected ? 0 : -1;
   }
+}
 
-  const filters = document.createElement("aside");
-  filters.className = "plot-filters";
-  filters.setAttribute("aria-label", "Implementation filters");
+function selectPlotMode(mode, moveFocus = false) {
+  if (!modeConfig[mode]) {
+    return;
+  }
+  activePlotMode = mode;
+  updateModeTabs();
+  updateFilterControls();
+  renderCurrentRanking();
+  renderHistoryChart();
+  if (moveFocus) {
+    byId(`plot-tab-${mode}`).focus({ preventScroll: true });
+  }
+}
 
-  const head = document.createElement("div");
-  head.className = "plot-filter-head";
-  const title = document.createElement("div");
-  title.className = "plot-filter-title";
-  const heading = document.createElement("h3");
-  heading.textContent = "Filters";
-  const summary = document.createElement("p");
-  summary.textContent = `${filteredRows.length}/${allRows.length} shown`;
-  title.append(heading, summary);
+function setFilterPanelOpen(open, restoreFocus = false) {
+  const panel = byId("performance-filter-panel");
+  const toggle = byId("performance-filter-toggle");
+  if (!panel || !toggle) {
+    return;
+  }
+  panel.hidden = !open;
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open && restoreFocus) {
+    toggle.focus({ preventScroll: true });
+  }
+}
 
+function ensureControls() {
+  if (controlsReady) {
+    return;
+  }
+  createModeTabs();
   const reset = document.createElement("button");
   reset.type = "button";
+  reset.id = "performance-filter-reset";
   reset.className = "plot-filter-reset";
   reset.textContent = "Reset";
-  reset.disabled = !activePlotFilters.languages.size && !activePlotFilters.vendors.size;
+  reset.disabled = true;
   reset.addEventListener("click", clearAllPlotFilters);
+  byId("performance-filters").append(reset);
 
-  head.append(title, reset);
-  filters.append(
-    head,
-    renderFilterGroup("Language", "languages", sortedFilterEntries(languageCounts, ["C", "C++", "Go", "JavaScript", "Python", "Rust"]), allRows.length),
-    renderFilterGroup("Vendor", "vendors", sortedFilterEntries(vendorCounts, ["CoQUIC"]), allRows.length),
-  );
-  return filters;
+  filterTrigger = byId("performance-filter-toggle");
+  filterTrigger.addEventListener("click", () => {
+    const open = filterTrigger.getAttribute("aria-expanded") !== "true";
+    setFilterPanelOpen(open);
+  });
+  if (!window.matchMedia("(max-width: 680px)").matches) {
+    setFilterPanelOpen(true);
+  }
+  controlsReady = true;
+  updateFilterControls();
+}
+
+function setStateMessage(element, state, title, detail = "") {
+  element.replaceChildren();
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  element.append(strong);
+  if (detail) {
+    const text = document.createElement("span");
+    text.textContent = detail;
+    element.append(text);
+  }
+  element.dataset.state = state;
+}
+
+function renderSummary() {
+  const sourceLabel = byId("performance-source");
+  const timestamp = byId("performance-timestamp");
+  const availability = byId("performance-availability");
+  if (currentState === "loading") {
+    sourceLabel.textContent = "Waiting for perf-results.json";
+    timestamp.textContent = "Waiting for benchmark timestamp";
+    availability.textContent = "Checking benchmark data";
+    return;
+  }
+  if (currentState === "error") {
+    sourceLabel.textContent = "perf-results.json unavailable";
+    timestamp.textContent = "Generated timestamp unavailable";
+    availability.textContent = "Current benchmark unavailable; retry when the artifact is published";
+    return;
+  }
+  const totalSources = Array.isArray(activeSnapshot.sources) ? activeSnapshot.sources.length : 0;
+  const availableSources = activeSnapshot.sources.filter((source) => !source.missing).length;
+  const completedRows = activeSnapshot.rows.filter((row) => row.status === "ok").length;
+  const event = activeSnapshot.event_name || "benchmark run";
+  sourceLabel.textContent = `${event} | ${availableSources}/${totalSources} sources available`;
+  timestamp.textContent = activeSnapshot.generated_at ? String(activeSnapshot.generated_at) : "Generated timestamp unavailable";
+  availability.textContent = `${completedRows} completed result${completedRows === 1 ? "" : "s"}`;
+}
+
+function rowDisplayName(row) {
+  return row.implementation === "coquic" && row.congestion_control ? `coquic[${row.congestion_control}]` : row.implementation;
 }
 
 function roleUtilization(row, role) {
@@ -716,6 +726,18 @@ function artifactUrl(path) {
     return "";
   }
   return `./perf-artifacts/${path}`;
+}
+
+function hasPerfDetails(row) {
+  return Object.keys(roleUtilization(row, "client")).length
+    || Object.keys(roleUtilization(row, "server")).length
+    || Object.keys(profileFor(row, "client")).length
+    || Object.keys(profileFor(row, "server")).length;
+}
+
+function metricDisplayName(row) {
+  const config = modeConfig[row.mode] || modeConfig.bulk;
+  return `${formatNumber(row[config.metric], config.decimals)} ${config.unit}`;
 }
 
 function renderDetailStatCell(label, value, detail = "") {
@@ -756,7 +778,6 @@ function renderDetailUtilizationRows(util) {
     renderDetailStatCell("avg", formatBytes(util.memory_bytes_avg), util.samples ? `${util.samples} samples` : ""),
     renderDetailStatCell("max", formatBytes(util.memory_bytes_max), "peak"),
   );
-
   return [cpuRow, memoryRow];
 }
 
@@ -768,70 +789,9 @@ function profileLabel(row, role) {
   return profile.status || "unavailable";
 }
 
-function hasPerfDetails(row) {
-  return Object.keys(roleUtilization(row, "client")).length
-    || Object.keys(roleUtilization(row, "server")).length
-    || Object.keys(profileFor(row, "client")).length
-    || Object.keys(profileFor(row, "server")).length;
-}
-
-function metricDisplayName(row) {
-  const config = modeConfig[row.mode] || modeConfig.bulk;
-  const value = Number(row[config.metric]);
-  return `${formatNumber(value, config.decimals)} ${config.unit}`;
-}
-
-function rowDisplayName(row) {
-  return row.implementation === "coquic" && row.congestion_control ? `coquic[${row.congestion_control}]` : row.implementation;
-}
-
-function closeFlamegraphFullscreen(restoreFocus = true) {
-  const card = document.querySelector(".detail-profile-card.flamegraph-fullscreen");
-  if (!card) {
-    return false;
-  }
-  card.classList.remove("flamegraph-fullscreen");
-  document.body.classList.remove("perf-flamegraph-fullscreen-open");
-
-  const button = card.querySelector(".detail-flamegraph-fullscreen-button");
-  if (button) {
-    const label = button.dataset.flamegraphLabel || "flamegraph";
-    button.setAttribute("aria-label", `Expand ${label}`);
-    button.setAttribute("title", "Expand flamegraph");
-    button.setAttribute("aria-pressed", "false");
-    button.replaceChildren(makeIcon("maximize"));
-    if (restoreFocus) {
-      button.focus({ preventScroll: true });
-    }
-  } else if (restoreFocus && perfFlamegraphFullscreenButton) {
-    perfFlamegraphFullscreenButton.focus({ preventScroll: true });
-  }
-  perfFlamegraphFullscreenButton = null;
-  return true;
-}
-
-function toggleFlamegraphFullscreen(card, button) {
-  if (card.classList.contains("flamegraph-fullscreen")) {
-    closeFlamegraphFullscreen();
-    return;
-  }
-
-  closeFlamegraphFullscreen(false);
-  card.classList.add("flamegraph-fullscreen");
-  document.body.classList.add("perf-flamegraph-fullscreen-open");
-  perfFlamegraphFullscreenButton = button;
-
-  const label = button.dataset.flamegraphLabel || "flamegraph";
-  button.setAttribute("aria-label", `Collapse ${label}`);
-  button.setAttribute("title", "Collapse flamegraph");
-  button.setAttribute("aria-pressed", "true");
-  button.replaceChildren(makeIcon("minimize"));
-  button.focus({ preventScroll: true });
-}
-
 function renderDetailProfileLink(row, role) {
   const profile = profileFor(row, role);
-  const item = document.createElement("div");
+  const item = document.createElement("article");
   item.className = "detail-profile-card";
   const title = document.createElement("div");
   title.className = "detail-profile-title";
@@ -843,31 +803,27 @@ function renderDetailProfileLink(row, role) {
 
   const links = document.createElement("div");
   links.className = "detail-profile-links";
-  let flamegraphPreview = null;
   if (profile.svg_file) {
-    item.classList.add("has-flamegraph");
     const flamegraphLabel = `${rowDisplayName(row)} ${role} flamegraph`;
     const flamegraphUrl = artifactUrl(profile.svg_file);
-    flamegraphPreview = document.createElement("div");
-    flamegraphPreview.className = "detail-flamegraph";
-
+    const preview = document.createElement("div");
+    preview.className = "detail-flamegraph";
     const frame = document.createElement("iframe");
     frame.className = "detail-flamegraph-frame";
     frame.src = flamegraphUrl;
     frame.title = flamegraphLabel;
     frame.loading = "lazy";
-    flamegraphPreview.append(frame);
-
     const fullscreen = document.createElement("button");
     fullscreen.type = "button";
     fullscreen.className = "detail-flamegraph-fullscreen-button";
-    fullscreen.dataset.flamegraphLabel = flamegraphLabel;
     fullscreen.setAttribute("aria-label", `Expand ${flamegraphLabel}`);
-    fullscreen.setAttribute("aria-pressed", "false");
     fullscreen.title = "Expand flamegraph";
-    fullscreen.append(makeIcon("maximize"));
-    fullscreen.addEventListener("click", () => toggleFlamegraphFullscreen(item, fullscreen));
-    flamegraphPreview.append(fullscreen);
+    fullscreen.dataset.flamegraphUrl = flamegraphUrl;
+    fullscreen.dataset.flamegraphLabel = flamegraphLabel;
+    fullscreen.append(makeIcon("info"));
+    fullscreen.addEventListener("click", () => openFlamegraphDialog(row, role, fullscreen));
+    preview.append(frame, fullscreen);
+    item.append(preview);
 
     const openSvg = document.createElement("a");
     openSvg.href = flamegraphUrl;
@@ -887,50 +843,22 @@ function renderDetailProfileLink(row, role) {
     empty.textContent = profile.reason || "No profile artifact for this endpoint.";
     links.append(empty);
   }
-  item.append(title);
-  if (flamegraphPreview) {
-    item.append(flamegraphPreview);
-  }
+  item.prepend(title);
   item.append(links);
   return item;
 }
 
-function renderPerfDetailModal(row) {
-  document.querySelector(".perf-detail-backdrop")?.remove();
-  const backdrop = document.createElement("div");
-  backdrop.className = "perf-detail-backdrop open";
-  backdrop.setAttribute("role", "presentation");
-
-  const modal = document.createElement("section");
-  modal.className = "perf-detail-modal";
-  modal.setAttribute("role", "dialog");
-  modal.setAttribute("aria-modal", "true");
-  modal.setAttribute("aria-labelledby", "perf-detail-title");
-
-  const head = document.createElement("div");
-  head.className = "perf-detail-head";
-  const titleWrap = document.createElement("div");
-  const title = document.createElement("h2");
-  title.id = "perf-detail-title";
+function populateDetailDialog(row) {
+  const title = byId("perf-detail-title");
   title.textContent = `${rowDisplayName(row)} details`;
-  const subtitle = document.createElement("span");
-  subtitle.textContent = `${modeConfig[row.mode]?.title || row.mode} | ${row.congestion_control || "default"} | ${libraryVersionLabel(row)}`;
-  titleWrap.append(title, subtitle);
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "perf-detail-close";
-  close.setAttribute("aria-label", "Close performance details");
-  close.append(makeIcon("x"));
-  close.addEventListener("click", () => closePerfDetailModal());
-  head.append(titleWrap, close);
+  const body = byId("perf-detail-body");
+  body.replaceChildren();
 
-  const body = document.createElement("div");
-  body.className = "perf-detail-body";
   const summary = document.createElement("div");
   summary.className = "perf-detail-summary";
   summary.append(
     renderDetailStatCell("metric", metricDisplayName(row), modeConfig[row.mode]?.metricLabel || "selected"),
-    renderDetailStatCell("elapsed", `${row.elapsed_ms} ms`),
+    renderDetailStatCell("elapsed", `${row.elapsed_ms ?? "-"} ms`),
     renderDetailStatCell("p50", `${formatNumber(row.p50_us, 0)} us`),
     renderDetailStatCell("p99", `${formatNumber(row.p99_us, 0)} us`),
   );
@@ -938,18 +866,17 @@ function renderPerfDetailModal(row) {
   const utilizationSection = document.createElement("section");
   utilizationSection.className = "perf-detail-section";
   const utilizationTitle = document.createElement("h3");
-  utilizationTitle.textContent = "Endpoint Utilization";
+  utilizationTitle.textContent = "Endpoint utilization";
   const utilizationGrid = document.createElement("div");
   utilizationGrid.className = "perf-detail-utilization";
   for (const role of ["client", "server"]) {
-    const util = roleUtilization(row, role);
     const card = document.createElement("article");
     card.className = "perf-detail-endpoint";
     const roleTitle = document.createElement("h4");
     roleTitle.textContent = role;
     const metrics = document.createElement("div");
     metrics.className = "perf-detail-metrics";
-    metrics.append(...renderDetailUtilizationRows(util));
+    metrics.append(...renderDetailUtilizationRows(roleUtilization(row, role)));
     card.append(roleTitle, metrics);
     utilizationGrid.append(card);
   }
@@ -958,41 +885,85 @@ function renderPerfDetailModal(row) {
   const profileSection = document.createElement("section");
   profileSection.className = "perf-detail-section";
   const profileTitle = document.createElement("h3");
-  profileTitle.textContent = "Perf Flamegraphs";
+  profileTitle.textContent = "Perf flamegraphs";
   const profileGrid = document.createElement("div");
   profileGrid.className = "perf-detail-profiles";
   profileGrid.append(renderDetailProfileLink(row, "client"), renderDetailProfileLink(row, "server"));
   profileSection.append(profileTitle, profileGrid);
-
   body.append(summary, utilizationSection, profileSection);
-  modal.append(head, body);
-  backdrop.append(modal);
-  backdrop.addEventListener("click", (event) => {
-    if (event.target === backdrop) {
-      closePerfDetailModal();
-    }
-  });
-  document.body.append(backdrop);
-  document.body.classList.add("perf-detail-open");
-  close.focus();
+}
+
+function closeFlamegraphDialog(restoreFocus = true) {
+  const dialog = byId("perf-flamegraph-dialog");
+  if (dialog.open) {
+    dialog.close();
+  }
+  document.body.classList.remove("perf-flamegraph-fullscreen-open");
+  const trigger = perfFlamegraphTrigger;
+  perfFlamegraphTrigger = null;
+  if (restoreFocus && trigger?.isConnected) {
+    trigger.focus({ preventScroll: true });
+  }
+}
+
+function openFlamegraphDialog(row, role, trigger) {
+  const profile = profileFor(row, role);
+  const url = artifactUrl(profile.svg_file);
+  if (!url) {
+    return;
+  }
+  closeFlamegraphDialog(false);
+  perfFlamegraphTrigger = trigger;
+  const dialog = byId("perf-flamegraph-dialog");
+  byId("perf-flamegraph-title").textContent = `${rowDisplayName(row)} ${role} flamegraph`;
+  const body = byId("perf-flamegraph-body");
+  body.replaceChildren();
+  const frame = document.createElement("iframe");
+  frame.className = "detail-flamegraph-frame detail-flamegraph-frame--fullscreen";
+  frame.src = url;
+  frame.title = `${rowDisplayName(row)} ${role} flamegraph`;
+  const links = document.createElement("div");
+  links.className = "detail-profile-links";
+  const openSvg = document.createElement("a");
+  openSvg.href = url;
+  decorateExternalLink(openSvg, `${row.implementation} ${role} flamegraph`);
+  openSvg.textContent = "Open SVG";
+  links.append(openSvg);
+  if (profile.log_file) {
+    const log = document.createElement("a");
+    log.href = artifactUrl(profile.log_file);
+    decorateExternalLink(log, `${row.implementation} ${role} perf log`);
+    log.textContent = "Perf log";
+    links.append(log);
+  }
+  body.append(frame, links);
+  dialog.showModal();
+  document.body.classList.add("perf-flamegraph-fullscreen-open");
+  byId("perf-flamegraph-close").focus({ preventScroll: true });
 }
 
 function closePerfDetailModal(restoreFocus = true) {
-  closeFlamegraphFullscreen(false);
-  const existing = document.querySelector(".perf-detail-backdrop");
-  if (existing) {
-    existing.remove();
+  closeFlamegraphDialog(false);
+  const dialog = byId("perf-detail-dialog");
+  if (dialog.open) {
+    dialog.close();
   }
   document.body.classList.remove("perf-detail-open");
-  if (restoreFocus && perfDetailTrigger) {
-    perfDetailTrigger.focus();
-  }
+  const trigger = perfDetailTrigger;
   perfDetailTrigger = null;
+  if (restoreFocus && trigger?.isConnected) {
+    trigger.focus({ preventScroll: true });
+  }
 }
 
 function openPerfDetail(row, trigger) {
+  closePerfDetailModal(false);
   perfDetailTrigger = trigger;
-  renderPerfDetailModal(row);
+  populateDetailDialog(row);
+  const dialog = byId("perf-detail-dialog");
+  dialog.showModal();
+  document.body.classList.add("perf-detail-open");
+  byId("perf-detail-close").focus({ preventScroll: true });
 }
 
 function renderPerfDetailButton(row) {
@@ -1007,115 +978,116 @@ function renderPerfDetailButton(row) {
   return button;
 }
 
-function renderBarplot(mode) {
-  const config = modeConfig[mode];
-  const unfilteredRows = leaderboardRows(mode, { applyFilters: false });
-  const rows = leaderboardRows(mode);
-  const maxValue = rows.length ? Math.max(...rows.map((row) => Number(row[config.metric]))) : 0;
-  const plot = document.createElement("section");
-  plot.className = "plot";
-  const content = document.createElement("div");
-  content.className = "plot-content";
-  content.id = "plot-panel";
-  content.setAttribute("role", "tabpanel");
-  content.setAttribute("aria-labelledby", `plot-tab-${activePlotMode}`);
-  const heading = document.createElement("h3");
-  heading.textContent = config.title;
-  const subtitle = document.createElement("p");
-  subtitle.textContent = config.metricDetail;
-  const list = document.createElement("div");
-  list.className = "bar-list";
+function renderCurrentRanking() {
+  const ranking = byId("performance-ranking");
+  const content = byId("performance-ranking-content");
+  const panel = byId("plot-panel");
+  const skeleton = byId("performance-current-skeleton");
+  const state = byId("performance-current-state");
+  const unit = byId("performance-ranking-unit");
+  const config = modeConfig[activePlotMode];
+  unit.textContent = config.metricDetail;
+  skeleton.hidden = currentState !== "loading";
+  panel.setAttribute("aria-labelledby", `plot-tab-${activePlotMode}`);
+  if (currentState === "loading") {
+    content.hidden = true;
+    panel.hidden = true;
+    setStateMessage(state, "loading", "Current benchmark loading", "Current evidence will appear before retained history.");
+    ranking.setAttribute("aria-busy", "true");
+    return;
+  }
+  if (currentState === "error") {
+    content.hidden = true;
+    panel.hidden = true;
+    setStateMessage(state, "error", "Benchmark data unavailable", "perf-results.json could not be loaded or did not match the benchmark schema. Retry after the artifact is published.");
+    ranking.setAttribute("aria-busy", "false");
+    return;
+  }
 
+  const allRows = leaderboardRows(activePlotMode, { applyFilters: false });
+  const rows = leaderboardRows(activePlotMode);
+  ranking.setAttribute("aria-busy", "false");
+  if (!allRows.length) {
+    content.hidden = false;
+    panel.hidden = false;
+    panel.replaceChildren();
+    setStateMessage(state, "ready", "No completed benchmark rows loaded", "The source responded, but this mode has no successful results.");
+    return;
+  }
+  const stateDetail = `${rows.length} of ${allRows.length} completed implementation result${allRows.length === 1 ? "" : "s"} shown.`;
+  setStateMessage(state, "ready", "Current ranking available", stateDetail);
+  content.hidden = false;
+  panel.hidden = false;
+  panel.replaceChildren(renderBarplot(activePlotMode, rows, allRows));
+}
+
+function renderBarplot(mode, rows, unfilteredRows) {
+  const config = modeConfig[mode];
+  const plot = document.createElement("div");
+  plot.className = "plot performance-ranking-panel";
+  const heading = document.createElement("div");
+  heading.className = "performance-panel-heading";
+  const title = document.createElement("h3");
+  title.textContent = config.title;
+  const subtitle = document.createElement("p");
+  subtitle.textContent = `${config.metricLabel} | ${config.unit}`;
+  heading.append(title, subtitle);
+  const list = document.createElement("div");
+  list.className = "bar-list performance-bar-list";
   if (!rows.length) {
-    const empty = document.createElement("div");
+    const empty = document.createElement("p");
     empty.className = "empty-state";
     empty.textContent = unfilteredRows.length ? "No implementations match the current filters." : "No completed benchmark rows loaded.";
     list.append(empty);
-    content.append(heading, subtitle, list, renderTrendChart(mode));
-    plot.append(content);
+    plot.append(heading, list);
     return plot;
   }
 
-  list.replaceChildren(
-    ...rows.map((row, index) => {
-      const value = Number(row[config.metric]);
-      const percent = maxValue > 0 ? Math.max((value / maxValue) * 100, 0.8) : 0;
-      const element = document.createElement("div");
-      const isCoquicFamily = isCoquicFamilyImplementation(row.implementation);
-      element.className = `bar-row${isCoquicFamily ? " own-impl coquic-family" : ""}`;
-      if (isCoquicFamily) {
-        element.style.setProperty("--family-color", colors[row.implementation] || colors.coquic);
-      }
+  const maxValue = Math.max(...rows.map((row) => Number(row[config.metric])));
+  list.replaceChildren(...rows.map((row, index) => {
+    const value = Number(row[config.metric]);
+    const element = document.createElement("article");
+    const isCoquicFamily = isCoquicFamilyImplementation(row.implementation);
+    element.className = `bar-row performance-bar-row${isCoquicFamily ? " own-impl coquic-family" : ""}`;
+    element.setAttribute("aria-label", `${rowDisplayName(row)}, ${formatNumber(value, config.decimals)} ${config.unit}`);
 
-      const rank = index + 1;
-      const rankBadge = document.createElement("span");
-      rankBadge.className = `rank-badge rank-${rank <= 3 ? rank : "default"}`;
-      rankBadge.title = `Rank ${rank}`;
-      rankBadge.textContent = String(rank);
+    const marker = document.createElement("span");
+    marker.className = "performance-family-marker";
+    marker.setAttribute("aria-hidden", "true");
 
-      const label = document.createElement("div");
-      label.className = "bar-label";
-      const info = implementationInfo(row.implementation);
-      const displayName = row.implementation === "coquic" && row.congestion_control ? `coquic[${row.congestion_control}]` : row.implementation;
-      label.append(renderBarImplementationIdentity(displayName, info, libraryVersionLabel(row)));
+    const rankBadge = document.createElement("span");
+    rankBadge.className = "rank-badge";
+    rankBadge.title = `Rank ${index + 1}`;
+    rankBadge.textContent = String(index + 1);
 
-      const track = document.createElement("div");
-      track.className = "bar-track";
-      const fill = document.createElement("div");
-      fill.className = "bar-fill";
-      fill.style.setProperty("--bar-width", `${percent}%`);
-      fill.style.setProperty("--bar-color", colors[row.implementation] || "#c3d4d8");
-      track.append(fill);
+    const label = document.createElement("div");
+    label.className = "bar-label";
+    const info = implementationInfo(row.implementation);
+    label.append(renderBarImplementationIdentity(row.implementation, info, libraryVersionLabel(row), rowDisplayName(row)));
 
-      const metricValue = document.createElement("div");
-      metricValue.className = "bar-value";
-      const metricText = document.createElement("span");
-      metricText.textContent = `${formatNumber(value, config.decimals)} ${config.unit}`;
-      metricValue.append(metricText, renderPerfDetailButton(row));
+    const track = document.createElement("div");
+    track.className = "bar-track";
+    track.setAttribute("role", "img");
+    track.setAttribute("aria-label", `${rowDisplayName(row)} relative performance ${formatNumber(value, config.decimals)} ${config.unit}`);
+    const fill = document.createElement("div");
+    fill.className = "bar-fill performance-bar-fill";
+    fill.style.setProperty("--bar-width", `${maxValue > 0 ? Math.max((value / maxValue) * 100, 0.8) : 0}%`);
+    track.append(fill);
 
-      element.append(rankBadge, label, track, metricValue);
-      return element;
-    }),
-  );
-
-  content.append(heading, subtitle, list, renderTrendChart(mode));
-  plot.append(content);
+    const metricValue = document.createElement("div");
+    metricValue.className = "bar-value";
+    const metricText = document.createElement("span");
+    metricText.textContent = `${formatNumber(value, config.decimals)} ${config.unit}`;
+    metricValue.append(metricText, renderPerfDetailButton(row));
+    element.append(marker, rankBadge, label, track, metricValue);
+    return element;
+  }));
+  plot.append(heading, list);
   return plot;
 }
 
-function selectPlotMode(mode) {
-  if (!modeConfig[mode]) {
-    return;
-  }
-  activePlotMode = mode;
-  renderPlots();
-}
-
-function renderPlots() {
-  const panel = document.createElement("div");
-  panel.className = "plot-panel-active";
-  panel.append(renderPlotTabs(), renderBarplot(activePlotMode));
-
-  document.getElementById("plot-grid").replaceChildren(
-    renderPlotFilters(activePlotMode),
-    panel,
-  );
-}
-
 function historySnapshots() {
-  if (Array.isArray(activeHistory.snapshots) && activeHistory.snapshots.length) {
-    return activeHistory.snapshots;
-  }
-  if (Array.isArray(activeSnapshot.rows) && activeSnapshot.rows.length) {
-    return [
-      {
-        date: dateFromGeneratedAt(activeSnapshot.generated_at),
-        generated_at: activeSnapshot.generated_at,
-        rows: activeSnapshot.rows,
-      },
-    ];
-  }
-  return [];
+  return Array.isArray(activeHistory.snapshots) ? activeHistory.snapshots : [];
 }
 
 function bestHistoryValue(snapshot, implementation, mode) {
@@ -1133,31 +1105,118 @@ function bestHistoryValue(snapshot, implementation, mode) {
   return best ? Number(best[config.metric]) : null;
 }
 
-function makeSvgElement(name) {
-  return document.createElementNS("http://www.w3.org/2000/svg", name);
+function seriesMarker(index) {
+  return ["circle", "square", "diamond", "triangle", "cross", "ring"][index % 6];
+}
+
+function setSeriesStyle(element, index) {
+  element.dataset.seriesIndex = String(index);
+  element.dataset.marker = seriesMarker(index);
+  if (index < 6) {
+    element.style.setProperty("--series-color", `var(--chart-${index + 1})`);
+  } else {
+    element.classList.add("performance-series-secondary");
+  }
+}
+
+function renderSeriesMarker(markerName, x, y, className = "trend-point") {
+  if (markerName === "square") {
+    const square = makeSvgElement("rect");
+    square.setAttribute("x", x - 3.2);
+    square.setAttribute("y", y - 3.2);
+    square.setAttribute("width", "6.4");
+    square.setAttribute("height", "6.4");
+    square.setAttribute("class", className);
+    return square;
+  }
+  if (markerName === "diamond") {
+    const diamond = makeSvgElement("path");
+    diamond.setAttribute("d", `M ${x} ${y - 4} L ${x + 4} ${y} L ${x} ${y + 4} L ${x - 4} ${y} Z`);
+    diamond.setAttribute("class", className);
+    return diamond;
+  }
+  if (markerName === "triangle") {
+    const triangle = makeSvgElement("path");
+    triangle.setAttribute("d", `M ${x} ${y - 4} L ${x + 4} ${y + 3.5} L ${x - 4} ${y + 3.5} Z`);
+    triangle.setAttribute("class", className);
+    return triangle;
+  }
+  if (markerName === "cross") {
+    const cross = makeSvgElement("path");
+    cross.setAttribute("d", `M ${x - 3.5} ${y - 3.5} L ${x + 3.5} ${y + 3.5} M ${x + 3.5} ${y - 3.5} L ${x - 3.5} ${y + 3.5}`);
+    cross.setAttribute("class", className);
+    return cross;
+  }
+  const circle = makeSvgElement("circle");
+  circle.setAttribute("cx", x);
+  circle.setAttribute("cy", y);
+  circle.setAttribute("r", markerName === "ring" ? "3.5" : "3");
+  circle.setAttribute("class", `${className}${markerName === "ring" ? " trend-point-ring" : ""}`);
+  return circle;
+}
+
+function renderTrendDataTable(mode, snapshots, valuesByImplementation) {
+  const details = document.createElement("details");
+  details.className = "performance-data-table";
+  const summary = document.createElement("summary");
+  summary.textContent = "Data table";
+  details.append(summary);
+  const wrapper = document.createElement("div");
+  wrapper.className = "performance-data-table__scroll";
+  wrapper.tabIndex = 0;
+  const table = document.createElement("table");
+  const caption = document.createElement("caption");
+  caption.textContent = `${modeConfig[mode].title} values by retained snapshot`;
+  table.append(caption);
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  const implementationHead = document.createElement("th");
+  implementationHead.scope = "col";
+  implementationHead.textContent = "Implementation";
+  headRow.append(implementationHead);
+  for (const snapshot of snapshots) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = snapshot.date || snapshot.generated_at || "latest";
+    headRow.append(cell);
+  }
+  head.append(headRow);
+  const body = document.createElement("tbody");
+  for (const [implementation, points] of valuesByImplementation.entries()) {
+    const row = document.createElement("tr");
+    const name = document.createElement("th");
+    name.scope = "row";
+    name.textContent = implementation;
+    row.append(name);
+    for (const point of points) {
+      const cell = document.createElement("td");
+      cell.textContent = point.value === null ? "-" : `${formatNumber(point.value, modeConfig[mode].decimals)} ${modeConfig[mode].unit}`;
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  wrapper.append(table);
+  details.append(wrapper);
+  return details;
 }
 
 function renderTrendChart(mode) {
   const config = modeConfig[mode];
   const snapshots = historySnapshots();
   const chart = document.createElement("section");
-  chart.className = "trend-chart";
+  chart.className = "trend-chart performance-trend-chart";
+  chart.tabIndex = 0;
+  chart.setAttribute("role", "region");
+  chart.setAttribute("aria-label", `${config.title} trend comparison`);
 
   const heading = document.createElement("div");
   heading.className = "trend-head";
   const title = document.createElement("h3");
   title.textContent = config.title;
   const subtitle = document.createElement("p");
-  subtitle.textContent = `${config.metricDetail} over ${snapshots.length || 0} day${snapshots.length === 1 ? "" : "s"}`;
+  subtitle.textContent = `${config.metricDetail} over ${snapshots.length} retained snapshot${snapshots.length === 1 ? "" : "s"}`;
   heading.append(title, subtitle);
-
-  if (!snapshots.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.textContent = "No performance history loaded.";
-    chart.append(heading, empty);
-    return chart;
-  }
 
   const valuesByImplementation = new Map();
   let maxValue = 0;
@@ -1167,18 +1226,15 @@ function renderTrendChart(mode) {
     }
     const points = snapshots.map((snapshot, index) => {
       const value = bestHistoryValue(snapshot, implementation, mode);
-      if (value !== null) {
-        maxValue = Math.max(maxValue, value);
-      }
+      if (value !== null) maxValue = Math.max(maxValue, value);
       return { index, value };
     });
     if (points.some((point) => point.value !== null)) {
       valuesByImplementation.set(implementation, points);
     }
   }
-
   if (!valuesByImplementation.size || maxValue <= 0) {
-    const empty = document.createElement("div");
+    const empty = document.createElement("p");
     empty.className = "empty-state";
     empty.textContent = activePlotFilters.languages.size || activePlotFilters.vendors.size
       ? "No history series match the current filters."
@@ -1194,55 +1250,11 @@ function renderTrendChart(mode) {
   const plotHeight = height - margin.top - margin.bottom;
   const xForIndex = (index) => margin.left + (snapshots.length === 1 ? plotWidth / 2 : (index / (snapshots.length - 1)) * plotWidth);
   const yForValue = (value) => margin.top + (1 - value / maxValue) * plotHeight;
-
   const svg = makeSvgElement("svg");
   svg.setAttribute("class", "trend-svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `${config.title} trend`);
-  const tooltip = document.createElement("div");
-  tooltip.className = "trend-tooltip";
-  tooltip.setAttribute("role", "tooltip");
-
-  function showTrendTooltip(event, detail, x, y) {
-    tooltip.replaceChildren();
-    const name = document.createElement("strong");
-    name.textContent = detail.title;
-    const value = document.createElement("span");
-    value.textContent = detail.value;
-    const date = document.createElement("span");
-    date.textContent = detail.date;
-    tooltip.append(name, value, date);
-    tooltip.classList.add("visible");
-
-    const chartRect = chart.getBoundingClientRect();
-    const svgRect = svg.getBoundingClientRect();
-    const pointX = (x / width) * svgRect.width + svgRect.left - chartRect.left;
-    const pointY = (y / height) * svgRect.height + svgRect.top - chartRect.top;
-    tooltip.style.left = `${Math.min(Math.max(pointX + 12, 8), chartRect.width - 180)}px`;
-    tooltip.style.top = `${Math.max(pointY - 56, 8)}px`;
-  }
-
-  function hideTrendTooltip() {
-    tooltip.classList.remove("visible");
-  }
-  const interactivePoints = [];
-
-  function showNearestTrendPoint(event) {
-    if (!interactivePoints.length) {
-      return;
-    }
-    const svgRect = svg.getBoundingClientRect();
-    const x = ((event.clientX - svgRect.left) / svgRect.width) * width;
-    const y = ((event.clientY - svgRect.top) / svgRect.height) * height;
-    const nearest = interactivePoints.reduce((best, point) => {
-      const distance = (point.x - x) ** 2 + (point.y - y) ** 2;
-      return !best || distance < best.distance ? { point, distance } : best;
-    }, null);
-    if (nearest) {
-      showTrendTooltip(event, nearest.point.detail, nearest.point.x, nearest.point.y);
-    }
-  }
+  svg.setAttribute("aria-label", `${config.title} trend chart in ${config.unit}`);
 
   for (let tick = 0; tick <= 4; tick += 1) {
     const value = (maxValue * tick) / 4;
@@ -1254,7 +1266,6 @@ function renderTrendChart(mode) {
     line.setAttribute("y1", y);
     line.setAttribute("y2", y);
     svg.append(line);
-
     const label = makeSvgElement("text");
     label.setAttribute("class", "trend-axis-label");
     label.setAttribute("x", margin.left - 8);
@@ -1265,9 +1276,7 @@ function renderTrendChart(mode) {
   }
 
   const dateLabelIndexes = new Set([0, snapshots.length - 1]);
-  if (snapshots.length > 3) {
-    dateLabelIndexes.add(Math.floor((snapshots.length - 1) / 2));
-  }
+  if (snapshots.length > 3) dateLabelIndexes.add(Math.floor((snapshots.length - 1) / 2));
   for (const index of dateLabelIndexes) {
     const label = makeSvgElement("text");
     label.setAttribute("class", "trend-axis-label");
@@ -1278,14 +1287,39 @@ function renderTrendChart(mode) {
     svg.append(label);
   }
 
-  for (const [implementation, points] of valuesByImplementation.entries()) {
+  const tooltip = document.createElement("div");
+  tooltip.className = "trend-tooltip";
+  tooltip.setAttribute("role", "tooltip");
+  const interactivePoints = [];
+  function showTrendTooltip(event, detail, x, y) {
+    tooltip.replaceChildren();
+    const name = document.createElement("strong");
+    name.textContent = detail.title;
+    const value = document.createElement("span");
+    value.textContent = detail.value;
+    const date = document.createElement("span");
+    date.textContent = detail.date;
+    tooltip.append(name, value, date);
+    tooltip.classList.add("visible");
+    const chartRect = chart.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const pointX = (x / width) * svgRect.width + svgRect.left - chartRect.left;
+    const pointY = (y / height) * svgRect.height + svgRect.top - chartRect.top;
+    tooltip.style.left = `${Math.min(Math.max(pointX + 12, 8), Math.max(chartRect.width - 180, 8))}px`;
+    tooltip.style.top = `${Math.max(pointY - 56, 8)}px`;
+  }
+  function hideTrendTooltip() {
+    tooltip.classList.remove("visible");
+  }
+
+  for (const [seriesIndex, [implementation, points]] of [...valuesByImplementation.entries()].entries()) {
     const filtered = points.filter((point) => point.value !== null);
     const pathData = filtered.map((point, index) => `${index === 0 ? "M" : "L"} ${xForIndex(point.index).toFixed(2)} ${yForValue(point.value).toFixed(2)}`).join(" ");
     const path = makeSvgElement("path");
     const isCoquicFamily = isCoquicFamilyImplementation(implementation);
     path.setAttribute("class", `trend-line${isCoquicFamily ? " coquic-family" : ""}`);
     path.setAttribute("d", pathData);
-    path.setAttribute("stroke", colors[implementation] || "#c3d4d8");
+    setSeriesStyle(path, seriesIndex);
     svg.append(path);
 
     for (const point of filtered) {
@@ -1296,19 +1330,15 @@ function renderTrendChart(mode) {
         value: `${formatNumber(point.value, config.decimals)} ${config.unit}`,
         date: snapshots[point.index].date || snapshots[point.index].generated_at || "latest",
       };
-      const circle = makeSvgElement("circle");
-      circle.setAttribute("class", `trend-point${isCoquicFamily ? " coquic-family" : ""}`);
-      circle.setAttribute("cx", x);
-      circle.setAttribute("cy", y);
-      circle.setAttribute("r", "2.7");
-      circle.setAttribute("fill", colors[implementation] || "#c3d4d8");
-      svg.append(circle);
-
+      const marker = renderSeriesMarker(seriesMarker(seriesIndex), x, y);
+      setSeriesStyle(marker, seriesIndex);
+      if (isCoquicFamily) marker.classList.add("coquic-family");
+      svg.append(marker);
       const hitPoint = makeSvgElement("circle");
       hitPoint.setAttribute("class", "trend-hit-point");
       hitPoint.setAttribute("cx", x);
       hitPoint.setAttribute("cy", y);
-      hitPoint.setAttribute("r", "9");
+      hitPoint.setAttribute("r", "10");
       hitPoint.setAttribute("tabindex", "0");
       hitPoint.setAttribute("aria-label", `${detail.title}, ${detail.value}, ${detail.date}`);
       hitPoint.addEventListener("mouseenter", (event) => showTrendTooltip(event, detail, x, y));
@@ -1321,61 +1351,96 @@ function renderTrendChart(mode) {
     }
   }
 
-  const hoverPlane = makeSvgElement("rect");
-  hoverPlane.setAttribute("class", "trend-hover-plane");
-  hoverPlane.setAttribute("x", margin.left);
-  hoverPlane.setAttribute("y", margin.top);
-  hoverPlane.setAttribute("width", plotWidth);
-  hoverPlane.setAttribute("height", plotHeight);
-  hoverPlane.addEventListener("mousemove", showNearestTrendPoint);
-  hoverPlane.addEventListener("mouseleave", hideTrendTooltip);
+  function showNearestTrendPoint(event) {
+    if (!interactivePoints.length) return;
+    const svgRect = svg.getBoundingClientRect();
+    const x = ((event.clientX - svgRect.left) / svgRect.width) * width;
+    const y = ((event.clientY - svgRect.top) / svgRect.height) * height;
+    const nearest = interactivePoints.reduce((best, point) => {
+      const distance = (point.x - x) ** 2 + (point.y - y) ** 2;
+      return !best || distance < best.distance ? { point, distance } : best;
+    }, null);
+    if (nearest) showTrendTooltip(event, nearest.point.detail, nearest.point.x, nearest.point.y);
+  }
   svg.addEventListener("mousemove", showNearestTrendPoint);
   svg.addEventListener("mouseleave", hideTrendTooltip);
-  svg.append(hoverPlane);
 
   const legend = document.createElement("div");
   legend.className = "trend-legend";
-  legend.replaceChildren(
-    ...[...valuesByImplementation.keys()].map((implementation) => {
-      const info = implementationInfo(implementation);
-      const item = document.createElement("span");
-      if (isCoquicFamilyImplementation(implementation)) {
-        item.className = "coquic-family";
-        item.style.setProperty("--family-color", colors[implementation] || colors.coquic);
-      }
-      const swatch = document.createElement("i");
-      swatch.style.setProperty("--legend-color", colors[implementation] || "#c3d4d8");
-      const text = document.createElement("b");
-      text.textContent = implementation;
-      if (info.familyLabel) {
-        const family = document.createElement("em");
-        family.className = "trend-family-chip";
-        family.textContent = info.surfaceLabel || info.familyLabel;
-        item.append(swatch, text, family);
-      } else {
-        item.append(swatch, text);
-      }
-      const meta = document.createElement("small");
-      meta.textContent = `${info.company} | ${info.language} | ${libraryVersionLabel(implementation)}`;
-      item.append(meta);
-      return item;
-    }),
-  );
-
-  chart.append(heading, svg, tooltip, legend);
+  for (const [seriesIndex, implementation] of [...valuesByImplementation.keys()].entries()) {
+    const info = implementationInfo(implementation);
+    const item = document.createElement("span");
+    if (isCoquicFamilyImplementation(implementation)) item.classList.add("coquic-family");
+    const marker = document.createElement("i");
+    marker.className = `trend-marker trend-marker--${seriesMarker(seriesIndex)}`;
+    setSeriesStyle(marker, seriesIndex);
+    marker.setAttribute("aria-hidden", "true");
+    const text = document.createElement("b");
+    text.textContent = implementation;
+    item.append(marker, text);
+    if (info.familyLabel) {
+      const family = document.createElement("em");
+      family.className = "trend-family-chip";
+      family.textContent = info.surfaceLabel || info.familyLabel;
+      item.append(family);
+    }
+    const meta = document.createElement("small");
+    meta.textContent = `${info.company} | ${info.language} | ${libraryVersionLabel(implementation)}`;
+    item.append(meta);
+    legend.append(item);
+  }
+  chart.append(heading, svg, tooltip, legend, renderTrendDataTable(mode, snapshots, valuesByImplementation));
   return chart;
 }
 
-function renderAll() {
-  renderPlots();
+function renderHistoryChart() {
+  const trend = byId("performance-trend");
+  const history = byId("performance-history");
+  const state = byId("performance-history-state");
+  const unit = byId("performance-history-unit");
+  unit.textContent = historyState === "ready" ? modeConfig[activePlotMode].metricDetail : historyState === "loading" ? "History loading" : "Unavailable";
+  if (historyState === "loading") {
+    history.setAttribute("aria-busy", "true");
+    trend.replaceChildren(renderLoadingSkeleton("history"));
+    setStateMessage(state, "loading", "History loading", "Current ranking remains available while retained snapshots load.");
+    return;
+  }
+  if (historyState === "error") {
+    history.setAttribute("aria-busy", "false");
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No performance history loaded.";
+    trend.replaceChildren(empty);
+    setStateMessage(state, "error", "History unavailable", "Current benchmark evidence is retained. Retry when history artifacts are available.");
+    return;
+  }
+  history.setAttribute("aria-busy", "false");
+  const snapshots = historySnapshots();
+  if (!snapshots.length) {
+    trend.replaceChildren();
+    setStateMessage(state, "ready", "No retained history", "No history snapshots were published for this benchmark.");
+    return;
+  }
+  setStateMessage(state, "ready", "History available", `${snapshots.length} retained snapshot${snapshots.length === 1 ? "" : "s"}.`);
+  trend.replaceChildren(renderTrendChart(activePlotMode));
 }
 
-function isSafePerfHistoryPath(path) {
-  return typeof path === "string" && /^[0-9A-Za-z._-]+\.json$/.test(path) && path !== "index.json";
+function renderLoadingSkeleton(kind) {
+  const skeleton = document.createElement("div");
+  skeleton.className = `performance-skeleton performance-skeleton--${kind}`;
+  skeleton.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < (kind === "history" ? 5 : 4); index += 1) {
+    skeleton.append(document.createElement("span"));
+  }
+  return skeleton;
+}
+
+function isValidSnapshot(snapshot) {
+  return Boolean(snapshot && Array.isArray(snapshot.rows) && Array.isArray(snapshot.sources));
 }
 
 function normalizeHistorySnapshot(snapshot, metadata = {}) {
-  if (!snapshot || !Array.isArray(snapshot.rows) || !Array.isArray(snapshot.sources)) {
+  if (!isValidSnapshot(snapshot)) {
     return null;
   }
   return {
@@ -1387,29 +1452,25 @@ function normalizeHistorySnapshot(snapshot, metadata = {}) {
   };
 }
 
+function isSafePerfHistoryPath(path) {
+  return typeof path === "string" && /^[0-9A-Za-z._-]+\.json$/.test(path) && path !== "index.json";
+}
+
 async function loadPerfHistoryFromIndex() {
   const response = await fetch("./perf-history/index.json", { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const index = await response.json();
-  if (!index || !Array.isArray(index.snapshots)) {
-    throw new Error("invalid perf-history/index.json");
-  }
+  if (!index || !Array.isArray(index.snapshots)) throw new Error("invalid perf-history/index.json");
   const entries = index.snapshots.filter((entry) => entry && isSafePerfHistoryPath(entry.path)).slice(-perfHistorySnapshotLimit);
-  const loaded = await Promise.all(
-    entries.map(async (entry) => {
-      try {
-        const snapshotResponse = await fetch(`./perf-history/${entry.path}`, { cache: "force-cache" });
-        if (!snapshotResponse.ok) {
-          throw new Error(`HTTP ${snapshotResponse.status}`);
-        }
-        return normalizeHistorySnapshot(await snapshotResponse.json(), entry);
-      } catch {
-        return null;
-      }
-    }),
-  );
+  const loaded = await Promise.all(entries.map(async (entry) => {
+    try {
+      const snapshotResponse = await fetch(`./perf-history/${entry.path}`, { cache: "force-cache" });
+      if (!snapshotResponse.ok) throw new Error(`HTTP ${snapshotResponse.status}`);
+      return normalizeHistorySnapshot(await snapshotResponse.json(), entry);
+    } catch {
+      return null;
+    }
+  }));
   return {
     schema_version: 1,
     generated_at: index.generated_at || "unavailable",
@@ -1419,59 +1480,111 @@ async function loadPerfHistoryFromIndex() {
 
 async function loadLegacyPerfHistory() {
   const response = await fetch("./perf-history.json", { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const history = await response.json();
-  if (!Array.isArray(history.snapshots)) {
-    throw new Error("invalid perf-history.json");
-  }
+  if (!Array.isArray(history.snapshots)) throw new Error("invalid perf-history.json");
   return {
     ...history,
     snapshots: history.snapshots.map((snapshot) => normalizeHistorySnapshot(snapshot)).filter(Boolean),
   };
 }
 
-async function loadLiveData() {
+async function loadCurrentSnapshot() {
+  const response = await fetch("./perf-results.json", { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const snapshot = await response.json();
+  if (!isValidSnapshot(snapshot)) throw new Error("invalid perf-results.json");
+  return snapshot;
+}
+
+async function loadHistory() {
   try {
-    const response = await fetch("./perf-results.json", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const snapshot = await response.json();
-    if (!Array.isArray(snapshot.rows) || !Array.isArray(snapshot.sources)) {
-      throw new Error("invalid perf-results.json");
-    }
-    activeSnapshot = snapshot;
+    const indexed = await loadPerfHistoryFromIndex();
+    if (indexed.snapshots.length) return indexed;
+    return await loadLegacyPerfHistory();
   } catch {
-    activeSnapshot = fallbackPerfSnapshot;
+    return await loadLegacyPerfHistory();
   }
-  try {
-    activeHistory = await loadPerfHistoryFromIndex();
-    if (!activeHistory.snapshots.length) {
-      activeHistory = await loadLegacyPerfHistory();
-    }
-  } catch {
-    try {
-      activeHistory = await loadLegacyPerfHistory();
-    } catch {
-      activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
-    }
-  }
+}
+
+function renderAll() {
+  ensureControls();
+  renderSummary();
+  updateFilterControls();
+  renderCurrentRanking();
+  renderHistoryChart();
+}
+
+function setupDialogs() {
+  if (dialogListenersReady) return;
+  const detailDialog = byId("perf-detail-dialog");
+  const flamegraphDialog = byId("perf-flamegraph-dialog");
+  byId("perf-detail-close").addEventListener("click", () => closePerfDetailModal());
+  byId("perf-flamegraph-close").addEventListener("click", () => closeFlamegraphDialog());
+  detailDialog.addEventListener("click", (event) => {
+    if (event.target === detailDialog) closePerfDetailModal();
+  });
+  flamegraphDialog.addEventListener("click", (event) => {
+    if (event.target === flamegraphDialog) closeFlamegraphDialog();
+  });
+  detailDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closePerfDetailModal();
+  });
+  flamegraphDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeFlamegraphDialog();
+  });
+  dialogListenersReady = true;
+}
+
+function startLoading() {
+  const token = ++loadToken;
+  currentState = "loading";
+  historyState = "loading";
+  activeSnapshot = fallbackPerfSnapshot;
+  activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
   renderAll();
+  setupDialogs();
+
+  const currentPromise = loadCurrentSnapshot();
+  const historyPromise = loadHistory();
+  currentPromise.then((snapshot) => {
+    if (token !== loadToken || !byId("performance-page")?.isConnected) return;
+    activeSnapshot = snapshot;
+    currentState = "ready";
+    renderSummary();
+    updateFilterControls();
+    renderCurrentRanking();
+  }).catch(() => {
+    if (token !== loadToken || !byId("performance-page")?.isConnected) return;
+    activeSnapshot = fallbackPerfSnapshot;
+    currentState = "error";
+    renderSummary();
+    updateFilterControls();
+    renderCurrentRanking();
+  });
+  historyPromise.then((history) => {
+    if (token !== loadToken || !byId("performance-page")?.isConnected) return;
+    activeHistory = history;
+    historyState = historySnapshots().length ? "ready" : "error";
+    renderHistoryChart();
+  }).catch(() => {
+    if (token !== loadToken || !byId("performance-page")?.isConnected) return;
+    activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
+    historyState = "error";
+    renderHistoryChart();
+  });
 }
 
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") {
-    return;
-  }
-  if (closeFlamegraphFullscreen()) {
-    event.preventDefault();
-    return;
-  }
-  if (document.querySelector(".perf-detail-backdrop")) {
-    closePerfDetailModal();
+  if (event.key === "Escape") {
+    const filterPanel = byId("performance-filter-panel");
+    if (filterPanel && !filterPanel.hidden && window.matchMedia("(max-width: 680px)").matches) {
+      event.preventDefault();
+      setFilterPanelOpen(false, true);
+    }
   }
 });
 
-loadLiveData();
+startLoading();

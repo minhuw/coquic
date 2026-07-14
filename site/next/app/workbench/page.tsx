@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Script from 'next/script';
 import { Gauge, Info, ListChecks, Play, Square, StepForward, X } from 'lucide-react';
 
-import { DemoNav } from '@/components/demo-nav';
 import { PageHeader } from '@/components/page-header';
 
 export const metadata: Metadata = {
@@ -147,7 +146,6 @@ export default function WorkbenchPage() {
   return (
     <>
       <main className="coquic-page workbench-page">
-        <DemoNav active="workbench" />
         <PageHeader eyebrow="wasm QUIC laboratory" title="CoQUIC Protocol Workbench" />
 
         <div className="scenario-toolbar" aria-label="Interop case controls">

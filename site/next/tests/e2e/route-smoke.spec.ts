@@ -73,7 +73,10 @@ test.describe('route identity', () => {
       expect(response?.ok(), `${route.path} returned ${response?.status() ?? 'no response'}`).toBe(true);
       await expect(page).toHaveTitle(route.title);
       await expect(page.getByRole('heading', { name: route.heading, level: route.headingLevel ?? 1 })).toBeVisible();
-      await expect(page.locator('body > main')).toHaveCount(1);
+      await expect(page.locator('main.coquic-page')).toHaveCount(1);
+      await expect(page.getByRole('navigation', { name: 'Demo views' })).toHaveCount(1);
+      await expect(page.getByRole('link', { name: 'Skip to content' })).toHaveCount(1);
+      await expect(page.getByRole('contentinfo')).toHaveCount(1);
     });
   }
 });

@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ExternalLink, FileJson, FileText } from 'lucide-react';
 
-import { DemoNav } from '@/components/demo-nav';
 import { Button } from '@/components/ui/button';
 
 export const metadata: Metadata = {
@@ -15,8 +14,6 @@ export const metadata: Metadata = {
 export default function DuvetPage() {
   return (
     <main className="coquic-page">
-      <DemoNav active="duvet" />
-
       <section className="grid gap-5 border-b border-[var(--line)] py-7 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div>
           <span className="eyebrow">RFC traceability</span>

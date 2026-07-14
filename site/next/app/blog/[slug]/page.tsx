@@ -5,7 +5,6 @@ import { ArrowLeft } from 'lucide-react';
 
 import { BlogLanguageProvider, BlogLanguageTabs } from '@/components/blog/blog-language-switcher';
 import { BlogPostContent } from '@/components/blog/blog-post-content';
-import { DemoNav } from '@/components/demo-nav';
 import { formatBlogDate, getBlogPost, getStaticBlogSlugs } from '@/lib/blog';
 
 type BlogPostPageProps = {
@@ -38,8 +37,6 @@ export default async function BlogPostPage({ params }: BlogPostPageProps) {
 
   return (
     <main className="coquic-page">
-      <DemoNav active="blog" />
-
       <BlogLanguageProvider>
         <article className="blog-post">
           <Link className="blog-back-link" href="/blog">

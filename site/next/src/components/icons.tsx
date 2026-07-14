@@ -12,7 +12,7 @@ export function CoquicLogoIcon(props: SVGProps<SVGSVGElement>) {
         </mask>
       </defs>
       <circle cx="256" cy="253" r="171" fill="currentColor" mask="url(#coquic-logo-cutouts)" />
-      <rect fill="#0F62FE" x="-47" y="307" width="65" height="101" rx="9" transform="skewX(45)" />
+      <rect fill="var(--accent-ink, #0F62FE)" x="-47" y="307" width="65" height="101" rx="9" transform="skewX(45)" />
     </svg>
   );
 }

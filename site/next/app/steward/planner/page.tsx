@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 
-import { DemoNav } from '@/components/demo-nav';
 import { StewardPlannerLive } from '@/components/steward-planner';
 
 export const metadata: Metadata = {
@@ -10,7 +9,6 @@ export const metadata: Metadata = {
 export default function StewardPlannerPage() {
   return (
     <main className="coquic-page steward-public-page">
-      <DemoNav active="steward" />
       <StewardPlannerLive />
     </main>
   );

@@ -1,10 +1,7 @@
 "use client";
 
-import { type ReactNode, useId, useState } from "react";
-import type { KeyboardEvent } from "react";
 import {
   Activity,
-  ChevronRight,
   Inbox,
   ImageIcon,
   ListChecks,
@@ -15,8 +12,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { CodexTranscriptThread } from "./codex-transcript-thread";
+import { EvidenceDisclosure } from "./evidence/disclosure";
+import { EvidenceMessage } from "./evidence/message";
+import { CodeBlock } from "./evidence/code-block";
 import { parseCodexTranscriptText } from "@/lib/codex-transcript";
-import { CodeBlock } from "./steward-code-block";
 
 export type PublicCodexRunDiagnostics = {
   status: string;
@@ -90,7 +89,7 @@ export function TranscriptView({
 }) {
   if (!text) {
     return (
-      <div className="chat-transcript" aria-label="Agent transcript" tabIndex={0}>
+      <div className="evidence-root chat-transcript" aria-label="Agent transcript" tabIndex={0}>
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
         <div className="empty-state">No transcript captured for the selected task.</div>
       </div>
@@ -100,32 +99,32 @@ export function TranscriptView({
   const records = parseCodexTranscriptText(text);
   if (!records.length) {
     return (
-      <div className="chat-transcript" aria-label="Agent transcript" tabIndex={0}>
+      <div className="evidence-root chat-transcript" aria-label="Agent transcript" tabIndex={0}>
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
         {promptParts.boilerplate && <CollapsedPrompt text={promptParts.boilerplate} />}
         {promptParts.visible && (
-          <ChatBubble hideLabel={isPlannerInputPrompt(promptParts.visible)} label="Task prompt" role="user">
+          <EvidenceMessage className="chat-bubble user" hideLabel={isPlannerInputPrompt(promptParts.visible)} icon={<UserRound size={16} />} label="Task prompt" role="user">
             <TextBlocks taskId={taskId} text={promptParts.visible} />
-          </ChatBubble>
+          </EvidenceMessage>
         )}
         {metadataOnlyTranscript(text) ? (
           <div className="empty-state">No displayable agent output has been captured yet.</div>
         ) : (
-          <ChatBubble label="Transcript text" role="assistant">
+          <EvidenceMessage className="chat-bubble assistant" icon={<MessageSquareText size={16} />} label="Transcript text" role="assistant">
             <TextBlocks taskId={taskId} text={text} />
-          </ChatBubble>
+          </EvidenceMessage>
         )}
       </div>
     );
   }
   return (
-    <div className="chat-transcript" aria-label="Agent transcript" tabIndex={0}>
+    <div className="evidence-root chat-transcript" aria-label="Agent transcript" tabIndex={0}>
       <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
       {promptParts.boilerplate && <CollapsedPrompt text={promptParts.boilerplate} />}
       {promptParts.visible && (
-        <ChatBubble hideLabel={isPlannerInputPrompt(promptParts.visible)} label="Task prompt" role="user">
+        <EvidenceMessage className="chat-bubble user" hideLabel={isPlannerInputPrompt(promptParts.visible)} icon={<UserRound size={16} />} label="Task prompt" role="user">
           <TextBlocks taskId={taskId} text={promptParts.visible} />
-        </ChatBubble>
+        </EvidenceMessage>
       )}
       <CodexTranscriptThread records={records} />
     </div>
@@ -145,10 +144,11 @@ function SessionDiagnostics({
   }
   const tail = diagnostics.last_item_type || diagnostics.last_event_type;
   return (
-    <ToolCard
+    <EvidenceDisclosure
+      className="tool-card danger"
       icon={<XCircle size={16} />}
-      meta={diagnostics.status.replaceAll("_", " ")}
-      title="Session diagnostics"
+      metadata={diagnostics.status.replaceAll("_", " ")}
+      label="Session diagnostics"
       tone="danger"
     >
       <div className="session-diagnostics">
@@ -171,7 +171,7 @@ function SessionDiagnostics({
           <CodeBlock compact text={diagnostics.last_output} title="Last output" />
         )}
       </div>
-    </ToolCard>
+    </EvidenceDisclosure>
   );
 }
 
@@ -224,76 +224,6 @@ function CollapsedPrompt({ text }: { text: string }) {
       <summary>Planner instructions</summary>
       <TextBlocks taskId="" text={text} />
     </details>
-  );
-}
-
-function ChatBubble({
-  children,
-  hideLabel = false,
-  label,
-  role,
-}: {
-  children: ReactNode;
-  hideLabel?: boolean;
-  label: string;
-  role: "assistant" | "user";
-}) {
-  return (
-    <article className={`chat-bubble ${role}`}>
-      <div className="chat-avatar">
-        {role === "user" ? <UserRound size={16} /> : <MessageSquareText size={16} />}
-      </div>
-      <div className="chat-body">
-        {!hideLabel && <div className="chat-label">{label}</div>}
-        {children}
-      </div>
-    </article>
-  );
-}
-
-function ToolCard({
-  children,
-  icon,
-  meta,
-  title,
-  tone,
-}: {
-  children: ReactNode;
-  icon: ReactNode;
-  meta: string;
-  title: string;
-  tone: "danger" | "neutral" | "ok" | "pending";
-}) {
-  const bodyId = useId();
-  const [open, setOpen] = useState(tone === "danger" || tone === "pending");
-  const toggle = () => setOpen((current) => !current);
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    toggle();
-  };
-
-  return (
-    <article className={`tool-card ${tone} ${open ? "open" : ""}`}>
-      <div
-        aria-controls={bodyId}
-        aria-expanded={open}
-        className="tool-head"
-        onClick={toggle}
-        onKeyDown={onKeyDown}
-        role="button"
-        tabIndex={0}
-      >
-        <div className="tool-icon">{icon}</div>
-        <div>
-          <h3>{title}</h3>
-          <span>{meta}</span>
-          {!open && <em>Click to inspect output</em>}
-        </div>
-        <ChevronRight className="tool-chevron" size={15} />
-      </div>
-      {open && <div className="tool-body" id={bodyId}>{children}</div>}
-    </article>
   );
 }
 

@@ -228,17 +228,22 @@ let activeRunToken = 0;
 let paused = false;
 let pauseWaiters = [];
 let modalLastFocus = null;
+let modalLastPacketId = 0;
 let stepBudget = 0;
 let schedulerWaiters = [];
 let currentRunPromise = null;
 let currentRunState = null;
 let protocolStepInProgress = false;
 let activeWorkbenchRoot = null;
+let activeWorkbenchView = "client";
 let networkEnvironment = new NetworkEnvironment();
 let activeScenarioPresetId = defaultScenarioPresetId;
 const activePackets = new Map();
 const activeDatagrams = new Map();
 const boundControlNodes = new WeakSet();
+const boundWorkbenchViewTabs = new WeakSet();
+const boundPacketDialogs = new WeakSet();
+const workbenchViews = ["client", "server", "trace", "packets"];
 
 function el(id) {
   return document.getElementById(id);
@@ -440,6 +445,71 @@ function bindControl(id, event, handler) {
   boundControlNodes.add(node);
 }
 
+function isNarrowWorkbench() {
+  return window.matchMedia("(max-width: 1023px)").matches;
+}
+
+function selectWorkbenchView(view, moveFocus = false) {
+  if (!workbenchViews.includes(view)) return;
+  activeWorkbenchView = view;
+  const root = el("workbench-page");
+  if (root) root.dataset.workbenchView = view;
+  updateWorkbenchViews();
+  if (moveFocus) el(`workbench-tab-${view}`)?.focus({ preventScroll: true });
+}
+
+function updateWorkbenchViews() {
+  const narrow = isNarrowWorkbench();
+  const tablist = el("workbench-view-tabs");
+  if (tablist) tablist.hidden = !narrow;
+  for (const view of workbenchViews) {
+    const tab = el(`workbench-tab-${view}`);
+    const panel = el(`workbench-panel-${view}`);
+    const selected = view === activeWorkbenchView;
+    if (tab) {
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    if (!panel) continue;
+    panel.hidden = narrow && !selected;
+    if (narrow) {
+      panel.setAttribute("role", "tabpanel");
+      panel.setAttribute("aria-labelledby", `workbench-tab-${view}`);
+      panel.tabIndex = 0;
+    } else {
+      panel.removeAttribute("role");
+      panel.removeAttribute("tabindex");
+      if (view === "client" || view === "server") {
+        panel.setAttribute("aria-labelledby", `${view}-panel-title`);
+      } else if (view === "trace") {
+        panel.setAttribute("aria-labelledby", "workbench-trace-title");
+      } else {
+        panel.removeAttribute("aria-labelledby");
+      }
+    }
+  }
+}
+
+function bindWorkbenchViewTabs() {
+  for (const [index, view] of workbenchViews.entries()) {
+    const tab = el(`workbench-tab-${view}`);
+    if (!tab || boundWorkbenchViewTabs.has(tab)) continue;
+    tab.addEventListener("click", () => selectWorkbenchView(view));
+    tab.addEventListener("keydown", (event) => {
+      let nextIndex = index;
+      if (event.key === "ArrowRight") nextIndex = (index + 1) % workbenchViews.length;
+      if (event.key === "ArrowLeft") nextIndex = (index - 1 + workbenchViews.length) % workbenchViews.length;
+      if (event.key === "Home") nextIndex = 0;
+      if (event.key === "End") nextIndex = workbenchViews.length - 1;
+      if (nextIndex === index) return;
+      event.preventDefault();
+      selectWorkbenchView(workbenchViews[nextIndex], true);
+    });
+    boundWorkbenchViewTabs.add(tab);
+  }
+  updateWorkbenchViews();
+}
+
 function log(timeMs, text, cls = "") {
   const list = el("log");
   if (!list) return;
@@ -497,7 +567,7 @@ function updateRunButton() {
   if (startLabel) startLabel.textContent = wasmFailed ? "Failed" : wasmUnavailable ? "Loading" : demoState === "paused" ? "Resume" : "Start";
   if (stopButton) {
     stopButton.disabled = wasmUnavailable || demoState !== "running";
-    stopButton.setAttribute("aria-label", "Stop protocol exchange");
+    stopButton.setAttribute("aria-label", "Pause protocol exchange");
   }
   if (stepButton) {
     stepButton.disabled = wasmUnavailable;
@@ -518,6 +588,7 @@ function setModuleState(text, className = "") {
   const node = el("module-state");
   if (!node) return;
   node.className = `module-state${className ? ` ${className}` : ""}`;
+  node.dataset.state = className === "failed" ? "error" : className === "ready" ? "ready" : "loading";
   node.textContent = text;
 }
 
@@ -1183,6 +1254,8 @@ function visualizePacket(direction, record, delayMs = currentPacketDelayMs()) {
   packetSerial += 1;
   packet.type = "button";
   packet.className = `packet ${fromClient ? "from-client" : "from-server"}`;
+  packet.dataset.packetId = `${record.id}`;
+  packet.setAttribute("aria-label", `Inspect packet ${record.id}, ${record.directionLabel} ${record.kind}`);
   packet.innerHTML = "<strong></strong><span></span>";
   packet.querySelector("strong").textContent = `#${record.id} ${record.kind}`;
   packet.addEventListener("click", () => selectPacket(record.id, { openModal: true }));
@@ -1339,11 +1412,16 @@ function frameSummary(record) {
 
 function renderPacketList() {
   const list = el("packet-list");
+  const focusedPacketId = list.contains(document.activeElement)
+    ? document.activeElement?.dataset?.packetId
+    : null;
   list.textContent = "";
   for (const record of packetRecords) {
     const row = document.createElement("button");
     row.type = "button";
     row.className = `packet-row${record.id === selectedPacketId ? " selected" : ""}`;
+    row.dataset.packetId = `${record.id}`;
+    row.setAttribute("aria-label", `Inspect packet ${record.id}, ${record.directionLabel} ${record.kind}, ${record.bytes.length} bytes`);
     row.innerHTML =
       '<strong class="mono"></strong><span></span><strong class="packet-kind"></strong><span class="packet-frames"></span><span class="packet-size"></span>';
     row.children[0].textContent = `#${record.id}`;
@@ -1358,6 +1436,9 @@ function renderPacketList() {
   updateDownloadPcapButton();
   list.scrollTop = list.scrollHeight;
   markSelectedPacket();
+  if (focusedPacketId) {
+    list.querySelector(`[data-packet-id="${focusedPacketId}"]`)?.focus({ preventScroll: true });
+  }
 }
 
 function addFieldRows(parent, rows) {
@@ -1469,6 +1550,9 @@ function renderPacketDetail(record, target = el("packet-modal-detail")) {
     if (record.inspect.plaintext_payload) {
       const plain = document.createElement("pre");
       plain.className = "hex-dump";
+      plain.tabIndex = 0;
+      plain.setAttribute("role", "region");
+      plain.setAttribute("aria-label", "Decrypted packet payload");
       plain.textContent = `Plaintext payload\n${record.inspect.plaintext_payload}`;
       tree.append(plain);
     }
@@ -1484,29 +1568,52 @@ function renderPacketDetail(record, target = el("packet-modal-detail")) {
 
   const raw = document.createElement("pre");
   raw.className = "hex-dump";
+  raw.tabIndex = 0;
+  raw.setAttribute("role", "region");
+  raw.setAttribute("aria-label", "Raw packet bytes");
   raw.textContent = hexDump(record.bytes);
   tree.append(raw);
   detail.append(tree);
 }
 
-function openPacketModal() {
+function setPacketModalScrollLock(locked) {
+  if (locked) {
+    const scrollbarGap = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+    document.body.style.setProperty("--workbench-scrollbar-gap", `${scrollbarGap}px`);
+    document.body.classList.add("workbench-modal-open");
+    return;
+  }
+  document.body.classList.remove("workbench-modal-open");
+  document.body.style.removeProperty("--workbench-scrollbar-gap");
+}
+
+function openPacketModal(trigger = null) {
   const modal = el("packet-modal");
-  modalLastFocus = document.activeElement;
+  if (!(modal instanceof HTMLDialogElement)) return;
+  modalLastFocus = trigger?.isConnected ? trigger : document.activeElement;
+  modalLastPacketId = selectedPacketId;
   modal.classList.add("open");
-  modal.setAttribute("aria-hidden", "false");
-  el("packet-modal-close").focus();
+  if (!modal.open) modal.showModal();
+  setPacketModalScrollLock(true);
+  el("packet-modal-close").focus({ preventScroll: true });
 }
 
 function closePacketModal() {
   const modal = el("packet-modal");
   if (!modal) return;
-  const shouldRestoreFocus = modal.classList.contains("open");
+  const shouldRestoreFocus = modal.open || modal.classList.contains("open");
+  if (modal.open) modal.close();
   modal.classList.remove("open");
-  modal.setAttribute("aria-hidden", "true");
-  if (shouldRestoreFocus && modalLastFocus && typeof modalLastFocus.focus === "function") {
-    modalLastFocus.focus();
+  setPacketModalScrollLock(false);
+  const currentPacketRow = modalLastPacketId
+    ? el("packet-list")?.querySelector(`[data-packet-id="${modalLastPacketId}"]`)
+    : null;
+  const focusTarget = currentPacketRow ?? modalLastFocus;
+  if (shouldRestoreFocus && focusTarget?.isConnected && typeof focusTarget.focus === "function") {
+    focusTarget.focus({ preventScroll: true });
   }
   modalLastFocus = null;
+  modalLastPacketId = 0;
 }
 
 function selectPacket(id, options = {}) {
@@ -1518,7 +1625,10 @@ function selectPacket(id, options = {}) {
     el("packet-selected").textContent = text;
     el("packet-modal-selected").textContent = text;
     renderPacketDetail(record);
-    if (options.openModal) openPacketModal();
+    if (options.openModal) {
+      const selectedRow = el("packet-list").querySelector(`[data-packet-id="${record.id}"]`);
+      openPacketModal(selectedRow);
+    }
   }
   markSelectedPacket();
 }
@@ -2900,6 +3010,19 @@ function handleStartClick() {
   startDemo(false);
 }
 
+function bindPacketDialog() {
+  const dialog = el("packet-modal");
+  if (!(dialog instanceof HTMLDialogElement) || boundPacketDialogs.has(dialog)) return;
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) closePacketModal();
+  });
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closePacketModal();
+  });
+  boundPacketDialogs.add(dialog);
+}
+
 function bindWorkbenchControls() {
   bindControl("start", "click", handleStartClick);
   bindControl("stop", "click", pauseDemo);
@@ -2914,9 +3037,8 @@ function bindWorkbenchControls() {
   bindControl("network-delay", "input", (event) => setNetworkDelay(event.target.value));
   bindControl("download-pcap", "click", downloadPcap);
   bindControl("packet-modal-close", "click", closePacketModal);
-  bindControl("packet-modal", "click", (event) => {
-    if (event.target === el("packet-modal")) closePacketModal();
-  });
+  bindPacketDialog();
+  bindWorkbenchViewTabs();
 }
 
 function initializeWorkbenchPage() {
@@ -2944,17 +3066,12 @@ loadModule().catch((error) => {
   updateRunButton();
 });
 
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && el("packet-modal")?.classList.contains("open")) {
-    closePacketModal();
-  }
-});
-
 window.addEventListener("resize", () => {
   if (!isWorkbenchMounted()) {
     stopDemoForUnmount();
     return;
   }
+  updateWorkbenchViews();
   renderPacketQueues();
 });
 

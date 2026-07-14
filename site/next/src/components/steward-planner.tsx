@@ -1,8 +1,11 @@
 'use client';
 
 import { CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, FileText, LoaderCircle, XCircle } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'react';
 
+import { PageHeader } from '@/components/page-header';
+import { CodeBlock } from '@/components/steward-code-block';
+import { ScrollRegion } from '@/components/ui/scroll-region';
 import type { PublicArtifact, PublicPlannerRun } from '@/generated/steward-public';
 import { decodePublicStewardJson } from '@/lib/steward-schema';
 
@@ -11,9 +14,13 @@ const PAGE_SIZE = 10;
 export function StewardPlannerLive() {
   const [runs, setRuns] = useState<PublicPlannerRun[]>([]);
   const [truncated, setTruncated] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const previousPageRef = useRef<HTMLButtonElement>(null);
+  const nextPageRef = useRef<HTMLButtonElement>(null);
+  const focusAfterPageChange = useRef<'previous' | 'next' | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +33,7 @@ export function StewardPlannerLive() {
         if (cancelled) return;
         setRuns(decoded.data.planner_runs);
         setTruncated(decoded.data.planner_runs_truncated);
+        setUpdatedAt(decoded.data.generated_at);
         setError(null);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : 'status unavailable');
@@ -45,46 +53,98 @@ export function StewardPlannerLive() {
     () => runs.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [runs, safePage],
   );
+  const summaryState = loading ? 'Loading' : error ? 'Unavailable' : null;
+
+  useEffect(() => {
+    if (focusAfterPageChange.current === 'previous') previousPageRef.current?.focus();
+    if (focusAfterPageChange.current === 'next') nextPageRef.current?.focus();
+    focusAfterPageChange.current = null;
+  }, [safePage]);
+
+  function goToPreviousPage() {
+    const nextPage = Math.max(1, safePage - 1);
+    focusAfterPageChange.current = nextPage === 1 ? 'next' : 'previous';
+    setPage(nextPage);
+  }
+
+  function goToNextPage() {
+    const nextPage = Math.min(pageCount, safePage + 1);
+    focusAfterPageChange.current = nextPage === pageCount ? 'previous' : 'next';
+    setPage(nextPage);
+  }
 
   return (
-    <section className="steward-planner-page" aria-labelledby="steward-planner-title">
-      <header className="steward-planner-header">
-        <div>
-          <span className="eyebrow">Read-only monitor</span>
-          <h1 id="steward-planner-title">Planner history</h1>
-          <p>Standalone signal-planner iterations, newest first.</p>
-        </div>
-        <div className="steward-planner-summary" aria-label="Planner history summary">
-          <span>{runs.length} visible runs</span>
-          {truncated && <strong>window truncated</strong>}
-        </div>
-      </header>
+    <section aria-label="Planner history" className="steward-planner-page">
+      <PageHeader
+        actions={(
+          <dl aria-label="Planner history summary" className="steward-planner-summary">
+            <div>
+              <dt>Visible runs</dt>
+              <dd>{summaryState ?? runs.length}</dd>
+            </div>
+            <div className={!summaryState && truncated ? 'steward-planner-summary-warning' : undefined}>
+              <dt>Published window</dt>
+              <dd>{summaryState ?? (truncated ? 'window truncated' : 'complete')}</dd>
+            </div>
+            <div>
+              <dt>Last update</dt>
+              <dd>
+                {summaryState ?? (updatedAt
+                  ? <time dateTime={updatedAt}>{formatTimestamp(updatedAt)}</time>
+                  : 'Unavailable')}
+              </dd>
+            </div>
+          </dl>
+        )}
+        className="steward-planner-header"
+        description="Read-only evidence from standalone signal-planner iterations, retained newest first."
+        eyebrow="Steward evidence"
+        title="Planner history"
+      />
 
-      {loading && <PlannerState icon={<LoaderCircle className="animate-spin" />} title="Loading planner history" />}
-      {!loading && error && <PlannerState icon={<CircleAlert />} title="Planner history unavailable" detail={error} />}
+      {loading && (
+        <PlannerState
+          detail="Reading the latest published Steward status."
+          icon={<LoaderCircle className="steward-planner-spinner" />}
+          title="Loading planner history"
+        />
+      )}
+      {!loading && error && (
+        <PlannerState
+          detail={error}
+          icon={<CircleAlert />}
+          recovery="Refresh the page to request the published status again."
+          title="Planner history unavailable"
+          tone="error"
+        />
+      )}
       {!loading && !error && !runs.length && <PlannerState icon={<FileText />} title="No planner runs published" detail="The daemon has not published a signal-planner iteration." />}
       {!loading && !error && runs.length > 0 && (
         <>
           <div className="steward-planner-list">
-            {pageRuns.map((run) => <PlannerRunCard key={run.id} run={run} />)}
+            {pageRuns.map((run) => <PlannerRunRow key={run.id} run={run} />)}
           </div>
           <nav className="steward-planner-pagination" aria-label="Planner history pagination">
-            <span>Page {safePage} of {pageCount}</span>
+            <span aria-live="polite">Page {safePage} of {pageCount}</span>
             <button
               aria-label="Previous planner history page"
               disabled={safePage === 1}
-              onClick={() => setPage(Math.max(1, safePage - 1))}
+              onClick={goToPreviousPage}
+              ref={previousPageRef}
+              title="Previous page"
               type="button"
             >
-              <ChevronLeft size={16} />
+              <ChevronLeft aria-hidden="true" size={18} />
             </button>
             <button
               aria-label="Next planner history page"
               disabled={safePage === pageCount}
-              onClick={() => setPage(Math.min(pageCount, safePage + 1))}
+              onClick={goToNextPage}
+              ref={nextPageRef}
+              title="Next page"
               type="button"
             >
-              <ChevronRight size={16} />
+              <ChevronRight aria-hidden="true" size={18} />
             </button>
           </nav>
         </>
@@ -93,22 +153,28 @@ export function StewardPlannerLive() {
   );
 }
 
-function PlannerRunCard({ run }: { run: PublicPlannerRun }) {
+function PlannerRunRow({ run }: { run: PublicPlannerRun }) {
+  const titleId = useId();
   const status = run.status;
   const Icon = status === 'succeeded' ? CheckCircle2 : status === 'failed' || status === 'invalid' ? XCircle : LoaderCircle;
   const transcript = run.artifacts.transcript;
   const lastMessage = run.artifacts.last_message;
   return (
-    <article className={`steward-planner-run planner-status-${status}`}>
+    <article aria-labelledby={titleId} className={`steward-planner-run planner-status-${status}`}>
       <header className="steward-planner-run-header">
         <div className="steward-planner-run-title">
-          <Icon aria-hidden="true" size={17} />
+          <Icon aria-hidden="true" className={status === 'running' ? 'steward-planner-spinner' : undefined} size={18} />
           <div>
-            <h2>{run.id}</h2>
-            <p>{formatTimestamp(run.started_at)}{run.completed_at ? ` to ${formatTimestamp(run.completed_at)}` : ' in progress'}</p>
+            <h2 id={titleId}>{run.id}</h2>
+            <div className="steward-planner-run-time">
+              <span>Started <time dateTime={run.started_at}>{formatTimestamp(run.started_at)}</time></span>
+              {run.completed_at
+                ? <span>Completed <time dateTime={run.completed_at}>{formatTimestamp(run.completed_at)}</time></span>
+                : <span>Completion in progress</span>}
+            </div>
           </div>
         </div>
-        <span className="steward-planner-status">{status}</span>
+        <span aria-label={`Status: ${status}`} className="steward-planner-status">{status}</span>
       </header>
       <dl className="steward-planner-metrics">
         <div><dt>Accepted</dt><dd>{run.accepted_count}</dd></div>
@@ -116,12 +182,21 @@ function PlannerRunCard({ run }: { run: PublicPlannerRun }) {
         <div><dt>Signals consumed</dt><dd>{run.consumed_signal_ids.length}</dd></div>
         <div><dt>Exit</dt><dd>{run.diagnostics.exit_code ?? '-'}</dd></div>
       </dl>
-      <p className="steward-planner-diagnostic">{run.diagnostics.summary || run.diagnostics.error_category}</p>
-      <p className="steward-planner-signals">
-        {run.consumed_signal_ids.length ? `Consumed: ${run.consumed_signal_ids.join(', ')}` : 'No signal IDs consumed'}
-      </p>
+      <div className="steward-planner-run-context">
+        <p className="steward-planner-diagnostic">
+          <span>Diagnostic</span>
+          <strong>{run.diagnostics.summary || run.diagnostics.error_category}</strong>
+        </p>
+        <p className="steward-planner-signals">
+          <span>Signals</span>
+          <strong>{run.consumed_signal_ids.length ? `Consumed: ${run.consumed_signal_ids.join(', ')}` : 'No signal IDs consumed'}</strong>
+        </p>
+      </div>
       <details className="steward-planner-artifacts">
-        <summary><FileText size={15} /> Artifacts</summary>
+        <summary>
+          <span><FileText aria-hidden="true" size={16} /> Artifacts</span>
+          <span>Transcript and last message</span>
+        </summary>
         <div className="steward-planner-artifact-grid">
           <ArtifactSummary label="Transcript" artifact={transcript ?? null} />
           <ArtifactSummary label="Last message" artifact={lastMessage ?? null} />
@@ -133,22 +208,69 @@ function PlannerRunCard({ run }: { run: PublicPlannerRun }) {
 
 function ArtifactSummary({ artifact, label }: { artifact: PublicArtifact; label: string }) {
   if (!artifact) {
-    return <div className="steward-planner-artifact"><b>{label}</b><span>Not produced</span></div>;
+    return (
+      <section aria-label={`${label} artifact`} className="steward-planner-artifact steward-planner-artifact-missing">
+        <header><h3>{label}</h3><span>Not produced</span></header>
+        <p>No public artifact was published for this run.</p>
+      </section>
+    );
   }
+  const availability = artifact.availability.replaceAll('_', ' ');
   return (
-    <div className="steward-planner-artifact">
-      <b>{label}</b>
-      <span>{artifact.availability}{artifact.truncated ? ' / truncated' : ''}</span>
-      {artifact.text && <pre>{artifact.text}</pre>}
+    <section aria-label={`${label} artifact`} className="steward-planner-artifact">
+      <header>
+        <h3>{label}</h3>
+        <span>{availability}{artifact.truncated ? ' / truncated' : ''}</span>
+      </header>
+      {artifact.text
+        ? (
+          <ScrollRegion
+            aria-label={`${label} artifact text`}
+            axis="both"
+            className="steward-planner-artifact-scroll"
+          >
+            <CodeBlock className="steward-planner-artifact-code" compact showLineNumbers={false} text={artifact.text} title={label} />
+          </ScrollRegion>
+        )
+        : <p>No public text was retained for this artifact.</p>}
+    </section>
+  );
+}
+
+function PlannerState({
+  detail,
+  icon,
+  recovery,
+  title,
+  tone = 'neutral',
+}: {
+  detail?: string;
+  icon: ReactNode;
+  recovery?: string;
+  title: string;
+  tone?: 'error' | 'neutral';
+}) {
+  return (
+    <div className={`steward-planner-state steward-planner-state-${tone}`} role={tone === 'error' ? 'alert' : 'status'}>
+      {icon}
+      <strong>{title}</strong>
+      {detail && <span>{detail}</span>}
+      {recovery && <span>{recovery}</span>}
     </div>
   );
 }
 
-function PlannerState({ detail, icon, title }: { detail?: string; icon: ReactNode; title: string }) {
-  return <div className="steward-planner-state">{icon}<strong>{title}</strong>{detail && <span>{detail}</span>}</div>;
-}
-
 function formatTimestamp(value: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString(undefined, {
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        month: 'short',
+        second: '2-digit',
+        timeZoneName: 'short',
+        year: 'numeric',
+      });
 }

@@ -229,6 +229,8 @@ struct EndpointConfig {
     // peers are expected to discard.
     bool enable_reserved_version_probe = false;
     bool enable_long_header_stateless_reset = false;
+    // Optional RFC 9000 Section 10.2.1 mode that drops packet protection keys after
+    // caching a CONNECTION_CLOSE and retains only CID attribution and close-response state.
     bool enable_minimal_closing_state_retention = false;
     bool allow_peer_address_change = true;
 };

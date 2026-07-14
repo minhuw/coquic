@@ -466,7 +466,8 @@ struct QuicCoreEndpointConfig {
     bool defer_inbound_application_send_drain = false;
     bool allow_peer_address_change = true;
     bool enable_long_header_stateless_reset = false;
-    // Retain only packet attribution and close-response state after an immediate close.
+    // RFC 9000 Section 10.2.1 keyless closing mode: retain only packet attribution and
+    // close-response state after caching a CONNECTION_CLOSE. Disabled by default.
     bool enable_minimal_closing_state_retention = false;
     // Validated peer addresses are reusable only within this connection and for this bounded
     // interval. Set to zero to disable recent-address reuse.
@@ -810,6 +811,9 @@ class QuicCore {
     bool has_failed() const;
 
   private:
+    // Keep unauthenticated route accounting bounded while cached close state is retained.
+    static constexpr std::size_t kMaximumMinimalClosingRoutes = 64;
+
     struct MinimalClosingRoute {
         bool amplification_limited = false;
         std::uint64_t received_bytes = 0;
@@ -818,9 +822,10 @@ class QuicCore {
 
     struct MinimalClosingState {
         QuicCoreTimePoint deadline{};
-        std::uint32_t version = kQuicVersion1;
         DatagramBuffer close_datagram;
         QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+        std::uint64_t cumulative_received_bytes = 0;
+        std::uint64_t cumulative_sent_bytes = 0;
         std::uint64_t packets_since_last_close = 0;
         std::uint64_t response_threshold = 2;
         bool responds_to_packets = false;
@@ -975,6 +980,8 @@ class QuicCore {
     stateless_reset_token_key(const std::array<std::byte, 16> &stateless_reset_token);
     static std::optional<ParsedEndpointDatagram>
     parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_greased_quic_bit = false);
+    static std::optional<ConnectionId>
+    destination_connection_id_for_attribution(std::span<const std::byte> bytes);
     std::vector<std::byte> make_endpoint_retry_token(
         std::uint64_t sequence, const ParsedEndpointDatagram *parsed = nullptr,
         const ConnectionId *retry_source_connection_id = nullptr,

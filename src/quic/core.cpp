@@ -1763,6 +1763,36 @@ QuicCore::stateless_reset_token_key(const std::array<std::byte, 16> &stateless_r
                        stateless_reset_token.size());
 }
 
+std::optional<ConnectionId>
+QuicCore::destination_connection_id_for_attribution(std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+
+    const auto first_byte = std::to_integer<std::uint8_t>(bytes.front());
+    if ((first_byte & 0x80u) == 0) {
+        if (bytes.size() < 1 + kEndpointConnectionIdLength) {
+            return std::nullopt;
+        }
+        return ConnectionId(bytes.begin() + 1, bytes.begin() + 1 + kEndpointConnectionIdLength);
+    }
+
+    constexpr std::size_t kLongHeaderDestinationConnectionIdOffset = 5;
+    if (bytes.size() <= kLongHeaderDestinationConnectionIdOffset) {
+        return std::nullopt;
+    }
+    const auto destination_connection_id_length = static_cast<std::size_t>(
+        std::to_integer<std::uint8_t>(bytes[kLongHeaderDestinationConnectionIdOffset]));
+    const auto destination_connection_id_offset = kLongHeaderDestinationConnectionIdOffset + 1;
+    if (destination_connection_id_length > bytes.size() - destination_connection_id_offset) {
+        return std::nullopt;
+    }
+    return ConnectionId(
+        bytes.begin() + static_cast<std::ptrdiff_t>(destination_connection_id_offset),
+        bytes.begin() + static_cast<std::ptrdiff_t>(destination_connection_id_offset +
+                                                    destination_connection_id_length));
+}
+
 std::optional<QuicCore::ParsedEndpointDatagram>
 QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_greased_quic_bit) {
     if (bytes.empty()) {
@@ -3663,7 +3693,6 @@ bool QuicCore::maybe_retain_minimal_closing_state(ConnectionEntry &entry,
     if (!deadline.has_value()) {
         return false;
     }
-    const auto diagnostics = entry.connection->diagnostics(entry.handle);
     const bool responds_to_packets = entry.connection->is_closing();
     if (responds_to_packets && close_datagram.bytes.empty()) {
         return false;
@@ -3671,7 +3700,6 @@ bool QuicCore::maybe_retain_minimal_closing_state(ConnectionEntry &entry,
 
     MinimalClosingState closing{
         .deadline = *deadline,
-        .version = diagnostics.current_version,
         .close_datagram = std::move(close_datagram.bytes),
         .ecn = entry.connection->last_drained_ecn_codepoint(),
         .responds_to_packets = responds_to_packets,
@@ -3681,14 +3709,12 @@ bool QuicCore::maybe_retain_minimal_closing_state(ConnectionEntry &entry,
         if (!route_amplification.has_value()) {
             continue;
         }
-        closing.routes.emplace(
-            route_handle,
-            MinimalClosingRoute{
-                .amplification_limited = endpoint_config_.role == EndpointRole::server &&
-                                         !route_amplification->validated,
-                .received_bytes = route_amplification->received_bytes,
-                .sent_bytes = route_amplification->sent_bytes,
-            });
+        closing.routes.emplace(route_handle,
+                               MinimalClosingRoute{
+                                   .amplification_limited = !route_amplification->validated,
+                                   .received_bytes = route_amplification->received_bytes,
+                                   .sent_bytes = route_amplification->sent_bytes,
+                               });
     }
     if (close_datagram.route.has_value() && !closing.routes.contains(*close_datagram.route)) {
         const auto route_amplification =
@@ -3699,7 +3725,6 @@ bool QuicCore::maybe_retain_minimal_closing_state(ConnectionEntry &entry,
             *close_datagram.route,
             MinimalClosingRoute{
                 .amplification_limited =
-                    endpoint_config_.role == EndpointRole::server &&
                     (!route_amplification.has_value() || !route_amplification->validated),
                 .received_bytes =
                     route_amplification.has_value() ? route_amplification->received_bytes : 0,
@@ -4200,6 +4225,76 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             }
             return true;
         };
+        const auto handle_minimal_closing_datagram = [&](ConnectionEntry &entry) {
+            if (!entry.minimal_closing_state.has_value()) {
+                return false;
+            }
+
+            auto &closing = *entry.minimal_closing_state;
+            if (!inbound->route_handle.has_value() || !closing.responds_to_packets) {
+                return true;
+            }
+
+            // RFC 9000 Section 10.2.1 permits keyless close responses to
+            // CID-attributed UDP datagrams without attempting packet protection.
+            auto route = closing.routes.find(*inbound->route_handle);
+            if (route == closing.routes.end()) {
+                if (closing.routes.size() >= QuicCore::kMaximumMinimalClosingRoutes) {
+                    return true;
+                }
+                route = closing.routes
+                            .emplace(*inbound->route_handle,
+                                     MinimalClosingRoute{.amplification_limited = true})
+                            .first;
+            }
+
+            const auto payload_bytes = static_cast<std::uint64_t>(inbound_payload.size());
+            const auto saturating_add = [](std::uint64_t value, std::uint64_t increment) {
+                const auto max = std::numeric_limits<std::uint64_t>::max();
+                return value > max - increment ? max : value + increment;
+            };
+            const auto amplification_budget = [](std::uint64_t received_bytes) {
+                const auto max = std::numeric_limits<std::uint64_t>::max();
+                return received_bytes > max / 3u ? max : received_bytes * 3u;
+            };
+            closing.cumulative_received_bytes =
+                saturating_add(closing.cumulative_received_bytes, payload_bytes);
+            route->second.received_bytes =
+                saturating_add(route->second.received_bytes, payload_bytes);
+            if (closing.packets_since_last_close < std::numeric_limits<std::uint64_t>::max()) {
+                ++closing.packets_since_last_close;
+            }
+            const auto cumulative_amplification_budget =
+                amplification_budget(closing.cumulative_received_bytes);
+            const auto route_amplification_budget =
+                amplification_budget(route->second.received_bytes);
+            const auto close_bytes = static_cast<std::uint64_t>(closing.close_datagram.size());
+            const bool within_cumulative_amplification_limit =
+                closing.cumulative_sent_bytes <= cumulative_amplification_budget &&
+                close_bytes <= cumulative_amplification_budget - closing.cumulative_sent_bytes;
+            const bool within_route_amplification_limit =
+                !route->second.amplification_limited ||
+                (route->second.sent_bytes <= route_amplification_budget &&
+                 close_bytes <= route_amplification_budget - route->second.sent_bytes);
+            if (closing.packets_since_last_close >= closing.response_threshold &&
+                within_cumulative_amplification_limit && within_route_amplification_limit) {
+                emit_send_datagram(result,
+                                   QuicCoreSendDatagram{
+                                       .connection = entry.handle,
+                                       .route_handle = inbound->route_handle,
+                                       .bytes = closing.close_datagram,
+                                       .ecn = closing.ecn,
+                                   },
+                                   send_sink);
+                closing.cumulative_sent_bytes =
+                    saturating_add(closing.cumulative_sent_bytes, close_bytes);
+                route->second.sent_bytes = saturating_add(route->second.sent_bytes, close_bytes);
+                closing.packets_since_last_close = 0;
+                closing.response_threshold =
+                    std::min<std::uint64_t>(closing.response_threshold * 2u, 1024u);
+            }
+            return true;
+        };
 
         if (endpoint_config_.role == EndpointRole::client &&
             parse_version_negotiation_packet(inbound_payload).has_value()) {
@@ -4233,6 +4328,24 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             }
         }
 
+        if (const auto destination_connection_id =
+                destination_connection_id_for_attribution(inbound_payload);
+            destination_connection_id.has_value()) {
+            if (const auto handle =
+                    find_endpoint_connection_for_connection_id(*destination_connection_id);
+                handle.has_value()) {
+                auto entry_it = connections_.find(*handle);
+                if (entry_it != connections_.end() &&
+                    entry_it->second.minimal_closing_state.has_value()) {
+                    if (inbound_route_closed_for_entry(entry_it->second)) {
+                        return finalize_endpoint_result(std::move(result), now);
+                    }
+                    static_cast<void>(handle_minimal_closing_datagram(entry_it->second));
+                    return finalize_endpoint_result(std::move(result), now);
+                }
+            }
+        }
+
         //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
         // # Receivers MAY route based on the information in the first packet
         // # contained in a UDP datagram.
@@ -4258,42 +4371,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 if (inbound_route_closed_for_entry(entry)) {
                     return finalize_endpoint_result(std::move(result), now);
                 }
-                if (entry.minimal_closing_state.has_value()) {
-                    auto &closing = *entry.minimal_closing_state;
-                    if (!inbound->route_handle.has_value() ||
-                        (parsed->kind != ParsedEndpointDatagram::Kind::short_header &&
-                         parsed->version != closing.version)) {
-                        return finalize_endpoint_result(std::move(result), now);
-                    }
-                    auto route = closing.routes.find(*inbound->route_handle);
-                    if (route == closing.routes.end() || !closing.responds_to_packets) {
-                        return finalize_endpoint_result(std::move(result), now);
-                    }
-                    route->second.received_bytes += inbound_payload.size();
-                    ++closing.packets_since_last_close;
-                    const auto amplification_budget =
-                        route->second.received_bytes >
-                                std::numeric_limits<std::uint64_t>::max() / 3u
-                            ? std::numeric_limits<std::uint64_t>::max()
-                            : route->second.received_bytes * 3u;
-                    if (closing.packets_since_last_close >= closing.response_threshold &&
-                        (!route->second.amplification_limited ||
-                         (route->second.sent_bytes <= amplification_budget &&
-                          closing.close_datagram.size() <=
-                              amplification_budget - route->second.sent_bytes))) {
-                        emit_send_datagram(result,
-                                           QuicCoreSendDatagram{
-                                               .connection = entry.handle,
-                                               .route_handle = inbound->route_handle,
-                                               .bytes = closing.close_datagram,
-                                               .ecn = closing.ecn,
-                                           },
-                                           send_sink);
-                        route->second.sent_bytes += closing.close_datagram.size();
-                        closing.packets_since_last_close = 0;
-                        closing.response_threshold =
-                            std::min<std::uint64_t>(closing.response_threshold * 2u, 1024u);
-                    }
+                if (handle_minimal_closing_datagram(entry)) {
                     return finalize_endpoint_result(std::move(result), now);
                 }
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-11

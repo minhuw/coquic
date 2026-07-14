@@ -55,6 +55,7 @@ test.describe('Steward dashboard', () => {
       await page.goto('/steward');
       const select = page.locator('#steward-view-select');
       await expect(select).toBeVisible();
+      await expect(page.getByRole('tablist', { name: 'Steward views' })).toHaveCount(0);
       for (const [value, heading] of Object.entries(viewHeadings)) {
         await select.selectOption(value);
         await expect(page.getByRole('heading', { level: 2, name: heading })).toBeVisible();
@@ -89,7 +90,13 @@ test.describe('Steward dashboard', () => {
 
   test('keeps local table and graph overflow contained and passes serious Axe checks', async ({ page }) => {
     await page.goto('/steward');
-    await page.getByRole('tab', { name: /^Tasks/ }).click();
+    const viewSelect = page.locator('#steward-view-select');
+    if ((page.viewportSize()?.width ?? 1440) <= 1023) {
+      await expect(viewSelect).toBeVisible();
+      await viewSelect.selectOption('tasks');
+    } else {
+      await page.getByRole('tab', { name: /^Tasks/ }).click();
+    }
     await expect(page.locator('.steward-dashboard-task-table').getByRole('link', { name: 'Implement dashboard contract', exact: true })).toBeVisible();
 
     const overflow = await page.locator('.steward-dashboard').evaluate((root) => ({

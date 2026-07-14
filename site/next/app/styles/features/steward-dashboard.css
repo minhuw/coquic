@@ -1353,11 +1353,7 @@
     }
 
     .steward-dashboard-view-navigation-desktop {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 208px;
-      opacity: 0;
+      display: none;
     }
 
     .steward-dashboard-planner-link {

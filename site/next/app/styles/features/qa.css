@@ -115,12 +115,31 @@
     gap: var(--space-2);
   }
 
+  .qa-actions .ui-button {
+    font-family: var(--font-host-grotesk), ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .qa-actions .ui-button svg {
+    width: var(--icon-compact);
+    height: var(--icon-compact);
+    flex: 0 0 auto;
+  }
+
   .qa-suggest-button {
-    width: 146px;
+    width: 112px;
+    color: var(--text-muted);
+  }
+
+  .qa-suggest-button:hover,
+  .qa-suggest-button:active {
+    color: var(--text-strong);
   }
 
   .qa-ask-button {
-    width: 72px;
+    width: 92px;
   }
 
   .qa-form-help {
@@ -542,7 +561,7 @@
     }
 
     .qa-ask-button {
-      width: 72px;
+      width: 92px;
     }
 
     .qa-retry-button {

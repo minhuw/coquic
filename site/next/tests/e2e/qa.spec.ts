@@ -10,6 +10,17 @@ import {
 } from './fixtures/qa';
 
 test.describe('QUIC specification QA', () => {
+  test('uses inline validation for an empty keyboard submission', async ({ page }) => {
+    await installQaFixture(page, { events: successfulQaEvents() });
+    await page.goto('/qa');
+
+    const textbox = page.getByRole('textbox', { name: 'Question' });
+    await textbox.press('Control+Enter');
+
+    await expect(textbox).toHaveAttribute('aria-invalid', 'true');
+    await expect(page.locator('#qa-question-error')).toHaveText('Enter a QUIC specification question before asking.');
+  });
+
   test('streams both channels, preserves the wire contract, and renders final evidence', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await installQaFixture(page, { events: successfulQaEvents(), intervalMs: 120 });

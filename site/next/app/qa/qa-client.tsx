@@ -2,7 +2,7 @@
 
 import { isValidElement, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Check, Copy, RotateCcw, ShieldAlert } from 'lucide-react';
+import { ArrowUp, Check, Copy, RotateCcw, ShieldAlert, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -478,7 +478,7 @@ export function QaClient() {
   return (
     <section className="qa-workspace" aria-label="Ask QUIC specification questions" data-qa-phase={state.phase}>
       <div className="qa-question-panel">
-        <form className="qa-form" ref={formRef} onSubmit={(event) => void submit(event)}>
+        <form className="qa-form" ref={formRef} noValidate onSubmit={(event) => void submit(event)}>
           <div className="qa-field-heading">
             <label className="qa-label" htmlFor="qa-question">
               Question
@@ -519,13 +519,15 @@ export function QaClient() {
               <Button
                 className="qa-suggest-button"
                 type="button"
-                variant="outline"
+                variant="ghost"
+                aria-label="Suggest question"
                 disabled={busy || suggesting}
                 loading={suggesting}
                 loadingLabel="Suggesting question"
                 onClick={() => void suggestQuestion()}
               >
-                Suggest question
+                <Sparkles aria-hidden="true" />
+                <span>Suggest</span>
               </Button>
               <Button
                 className="qa-ask-button"
@@ -534,7 +536,8 @@ export function QaClient() {
                 loading={busy}
                 loadingLabel="Asking question"
               >
-                Ask
+                <span>Ask</span>
+                <ArrowUp aria-hidden="true" />
               </Button>
             </div>
           </div>

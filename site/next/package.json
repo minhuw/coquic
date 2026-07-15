@@ -1,6 +1,10 @@
 {
   "name": "coquic-demo",
   "private": true,
+  "engines": {
+    "node": ">=24.0.0 <25.0.0"
+  },
+  "packageManager": "npm@11.12.1",
   "scripts": {
     "prepare:site": "node scripts/prepare-public-assets.mjs && node scripts/build-transcript-dataset.mjs && node scripts/build-search-index.mjs",
     "predev": "npm run prepare:site",
@@ -50,7 +54,7 @@
     "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@types/node": "25.9.1",
+    "@types/node": "24.13.3",
     "@types/react": "19.2.15",
     "@vitejs/plugin-react": "^6.0.3",
     "jsdom": "^29.1.1",

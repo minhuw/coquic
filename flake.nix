@@ -18,6 +18,7 @@
       pkgs = import nixpkgs {
         inherit system;
       };
+      nodejs = pkgs.nodejs_24;
       lib = pkgs.lib;
       llvmPkgs = pkgs.llvmPackages_20;
       coverageLlvmPkgs = pkgs.llvmPackages_21;
@@ -751,7 +752,7 @@
         src = projectSrc;
         nativeBuildInputs = [
           pkgs.makeWrapper
-          pkgs.nodejs
+          nodejs
         ];
         buildInputs = [
           boringsslPackage
@@ -759,7 +760,7 @@
         COQUIC_TLS_BACKEND = "boringssl";
         COQUIC_LIB_DIR = "${boringsslPackage}/lib";
         COQUIC_LIB_NAME = "coquic-boringssl";
-        NODE_INCLUDE_DIR = "${pkgs.nodejs}/include/node";
+        NODE_INCLUDE_DIR = "${nodejs}/include/node";
         LD_LIBRARY_PATH = lib.makeLibraryPath [
           boringsslPackage
           pkgs.stdenv.cc.cc.lib
@@ -793,7 +794,7 @@
           mkdir -p "$out/share/coquic-js-perf/node_modules/@coquic"
           ln -s "$out/share/coquic-js-binding" \
             "$out/share/coquic-js-perf/node_modules/@coquic/coquic"
-          makeWrapper "${pkgs.nodejs}/bin/node" "$out/bin/coquic-js-perf" \
+          makeWrapper "${nodejs}/bin/node" "$out/bin/coquic-js-perf" \
             --add-flags "$out/share/coquic-js-perf/bin/coquic-js-perf.mjs" \
             --prefix LD_LIBRARY_PATH : ${
               lib.makeLibraryPath [
@@ -1896,6 +1897,7 @@ EOF
           pkgs.python3
           pkgs.uv
           duvetTool
+          nodejs
         ];
       };
       toolsShell = mkCoquicShell {
@@ -1907,7 +1909,7 @@ EOF
           llvmPkgs.clang
           pkgs.lldb
           pkgs.mkcert
-          pkgs.nodejs
+          nodejs
           goToolchain
           boringssl
           pkgs.python3

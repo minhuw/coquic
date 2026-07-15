@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,7 @@ const configuredOutputRoot = process.env.COQUIC_PLAYWRIGHT_FIXTURE_ROOT;
 const outputRoot = configuredOutputRoot === undefined
   ? defaultFixtureRoot()
   : configuredOutputRoot.trim();
-const safeOutputRoot = validateFixtureRoot(outputRoot);
+const safeOutputRoot = await validateFixtureRoot(outputRoot);
 const monitorFixture = path.join(
   repositoryRoot,
   'steward/schema/fixtures/public-monitor-v3/integration.json',
@@ -87,17 +87,14 @@ function defaultFixtureRoot() {
   return path.join(os.tmpdir(), `coquic-steward-playwright-${checkoutId}`);
 }
 
-function validateFixtureRoot(candidate) {
+async function validateFixtureRoot(candidate) {
   if (!candidate) throw new Error('COQUIC_PLAYWRIGHT_FIXTURE_ROOT must not be empty');
 
   const temporaryRoot = path.resolve(os.tmpdir());
   const temporaryRoots = [temporaryRoot];
   if (path.sep === '/' && temporaryRoot.startsWith('/tmp/')) temporaryRoots.push('/tmp');
   const resolvedCandidate = path.resolve(candidate);
-  const outsideTemporaryRoot = temporaryRoots.every((root) => {
-    const relative = path.relative(root, resolvedCandidate);
-    return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
-  });
+  const outsideTemporaryRoot = temporaryRoots.every((root) => !isStrictChild(root, resolvedCandidate));
   if (
     resolvedCandidate === path.parse(resolvedCandidate).root
     || temporaryRoots.includes(resolvedCandidate)
@@ -105,5 +102,35 @@ function validateFixtureRoot(candidate) {
   ) {
     throw new Error(`COQUIC_PLAYWRIGHT_FIXTURE_ROOT must be a child of a temporary directory; received ${candidate}`);
   }
+
+  const canonicalTemporaryRoots = await Promise.all(temporaryRoots.map((root) => realpath(root)));
+  const canonicalCandidate = await resolveThroughExistingAncestor(resolvedCandidate);
+  if (canonicalTemporaryRoots.every((root) => !isStrictChild(root, canonicalCandidate))) {
+    throw new Error(`COQUIC_PLAYWRIGHT_FIXTURE_ROOT must not resolve outside the temporary directory; received ${candidate}`);
+  }
   return resolvedCandidate;
+}
+
+function isStrictChild(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative)
+    && relative !== '..'
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+async function resolveThroughExistingAncestor(candidate) {
+  let ancestor = candidate;
+  const missingSegments = [];
+  while (true) {
+    try {
+      return path.resolve(await realpath(ancestor), ...missingSegments);
+    } catch (error) {
+      if (!error || typeof error !== 'object' || error.code !== 'ENOENT') throw error;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw error;
+      missingSegments.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
 }

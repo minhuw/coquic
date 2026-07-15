@@ -151,9 +151,13 @@ describe('shared UI primitives', () => {
 
 describe('PageHeader', () => {
   it('keeps the compatible eyebrow/title form with one heading', () => {
-    const { container } = render(<PageHeader eyebrow="Evidence" title="Interop" />);
+    const { container } = render(<PageHeader eyebrow="Evidence" title="Interop" variant="evidence" />);
     expect(screen.getByText('Evidence')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: 'Interop' })).toBeInTheDocument();
+    expect(container.querySelector('.page-header__eyebrow-marker')).toHaveAttribute('aria-hidden', 'true');
+    expect(container.querySelector('.page-header')).toHaveAttribute('data-page-header-variant', 'evidence');
+    expect(container.querySelector('.page-header__context')).toBeInTheDocument();
+    expect(container.querySelector('.page-header svg')).not.toBeInTheDocument();
     expect(container.querySelectorAll('h1')).toHaveLength(1);
   });
 
@@ -171,6 +175,7 @@ describe('PageHeader', () => {
     expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument();
     expect(container.querySelector('.container-focused')).toBeInTheDocument();
     expect(container.querySelector('.measure-reading')).toBeInTheDocument();
+    expect(container.querySelector('.page-header')).toHaveClass('page-header--without-context');
     expect(container.querySelector('article, .ui-panel')).not.toBeInTheDocument();
     expect(container.querySelectorAll('h1')).toHaveLength(1);
   });

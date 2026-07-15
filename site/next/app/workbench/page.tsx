@@ -162,7 +162,7 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
 export default function WorkbenchPage() {
   return (
     <main className="coquic-page workbench-page" id="workbench-page" data-workbench-view="client">
-      <PageHeader eyebrow="wasm QUIC laboratory" title="CoQUIC Protocol Workbench" />
+      <PageHeader eyebrow="wasm QUIC laboratory" title="CoQUIC Protocol Workbench" variant="tool" />
 
       <div className="scenario-toolbar" aria-label="Interop case controls">
         <div className="scenario-control">

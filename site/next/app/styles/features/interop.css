@@ -38,7 +38,10 @@
   .interop-page .interop-page-header .page-title {
     margin-top: 0;
     color: var(--text-strong);
-    font: var(--type-page-title);
+    font-family: var(--font-host-grotesk), ui-sans-serif, system-ui, sans-serif;
+    font-size: 36px;
+    font-weight: 500;
+    line-height: 1.12;
     letter-spacing: 0;
   }
 

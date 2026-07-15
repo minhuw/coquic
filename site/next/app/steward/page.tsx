@@ -17,6 +17,7 @@ export default function StewardPage() {
         description="A read-only public publication of Steward runtime state, work evidence, and current freshness."
         eyebrow="public operations"
         title="CoQUIC Steward"
+        variant="operations"
       />
       <section aria-label="Steward dashboard" className="steward-dashboard-page-content">
         <StewardDashboardLive />

@@ -23,6 +23,7 @@ export async function DocsView({ page }: DocsViewProps) {
         eyebrow="project documentation"
         title={page.title}
         actions={<DocsMobileNavigation currentHref={page.href} navItems={navItems} />}
+        variant="editorial"
       />
 
       <section className="docs-layout" aria-label="CoQUIC documentation">

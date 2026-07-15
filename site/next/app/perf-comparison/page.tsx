@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 export default function PerformancePage() {
   return (
     <main className="coquic-page performance-page" id="performance-page" data-testid="performance-page">
-      <PageHeader eyebrow="QUIC performance" title="CoQUIC Performance Comparison" />
+      <PageHeader eyebrow="QUIC performance" title="CoQUIC Performance Comparison" variant="evidence" />
 
       <section className="performance-summary" aria-label="Benchmark scope and availability">
         <div className="performance-summary__scope">

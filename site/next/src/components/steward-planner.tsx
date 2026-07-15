@@ -100,6 +100,7 @@ export function StewardPlannerLive() {
         description="Read-only evidence from standalone signal-planner iterations, retained newest first."
         eyebrow="Steward evidence"
         title="Planner history"
+        variant="operations"
       />
 
       {loading && (

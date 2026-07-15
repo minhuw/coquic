@@ -441,6 +441,7 @@ export function TranscriptDataset() {
             </span>
           )
         }
+        variant="data"
       />
 
       {manifest ? (

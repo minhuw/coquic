@@ -56,6 +56,7 @@ export default function CoveragePage() {
             </Button>
           </div>
         }
+        variant="evidence"
       />
 
       <section

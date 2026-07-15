@@ -15,7 +15,12 @@ export default function BlogIndexPage() {
 
   return (
     <main className="coquic-page">
-      <PageHeader eyebrow="project blog" title="CoQUIC Blog" />
+      <PageHeader
+        containerClassName="blog-page-header__container"
+        eyebrow="project blog"
+        title="CoQUIC Blog"
+        variant="editorial"
+      />
 
       <section className="blog-list" aria-label="Blog posts">
         {posts.length ? (

@@ -55,7 +55,7 @@ const routeInventory: RouteContract[] = [
   { path: '/interop-results', title: 'CoQUIC Interop Results', heading: 'CoQUIC Interop Matrix' },
   { path: '/coverage', title: 'CoQUIC Coverage Results', heading: 'CoQUIC Coverage Report' },
   { path: '/coverage-results', title: 'CoQUIC Coverage Results', heading: 'CoQUIC Coverage Report' },
-  { path: '/steward', title: 'CoQUIC Steward', heading: 'CoQUIC Steward', headingLevel: 2 },
+  { path: '/steward', title: 'CoQUIC Steward', heading: 'CoQUIC Steward' },
   { path: '/steward/planner', title: 'Planner history | CoQUIC Steward', heading: 'Planner history' },
   {
     path: '/steward/tasks/task-20260713115945-a1b2c3d4',
@@ -63,6 +63,23 @@ const routeInventory: RouteContract[] = [
     heading: 'Implement dashboard contract',
   },
 ];
+
+const sharedHeaderRoutes = new Map<string, string>([
+  ...docsRoutes.map(({ path }) => [path, 'editorial'] as const),
+  ['/blog', 'editorial'],
+  ['/qa', 'tool'],
+  ['/transcript', 'data'],
+  ['/workbench', 'tool'],
+  ['/duvet', 'evidence'],
+  ['/performance', 'evidence'],
+  ['/perf-comparison', 'evidence'],
+  ['/interop', 'evidence'],
+  ['/interop-results', 'evidence'],
+  ['/coverage', 'evidence'],
+  ['/coverage-results', 'evidence'],
+  ['/steward', 'operations'],
+  ['/steward/planner', 'operations'],
+]);
 
 test.describe('route identity', () => {
   test.describe.configure({ mode: 'serial' });
@@ -77,8 +94,49 @@ test.describe('route identity', () => {
       await expect(page.getByRole('navigation', { name: 'Demo views' })).toHaveCount(1);
       await expect(page.getByRole('link', { name: 'Skip to content' })).toHaveCount(1);
       await expect(page.getByRole('contentinfo')).toHaveCount(1);
+      const headerVariant = sharedHeaderRoutes.get(route.path);
+      if (headerVariant) {
+        const header = page.locator('main .page-header');
+        await expect(header).toHaveCount(1);
+        await expect(header).toHaveAttribute('data-page-header-variant', headerVariant);
+        await expect(header.locator('.page-header__eyebrow-marker')).toHaveCount(1);
+        await expect(header.locator('.page-header__art')).toHaveCount(0);
+      }
     });
   }
+});
+
+test('shared page header keeps route context on the page content axis', async ({ page }) => {
+  await page.goto('/docs');
+
+  const header = page.locator('main .page-header');
+  const viewportWidth = page.viewportSize()?.width ?? 0;
+  const geometry = await header.evaluate((element) => {
+    const headerBounds = element.getBoundingClientRect();
+    const contextBounds = element.querySelector<HTMLElement>('.page-header__context')?.getBoundingClientRect();
+    const titleBounds = element.querySelector<HTMLElement>('.page-title')?.getBoundingClientRect();
+    return {
+      background: getComputedStyle(element).backgroundColor,
+      contextBottom: contextBounds?.bottom ?? 0,
+      contextLeft: contextBounds?.left ?? 0,
+      headerHeight: headerBounds.height,
+      titleFontSize: Number.parseFloat(getComputedStyle(element.querySelector('.page-title')!).fontSize),
+      titleLeft: titleBounds?.left ?? 0,
+      titleTop: titleBounds?.top ?? 0,
+    };
+  });
+
+  expect(geometry.background).toBe('rgba(0, 0, 0, 0)');
+  expect(geometry.titleFontSize).toBeGreaterThanOrEqual(28);
+  expect(Math.abs(geometry.contextLeft - geometry.titleLeft)).toBeLessThanOrEqual(1);
+  expect(geometry.contextBottom).toBeLessThanOrEqual(geometry.titleTop);
+  await expect(header.locator('.page-header__art')).toHaveCount(0);
+  if (viewportWidth >= 768) {
+    expect(geometry.headerHeight).toBeLessThan(190);
+  } else {
+    expect(geometry.headerHeight).toBeLessThan(260);
+  }
+  await expectNoGlobalOverflow(page);
 });
 
 for (const [canonical, alias] of [

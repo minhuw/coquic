@@ -46,6 +46,7 @@ export default function DuvetPage() {
             </Button>
           </div>
         }
+        variant="evidence"
       />
 
       <section className="duvet-report-shell" aria-label="Duvet RFC compliance report">

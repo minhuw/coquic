@@ -28,6 +28,7 @@ export default function InteropPage() {
             <span className="interop-scope">Scope: CoQUIC as client or server across reported peer lanes.</span>
           </>
         }
+        variant="evidence"
       />
 
       <section className="interop-summary-section" aria-labelledby="interop-summary-title">

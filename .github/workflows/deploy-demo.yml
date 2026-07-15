@@ -63,14 +63,12 @@ jobs:
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 
       - name: Build Next.js demo
-        working-directory: site/next
         run: |
-          npm install
-          npm run build:demo
+          nix develop -c npm --prefix site/next ci
+          nix develop -c npm --prefix site/next run build:demo
 
       - name: Package demo app
-        working-directory: site/next
-        run: npm run package:demo -- "${RUNNER_TEMP}/demo-app"
+        run: nix develop -c npm --prefix site/next run package:demo -- "${RUNNER_TEMP}/demo-app"
 
       - name: Configure SSH
         env:

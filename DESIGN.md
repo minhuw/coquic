@@ -883,7 +883,10 @@ Run the repository checks appropriate to the change, including:
 - `git diff --check`
 
 Keep generated preview data, screenshots, build output, and downloaded state
-untracked unless explicitly requested.
+untracked unless explicitly requested. The reviewed shared-foundation baselines
+under `site/next/tests/e2e/visual-foundation.spec.ts-snapshots/` are the explicit
+exception: they are tracked golden screenshots used by the deterministic
+Chromium visual gate.
 
 ## Review Checklist
 

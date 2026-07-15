@@ -1954,6 +1954,8 @@ EOF
           clangFormatExtraPackages,
           clangTidyEntry,
           clangTidyExtraPackages,
+          frontendEntry,
+          frontendExtraPackages,
         }:
         git-hooks.lib.${system}.run {
         src = ./.;
@@ -1988,6 +1990,15 @@ EOF
             language = "system";
             pass_filenames = false;
           };
+          coquic-frontend = {
+            enable = true;
+            name = "frontend quality";
+            entry = frontendEntry;
+            extraPackages = frontendExtraPackages;
+            files = "^site/next/.*\\.(css|json|mjs|ts|tsx)$";
+            language = "system";
+            pass_filenames = false;
+          };
         };
       };
       pre-commit-shell = mkPreCommitCheck {
@@ -1995,6 +2006,8 @@ EOF
         clangFormatExtraPackages = [ llvmPkgs.clang-tools ];
         clangTidyEntry = "${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh";
         clangTidyExtraPackages = [ ];
+        frontendEntry = "${pkgs.bash}/bin/bash -c 'npm --prefix site/next run lint && npm --prefix site/next run typecheck'";
+        frontendExtraPackages = [ nodejs ];
       };
       pre-commit-check = mkPreCommitCheck {
         clangFormatEntry = "${llvmPkgs.clang-tools}/bin/clang-format -style=file -i";
@@ -2009,6 +2022,8 @@ EOF
           pkgs.python3
           pkgs.util-linux
         ];
+        frontendEntry = "${pkgs.bash}/bin/bash -c 'npm --prefix site/next run lint && npm --prefix site/next run typecheck'";
+        frontendExtraPackages = [ nodejs ];
       };
       qdrant-dev-app = pkgs.writeShellApplication {
         name = "qdrant-dev";

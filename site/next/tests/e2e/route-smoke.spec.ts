@@ -164,9 +164,14 @@ test('home shell fits the configured project viewport', async ({ page }, testInf
   await expectNoSeriousAxeViolations(page, 'main');
 });
 
-test('retained Steward task exposes a named local scroll region', async ({ page }) => {
+test('retained Steward task exposes its pipeline for the active breakpoint', async ({ page, isMobile }) => {
   await page.goto('/steward/tasks/task-20260713115945-a1b2c3d4');
   await expect(page.getByRole('heading', { name: 'Implement dashboard contract' })).toBeVisible();
+  if (isMobile) {
+    await expect(page.locator('.pipeline-graph')).toBeHidden();
+    await expect(page.getByRole('list', { name: 'Task pipeline stages and feedback loops' })).toBeVisible();
+    return;
+  }
   await expectLocalScrollRegion(page, '.pipeline-graph');
 });
 

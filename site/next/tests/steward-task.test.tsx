@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -143,7 +143,7 @@ describe('Steward task flow and evidence state', () => {
 });
 
 describe('Steward task attempts and artifacts', () => {
-  it('keeps active-attempt auto-open, manual collapse, keyboard tabs, and manual tab override', () => {
+  it('keeps active-attempt auto-open, manual collapse, keyboard tabs, and manual tab override', async () => {
     const detail = richDetail();
     const { rerender } = render(<StewardTaskDetail detail={detail} loaded requestStatus="ready" taskId={detail.task.id} />);
     const attempt = screen.getByRole('button', { name: /Initial attempt/ });
@@ -159,7 +159,9 @@ describe('Steward task attempts and artifacts', () => {
     fireEvent.click(screen.getByRole('button', { name: /Initial attempt/ }));
     const reviewTab = screen.getByRole('tab', { name: /^Review/ });
     reviewTab.focus();
-    fireEvent.keyDown(reviewTab, { key: 'ArrowLeft' });
+    await act(async () => {
+      fireEvent.keyDown(reviewTab, { key: 'ArrowLeft' });
+    });
     expect(screen.getByRole('tab', { name: /^Validation/ })).toHaveAttribute('aria-selected', 'true');
     fireEvent.click(screen.getByRole('tab', { name: /^Patch/ }));
     expect(screen.getByRole('tab', { name: /^Patch/ })).toHaveAttribute('aria-selected', 'true');
@@ -233,7 +235,12 @@ describe('Steward task attempts and artifacts', () => {
     render(<StewardTaskDetail detail={detail} loaded requestStatus="ready" taskId={detail.task.id} />);
     fireEvent.click(screen.getByRole('tab', { name: /^Patch/ }));
     expect(screen.getByText('Loading artifact.')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('table', { name: 'Unified diff' })).toBeInTheDocument());
+    await waitFor(() => {
+      const diffContainer = screen.getByLabelText('Unified diff');
+      const diffTable = within(diffContainer).getByRole('table', { name: 'Unified diff contents' });
+      expect(diffTable).toHaveTextContent('-old');
+      expect(diffTable).toHaveTextContent('+new');
+    });
     expect(fetchMock).toHaveBeenCalledWith('/artifacts/patch.diff', { cache: 'no-store' });
 
     const failure = richDetail();

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { expectNoSeriousAxeViolations, setStoredTheme, tabUntilFocused } from './helpers/design-system';
+import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, tabUntilFocused } from './helpers/design-system';
 
 test.describe('desktop shell behavior', () => {
   test.skip(({ isMobile }) => isMobile, 'Shell interaction characterization runs in the desktop project.');
@@ -13,6 +13,21 @@ test.describe('desktop shell behavior', () => {
     await home.press('Enter');
     await expect(page).toHaveURL('/');
     await expect(page.getByRole('link', { name: 'Home', exact: true })).toHaveAttribute('aria-current', 'page');
+  });
+
+  test('uses the original desktop navigation hierarchy', async ({ page }) => {
+    await page.goto('/');
+    const navigation = page.locator('.top-nav-links');
+
+    await expect(navigation.locator(':scope > a.nav-link')).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench']);
+    await expect(navigation.locator(':scope > .nav-menu > .nav-menu-trigger')).toHaveText(['Benchmark', 'Development']);
+    await expect(page.getByRole('link', { name: 'Minhu Wang contact page' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Benchmark' }).click();
+    await expect(navigation.locator('.nav-menu-content').first().getByRole('link')).toHaveText(['LAN']);
+    await page.getByRole('button', { name: 'Benchmark' }).click();
+    await page.getByRole('button', { name: 'Development' }).click();
+    await expect(navigation.locator('.nav-menu-content').last().getByRole('link')).toHaveText(['Interop', 'Coverage', 'Duvet', 'Steward']);
   });
 
   test('theme choice persists across navigation and reload', async ({ page }) => {
@@ -73,10 +88,13 @@ test.describe('desktop shell behavior', () => {
     await expectNoSeriousAxeViolations(page);
   });
 
-  for (const disclosure of ['Evidence', 'Project']) {
-    test(`${disclosure} disclosure closes on Escape, outside pointer, and link selection`, async ({ page }) => {
+  for (const disclosure of [
+    { destination: 'LAN', href: '/performance', label: 'Benchmark' },
+    { destination: 'Coverage', href: '/coverage', label: 'Development' },
+  ]) {
+    test(`${disclosure.label} disclosure closes on Escape, outside pointer, and link selection`, async ({ page }) => {
       await page.goto('/');
-      const trigger = page.getByRole('button', { name: disclosure });
+      const trigger = page.getByRole('button', { name: disclosure.label });
       await trigger.click();
       await expect(trigger).toHaveAttribute('aria-expanded', 'true');
       await trigger.press('Escape');
@@ -87,8 +105,8 @@ test.describe('desktop shell behavior', () => {
       await expect(trigger).toHaveAttribute('aria-expanded', 'false');
       await expect(trigger).toBeFocused();
       await trigger.click();
-      await page.getByRole('link', { name: disclosure === 'Evidence' ? 'Coverage' : 'Blog' }).click();
-      await expect(page).toHaveURL(disclosure === 'Evidence' ? '/coverage' : '/blog');
+      await page.getByRole('link', { name: disclosure.destination, exact: true }).click();
+      await expect(page).toHaveURL(disclosure.href);
     });
   }
 });
@@ -126,6 +144,36 @@ test('plan 003 provides complete mobile menu access', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Open menu' }).click();
   await expect(page.getByRole('dialog', { name: 'CoQUIC navigation' }).getByRole('link')).toHaveCount(12);
+});
+
+test('navigation switches to compact controls before desktop labels wrap', async ({ page }) => {
+  await page.setViewportSize({ width: 1023, height: 900 });
+  await page.goto('/coverage');
+
+  await expect(page.locator('.desktop-nav-content')).toBeHidden();
+  await expect(page.locator('.mobile-nav-actions')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Search' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open menu' })).toBeVisible();
+  await expectNoGlobalOverflow(page);
+
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await expect(page.locator('.desktop-nav-content')).toBeVisible();
+  await expect(page.locator('.mobile-nav-actions')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Search' })).toBeVisible();
+  await expectNoGlobalOverflow(page);
+});
+
+test('short pages keep the footer at the document bottom', async ({ page }) => {
+  await page.goto('/blog');
+
+  const geometry = await page.locator('.project-footer').evaluate((footer) => ({
+    documentHeight: document.documentElement.scrollHeight,
+    footerBottom: footer.getBoundingClientRect().bottom + window.scrollY,
+    viewportHeight: window.innerHeight,
+  }));
+
+  expect(geometry.footerBottom).toBeGreaterThanOrEqual(geometry.viewportHeight - 1);
+  expect(Math.abs(geometry.documentHeight - geometry.footerBottom)).toBeLessThanOrEqual(1);
 });
 
 test('plan 003 restores search focus after dismissal', async ({ page }) => {

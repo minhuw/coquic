@@ -1,8 +1,9 @@
 /* Shared shell layer owns navigation, overlays, and responsive chrome. */
 @layer components {
+  body { display: flex; min-height: 100dvh; flex-direction: column; }
   .skip-link { position: fixed; left: 12px; top: 8px; z-index: var(--z-skip-link, 70); transform: translateY(-150%); background: var(--surface); color: var(--ink); padding: 10px 14px; }
   .skip-link:focus { transform: translateY(0); }
-  .shell-main { min-width: 0; }
+  .shell-main { min-width: 0; flex: 1 0 auto; }
   .top-nav { position: sticky; top: 0; z-index: 20; display: flex; min-height: 56px; align-items: center; gap: 16px; border-bottom: 1px solid var(--line); background: var(--nav-surface); padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left)); }
   .top-nav-home, .shell-icon-button, .theme-toggle, .site-search-trigger, .repo-link { display: inline-flex; min-width: 44px; min-height: 44px; align-items: center; justify-content: center; color: var(--ink); }
   .top-nav-home { flex: 0 0 44px; }
@@ -57,5 +58,5 @@
   .top-nav, .top-nav * { max-width: 100%; }
   .top-nav-links { overflow: visible !important; }
   html, body { overflow-x: clip; }
-  @media (max-width: 767px) { .desktop-nav-content { display: none; } .mobile-nav-actions { display: flex; } .site-search-trigger-label, .site-search-trigger kbd { display: none; } .top-nav { gap: 4px; overflow: hidden; } .top-nav-links { overflow: hidden !important; } }
+  @media (max-width: 1023px) { .desktop-nav-content { display: none; } .mobile-nav-actions { display: flex; } .site-search-trigger-label, .site-search-trigger kbd { display: none; } .top-nav { gap: 4px; overflow: hidden; } .top-nav-links { overflow: hidden !important; } }
 }

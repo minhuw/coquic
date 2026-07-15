@@ -13,21 +13,22 @@ import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from '
 export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'dataset' | 'interop' | 'coverage' | 'duvet' | 'steward' | 'qa';
 
 export const views: { href: string; label: string; route: DemoRoute }[] = [
-  { href: '/docs', label: 'Docs', route: 'docs' },
-  { href: '/workbench', label: 'Workbench', route: 'workbench' },
   { href: '/qa', label: 'Ask', route: 'qa' },
+  { href: '/docs', label: 'Docs', route: 'docs' },
+  { href: '/blog', label: 'Blog', route: 'blog' },
   { href: '/transcript', label: 'Dataset', route: 'dataset' },
-  { href: '/performance', label: 'Performance', route: 'performance' },
+  { href: '/workbench', label: 'Workbench', route: 'workbench' },
+  { href: '/performance', label: 'LAN', route: 'performance' },
   { href: '/interop', label: 'Interop', route: 'interop' },
   { href: '/coverage', label: 'Coverage', route: 'coverage' },
   { href: '/duvet', label: 'Duvet', route: 'duvet' },
-  { href: '/blog', label: 'Blog', route: 'blog' },
   { href: '/steward', label: 'Steward', route: 'steward' },
 ];
 
-const evidenceViews = views.filter((view) => ['performance', 'interop', 'coverage', 'duvet'].includes(view.route));
-const projectViews = views.filter((view) => ['blog', 'steward'].includes(view.route));
-type NavMenuId = 'evidence' | 'project';
+const primaryViews = views.filter((view) => ['qa', 'docs', 'blog', 'dataset', 'workbench'].includes(view.route));
+const benchmarkViews = views.filter((view) => view.route === 'performance');
+const developmentViews = views.filter((view) => ['interop', 'coverage', 'duvet', 'steward'].includes(view.route));
+type NavMenuId = 'benchmark' | 'development';
 
 function routeForPath(pathname: string): DemoRoute {
   if (pathname === '/') return 'home';
@@ -48,23 +49,24 @@ export function DemoNav() {
   const pathname = usePathname() || '/';
   const active = routeForPath(pathname);
   const [openMenu, setOpenMenu] = useState<NavMenuId | null>(null);
-  const activeEvidence = evidenceViews.some((view) => view.route === active);
-  const activeProject = projectViews.some((view) => view.route === active);
+  const activeBenchmark = benchmarkViews.some((view) => view.route === active);
+  const activeDevelopment = developmentViews.some((view) => view.route === active);
 
   return (
     <nav className="top-nav" aria-label="Demo views">
       <Link className="top-nav-home" href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined}>
-        <CoquicLogoIcon className="size-7" aria-hidden="true" />
+        <CoquicLogoIcon className="size-8" aria-hidden="true" />
       </Link>
       <div className="desktop-nav-content">
         <span className="top-nav-links">
-          {views.slice(0, 4).map((view) => <NavLink key={view.href} view={view} active={active} />)}
-          <Disclosure id="evidence" label="Evidence" active={active} isActive={activeEvidence} openMenu={openMenu} setOpenMenu={setOpenMenu} views={evidenceViews} />
-          <Disclosure id="project" label="Project" active={active} isActive={activeProject} openMenu={openMenu} setOpenMenu={setOpenMenu} views={projectViews} />
+          {primaryViews.map((view) => <NavLink key={view.href} view={view} active={active} />)}
+          <Disclosure id="benchmark" label="Benchmark" active={active} isActive={activeBenchmark} openMenu={openMenu} setOpenMenu={setOpenMenu} views={benchmarkViews} />
+          <Disclosure id="development" label="Development" active={active} isActive={activeDevelopment} openMenu={openMenu} setOpenMenu={setOpenMenu} views={developmentViews} />
         </span>
         <span className="nav-icon-actions">
           <SiteSearch />
           <ThemeToggle />
+          <a className="repo-link" href="https://www.minhuw.dev" target="_blank" rel="noopener noreferrer" aria-label="Minhu Wang contact page"><Contact aria-hidden="true" className="size-[19px]" /></a>
           <a className="repo-link" href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer" aria-label="CoQUIC on GitHub"><GitHubIcon className="size-5" /></a>
         </span>
       </div>

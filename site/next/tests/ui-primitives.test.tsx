@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { PageHeader } from '@/components/page-header';
@@ -135,7 +135,9 @@ describe('shared UI primitives', () => {
     const client = screen.getByRole('tab', { name: 'Client' });
     const server = screen.getByRole('tab', { name: 'Server' });
     client.focus();
-    fireEvent.keyDown(client, { key: 'ArrowRight' });
+    await act(async () => {
+      fireEvent.keyDown(client, { key: 'ArrowRight' });
+    });
     await waitFor(() => expect(server).toHaveFocus());
     await waitFor(() => expect(server).toHaveAttribute('aria-selected', 'true'));
   });

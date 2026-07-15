@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -69,19 +69,27 @@ describe('blog language characterization', () => {
     const chinese = screen.getByRole('tab', { name: '中文' });
 
     english.focus();
-    fireEvent.keyDown(english, { key: 'ArrowRight' });
+    await act(async () => {
+      fireEvent.keyDown(english, { key: 'ArrowRight' });
+    });
     await waitFor(() => expect(chinese).toHaveFocus());
     expect(chinese).toHaveAttribute('aria-selected', 'true');
 
-    fireEvent.keyDown(chinese, { key: 'Home' });
+    await act(async () => {
+      fireEvent.keyDown(chinese, { key: 'Home' });
+    });
     await waitFor(() => expect(english).toHaveFocus());
     expect(english).toHaveAttribute('aria-selected', 'true');
 
-    fireEvent.keyDown(english, { key: 'End' });
+    await act(async () => {
+      fireEvent.keyDown(english, { key: 'End' });
+    });
     await waitFor(() => expect(chinese).toHaveFocus());
     expect(chinese).toHaveAttribute('aria-selected', 'true');
 
-    fireEvent.keyDown(chinese, { key: 'ArrowLeft' });
+    await act(async () => {
+      fireEvent.keyDown(chinese, { key: 'ArrowLeft' });
+    });
     await waitFor(() => expect(english).toHaveFocus());
     expect(english).toHaveAttribute('aria-selected', 'true');
   });

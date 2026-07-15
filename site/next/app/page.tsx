@@ -1,34 +1,21 @@
 import Link from 'next/link';
-import { ArrowUpRight, BookOpen, ChevronRight } from 'lucide-react';
+import { ArrowUpRight, ShieldCheck } from 'lucide-react';
 
 import { CoquicLogoIcon } from '@/components/icons';
+import { HomeArtwork, type HomeArtworkVariant } from '@/components/home-artwork';
 
-const taskItems = [
-  {
-    href: '/workbench',
-    title: 'Inspect protocol behavior',
-    description: 'Run the default transfer scenario and inspect packets, endpoints, streams, and recovery state.',
-  },
-  {
-    href: '/docs/api/integration',
-    title: 'Integrate the API',
-    description: 'Follow the runtime event loop and public wrapper guidance for a sans-I/O integration.',
-  },
-  {
-    href: '/duvet',
-    title: 'Review evidence',
-    description: 'Trace RFC requirements to implementation citations and tests in the Duvet report.',
-  },
-  {
-    href: '/blog',
-    title: 'Browse development history',
-    description: 'Read project notes, implementation updates, interop findings, and benchmark observations.',
-  },
-  {
-    href: '/steward',
-    title: 'Monitor Steward',
-    description: 'Inspect public repository stewardship tasks and planner history.',
-  },
+const evidenceItems = [
+  { href: '/performance', title: 'Performance', description: 'Throughput and request-rate benchmarks.', art: 'performance' },
+  { href: '/interop', title: 'Interop', description: 'Peer and testcase results.', art: 'interop' },
+  { href: '/coverage', title: 'Coverage', description: 'Source coverage by path.', art: 'coverage' },
+  { href: '/duvet', title: 'Duvet', description: 'RFC requirements mapped to source and tests.', art: 'duvet' },
+] as const;
+
+const toolItems = [
+  { href: '/workbench', title: 'Workbench', description: 'Packets, streams, and recovery.', art: 'workbench' },
+  { href: '/docs/api/integration', title: 'API', description: 'Sans-I/O integration guide.', art: 'api' },
+  { href: '/qa', title: 'Ask', description: 'QUIC answers with RFC citations.', art: 'ask' },
+  { href: '/transcript', title: 'Dataset', description: 'Public Codex transcripts.', art: 'dataset' },
 ] as const;
 
 export default function Home() {
@@ -37,113 +24,95 @@ export default function Home() {
       <meta name="coquic-demo-marker" content="coquic-wasm-demo-v1" />
       <meta name="coquic-home-marker" content="coquic-demo-home-v1" />
 
-      <div className="home-container container-focused">
-        <section className="home-portal" aria-labelledby="home-title">
-          <div className="home-intro">
-            <CoquicLogoIcon className="home-mark" aria-hidden="true" />
-            <h1 id="home-title" className="home-title">
-              CoQUIC
-            </h1>
-            <p className="home-slogan">From Prompt to Packet.</p>
-            <p className="home-description">
-              CoQUIC is an open-source QUIC implementation, made inspectable through protocol state and engineering evidence.
+      <section className="home-hero" aria-labelledby="home-title">
+        <div className="home-hero-inner container-wide">
+          <div className="home-hero-copy">
+            <p className="home-kicker">
+              <span className="home-kicker-marker" aria-hidden="true" />
+              Experimental / open source
             </p>
 
-            <div className="home-actions" aria-label="Project entry points">
-              <Link className="ui-button ui-button--default ui-button--default-size home-action-primary" href="/workbench">
-                <span className="ui-button__content">
-                  <span>Open Workbench</span>
+            <div className="home-brand-lockup">
+              <CoquicLogoIcon className="home-mark" aria-hidden="true" />
+              <h1 id="home-title" className="home-title">CoQUIC</h1>
+            </div>
+
+            <p className="home-slogan">From Prompt to Packet.</p>
+            <p className="home-description">
+              Experimental QUIC and HTTP/3, generated with Codex.
+            </p>
+          </div>
+
+          <Link className="home-steward-feature" href="/steward" aria-label="Open Steward">
+            <span className="home-steward-label">
+              <ShieldCheck aria-hidden="true" size={20} />
+              Steward
+            </span>
+            <strong>Repository tasks and automation</strong>
+            <span className="home-steward-action">
+              Open Steward
+              <ArrowUpRight aria-hidden="true" size={18} />
+            </span>
+          </Link>
+        </div>
+      </section>
+
+      <HomeIndex
+        className="home-evidence"
+        heading="Evidence"
+        items={evidenceItems}
+        label="Engineering evidence"
+      />
+
+      <HomeIndex
+        className="home-tools"
+        heading="Tools"
+        items={toolItems}
+        label="Project tools"
+      />
+    </main>
+  );
+}
+
+function HomeIndex({
+  className,
+  heading,
+  items,
+  label,
+}: {
+  className: string;
+  heading: string;
+  items: ReadonlyArray<{
+    href: string;
+    title: string;
+    description: string;
+    art: HomeArtworkVariant;
+  }>;
+  label: string;
+}) {
+  const headingId = `home-${heading.toLowerCase()}-title`;
+
+  return (
+    <section className={`home-index ${className}`} aria-labelledby={headingId}>
+      <div className="home-index-inner container-wide">
+        <h2 id={headingId}>{heading}</h2>
+        <nav className="home-index-links" aria-label={label}>
+          {items.map((item) => {
+            return (
+              <Link href={item.href} key={item.href}>
+                <HomeArtwork variant={item.art} />
+                <span className="home-index-card-body">
+                  <span className="home-index-copy">
+                    <strong>{item.title}</strong>
+                    <span>{item.description}</span>
+                  </span>
                   <ArrowUpRight aria-hidden="true" size={16} />
                 </span>
               </Link>
-              <Link className="home-action-secondary" href="/docs">
-                <BookOpen aria-hidden="true" size={16} />
-                <span>Read the docs</span>
-              </Link>
-              <Link className="home-action-resource" href="/interop">
-                <span>View interop evidence</span>
-                <ArrowUpRight aria-hidden="true" size={16} />
-              </Link>
-            </div>
-          </div>
-
-          <section className="home-preview" aria-labelledby="preview-title">
-            <div className="home-preview-header">
-              <div>
-                <p className="home-eyebrow">scenario preview</p>
-                <h2 id="preview-title">Transfer scenario preview</h2>
-              </div>
-              <Link className="home-preview-link" href="/workbench">
-                <span>Open scenario in Workbench</span>
-                <ArrowUpRight aria-hidden="true" size={16} />
-              </Link>
-            </div>
-            <p className="home-preview-description">
-              Scenario preview only. The default Transfer scenario represents client and server paths across the Initial, Handshake, and 1-RTT packet spaces.
-            </p>
-
-            <div className="home-protocol-visual" aria-label="Client and server protocol channels">
-              <div className="home-endpoint home-endpoint-client">
-                <span className="home-endpoint-token" aria-hidden="true">C</span>
-                <strong>Client</strong>
-                <span>browser endpoint</span>
-              </div>
-
-              <div className="home-protocol-flow">
-                <div className="home-lane home-lane-client">
-                  <span className="home-direction">client to server</span>
-                  <span className="home-wire" aria-hidden="true">
-                    <span className="home-packet home-packet-client home-packet-one" />
-                    <span className="home-packet home-packet-client home-packet-two" />
-                    <span className="home-packet home-packet-client home-packet-three" />
-                  </span>
-                </div>
-                <div className="home-lane home-lane-server">
-                  <span className="home-direction">server to client</span>
-                  <span className="home-wire" aria-hidden="true">
-                    <span className="home-packet home-packet-server home-packet-one" />
-                    <span className="home-packet home-packet-server home-packet-two" />
-                    <span className="home-packet home-packet-server home-packet-three" />
-                  </span>
-                </div>
-                <ol className="home-stage-track" aria-label="QUIC packet stages">
-                  <li><span className="home-stage-marker" aria-hidden="true" />Initial</li>
-                  <li><span className="home-stage-marker" aria-hidden="true" />Handshake</li>
-                  <li><span className="home-stage-marker" aria-hidden="true" />1-RTT</li>
-                </ol>
-              </div>
-
-              <div className="home-endpoint home-endpoint-server">
-                <span className="home-endpoint-token" aria-hidden="true">S</span>
-                <strong>Server</strong>
-                <span>browser endpoint</span>
-              </div>
-            </div>
-          </section>
-        </section>
-
-        <section className="home-tasks" aria-labelledby="task-index-title">
-          <div className="home-section-heading">
-            <div>
-              <p className="home-eyebrow">project index</p>
-              <h2 id="task-index-title">Pick a project job</h2>
-            </div>
-            <p>Use the real site surfaces to inspect, integrate, review, and follow the project.</p>
-          </div>
-
-          <div className="home-task-list">
-            {taskItems.map((item) => (
-              <Link className="home-task-row" href={item.href} key={item.href}>
-                <span className="home-task-copy">
-                  <strong>{item.title}</strong>
-                  <span>{item.description}</span>
-                </span>
-                <ChevronRight aria-hidden="true" size={18} />
-              </Link>
-            ))}
-          </div>
-        </section>
+            );
+          })}
+        </nav>
       </div>
-    </main>
+    </section>
   );
 }

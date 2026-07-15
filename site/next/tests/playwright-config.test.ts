@@ -62,6 +62,7 @@ describe('Playwright isolation configuration', () => {
     ['the filesystem root', path.parse(os.tmpdir()).root],
     ['the temporary root', os.tmpdir()],
     ['a normalized alias of the temporary root', path.join(os.tmpdir(), 'fixture', '..')],
+    ['a nested path with a replaceable parent', path.join(os.tmpdir(), 'fixture-parent', 'fixture')],
     ['a path outside the temporary root', process.cwd()],
   ])('rejects %s before fixture deletion', (_label, unsafeRoot) => {
     const result = spawnSync(process.execPath, [fixtureScript], {
@@ -70,7 +71,7 @@ describe('Playwright isolation configuration', () => {
     });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/must not be empty|must be a child of a temporary directory/);
+    expect(result.stderr).toMatch(/must not be empty|must be a direct child of the temporary directory/);
   });
 
   it('rejects an existing parent symlink that resolves outside the temporary root', async () => {
@@ -93,10 +94,35 @@ describe('Playwright isolation configuration', () => {
       });
 
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toMatch(/must not resolve outside the temporary directory/);
+      expect(result.stderr).toMatch(/must be a direct child of the temporary directory/);
       await expect(access(sentinel)).resolves.toBeUndefined();
     } finally {
       await rm(linkedParent, { force: true });
+      await rm(outsideRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('replaces a selected symlink without deleting its target', async () => {
+    const outsideRoot = await mkdtemp(path.join(process.cwd(), '.playwright-fixture-target-'));
+    const sentinel = path.join(outsideRoot, 'sentinel');
+    const selectedRoot = await mkdtemp(path.join(os.tmpdir(), 'coquic-playwright-selected-'));
+    await writeFile(sentinel, 'preserve');
+    await rm(selectedRoot, { recursive: true });
+    await symlink(outsideRoot, selectedRoot, 'dir');
+
+    try {
+      const result = spawnSync(process.execPath, [fixtureScript], {
+        encoding: 'utf8',
+        env: { ...process.env, COQUIC_PLAYWRIGHT_FIXTURE_ROOT: selectedRoot },
+      });
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      await expect(access(sentinel)).resolves.toBeUndefined();
+      await expect(access(path.join(selectedRoot, 'public/steward/status.json')))
+        .resolves.toBeUndefined();
+    } finally {
+      await rm(selectedRoot, { force: true, recursive: true });
       await rm(outsideRoot, { force: true, recursive: true });
     }
   });

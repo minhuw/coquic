@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,67 +19,79 @@ const detailFixture = path.join(
   'steward/schema/fixtures/public-task-v2/feature.json',
 );
 
-await rm(safeOutputRoot, { recursive: true, force: true });
-await mkdir(path.join(safeOutputRoot, 'public/steward/data/tasks'), { recursive: true });
-const monitorSource = await readFile(monitorFixture);
-const monitor = JSON.parse(monitorSource.toString('utf8'));
-const nowMs = Date.now();
-const generatedAtMs = Date.parse(monitor.generated_at);
-if (!Number.isFinite(generatedAtMs)) {
-  throw new Error('Steward monitor fixture has an invalid generated_at timestamp');
-}
-const timestampOffsetMs = nowMs - 5_000 - generatedAtMs;
-const isoTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const stagingRoot = await mkdtemp(path.join(
+  path.dirname(safeOutputRoot),
+  '.coquic-steward-playwright-stage-',
+));
+let fixtureInstalled = false;
 
-function shiftTimestamps(value) {
-  if (Array.isArray(value)) {
-    value.forEach(shiftTimestamps);
-    return;
+try {
+  await mkdir(path.join(stagingRoot, 'public/steward/data/tasks'), { recursive: true });
+  const monitorSource = await readFile(monitorFixture);
+  const monitor = JSON.parse(monitorSource.toString('utf8'));
+  const nowMs = Date.now();
+  const generatedAtMs = Date.parse(monitor.generated_at);
+  if (!Number.isFinite(generatedAtMs)) {
+    throw new Error('Steward monitor fixture has an invalid generated_at timestamp');
   }
-  if (value === null || typeof value !== 'object') return;
+  const timestampOffsetMs = nowMs - 5_000 - generatedAtMs;
+  const isoTimestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
-  for (const [key, child] of Object.entries(value)) {
-    if (
-      typeof child === 'string'
-      && (key === 'timestamp' || key.endsWith('_at'))
-      && isoTimestampPattern.test(child)
-    ) {
-      const timestampMs = Date.parse(child);
-      if (Number.isFinite(timestampMs)) {
-        value[key] = new Date(timestampMs + timestampOffsetMs).toISOString();
-      }
-      continue;
+  function shiftTimestamps(value) {
+    if (Array.isArray(value)) {
+      value.forEach(shiftTimestamps);
+      return;
     }
-    shiftTimestamps(child);
-  }
-}
+    if (value === null || typeof value !== 'object') return;
 
-shiftTimestamps(monitor);
-await writeFile(
-  path.join(safeOutputRoot, 'public/steward/status.json'),
-  JSON.stringify(monitor),
-);
-const monitorSourceAfter = await readFile(monitorFixture);
-if (!monitorSource.equals(monitorSourceAfter)) {
-  throw new Error('Steward monitor source fixture changed while preparing test data');
-}
-const detailSource = await readFile(detailFixture);
-const detail = JSON.parse(detailSource.toString('utf8'));
-detail.attempts[0].patch = {
-  availability: 'available',
-  mode: 'redacted',
-  text: 'diff --git a/monitor.ts b/monitor.ts\n@@ -1 +1 @@\n-old\n+new\n',
-  size: 65,
-  truncated: false,
-  tail_bytes: 65,
-};
-await writeFile(
-  path.join(safeOutputRoot, 'public/steward/data/tasks/task-20260713115945-a1b2c3d4.json'),
-  JSON.stringify(detail),
-);
-const detailSourceAfter = await readFile(detailFixture);
-if (!detailSource.equals(detailSourceAfter)) {
-  throw new Error('Steward detail source fixture changed while preparing test data');
+    for (const [key, child] of Object.entries(value)) {
+      if (
+        typeof child === 'string'
+        && (key === 'timestamp' || key.endsWith('_at'))
+        && isoTimestampPattern.test(child)
+      ) {
+        const timestampMs = Date.parse(child);
+        if (Number.isFinite(timestampMs)) {
+          value[key] = new Date(timestampMs + timestampOffsetMs).toISOString();
+        }
+        continue;
+      }
+      shiftTimestamps(child);
+    }
+  }
+
+  shiftTimestamps(monitor);
+  await writeFile(
+    path.join(stagingRoot, 'public/steward/status.json'),
+    JSON.stringify(monitor),
+  );
+  const monitorSourceAfter = await readFile(monitorFixture);
+  if (!monitorSource.equals(monitorSourceAfter)) {
+    throw new Error('Steward monitor source fixture changed while preparing test data');
+  }
+  const detailSource = await readFile(detailFixture);
+  const detail = JSON.parse(detailSource.toString('utf8'));
+  detail.attempts[0].patch = {
+    availability: 'available',
+    mode: 'redacted',
+    text: 'diff --git a/monitor.ts b/monitor.ts\n@@ -1 +1 @@\n-old\n+new\n',
+    size: 65,
+    truncated: false,
+    tail_bytes: 65,
+  };
+  await writeFile(
+    path.join(stagingRoot, 'public/steward/data/tasks/task-20260713115945-a1b2c3d4.json'),
+    JSON.stringify(detail),
+  );
+  const detailSourceAfter = await readFile(detailFixture);
+  if (!detailSource.equals(detailSourceAfter)) {
+    throw new Error('Steward detail source fixture changed while preparing test data');
+  }
+
+  await installFixtureRoot(stagingRoot, safeOutputRoot);
+  fixtureInstalled = true;
+} finally {
+  if (!fixtureInstalled) await rm(stagingRoot, { recursive: true, force: true });
 }
 
 function defaultFixtureRoot() {
@@ -94,43 +106,41 @@ async function validateFixtureRoot(candidate) {
   const temporaryRoots = [temporaryRoot];
   if (path.sep === '/' && temporaryRoot.startsWith('/tmp/')) temporaryRoots.push('/tmp');
   const resolvedCandidate = path.resolve(candidate);
-  const outsideTemporaryRoot = temporaryRoots.every((root) => !isStrictChild(root, resolvedCandidate));
-  if (
-    resolvedCandidate === path.parse(resolvedCandidate).root
-    || temporaryRoots.includes(resolvedCandidate)
-    || outsideTemporaryRoot
-  ) {
-    throw new Error(`COQUIC_PLAYWRIGHT_FIXTURE_ROOT must be a child of a temporary directory; received ${candidate}`);
+  const selectedTemporaryRoot = temporaryRoots.find(
+    (root) => path.dirname(resolvedCandidate) === root,
+  );
+  if (temporaryRoots.includes(resolvedCandidate) || selectedTemporaryRoot === undefined) {
+    throw new Error(`COQUIC_PLAYWRIGHT_FIXTURE_ROOT must be a direct child of the temporary directory; received ${candidate}`);
   }
-
-  const canonicalTemporaryRoots = await Promise.all(temporaryRoots.map((root) => realpath(root)));
-  const canonicalCandidate = await resolveThroughExistingAncestor(resolvedCandidate);
-  if (canonicalTemporaryRoots.every((root) => !isStrictChild(root, canonicalCandidate))) {
-    throw new Error(`COQUIC_PLAYWRIGHT_FIXTURE_ROOT must not resolve outside the temporary directory; received ${candidate}`);
-  }
-  return resolvedCandidate;
+  const canonicalTemporaryRoot = await realpath(selectedTemporaryRoot);
+  return path.join(canonicalTemporaryRoot, path.basename(resolvedCandidate));
 }
 
-function isStrictChild(root, candidate) {
-  const relative = path.relative(root, candidate);
-  return Boolean(relative)
-    && relative !== '..'
-    && !relative.startsWith(`..${path.sep}`)
-    && !path.isAbsolute(relative);
-}
+async function installFixtureRoot(source, destination) {
+  const retiredRoot = path.join(
+    path.dirname(destination),
+    `.coquic-steward-playwright-retired-${randomUUID()}`,
+  );
+  let retiredExistingFixture = false;
 
-async function resolveThroughExistingAncestor(candidate) {
-  let ancestor = candidate;
-  const missingSegments = [];
-  while (true) {
-    try {
-      return path.resolve(await realpath(ancestor), ...missingSegments);
-    } catch (error) {
-      if (!error || typeof error !== 'object' || error.code !== 'ENOENT') throw error;
-      const parent = path.dirname(ancestor);
-      if (parent === ancestor) throw error;
-      missingSegments.unshift(path.basename(ancestor));
-      ancestor = parent;
+  try {
+    await rename(destination, retiredRoot);
+    retiredExistingFixture = true;
+  } catch (error) {
+    if (!error || typeof error !== 'object' || error.code !== 'ENOENT') throw error;
+  }
+
+  try {
+    await rename(source, destination);
+  } finally {
+    if (retiredExistingFixture) {
+      try {
+        await rm(retiredRoot, { recursive: true, force: true });
+      } catch (cleanupError) {
+        throw new Error(`Failed to remove retired Playwright fixture ${retiredRoot}`, {
+          cause: cleanupError,
+        });
+      }
     }
   }
 }

@@ -1,7 +1,6 @@
 'use client';
 
-import { type KeyboardEvent, type ReactNode, useId, useState } from 'react';
-import { Bot, CheckCircle2, ChevronRight, Code2, FilePenLine, ListChecks, MessageSquareText, Search, Sparkles, TerminalSquare, UserRound, Wrench, XCircle } from 'lucide-react';
+import { Bot, CheckCircle2, Code2, FilePenLine, ListChecks, MessageSquareText, Search, Sparkles, TerminalSquare, UserRound, Wrench, XCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -17,7 +16,10 @@ import {
   type TranscriptRole,
   type TranscriptToolGroup,
 } from '@/lib/codex-transcript';
-import { CodeBlock } from './steward-code-block';
+import { EvidenceDisclosure } from './evidence/disclosure';
+import { EvidenceMessage } from './evidence/message';
+import type { EvidenceTone } from './evidence/message';
+import { CodeBlock } from './evidence/code-block';
 
 export function CodexTranscriptThread({
   empty,
@@ -29,14 +31,14 @@ export function CodexTranscriptThread({
   const conversationRecords = records.filter(isRenderableRecord);
   const conversationItems = groupConversationRecords(conversationRecords);
   if (!conversationItems.length) {
-    return <div className="transcript-empty">{empty ?? 'No displayable transcript records.'}</div>;
+    return <div className="evidence-root evidence-thread"><div className="transcript-empty">{empty ?? 'No displayable transcript records.'}</div></div>;
   }
   return (
-    <>
+    <div className="evidence-root evidence-thread">
       {conversationItems.map((item) => (
         <TranscriptItem key={item.key} item={item} />
       ))}
-    </>
+    </div>
   );
 }
 
@@ -54,25 +56,25 @@ function TranscriptMessage({ record }: { record: TranscriptRecord }) {
   const kind = conversationKind(record);
   if (kind === 'reasoning') {
     return (
-      <ToolCard icon={<Sparkles size={16} />} meta={lineMeta(record)} title="Reasoning" tone="neutral">
+      <EvidenceDisclosure className="tool-card neutral" icon={<Sparkles size={16} />} metadata={lineMeta(record)} label="Reasoning" tone="neutral">
         <MarkdownText text={record.text} />
         {record.textTruncated ? <TranscriptNote /> : null}
-      </ToolCard>
+      </EvidenceDisclosure>
     );
   }
   if (kind === 'event') {
     return (
-      <ToolCard icon={<XCircle size={16} />} meta={lineMeta(record)} title={messageLabel(role, kind, record)} tone={record.payloadType === 'error' ? 'danger' : 'neutral'}>
+      <EvidenceDisclosure className={`tool-card ${record.payloadType === 'error' ? 'danger' : 'neutral'}`} icon={<XCircle size={16} />} metadata={lineMeta(record)} label={messageLabel(role, kind, record)} tone={record.payloadType === 'error' ? 'danger' : 'neutral'}>
         <MarkdownText text={record.text} />
         {record.textTruncated ? <TranscriptNote /> : null}
-      </ToolCard>
+      </EvidenceDisclosure>
     );
   }
   return (
-    <ChatBubble label={messageLabel(role, kind, record)} role={role}>
+    <EvidenceMessage className={`chat-bubble ${role}`} icon={role === 'user' ? <UserRound size={16} /> : <MessageSquareText size={16} />} label={messageLabel(role, kind, record)} role={role}>
       <MarkdownText text={record.text} />
       {record.textTruncated ? <TranscriptNote /> : null}
-    </ChatBubble>
+    </EvidenceMessage>
   );
 }
 
@@ -86,7 +88,7 @@ function TranscriptToolCard({ group }: { group: TranscriptToolGroup }) {
   const payloadLabel = toolPayloadLabel(primaryRecord.payloadType);
   const meta = [toolGroupState(group), payloadLabel, toolLineLabel(group)].filter(Boolean).join(' / ');
   return (
-    <ToolCard icon={toolIcon(primaryRecord)} meta={meta} title={toolName} tone={toolTone(group)}>
+    <EvidenceDisclosure className={`tool-card ${compatibilityToneClass(toolTone(group))}`} icon={toolIcon(primaryRecord)} metadata={meta} label={toolName} tone={toolTone(group)}>
       <div className="transcript-tool-sections steward-tool-sections">
         {group.call ? <ToolSection format={toolCallFormat(group.call)} label="Call" record={group.call} /> : null}
         {group.result ? (
@@ -96,7 +98,7 @@ function TranscriptToolCard({ group }: { group: TranscriptToolGroup }) {
         )}
       </div>
       {group.call?.textTruncated || group.result?.textTruncated ? <TranscriptNote /> : null}
-    </ToolCard>
+    </EvidenceDisclosure>
   );
 }
 
@@ -104,7 +106,7 @@ function FileChangeCard({ record }: { record: TranscriptRecord }) {
   const parsed = parseJsonRecord(record.text) as { changes?: Array<{ kind?: string; path?: string }>; status?: string } | null;
   const changes = Array.isArray(parsed?.changes) ? parsed.changes : [];
   return (
-    <ToolCard icon={<FilePenLine size={16} />} meta={parsed?.status || lineMeta(record)} title="File change" tone="pending">
+    <EvidenceDisclosure className="tool-card pending" icon={<FilePenLine size={16} />} metadata={parsed?.status || lineMeta(record)} label="File change" tone="warning">
       {changes.length ? (
         <ul className="file-list">
           {changes.map((change, index) => (
@@ -118,7 +120,7 @@ function FileChangeCard({ record }: { record: TranscriptRecord }) {
         <MarkdownText text={record.text} />
       )}
       {record.textTruncated ? <TranscriptNote /> : null}
-    </ToolCard>
+    </EvidenceDisclosure>
   );
 }
 
@@ -126,7 +128,7 @@ function TodoListCard({ record }: { record: TranscriptRecord }) {
   const parsed = parseJsonRecord(record.text) as { items?: Array<{ completed?: boolean; text?: string }> } | null;
   const items = Array.isArray(parsed?.items) ? parsed.items : [];
   return (
-    <ToolCard icon={<ListChecks size={16} />} meta={`${items.length} items`} title="Task plan" tone="neutral">
+    <EvidenceDisclosure className="tool-card neutral" icon={<ListChecks size={16} />} metadata={`${items.length} items`} label="Task plan" tone="neutral">
       {items.length ? (
         <ul className="todo-list">
           {items.map((todo, index) => (
@@ -140,16 +142,16 @@ function TodoListCard({ record }: { record: TranscriptRecord }) {
         <MarkdownText text={record.text} />
       )}
       {record.textTruncated ? <TranscriptNote /> : null}
-    </ToolCard>
+    </EvidenceDisclosure>
   );
 }
 
 function WebSearchCard({ record }: { record: TranscriptRecord }) {
   return (
-    <ToolCard icon={<Search size={16} />} meta={lineMeta(record)} title="Web search" tone="neutral">
+    <EvidenceDisclosure className="tool-card neutral" icon={<Search size={16} />} metadata={lineMeta(record)} label="Web search" tone="neutral">
       <code className="transcript-inline-code">{record.text || '(empty query)'}</code>
       {record.textTruncated ? <TranscriptNote /> : null}
-    </ToolCard>
+    </EvidenceDisclosure>
   );
 }
 
@@ -181,81 +183,9 @@ function ToolSection({ format, label, record }: { format: 'bash' | 'json' | 'mar
   );
 }
 
-function ChatBubble({
-  children,
-  label,
-  role,
-}: {
-  children: ReactNode;
-  label: string;
-  role: TranscriptRole;
-}) {
-  return (
-    <article className={`chat-bubble ${role}`}>
-      <div className="chat-avatar">
-        {role === 'user' ? <UserRound size={16} /> : <MessageSquareText size={16} />}
-      </div>
-      <div className="chat-body">
-        <div className="chat-label">{label}</div>
-        {children}
-      </div>
-    </article>
-  );
-}
-
-function ToolCard({
-  children,
-  icon,
-  meta,
-  title,
-  tone,
-}: {
-  children: ReactNode;
-  icon: ReactNode;
-  meta: string;
-  title: string;
-  tone: 'danger' | 'neutral' | 'ok' | 'pending';
-}) {
-  const bodyId = useId();
-  const [open, setOpen] = useState(tone === 'danger' || tone === 'pending');
-  const toggle = () => setOpen((current) => !current);
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    toggle();
-  };
-
-  return (
-    <article className={`tool-card ${tone} ${open ? 'open' : ''}`}>
-      <div
-        aria-controls={bodyId}
-        aria-expanded={open}
-        className="tool-head"
-        onClick={toggle}
-        onKeyDown={onKeyDown}
-        role="button"
-        tabIndex={0}
-      >
-        <div className="tool-icon">{icon}</div>
-        <div>
-          <h3>{title}</h3>
-          <span>{meta}</span>
-          {!open && <em>Click to inspect output</em>}
-        </div>
-        <ChevronRight className="tool-chevron" size={15} />
-      </div>
-      {open && (
-        <div className="tool-body" id={bodyId}>
-          {children}
-        </div>
-      )}
-    </article>
-  );
-}
-
 function MarkdownText({ text }: { text: string }) {
   return (
-    <div className="transcript-markdown">
+    <div className="evidence-markdown transcript-markdown">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   );
@@ -293,10 +223,16 @@ function toolGroupState(group: TranscriptToolGroup) {
   return 'result only';
 }
 
-function toolTone(group: TranscriptToolGroup): 'danger' | 'neutral' | 'ok' | 'pending' {
+function toolTone(group: TranscriptToolGroup): EvidenceTone {
   if (group.result?.payloadType === 'error' || group.call?.payloadType === 'error') return 'danger';
-  if (!group.result) return 'pending';
-  return 'ok';
+  if (!group.result) return 'warning';
+  return 'success';
+}
+
+function compatibilityToneClass(tone: EvidenceTone) {
+  if (tone === 'success') return 'ok';
+  if (tone === 'warning') return 'pending';
+  return tone;
 }
 
 function toolIcon(record: TranscriptRecord) {

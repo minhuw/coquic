@@ -821,9 +821,13 @@ Meet WCAG 2.2 AA as the minimum target.
   reusable layout patterns.
 - `design-reference/` is a non-normative evaluation surface. It may illustrate
   the system, but it does not define route requirements or override this file.
-- `site/next/app/globals.css` remains the global CSS entry point.
-- As the implementation is modernized, split imported styles by responsibility:
-  foundations/tokens, base elements, shared components, then feature styles.
+- `site/next/app/styles/theme.css` is the permanent minimal global entry point
+  for Tailwind, canonical tokens, base elements, and layout foundations.
+- `site/next/app/globals.css` is a temporary compatibility manifest that imports
+  legacy, shared, and feature styles while their consumers migrate.
+- Delete the compatibility manifest only after there are zero legacy variable
+  consumers, zero emitted selectors owned only by compatibility sheets, and all
+  route and visual tests are green.
 - Shared React primitives live under `site/next/src/components/ui/`.
 - Feature styles may consume semantic tokens; they may not redefine the global
   brand palette.

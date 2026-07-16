@@ -1,5 +1,8 @@
 /* Plan 002 owns global tokens, base elements, accessibility, and layout foundations. */
 
+@import "tailwindcss";
+@import "../globals.css";
+
 @theme inline {
   --font-sans:
     var(--font-host-grotesk), ui-sans-serif, system-ui, -apple-system,
@@ -97,7 +100,7 @@
     --icon-navigation: 24px;
 
     --shadow-dropdown: 0 12px 32px rgb(17 19 16 / 14%);
-    --shadow-modal: 0 24px 64px rgb(17 19 16 / 20%);
+    --elevation-modal: 0 24px 64px rgb(17 19 16 / 20%);
 
     --z-base: 0;
     --z-sticky: 10;
@@ -202,7 +205,7 @@
     --chart-6: #b2c1b5;
 
     --shadow-dropdown: 0 16px 40px rgb(0 0 0 / 48%);
-    --shadow-modal: 0 28px 72px rgb(0 0 0 / 64%);
+    --elevation-modal: 0 28px 72px rgb(0 0 0 / 64%);
   }
 
   *,

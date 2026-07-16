@@ -1041,7 +1041,7 @@
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-overlay);
     background: var(--canvas);
-    box-shadow: var(--shadow-modal);
+    box-shadow: var(--elevation-modal);
   }
 
   .workbench-page .modal-head {

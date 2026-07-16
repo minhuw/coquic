@@ -615,17 +615,17 @@
     "text": "Expected selector \".workbench-page .summary-item span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
   },
   {
-    "file": "app/styles/foundation.css",
+    "file": "app/styles/theme.css",
     "rule": "declaration-block-no-redundant-longhand-properties",
     "text": "Expected shorthand property \"padding\" (declaration-block-no-redundant-longhand-properties)"
   },
   {
-    "file": "app/styles/foundation.css",
+    "file": "app/styles/theme.css",
     "rule": "font-family-name-quotes",
     "text": "Expected no quotes around \"BlinkMacSystemFont\" (font-family-name-quotes)"
   },
   {
-    "file": "app/styles/foundation.css",
+    "file": "app/styles/theme.css",
     "rule": "font-family-name-quotes",
     "text": "Expected no quotes around \"SFMono-Regular\" (font-family-name-quotes)"
   },

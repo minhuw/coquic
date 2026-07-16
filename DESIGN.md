@@ -370,7 +370,7 @@ comfortable density even when the screen is wide.
 - Dropdown shadow (`--shadow-dropdown`):
   `0 12px 32px rgb(17 19 16 / 14%)` in light mode and
   `0 16px 40px rgb(0 0 0 / 48%)` in dark mode.
-- Modal shadow (`--shadow-modal`):
+- Modal shadow (`--elevation-modal`):
   `0 24px 64px rgb(17 19 16 / 20%)` in light mode and
   `0 28px 72px rgb(0 0 0 / 64%)` in dark mode.
 

@@ -25,8 +25,6 @@ const config = [
           argsIgnorePattern: '^_',
           caughtErrors: 'all',
           caughtErrorsIgnorePattern: '^_',
-          destructuredArrayIgnorePattern: '^_',
-          varsIgnorePattern: '^_',
         },
       ],
     },
@@ -57,14 +55,20 @@ const config = [
   },
   {
     name: 'coquic/render-derived-values',
+    files: ['src/components/docs/markdown.tsx'],
+    rules: {
+      // This value is intentionally derived from parsed content.
+      'react-hooks/immutability': 'off',
+    },
+  },
+  {
+    name: 'coquic/render-clock-values',
     files: [
-      'src/components/docs/markdown.tsx',
       'src/components/steward/dashboard.tsx',
       'src/components/steward/shared.tsx',
     ],
     rules: {
-      // These values are intentionally derived from parsed content or an external clock.
-      'react-hooks/immutability': 'off',
+      // These values are intentionally derived from an external clock.
       'react-hooks/purity': 'off',
     },
   },

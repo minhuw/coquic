@@ -1,0 +1,1792 @@
+[
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".anchored-heading__permalink:focus-visible\" to come before selector \".anchored-heading:hover .anchored-heading__permalink\", at line 172 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".anchored-heading__permalink:hover\" to come before selector \".anchored-heading:hover .anchored-heading__permalink\", at line 172 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".editorial-code-block\" to come before selector \".article-content > .editorial-code-block\", at line 26 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".editorial-code-scroll code\" to come before selector \".article-content :not(pre) > code\", at line 87 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".editorial-table-region code\" to come before selector \".article-content :not(pre) > code\", at line 87 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".editorial-table-region\" to come before selector \".article-content > .editorial-table-region\", at line 26 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "property-no-deprecated",
+    "text": "Deprecated property \"clip\" (property-no-deprecated)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "selector-not-notation",
+    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "selector-not-notation",
+    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "selector-not-notation",
+    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
+  },
+  {
+    "file": "app/styles/editorial.css",
+    "rule": "selector-not-notation",
+    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
+  },
+  {
+    "file": "app/styles/evidence.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".evidence-disclosure__trigger:hover\" to come before selector \".evidence-disclosure.is-open .evidence-disclosure__trigger\", at line 170 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/evidence.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".evidence-message__body\" to come before selector \".evidence-message.evidence-message--user .evidence-message__body\", at line 48 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/evidence.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".evidence-message__icon\" to come before selector \".evidence-message.evidence-message--user .evidence-message__icon\", at line 43 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/evidence.css",
+    "rule": "property-no-deprecated",
+    "text": "Deprecated property \"clip\" (property-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/blog.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".blog-back-link svg\" to come before selector \".blog-row-link:hover .blog-row-cta svg\", at line 129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/blog.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".blog-language-panel\" to come before selector \".blog-language-panel:focus-visible\", at line 273 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/docs.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".docs-mobile-drawer__close\" (\".docs-page .docs-mobile-drawer__close\") to come before selector \".docs-mobile-drawer__close:hover\" (\".docs-page .docs-mobile-drawer__close:hover\"), at line 98 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/home.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".home-index-art svg\" to come before selector \".home-index-card-body > svg:last-child\", at line 204 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/home.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".home-index-links a + a\" to come before selector \".home-index-links a:nth-child(odd)\", at line 455 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/home.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".home-index-links a\" to come before selector \".home-index-links a:nth-child(odd)\", at line 354 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/interop.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".interop-page .compat-matrix thead th\" to come before selector \".interop-page .compat-matrix th:nth-child(n + 4)\", at line 588 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/interop.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".interop-page .participant-fallback\" to come before selector \".interop-page .participant-identity-icon img + .participant-fallback\", at line 388 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/interop.css",
+    "rule": "property-no-deprecated",
+    "text": "Deprecated property \"clip\" (property-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .bar-value\" to come before selector \".performance-page .performance-bar-row .bar-value\", at line 1453 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .detail-profile-title strong\" to come before selector \".performance-page #performance-current-state strong\", at line 424 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .identity-fallback\" to come before selector \".performance-page .identity-icon.has-image .identity-fallback\", at line 653 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .identity-icon\" to come before selector \".performance-page .identity-icon:hover\", at line 580 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .perf-detail-stat strong\" to come before selector \".performance-page #performance-current-state strong\", at line 424 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .performance-data-table thead th\" to come before selector \".performance-page .performance-data-table th:first-child\", at line 1045 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .performance-data-table__scroll\" to come before selector \".performance-page .performance-data-table__scroll:focus-visible\", at line 440 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .performance-trend-chart\" to come before selector \".performance-page .performance-trend-chart:focus-visible\", at line 440 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .plot-filter-reset:disabled\" to come before selector \".performance-page .plot-filter-reset:hover:not(:disabled)\", at line 229 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .plot-filter-reset:focus-visible\" to come before selector \".performance-page .plot-filter-reset:hover:not(:disabled)\", at line 229 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .plot-filter-reset\" to come before selector \".performance-page .plot-filter-reset:hover:not(:disabled)\", at line 229 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".performance-page .trend-tooltip strong\" to come before selector \".performance-page #performance-current-state strong\", at line 424 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/performance.css",
+    "rule": "property-no-deprecated",
+    "text": "Deprecated property \"clip\" (property-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/qa.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".qa-icon-button svg\" to come before selector \".qa-actions .ui-button svg\", at line 125 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/qa.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".qa-retry-button svg\" to come before selector \".qa-actions .ui-button svg\", at line 125 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/qa.css",
+    "rule": "no-duplicate-selectors",
+    "text": "Duplicate selector \".qa-answer-header\", first used at line 593 (no-duplicate-selectors)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-audit-list li svg\" to come before selector \".steward-dashboard .steward-panel-title > svg\", at line 388 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-column-head span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-config-grid > div\" to come before selector \".steward-dashboard-summary-lead > div:first-child\", at line 81 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-config-groups h3\" to come before selector \".steward-dashboard .steward-panel-title h3\", at line 399 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-config-groups li span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-config-groups p\" to come before selector \".steward-dashboard .steward-panel-title p\", at line 405 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-fact span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-fact span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-fetch-meta > span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-fetch-row p\" to come before selector \".steward-dashboard .steward-panel-title p\", at line 405 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-fetch-row small\" to come before selector \".steward-dashboard-task-graph summary small\", at line 785 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-graph-node > span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-page-button:disabled\" to come before selector \".steward-dashboard-page-button:hover:not(:disabled)\", at line 730 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-planner-link\" to come before selector \".steward-dashboard-planner-link:hover\", at line 277 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-provider-detail-head > div span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-provider-detail-head > div\" to come before selector \".steward-dashboard-summary-lead > div:first-child\", at line 81 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-provider-tab small\" to come before selector \".steward-dashboard-task-graph summary small\", at line 785 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-row > span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-row > svg\" to come before selector \".steward-dashboard .steward-panel-title > svg\", at line 388 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-row-list\" to come before selector \".steward-dashboard-evidence-heading + .steward-dashboard-row-list\", at line 500 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-signal-links a\" to come before selector \".steward-dashboard-summary-fact dd a\", at line 174 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-signal-row > span > span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-signal-row > span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-snapshot-header p\" to come before selector \".steward-dashboard .steward-panel-title p\", at line 405 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-snapshot-task span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-task-chip span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-task-graph summary > span\" to come before selector \".steward-dashboard-planner-link > span:nth-child(2)\", at line 291 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-dashboard-unavailable-panel p\" to come before selector \".steward-dashboard .steward-panel-title p\", at line 405 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "property-no-deprecated",
+    "text": "Deprecated property \"clip\" (property-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/steward-dashboard.css",
+    "rule": "property-no-deprecated",
+    "text": "Deprecated property \"clip\" (property-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/steward-planner.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-artifact header span\" to come before selector \".steward-planner-artifacts > summary > span:last-child\", at line 255 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-planner.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-metrics > div\" to come before selector \".steward-planner-summary > div:first-child\", at line 47 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-planner.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-pagination button:disabled\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 401 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-planner.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-state span\" to come before selector \".steward-planner-artifacts > summary > span\", at line 248 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-planner.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-state svg\" to come before selector \".planner-status-succeeded .steward-planner-run-title > svg\", at line 113 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-planner.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-state-error svg\" to come before selector \".planner-status-succeeded .steward-planner-run-title > svg\", at line 113 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "declaration-property-value-keyword-no-deprecated",
+    "text": "Deprecated keyword \"break-word\" for property \"word-break\" (declaration-property-value-keyword-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "declaration-property-value-keyword-no-deprecated",
+    "text": "Deprecated keyword \"break-word\" for property \"word-break\" (declaration-property-value-keyword-no-deprecated)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .attempt-card-meta span\" to come before selector \".steward-public-page .task-conclusion > span:last-child\", at line 211 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .attempt-meta span\" to come before selector \".steward-public-page .task-conclusion > span:last-child\", at line 211 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .key-value b\" to come before selector \".steward-public-page .attempt-tabs button b\", at line 757 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .key-value span\" to come before selector \".steward-public-page .task-conclusion > span:last-child\", at line 211 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/steward-task.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .task-timeline\" to come before selector \".steward-public-page .task-timeline:focus-visible\", at line 766 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-back svg\" to come before selector \".transcript-search button svg\", at line 177 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-back\" to come before selector \".transcript-back:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-clear-filters svg\" to come before selector \".transcript-search button svg\", at line 177 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-clear-filters\" to come before selector \".transcript-clear-filters:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-presets button\" to come before selector \".transcript-pagination button:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-trigger > svg\" to come before selector \".transcript-search button svg\", at line 177 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-list\" to come before selector \".transcript-list:focus-visible\", at line 342 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-load-more\" to come before selector \".transcript-load-more:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-meta-grid > div\" to come before selector \".transcript-summary > div:first-child\", at line 85 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-pagination button\" to come before selector \".transcript-pagination button:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-preview-thread\" to come before selector \".transcript-preview-thread:focus-visible\", at line 342 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-request-banner button\" to come before selector \".transcript-pagination button:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-request-state > svg\" to come before selector \".transcript-search button svg\", at line 177 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-request-state button\" to come before selector \".transcript-pagination button:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-row\" to come before selector \".transcript-row:focus-visible\", at line 242 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/transcript.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-viewer\" to come before selector \".transcript-viewer:focus-visible\", at line 342 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .control-button:disabled\" to come before selector \".workbench-page .control-button:hover:not(:disabled)\", at line 107 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .control-button\" to come before selector \".workbench-page .control-button:hover:not(:disabled)\", at line 107 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .control-timer span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .diag-flag dd\" to come before selector \".workbench-page .client .diag-flag.on dd\", at line 730 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .diag-flag dd\" to come before selector \".workbench-page .client .diag-flag.on dd\", at line 730 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .diag-stat dd\" to come before selector \".workbench-page .client .diag-flag.on dd\", at line 730 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .diag-stat dd\" to come before selector \".workbench-page .client .diag-flag.on dd\", at line 730 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .endpoint-title span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .field-row dd\" to come before selector \".workbench-page .client .diag-flag.on dd\", at line 730 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .modal-close\" to come before selector \".workbench-page .modal-close:hover\", at line 107 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .modal-head span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .network-range > span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .network-range span span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .panel-actions > span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .panel-button:disabled\" to come before selector \".workbench-page .panel-button:hover:not(:disabled)\", at line 107 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .panel-button\" to come before selector \".workbench-page .panel-button:hover:not(:disabled)\", at line 107 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .scenario-info\" to come before selector \".workbench-page .scenario-info:hover\", at line 107 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .stage-client > span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .stage-node > span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .stage-node > span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .stage-server > span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .state-step span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .state-step span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/features/workbench.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".workbench-page .summary-item span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/foundation.css",
+    "rule": "declaration-block-no-redundant-longhand-properties",
+    "text": "Expected shorthand property \"padding\" (declaration-block-no-redundant-longhand-properties)"
+  },
+  {
+    "file": "app/styles/foundation.css",
+    "rule": "font-family-name-quotes",
+    "text": "Expected no quotes around \"BlinkMacSystemFont\" (font-family-name-quotes)"
+  },
+  {
+    "file": "app/styles/foundation.css",
+    "rule": "font-family-name-quotes",
+    "text": "Expected no quotes around \"SFMono-Regular\" (font-family-name-quotes)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "declaration-block-no-redundant-longhand-properties",
+    "text": "Redundant longhand property \"border-left-color\" after shorthand property \"border-color\" (declaration-block-no-redundant-longhand-properties)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "declaration-block-no-redundant-longhand-properties",
+    "text": "Redundant longhand property \"border-left-color\" after shorthand property \"border-color\" (declaration-block-no-redundant-longhand-properties)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "declaration-property-value-keyword-no-deprecated",
+    "text": "Deprecated keyword \"break-word\" for property \"word-break\" (declaration-property-value-keyword-no-deprecated)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "declaration-property-value-keyword-no-deprecated",
+    "text": "Deprecated keyword \"break-word\" for property \"word-break\" (declaration-property-value-keyword-no-deprecated)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "declaration-property-value-keyword-no-deprecated",
+    "text": "Deprecated keyword \"break-word\" for property \"word-break\" (declaration-property-value-keyword-no-deprecated)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "declaration-property-value-keyword-no-deprecated",
+    "text": "Deprecated keyword \"break-word\" for property \"word-break\" (declaration-property-value-keyword-no-deprecated)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".attempt-meta span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".attempt-section-head code\" to come before selector \".transcript-markdown pre code\", at line 3197 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".attempt-section-head svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".attempt-tabs button b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".attempt-tabs button\" to come before selector \".steward-public-page.coquic-page button\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".attempt-transcript\" to come before selector \".attempt-review-stack .attempt-transcript\", at line 4669 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".bar-identity .identity-fallback\" to come before selector \".identity-icon.has-image img + .identity-fallback\", at line 8131 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".bar-value > span\" to come before selector \".packet-row span:nth-child(2)\", at line 9521 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".bar-value > span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".bar-value\" to come before selector \".bar-row .bar-value\", at line 9564 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".brand-title h2\" to come before selector \".steward-public-page .panel-title h2\", at line 296 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".chat-avatar\" to come before selector \".chat-bubble.user .chat-avatar\", at line 5426 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".chat-body\" to come before selector \".chat-bubble.user .chat-body\", at line 5433 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".chat-bubble.assistant\" to come before selector \".transcript-preview-thread .chat-bubble.assistant\", at line 2973 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".chat-bubble.user\" to come before selector \".transcript-preview-thread .chat-bubble.user\", at line 2978 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".chat-bubble\" to come before selector \".attempt-transcript .chat-bubble\", at line 4912 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".chat-transcript\" to come before selector \".attempt-transcript .chat-transcript\", at line 4905 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".detail-profile-links span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".detail-profile-links span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".detail-profile-title span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".detail-profile-title strong\" to come before selector \".plot-tab[aria-selected=\"true\"] strong\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".docs-code-scroll .shiki span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".docs-markdown td\" to come before selector \".steward-public-page tr.selected-row td\", at line 337 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".file-list code\" to come before selector \".transcript-markdown pre code\", at line 3197 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".file-list li\" to come before selector \".transcript-markdown li + li\", at line 3168 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".filter-choice\" to come before selector \".plot-filter-options .filter-choice\", at line 9426 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".identity-fallback\" to come before selector \".identity-icon.has-image img + .identity-fallback\", at line 8131 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".identity-icon\" to come before selector \".identity-icon:hover\", at line 8045 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".identity-name\" to come before selector \".identity-group > .identity-name\", at line 7972 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".interop-tooltip small\" to come before selector \".filter-choice[aria-pressed=\"true\"] small\", at line 7645 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".interop-tooltip span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".interop-tooltip strong\" to come before selector \".plot-tab[aria-selected=\"true\"] strong\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".packet-lane.s2c .pipe-back\" to come before selector \"html[data-theme=\"dark\"] .workbench-page .packet-lane.c2s .pipe-back\", at line 6723 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".packet-lane.s2c .pipe-front\" to come before selector \"html[data-theme=\"dark\"] .workbench-page .packet-lane.c2s .pipe-front\", at line 6727 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".perf-detail-head span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".perf-detail-stat small\" to come before selector \".filter-choice[aria-pressed=\"true\"] small\", at line 7645 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".perf-detail-stat strong\" to come before selector \".plot-tab[aria-selected=\"true\"] strong\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".plot-tab small\" to come before selector \".filter-choice[aria-pressed=\"true\"] small\", at line 7645 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".qa-markdown li\" to come before selector \".transcript-markdown li + li\", at line 3168 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".qa-markdown p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".qa-markdown pre code\" to come before selector \".transcript-tool .transcript-markdown code\", at line 3524 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".qa-markdown td\" to come before selector \".steward-public-page tr.selected-row td\", at line 337 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".review-finding p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".review-gaps li\" to come before selector \".transcript-markdown li + li\", at line 3168 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".review-note p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".run-patch .code-block-pre\" to come before selector \".code-block.compact .code-block-pre\", at line 5172 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".status\" to come before selector \".steward-public-page .graph-node-meta .status\", at line 662 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-artifact-link span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-attempt-meta span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-attempt-section-head code\" to come before selector \".transcript-markdown pre code\", at line 3197 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-attempt-section-head svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-attempt-tabs button b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-attempt-tabs button\" to come before selector \".steward-public-page.coquic-page button\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-audit-list li span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-audit-list li svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-code-panel pre\" to come before selector \".transcript-message-body .transcript-tool pre\", at line 3547 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-column-head b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-column-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-commit-link\" to come before selector \".steward-public-page .steward-commit-link\", at line 2100 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-config-grid > div\" to come before selector \".steward-planner-metrics > div:last-child\", at line 1129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-config-sections li b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-config-sections li span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-event-row b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-event-row div\" to come before selector \".steward-planner-metrics > div:last-child\", at line 1129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-event-row p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-fact-pill b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-fact-pill span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-freshness > span:not(.steward-freshness-detail)\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-freshness > svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-integration-run-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-lane-title b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-mirror-kpis b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-mirror-nav-item b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-mirror-nav-item span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-mirror-nav-item svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-mirror-topbar h2\" to come before selector \".steward-public-page .panel-title h2\", at line 296 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-panel-title > svg + div\" to come before selector \".steward-planner-metrics > div:last-child\", at line 1129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-panel-title > svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-pipeline-feedback b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-pipeline-feedback span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-pipeline-node b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-pipeline-node p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-artifact b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-artifact b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-artifact span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-pagination button:disabled\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 1247 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-pagination button\" to come before selector \".steward-public-page.coquic-page button\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-run-title > svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-run-title h2\" to come before selector \".steward-public-page .panel-title h2\", at line 296 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-state span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-planner-state svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-provider-detail-head b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-provider-detail-head div\" to come before selector \".steward-planner-metrics > div:last-child\", at line 1129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-provider-detail-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .fact-pill span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .graph-node-context span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .key-value span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .lane-title span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-public-page .task-spec-chip span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-row > svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-row b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-row span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-run-card p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-runtime-fact > b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-runtime-fact > span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-scheduler-lane-head svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-scheduler-lane-meta b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-task-context b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-task-context span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-task-title-row .inline-flex\" to come before selector \".steward-public-page .task-title-row .inline-flex\", at line 2021 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".steward-validation-row p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".timeline-chip b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".timeline-review > div\" to come before selector \".steward-planner-metrics > div:last-child\", at line 1129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".timeline-review li span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".timeline-review li\" to come before selector \".transcript-markdown li + li\", at line 3168 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".timeline-review p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".timeline\" to come before selector \".steward-public-page .task-timeline-panel .timeline\", at line 3847 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".todo-list li\" to come before selector \".transcript-markdown li + li\", at line 3168 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".todo-list li\" to come before selector \".transcript-markdown li + li\", at line 3168 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".todo-list svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".tool-card\" to come before selector \".transcript-preview-thread .tool-card\", at line 2973 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".tool-command .code-block-pre\" to come before selector \".code-block.compact .code-block-pre\", at line 5172 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".tool-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-archive-member svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-clear svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-filter input\" to come before selector \".steward-public-page.coquic-page input\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-input-shell button svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-input-shell button:focus-visible\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 1247 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-input-shell button:focus-visible\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 1247 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-input-shell button:hover\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 1247 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-input-shell button\" to come before selector \".steward-public-page.coquic-page button\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-input-shell input\" to come before selector \".steward-public-page.coquic-page input\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-presets button:hover\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 1247 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-presets button\" to come before selector \".steward-public-page.coquic-page button\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-trigger b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-trigger span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-trigger svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-date-trigger:focus-visible\" to come before selector \".transcript-date-filter[data-open='true'] .transcript-date-trigger\", at line 2495 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-download span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-download svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-eyebrow svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-hero h1\" to come before selector \".steward-public-page .task-title-row h1\", at line 2035 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-hero p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-list-head b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-list-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-list-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-load-more:disabled\" to come before selector \".transcript-load-more:hover:not(:disabled)\", at line 3575 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-loading svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-markdown p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-markdown td\" to come before selector \".steward-public-page tr.selected-row td\", at line 337 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-avatar svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-avatar\" to come before selector \".transcript-message[data-role=\"assistant\"] .transcript-message-avatar\", at line 3058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-avatar\" to come before selector \".transcript-message[data-role=\"assistant\"] .transcript-message-avatar\", at line 3820 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-body p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-body\" to come before selector \".transcript-message[data-role=\"assistant\"] .transcript-message-body\", at line 3062 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-meta b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-meta span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-message-meta span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-meta-grid div\" to come before selector \".steward-planner-metrics > div:last-child\", at line 1129 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-metric b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-metric span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-metric svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-metric\" to come before selector \".transcript-metric:nth-child(3n)\", at line 3712 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-page-jump input:disabled\" to come before selector \".steward-public-page .pagination-jump input:focus\", at line 498 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-page-jump input:focus\" to come before selector \".steward-public-page .pagination-jump input:focus\", at line 498 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-page-jump input\" to come before selector \".steward-public-page.coquic-page input\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-pagination button:disabled\" to come before selector \".steward-planner-pagination button:hover:not(:disabled)\", at line 1247 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-pagination button\" to come before selector \".steward-public-page.coquic-page button\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-row-meta span:first-child\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-row-meta span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-row-top b\" to come before selector \".steward-public-page .lane-title b\", at line 549 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-search input\" to come before selector \".steward-public-page.coquic-page input\", at line 259 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-search svg\" to come before selector \".steward-public-page .panel-title svg\", at line 292 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-tool code\" to come before selector \".transcript-markdown pre code\", at line 3197 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-tool-missing\" to come before selector \".transcript-tool-section + .transcript-tool-missing\", at line 3449 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-tool-section-head code\" to come before selector \".transcript-markdown pre code\", at line 3197 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-tool-section-head span\" to come before selector \".steward-public-page a.commit-link span\", at line 381 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-tool[open] summary\" to come before selector \".transcript-tool[data-kind=\"tool_result\"] summary:hover\", at line 3317 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-viewer-foot code\" to come before selector \".transcript-markdown pre code\", at line 3197 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-viewer-head h2\" to come before selector \".steward-public-page .panel-title h2\", at line 296 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".transcript-viewer-head p\" to come before selector \".steward-public-page .task-overview-head p\", at line 2058 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".trend-legend small\" to come before selector \".filter-choice[aria-pressed=\"true\"] small\", at line 7645 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".trend-legend span\" to come before selector \".packet-row span:nth-child(2)\", at line 9521 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".trend-legend span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".trend-tooltip span\" to come before selector \".plot-tab[aria-selected=\"true\"] span\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-descending-specificity",
+    "text": "Expected selector \".trend-tooltip strong\" to come before selector \".plot-tab[aria-selected=\"true\"] strong\", at line 7725 (no-descending-specificity)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-duplicate-selectors",
+    "text": "Duplicate selector \".packet-rail\", first used at line 6629 (no-duplicate-selectors)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-duplicate-selectors",
+    "text": "Duplicate selector \".state-step\", first used at line 7124 (no-duplicate-selectors)"
+  },
+  {
+    "file": "app/styles/legacy.css",
+    "rule": "no-duplicate-selectors",
+    "text": "Duplicate selector \".trend-family-chip\", first used at line 9614 (no-duplicate-selectors)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "declaration-block-single-line-max-declarations",
+    "text": "Too many declarations, maximum 1 (declaration-block-single-line-max-declarations)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "no-duplicate-selectors",
+    "text": "Duplicate selector \".site-search-result-copy small, .site-search-result-copy em\", first used at line 44 (no-duplicate-selectors)"
+  },
+  {
+    "file": "app/styles/shell.css",
+    "rule": "no-duplicate-selectors",
+    "text": "Duplicate selector \".top-nav-links\", first used at line 12 (no-duplicate-selectors)"
+  }
+]

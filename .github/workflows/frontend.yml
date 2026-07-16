@@ -1,0 +1,67 @@
+name: Frontend
+
+on:
+  pull_request:
+    paths:
+      - 'site/next/**'
+      - 'flake.nix'
+      - 'DESIGN.md'
+      - '.github/workflows/frontend.yml'
+  push:
+    paths:
+      - 'site/next/**'
+      - 'flake.nix'
+      - 'DESIGN.md'
+      - '.github/workflows/frontend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Frontend quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+
+      - name: Install frontend dependencies
+        run: nix develop -c npm --prefix site/next ci
+
+      - name: Install Playwright Chromium
+        run: nix develop -c npm --prefix site/next exec -- playwright install --with-deps chromium
+
+      - name: Lint
+        run: nix develop -c npm --prefix site/next run lint
+
+      - name: Typecheck
+        run: nix develop -c npm --prefix site/next run typecheck
+
+      - name: Unit tests
+        run: nix develop -c npm --prefix site/next run test
+
+      - name: Production build
+        run: nix develop -c npm --prefix site/next run build
+
+      - name: Visual smoke
+        env:
+          COQUIC_PLAYWRIGHT_PORT: 3204
+          COQUIC_PLAYWRIGHT_FIXTURE_ROOT: /tmp/coquic-steward-playwright-ci
+        run: nix develop -c npm --prefix site/next run test:e2e -- tests/e2e/visual-foundation.spec.ts --project=desktop
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-playwright-artifacts
+          if-no-files-found: ignore
+          path: |
+            site/next/test-results/**
+            site/next/playwright-report/**

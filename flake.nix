@@ -1948,6 +1948,27 @@ EOF
         export COQUIC_CLANG_TIDY_IN_NIX=1
         exec ${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh "$@"
       '';
+      frontendNodeModules = pkgs.importNpmLock.buildNodeModules {
+        npmRoot = ./site/next;
+        inherit nodejs;
+      };
+      frontendNixCheckHook = pkgs.writeShellApplication {
+        name = "coquic-frontend-check";
+        runtimeInputs = [ nodejs ];
+        text = ''
+          node_modules_link="site/next/node_modules"
+          if [[ -e "$node_modules_link" ]]; then
+            echo "$node_modules_link must be absent in the Nix frontend check" >&2
+            exit 1
+          fi
+
+          ln -s ${frontendNodeModules}/node_modules "$node_modules_link"
+          trap 'rm -f "$node_modules_link"' EXIT
+
+          npm --prefix site/next run lint
+          npm --prefix site/next run typecheck
+        '';
+      };
       mkPreCommitCheck =
         {
           clangFormatEntry,
@@ -2022,8 +2043,8 @@ EOF
           pkgs.python3
           pkgs.util-linux
         ];
-        frontendEntry = "${pkgs.bash}/bin/bash -c 'npm --prefix site/next run lint && npm --prefix site/next run typecheck'";
-        frontendExtraPackages = [ nodejs ];
+        frontendEntry = "${frontendNixCheckHook}/bin/coquic-frontend-check";
+        frontendExtraPackages = [ ];
       };
       qdrant-dev-app = pkgs.writeShellApplication {
         name = "qdrant-dev";

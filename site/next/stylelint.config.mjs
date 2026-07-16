@@ -20,12 +20,7 @@ const config = {
         ],
       },
     ],
-    // Existing CSS uses BEM elements/modifiers and layered selectors whose
-    // cascade order is intentional across imported feature files.
     'selector-class-pattern': [/^[a-z][a-z0-9]*(?:[-_]{1,2}[a-z0-9]+)*$/],
-    'no-descending-specificity': null,
-    'no-duplicate-selectors': null,
-    'selector-not-notation': null,
     // Keep the existing compatibility and token formatting conventions while
     // still checking parsing, unknown properties, and malformed values.
     'alpha-value-notation': null,
@@ -33,16 +28,88 @@ const config = {
     'color-function-notation': null,
     'color-hex-length': null,
     'custom-property-empty-line-before': null,
-    'declaration-block-no-redundant-longhand-properties': null,
-    'declaration-block-single-line-max-declarations': null,
     'declaration-empty-line-before': null,
-    'declaration-property-value-keyword-no-deprecated': null,
-    'font-family-name-quotes': null,
     'import-notation': null,
     'media-feature-range-notation': null,
-    'property-no-deprecated': null,
     'value-keyword-case': null,
   },
+  overrides: [
+    {
+      // Preserve the reviewed cascade in existing composed styles; new CSS
+      // files retain the standard descending-specificity check.
+      files: [
+        'app/styles/editorial.css',
+        'app/styles/evidence.css',
+        'app/styles/features/blog.css',
+        'app/styles/features/docs.css',
+        'app/styles/features/home.css',
+        'app/styles/features/interop.css',
+        'app/styles/features/performance.css',
+        'app/styles/features/qa.css',
+        'app/styles/features/steward-dashboard.css',
+        'app/styles/features/steward-planner.css',
+        'app/styles/features/steward-task.css',
+        'app/styles/features/transcript.css',
+        'app/styles/features/workbench.css',
+        'app/styles/legacy.css',
+      ],
+      rules: {
+        'no-descending-specificity': null,
+      },
+    },
+    {
+      files: [
+        'app/styles/features/qa.css',
+        'app/styles/legacy.css',
+        'app/styles/shell.css',
+      ],
+      rules: {
+        'no-duplicate-selectors': null,
+      },
+    },
+    {
+      files: ['app/styles/editorial.css'],
+      rules: {
+        'selector-not-notation': null,
+      },
+    },
+    {
+      files: ['app/styles/foundation.css', 'app/styles/legacy.css'],
+      rules: {
+        'declaration-block-no-redundant-longhand-properties': null,
+      },
+    },
+    {
+      files: ['app/styles/shell.css'],
+      rules: {
+        'declaration-block-single-line-max-declarations': null,
+      },
+    },
+    {
+      files: ['app/styles/features/steward-task.css', 'app/styles/legacy.css'],
+      rules: {
+        'declaration-property-value-keyword-no-deprecated': null,
+      },
+    },
+    {
+      files: ['app/styles/foundation.css'],
+      rules: {
+        'font-family-name-quotes': null,
+      },
+    },
+    {
+      files: [
+        'app/styles/editorial.css',
+        'app/styles/evidence.css',
+        'app/styles/features/interop.css',
+        'app/styles/features/performance.css',
+        'app/styles/features/steward-dashboard.css',
+      ],
+      rules: {
+        'property-no-deprecated': null,
+      },
+    },
+  ],
 };
 
 export default config;

@@ -1957,13 +1957,23 @@ EOF
         runtimeInputs = [ nodejs ];
         text = ''
           node_modules_link="site/next/node_modules"
-          if [[ -e "$node_modules_link" ]]; then
-            echo "$node_modules_link must be absent in the Nix frontend check" >&2
-            exit 1
+          backup_root=""
+          cleanup() {
+            rm -f "$node_modules_link"
+            if [[ -n "$backup_root" && -e "$backup_root/node_modules" ]]; then
+              mv "$backup_root/node_modules" "$node_modules_link"
+            fi
+            if [[ -n "$backup_root" ]]; then
+              rmdir "$backup_root"
+            fi
+          }
+          if [[ -e "$node_modules_link" || -L "$node_modules_link" ]]; then
+            backup_root="$(mktemp -d)"
+            mv "$node_modules_link" "$backup_root/node_modules"
           fi
 
           ln -s ${frontendNodeModules}/node_modules "$node_modules_link"
-          trap 'rm -f "$node_modules_link"' EXIT
+          trap cleanup EXIT
 
           npm --prefix site/next run lint
           npm --prefix site/next run typecheck

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { docItems, type DocNavItem, type DocSlug } from '@/lib/doc-items';
+import { docItems, type DocNavItem } from '@/lib/doc-items';
 
 export type DocPage = DocNavItem & {
   title: string;

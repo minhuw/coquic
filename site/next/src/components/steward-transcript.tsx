@@ -466,7 +466,7 @@ function DiffBlock({ text }: { text: string }) {
   return <CodeBlock className="chat-diff" compact language="diff" text={text} title="Diff" />;
 }
 
-function ImageBlock({ path, taskId }: { path: string; taskId: string }) {
+function ImageBlock({ path, taskId: _taskId }: { path: string; taskId: string }) {
   const remote = /^https?:\/\//i.test(path);
   const src = remote
     ? path

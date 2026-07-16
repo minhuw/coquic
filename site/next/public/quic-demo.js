@@ -19,14 +19,6 @@ const wasmOptionFlags = {
   allowPeerAddressChange: 1 << 5,
   zeroRtt: 1 << 6,
 };
-const ecnCodepoints = {
-  unavailable: 0,
-  notEct: 1,
-  ect0: 2,
-  ect1: 3,
-  ce: 4,
-};
-
 const scenarioPresets = {
   handshake: {
     label: "Handshake",
@@ -748,7 +740,7 @@ function wakeScheduler() {
   for (const resolve of waiters) resolve();
 }
 
-async function waitForProtocolStep(runState, description) {
+async function waitForProtocolStep(runState) {
   while (isRunActive(runState.runToken)) {
     if (stepBudget > 0) {
       stepBudget -= 1;
@@ -1388,10 +1380,6 @@ function resetPacketInspector() {
   el("packet-modal-detail").innerHTML =
     '<p class="empty-detail">Select a packet to inspect its QUIC header, protected payload, and raw bytes.</p>';
   closePacketModal();
-}
-
-function addText(parent, text) {
-  parent.append(document.createTextNode(text));
 }
 
 function frameSummary(record) {

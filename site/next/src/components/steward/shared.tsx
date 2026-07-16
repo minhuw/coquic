@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 
 import { Badge } from '@/components/ui/badge';

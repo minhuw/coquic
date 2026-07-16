@@ -1,7 +1,9 @@
 import nextConfig from 'eslint-config-next/core-web-vitals';
+import typescriptConfig from 'eslint-config-next/typescript';
 
 const config = [
   ...nextConfig,
+  ...typescriptConfig,
   {
     name: 'coquic/ignores',
     ignores: [
@@ -11,6 +13,23 @@ const config = [
       'coverage/**',
       'src/generated/**',
     ],
+  },
+  {
+    name: 'coquic/unused-convention',
+    files: ['**/*.{ts,tsx,mts,cts}'],
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          args: 'all',
+          argsIgnorePattern: '^_',
+          caughtErrors: 'all',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+        },
+      ],
+    },
   },
   {
     name: 'coquic/effect-synchronization',

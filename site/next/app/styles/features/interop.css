@@ -463,7 +463,7 @@
     padding: 10px 12px;
     background: var(--surface);
     color: var(--text-strong);
-    box-shadow: var(--shadow-modal);
+    box-shadow: var(--elevation-modal);
     opacity: 0;
     pointer-events: none;
     visibility: hidden;

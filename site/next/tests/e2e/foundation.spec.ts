@@ -32,6 +32,17 @@ const darkTokens = {
   '--chart-6': 'rgb(178, 193, 181)',
 } as const;
 
+// Temporary compatibility vocabulary for Plan 017 to reduce to zero.
+const legacyTokenAllowlist = [
+  '--bg',
+  '--ink',
+  '--soft',
+  '--muted',
+  '--line',
+  '--primary',
+  '--primary-action',
+] as const;
+
 const legacyLightTokens = {
   '--bg': 'rgb(255, 255, 255)',
   '--ink': 'rgb(22, 22, 22)',
@@ -66,6 +77,7 @@ async function installFoundationProbe(page: Page) {
       <div id="panel-probe" style="border-radius: var(--radius-panel)"></div>
       <div id="motion-probe" class="skeleton" style="width: 40px; height: 12px"></div>
       <div class="container-focused" id="container-probe"></div>
+      <div id="modal-shadow-probe" class="ui-dialog__content" aria-hidden="true"></div>
     `;
     body.append(probe);
   });
@@ -113,9 +125,14 @@ test('tokens, fonts, geometry, and interaction states resolve through the founda
   await test.step('light semantic tokens resolve while migration aliases remain legacy-owned', async () => {
     await setStoredTheme(page, 'light');
     await page.goto('/');
+    await installFoundationProbe(page);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
     await expect.poll(() => readTokens(page, Object.keys(lightTokens))).toEqual(lightTokens);
     await expect.poll(() => readTokens(page, Object.keys(legacyLightTokens))).toEqual(legacyLightTokens);
+    expect(Object.keys(legacyLightTokens)).toEqual(legacyTokenAllowlist);
+    const modalShadow = await page.locator('#modal-shadow-probe').evaluate((element) => getComputedStyle(element).boxShadow);
+    expect(modalShadow).not.toBe('none');
+    expect(modalShadow).toContain('24px 64px');
     const resolved = (await readTokens(page, ['--command', '--on-command'])) as Record<string, string>;
     expect(contrastRatio(resolved['--command'], resolved['--on-command'])).toBeGreaterThanOrEqual(15);
   });
@@ -123,15 +140,19 @@ test('tokens, fonts, geometry, and interaction states resolve through the founda
   await test.step('dark semantic tokens resolve while migration aliases remain legacy-owned', async () => {
     await page.evaluate(() => window.localStorage.setItem('coquic-theme', 'dark'));
     await page.reload();
+    await installFoundationProbe(page);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect.poll(() => readTokens(page, Object.keys(darkTokens))).toEqual(darkTokens);
     await expect.poll(() => readTokens(page, Object.keys(legacyDarkTokens))).toEqual(legacyDarkTokens);
+    expect(Object.keys(legacyDarkTokens)).toEqual(legacyTokenAllowlist);
+    const modalShadow = await page.locator('#modal-shadow-probe').evaluate((element) => getComputedStyle(element).boxShadow);
+    expect(modalShadow).not.toBe('none');
+    expect(modalShadow).toContain('28px 72px');
     const resolved = (await readTokens(page, ['--command', '--on-command'])) as Record<string, string>;
     expect(contrastRatio(resolved['--command'], resolved['--on-command'])).toBeGreaterThanOrEqual(15);
   });
 
   await test.step('local sans, mono, and CJK fallback glyphs render without third-party font requests', async () => {
-    await installFoundationProbe(page);
     await page.evaluate(() => document.fonts.ready);
 
     const fonts = await page.evaluate(() => {

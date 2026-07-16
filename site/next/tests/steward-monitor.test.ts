@@ -15,7 +15,6 @@ import {
 } from '@/lib/steward-freshness';
 import { paginateStewardItems } from '@/lib/steward-pagination';
 import {
-  parsePublicStewardStatus,
   readPublicStewardStatus,
 } from '../app/steward/status/status-route';
 

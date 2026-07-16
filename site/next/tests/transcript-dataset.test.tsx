@@ -22,7 +22,6 @@ import {
   transcriptEmptySearch,
   transcriptRecords,
   transcriptSearchResponse,
-  transcriptSessions,
 } from './e2e/fixtures/transcript';
 
 function jsonResponse(body: unknown, status = 200) {

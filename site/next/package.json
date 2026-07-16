@@ -10,11 +10,16 @@
     "predev": "npm run prepare:site",
     "dev": "next dev --hostname 127.0.0.1 --port 3001",
     "typecheck": "tsc --noEmit",
+    "lint:ts": "eslint . --max-warnings=0",
+    "lint:css": "node scripts/check-stylelint-baseline.mjs",
+    "lint:css:update": "node scripts/check-stylelint-baseline.mjs --update",
+    "lint": "npm run lint:ts && npm run lint:css",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "prebuild": "npm run prepare:site",
     "build": "next build",
+    "verify": "npm run lint && npm run typecheck && npm run test",
     "build:wasm-deps": "cd ../.. && nix develop .#wasm --option fallback true -c bash scripts/build-boringssl-wasm.sh",
     "compile:wasm": "cd ../.. && nix develop .#wasm --option fallback true -c zig build wasm-quic -Doptimize=ReleaseSmall --summary all",
     "smoke:wasm": "cd ../.. && node scripts/wasm-quic-smoke.mjs zig-out/share/wasm-quic/coquic-wasm-quic.wasm",
@@ -51,6 +56,11 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "16.2.6",
+    "stylelint": "^17.14.0",
+    "stylelint-config-standard": "^40.0.0",
+    "stylelint-config-tailwindcss": "^1.0.1",
     "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -64,25 +74,6 @@
   "overrides": {
     "next": {
       "postcss": "8.5.15"
-    }
-  },
-  "stylelint": {
-    "rules": {
-      "alpha-value-notation": null,
-      "at-rule-empty-line-before": null,
-      "color-function-notation": null,
-      "color-hex-length": null,
-      "custom-property-empty-line-before": null,
-      "declaration-empty-line-before": null,
-      "import-notation": null,
-      "media-feature-range-notation": null,
-      "value-keyword-case": null
-    }
-  },
-  "eslintConfig": {
-    "rules": {
-      "@typescript-eslint/no-confusing-void-expression": "off",
-      "security/detect-object-injection": "off"
     }
   }
 }

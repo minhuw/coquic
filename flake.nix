@@ -1948,12 +1948,45 @@ EOF
         export COQUIC_CLANG_TIDY_IN_NIX=1
         exec ${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh "$@"
       '';
+      frontendNodeModules = pkgs.importNpmLock.buildNodeModules {
+        npmRoot = ./site/next;
+        inherit nodejs;
+      };
+      frontendNixCheckHook = pkgs.writeShellApplication {
+        name = "coquic-frontend-check";
+        runtimeInputs = [ nodejs ];
+        text = ''
+          node_modules_link="site/next/node_modules"
+          backup_root=""
+          cleanup() {
+            rm -f "$node_modules_link"
+            if [[ -n "$backup_root" && -e "$backup_root/node_modules" ]]; then
+              mv "$backup_root/node_modules" "$node_modules_link"
+            fi
+            if [[ -n "$backup_root" ]]; then
+              rmdir "$backup_root"
+            fi
+          }
+          if [[ -e "$node_modules_link" || -L "$node_modules_link" ]]; then
+            backup_root="$(mktemp -d)"
+            mv "$node_modules_link" "$backup_root/node_modules"
+          fi
+
+          ln -s ${frontendNodeModules}/node_modules "$node_modules_link"
+          trap cleanup EXIT
+
+          npm --prefix site/next run lint
+          npm --prefix site/next run typecheck
+        '';
+      };
       mkPreCommitCheck =
         {
           clangFormatEntry,
           clangFormatExtraPackages,
           clangTidyEntry,
           clangTidyExtraPackages,
+          frontendEntry,
+          frontendExtraPackages,
         }:
         git-hooks.lib.${system}.run {
         src = ./.;
@@ -1988,6 +2021,15 @@ EOF
             language = "system";
             pass_filenames = false;
           };
+          coquic-frontend = {
+            enable = true;
+            name = "frontend quality";
+            entry = frontendEntry;
+            extraPackages = frontendExtraPackages;
+            files = "^site/next/.*\\.(css|json|mjs|ts|tsx)$";
+            language = "system";
+            pass_filenames = false;
+          };
         };
       };
       pre-commit-shell = mkPreCommitCheck {
@@ -1995,6 +2037,8 @@ EOF
         clangFormatExtraPackages = [ llvmPkgs.clang-tools ];
         clangTidyEntry = "${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh";
         clangTidyExtraPackages = [ ];
+        frontendEntry = "${pkgs.bash}/bin/bash -c 'npm --prefix site/next run lint && npm --prefix site/next run typecheck'";
+        frontendExtraPackages = [ nodejs ];
       };
       pre-commit-check = mkPreCommitCheck {
         clangFormatEntry = "${llvmPkgs.clang-tools}/bin/clang-format -style=file -i";
@@ -2009,6 +2053,8 @@ EOF
           pkgs.python3
           pkgs.util-linux
         ];
+        frontendEntry = "${frontendNixCheckHook}/bin/coquic-frontend-check";
+        frontendExtraPackages = [ ];
       };
       qdrant-dev-app = pkgs.writeShellApplication {
         name = "qdrant-dev";

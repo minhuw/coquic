@@ -44,6 +44,14 @@ export function createPlaywrightConfig(
 
   return defineConfig({
     testDir: './tests/e2e',
+    expect: {
+      toHaveScreenshot: {
+        animations: 'disabled',
+        caret: 'hide',
+        scale: 'css',
+      },
+    },
+    snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{projectName}/{arg}{ext}',
     fullyParallel: true,
     forbidOnly: !!environment.CI,
     retries: environment.CI ? 2 : 0,

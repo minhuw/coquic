@@ -1,0 +1,284 @@
+.root {
+  display: grid;
+  width: min(100%, var(--measure-editorial));
+  min-width: 0;
+  margin-inline: auto;
+  gap: 1.25rem;
+  color: var(--text);
+  font: var(--type-body);
+  letter-spacing: 0;
+}
+
+.root > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)):not(:global(.docs-function-card)),
+.root > :global(.blog-language-panel) > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)),
+.root > :global(.article-content) > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)) {
+  width: min(100%, var(--measure-reading));
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.root > :global(.editorial-code-block),
+.root > :global(.editorial-table-region),
+.root > :global(.docs-function-card),
+.root > :global(.blog-language-panel) {
+  width: 100%;
+  max-width: var(--measure-editorial);
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.root > :global(.blog-language-panel):not([hidden]) {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.root p {
+  overflow-wrap: break-word;
+}
+
+.root p + p {
+  margin-top: 0.2rem;
+}
+
+.root ul,
+.root ol {
+  display: grid;
+  gap: 0.45rem;
+  padding-inline-start: 1.35rem;
+}
+
+.root ul {
+  list-style: disc;
+}
+
+.root ol {
+  list-style: decimal;
+}
+
+.root li {
+  padding-inline-start: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.root strong {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.root a {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentcolor 52%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.root a:hover {
+  color: var(--accent-hover);
+  text-decoration-color: currentcolor;
+}
+
+.root :not(pre) > code {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-subtle);
+  padding: 0.1em 0.32em;
+  color: var(--text-strong);
+  font: var(--type-code);
+  font-size: 0.9em;
+  white-space: break-spaces;
+}
+
+/* Keep plugin-generated pre/code defaults behind the CoQUIC code surface. */
+.root > :global(.editorial-code-block) :global(pre),
+.root > :global(.editorial-code-block) :global(pre) :global(code) {
+  background: var(--code-surface);
+  color: var(--text-strong);
+}
+
+.root :global(.anchored-heading) {
+  position: relative;
+  width: min(100%, var(--measure-reading));
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.root :global(.anchored-heading__title) {
+  min-width: 0;
+  padding-inline-end: 2rem;
+  color: var(--text-strong);
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+.root :global(.anchored-heading[data-heading-level='1']) {
+  margin-block: 0.25rem 0.5rem;
+}
+
+.root :global(.anchored-heading[data-heading-level='1']) :global(.anchored-heading__title) {
+  font: var(--type-page-title);
+}
+
+.root :global(.anchored-heading[data-heading-level='2']) {
+  margin-block: 1.9rem 0.15rem;
+}
+
+.root :global(.anchored-heading[data-heading-level='2']) :global(.anchored-heading__title) {
+  border-top: 1px solid var(--border);
+  padding-top: 1.1rem;
+  font: var(--type-section-title);
+}
+
+.root :global(.anchored-heading[data-heading-level='3']) {
+  margin-block: 1.25rem 0.1rem;
+}
+
+.root :global(.anchored-heading[data-heading-level='3']) :global(.anchored-heading__title) {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.root :global(.anchored-heading[data-heading-level='4']) :global(.anchored-heading__title),
+.root :global(.anchored-heading[data-heading-level='5']) :global(.anchored-heading__title),
+.root :global(.anchored-heading[data-heading-level='6']) :global(.anchored-heading__title) {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.root :global(.anchored-heading__permalink) {
+  position: absolute;
+  inset-inline-end: 0;
+  top: 50%;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-50%);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--text-muted);
+  text-decoration: none;
+  visibility: hidden;
+}
+
+.root :global(.anchored-heading:hover) :global(.anchored-heading__permalink),
+.root :global(.anchored-heading:focus-within) :global(.anchored-heading__permalink),
+.root :global(.anchored-heading__permalink:focus-visible) {
+  visibility: visible;
+}
+
+.root :global(.anchored-heading__permalink:hover) {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--accent-ink);
+}
+
+.root :global(.editorial-code-block),
+.root :global(.editorial-table-region) {
+  min-width: 0;
+}
+
+.root :global(.article-content) :global(.editorial-code-block),
+.root :global(.article-content) :global(.editorial-table-region) {
+  width: 100%;
+}
+
+.root figure,
+.root p:has(> img) {
+  width: min(100%, var(--measure-editorial));
+}
+
+.root img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.root :global(.docs-function-card) {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.root :global(.docs-function-card-header) {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--code-surface);
+  padding: 0.75rem 1rem;
+}
+
+.root :global(.docs-function-heading) {
+  width: 100%;
+  margin: 0;
+}
+
+.root :global(.docs-function-heading) :global(.anchored-heading__title) {
+  padding-inline-end: 2rem;
+  font: var(--type-code);
+  font-weight: 600;
+}
+
+.root :global(.docs-function-card-body) {
+  min-width: 0;
+  padding: 1rem;
+}
+
+.root :global(.docs-function-card-body) > :first-child {
+  margin-top: 0;
+}
+
+.root :global(.docs-function-card-body) > :last-child {
+  margin-bottom: 0;
+}
+
+.root :global(.docs-function-label) {
+  margin-top: 1rem;
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.compact {
+  width: min(100%, var(--measure-reading));
+  gap: 0.75rem;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.fullWidth {
+  width: 100%;
+  max-width: none;
+}
+
+.fullWidth > * {
+  width: 100%;
+  max-width: none;
+}
+
+@media (pointer: coarse) {
+  .root :global(.anchored-heading__title) {
+    padding-inline-end: calc(var(--control-coarse) + 0.25rem);
+  }
+
+  .root :global(.anchored-heading__permalink) {
+    width: var(--control-coarse);
+    height: var(--control-coarse);
+    visibility: visible;
+  }
+}
+
+@media (max-width: 767px) {
+  .root {
+    gap: 1rem;
+  }
+}

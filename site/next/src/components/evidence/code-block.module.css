@@ -1,0 +1,206 @@
+.root {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--code-surface);
+  color: var(--text);
+}
+
+.compact {
+  width: 100%;
+}
+
+.toolbar,
+.dialogToolbar {
+  display: flex;
+  min-height: 36px;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+  padding: 5px 7px 5px 10px;
+}
+
+.title,
+.dialogToolbar h2 {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.iconButton {
+  display: inline-grid;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: transparent;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.iconButton:hover,
+.iconButton:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.scroll {
+  width: 100%;
+  min-width: 0;
+  max-height: 540px;
+  background: var(--code-surface);
+  font: var(--type-code);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.compact .scroll {
+  max-height: 300px;
+}
+
+.pre {
+  width: max-content;
+  min-width: 100%;
+  max-height: none;
+  overflow: visible;
+  margin: 0;
+  padding: 8px 0;
+  color: var(--text);
+  background: var(--code-surface);
+  font: inherit;
+  white-space: pre;
+}
+
+.code {
+  display: block;
+  width: 100%;
+  min-width: 100%;
+  padding: 0;
+  font: inherit;
+}
+
+.line {
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+  min-height: 19px;
+}
+
+.lineNumber {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 44px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-subtle);
+  padding: 0 10px 0 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+.lineContent {
+  min-width: max-content;
+  flex: 1 0 auto;
+  padding: 0 12px;
+  white-space: pre;
+}
+
+.emptyLine {
+  display: inline-block;
+  min-width: 1ch;
+}
+
+.token {
+  color: var(--shiki-light, currentColor);
+  background-color: var(--shiki-light-bg, transparent);
+}
+
+:global(html[data-theme='dark']) .token {
+  color: var(--shiki-dark, var(--shiki-light, currentColor));
+  background-color: var(--shiki-dark-bg, var(--shiki-light-bg, transparent));
+}
+
+.diffScroll {
+  width: 100%;
+  min-width: 0;
+  max-height: 540px;
+  background: var(--code-surface);
+  font: var(--type-code);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.dialog {
+  display: flex;
+  width: min(calc(100vw - 24px), var(--dialog-wide));
+  max-height: calc(100dvh - 24px);
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.dialogToolbar h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  text-transform: none;
+}
+
+.dialogBody {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.dialogScroll {
+  height: 100%;
+  max-height: none;
+}
+
+@media (max-width: 600px) {
+  .dialog {
+    max-height: calc(100dvh - 16px);
+  }
+}
+
+@media (pointer: coarse) {
+  .iconButton {
+    width: var(--control-coarse);
+    min-width: var(--control-coarse);
+    height: var(--control-coarse);
+    min-height: var(--control-coarse);
+    flex-basis: var(--control-coarse);
+  }
+}

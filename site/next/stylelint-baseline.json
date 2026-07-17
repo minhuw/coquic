@@ -1,76 +1,6 @@
 [
   {
     "file": "app/styles/editorial.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".anchored-heading__permalink:focus-visible\" to come before selector \".anchored-heading:hover .anchored-heading__permalink\", at line 172 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".anchored-heading__permalink:hover\" to come before selector \".anchored-heading:hover .anchored-heading__permalink\", at line 172 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".editorial-code-block\" to come before selector \".article-content > .editorial-code-block\", at line 26 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".editorial-code-scroll code\" to come before selector \".article-content :not(pre) > code\", at line 87 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".editorial-table-region code\" to come before selector \".article-content :not(pre) > code\", at line 87 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".editorial-table-region\" to come before selector \".article-content > .editorial-table-region\", at line 26 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "property-no-deprecated",
-    "text": "Deprecated property \"clip\" (property-no-deprecated)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "selector-not-notation",
-    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "selector-not-notation",
-    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "selector-not-notation",
-    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
-  },
-  {
-    "file": "app/styles/editorial.css",
-    "rule": "selector-not-notation",
-    "text": "Expected complex :not() pseudo-class notation (selector-not-notation)"
-  },
-  {
-    "file": "app/styles/evidence.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".evidence-disclosure__trigger:hover\" to come before selector \".evidence-disclosure.is-open .evidence-disclosure__trigger\", at line 170 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/evidence.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".evidence-message__body\" to come before selector \".evidence-message.evidence-message--user .evidence-message__body\", at line 48 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/evidence.css",
-    "rule": "no-descending-specificity",
-    "text": "Expected selector \".evidence-message__icon\" to come before selector \".evidence-message.evidence-message--user .evidence-message__icon\", at line 43 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/evidence.css",
     "rule": "property-no-deprecated",
     "text": "Deprecated property \"clip\" (property-no-deprecated)"
   },
@@ -613,21 +543,6 @@
     "file": "app/styles/features/workbench.css",
     "rule": "no-descending-specificity",
     "text": "Expected selector \".workbench-page .summary-item span\" to come before selector \".workbench-page .network-control-head > span:last-child\", at line 233 (no-descending-specificity)"
-  },
-  {
-    "file": "app/styles/theme.css",
-    "rule": "declaration-block-no-redundant-longhand-properties",
-    "text": "Expected shorthand property \"padding\" (declaration-block-no-redundant-longhand-properties)"
-  },
-  {
-    "file": "app/styles/theme.css",
-    "rule": "font-family-name-quotes",
-    "text": "Expected no quotes around \"BlinkMacSystemFont\" (font-family-name-quotes)"
-  },
-  {
-    "file": "app/styles/theme.css",
-    "rule": "font-family-name-quotes",
-    "text": "Expected no quotes around \"SFMono-Regular\" (font-family-name-quotes)"
   },
   {
     "file": "app/styles/legacy.css",
@@ -1788,5 +1703,20 @@
     "file": "app/styles/shell.css",
     "rule": "no-duplicate-selectors",
     "text": "Duplicate selector \".top-nav-links\", first used at line 12 (no-duplicate-selectors)"
+  },
+  {
+    "file": "app/styles/theme.css",
+    "rule": "declaration-block-no-redundant-longhand-properties",
+    "text": "Expected shorthand property \"padding\" (declaration-block-no-redundant-longhand-properties)"
+  },
+  {
+    "file": "app/styles/theme.css",
+    "rule": "font-family-name-quotes",
+    "text": "Expected no quotes around \"BlinkMacSystemFont\" (font-family-name-quotes)"
+  },
+  {
+    "file": "app/styles/theme.css",
+    "rule": "font-family-name-quotes",
+    "text": "Expected no quotes around \"SFMono-Regular\" (font-family-name-quotes)"
   }
 ]

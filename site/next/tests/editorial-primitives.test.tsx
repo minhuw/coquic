@@ -6,6 +6,9 @@ import { BlogPostContent } from '@/components/blog/blog-post-content';
 import { CopyCodeButton } from '@/components/docs/copy-code-button';
 import { Markdown } from '@/components/docs/markdown';
 import { CodeBlock } from '@/components/editorial/code-block';
+import { RawCodeBlock } from '@/components/editorial/raw-code-block';
+import { TableRegion } from '@/components/editorial/table-region';
+import { Prose } from '@/components/typography/prose';
 import { hrefForBlogLink, type BlogPost } from '@/lib/blog';
 import { hrefForDocLink } from '@/lib/docs';
 import { useMDXComponents } from '../mdx-components';
@@ -221,5 +224,35 @@ describe('copy controls', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Copy failed' })).toBeInTheDocument());
     expect(screen.getByRole('status')).toHaveTextContent('Unable to copy code. Try again.');
+  });
+});
+
+describe('typed presentation adapters', () => {
+  it('keeps prose variants explicit and composes a raw code adapter without Shiki', () => {
+    render(
+      <Prose variant="compact">
+        <p>Compact prose</p>
+        <RawCodeBlock code="const raw = true;" language="typescript" variant="compact" />
+      </Prose>,
+    );
+
+    expect(screen.getByText('Compact prose')).toBeInTheDocument();
+    expect(screen.getByText('const raw = true;')).toBeInTheDocument();
+    expect(screen.getByText('Compact prose').closest('[data-prose-variant]')).toHaveAttribute('data-prose-variant', 'compact');
+  });
+
+  it('retains table semantics while exposing a caption slot', () => {
+    render(
+      <TableRegion caption="Fixture rows" label="Fixture table" variant="compact">
+        <table>
+          <thead><tr><th>Key</th></tr></thead>
+          <tbody><tr><td>value</td></tr></tbody>
+        </table>
+      </TableRegion>,
+    );
+
+    expect(screen.getByText('Fixture rows')).toBeInTheDocument();
+    expect(document.querySelector('[data-editorial-table-region="true"]')).toHaveAttribute('data-table-variant', 'compact');
+    expect(screen.getByRole('table')).toHaveTextContent('value');
   });
 });

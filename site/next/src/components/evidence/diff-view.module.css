@@ -1,0 +1,162 @@
+.root {
+  width: 100%;
+  min-width: 0;
+  max-height: 540px;
+  background: var(--code-surface);
+  font: var(--type-code);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.split,
+.unified {
+  width: max-content;
+  min-width: 100%;
+  max-height: none;
+  overflow: visible;
+  background: var(--code-surface);
+}
+
+.split {
+  min-width: 980px;
+}
+
+.splitHeader,
+.splitRow {
+  display: grid;
+  min-width: 980px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.splitHeader {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.splitColumnLabel {
+  padding: 5px 10px;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.splitColumnLabel + .splitColumnLabel {
+  border-left: 1px solid var(--border);
+}
+
+.splitBody,
+.splitMeta {
+  min-width: 980px;
+}
+
+.splitRow {
+  min-height: 19px;
+}
+
+.splitCell {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 44px 18px minmax(0, 1fr);
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.splitCell + .splitCell {
+  border-right: 0;
+}
+
+.splitLineNumber,
+.unifiedLineNumber {
+  padding: 0 8px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+.splitMarker,
+.unifiedMarker {
+  color: var(--text-muted);
+  text-align: center;
+  user-select: none;
+}
+
+.splitContent,
+.unifiedContent {
+  min-width: max-content;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.splitCellAdded,
+.unifiedLineAdded {
+  background: var(--status-success-surface);
+}
+
+.splitCellRemoved,
+.unifiedLineRemoved {
+  background: var(--status-danger-surface);
+}
+
+.splitCellEmpty {
+  background: repeating-linear-gradient(-45deg, var(--surface-subtle), var(--surface-subtle) 6px, var(--surface-strong) 6px, var(--surface-strong) 12px);
+}
+
+.splitMeta,
+.unifiedMeta {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+  padding: 4px 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.metaFile {
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.unified {
+  min-width: max-content;
+}
+
+.unifiedLine {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  min-height: 19px;
+  grid-template-columns: 44px 44px 18px minmax(0, 1fr);
+  background: var(--surface);
+}
+
+.unifiedNoLineNumbers .unifiedLine {
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.unifiedLineNumber {
+  position: sticky;
+  z-index: 1;
+}
+
+.unifiedOld {
+  left: 0;
+}
+
+.unifiedNew {
+  left: 44px;
+}

@@ -1,0 +1,63 @@
+.root {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.compact > table {
+  font-size: 13px;
+}
+
+.compact th,
+.compact td {
+  padding: 0.5rem 0.6rem;
+}
+
+.caption {
+  padding: 0.7rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.root > table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.root th,
+.root td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.7rem 0.8rem;
+  text-align: start;
+  vertical-align: top;
+}
+
+.root th {
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  font-weight: 600;
+}
+
+.root td {
+  color: var(--text);
+}
+
+.root tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.root tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--surface-subtle) 52%, transparent);
+}
+
+.root code {
+  white-space: nowrap;
+}

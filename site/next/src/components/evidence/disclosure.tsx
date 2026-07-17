@@ -3,7 +3,10 @@
 import { AlertTriangle, CheckCircle2, ChevronRight, Clock3 } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
 
+import { cn } from '@/lib/utils';
+
 import type { EvidenceTone } from './message';
+import styles from './evidence.module.css';
 
 export type EvidenceDisclosureProps = {
   children: ReactNode;
@@ -31,36 +34,53 @@ export function EvidenceDisclosure({
   const outcome = outcomeForTone(tone);
 
   return (
-    <article className={`evidence-disclosure evidence-disclosure--${tone} ${open ? 'is-open' : ''} ${className}`.trim()} data-evidence-disclosure="true">
+    <article
+      className={cn(
+        styles.disclosure,
+        tone === 'success' && styles.disclosureSuccess,
+        tone === 'warning' && styles.disclosureWarning,
+        tone === 'danger' && styles.disclosureDanger,
+        open && styles.disclosureOpen,
+        'evidence-disclosure',
+        `evidence-disclosure--${tone}`,
+        open && 'is-open',
+        className,
+      )}
+      data-evidence-disclosure="true"
+    >
       <button
         aria-controls={bodyId}
         aria-describedby={metadata || outcome ? metadataId : undefined}
         aria-expanded={open}
         aria-labelledby={titleId}
-        className="evidence-disclosure__trigger"
+        className={cn(styles.disclosureTrigger, 'evidence-disclosure__trigger')}
         onClick={() => setOpen((current) => !current)}
         type="button"
       >
-        <span className="evidence-disclosure__icon" aria-hidden="true">{icon}</span>
-        <span className="evidence-disclosure__summary">
-          <span className="evidence-disclosure__title" id={titleId} role="heading" aria-level={3}>{label}</span>
+        <span className={cn(styles.disclosureIcon, 'evidence-disclosure__icon')} aria-hidden="true">{icon}</span>
+        <span className={styles.disclosureSummary}>
+          <span className={cn(styles.disclosureTitle, 'evidence-disclosure__title')} id={titleId} role="heading" aria-level={3}>{label}</span>
           {metadata || outcome ? (
-            <span className="evidence-disclosure__metadata" id={metadataId}>
+            <span className={cn(styles.metadata, styles.disclosureMetadata, 'evidence-disclosure__metadata')} id={metadataId}>
               {metadata ? <span>{metadata}</span> : null}
-              {outcome ? <span className="evidence-disclosure__outcome">{outcome.icon}<span>{outcome.label}</span></span> : null}
+              {outcome ? <span className={cn(styles.outcome, outcome.tone && styles[`outcome${capitalize(outcome.tone)}`], 'evidence-disclosure__outcome')}>{outcome.icon}<span>{outcome.label}</span></span> : null}
             </span>
           ) : null}
         </span>
-        <ChevronRight className="evidence-disclosure__chevron" size={16} aria-hidden="true" />
+        <ChevronRight className={cn(styles.chevron, 'evidence-disclosure__chevron')} size={16} aria-hidden="true" />
       </button>
-      {open ? <div className="evidence-disclosure__body" id={bodyId}>{children}</div> : null}
+      {open ? <div className={cn(styles.body, 'evidence-disclosure__body')} id={bodyId}>{children}</div> : null}
     </article>
   );
 }
 
 function outcomeForTone(tone: EvidenceTone) {
-  if (tone === 'success') return { icon: <CheckCircle2 size={14} aria-hidden="true" />, label: 'Complete' };
-  if (tone === 'warning') return { icon: <Clock3 size={14} aria-hidden="true" />, label: 'Pending' };
-  if (tone === 'danger') return { icon: <AlertTriangle size={14} aria-hidden="true" />, label: 'Attention' };
+  if (tone === 'success') return { icon: <CheckCircle2 size={14} aria-hidden="true" />, label: 'Complete', tone };
+  if (tone === 'warning') return { icon: <Clock3 size={14} aria-hidden="true" />, label: 'Pending', tone };
+  if (tone === 'danger') return { icon: <AlertTriangle size={14} aria-hidden="true" />, label: 'Attention', tone };
   return null;
+}
+
+function capitalize(value: string) {
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }

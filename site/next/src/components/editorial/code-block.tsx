@@ -5,13 +5,19 @@ import { CopyCodeButton } from '@/components/docs/copy-code-button';
 import { ScrollRegion } from '@/components/ui/scroll-region';
 import { cn } from '@/lib/utils';
 
-type CodeBlockProps = {
+import { CodeBlockFrame } from './code-block-frame';
+export { CodeBlockFrame } from './code-block-frame';
+export type { CodeBlockFrameProps } from './code-block-frame';
+import styles from './code-block.module.css';
+
+export type CodeBlockProps = {
   code: string;
   className?: string;
   language?: string;
+  variant?: 'compact' | 'default';
 };
 
-export async function CodeBlock({ className, code, language = '' }: CodeBlockProps) {
+export async function CodeBlock({ className, code, language = '', variant = 'default' }: CodeBlockProps) {
   const { tokens } = await codeToTokens(code, {
     lang: normalizeLanguage(language),
     themes: {
@@ -23,20 +29,21 @@ export async function CodeBlock({ className, code, language = '' }: CodeBlockPro
   const displayLanguage = language || 'text';
 
   return (
-    <div className={cn('editorial-code-block', className)} data-editorial-code-block="true">
-      <div className="editorial-code-toolbar">
-        <span className="editorial-code-language">{displayLanguage}</span>
-        <CopyCodeButton code={code} />
-      </div>
+    <CodeBlockFrame
+      className={className}
+      language={displayLanguage}
+      toolbar={<CopyCodeButton code={code} />}
+      variant={variant}
+    >
       <ScrollRegion
         aria-label={`${displayLanguage} code`}
         axis="horizontal"
-        className="editorial-code-scroll"
+        className={cn(styles.scroll, 'editorial-code-scroll')}
       >
-        <pre>
+        <pre className={styles.pre}>
           <code data-language={displayLanguage}>
             {tokens.map((line, lineIndex) => (
-              <span className="editorial-code-line" key={lineIndex}>
+              <span className={cn(styles.line, 'editorial-code-line')} key={lineIndex}>
                 {line.map((token, tokenIndex) => (
                   <span key={tokenIndex} style={token.htmlStyle ?? { color: token.color }}>
                     {token.content}
@@ -48,9 +55,10 @@ export async function CodeBlock({ className, code, language = '' }: CodeBlockPro
           </code>
         </pre>
       </ScrollRegion>
-    </div>
+    </CodeBlockFrame>
   );
 }
+
 
 export type HighlightLanguage = BundledLanguage | 'text';
 

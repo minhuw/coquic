@@ -1,5 +1,9 @@
 import type { ReactNode } from 'react';
 
+import { cn } from '@/lib/utils';
+
+import styles from './evidence.module.css';
+
 export type EvidenceTone = 'neutral' | 'success' | 'warning' | 'danger';
 
 export type EvidenceMessageProps = {
@@ -24,14 +28,24 @@ export function EvidenceMessage({
   tone = 'neutral',
 }: EvidenceMessageProps) {
   return (
-    <article className={`evidence-message evidence-message--${role} evidence-message--${tone} ${className}`.trim()} data-evidence-message="true">
-      {icon ? <div className="evidence-message__icon" aria-hidden="true">{icon}</div> : null}
-      <div className="evidence-message__body">
-        <header className="evidence-message__header">
-          <h3 className={hideLabel ? 'evidence-visually-hidden' : undefined}>{label}</h3>
-          {metadata ? <span className="evidence-message__metadata">{metadata}</span> : null}
+    <article
+      className={cn(
+        styles.message,
+        role === 'user' && styles.messageUser,
+        'evidence-message',
+        `evidence-message--${role}`,
+        `evidence-message--${tone}`,
+        className,
+      )}
+      data-evidence-message="true"
+    >
+      {icon ? <div className={cn(styles.messageIcon, 'evidence-message__icon')} aria-hidden="true">{icon}</div> : null}
+      <div className={cn(styles.messageBody, 'evidence-message__body')}>
+        <header className={cn(styles.messageHeader, 'evidence-message__header')}>
+          <h3 className={cn(styles.messageHeading, hideLabel && styles.visuallyHidden, hideLabel && 'evidence-visually-hidden')}>{label}</h3>
+          {metadata ? <span className={cn(styles.metadata, 'evidence-message__metadata')}>{metadata}</span> : null}
         </header>
-        <div className="evidence-message__content">{children}</div>
+        <div className={cn(styles.messageContent, 'evidence-message__content')}>{children}</div>
       </div>
     </article>
   );

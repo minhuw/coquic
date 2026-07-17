@@ -1,0 +1,251 @@
+.root {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.message {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  color: var(--text);
+  padding: 12px;
+}
+
+.messageUser {
+  width: min(82%, 760px);
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-self: flex-end;
+  border-color: var(--status-known-peer-border);
+  background: var(--status-known-peer-surface);
+}
+
+.messageUser .messageIcon {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.messageUser .messageBody {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.messageIcon,
+.disclosureIcon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-subtle);
+  color: var(--accent-ink);
+}
+
+.messageBody,
+.messageContent {
+  min-width: 0;
+}
+
+.messageHeader {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.messageHeading,
+.disclosureTitle {
+  min-width: 0;
+  color: var(--text-strong);
+  font: var(--type-panel-title);
+}
+
+.metadata {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  font-variant-numeric: tabular-nums;
+}
+
+.markdown,
+.messageContent {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown :is(p, ul, ol, blockquote, pre, table) {
+  margin-block: 8px;
+}
+
+.markdown code,
+.messageContent code,
+.metadata {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.disclosure {
+  display: block;
+  width: min(100%, 860px);
+  min-width: 0;
+  margin-left: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.disclosureSuccess {
+  border-left-color: var(--status-success-border);
+}
+
+.disclosureWarning {
+  border-left-color: var(--status-warning-border);
+}
+
+.disclosureDanger {
+  border-left-color: var(--status-danger-border);
+}
+
+.disclosureTrigger {
+  display: grid;
+  width: 100%;
+  min-height: 64px;
+  grid-template-columns: 32px minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: var(--surface);
+  padding: 11px 12px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.disclosureOpen .disclosureTrigger {
+  border-bottom-color: var(--border);
+}
+
+.disclosureTrigger:hover {
+  background: var(--surface-subtle);
+}
+
+.disclosureSummary {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.disclosureTitle {
+  overflow-wrap: anywhere;
+}
+
+.disclosureMetadata {
+  align-items: center;
+}
+
+.outcome {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.outcomeSuccess {
+  color: var(--status-success-ink);
+}
+
+.outcomeWarning {
+  color: var(--status-warning-ink);
+}
+
+.outcomeDanger {
+  color: var(--status-danger-ink);
+}
+
+.chevron {
+  color: var(--text-muted);
+  transition: transform var(--motion-standard) var(--ease-standard);
+}
+
+.disclosureOpen .chevron {
+  transform: rotate(90deg);
+}
+
+.body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.note {
+  display: block;
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.toolSections {
+  min-width: 0;
+}
+
+@media (max-width: 600px) {
+  .messageUser,
+  .disclosure {
+    width: 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  .disclosureTrigger {
+    min-height: var(--control-coarse);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chevron {
+    transition: none;
+  }
+}

@@ -3,13 +3,18 @@ import { Children, isValidElement, type HTMLAttributes, type ReactNode } from 'r
 
 import { cn } from '@/lib/utils';
 
+import styles from './anchored-heading.module.css';
+
 export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
 
 type AnchoredHeadingProps = Omit<HTMLAttributes<HTMLHeadingElement>, 'id'> & {
   children: ReactNode;
+  headingClassName?: string;
   id?: string;
   label?: string;
   level: HeadingLevel;
+  permalinkClassName?: string;
+  permalinkLabel?: string;
 };
 
 const headingTags = {
@@ -21,21 +26,32 @@ const headingTags = {
   6: 'h6',
 } as const;
 
-export function AnchoredHeading({ children, className, id, label, level, ...props }: AnchoredHeadingProps) {
+export function AnchoredHeading({
+  children,
+  className,
+  headingClassName,
+  id,
+  label,
+  level,
+  permalinkClassName,
+  permalinkLabel,
+  ...props
+}: AnchoredHeadingProps) {
   const HeadingTag = headingTags[level];
   const headingLabel = label || textContent(children).trim() || 'heading';
+  const accessibleLabel = permalinkLabel || `Permalink to ${headingLabel}`;
 
   return (
-    <div className="anchored-heading" data-heading-level={level}>
-      <HeadingTag {...props} className={cn('anchored-heading__title', className)} id={id}>
+    <div className={cn(styles.root, 'anchored-heading', className)} data-heading-level={level}>
+      <HeadingTag {...props} className={cn(styles.title, 'anchored-heading__title', headingClassName)} id={id}>
         {children}
       </HeadingTag>
       {id ? (
         <a
-          aria-label={`Permalink to ${headingLabel}`}
-          className="anchored-heading__permalink"
+          aria-label={accessibleLabel}
+          className={cn(styles.permalink, 'anchored-heading__permalink', permalinkClassName)}
           href={`#${id}`}
-          title={`Permalink to ${headingLabel}`}
+          title={accessibleLabel}
         >
           <Link2 aria-hidden="true" size={16} strokeWidth={1.8} />
         </a>

@@ -1,0 +1,141 @@
+.root {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.empty {
+  color: var(--text-muted);
+  font: var(--type-body);
+}
+
+.markdown {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown :is(p, ul, ol, blockquote, pre, table) {
+  margin-block: 8px;
+}
+
+.markdown code,
+.inlineCode,
+.sectionHead code {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.toolSections {
+  min-width: 0;
+}
+
+.section {
+  min-width: 0;
+}
+
+.section + .section {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.sectionHead {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.sectionHead code {
+  color: var(--text-muted);
+}
+
+.toolMarkdown {
+  min-width: 0;
+}
+
+.emptyTool {
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.fileList,
+.todoList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fileList li,
+.todoList li {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.fileList code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: var(--type-code);
+}
+
+.todoList li {
+  align-items: flex-start;
+}
+
+.todoList li svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--status-success-ink);
+}
+
+.todoList li.done > span:last-child {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.done {
+  color: var(--text-muted);
+}
+
+.todoDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  margin-top: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+.inlineCode {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  white-space: pre-wrap;
+}
+
+.note {
+  display: block;
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}

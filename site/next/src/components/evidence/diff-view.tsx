@@ -3,6 +3,9 @@
 import { Fragment } from 'react';
 
 import { ScrollRegion } from '@/components/ui/scroll-region';
+import { cn } from '@/lib/utils';
+
+import styles from './diff-view.module.css';
 
 export type DiffCell = { kind: 'added' | 'context' | 'empty' | 'removed'; lineNumber: string; text: string };
 export type DiffMetaVariant = 'file' | 'hunk' | 'plain';
@@ -24,7 +27,7 @@ export function DiffView({
 }) {
   const label = display === 'split' ? 'Side-by-side diff' : 'Unified diff';
   return (
-    <ScrollRegion aria-label={label} axis="both" className={`evidence-diff-scroll ${className}`.trim()}>
+    <ScrollRegion aria-label={label} axis="both" className={cn(styles.root, 'evidence-diff-scroll', className)}>
       {display === 'split' ? (
         <SplitDiffTable rows={rows} showLineNumbers={showLineNumbers} />
       ) : (
@@ -36,19 +39,19 @@ export function DiffView({
 
 function SplitDiffTable({ rows, showLineNumbers }: { rows: DiffSplitRow[]; showLineNumbers: boolean }) {
   return (
-    <div className="diff-split" role="table" aria-label="Side-by-side diff contents">
-      <div className="diff-split-header" role="row">
-        <div className="diff-split-column-label" role="columnheader">Old</div>
-        <div className="diff-split-column-label" role="columnheader">New</div>
+    <div className={cn(styles.split, 'diff-split')} role="table" aria-label="Side-by-side diff contents">
+      <div className={cn(styles.splitHeader, 'diff-split-header')} role="row">
+        <div className={cn(styles.splitColumnLabel, 'diff-split-column-label')} role="columnheader">Old</div>
+        <div className={cn(styles.splitColumnLabel, 'diff-split-column-label')} role="columnheader">New</div>
       </div>
-      <div className="diff-split-body">
+      <div className={cn(styles.splitBody, 'diff-split-body')}>
         {rows.map((row, index) =>
           row.kind === 'meta' ? (
-            <div className={`diff-split-meta ${row.variant}`} key={index} role="row">
+            <div className={cn(styles.splitMeta, row.variant === 'file' && styles.metaFile, 'diff-split-meta', row.variant)} key={index} role="row">
               {row.text.split('\n').map((line, lineIndex) => <span key={lineIndex}>{line || ' '}</span>)}
             </div>
           ) : (
-            <div className="diff-split-row" key={index} role="row">
+            <div className={cn(styles.splitRow, 'diff-split-row')} key={index} role="row">
               <DiffSplitCell cell={row.oldCell} showLineNumbers={showLineNumbers} />
               <DiffSplitCell cell={row.newCell} showLineNumbers={showLineNumbers} />
             </div>
@@ -61,21 +64,21 @@ function SplitDiffTable({ rows, showLineNumbers }: { rows: DiffSplitRow[]; showL
 
 function DiffSplitCell({ cell, showLineNumbers }: { cell: DiffCell; showLineNumbers: boolean }) {
   return (
-    <div className={`diff-split-cell ${cell.kind}`} role="cell">
-      <span className="diff-split-line-number">{showLineNumbers ? cell.lineNumber || ' ' : ' '}</span>
-      <span className="diff-split-marker">{diffMarker(cell.kind)}</span>
-      <span className="diff-split-content">{cell.text || ' '}</span>
+    <div className={cn(styles.splitCell, cell.kind === 'added' && styles.splitCellAdded, cell.kind === 'removed' && styles.splitCellRemoved, cell.kind === 'empty' && styles.splitCellEmpty, 'diff-split-cell', cell.kind)} role="cell">
+      <span className={cn(styles.splitLineNumber, 'diff-split-line-number')}>{showLineNumbers ? cell.lineNumber || ' ' : ' '}</span>
+      <span className={cn(styles.splitMarker, 'diff-split-marker')}>{diffMarker(cell.kind)}</span>
+      <span className={cn(styles.splitContent, 'diff-split-content')}>{cell.text || ' '}</span>
     </div>
   );
 }
 
 function UnifiedDiffTable({ rows, showLineNumbers }: { rows: DiffSplitRow[]; showLineNumbers: boolean }) {
   return (
-    <div className={`diff-unified ${showLineNumbers ? '' : 'no-line-numbers'}`.trim()} role="table" aria-label="Unified diff contents">
+    <div className={cn(styles.unified, !showLineNumbers && styles.unifiedNoLineNumbers, 'diff-unified', !showLineNumbers && 'no-line-numbers')} role="table" aria-label="Unified diff contents">
       {rows.map((row, index) => {
         if (row.kind === 'meta') {
           return (
-            <div className={`diff-unified-meta ${row.variant}`} key={index} role="row">
+            <div className={cn(styles.unifiedMeta, row.variant === 'file' && styles.metaFile, 'diff-unified-meta', row.variant)} key={index} role="row">
               {row.text.split('\n').map((line, lineIndex) => <span key={lineIndex}>{line || ' '}</span>)}
             </div>
           );
@@ -128,15 +131,15 @@ function UnifiedDiffLine({
   showLineNumbers: boolean;
 }) {
   return (
-    <div className={`diff-unified-line ${cell.kind}`} role="row">
+    <div className={cn(styles.unifiedLine, cell.kind === 'added' && styles.unifiedLineAdded, cell.kind === 'removed' && styles.unifiedLineRemoved, 'diff-unified-line', cell.kind)} role="row">
       {showLineNumbers ? (
         <>
-          <span className="diff-unified-line-number old">{oldLineNumber || ' '}</span>
-          <span className="diff-unified-line-number new">{newLineNumber || ' '}</span>
+          <span className={cn(styles.unifiedLineNumber, styles.unifiedOld, 'diff-unified-line-number', 'old')}>{oldLineNumber || ' '}</span>
+          <span className={cn(styles.unifiedLineNumber, styles.unifiedNew, 'diff-unified-line-number', 'new')}>{newLineNumber || ' '}</span>
         </>
       ) : null}
-      <span className="diff-unified-marker">{diffMarker(cell.kind)}</span>
-      <span className="diff-unified-content">{cell.text || ' '}</span>
+      <span className={cn(styles.unifiedMarker, 'diff-unified-marker')}>{diffMarker(cell.kind)}</span>
+      <span className={cn(styles.unifiedContent, 'diff-unified-content')}>{cell.text || ' '}</span>
     </div>
   );
 }

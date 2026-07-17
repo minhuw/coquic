@@ -4,6 +4,7 @@ import { Bot, CheckCircle2, Code2, FilePenLine, ListChecks, MessageSquareText, S
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { cn } from '@/lib/utils';
 import {
   conversationKind,
   groupConversationRecords,
@@ -20,6 +21,7 @@ import { EvidenceDisclosure } from './evidence/disclosure';
 import { EvidenceMessage } from './evidence/message';
 import type { EvidenceTone } from './evidence/message';
 import { CodeBlock } from './evidence/code-block';
+import styles from './codex-transcript-thread.module.css';
 
 export function CodexTranscriptThread({
   empty,
@@ -31,10 +33,10 @@ export function CodexTranscriptThread({
   const conversationRecords = records.filter(isRenderableRecord);
   const conversationItems = groupConversationRecords(conversationRecords);
   if (!conversationItems.length) {
-    return <div className="evidence-root evidence-thread"><div className="transcript-empty">{empty ?? 'No displayable transcript records.'}</div></div>;
+    return <div className={cn(styles.root, 'evidence-root', 'evidence-thread')}><div className={cn(styles.empty, 'transcript-empty')}>{empty ?? 'No displayable transcript records.'}</div></div>;
   }
   return (
-    <div className="evidence-root evidence-thread">
+    <div className={cn(styles.root, 'evidence-root', 'evidence-thread')}>
       {conversationItems.map((item) => (
         <TranscriptItem key={item.key} item={item} />
       ))}
@@ -89,12 +91,12 @@ function TranscriptToolCard({ group }: { group: TranscriptToolGroup }) {
   const meta = [toolGroupState(group), payloadLabel, toolLineLabel(group)].filter(Boolean).join(' / ');
   return (
     <EvidenceDisclosure className={`tool-card ${compatibilityToneClass(toolTone(group))}`} icon={toolIcon(primaryRecord)} metadata={meta} label={toolName} tone={toolTone(group)}>
-      <div className="transcript-tool-sections steward-tool-sections">
+      <div className={cn(styles.toolSections, 'transcript-tool-sections', 'steward-tool-sections')}>
         {group.call ? <ToolSection format={toolCallFormat(group.call)} label="Call" record={group.call} /> : null}
         {group.result ? (
           <ToolSection format="markdown" label="Result" record={group.result} />
         ) : (
-          <div className="tool-empty">Result is not loaded in the current preview page.</div>
+          <div className={cn(styles.emptyTool, 'tool-empty')}>Result is not loaded in the current preview page.</div>
         )}
       </div>
       {group.call?.textTruncated || group.result?.textTruncated ? <TranscriptNote /> : null}
@@ -108,7 +110,7 @@ function FileChangeCard({ record }: { record: TranscriptRecord }) {
   return (
     <EvidenceDisclosure className="tool-card pending" icon={<FilePenLine size={16} />} metadata={parsed?.status || lineMeta(record)} label="File change" tone="warning">
       {changes.length ? (
-        <ul className="file-list">
+        <ul className={cn(styles.fileList, 'file-list')}>
           {changes.map((change, index) => (
             <li key={`${change.path || 'file'}-${index}`}>
               <span>{change.kind || 'change'}</span>
@@ -130,10 +132,10 @@ function TodoListCard({ record }: { record: TranscriptRecord }) {
   return (
     <EvidenceDisclosure className="tool-card neutral" icon={<ListChecks size={16} />} metadata={`${items.length} items`} label="Task plan" tone="neutral">
       {items.length ? (
-        <ul className="todo-list">
+        <ul className={cn(styles.todoList, 'todo-list')}>
           {items.map((todo, index) => (
-            <li className={todo.completed ? 'done' : ''} key={`${todo.text || 'todo'}-${index}`}>
-              {todo.completed ? <CheckCircle2 size={15} /> : <span className="todo-dot" />}
+            <li className={cn(todo.completed && styles.done, todo.completed && 'done')} key={`${todo.text || 'todo'}-${index}`}>
+              {todo.completed ? <CheckCircle2 size={15} /> : <span className={cn(styles.todoDot, 'todo-dot')} />}
               <span>{todo.text || '(empty item)'}</span>
             </li>
           ))}
@@ -149,7 +151,7 @@ function TodoListCard({ record }: { record: TranscriptRecord }) {
 function WebSearchCard({ record }: { record: TranscriptRecord }) {
   return (
     <EvidenceDisclosure className="tool-card neutral" icon={<Search size={16} />} metadata={lineMeta(record)} label="Web search" tone="neutral">
-      <code className="transcript-inline-code">{record.text || '(empty query)'}</code>
+      <code className={cn(styles.inlineCode, 'transcript-inline-code')}>{record.text || '(empty query)'}</code>
       {record.textTruncated ? <TranscriptNote /> : null}
     </EvidenceDisclosure>
   );
@@ -158,19 +160,19 @@ function WebSearchCard({ record }: { record: TranscriptRecord }) {
 function ToolSection({ format, label, record }: { format: 'bash' | 'json' | 'markdown' | 'text'; label: string; record: TranscriptRecord }) {
   if (format === 'markdown') {
     return (
-      <section className="steward-tool-section">
-        <div className="steward-tool-section-head">
+      <section className={cn(styles.section, 'steward-tool-section')}>
+        <div className={cn(styles.sectionHead, 'steward-tool-section-head')}>
           <span>{label}</span>
           <code>line {formatInteger(record.line)}</code>
         </div>
-        <div className="steward-tool-markdown">
+        <div className={cn(styles.toolMarkdown, 'steward-tool-markdown')}>
           <MarkdownText text={record.text} />
         </div>
       </section>
     );
   }
   return (
-    <section className="steward-tool-section">
+    <section className={cn(styles.section, 'steward-tool-section')}>
       <CodeBlock
         className={format === 'bash' ? 'tool-command' : 'tool-output'}
         compact
@@ -185,14 +187,14 @@ function ToolSection({ format, label, record }: { format: 'bash' | 'json' | 'mar
 
 function MarkdownText({ text }: { text: string }) {
   return (
-    <div className="evidence-markdown transcript-markdown">
+    <div className={cn(styles.markdown, 'evidence-markdown', 'transcript-markdown')}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   );
 }
 
 function TranscriptNote() {
-  return <small className="transcript-message-note">Preview truncated. Download the JSONL member for the full record.</small>;
+  return <small className={cn(styles.note, 'transcript-message-note')}>Preview truncated. Download the JSONL member for the full record.</small>;
 }
 
 function isRenderableRecord(record: TranscriptRecord) {

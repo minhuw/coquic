@@ -1,0 +1,129 @@
+.root {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--code-surface);
+}
+
+.compact {
+  width: 100%;
+}
+
+.toolbar {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  padding-inline: 0.75rem;
+}
+
+.language {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scroll {
+  max-width: 100%;
+  background: var(--code-surface);
+}
+
+.pre {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  padding: 1rem;
+  color: var(--text-strong);
+  font: var(--type-code);
+  white-space: pre;
+}
+
+.pre code {
+  display: block;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  white-space: pre;
+}
+
+/* Typography's plugin styles pre/code descendants; keep code adapters on the semantic palette. */
+.root .pre,
+.root .pre code {
+  background: var(--code-surface);
+  color: var(--text-strong);
+}
+
+.line {
+  display: block;
+  min-height: 1.55em;
+  white-space: pre;
+}
+
+.root :global(.editorial-copy-button) {
+  display: inline-flex;
+  width: 88px;
+  min-width: 88px;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  padding-inline: 0.6rem;
+  color: var(--text-strong);
+  font: var(--type-metadata);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.root :global(.editorial-copy-button) svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  stroke: currentcolor;
+}
+
+.root :global(.editorial-copy-button:hover),
+.root :global(.editorial-copy-button:focus-visible) {
+  border-color: var(--accent-ink);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.root :global(.editorial-copy-button[data-copy-state='error']) {
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-surface);
+  color: var(--status-danger-ink);
+}
+
+.root :global(.editorial-copy-announcement) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+@media (pointer: coarse) {
+  .root :global(.editorial-copy-button) {
+    min-height: var(--control-coarse);
+  }
+}
+
+@media (max-width: 767px) {
+  .pre {
+    padding: 0.85rem;
+  }
+}

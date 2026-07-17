@@ -4,6 +4,9 @@ import type { ReactNode } from 'react';
 import { createContext, useContext, useState } from 'react';
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
+
+import styles from './blog.module.css';
 
 type BlogLanguage = 'en' | 'zh';
 
@@ -31,10 +34,10 @@ export function BlogLanguageProvider({ children }: BlogLanguageProviderProps) {
   };
 
   return (
-    <section className="blog-language-shell" data-blog-language={language}>
+    <section className={styles.languageShell} data-blog-language={language}>
       <BlogLanguageContext.Provider value={language}>
         <BlogLanguageTabsContext.Provider value>
-          <Tabs className="blog-language-root" value={language} onValueChange={handleLanguageChange}>
+          <Tabs className={styles.languageRoot} value={language} onValueChange={handleLanguageChange}>
             {children}
           </Tabs>
         </BlogLanguageTabsContext.Provider>
@@ -45,10 +48,10 @@ export function BlogLanguageProvider({ children }: BlogLanguageProviderProps) {
 
 export function BlogLanguageTabs() {
   return (
-    <TabsList className="blog-language-tabs" aria-label="Article language">
+    <TabsList className={styles.languageTabs} aria-label="Article language">
       {languages.map((item) => (
         <TabsTrigger
-          className="blog-language-tab"
+          className={styles.languageTab}
           key={item.value}
           value={item.value}
         >
@@ -64,7 +67,7 @@ export function BlogLanguagePanel({ children, language }: BlogLanguagePanelProps
   const insideTabs = useContext(BlogLanguageTabsContext);
   const panelProps = {
     'aria-hidden': !active,
-    className: 'blog-language-panel',
+    className: cn(styles.languagePanel, 'blog-language-panel'),
     'data-blog-language-panel': language,
     hidden: !active,
     lang: language === 'zh' ? 'zh-CN' : 'en',

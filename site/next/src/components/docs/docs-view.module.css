@@ -1,0 +1,202 @@
+.header {
+  padding-block: var(--space-5) var(--space-4);
+}
+
+.headerContainer,
+.layout {
+  width: min(100%, calc(232px + 3rem + var(--measure-editorial)));
+  margin-inline: auto;
+}
+
+.layout {
+  display: block;
+  min-width: 0;
+  padding-block: var(--space-3) var(--space-7);
+}
+
+.sidebar {
+  display: none;
+}
+
+.article {
+  min-width: 0;
+}
+
+.mobileNavigation {
+  display: flex;
+}
+
+.mobileTrigger,
+.drawerClose {
+  display: inline-flex;
+  min-width: var(--control-coarse);
+  min-height: var(--control-coarse);
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.mobileTrigger {
+  padding-inline: var(--space-3);
+}
+
+.mobileTrigger svg,
+.drawerClose svg {
+  width: var(--icon-default);
+  height: var(--icon-default);
+}
+
+.mobileTrigger:hover,
+.mobileTrigger:focus-visible,
+.drawerClose:hover,
+.drawerClose:focus-visible {
+  border-color: var(--accent-ink);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.mobileDrawer {
+  top: 0;
+  right: 0;
+  left: auto;
+  width: min(88vw, 360px);
+  max-height: none;
+  height: 100dvh;
+  transform: none;
+  translate: none !important;
+  border: 0;
+  border-left: 1px solid var(--border-strong);
+  border-radius: 0;
+  padding: calc(var(--space-3) + env(safe-area-inset-top)) max(var(--space-4), env(safe-area-inset-right)) calc(var(--space-4) + env(safe-area-inset-bottom)) max(var(--space-4), env(safe-area-inset-left));
+}
+
+.drawerHeader {
+  display: flex;
+  min-height: var(--control-coarse);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-strong);
+  font: var(--type-panel-title);
+}
+
+.drawerClose {
+  flex: 0 0 var(--control-coarse);
+}
+
+.drawerNavigation {
+  display: grid;
+  max-height: calc(100dvh - 76px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-2) 2px;
+}
+
+.navSection {
+  display: block;
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.navSection:first-child {
+  margin-top: 0;
+}
+
+.navLink {
+  display: flex;
+  min-height: var(--control-coarse);
+  align-items: center;
+  border-left: 2px solid transparent;
+  padding: var(--space-2) var(--space-2);
+  color: var(--text);
+  font: var(--type-ui-label);
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.navLink:hover,
+.navLink:focus-visible {
+  background: var(--surface-subtle);
+  color: var(--text-strong);
+}
+
+.navLink[aria-current='page'] {
+  border-left-color: var(--accent-ink);
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.navLinkNested {
+  margin-left: var(--space-3);
+}
+
+.sidebarHead {
+  display: grid;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-2) var(--space-2) var(--space-3);
+}
+
+.sidebarHead span {
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.sidebarHead strong {
+  color: var(--text-strong);
+  font: var(--type-panel-title);
+}
+
+.sidebar nav {
+  display: grid;
+  padding-block: var(--space-2);
+}
+
+@media (min-width: 1024px) {
+  .header {
+    padding-block: var(--space-6) var(--space-4);
+  }
+
+  .mobileNavigation {
+    display: none;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 232px minmax(0, var(--measure-editorial));
+    align-items: start;
+    gap: var(--space-7);
+  }
+
+  .sidebar {
+    position: sticky;
+    top: calc(56px + var(--space-4));
+    display: block;
+    max-height: calc(100dvh - 56px - var(--space-6));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-right: 1px solid var(--border);
+    padding: 2px var(--space-3) 2px 2px;
+  }
+
+  .sidebar .navLink {
+    min-height: 36px;
+  }
+}
+
+@media (forced-colors: active) {
+  .navLink[aria-current='page'] {
+    border-left-color: CanvasText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobileTrigger,
+  .drawerClose,
+  .navLink {
+    transition: none;
+  }
+}

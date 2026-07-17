@@ -4,6 +4,8 @@ import { ArrowRight } from 'lucide-react';
 
 import { PageHeader } from '@/components/page-header';
 import { formatBlogDate, getBlogPosts } from '@/lib/blog';
+import styles from '@/components/blog/blog.module.css';
+import { cn } from '@/lib/utils';
 
 export const metadata: Metadata = {
   title: 'CoQUIC Blog',
@@ -16,36 +18,35 @@ export default function BlogIndexPage() {
   return (
     <main className="coquic-page">
       <PageHeader
-        containerClassName="blog-page-header__container"
         eyebrow="project blog"
         title="CoQUIC Blog"
         variant="editorial"
       />
 
-      <section className="blog-list" aria-label="Blog posts">
+      <section className={styles.list} aria-label="Blog posts">
         {posts.length ? (
           posts.map((post) => (
-            <article className="blog-row" key={post.slug}>
-              <Link className="blog-row-link" href={`/blog/${post.slug}`}>
-                <div className="blog-row-main">
-                  <div className="blog-row-meta">
-                    <time className="blog-meta-date" dateTime={post.date}>
+            <article className={cn(styles.row, 'blog-row')} key={post.slug}>
+              <Link className={styles.rowLink} href={`/blog/${post.slug}`}>
+                <div className={styles.rowMain}>
+                  <div className={cn(styles.rowMeta, 'blog-row-meta')}>
+                    <time className={styles.metaDate} dateTime={post.date}>
                       {formatBlogDate(post.date)}
                     </time>
-                    <span className="blog-meta-unit">{post.readingMinutes} min read</span>
-                    <span className="blog-meta-person">{post.author}</span>
-                    {post.writtenBy ? <span className="blog-meta-attribution">Written by {post.writtenBy}</span> : null}
-                    {post.polishedBy ? <span className="blog-meta-attribution">Polished by {post.polishedBy}</span> : null}
+                    <span className={styles.metaUnit}>{post.readingMinutes} min read</span>
+                    <span className={styles.metaPerson}>{post.author}</span>
+                    {post.writtenBy ? <span className={styles.metaAttribution}>Written by {post.writtenBy}</span> : null}
+                    {post.polishedBy ? <span className={styles.metaAttribution}>Polished by {post.polishedBy}</span> : null}
                   </div>
-                  <h2>{post.title}</h2>
-                  <p>{post.description}</p>
-                  <span className="blog-row-foot">
-                    <span className="blog-tags">
+                  <h2 className={styles.rowTitle}>{post.title}</h2>
+                  <p className={styles.rowDescription}>{post.description}</p>
+                  <span className={styles.rowFoot}>
+                    <span className={cn(styles.tags, 'blog-tags')}>
                       {post.tags.map((tag) => (
-                        <span key={tag}>{tag}</span>
+                        <span className={styles.tag} key={tag}>{tag}</span>
                       ))}
                     </span>
-                    <span className="blog-row-cta">
+                    <span className={cn(styles.rowCta, 'blog-row-cta')}>
                       Read article
                       <ArrowRight aria-hidden="true" />
                     </span>
@@ -55,7 +56,7 @@ export default function BlogIndexPage() {
             </article>
           ))
         ) : (
-          <p className="empty-state">No blog posts have been published yet.</p>
+          <p className={styles.emptyState}>No blog posts have been published yet.</p>
         )}
       </section>
     </main>

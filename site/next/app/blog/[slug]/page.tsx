@@ -6,6 +6,8 @@ import { ArrowLeft } from 'lucide-react';
 import { BlogLanguageProvider, BlogLanguageTabs } from '@/components/blog/blog-language-switcher';
 import { BlogPostContent } from '@/components/blog/blog-post-content';
 import { formatBlogDate, getBlogPost, getStaticBlogSlugs } from '@/lib/blog';
+import styles from '@/components/blog/blog.module.css';
+import { cn } from '@/lib/utils';
 
 type BlogPostPageProps = {
   params: Promise<{ slug: string }>;
@@ -38,28 +40,28 @@ export default async function BlogPostPage({ params }: BlogPostPageProps) {
   return (
     <main className="coquic-page">
       <BlogLanguageProvider>
-        <article className="blog-post">
-          <Link className="blog-back-link" href="/blog">
+        <article className={cn(styles.post, 'blog-post')}>
+          <Link className={styles.backLink} href="/blog">
             <ArrowLeft aria-hidden="true" />
             Blog
           </Link>
-          <header className="blog-post-header">
-            <div className="blog-post-meta">
-              <time className="blog-post-meta-date" dateTime={post.date}>
+          <header className={cn(styles.postHeader, 'blog-post-header')}>
+            <div className={styles.postMeta}>
+              <time className={styles.metaDate} dateTime={post.date}>
                 {formatBlogDate(post.date)}
               </time>
-              <span className="blog-post-meta-unit">{post.readingMinutes} min read</span>
-              <span className="blog-post-meta-person">{post.author}</span>
-              {post.writtenBy ? <span className="blog-post-meta-attribution">Written by {post.writtenBy}</span> : null}
-              {post.polishedBy ? <span className="blog-post-meta-attribution">Polished by {post.polishedBy}</span> : null}
+              <span className={styles.metaUnit}>{post.readingMinutes} min read</span>
+              <span className={styles.metaPerson}>{post.author}</span>
+              {post.writtenBy ? <span className={styles.metaAttribution}>Written by {post.writtenBy}</span> : null}
+              {post.polishedBy ? <span className={styles.metaAttribution}>Polished by {post.polishedBy}</span> : null}
             </div>
-            <h1>{post.title}</h1>
-            <p>{post.description}</p>
-            <div className="blog-post-actions">
+            <h1 className={styles.postTitle}>{post.title}</h1>
+            <p className={styles.postDescription}>{post.description}</p>
+            <div className={cn(styles.postActions, 'blog-post-actions')}>
               {post.tags.length ? (
-                <span className="blog-tags">
+                <span className={cn(styles.tags, 'blog-tags')}>
                   {post.tags.map((tag) => (
-                    <span key={tag}>{tag}</span>
+                    <span className={styles.tag} key={tag}>{tag}</span>
                   ))}
                 </span>
               ) : null}

@@ -99,7 +99,7 @@ test.describe('documentation routes', () => {
     await page.evaluate(() => window.scrollTo(0, 2400));
     await expect(navigation).toBeVisible();
 
-    const heading = page.locator('.docs-function-heading').first();
+    const heading = page.locator('.docs-function-heading .anchored-heading__title').first();
     const headingId = await heading.getAttribute('id');
     expect(headingId).toBeTruthy();
     const permalink = heading.locator('..').getByRole('link', { name: /Permalink to/ });

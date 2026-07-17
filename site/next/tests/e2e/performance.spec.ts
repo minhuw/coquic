@@ -4,6 +4,7 @@ import {
   designViewports,
   expectNoGlobalOverflow,
   expectNoSeriousAxeViolations,
+  setStoredTheme,
 } from './helpers/design-system';
 import { installPerformanceFixture } from './fixtures/performance';
 
@@ -18,6 +19,12 @@ async function loadReadyPerformance(page: Page, path = '/perf-comparison') {
   await page.goto(path);
   await expect(page.locator('#performance-current-state')).toHaveAttribute('data-state', 'ready');
   return fixture;
+}
+
+async function removeNextDevTools(page: Page) {
+  await page.locator('body').evaluate((body) => {
+    body.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
+  });
 }
 
 test.describe('performance evidence contracts', () => {
@@ -87,6 +94,58 @@ test.describe('performance evidence contracts', () => {
     expect(styles.chartValues).toEqual(styles.themeChartValues);
     expect(styles.modalShadow).toContain('64px');
     expect(styles.modalShadow).not.toContain('80px');
+  });
+
+  test('matches the reviewed wide populated route in dark theme', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'The wide baseline is owned by the desktop project.');
+    await page.setViewportSize(designViewports.wide);
+    await setStoredTheme(page, 'dark');
+    await loadReadyPerformance(page);
+
+    await expect(page.locator('#performance-history-state')).toHaveAttribute('data-state', 'ready');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe('dark');
+    await page.evaluate(() => document.fonts.ready);
+    await expectNoGlobalOverflow(page);
+    await removeNextDevTools(page);
+    await expect(page).toHaveScreenshot('performance-wide-populated-dark.png', { fullPage: true });
+  });
+
+  test('matches the reviewed mobile active-filter route', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'mobile', 'The mobile filter baseline is owned by the mobile project.');
+    await page.setViewportSize(designViewports.phone375);
+    await loadReadyPerformance(page);
+
+    await expect(page.locator('#performance-history-state')).toHaveAttribute('data-state', 'ready');
+    await page.locator('#performance-filter-toggle').click();
+    const rust = page.locator('[data-filter-group="languages"] button[data-filter-value="Rust"]');
+    await rust.click();
+    await expect(page.locator('#performance-filter-panel')).toBeVisible();
+    await expect(page.locator('#performance-filter-count')).toHaveText('1 filter active');
+    await page.evaluate(() => document.fonts.ready);
+    await expectNoGlobalOverflow(page);
+    await removeNextDevTools(page);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+    await expect(page).toHaveScreenshot('performance-mobile-filter.png', { fullPage: true });
+  });
+
+  test('keeps the populated route bounded at 200 percent zoom', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'The zoom probe runs once in the desktop project.');
+    await page.setViewportSize({ width: 640, height: 1_000 });
+    await loadReadyPerformance(page);
+    await expect(page.locator('#performance-history-state')).toHaveAttribute('data-state', 'ready');
+
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = '200%';
+    });
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('32px');
+    await expectNoGlobalOverflow(page);
+    const geometry = await page.locator('#performance-page').evaluate((root) => ({
+      right: root.getBoundingClientRect().right,
+      viewportWidth: window.innerWidth,
+    }));
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth + 1);
   });
 
   test('keeps mode and filter controls stable through keyboard selection', async ({ page }) => {

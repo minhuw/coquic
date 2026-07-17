@@ -41,7 +41,7 @@ export async function DocsView({ page }: DocsViewProps) {
           </nav>
         </aside>
 
-        <article className={cn(styles.article, 'docs-article')}>
+        <article className={styles.article}>
           {await Markdown({ markdown: page.markdown, currentSlug: page.slug, skipFirstH1: true })}
         </article>
       </section>

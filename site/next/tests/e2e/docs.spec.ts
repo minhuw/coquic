@@ -13,6 +13,7 @@ const docs = docItems.map((item) => ({
   ...item,
   title: item.href === '/docs' ? 'CoQUIC Documentation' : `${item.label} | CoQUIC Documentation`,
 }));
+const themes = ['light', 'dark'] as const;
 
 async function expectDocsAxe(page: Parameters<typeof setStoredTheme>[0]) {
   await page.waitForFunction(() => {
@@ -60,7 +61,7 @@ test.describe('documentation routes', () => {
     await setStoredTheme(page, 'light');
     await page.goto('/docs/api/c-ffi-reference');
 
-    const firstContent = page.locator('.docs-article :is(h2, p)').first();
+    const firstContent = page.locator('main article :is(h2, p)').first();
     await expect(firstContent).toBeVisible();
     expect((await firstContent.boundingBox())?.y).toBeLessThan(600);
 
@@ -131,6 +132,17 @@ test.describe('documentation routes', () => {
     expect(copiedCode?.replace(/\s+/g, ' ').trim()).toBe(renderedCode);
     await expectDocsAxe(page);
   });
+
+  for (const theme of themes) {
+    test(`the C FFI reference matches the ${theme} visual baseline`, async ({ page }) => {
+      await setStoredTheme(page, theme);
+      await page.goto('/docs/api/c-ffi-reference');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect(page.locator('main article')).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      await expect(page).toHaveScreenshot(`docs-api-c-ffi-reference-${theme}.png`, { fullPage: false });
+    });
+  }
 
   test('code remains a local scroll region on a narrow viewport', async ({ page }) => {
     await page.setViewportSize(designViewports.phone320);

@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
 
-import { expectNoGlobalOverflow, expectNoSeriousAxeViolations } from './helpers/design-system';
+import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
+
+const themes = ['light', 'dark'] as const;
 
 test.describe('blog characterization', () => {
   test.describe.configure({ mode: 'default' });
@@ -26,6 +28,24 @@ test.describe('blog characterization', () => {
     await expect(articles.nth(0)).toContainText('Written by Claude Fable 5');
     await expect(articles.nth(1)).toContainText('Polished by GPT');
   });
+
+  for (const theme of themes) {
+    test(`the index and representative post match the ${theme} visual baseline`, async ({ page }) => {
+      await setStoredTheme(page, theme);
+      await page.goto('/blog');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect(page.getByRole('article')).toHaveCount(2);
+      await page.evaluate(() => document.fonts.ready);
+      await expect(page).toHaveScreenshot(`blog-index-${theme}.png`, { fullPage: false });
+
+      await page.goto('/blog/coquic-steward');
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText(
+        'CoQUIC Steward: Letting an Agent Maintain the Repository',
+      );
+      await page.evaluate(() => document.fonts.ready);
+      await expect(page).toHaveScreenshot(`blog-post-${theme}.png`, { fullPage: false });
+    });
+  }
 
   test('uses divided rows that wrap long labels at 320px without focus layout shift', async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 800 });

@@ -131,6 +131,11 @@
   color: var(--text);
 }
 
+.metaCell {
+  display: flex;
+  flex-direction: column;
+}
+
 .unified {
   min-width: max-content;
 }

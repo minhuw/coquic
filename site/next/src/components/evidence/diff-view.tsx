@@ -48,7 +48,9 @@ function SplitDiffTable({ rows, showLineNumbers }: { rows: DiffSplitRow[]; showL
         {rows.map((row, index) =>
           row.kind === 'meta' ? (
             <div className={cn(styles.splitMeta, row.variant === 'file' && styles.metaFile, 'diff-split-meta', row.variant)} key={index} role="row">
-              {row.text.split('\n').map((line, lineIndex) => <span key={lineIndex}>{line || ' '}</span>)}
+              <div aria-colspan={2} className={styles.metaCell} role="cell">
+                {row.text.split('\n').map((line, lineIndex) => <span key={lineIndex}>{line || ' '}</span>)}
+              </div>
             </div>
           ) : (
             <div className={cn(styles.splitRow, 'diff-split-row')} key={index} role="row">
@@ -79,7 +81,9 @@ function UnifiedDiffTable({ rows, showLineNumbers }: { rows: DiffSplitRow[]; sho
         if (row.kind === 'meta') {
           return (
             <div className={cn(styles.unifiedMeta, row.variant === 'file' && styles.metaFile, 'diff-unified-meta', row.variant)} key={index} role="row">
-              {row.text.split('\n').map((line, lineIndex) => <span key={lineIndex}>{line || ' '}</span>)}
+              <div aria-colspan={showLineNumbers ? 4 : 2} className={styles.metaCell} role="cell">
+                {row.text.split('\n').map((line, lineIndex) => <span key={lineIndex}>{line || ' '}</span>)}
+              </div>
             </div>
           );
         }
@@ -134,12 +138,12 @@ function UnifiedDiffLine({
     <div className={cn(styles.unifiedLine, cell.kind === 'added' && styles.unifiedLineAdded, cell.kind === 'removed' && styles.unifiedLineRemoved, 'diff-unified-line', cell.kind)} role="row">
       {showLineNumbers ? (
         <>
-          <span className={cn(styles.unifiedLineNumber, styles.unifiedOld, 'diff-unified-line-number', 'old')}>{oldLineNumber || ' '}</span>
-          <span className={cn(styles.unifiedLineNumber, styles.unifiedNew, 'diff-unified-line-number', 'new')}>{newLineNumber || ' '}</span>
+          <span className={cn(styles.unifiedLineNumber, styles.unifiedOld, 'diff-unified-line-number', 'old')} role="cell">{oldLineNumber || ' '}</span>
+          <span className={cn(styles.unifiedLineNumber, styles.unifiedNew, 'diff-unified-line-number', 'new')} role="cell">{newLineNumber || ' '}</span>
         </>
       ) : null}
-      <span className={cn(styles.unifiedMarker, 'diff-unified-marker')}>{diffMarker(cell.kind)}</span>
-      <span className={cn(styles.unifiedContent, 'diff-unified-content')}>{cell.text || ' '}</span>
+      <span className={cn(styles.unifiedMarker, 'diff-unified-marker')} role="cell">{diffMarker(cell.kind)}</span>
+      <span className={cn(styles.unifiedContent, 'diff-unified-content')} role="cell">{cell.text || ' '}</span>
     </div>
   );
 }

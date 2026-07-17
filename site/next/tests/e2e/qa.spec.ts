@@ -24,19 +24,20 @@ test.describe('QUIC specification QA', () => {
       await page.goto('/qa');
       await hideNextDevTools(page);
 
+      const route = page.locator('[data-qa-root]');
       const workspace = page.locator('[data-qa-workspace]');
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(workspace).toHaveAttribute('data-qa-phase', 'ready');
       await page.evaluate(() => document.fonts.ready);
       await expectNoGlobalOverflow(page);
-      await expect(page).toHaveScreenshot(`qa-idle-${theme}.png`, { fullPage: true });
+      await expect(route).toHaveScreenshot(`qa-idle-${theme}.png`);
 
       await ask(page);
       await expect(workspace).toHaveAttribute('data-qa-phase', 'streaming');
       await expect(page.locator('[data-channel="direct"]:visible')).toContainText('Direct partial');
       await expect(page.getByRole('button', { name: 'Asking question' })).toHaveAttribute('aria-busy', 'true');
       await expectNoGlobalOverflow(page);
-      await expect(page).toHaveScreenshot(`qa-streaming-${theme}.png`, { fullPage: true });
+      await expect(route).toHaveScreenshot(`qa-streaming-${theme}.png`);
     });
 
     test(`captures populated presentation in ${theme}`, async ({ page }) => {
@@ -47,13 +48,14 @@ test.describe('QUIC specification QA', () => {
       await hideNextDevTools(page);
       await ask(page);
 
+      const route = page.locator('[data-qa-root]');
       const workspace = page.locator('[data-qa-workspace]');
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(workspace).toHaveAttribute('data-qa-phase', 'completed');
       await expect(page.locator('[data-qa-results]')).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       await expectNoGlobalOverflow(page);
-      await expect(page).toHaveScreenshot(`qa-populated-${theme}.png`, { fullPage: true });
+      await expect(route).toHaveScreenshot(`qa-populated-${theme}.png`);
     });
   }
 
@@ -290,5 +292,7 @@ async function ask(page: Parameters<typeof installQaFixture>[0]) {
 }
 
 async function hideNextDevTools(page: Parameters<typeof installQaFixture>[0]) {
-  await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
+  await page.addStyleTag({
+    content: 'nextjs-portal { display: none !important; } nav[aria-label="Demo views"] { position: static !important; }',
+  });
 }

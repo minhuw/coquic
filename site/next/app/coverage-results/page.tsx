@@ -3,8 +3,7 @@ import Script from 'next/script';
 import Link from 'next/link';
 import { ExternalLink, FileJson } from 'lucide-react';
 
-import { PageHeader } from '@/components/page-header';
-import { Button } from '@/components/ui/button';
+import { ComplianceAction, CompliancePage, complianceStyles as styles } from '@/components/compliance';
 
 export const metadata: Metadata = {
   title: 'CoQUIC Coverage Results',
@@ -15,16 +14,15 @@ export const metadata: Metadata = {
 
 export default function CoveragePage() {
   return (
-    <main className="coquic-page compliance-page">
-      <PageHeader
+    <CompliancePage
         eyebrow="LLVM source coverage"
         title="CoQUIC Coverage Report"
         description={
-          <div className="coverage-source-block">
+          <div className={styles.coverageSource}>
             <p id="coverage-source-label" aria-live="polite">
               waiting for coverage-results.json
             </p>
-            <dl className="coverage-source-meta" aria-label="Coverage source metadata">
+            <dl className={styles.coverageSourceMeta} aria-label="Coverage source metadata">
               <div>
                 <dt>Generated</dt>
                 <dd id="coverage-generated-at">awaiting</dd>
@@ -41,40 +39,38 @@ export default function CoveragePage() {
           </div>
         }
         actions={
-          <div className="compliance-actions">
-            <Button asChild variant="outline" size="sm">
+          <>
+            <ComplianceAction asChild variant="outline" size="sm">
               <Link href="/coverage/index.html">
                 <ExternalLink aria-hidden="true" />
                 Open LLVM HTML
               </Link>
-            </Button>
-            <Button asChild variant="outline" size="sm">
+            </ComplianceAction>
+            <ComplianceAction asChild variant="outline" size="sm">
               <Link href="./coverage-results.json">
                 <FileJson aria-hidden="true" />
                 Download JSON
               </Link>
-            </Button>
-          </div>
+            </ComplianceAction>
+          </>
         }
-        variant="evidence"
-      />
-
+      >
       <section
-        className="coverage-evidence"
+        className={styles.coverageEvidence}
         id="coverage-evidence"
         data-coverage-state="loading"
         aria-busy="true"
         aria-label="Coverage evidence"
       >
-        <div id="coverage-status" className="coverage-status" role="status" aria-live="polite">
+        <div id="coverage-status" className={styles.coverageStatus} role="status" aria-live="polite">
           Loading coverage-results.json.
         </div>
 
-        <section className="coverage-summary" id="summary-grid" aria-label="Coverage totals" />
+        <section id="summary-grid" aria-label="Coverage totals" className={styles.coverageSummary} />
 
-        <div className="coverage-detail-grid" aria-label="Coverage details">
-          <section className="coverage-evidence-panel" aria-labelledby="components-heading">
-            <header className="coverage-panel-heading">
+        <div className={styles.coverageDetailGrid} aria-label="Coverage details">
+          <section className={styles.coverageEvidencePanel} aria-labelledby="components-heading">
+            <header className={styles.coveragePanelHeading}>
               <div>
                 <h2 id="components-heading">Components</h2>
                 <p>Line coverage by source area</p>
@@ -83,8 +79,8 @@ export default function CoveragePage() {
             <div id="component-list" />
           </section>
 
-          <section className="coverage-evidence-panel" aria-labelledby="files-heading">
-            <header className="coverage-panel-heading">
+          <section className={styles.coverageEvidencePanel} aria-labelledby="files-heading">
+            <header className={styles.coveragePanelHeading}>
               <div>
                 <h2 id="files-heading">Lowest Files</h2>
                 <p>Files kept in report order</p>
@@ -96,6 +92,6 @@ export default function CoveragePage() {
       </section>
 
       <Script src="/coverage-results.js" strategy="afterInteractive" type="module" />
-    </main>
+    </CompliancePage>
   );
 }

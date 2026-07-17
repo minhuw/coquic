@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 
+import { cn } from '@/lib/utils';
+
+import { complianceStyles as styles } from './compliance';
+
 const reportUrl = '/duvet/report.html';
 const delayedLoadMs = 15_000;
 
@@ -108,45 +112,52 @@ export function DuvetReportFrame() {
   );
 
   const retryVisible = state === 'delayed' || state === 'unavailable';
+  const statusToneClass = {
+    probing: undefined,
+    loading: undefined,
+    ready: styles.duvetStatusReady,
+    delayed: styles.duvetStatusDelayed,
+    unavailable: styles.duvetStatusUnavailable,
+  }[state];
 
   return (
     <div
-      className="duvet-report-frame-region"
+      className={styles.duvetReportFrameRegion}
       data-duvet-frame-region="true"
       data-duvet-state={state}
       role="region"
       aria-label="Duvet report viewport"
       tabIndex={0}
     >
-      <div className="duvet-report-viewport">
+      <div className={styles.duvetReportViewport}>
         {iframeMounted ? (
           <iframe
-            className="duvet-report-frame"
+            className={styles.duvetReportFrame}
             src={reportUrl}
             title="Duvet RFC compliance report"
             onLoad={handleLoad}
             onError={handleError}
           />
         ) : (
-          <div className="duvet-report-placeholder" aria-hidden="true" />
+          <div className={styles.duvetReportPlaceholder} aria-hidden="true" />
         )}
       </div>
 
       <div
-        className="duvet-report-state"
+        className={styles.duvetReportState}
         role={state === 'unavailable' ? 'alert' : 'status'}
         aria-live={state === 'unavailable' ? 'assertive' : 'polite'}
       >
-        <span className={`duvet-status-token duvet-status-token--${state}`}>{state}</span>
+        <span className={cn(styles.duvetStatusToken, statusToneClass)}>{state}</span>
         <p data-duvet-reason={state === 'unavailable' || state === 'delayed' ? 'true' : undefined}>
           {stateMessage(state, reason)}
         </p>
         {retryVisible ? (
-          <div className="duvet-report-state-actions">
-            <button className="compliance-inline-action" type="button" onClick={retry} aria-label="Retry Duvet report">
+          <div className={styles.duvetReportStateActions}>
+            <button className={styles.inlineAction} type="button" onClick={retry} aria-label="Retry Duvet report">
               Retry
             </button>
-            <a className="compliance-inline-action" href={reportUrl}>
+            <a className={styles.inlineAction} href={reportUrl}>
               Open HTML
             </a>
           </div>

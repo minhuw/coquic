@@ -1,0 +1,459 @@
+.root {
+  --compliance-panel-border: var(--border-strong);
+  --compliance-divider: var(--border);
+  --compliance-status-surface: var(--surface-subtle);
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.action {
+  min-height: var(--control-coarse);
+  height: auto;
+  white-space: normal;
+  text-align: center;
+}
+
+.coverageSource {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+}
+
+.root :global(#coverage-source-label) {
+  min-height: 1.6em;
+  color: var(--text-muted);
+}
+
+.coverageSourceMeta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, max-content));
+  gap: var(--space-4);
+  margin: 0;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.coverageSourceMeta div {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.coverageSourceMeta dt {
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.coverageSourceMeta dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.coverageEvidence {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
+}
+
+.coverageStatus {
+  display: flex;
+  min-height: var(--control-default);
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  border-inline-start: 3px solid var(--accent-ink);
+  padding: var(--space-3) var(--space-4);
+  background: var(--compliance-status-surface);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.coverageEvidence[data-coverage-state='unavailable'] .coverageStatus,
+.coverageEvidence[data-coverage-state='malformed'] .coverageStatus {
+  border-inline-start-color: var(--status-danger-ink);
+}
+
+.inlineAction {
+  min-height: var(--control-coarse);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  padding-inline: var(--space-3);
+  background: var(--surface);
+  color: var(--text-strong);
+  font: var(--type-ui-label);
+  cursor: pointer;
+}
+
+.root :global([data-coverage-action='retry']):hover,
+.root :global([data-coverage-action='retry']):focus-visible,
+.inlineAction:hover,
+.inlineAction:focus-visible {
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+}
+
+.coverageSummary {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-block: 2px solid var(--compliance-panel-border);
+  background: var(--surface);
+}
+
+.root :global(.coverage-metric) {
+  display: grid;
+  min-width: 0;
+  min-height: 148px;
+  align-content: start;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.root :global(.coverage-metric) + :global(.coverage-metric) {
+  border-inline-start: 1px solid var(--compliance-divider);
+}
+
+.root :global(.coverage-metric-heading),
+.root :global(.coverage-row-heading) {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.root :global(.coverage-metric) h3,
+.coveragePanelHeading h2 {
+  color: var(--text-strong);
+  font: var(--type-panel-title);
+}
+
+.root :global(.coverage-metric-percent) {
+  flex: 0 0 auto;
+  color: var(--text-strong);
+  font: 500 30px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.root :global(.coverage-metric-count),
+.coveragePanelHeading p {
+  margin: 0;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.root :global(.coverage-metric-count) {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.root :global(.coverage-meter) {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  background: var(--surface-strong);
+}
+
+.root :global(.coverage-meter) span {
+  display: block;
+  height: 100%;
+  background: var(--accent-ink);
+}
+
+.coverageDetailGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-5);
+}
+
+.coverageEvidencePanel {
+  min-width: 0;
+  overflow: hidden;
+  border: 2px solid var(--compliance-panel-border);
+  background: var(--surface);
+}
+
+.coveragePanelHeading {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  border-bottom: 1px solid var(--compliance-divider);
+  padding: var(--space-4);
+}
+
+.coveragePanelHeading > div {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.root :global(.coverage-list-row) {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--compliance-divider);
+  padding: var(--space-4);
+}
+
+.root :global(.coverage-list-row:last-child) {
+  border-bottom: 0;
+}
+
+.root :global(.coverage-row-heading) strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.root :global(.coverage-row-percent) {
+  flex: 0 0 auto;
+  color: var(--accent-ink);
+  font: var(--type-metadata);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.root :global(.coverage-row-metrics) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.root :global(.coverage-row-metrics) div {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.root :global(.coverage-row-metrics) dt,
+.root :global(.coverage-row-metrics) dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font: var(--type-metadata);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.root :global(.coverage-row-metrics) dt {
+  color: var(--text-muted);
+}
+
+.root :global(.coverage-row-metrics) dd {
+  color: var(--text);
+}
+
+.root :global(.coverage-empty-state) {
+  min-height: 112px;
+  margin: 0;
+  padding: var(--space-5) var(--space-4);
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.root :global(.coverage-loading-row) {
+  min-height: 112px;
+  margin: var(--space-4);
+  background: var(--surface-strong);
+}
+
+.root :global(.coverage-unavailable-row) {
+  display: grid;
+  min-height: 148px;
+  place-items: center;
+  padding: var(--space-4);
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  text-align: center;
+}
+
+.coverageSummary :global(.coverage-loading-row) {
+  min-height: 148px;
+  margin: 0;
+}
+
+.coverageSummary :global(.coverage-loading-row) + :global(.coverage-loading-row) {
+  border-inline-start: 1px solid var(--compliance-divider);
+}
+
+.duvetReportShell {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  min-height: 0;
+  margin-top: var(--space-5);
+  overflow: hidden;
+  border: 2px solid var(--compliance-panel-border);
+  border-radius: 0;
+  background: var(--surface);
+}
+
+.duvetReportFrameRegion {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  min-height: 420px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.duvetReportViewport {
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  height: clamp(360px, calc(100dvh - 280px), 720px);
+  min-height: 360px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.duvetReportPlaceholder {
+  min-width: 0;
+  min-height: 360px;
+  background: var(--surface-subtle);
+}
+
+.duvetReportFrame {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--surface);
+}
+
+.duvetReportState {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  border-top: 1px solid var(--compliance-divider);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.duvetReportState p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.duvetStatusToken {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  padding-inline: var(--space-2);
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  text-transform: uppercase;
+}
+
+.duvetStatusReady {
+  border-color: var(--status-success-border);
+  background: var(--status-success-surface);
+  color: var(--status-success-ink);
+}
+
+.duvetStatusDelayed {
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-surface);
+  color: var(--status-warning-ink);
+}
+
+.duvetStatusUnavailable {
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-surface);
+  color: var(--status-danger-ink);
+}
+
+.duvetReportStateActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-inline-start: auto;
+}
+
+.duvetReportStateActions .inlineAction {
+  display: inline-flex;
+  min-height: var(--control-coarse);
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+@media (max-width: 767px) {
+  .actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .coverageSourceMeta {
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+  }
+
+  .coverageSummary,
+  .coverageDetailGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .root :global(.coverage-metric) + :global(.coverage-metric) {
+    border-block-start: 1px solid var(--compliance-divider);
+    border-inline-start: 0;
+  }
+
+  .root :global(.coverage-row-metrics) {
+    grid-template-columns: 1fr;
+  }
+
+  .duvetReportStateActions {
+    width: 100%;
+    margin-inline-start: 0;
+  }
+
+  .duvetReportStateActions .inlineAction {
+    flex: 1 1 140px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root :global(.coverage-loading-row) {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .root :global(.coverage-meter) span {
+    background: Highlight;
+  }
+
+  .coverageStatus,
+  .coverageEvidencePanel,
+  .duvetReportShell {
+    forced-color-adjust: auto;
+  }
+}

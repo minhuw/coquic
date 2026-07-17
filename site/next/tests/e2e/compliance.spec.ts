@@ -114,6 +114,8 @@ test.describe('coverage evidence states', () => {
     await expect(metrics.nth(1)).toContainText('84.20%');
     await expect(metrics.nth(2)).toHaveAttribute('data-metric', 'branches');
     await expect(metrics.nth(2)).toContainText('61.00%');
+    await expect(page.getByRole('meter')).toHaveCount(8);
+    await expect(page.getByRole('meter').first()).toHaveAttribute('aria-label', 'Functions coverage: 73.00%');
     await expect(page.locator('.metric-card, .metric-bar, [role="progressbar"]')).toHaveCount(0);
 
     expect(await page.locator('#component-list [data-component-name]').evaluateAll((rows) => rows.map((row) => row.getAttribute('data-component-name')))).toEqual([
@@ -165,7 +167,7 @@ test.describe('coverage evidence states', () => {
     await expect(page.locator('[data-coverage-state]')).toHaveAttribute('data-coverage-state', 'unavailable');
     await expect(page.locator('#coverage-status')).toContainText('HTTP 404');
     await expect(page.locator('#summary-grid')).not.toContainText('0.00%');
-    await expect(page.getByRole('button', { name: 'Retry coverage results' })).toHaveClass(/coverage-inline-action/);
+    await expect(page.getByRole('button', { name: 'Retry coverage results' })).toHaveAttribute('data-coverage-action', 'retry');
 
     await page.unroute('**/coverage-results.json');
     await fulfillCoverage(page, coverageJson(zeroCoverage));
@@ -320,7 +322,7 @@ test.describe('Duvet report boundary', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(page.locator('[data-duvet-state]')).toHaveAttribute('data-duvet-state', 'ready');
       surfaces[theme] = await page.locator('[data-duvet-frame-region]').evaluate((element) => getComputedStyle(element).backgroundColor);
-      const actions = page.locator('.compliance-actions a');
+      const actions = page.locator('[data-compliance-actions] a');
       for (let index = 0; index < await actions.count(); index += 1) {
         const bounds = await actions.nth(index).boundingBox();
         expect(bounds?.height).toBeGreaterThanOrEqual(44);

@@ -63,10 +63,14 @@ function metricCount(metric) {
   return `${formatCount(metric.covered)} / ${formatCount(metric.total)}`;
 }
 
-function coverageMeter(metric) {
+function coverageMeter(metric, label) {
   const meter = document.createElement("div");
   meter.className = "coverage-meter";
-  meter.setAttribute("aria-hidden", "true");
+  meter.setAttribute("role", "meter");
+  meter.setAttribute("aria-label", label);
+  meter.setAttribute("aria-valuemin", "0");
+  meter.setAttribute("aria-valuemax", "100");
+  meter.setAttribute("aria-valuenow", String(metric.percent));
   const fill = document.createElement("span");
   fill.style.width = formatPercent(metric.percent);
   meter.append(fill);
@@ -92,7 +96,7 @@ function metricEvidence(key, metric) {
   count.className = "coverage-metric-count";
   count.textContent = `${metricCount(metric)} covered`;
 
-  evidence.append(heading, count, coverageMeter(metric));
+  evidence.append(heading, count, coverageMeter(metric, `${metricLabels[key]} coverage: ${formatPercent(metric.percent)}`));
   return evidence;
 }
 
@@ -128,7 +132,11 @@ function componentRow(component) {
     rowMetric("Branches", component.metrics.branches),
   );
 
-  row.append(heading, coverageMeter(component.metrics.lines), details);
+  row.append(
+    heading,
+    coverageMeter(component.metrics.lines, `Line coverage for ${component.name}: ${formatPercent(component.metrics.lines.percent)}`),
+    details,
+  );
   return row;
 }
 
@@ -155,7 +163,11 @@ function fileRow(file) {
     rowMetric("Branches", file.metrics.branches),
   );
 
-  row.append(heading, coverageMeter(file.metrics.lines), details);
+  row.append(
+    heading,
+    coverageMeter(file.metrics.lines, `Line coverage for ${file.path}: ${formatPercent(file.metrics.lines.percent)}`),
+    details,
+  );
   return row;
 }
 
@@ -229,7 +241,7 @@ function setState(state, statusText, sourceText) {
 
 function addRetryAction(status, onRetry) {
   const retry = document.createElement("button");
-  retry.className = "coverage-inline-action";
+  retry.dataset.coverageAction = "retry";
   retry.type = "button";
   retry.textContent = "Retry";
   retry.setAttribute("aria-label", "Retry coverage results");

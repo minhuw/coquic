@@ -7,6 +7,7 @@ import {
   loadPublicStewardTaskDetailResult,
   StewardDashboard,
   StewardFreshness,
+  StewardStatusLabel,
   StewardTaskDetail,
   stewardStatusTone,
   usePublicStewardState,
@@ -109,6 +110,24 @@ describe('Steward retained read views', () => {
 });
 
 describe('Steward request states', () => {
+  it('renders operational states through StatusLabel with a tone and icon', () => {
+    render(
+      <>
+        <StewardStatusLabel status="failed" />
+        <StewardStatusLabel status="unknown-status" />
+      </>,
+    );
+
+    const failed = screen.getByText('failed').closest('[data-slot="status-label"]');
+    const unknown = screen.getByText('unknown-status').closest('[data-slot="status-label"]');
+    if (!failed || !unknown) throw new Error('expected StatusLabel wrappers');
+    expect(failed).toHaveAttribute('data-slot', 'status-label');
+    expect(failed).toHaveAttribute('data-tone', 'danger');
+    expect(failed.closest('[data-slot="badge"]')).not.toBeInTheDocument();
+    expect(unknown).toHaveAttribute('data-slot', 'status-label');
+    expect(unknown).toHaveAttribute('data-tone', 'neutral');
+  });
+
   it('distinguishes dashboard publication, incompatibility, invalid data, and transport failure', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(producerFixtureText('active')))

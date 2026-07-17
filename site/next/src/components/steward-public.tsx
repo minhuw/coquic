@@ -21,9 +21,8 @@ export {
 } from './steward/dashboard';
 export { StewardTaskDetail, StewardTaskDetailLive } from './steward/task-detail';
 export {
-  StatusBadge,
-  StatusPill,
   StewardFreshness,
+  StewardStatusLabel,
   StewardUnavailableNotice,
   stewardStatusTone,
 } from './steward/shared';

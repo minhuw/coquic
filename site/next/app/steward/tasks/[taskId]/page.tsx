@@ -18,8 +18,10 @@ export default async function StewardTaskPage({ params }: StewardTaskPageProps) 
   const { taskId } = await params;
   if (!/^task-\d{14}-[a-f0-9]{8}$/.test(taskId)) notFound();
   return (
-    <main className="coquic-page steward-public-page">
-      <StewardTaskDetailLive taskId={taskId} />
+    <main className="coquic-page steward-task-route" data-steward-surface="task">
+      <div data-steward-root="task">
+        <StewardTaskDetailLive taskId={taskId} />
+      </div>
     </main>
   );
 }

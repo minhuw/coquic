@@ -3,10 +3,7 @@
 import Link from 'next/link';
 import {
   Activity,
-  AlertTriangle,
-  CheckCircle2,
   Circle,
-  CircleDot,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
@@ -19,7 +16,6 @@ import {
   Settings2,
   ShieldAlert,
   ShieldCheck,
-  XCircle,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 
@@ -33,6 +29,7 @@ import {
   relativeTime,
   shortDate,
   shortSha,
+  StewardStatusLabel,
   StewardFreshness,
   stewardStatusTone,
 } from './shared';
@@ -169,7 +166,7 @@ export function StewardDashboard({
   const publication = state.publication;
 
   return (
-    <div className="steward-dashboard steward-mirror-shell">
+    <div className="steward-dashboard steward-dashboard-root steward-mirror-shell" data-steward-module="dashboard" data-steward-root="dashboard">
       <section className="steward-dashboard-summary" aria-label="Steward runtime status">
         <div className="steward-dashboard-summary-lead">
           <div>
@@ -728,8 +725,13 @@ function SignalRow({ item }: { item: PublicStewardSignalItem }) {
 
 function StewardStatus({ label, status }: { label?: string; status: string }) {
   const tone = stewardStatusTone(status);
-  const Icon = tone === 'success' ? CheckCircle2 : tone === 'danger' ? XCircle : tone === 'warning' ? AlertTriangle : CircleDot;
-  return <span className={`steward-dashboard-status steward-dashboard-status--${tone}`} data-status={status}><Icon aria-hidden="true" /><span>{label ?? status}</span></span>;
+  return (
+    <StewardStatusLabel
+      className={`steward-dashboard-status steward-dashboard-status--${tone}`}
+      label={label}
+      status={status}
+    />
+  );
 }
 
 function SchedulerLane({ active, capacity, icon, label, queued }: { active: number; capacity: number; icon: ReactNode; label: string; queued: number }) {

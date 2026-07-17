@@ -26,8 +26,10 @@ describe('Steward dashboard state characterization', () => {
 
     for (const [fixture, state, tone] of expectedStates) {
       const { container, unmount } = render(<StewardDashboard state={asLegacyStewardState(producerFixture(fixture))} />);
+      expect(container.querySelector('[data-steward-module="dashboard"]')).toBeInTheDocument();
       const status = container.querySelector(`[data-status="${state}"]`);
       expect(status).toHaveClass(tone);
+      expect(status).toHaveAttribute('data-slot', 'status-label');
       if (state === 'idle') expect(status).not.toHaveClass('steward-dashboard-status--success');
       expect(screen.getByText('minhuw/coquic')).toBeInTheDocument();
       unmount();

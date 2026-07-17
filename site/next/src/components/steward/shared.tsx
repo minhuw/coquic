@@ -1,7 +1,7 @@
-import { AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CircleDot, XCircle } from 'lucide-react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 
-import { Badge } from '@/components/ui/badge';
+import { StatusLabel } from '@/components/ui/status-label';
 import { classifyStewardFreshness, stewardFreshnessLabel } from '@/lib/steward-freshness';
 
 import type {
@@ -24,6 +24,36 @@ export function stewardStatusTone(status: string): StewardStatusTone {
   return 'neutral';
 }
 
+function StatusIcon({ tone }: { tone: StewardStatusTone }) {
+  if (tone === 'success') return <CheckCircle2 aria-hidden="true" size={14} />;
+  if (tone === 'danger') return <XCircle aria-hidden="true" size={14} />;
+  if (tone === 'warning') return <AlertTriangle aria-hidden="true" size={14} />;
+  return <CircleDot aria-hidden="true" size={14} />;
+}
+
+export function StewardStatusLabel({
+  className,
+  label,
+  status,
+}: {
+  className?: string;
+  label?: string;
+  status: string;
+}) {
+  const tone = stewardStatusTone(status);
+  return (
+    <StatusLabel
+      aria-label={label ? `${label}: ${status}` : status}
+      className={[className, `steward-status-label--${tone}`].filter(Boolean).join(' ')}
+      data-status={status}
+      tone={tone}
+    >
+      <StatusIcon tone={tone} />
+      <span>{label ?? status}</span>
+    </StatusLabel>
+  );
+}
+
 export function handleTabKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
   const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown'
     ? 1
@@ -43,18 +73,6 @@ export function handleTabKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
   event.preventDefault();
   tabs[nextIndex]?.focus();
   tabs[nextIndex]?.click();
-}
-
-export function StatusBadge({ status }: { status: string }) {
-  if (['pushed', 'succeeded', 'ok', 'idle'].includes(status)) return <Badge variant="success">{status}</Badge>;
-  if (['running', 'reviewing', 'integrating', 'working', 'planned'].includes(status)) return <Badge variant="primary">{status}</Badge>;
-  if (['queued', 'pending'].includes(status)) return <Badge variant="warning">{status}</Badge>;
-  if (['failed', 'blocked', 'error', 'attention'].includes(status)) return <Badge variant="danger">{status}</Badge>;
-  return <Badge>{status}</Badge>;
-}
-
-export function StatusPill({ status }: { status: string }) {
-  return <span className={`status status-${status}`}>{status}</span>;
 }
 
 export function PanelTitle({ description, icon, title }: { description?: string; icon?: ReactNode; title: string }) {
@@ -92,9 +110,9 @@ export function shortSha(value: string) {
 
 export function StewardUnavailableNotice() {
   return (
-    <div className="rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-4 text-sm text-[var(--muted)]">
-      <div className="mb-2 flex items-center gap-2 font-medium text-[var(--ink)]">
-        <AlertTriangle className="size-4 text-[var(--warning)]" />
+    <div className="steward-unavailable-notice">
+      <div className="steward-unavailable-notice-title">
+        <AlertTriangle aria-hidden="true" className="steward-unavailable-notice-icon" size={16} />
         Public Steward mirror unavailable
       </div>
       The daemon will publish this file after its next state change.

@@ -59,6 +59,8 @@ describe('Steward task request states and anatomy', () => {
     const detail = richDetail();
     const { container } = render(<StewardTaskDetail detail={detail} loaded requestStatus="ready" taskId={detail.task.id} />);
 
+    expect(container.querySelector('[data-steward-module="task"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-status="reviewing"]')).toHaveAttribute('data-slot', 'status-label');
     expect(container.querySelectorAll('main')).toHaveLength(0);
     expect(screen.getByRole('heading', { name: detail.task.title, level: 1 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Current iteration', level: 2 })).toBeInTheDocument();

@@ -13,7 +13,6 @@ import {
   FileText,
   GitBranch,
   ListChecks,
-  ShieldAlert,
   XCircle,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
@@ -28,6 +27,7 @@ import {
   relativeTime,
   shortDate,
   shortSha,
+  StewardStatusLabel,
   stewardStatusTone,
 } from './shared';
 import { defaultAttemptTab, publicTaskFlow, TaskFlowPanel } from './task-flow';
@@ -86,7 +86,7 @@ export function StewardTaskDetail({
   const currentStage = flow.stages.find((stage) => stage.key === flow.activeKey);
   const blockedStage = flow.stages.find((stage) => stage.state === 'blocked');
   return (
-    <div className="task-page-frame">
+    <TaskSurface>
       <section className="task-page-shell">
         <header className="task-page-topbar">
           <Link className="task-back-link" href="/steward">
@@ -203,7 +203,7 @@ export function StewardTaskDetail({
           </aside>
         </div>
       </section>
-    </div>
+    </TaskSurface>
   );
 }
 
@@ -228,7 +228,7 @@ function TaskPageState({ loaded, requestStatus, taskId }: { loaded: boolean; req
           ? 'The published task detail did not match the expected JSON shape.'
           : 'The public Steward mirror could not be reached. Try again after the next publication.';
   return (
-    <div className="task-page-frame">
+    <TaskSurface>
       <section className="task-page-shell">
         <header className="task-page-topbar">
           <Link className="task-back-link" href="/steward">
@@ -246,6 +246,18 @@ function TaskPageState({ loaded, requestStatus, taskId }: { loaded: boolean; req
           {state !== 'loading' && <code>{taskId}</code>}
         </section>
       </section>
+    </TaskSurface>
+  );
+}
+
+function TaskSurface({ children }: { children: ReactNode }) {
+  return (
+    <div className="steward-task-root" data-steward-module="task" data-steward-root="task">
+      <div className="steward-public-page steward-task-style-scope">
+        <div className="task-page-frame">
+          {children}
+        </div>
+      </div>
     </div>
   );
 }
@@ -261,13 +273,7 @@ function Fact({ label, value }: { label: string; value: ReactNode }) {
 
 function TaskStatus({ status }: { status: string }) {
   const tone = stewardStatusTone(status);
-  const Icon = tone === 'success' ? CheckCircle2 : tone === 'danger' ? ShieldAlert : tone === 'warning' ? AlertTriangle : Activity;
-  return (
-    <span className={`task-status task-status-${tone}`} data-status={status}>
-      <Icon size={16} aria-hidden="true" />
-      <span>{status}</span>
-    </span>
-  );
+  return <StewardStatusLabel className={`task-status task-status-${tone}`} status={status} />;
 }
 
 function TaskTimeline({ events }: { events: PublicStewardEvent[] }) {

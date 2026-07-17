@@ -20,6 +20,7 @@ describe('Steward planner history', () => {
     render(<StewardPlannerLive />);
 
     expect(screen.getByRole('heading', { level: 1, name: 'Planner history' })).toBeInTheDocument();
+    expect(document.querySelector('[data-steward-module="planner"]')).toBeInTheDocument();
     expect(screen.getByText('Loading planner history')).toBeInTheDocument();
     expectPlannerSummary('Loading', 'Loading', 'Loading');
     expect(await screen.findByText('Page 1 of 2')).toBeInTheDocument();

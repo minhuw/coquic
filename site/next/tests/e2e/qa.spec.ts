@@ -28,8 +28,8 @@ test.describe('QUIC specification QA', () => {
     await page.getByRole('textbox', { name: 'Question' }).fill('How does ACK delay affect loss recovery?');
     await page.getByRole('button', { name: 'Ask' }).click();
 
-    const direct = page.locator('.qa-results-desktop [data-channel="direct"]');
-    const rag = page.locator('.qa-results-desktop [data-channel="rag"]');
+    const direct = page.locator('[data-qa-results-view="desktop"] [data-channel="direct"]');
+    const rag = page.locator('[data-qa-results-view="desktop"] [data-channel="rag"]');
     await expect(direct).toHaveAttribute('aria-busy', 'true');
     await expect(direct).toContainText('Direct partial');
     await expect(rag).toContainText('Grounded partial');
@@ -73,11 +73,11 @@ test.describe('QUIC specification QA', () => {
       await page.goto('/qa');
       await ask(page);
 
-      const status = page.locator('.qa-request-status');
+      const status = page.locator('[data-qa-request-status]');
       await expect(status).toContainText(message);
       await expect(status.getByRole('button', { name: 'Retry' })).toBeVisible();
-      await expect(page.locator('.qa-results-desktop [data-channel="direct"]')).toContainText('Direct response retained.');
-      await expect(page.locator('.qa-results-desktop [data-channel="rag"]')).toContainText('Grounded response retained.');
+      await expect(page.locator('[data-qa-results-view="desktop"] [data-channel="direct"]')).toContainText('Direct response retained.');
+      await expect(page.locator('[data-qa-results-view="desktop"] [data-channel="rag"]')).toContainText('Grounded response retained.');
     });
   }
 
@@ -85,8 +85,8 @@ test.describe('QUIC specification QA', () => {
     await installQaFixture(page, { streamStatus: 429 });
     await page.goto('/qa');
     await ask(page);
-    await expect(page.locator('.qa-request-status')).toContainText('Request limit reached. Try again in a minute.');
-    await expect(page.locator('.qa-answer')).toHaveCount(0);
+    await expect(page.locator('[data-qa-request-status]')).toContainText('Request limit reached. Try again in a minute.');
+    await expect(page.locator('[data-channel]')).toHaveCount(0);
 
     await page.close();
   });
@@ -100,8 +100,8 @@ test.describe('QUIC specification QA', () => {
     await page.goto('/qa');
     await ask(page);
 
-    await expect(page.locator('.qa-request-status')).toContainText('could not be completed');
-    const direct = page.locator('.qa-results-desktop [data-channel="direct"]');
+    await expect(page.locator('[data-qa-request-status]')).toContainText('could not be completed');
+    const direct = page.locator('[data-qa-results-view="desktop"] [data-channel="direct"]');
     await expect(direct).toContainText('Direct partial');
     await expect(direct).not.toContainText('could not be completed');
   });
@@ -111,8 +111,8 @@ test.describe('QUIC specification QA', () => {
     await page.goto('/qa');
     await ask(page);
 
-    await expect(page.locator('.qa-request-status')).toContainText('Unable to reach specification QA.');
-    await expect(page.locator('.qa-answer')).toHaveCount(0);
+    await expect(page.locator('[data-qa-request-status]')).toContainText('Unable to reach specification QA.');
+    await expect(page.locator('[data-channel]')).toHaveCount(0);
   });
 
   test('uses mobile roving tabs and keeps supporting evidence keyboard reachable', async ({ page }) => {
@@ -137,7 +137,7 @@ test.describe('QUIC specification QA', () => {
     await disclosure.press('Enter');
     const excerpt = ragPanel.getByRole('region', { name: 'RFC 9000 Section 13.2 excerpt' });
     await expect(excerpt).toBeVisible();
-    await expectLocalScrollRegion(page, '.qa-results-mobile [data-channel="rag"] .qa-citation-excerpt');
+    await expectLocalScrollRegion(page, '[data-qa-results-view="mobile"] [data-channel="rag"] [data-qa-citation-excerpt]');
     const geometry = await excerpt.evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
     expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
     await expectNoGlobalOverflow(page);
@@ -151,7 +151,7 @@ test.describe('QUIC specification QA', () => {
       await page.goto('/qa');
       await ask(page);
 
-      const codeSelector = '.qa-results-mobile [data-channel="direct"] .editorial-code-scroll';
+      const codeSelector = '[data-qa-results-view="mobile"] [data-channel="direct"] [data-editorial-code-block] [data-slot="scroll-region"]';
       const codeRegion = page.locator(codeSelector);
       await expect(codeRegion).toHaveAttribute('data-overflow', 'true');
       await expect(codeRegion).toHaveAccessibleName('typescript answer code');
@@ -159,7 +159,7 @@ test.describe('QUIC specification QA', () => {
 
       const tabs = page.getByRole('tablist', { name: 'Answer comparison' });
       await tabs.getByRole('tab', { name: 'With RAG' }).click();
-      const tableSelector = '.qa-results-mobile [data-channel="rag"] .editorial-table-region';
+      const tableSelector = '[data-qa-results-view="mobile"] [data-channel="rag"] [data-editorial-table-region]';
       const tableRegion = page.locator(tableSelector);
       await expect(tableRegion).toHaveAttribute('data-overflow', 'true');
       await expect(tableRegion).toHaveAccessibleName('Answer data table');
@@ -185,10 +185,10 @@ test.describe('QUIC specification QA', () => {
     const textbox = page.getByRole('textbox', { name: 'Question' });
     await expect(textbox).toHaveValue('How are QUIC packet numbers encoded?');
     await textbox.press('Control+Enter');
-    await expect(page.locator('.qa-results-desktop [data-channel="direct"]')).toContainText('Direct final answer');
+    await expect(page.locator('[data-qa-results-view="desktop"] [data-channel="direct"]')).toContainText('Direct final answer');
 
-    await page.locator('.qa-results-desktop').getByRole('button', { name: 'Copy Direct answer' }).click();
-    await expect(page.locator('.qa-results-desktop [data-channel="direct"]').getByRole('status')).toContainText(
+    await page.locator('[data-qa-results-view="desktop"]').getByRole('button', { name: 'Copy Direct answer' }).click();
+    await expect(page.locator('[data-qa-results-view="desktop"] [data-channel="direct"]').getByRole('status')).toContainText(
       'copied to clipboard',
     );
     await expect.poll(() => page.evaluate(() => window.localStorage.getItem('coquic-qa-copied'))).toBe(
@@ -219,7 +219,7 @@ test.describe('QUIC specification QA', () => {
     await askButton.click();
     const loadingAsk = page.getByRole('button', { name: 'Asking question' });
     expect((await loadingAsk.boundingBox())?.width).toBe(enabled.ask?.width);
-    await expect(page.locator('.qa-answer-placeholder span').first()).toHaveCSS('animation-name', 'none');
+    await expect(page.locator('[data-qa-placeholder] span').first()).toHaveCSS('animation-name', 'none');
 
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expectNoGlobalOverflow(page);
@@ -229,7 +229,7 @@ test.describe('QUIC specification QA', () => {
       document.documentElement.style.fontSize = '200%';
     });
     await expectNoGlobalOverflow(page);
-    const actionGeometry = await page.locator('.qa-actions').evaluate((element) => ({
+    const actionGeometry = await page.locator('[data-qa-actions]').evaluate((element) => ({
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
     }));

@@ -166,7 +166,7 @@ describe('QA stream and form contract', () => {
         signal: expect.any(AbortSignal),
       }),
     );
-    const desktop = document.querySelector('.qa-results-desktop')!;
+    const desktop = document.querySelector('[data-qa-results-view="desktop"]')!;
     expect(within(desktop as HTMLElement).getByText('Direct final answer.')).toBeInTheDocument();
     expect(within(desktop as HTMLElement).getByText('RAG final answer.')).toBeInTheDocument();
     expect(within(desktop as HTMLElement).getByText('15 tok')).toBeInTheDocument();
@@ -204,10 +204,10 @@ describe('QA stream and form contract', () => {
     render(<QaClient />);
 
     ask('How does QUIC recover loss?');
-    await waitFor(() => expect(document.querySelector('.qa-request-status')).toHaveTextContent(message));
+    await waitFor(() => expect(document.querySelector('[data-qa-request-status]')).toHaveTextContent(message));
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
     expect(screen.queryByText('request failed: 500')).not.toBeInTheDocument();
-    expect(document.querySelectorAll('.qa-answer')).toHaveLength(0);
+    expect(document.querySelectorAll('[data-channel]')).toHaveLength(0);
   });
 
   it('classifies a network rejection as offline', async () => {
@@ -216,7 +216,7 @@ describe('QA stream and form contract', () => {
 
     ask('How does QUIC recover loss?');
     await waitFor(() =>
-      expect(document.querySelector('.qa-request-status')).toHaveTextContent(
+      expect(document.querySelector('[data-qa-request-status]')).toHaveTextContent(
         'Unable to reach specification QA. Check your connection and try again.',
       ),
     );
@@ -298,7 +298,7 @@ describe('QA auxiliary controls', () => {
 
     ask('What is QUIC?');
     await waitFor(() => expect(screen.getByText('answered')).toBeInTheDocument());
-    const desktop = document.querySelector('.qa-results-desktop')!;
+    const desktop = document.querySelector('[data-qa-results-view="desktop"]')!;
     const copyButtons = within(desktop as HTMLElement).getAllByRole('button', { name: /^Copy/ });
     fireEvent.click(copyButtons[0]!);
     await waitFor(() => expect(within(desktop as HTMLElement).getByText('Direct answer copied to clipboard.')).toBeInTheDocument());

@@ -1,17 +1,20 @@
 'use client';
 
-import { isValidElement, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { isValidElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowUp, Check, Copy, RotateCcw, ShieldAlert, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { RawCodeBlock } from '@/components/editorial/raw-code-block';
 import { Button } from '@/components/ui/button';
-import { CopyCodeButton } from '@/components/docs/copy-code-button';
 import { TableRegion } from '@/components/editorial/table-region';
 import { ScrollRegion } from '@/components/ui/scroll-region';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Prose } from '@/components/typography/prose';
+
+import styles from './qa.module.css';
 
 interface Usage {
   prompt_tokens?: number | null;
@@ -476,14 +479,14 @@ export function QaClient() {
   }
 
   return (
-    <section className="qa-workspace" aria-label="Ask QUIC specification questions" data-qa-phase={state.phase}>
-      <div className="qa-question-panel">
-        <form className="qa-form" ref={formRef} noValidate onSubmit={(event) => void submit(event)}>
-          <div className="qa-field-heading">
-            <label className="qa-label" htmlFor="qa-question">
+    <section className={styles.workspace} aria-label="Ask QUIC specification questions" data-qa-phase={state.phase} data-qa-workspace="true">
+      <div className={styles['question-panel']} data-qa-question-panel="true">
+        <form className={styles.form} ref={formRef} noValidate onSubmit={(event) => void submit(event)}>
+          <div className={styles['field-heading']}>
+            <label className={styles.label} htmlFor="qa-question">
               Question
             </label>
-            <span className="qa-character-count" id="qa-question-count">
+            <span className={styles['character-count']} id="qa-question-count">
               {state.question.length.toLocaleString()} / {maxQuestionLength.toLocaleString()}
             </span>
           </div>
@@ -491,7 +494,7 @@ export function QaClient() {
             aria-describedby="qa-question-help qa-question-count"
             aria-errormessage={state.questionError ? 'qa-question-error' : undefined}
             aria-invalid={Boolean(state.questionError)}
-            className="qa-question"
+            className={styles.question}
             id="qa-question"
             name="question"
             maxLength={maxQuestionLength}
@@ -509,15 +512,15 @@ export function QaClient() {
             }}
             placeholder="How does QUIC ACK delay affect loss recovery?"
           />
-          <div className="qa-form-footer">
-            <div className="qa-provider">
-              <img className="qa-provider-logo" src="/deepseek-logo-icon.svg" alt="" aria-hidden="true" />
+          <div className={styles['form-footer']}>
+            <div className={styles.provider}>
+              <img className={styles['provider-logo']} src="/deepseek-logo-icon.svg" alt="" aria-hidden="true" />
               <span>DeepSeek V4 Pro</span>
               <PrivacyNotice />
             </div>
-            <div className="qa-actions">
+            <div className={styles.actions} data-qa-actions="true">
               <Button
-                className="qa-suggest-button"
+                className={styles['suggest-button']}
                 type="button"
                 variant="ghost"
                 aria-label="Suggest question"
@@ -530,7 +533,7 @@ export function QaClient() {
                 <span>Suggest</span>
               </Button>
               <Button
-                className="qa-ask-button"
+                className={styles['ask-button']}
                 type="submit"
                 disabled={busy || suggesting || !state.question.trim()}
                 loading={busy}
@@ -541,19 +544,19 @@ export function QaClient() {
               </Button>
             </div>
           </div>
-          <p className="qa-form-help" id="qa-question-help">
+          <p className={styles['form-help']} id="qa-question-help">
             Questions and answers are not stored by CoQUIC.
           </p>
-          <p className="qa-live-status sr-only" role="status" aria-live="polite">
+          <p className="sr-only" role="status" aria-live="polite">
             {state.statusMessage}
           </p>
           {state.questionError ? (
-            <p className="qa-field-error" id="qa-question-error" role="alert">
+            <p className={styles['field-error']} id="qa-question-error" role="alert">
               {state.questionError}
             </p>
           ) : null}
           {state.suggestionError ? (
-            <p className="qa-field-error" role="alert">
+            <p className={styles['field-error']} role="alert">
               {state.suggestionError}
             </p>
           ) : null}
@@ -569,8 +572,8 @@ export function QaClient() {
       ) : null}
 
       {showComparison ? (
-        <section className="qa-results" aria-label="Answer comparison">
-          <div className="qa-results-desktop">
+        <section className={styles.results} aria-label="Answer comparison" data-qa-results="true">
+          <div className={styles['results-desktop']} data-qa-results-view="desktop">
             <AnswerPanel channel={state.direct} elapsedMs={state.elapsedMs} kind="direct" />
             <AnswerPanel
               channel={state.rag}
@@ -581,21 +584,21 @@ export function QaClient() {
               kind="rag"
             />
           </div>
-          <Tabs className="qa-results-mobile" defaultValue="direct">
-            <TabsList aria-label="Answer comparison">
-              <TabsTrigger value="direct">
+          <Tabs className={styles['results-mobile']} defaultValue="direct" data-qa-results-view="mobile">
+            <TabsList className={styles['tabs-list']} aria-label="Answer comparison">
+              <TabsTrigger className={styles['tabs-trigger']} value="direct">
                 Direct
                 <ChannelTabStatus phase={state.direct.phase} />
               </TabsTrigger>
-              <TabsTrigger value="rag">
+              <TabsTrigger className={styles['tabs-trigger']} value="rag">
                 With RAG
                 <ChannelTabStatus phase={state.rag.phase} />
               </TabsTrigger>
             </TabsList>
-            <TabsContent value="direct">
+            <TabsContent className={styles['tabs-content']} value="direct">
               <AnswerPanel channel={state.direct} elapsedMs={state.elapsedMs} kind="direct" />
             </TabsContent>
-            <TabsContent value="rag">
+            <TabsContent className={styles['tabs-content']} value="rag">
               <AnswerPanel
                 channel={state.rag}
                 citationHeadingId="qa-mobile-citations"
@@ -615,12 +618,12 @@ export function QaClient() {
 function PrivacyNotice() {
   const [open, setOpen] = useState(false);
   return (
-    <span className="qa-privacy" data-open={open || undefined}>
+    <span className={styles.privacy} data-open={open || undefined}>
       <button
         aria-describedby="qa-privacy-content"
         aria-expanded={open}
         aria-label="Privacy notice"
-        className="qa-icon-button qa-privacy-trigger"
+        className={`${styles['icon-button']} ${styles['privacy-trigger']}`}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           if (event.key === 'Escape') setOpen(false);
@@ -629,7 +632,7 @@ function PrivacyNotice() {
       >
         <ShieldAlert aria-hidden="true" />
       </button>
-      <span className="qa-privacy-content" id="qa-privacy-content" role="tooltip">
+      <span className={styles['privacy-content']} id="qa-privacy-content" role="tooltip">
         CoQUIC does not store your questions or generated answers. DeepSeek V4 Pro processes QA requests; refer to
         DeepSeek&apos;s privacy policy for how DeepSeek handles submitted data.
       </span>
@@ -639,12 +642,12 @@ function PrivacyNotice() {
 
 function RequestStatus({ message, phase, onRetry }: { message: string; phase: QaPhase; onRetry(): void }) {
   return (
-    <div className="qa-request-status" data-status={statusTone(phase)} role={phase === 'failed' ? 'alert' : 'status'}>
+    <div className={styles['request-status']} data-qa-request-status="true" data-status={statusTone(phase)} role={phase === 'failed' ? 'alert' : 'status'}>
       <div>
         <strong>{statusTitle(phase)}</strong>
         <p>{message}</p>
       </div>
-      <Button className="qa-retry-button" type="button" variant="outline" onClick={onRetry}>
+      <Button className={styles['retry-button']} type="button" variant="outline" onClick={onRetry}>
         <RotateCcw aria-hidden="true" />
         Retry
       </Button>
@@ -654,7 +657,7 @@ function RequestStatus({ message, phase, onRetry }: { message: string; phase: Qa
 
 function ChannelTabStatus({ phase }: { phase: ChannelPhase }) {
   if (phase !== 'waiting' && phase !== 'streaming') return null;
-  return <span className="qa-tab-status sr-only">, {phase === 'waiting' ? 'waiting' : 'streaming'}</span>;
+  return <span className="sr-only">, {phase === 'waiting' ? 'waiting' : 'streaming'}</span>;
 }
 
 function AnswerPanel({
@@ -675,11 +678,11 @@ function AnswerPanel({
   const title = kind === 'direct' ? 'Direct' : 'With RAG';
   const busy = channel.phase === 'waiting' || channel.phase === 'streaming';
   return (
-    <article className="qa-answer" aria-busy={busy} data-channel={kind} data-channel-phase={channel.phase}>
-      <header className="qa-answer-header">
-        <div className="qa-answer-title-row">
+    <article className={styles.answer} aria-busy={busy} data-channel={kind} data-channel-phase={channel.phase}>
+      <header className={styles['answer-header']}>
+        <div className={styles['answer-title-row']}>
           <div>
-            <p className="qa-answer-kicker">{kind === 'direct' ? 'Model baseline' : 'Specification-grounded'}</p>
+            <p className={styles['answer-kicker']}>{kind === 'direct' ? 'Model baseline' : 'Specification-grounded'}</p>
             <h2>{title}</h2>
           </div>
           <CopyAnswerButton answer={channel.answer} disabled={busy} label={`${title} answer`} />
@@ -693,17 +696,17 @@ function AnswerPanel({
           usage={channel.usage}
         />
       </header>
-      <div className="qa-answer-body">
+      <div className={styles['answer-body']}>
         {channel.answer ? (
           <MarkdownAnswer>{channel.answer}</MarkdownAnswer>
         ) : busy ? (
-          <div className="qa-answer-placeholder" aria-hidden="true">
+          <div className={styles.placeholder} data-qa-placeholder="true" aria-hidden="true">
             <span />
             <span />
             <span />
           </div>
         ) : (
-          <p className="qa-answer-empty">No answer text was returned.</p>
+          <p className={styles['answer-empty']}>No answer text was returned.</p>
         )}
         {kind === 'rag' && citations.length > 0 ? (
           <Citations citations={citations} headingId={citationHeadingId ?? 'qa-citations'} />
@@ -736,7 +739,7 @@ function AnswerMetadata({
   const confidenceValue = confidence === null ? null : Math.max(0, Math.min(1, confidence));
 
   return (
-    <dl className="qa-metadata">
+    <dl className={styles.metadata}>
       <MetadataRow label="Model" value={displayModel(model)} />
       <MetadataRow label="First token" value={metrics.firstTokenMs === null ? 'Pending' : formatElapsed(metrics.firstTokenMs)} />
       <MetadataRow label="Generation speed" value={speedLabel} />
@@ -755,7 +758,7 @@ function AnswerMetadata({
 
 function MetadataRow({ label, title, value }: { label: string; title?: string; value: string }) {
   return (
-    <div className="qa-metadata-row" title={title}>
+    <div className={styles['metadata-row']} title={title}>
       <dt>{label}</dt>
       <dd>{value}</dd>
     </div>
@@ -788,10 +791,10 @@ function CopyAnswerButton({ answer, disabled, label }: { answer: string; disable
   const accessibleLabel =
     copyState === 'copied' ? `${label} copied` : copyState === 'failed' ? `Unable to copy ${label}` : `Copy ${label}`;
   return (
-    <span className="qa-copy-control">
+    <span className={styles['copy-control']}>
       <button
         aria-label={accessibleLabel}
-        className="qa-icon-button qa-copy-button"
+        className={styles['icon-button']}
         disabled={copyDisabled}
         onClick={() => void copyAnswer()}
         title={accessibleLabel}
@@ -812,9 +815,9 @@ function CopyAnswerButton({ answer, disabled, label }: { answer: string; disable
 
 function MarkdownAnswer({ children }: { children: string }) {
   return (
-    <div className="article-content qa-markdown">
+    <Prose className={styles.markdown} variant="compact">
       <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-    </div>
+    </Prose>
   );
 }
 
@@ -825,7 +828,7 @@ const markdownComponents: Components = {
 
 function MarkdownTable({ children }: { children?: ReactNode }) {
   return (
-    <TableRegion label="Answer data table">
+    <TableRegion className={styles['markdown-table']} label="Answer data table">
       <table>{children}</table>
     </TableRegion>
   );
@@ -835,25 +838,30 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
   const codeElement = isValidElement<{ children?: ReactNode; className?: string }>(children) ? children : null;
   const language = codeElement?.props.className?.match(/language-([^\s]+)/)?.at(1) ?? 'text';
   const code = String(codeElement?.props.children ?? '').replace(/\n$/, '');
+  return <QaRawCodeBlock code={code} language={language} />;
+}
+
+function QaRawCodeBlock({ code, language }: { code: string; language: string }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    rootRef.current?.querySelector<HTMLElement>('[data-slot="scroll-region"]')?.setAttribute(
+      'aria-label',
+      `${language} answer code`,
+    );
+  }, [language]);
+
   return (
-    <div className="editorial-code-block" data-editorial-code-block="true">
-      <div className="editorial-code-toolbar">
-        <span className="editorial-code-language">{language}</span>
-        <CopyCodeButton code={code} />
-      </div>
-      <ScrollRegion aria-label={`${language} answer code`} axis="horizontal" className="editorial-code-scroll">
-        <pre>
-          <code data-language={language}>{code}</code>
-        </pre>
-      </ScrollRegion>
+    <div ref={rootRef} className={styles['markdown-code']} data-qa-code-block="true">
+      <RawCodeBlock code={code} language={language} />
     </div>
   );
 }
 
 function Citations({ citations, headingId }: { citations: Citation[]; headingId: string }) {
   return (
-    <section className="qa-citations" aria-labelledby={headingId}>
-      <div className="qa-citations-heading">
+    <section className={styles.citations} aria-labelledby={headingId}>
+      <div className={styles['citations-heading']}>
         <h3 id={headingId}>Supporting evidence</h3>
         <span>{citations.length} {citations.length === 1 ? 'source' : 'sources'}</span>
       </div>
@@ -862,9 +870,9 @@ function Citations({ citations, headingId }: { citations: Citation[]; headingId:
           const score = typeof citation.score === 'number' ? citation.score : null;
           const source = citation.citation ?? 'unknown section';
           return (
-            <li className="qa-citation" key={`${citation.doc_id ?? 'doc'}-${citation.section_id ?? index}`}>
-              <div className="qa-citation-main">
-                <div className="qa-citation-labels">
+            <li className={styles.citation} key={`${citation.doc_id ?? 'doc'}-${citation.section_id ?? index}`}>
+              <div className={styles['citation-main']}>
+                <div className={styles['citation-labels']}>
                   {citation.url ? (
                     <a href={citation.url} rel="noopener noreferrer" target="_blank">
                       {source}
@@ -877,7 +885,7 @@ function Citations({ citations, headingId }: { citations: Citation[]; headingId:
                 {score === null ? null : (
                   <span
                     aria-label={`Retrieval similarity ${score.toFixed(3)}`}
-                    className="qa-retrieval-score"
+                    className={styles['retrieval-score']}
                     title="Vector retrieval similarity score"
                   >
                     Similarity {score.toFixed(3)}
@@ -885,17 +893,16 @@ function Citations({ citations, headingId }: { citations: Citation[]; headingId:
                 )}
               </div>
               {citation.text ? (
-                <details className="qa-citation-disclosure">
+                <details className={styles['citation-disclosure']}>
                   <summary>RFC excerpt</summary>
-                  <pre
+                  <ScrollRegion
                     aria-label={`${source} excerpt`}
-                    className="qa-citation-excerpt"
-                    data-scroll-region="true"
-                    role="region"
-                    tabIndex={0}
+                    axis="both"
+                    className={styles['citation-excerpt']}
+                    data-qa-citation-excerpt="true"
                   >
-                    <code>{citation.text}</code>
-                  </pre>
+                    <pre><code>{citation.text}</code></pre>
+                  </ScrollRegion>
                 </details>
               ) : null}
             </li>

@@ -15,13 +15,19 @@ const Table = React.forwardRef<HTMLTableElement, TableProps>(
     return (
       <div
         ref={scrollRef}
-        className="table-scroll-region"
+        className="table-scroll-region relative max-w-full overflow-x-auto overscroll-contain data-[overflow=true]:shadow-[inset_-10px_0_10px_-12px_var(--text-muted)]"
         aria-label={scrollLabel}
         data-overflow={overflowing || undefined}
         role={overflowing ? 'region' : undefined}
         tabIndex={overflowing ? 0 : undefined}
+        data-slot="table-scroll-region"
       >
-        <table ref={ref} className={cn('ui-table', className)} {...props} />
+        <table
+          ref={ref}
+          className={cn('ui-table w-full border-collapse caption-bottom text-sm', className)}
+          {...props}
+          data-slot="table"
+        />
       </div>
     );
   },
@@ -29,27 +35,55 @@ const Table = React.forwardRef<HTMLTableElement, TableProps>(
 Table.displayName = 'Table';
 
 const TableHeader = React.forwardRef<HTMLTableSectionElement, React.HTMLAttributes<HTMLTableSectionElement>>(
-  ({ className, ...props }, ref) => <thead ref={ref} className={cn('ui-table__header', className)} {...props} />,
+  ({ className, ...props }, ref) => (
+    <thead ref={ref} className={cn('ui-table__header', className)} {...props} data-slot="table-header" />
+  ),
 );
 TableHeader.displayName = 'TableHeader';
 
 const TableBody = React.forwardRef<HTMLTableSectionElement, React.HTMLAttributes<HTMLTableSectionElement>>(
-  ({ className, ...props }, ref) => <tbody ref={ref} className={cn('ui-table__body', className)} {...props} />,
+  ({ className, ...props }, ref) => (
+    <tbody ref={ref} className={cn('ui-table__body', className)} {...props} data-slot="table-body" />
+  ),
 );
 TableBody.displayName = 'TableBody';
 
 const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTMLTableRowElement>>(
-  ({ className, ...props }, ref) => <tr ref={ref} className={cn('ui-table__row', className)} {...props} />,
+  ({ className, ...props }, ref) => (
+    <tr
+      ref={ref}
+      className={cn('ui-table__row border-b border-[var(--border)] hover:bg-[var(--surface-subtle)]', className)}
+      {...props}
+      data-slot="table-row"
+    />
+  ),
 );
 TableRow.displayName = 'TableRow';
 
 const TableHead = React.forwardRef<HTMLTableCellElement, React.ThHTMLAttributes<HTMLTableCellElement>>(
-  ({ className, ...props }, ref) => <th ref={ref} className={cn('ui-table__head', className)} {...props} />,
+  ({ className, ...props }, ref) => (
+    <th
+      ref={ref}
+      className={cn(
+        'ui-table__head h-10 px-[var(--space-3)] text-left align-middle text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]',
+        className,
+      )}
+      {...props}
+      data-slot="table-head"
+    />
+  ),
 );
 TableHead.displayName = 'TableHead';
 
 const TableCell = React.forwardRef<HTMLTableCellElement, React.TdHTMLAttributes<HTMLTableCellElement>>(
-  ({ className, ...props }, ref) => <td ref={ref} className={cn('ui-table__cell', className)} {...props} />,
+  ({ className, ...props }, ref) => (
+    <td
+      ref={ref}
+      className={cn('ui-table__cell p-[var(--space-3)] align-middle text-[var(--text)]', className)}
+      {...props}
+      data-slot="table-cell"
+    />
+  ),
 );
 TableCell.displayName = 'TableCell';
 

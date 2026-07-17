@@ -12,6 +12,12 @@ function isOverflowing(element: HTMLElement, axis: OverflowAxis) {
   return axis === 'horizontal' ? horizontal : axis === 'vertical' ? vertical : horizontal || vertical;
 }
 
+const axisClasses: Record<OverflowAxis, string> = {
+  horizontal: 'overflow-x-auto',
+  vertical: 'overflow-y-auto',
+  both: 'overflow-x-auto overflow-y-auto',
+};
+
 export function useOverflow<T extends HTMLElement>(axis: OverflowAxis = 'both') {
   const ref = React.useRef<T>(null);
   const [overflowing, setOverflowing] = React.useState(false);
@@ -56,12 +62,18 @@ const ScrollRegion = React.forwardRef<HTMLDivElement, ScrollRegionProps>(
     return (
       <div
         ref={ref}
-        className={cn('scroll-region', `scroll-region--${axis}`, className)}
+        className={cn(
+          'scroll-region relative max-w-full overscroll-contain data-[overflow=true]:shadow-[inset_-10px_0_10px_-12px_var(--text-muted)]',
+          `scroll-region--${axis}`,
+          axisClasses[axis],
+          className,
+        )}
         data-overflow={overflowing || undefined}
         data-scroll-region="true"
         role={overflowing ? 'region' : undefined}
         tabIndex={overflowing ? (tabIndex ?? 0) : undefined}
         {...props}
+        data-slot="scroll-region"
       />
     );
   },

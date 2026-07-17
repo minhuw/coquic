@@ -17,17 +17,17 @@ test.describe('desktop shell behavior', () => {
 
   test('uses the original desktop navigation hierarchy', async ({ page }) => {
     await page.goto('/');
-    const navigation = page.locator('.top-nav-links');
+    const navigation = page.locator('[data-shell-primary-nav]');
 
-    await expect(navigation.locator(':scope > a.nav-link')).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench']);
-    await expect(navigation.locator(':scope > .nav-menu > .nav-menu-trigger')).toHaveText(['Benchmark', 'Development']);
+    await expect(navigation.locator(':scope > a[data-slot="nav-link"]')).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench']);
+    await expect(navigation.locator(':scope > [data-slot="nav-menu"] > [data-slot="nav-menu-trigger"]')).toHaveText(['Benchmark', 'Development']);
     await expect(page.getByRole('link', { name: 'Minhu Wang contact page' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Benchmark' }).click();
-    await expect(navigation.locator('.nav-menu-content').first().getByRole('link')).toHaveText(['LAN']);
+    await expect(navigation.locator('[data-slot="nav-menu-content"]').first().getByRole('link')).toHaveText(['LAN']);
     await page.getByRole('button', { name: 'Benchmark' }).click();
     await page.getByRole('button', { name: 'Development' }).click();
-    await expect(navigation.locator('.nav-menu-content').last().getByRole('link')).toHaveText(['Interop', 'Coverage', 'Duvet', 'Steward']);
+    await expect(navigation.locator('[data-slot="nav-menu-content"]').last().getByRole('link')).toHaveText(['Interop', 'Coverage', 'Duvet', 'Steward']);
   });
 
   test('theme choice persists across navigation and reload', async ({ page }) => {
@@ -146,19 +146,47 @@ test('plan 003 provides complete mobile menu access', async ({ page }) => {
   await expect(page.getByRole('dialog', { name: 'CoQUIC navigation' }).getByRole('link')).toHaveCount(12);
 });
 
+test('mobile menu preserves destination order and external links', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto('/coverage');
+  await page.getByRole('button', { name: 'Open menu' }).click();
+
+  const links = page.getByRole('dialog', { name: 'CoQUIC navigation' }).getByRole('link');
+  await expect(links).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench', 'LAN', 'Interop', 'Coverage', 'Duvet', 'Steward', 'GitHub', 'Contact']);
+  const destinations = await links.evaluateAll((elements) => elements.map((element) => {
+    const link = element as HTMLAnchorElement;
+    const url = new URL(link.href);
+    return url.origin === window.location.origin ? url.pathname : url.href;
+  }));
+  expect(destinations).toEqual([
+    '/qa',
+    '/docs',
+    '/blog',
+    '/transcript',
+    '/workbench',
+    '/performance',
+    '/interop',
+    '/coverage',
+    '/duvet',
+    '/steward',
+    'https://github.com/minhuw/coquic',
+    'https://www.minhuw.dev/',
+  ]);
+});
+
 test('navigation switches to compact controls before desktop labels wrap', async ({ page }) => {
   await page.setViewportSize({ width: 1023, height: 900 });
   await page.goto('/coverage');
 
-  await expect(page.locator('.desktop-nav-content')).toBeHidden();
-  await expect(page.locator('.mobile-nav-actions')).toBeVisible();
+  await expect(page.locator('[data-shell-desktop]')).toBeHidden();
+  await expect(page.locator('[data-shell-mobile]')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Search' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open menu' })).toBeVisible();
   await expectNoGlobalOverflow(page);
 
   await page.setViewportSize({ width: 1024, height: 900 });
-  await expect(page.locator('.desktop-nav-content')).toBeVisible();
-  await expect(page.locator('.mobile-nav-actions')).toBeHidden();
+  await expect(page.locator('[data-shell-desktop]')).toBeVisible();
+  await expect(page.locator('[data-shell-mobile]')).toBeHidden();
   await expect(page.getByRole('button', { name: 'Search' })).toBeVisible();
   await expectNoGlobalOverflow(page);
 });
@@ -166,7 +194,7 @@ test('navigation switches to compact controls before desktop labels wrap', async
 test('short pages keep the footer at the document bottom', async ({ page }) => {
   await page.goto('/blog');
 
-  const geometry = await page.locator('.project-footer').evaluate((footer) => ({
+  const geometry = await page.locator('[data-slot="project-footer"]').evaluate((footer) => ({
     documentHeight: document.documentElement.scrollHeight,
     footerBottom: footer.getBoundingClientRect().bottom + window.scrollY,
     viewportHeight: window.innerHeight,
@@ -174,6 +202,28 @@ test('short pages keep the footer at the document bottom', async ({ page }) => {
 
   expect(geometry.footerBottom).toBeGreaterThanOrEqual(geometry.viewportHeight - 1);
   expect(Math.abs(geometry.documentHeight - geometry.footerBottom)).toBeLessThanOrEqual(1);
+});
+
+test('long routes keep the footer after main content in mobile landscape', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto('/steward');
+
+  const geometry = await page.locator('[data-slot="project-footer"]').evaluate((footer) => {
+    const main = document.querySelector<HTMLElement>('[data-slot="shell-main"]');
+    if (!main) throw new Error('shell main is missing');
+    const footerBounds = footer.getBoundingClientRect();
+    const mainBounds = main.getBoundingClientRect();
+    return {
+      documentHeight: document.documentElement.scrollHeight,
+      footerTop: footerBounds.top + window.scrollY,
+      mainBottom: mainBounds.bottom + window.scrollY,
+      viewportHeight: window.innerHeight,
+    };
+  });
+
+  expect(geometry.documentHeight).toBeGreaterThan(geometry.viewportHeight);
+  expect(geometry.footerTop).toBeGreaterThanOrEqual(geometry.mainBottom - 1);
+  expect(geometry.footerTop).toBeGreaterThan(geometry.viewportHeight);
 });
 
 test('plan 003 restores search focus after dismissal', async ({ page }) => {

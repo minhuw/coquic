@@ -1,0 +1,24 @@
+.toggle {
+  display: inline-flex;
+  min-width: var(--control-coarse);
+  min-height: var(--control-coarse);
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.toggle:hover,
+.toggle:focus-visible {
+  background: var(--surface-subtle);
+  color: var(--accent-ink);
+}
+
+.toggle svg {
+  width: var(--icon-prominent);
+  height: var(--icon-prominent);
+  stroke: currentcolor;
+}

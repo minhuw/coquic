@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 
 import { CoquicLogoIcon, GitHubIcon } from './icons';
+import styles from './demo-nav.module.css';
 import { SiteSearch } from './site-search';
 import { ThemeToggle } from './theme-toggle';
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from './ui/dialog';
@@ -53,37 +54,37 @@ export function DemoNav() {
   const activeDevelopment = developmentViews.some((view) => view.route === active);
 
   return (
-    <nav className="top-nav" aria-label="Demo views">
-      <Link className="top-nav-home" href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined}>
+    <nav className={styles.nav} aria-label="Demo views" data-slot="shell-nav">
+      <Link className={styles.home} href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined} data-slot="nav-home">
         <CoquicLogoIcon className="size-8" aria-hidden="true" />
       </Link>
-      <div className="desktop-nav-content">
-        <span className="top-nav-links">
+      <div className={styles.desktopContent} data-shell-desktop>
+        <span className={styles.navLinks} data-shell-primary-nav>
           {primaryViews.map((view) => <NavLink key={view.href} view={view} active={active} />)}
           <Disclosure id="benchmark" label="Benchmark" active={active} isActive={activeBenchmark} openMenu={openMenu} setOpenMenu={setOpenMenu} views={benchmarkViews} />
           <Disclosure id="development" label="Development" active={active} isActive={activeDevelopment} openMenu={openMenu} setOpenMenu={setOpenMenu} views={developmentViews} />
         </span>
-        <span className="nav-icon-actions">
+        <span className={styles.navIconActions} data-slot="nav-actions">
           <SiteSearch />
           <ThemeToggle />
-          <a className="repo-link" href="https://www.minhuw.dev" target="_blank" rel="noopener noreferrer" aria-label="Minhu Wang contact page"><Contact aria-hidden="true" className="size-[19px]" /></a>
-          <a className="repo-link" href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer" aria-label="CoQUIC on GitHub"><GitHubIcon className="size-5" /></a>
+          <a className={styles.iconLink} href="https://www.minhuw.dev" target="_blank" rel="noopener noreferrer" aria-label="Minhu Wang contact page"><Contact aria-hidden="true" /></a>
+          <a className={styles.iconLink} href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer" aria-label="CoQUIC on GitHub"><GitHubIcon /></a>
         </span>
       </div>
-      <div className="mobile-nav-actions">
+      <div className={styles.mobileActions} data-shell-mobile>
         <SiteSearch enableShortcut={false} />
         <ThemeToggle />
         <Dialog>
-          <DialogTrigger asChild><button className="shell-icon-button mobile-menu-trigger" type="button" aria-label="Open menu"><Menu aria-hidden="true" /></button></DialogTrigger>
-          <DialogContent className="mobile-nav-drawer" aria-describedby={undefined}>
-            <div className="mobile-drawer-header">
+          <DialogTrigger asChild><button className={styles.iconButton} type="button" aria-label="Open menu" data-slot="mobile-menu-trigger"><Menu aria-hidden="true" /></button></DialogTrigger>
+          <DialogContent className={styles.drawer} aria-describedby={undefined}>
+            <div className={styles.drawerHeader}>
               <DialogTitle>CoQUIC navigation</DialogTitle>
-              <DialogClose className="shell-icon-button" aria-label="Close menu"><X aria-hidden="true" /></DialogClose>
+              <DialogClose className={styles.iconButton} aria-label="Close menu"><X aria-hidden="true" /></DialogClose>
             </div>
-            <div className="mobile-drawer-links">
+            <div className={styles.drawerLinks} data-slot="mobile-nav-links">
               {views.map((view) => <NavLink key={view.href} view={view} active={active} drawer />)}
-              <a className="mobile-drawer-link" href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer"><GitHubIcon /> GitHub</a>
-              <a className="mobile-drawer-link" href="https://www.minhuw.dev" target="_blank" rel="noopener noreferrer"><Contact /> Contact</a>
+              <a className={styles.drawerLink} href="https://github.com/minhuw/coquic" target="_blank" rel="noopener noreferrer"><GitHubIcon /> GitHub</a>
+              <a className={styles.drawerLink} href="https://www.minhuw.dev" target="_blank" rel="noopener noreferrer"><Contact /> Contact</a>
             </div>
           </DialogContent>
         </Dialog>
@@ -93,7 +94,7 @@ export function DemoNav() {
 }
 
 function NavLink({ view, active, drawer = false, menu = false, onSelect }: { view: (typeof views)[number]; active: DemoRoute; drawer?: boolean; menu?: boolean; onSelect?: () => void }) {
-  return <Link className={drawer ? 'mobile-drawer-link' : menu ? 'nav-menu-link' : 'nav-link'} href={view.href} aria-current={active === view.route ? 'page' : undefined} onClick={onSelect}>{view.label}</Link>;
+  return <Link className={drawer ? styles.drawerLink : menu ? styles.menuLink : styles.link} href={view.href} aria-current={active === view.route ? 'page' : undefined} onClick={onSelect} data-slot={drawer ? 'mobile-nav-link' : menu ? 'nav-menu-link' : 'nav-link'}>{view.label}</Link>;
 }
 
 function Disclosure({ id, label, active, isActive, openMenu, setOpenMenu, views: menuViews }: { id: NavMenuId; label: string; active: DemoRoute; isActive: boolean; openMenu: NavMenuId | null; setOpenMenu: (id: NavMenuId | null) => void; views: typeof views }) {
@@ -124,11 +125,11 @@ function Disclosure({ id, label, active, isActive, openMenu, setOpenMenu, views:
   };
 
   return (
-    <span className={`nav-menu${isActive ? ' nav-menu-active' : ''}`} data-open={open ? 'true' : undefined}>
-      <button ref={triggerRef} className="nav-link nav-menu-trigger" type="button" aria-expanded={open} aria-current={isActive ? 'page' : undefined} onClick={() => open ? closeMenu() : setOpenMenu(id)}>
+    <span className={`${styles.menu}${isActive ? ` ${styles.menuActive}` : ''}`} data-open={open ? 'true' : undefined} data-slot="nav-menu">
+      <button ref={triggerRef} className={`${styles.link} ${styles.menuTrigger}`} type="button" aria-expanded={open} aria-current={isActive ? 'page' : undefined} onClick={() => open ? closeMenu() : setOpenMenu(id)} data-slot="nav-menu-trigger">
         {label}<ChevronDown aria-hidden="true" />
       </button>
-      <span className="nav-menu-content">
+      <span className={styles.menuContent} data-slot="nav-menu-content">
         {menuViews.map((view) => <NavLink key={view.href} view={view} active={active} menu onSelect={closeMenu} />)}
       </span>
     </span>

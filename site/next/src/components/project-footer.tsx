@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Mail } from 'lucide-react';
 
 import { CoquicLogoIcon, GitHubIcon } from './icons';
+import styles from './project-footer.module.css';
 
 const contactHref = 'https://www.minhuw.dev';
 const githubHref = 'https://github.com/minhuw/coquic';
@@ -9,14 +10,14 @@ const licenseHref = `${githubHref}/blob/main/LICENSE`;
 
 export function ProjectFooter() {
   return (
-    <footer className="project-footer">
-      <div className="project-footer-inner">
-        <Link className="project-footer-brand" href="/" aria-label="CoQUIC home">
+    <footer className={styles.footer} data-slot="project-footer">
+      <div className={styles.inner}>
+        <Link className={styles.brand} href="/" aria-label="CoQUIC home">
           <CoquicLogoIcon aria-hidden="true" />
           <span>CoQUIC</span>
         </Link>
         <p>Open-source QUIC implementation from prompt to packet.</p>
-        <nav className="project-footer-links" aria-label="Project links">
+        <nav className={styles.links} aria-label="Project links">
           <a href={githubHref} target="_blank" rel="noopener noreferrer">
             <GitHubIcon />
             <span>GitHub</span>

@@ -6,6 +6,7 @@ import MiniSearch from 'minisearch';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { siteSearchItems, type SiteSearchItem, type SiteSearchKind } from '@/lib/search-index';
+import styles from './site-search.module.css';
 import { DialogClose, DialogContent, DialogTitle } from './ui/dialog';
 
 const emptyQueryIds = ['route-docs', 'route-workbench', 'route-qa', 'route-dataset', 'route-steward'];
@@ -46,17 +47,17 @@ export function SiteSearchDialog() {
   }
 
   return (
-    <DialogContent className="site-search-dialog" aria-describedby="site-search-status">
+    <DialogContent className={styles.dialog} aria-describedby="site-search-status" data-slot="site-search-dialog">
       <DialogTitle className="sr-only">Site search</DialogTitle>
-      <div className="site-search-field">
+      <div className={styles.field} data-slot="site-search-field">
         <Search aria-hidden="true" />
         <input ref={inputRef} aria-activedescendant={results[activeIndex] ? `site-search-result-${results[activeIndex].id}` : undefined} aria-controls="site-search-results" aria-label="Search CoQUIC" autoComplete="off" onChange={(event) => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder="Search docs, dashboards, workbench scenarios..." type="search" value={query} />
-        {query ? <button className="site-search-clear" type="button" aria-label="Clear search" onClick={() => setQuery('')}><X aria-hidden="true" /></button> : null}
-        <DialogClose className="site-search-close" aria-label="Close search"><X aria-hidden="true" /></DialogClose>
+        {query ? <button className={styles.clear} type="button" aria-label="Clear search" onClick={() => setQuery('')}><X aria-hidden="true" /></button> : null}
+        <DialogClose className={styles.close} aria-label="Close search"><X aria-hidden="true" /></DialogClose>
       </div>
-      <div className="site-search-status" id="site-search-status" role="status" aria-live="polite">{query ? `${results.length} result${results.length === 1 ? '' : 's'}` : 'Suggested destinations'}</div>
-      <div ref={resultsRef} className="site-search-results" id="site-search-results" role="region" aria-label="Search results" tabIndex={0}>
-        {results.length ? groupResults(results).map(([group, items]) => <section key={group} className="site-search-group" aria-label={group}><h3>{group}</h3>{items.map((item) => <SearchResult key={item.id} item={item} active={results[activeIndex]?.id === item.id} index={results.indexOf(item)} query={query} />)}</section>) : <div className="site-search-empty"><strong>No matches</strong><span>No indexed CoQUIC destination matches this query.</span></div>}
+      <div className={styles.status} id="site-search-status" role="status" aria-live="polite">{query ? `${results.length} result${results.length === 1 ? '' : 's'}` : 'Suggested destinations'}</div>
+      <div ref={resultsRef} className={styles.results} id="site-search-results" role="region" aria-label="Search results" tabIndex={0}>
+        {results.length ? groupResults(results).map(([group, items]) => <section key={group} className={styles.group} aria-label={group}><h3>{group}</h3>{items.map((item) => <SearchResult key={item.id} item={item} active={results[activeIndex]?.id === item.id} index={results.indexOf(item)} query={query} />)}</section>) : <div className={styles.empty}><strong>No matches</strong><span>No indexed CoQUIC destination matches this query.</span></div>}
       </div>
     </DialogContent>
   );
@@ -64,7 +65,7 @@ export function SiteSearchDialog() {
 
 function SearchResult({ item, active, index, query }: { item: SiteSearchItem; active: boolean; index: number; query: string }) {
   const Icon = iconForKind(item.kind);
-  return <Link id={`site-search-result-${item.id}`} className="site-search-result" data-result-index={index} data-active={active ? 'true' : undefined} href={item.href}><span className="site-search-result-icon" aria-hidden="true"><Icon /></span><span className="site-search-result-copy"><strong>{item.title}</strong><small>{item.section}</small><em>{snippetForItem(item, query)}</em></span><ArrowRight className="site-search-result-arrow" aria-hidden="true" /></Link>;
+  return <Link id={`site-search-result-${item.id}`} className={styles.result} data-result-index={index} data-active={active ? 'true' : undefined} href={item.href}><span className={styles.resultIcon} aria-hidden="true"><Icon /></span><span className={styles.resultCopy}><strong>{item.title}</strong><small>{item.section}</small><em>{snippetForItem(item, query)}</em></span><ArrowRight className={styles.resultArrow} aria-hidden="true" /></Link>;
 }
 
 export function searchItems(engine: MiniSearch<SiteSearchItem & { item: SiteSearchItem }>, query: string) {

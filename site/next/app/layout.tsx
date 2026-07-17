@@ -4,6 +4,7 @@ import type { Metadata } from 'next';
 
 import { DemoNav } from '@/components/demo-nav';
 import { ProjectFooter } from '@/components/project-footer';
+import shellStyles from '@/components/shell-layout.module.css';
 import { ThemeScript } from '@/components/theme-script';
 import { googleSansCode, hostGrotesk } from '@/lib/fonts';
 
@@ -21,12 +22,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <head>
         <ThemeScript />
       </head>
-      <body className={`${hostGrotesk.variable} ${googleSansCode.variable}`}>
-        <a className="skip-link" href="#shell-main">
+      <body className={`${hostGrotesk.variable} ${googleSansCode.variable} ${shellStyles.body}`}>
+        <a className={shellStyles.skipLink} href="#shell-main" data-slot="skip-link">
           Skip to content
         </a>
         <DemoNav />
-        <div className="shell-main" id="shell-main" tabIndex={-1}>
+        <div className={shellStyles.main} id="shell-main" data-slot="shell-main" tabIndex={-1}>
           {children}
         </div>
         <ProjectFooter />

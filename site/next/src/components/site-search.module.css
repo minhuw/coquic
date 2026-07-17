@@ -1,0 +1,220 @@
+.trigger {
+  display: inline-flex;
+  min-width: var(--control-coarse);
+  min-height: var(--control-coarse);
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  padding: 0 8px;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.trigger:hover,
+.trigger:focus-visible {
+  background: var(--surface-subtle);
+  color: var(--accent-ink);
+}
+
+.trigger svg {
+  width: var(--icon-prominent);
+  height: var(--icon-prominent);
+  flex: 0 0 auto;
+}
+
+.triggerLabel,
+.triggerKbd {
+  display: inline;
+}
+
+.triggerLabel {
+  font: var(--type-ui-label);
+}
+
+.triggerKbd {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-subtle);
+  padding: 2px 5px;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.dialog {
+  width: min(calc(100vw - 24px), var(--dialog-default));
+  max-height: min(84dvh, 720px);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0;
+}
+
+.field {
+  display: grid;
+  min-height: 56px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px;
+}
+
+.field > svg {
+  width: var(--icon-prominent);
+  height: var(--icon-prominent);
+  color: var(--text-muted);
+}
+
+.field input {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 12px 0;
+  color: var(--text-strong);
+  font-size: 16px;
+  outline: 0;
+}
+
+.field input::placeholder {
+  color: var(--text-muted);
+}
+
+.clear,
+.close {
+  display: inline-flex;
+  min-width: var(--control-coarse);
+  min-height: var(--control-coarse);
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.clear:hover,
+.clear:focus-visible,
+.close:hover,
+.close:focus-visible {
+  background: var(--surface-subtle);
+  color: var(--accent-ink);
+}
+
+.clear svg,
+.close svg {
+  width: var(--icon-prominent);
+  height: var(--icon-prominent);
+}
+
+.status {
+  min-height: 28px;
+  padding: 8px 14px 0;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+}
+
+.results {
+  max-height: min(62dvh, 560px);
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.group h3 {
+  padding: 8px 10px 4px;
+  color: var(--text-muted);
+  font: var(--type-metadata);
+  text-transform: uppercase;
+}
+
+.result {
+  display: grid;
+  min-height: 56px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
+  color: var(--text-strong);
+  text-decoration: none;
+}
+
+.result:hover,
+.result[data-active='true'] {
+  background: var(--accent-soft);
+}
+
+.resultIcon {
+  display: inline-flex;
+  min-width: 36px;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--accent-ink);
+}
+
+.resultIcon svg {
+  width: var(--icon-compact);
+  height: var(--icon-compact);
+}
+
+.resultCopy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.resultCopy strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.resultCopy small,
+.resultCopy em {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.resultCopy em {
+  overflow: hidden;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resultArrow {
+  width: var(--icon-compact);
+  height: var(--icon-compact);
+  color: var(--text-muted);
+}
+
+.empty {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-subtle);
+  padding: 24px 12px;
+  color: var(--text-muted);
+}
+
+.empty strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.empty span {
+  font-size: 14px;
+}
+
+@media (max-width: 1023px) {
+  .triggerLabel,
+  .triggerKbd {
+    display: none;
+  }
+}

@@ -57,6 +57,38 @@ test.describe('performance evidence contracts', () => {
     expectNoPageErrors();
   });
 
+  test('keeps route styling scoped to canonical evidence roles', async ({ page }) => {
+    await loadReadyPerformance(page);
+
+    const styles = await page.locator('#performance-page').evaluate((root) => {
+      const kicker = root.querySelector<HTMLElement>('[aria-label="Benchmark scope and availability"] span');
+      if (!kicker) throw new Error('performance kicker is missing');
+      const metadata = [
+        ...root.querySelectorAll('[aria-label="Benchmark scope and availability"] dt, [aria-label="Benchmark scope and availability"] dd'),
+        root.querySelector('#performance-ranking-unit'),
+        root.querySelector('#performance-history-unit'),
+      ].filter((element): element is Element => Boolean(element)).map((element) => getComputedStyle(element).fontSize);
+      const rootStyle = getComputedStyle(root);
+      const themeStyle = getComputedStyle(document.documentElement);
+      const dialog = root.querySelector('#perf-detail-dialog');
+      return {
+        className: root.className,
+        letterSpacing: getComputedStyle(kicker).letterSpacing,
+        metadata,
+        chartValues: Array.from({ length: 6 }, (_, index) => rootStyle.getPropertyValue(`--chart-${index + 1}`).trim()),
+        themeChartValues: Array.from({ length: 6 }, (_, index) => themeStyle.getPropertyValue(`--chart-${index + 1}`).trim()),
+        modalShadow: dialog ? getComputedStyle(dialog).boxShadow : '',
+      };
+    });
+
+    expect(styles.className).not.toContain('performance-page');
+    expect(['0px', 'normal']).toContain(styles.letterSpacing);
+    expect(styles.metadata.every((size) => Number.parseFloat(size) >= 12)).toBe(true);
+    expect(styles.chartValues).toEqual(styles.themeChartValues);
+    expect(styles.modalShadow).toContain('64px');
+    expect(styles.modalShadow).not.toContain('80px');
+  });
+
   test('keeps mode and filter controls stable through keyboard selection', async ({ page }) => {
     const expectNoPageErrors = collectPageErrors(page);
     await loadReadyPerformance(page);

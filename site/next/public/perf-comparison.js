@@ -898,7 +898,7 @@ function closeFlamegraphDialog(restoreFocus = true) {
   if (dialog.open) {
     dialog.close();
   }
-  document.body.classList.remove("perf-flamegraph-fullscreen-open");
+  byId("performance-page")?.removeAttribute("data-flamegraph-open");
   const trigger = perfFlamegraphTrigger;
   perfFlamegraphTrigger = null;
   if (restoreFocus && trigger?.isConnected) {
@@ -938,7 +938,7 @@ function openFlamegraphDialog(row, role, trigger) {
   }
   body.append(frame, links);
   dialog.showModal();
-  document.body.classList.add("perf-flamegraph-fullscreen-open");
+  byId("performance-page")?.setAttribute("data-flamegraph-open", "true");
   byId("perf-flamegraph-close").focus({ preventScroll: true });
 }
 
@@ -948,7 +948,7 @@ function closePerfDetailModal(restoreFocus = true) {
   if (dialog.open) {
     dialog.close();
   }
-  document.body.classList.remove("perf-detail-open");
+  byId("performance-page")?.removeAttribute("data-detail-open");
   const trigger = perfDetailTrigger;
   perfDetailTrigger = null;
   if (restoreFocus && trigger?.isConnected) {
@@ -962,7 +962,7 @@ function openPerfDetail(row, trigger) {
   populateDetailDialog(row);
   const dialog = byId("perf-detail-dialog");
   dialog.showModal();
-  document.body.classList.add("perf-detail-open");
+  byId("performance-page")?.setAttribute("data-detail-open", "true");
   byId("perf-detail-close").focus({ preventScroll: true });
 }
 

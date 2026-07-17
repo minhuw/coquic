@@ -3,6 +3,8 @@ import Script from 'next/script';
 
 import { PageHeader } from '@/components/page-header';
 
+import styles from './performance.module.css';
+
 export const metadata: Metadata = {
   title: 'CoQUIC Performance Comparison',
   other: {
@@ -12,15 +14,15 @@ export const metadata: Metadata = {
 
 export default function PerformancePage() {
   return (
-    <main className="coquic-page performance-page" id="performance-page" data-testid="performance-page">
+    <main className={`coquic-page ${styles.root}`} id="performance-page" data-testid="performance-page">
       <PageHeader eyebrow="QUIC performance" title="CoQUIC Performance Comparison" variant="evidence" />
 
-      <section className="performance-summary" aria-label="Benchmark scope and availability">
-        <div className="performance-summary__scope">
-          <span className="performance-kicker">Evidence surface</span>
+      <section className={styles.summary} aria-label="Benchmark scope and availability">
+        <div className={styles.summaryScope}>
+          <span className={styles.kicker}>Evidence surface</span>
           <p>Current benchmark results are shown first. Historical comparisons hydrate separately.</p>
         </div>
-        <dl className="performance-summary__facts">
+        <dl className={styles.summaryFacts}>
           <div>
             <dt>Source</dt>
             <dd id="performance-source">Waiting for perf-results.json</dd>
@@ -36,16 +38,16 @@ export default function PerformancePage() {
         </dl>
       </section>
 
-      <section className="performance-workspace" aria-label="Performance comparison">
-        <div className="plot-grid" id="plot-grid">
-          <section className="performance-controls" id="performance-controls" aria-label="Benchmark controls">
-            <div className="performance-controls__head">
+      <section className={styles.workspace} aria-label="Performance comparison">
+        <div id="plot-grid">
+          <section className={styles.controls} id="performance-controls" aria-label="Benchmark controls">
+            <div className={styles.controlsHead}>
               <div>
-                <span className="performance-kicker">Compare</span>
+                <span className={styles.kicker}>Compare</span>
                 <h2>Benchmark mode</h2>
               </div>
               <button
-                className="performance-filter-toggle"
+                className={styles.filterToggle}
                 id="performance-filter-toggle"
                 type="button"
                 aria-controls="performance-filter-panel"
@@ -55,28 +57,28 @@ export default function PerformancePage() {
               </button>
             </div>
             <div id="performance-mode-tabs" />
-            <div className="performance-filter-summary" aria-live="polite">
+            <div className={styles.filterSummary} aria-live="polite">
               <span id="performance-filter-count">0 filters active</span>
               <span id="performance-filter-selection">All implementations</span>
             </div>
-            <div id="performance-filter-panel" className="performance-filter-panel" hidden>
+            <div id="performance-filter-panel" className={styles.filterPanel} hidden>
               <div id="performance-filters" />
             </div>
           </section>
 
           <section
-            className="performance-result performance-result--ranking"
+            className={`${styles.result} ${styles.resultRanking}`}
             id="performance-ranking"
             aria-labelledby="performance-ranking-title"
             aria-busy="true"
             data-state="loading"
           >
-            <div className="performance-result__heading">
+            <div className={styles.resultHeading}>
               <div>
-                <span className="performance-kicker">Current result</span>
+                <span className={styles.kicker}>Current result</span>
                 <h2 id="performance-ranking-title">Ranking</h2>
               </div>
-              <span className="performance-result__unit" id="performance-ranking-unit">Waiting</span>
+              <span className={styles.resultUnit} id="performance-ranking-unit">Waiting</span>
             </div>
             <div
               className="performance-skeleton performance-skeleton--ranking"
@@ -103,62 +105,62 @@ export default function PerformancePage() {
           </section>
 
           <section
-            className="performance-result performance-result--history"
+            className={`${styles.result} ${styles.resultHistory}`}
             id="performance-history"
             aria-labelledby="performance-history-title"
             aria-busy="true"
             data-state="loading"
           >
-            <div className="performance-result__heading">
+            <div className={styles.resultHeading}>
               <div>
-                <span className="performance-kicker">Retained evidence</span>
+                <span className={styles.kicker}>Retained evidence</span>
                 <h2 id="performance-history-title">Trend</h2>
               </div>
-              <span className="performance-result__unit" id="performance-history-unit">History loading</span>
+              <span className={styles.resultUnit} id="performance-history-unit">History loading</span>
             </div>
             <div id="performance-history-state" data-state="loading" role="status">
               Loading retained benchmark history.
             </div>
-            <div id="performance-trend" className="performance-trend" tabIndex={-1} />
+            <div id="performance-trend" tabIndex={-1} />
           </section>
         </div>
       </section>
 
       <dialog
-        className="performance-dialog performance-dialog--detail"
+        className={`${styles.dialog} ${styles.dialogDetail}`}
         id="perf-detail-dialog"
         aria-labelledby="perf-detail-title"
       >
-        <div className="performance-dialog__surface">
-          <header className="performance-dialog__head">
+        <div className={styles.dialogSurface}>
+          <header className={styles.dialogHead}>
             <div>
-              <span className="performance-kicker">Run detail</span>
+              <span className={styles.kicker}>Run detail</span>
               <h2 id="perf-detail-title">Performance details</h2>
             </div>
-            <button className="performance-dialog__close" id="perf-detail-close" type="button" aria-label="Close performance details">
+            <button className={styles.dialogClose} id="perf-detail-close" type="button" aria-label="Close performance details">
               Close
             </button>
           </header>
-          <div className="performance-dialog__body" id="perf-detail-body" />
+          <div className={styles.dialogBody} id="perf-detail-body" />
         </div>
       </dialog>
 
       <dialog
-        className="performance-dialog performance-dialog--flamegraph"
+        className={`${styles.dialog} ${styles.dialogFlamegraph}`}
         id="perf-flamegraph-dialog"
         aria-labelledby="perf-flamegraph-title"
       >
-        <div className="performance-dialog__surface">
-          <header className="performance-dialog__head">
+        <div className={styles.dialogSurface}>
+          <header className={styles.dialogHead}>
             <div>
-              <span className="performance-kicker">Profile artifact</span>
+              <span className={styles.kicker}>Profile artifact</span>
               <h2 id="perf-flamegraph-title">Flamegraph</h2>
             </div>
-            <button className="performance-dialog__close" id="perf-flamegraph-close" type="button" aria-label="Close flamegraph">
+            <button className={styles.dialogClose} id="perf-flamegraph-close" type="button" aria-label="Close flamegraph">
               Close
             </button>
           </header>
-          <div className="performance-dialog__body" id="perf-flamegraph-body" />
+          <div className={styles.dialogBody} id="perf-flamegraph-body" />
         </div>
       </dialog>
 

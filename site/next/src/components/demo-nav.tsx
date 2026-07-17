@@ -9,6 +9,7 @@ import { CoquicLogoIcon, GitHubIcon } from './icons';
 import styles from './demo-nav.module.css';
 import { SiteSearch } from './site-search';
 import { ThemeToggle } from './theme-toggle';
+import { Button } from './ui/button';
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from './ui/dialog';
 
 export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'dataset' | 'interop' | 'coverage' | 'duvet' | 'steward' | 'qa';
@@ -75,7 +76,7 @@ export function DemoNav() {
         <SiteSearch enableShortcut={false} />
         <ThemeToggle />
         <Dialog>
-          <DialogTrigger asChild><button className={styles.iconButton} type="button" aria-label="Open menu" data-slot="mobile-menu-trigger"><Menu aria-hidden="true" /></button></DialogTrigger>
+          <DialogTrigger asChild><Button className={styles.iconButton} variant="ghost" size="icon" type="button" aria-label="Open menu" data-shell-control="mobile-menu-trigger"><Menu aria-hidden="true" /></Button></DialogTrigger>
           <DialogContent className={styles.drawer} aria-describedby={undefined}>
             <div className={styles.drawerHeader}>
               <DialogTitle>CoQUIC navigation</DialogTitle>
@@ -126,9 +127,9 @@ function Disclosure({ id, label, active, isActive, openMenu, setOpenMenu, views:
 
   return (
     <span className={`${styles.menu}${isActive ? ` ${styles.menuActive}` : ''}`} data-open={open ? 'true' : undefined} data-slot="nav-menu">
-      <button ref={triggerRef} className={`${styles.link} ${styles.menuTrigger}`} type="button" aria-expanded={open} aria-current={isActive ? 'page' : undefined} onClick={() => open ? closeMenu() : setOpenMenu(id)} data-slot="nav-menu-trigger">
+      <Button ref={triggerRef} className={`${styles.link} ${styles.menuTrigger}`} variant="ghost" type="button" aria-expanded={open} aria-current={isActive ? 'page' : undefined} onClick={() => open ? closeMenu() : setOpenMenu(id)} data-shell-control="nav-menu-trigger">
         {label}<ChevronDown aria-hidden="true" />
-      </button>
+      </Button>
       <span className={styles.menuContent} data-slot="nav-menu-content">
         {menuViews.map((view) => <NavLink key={view.href} view={view} active={active} menu onSelect={closeMenu} />)}
       </span>

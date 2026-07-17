@@ -20,11 +20,16 @@ test.describe('desktop shell behavior', () => {
     const navigation = page.locator('[data-shell-primary-nav]');
 
     await expect(navigation.locator(':scope > a[data-slot="nav-link"]')).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench']);
-    await expect(navigation.locator(':scope > [data-slot="nav-menu"] > [data-slot="nav-menu-trigger"]')).toHaveText(['Benchmark', 'Development']);
+    await expect(navigation.locator(':scope > [data-slot="nav-menu"] > [data-shell-control="nav-menu-trigger"]')).toHaveText(['Benchmark', 'Development']);
     await expect(page.getByRole('link', { name: 'Minhu Wang contact page' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Benchmark' }).click();
-    await expect(navigation.locator('[data-slot="nav-menu-content"]').first().getByRole('link')).toHaveText(['LAN']);
+    const lan = navigation.locator('[data-slot="nav-menu-content"]').first().getByRole('link');
+    await expect(lan).toHaveText(['LAN']);
+    expect(await lan.evaluate((link) => {
+      const bounds = link.getBoundingClientRect();
+      return document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)?.closest('a') === link;
+    })).toBe(true);
     await page.getByRole('button', { name: 'Benchmark' }).click();
     await page.getByRole('button', { name: 'Development' }).click();
     await expect(navigation.locator('[data-slot="nav-menu-content"]').last().getByRole('link')).toHaveText(['Interop', 'Coverage', 'Duvet', 'Steward']);

@@ -4,6 +4,7 @@
   min-height: var(--control-coarse);
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   gap: 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-control);
@@ -20,9 +21,13 @@
 }
 
 .trigger svg {
-  width: var(--icon-prominent);
-  height: var(--icon-prominent);
+  width: var(--icon-default);
+  height: var(--icon-default);
   flex: 0 0 auto;
+}
+
+.trigger > [data-slot='button-content'] {
+  gap: 8px;
 }
 
 .triggerLabel,
@@ -31,16 +36,17 @@
 }
 
 .triggerLabel {
-  font: var(--type-ui-label);
+  font: var(--type-ui-label, 500 14px/1 var(--font-host-grotesk));
+  line-height: 1;
 }
 
 .triggerKbd {
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--surface-subtle);
-  padding: 2px 5px;
+  padding: 2px 6px;
   color: var(--text-muted);
-  font: var(--type-metadata);
+  font: 600 10px/1 var(--font-google-sans-code);
 }
 
 .dialog {
@@ -96,6 +102,10 @@
   cursor: pointer;
 }
 
+.clear {
+  flex: 0 0 auto;
+}
+
 .clear:hover,
 .clear:focus-visible,
 .close:hover,
@@ -106,8 +116,8 @@
 
 .clear svg,
 .close svg {
-  width: var(--icon-prominent);
-  height: var(--icon-prominent);
+  width: var(--icon-default);
+  height: var(--icon-default);
 }
 
 .status {

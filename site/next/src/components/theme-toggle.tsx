@@ -4,6 +4,7 @@ import { Moon, Sun } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import styles from './theme-toggle.module.css';
+import { Button } from './ui/button';
 
 type Theme = 'light' | 'dark';
 
@@ -46,17 +47,18 @@ export function ThemeToggle() {
   const dark = theme === 'dark';
 
   return (
-    <button
-      // Retained for the visual foundation selector; presentation is module-owned.
-      className={`theme-toggle ${styles.toggle}`}
+    <Button
+      className={styles.toggle}
+      variant="ghost"
+      size="icon"
       type="button"
       aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
       aria-pressed={dark}
-      data-slot="theme-toggle"
+      data-shell-control="theme-toggle"
       onClick={toggleTheme}
       title={dark ? 'Light mode' : 'Dark mode'}
     >
       {dark ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-    </button>
+    </Button>
   );
 }

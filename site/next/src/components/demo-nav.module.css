@@ -5,9 +5,11 @@
   display: flex;
   min-height: 56px;
   min-width: 0;
+  max-width: 100%;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
-  overflow: hidden;
+  overflow: visible;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   padding: 6px max(12px, var(--safe-area-right)) 6px max(12px, var(--safe-area-left));
@@ -34,8 +36,8 @@
 }
 
 .home svg {
-  width: var(--icon-navigation);
-  height: var(--icon-navigation);
+  width: var(--space-6);
+  height: var(--space-6);
 }
 
 .iconButton,
@@ -79,6 +81,8 @@
 }
 
 .navLinks {
+  flex: 1;
+  justify-content: flex-end;
   gap: 4px;
   overflow: visible;
 }
@@ -93,7 +97,8 @@
   border-radius: var(--radius-control);
   padding: 0 10px;
   color: var(--text-strong);
-  font: var(--type-ui-label);
+  font: var(--type-ui-label, 500 14px/1 var(--font-host-grotesk));
+  line-height: 1;
   text-decoration: none;
   white-space: nowrap;
 }
@@ -121,9 +126,13 @@
   cursor: pointer;
 }
 
+.menuTrigger > [data-slot='button-content'] {
+  gap: 6px;
+}
+
 .menuTrigger svg {
-  width: var(--icon-compact);
-  height: var(--icon-compact);
+  width: 14px;
+  height: 14px;
   transition: transform var(--motion-standard) var(--ease-standard);
 }
 
@@ -167,6 +176,7 @@
 }
 
 .navIconActions {
+  margin-left: var(--space-4);
   gap: 4px;
 }
 
@@ -239,6 +249,7 @@
 @media (max-width: 1023px) {
   .nav {
     gap: 4px;
+    overflow: hidden;
   }
 
   .desktopContent {
@@ -247,6 +258,12 @@
 
   .mobileActions {
     display: flex;
+  }
+}
+
+@media (max-width: 680px) {
+  .nav {
+    margin-inline: calc(-1 * var(--page-gutter));
   }
 }
 

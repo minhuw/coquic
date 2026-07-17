@@ -7,7 +7,7 @@ for (const theme of ['light', 'dark'] as const) {
     await setStoredTheme(page, theme);
     await page.goto('/');
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-    await expect(page.locator('.theme-toggle:visible')).toHaveAttribute(
+    await expect(page.locator('[data-shell-control="theme-toggle"]:visible')).toHaveAttribute(
       'aria-pressed',
       theme === 'dark' ? 'true' : 'false',
     );

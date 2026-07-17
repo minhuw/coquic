@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { siteSearchItems, type SiteSearchItem, type SiteSearchKind } from '@/lib/search-index';
 import styles from './site-search.module.css';
+import { Button } from './ui/button';
 import { DialogClose, DialogContent, DialogTitle } from './ui/dialog';
 
 const emptyQueryIds = ['route-docs', 'route-workbench', 'route-qa', 'route-dataset', 'route-steward'];
@@ -52,7 +53,7 @@ export function SiteSearchDialog() {
       <div className={styles.field} data-slot="site-search-field">
         <Search aria-hidden="true" />
         <input ref={inputRef} aria-activedescendant={results[activeIndex] ? `site-search-result-${results[activeIndex].id}` : undefined} aria-controls="site-search-results" aria-label="Search CoQUIC" autoComplete="off" onChange={(event) => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder="Search docs, dashboards, workbench scenarios..." type="search" value={query} />
-        {query ? <button className={styles.clear} type="button" aria-label="Clear search" onClick={() => setQuery('')}><X aria-hidden="true" /></button> : null}
+        {query ? <Button className={styles.clear} variant="ghost" size="icon" type="button" aria-label="Clear search" onClick={() => setQuery('')} data-shell-control="search-clear"><X aria-hidden="true" /></Button> : null}
         <DialogClose className={styles.close} aria-label="Close search"><X aria-hidden="true" /></DialogClose>
       </div>
       <div className={styles.status} id="site-search-status" role="status" aria-live="polite">{query ? `${results.length} result${results.length === 1 ? '' : 's'}` : 'Suggested destinations'}</div>

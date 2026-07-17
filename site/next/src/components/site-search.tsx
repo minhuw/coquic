@@ -5,6 +5,7 @@ import { Search } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import styles from './site-search.module.css';
+import { Button } from './ui/button';
 import { Dialog, DialogTrigger } from './ui/dialog';
 
 const SiteSearchDialog = dynamic(() => import('./site-search-dialog').then((module) => module.SiteSearchDialog), { ssr: false });
@@ -27,11 +28,11 @@ export function SiteSearch({ enableShortcut = true }: { enableShortcut?: boolean
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <button className={styles.trigger} type="button" aria-label="Search" aria-haspopup="dialog" data-slot="site-search-trigger">
+        <Button className={styles.trigger} variant="ghost" type="button" aria-label="Search" aria-haspopup="dialog" data-shell-control="site-search-trigger">
           <Search aria-hidden="true" />
           <span className={styles.triggerLabel}>Search</span>
           <kbd className={styles.triggerKbd}>Ctrl K</kbd>
-        </button>
+        </Button>
       </DialogTrigger>
       {open ? <SiteSearchDialog /> : null}
     </Dialog>

@@ -15,6 +15,13 @@ const docs = docItems.map((item) => ({
 }));
 const themes = ['light', 'dark'] as const;
 
+async function prepareVisualSnapshot(page: Parameters<typeof setStoredTheme>[0]) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
+  });
+}
+
 async function expectDocsAxe(page: Parameters<typeof setStoredTheme>[0]) {
   await page.waitForFunction(() => {
     const regions = Array.from(document.querySelectorAll<HTMLElement>('[data-scroll-region="true"]'));
@@ -139,7 +146,7 @@ test.describe('documentation routes', () => {
       await page.goto('/docs/api/c-ffi-reference');
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(page.locator('main article')).toBeVisible();
-      await page.evaluate(() => document.fonts.ready);
+      await prepareVisualSnapshot(page);
       await expect(page).toHaveScreenshot(`docs-api-c-ffi-reference-${theme}.png`, { fullPage: false });
     });
   }

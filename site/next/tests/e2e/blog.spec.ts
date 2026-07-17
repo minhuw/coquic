@@ -4,6 +4,13 @@ import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } 
 
 const themes = ['light', 'dark'] as const;
 
+async function prepareVisualSnapshot(page: Parameters<typeof setStoredTheme>[0]) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
+  });
+}
+
 test.describe('blog characterization', () => {
   test.describe.configure({ mode: 'default' });
 
@@ -35,14 +42,14 @@ test.describe('blog characterization', () => {
       await page.goto('/blog');
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(page.getByRole('article')).toHaveCount(2);
-      await page.evaluate(() => document.fonts.ready);
+      await prepareVisualSnapshot(page);
       await expect(page).toHaveScreenshot(`blog-index-${theme}.png`, { fullPage: false });
 
       await page.goto('/blog/coquic-steward');
       await expect(page.getByRole('heading', { level: 1 })).toHaveText(
         'CoQUIC Steward: Letting an Agent Maintain the Repository',
       );
-      await page.evaluate(() => document.fonts.ready);
+      await prepareVisualSnapshot(page);
       await expect(page).toHaveScreenshot(`blog-post-${theme}.png`, { fullPage: false });
     });
   }

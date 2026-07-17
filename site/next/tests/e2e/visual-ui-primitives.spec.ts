@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { devices, expect, test, type Page } from '@playwright/test';
 
 import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
 
@@ -124,6 +124,31 @@ test('button owns hover, active, disabled, and loading states', async ({ page })
     element.setAttribute('data-loading', 'true');
   });
   expect(await loading.evaluate((element) => getComputedStyle(element).cursor)).toBe('progress');
+});
+
+test('compact slotted buttons preserve coarse pointer targets', async ({ baseURL, browser }) => {
+  const context = await browser.newContext({ ...devices['Pixel 5'], baseURL });
+  const page = await context.newPage();
+
+  try {
+    await page.goto('/duvet');
+    const compactLink = page.getByRole('link', { name: 'Open HTML' });
+    await compactLink.evaluate((element) => document.body.append(element));
+    const geometry = await compactLink.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        coarse: matchMedia('(pointer: coarse)').matches,
+        height: element.getBoundingClientRect().height,
+        minHeight: style.minHeight,
+      };
+    });
+
+    expect(geometry.coarse).toBe(true);
+    expect(geometry.height).toBeGreaterThanOrEqual(44);
+    expect(geometry.minHeight).toBe('44px');
+  } finally {
+    await context.close();
+  }
 });
 
 test('dialog owns overlay and content presentation while preserving focus restoration', async ({ page }) => {

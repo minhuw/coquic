@@ -16,7 +16,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { CodexTranscriptThread, transcriptDisplayCount } from '@/components/codex-transcript-thread';
 import { PageHeader } from '@/components/page-header';
+import { Prose } from '@/components/typography/prose';
+import { Button } from '@/components/ui/button';
+import { StatusLabel } from '@/components/ui/status-label';
 import type { TranscriptRecord, TranscriptRole } from '@/lib/codex-transcript';
+import { cn } from '@/lib/utils';
+
+import styles from './transcript.module.css';
 
 interface TranscriptSample {
   role: TranscriptRole;
@@ -421,21 +427,23 @@ export function TranscriptDataset() {
   const hasFilters = Boolean(owned.q || owned.from || owned.to);
 
   return (
-    <section className="transcript-shell" aria-labelledby="transcript-title" data-mode={owned.session ? 'detail' : 'collection'}>
+    <section className={cn(styles['transcript-shell'], 'transcript-shell')} aria-labelledby="transcript-title" data-mode={owned.session ? 'detail' : 'collection'}>
       <PageHeader
-        className="transcript-header"
+        className={styles['transcript-header']}
         eyebrow="Public dataset"
         title="CoQUIC Transcript Dataset"
         description="Development transcripts from the Codex sessions that built CoQUIC, indexed for browsing and available as raw JSONL."
         actions={
           manifest?.archiveBytes && manifest.archiveUrl ? (
-            <a className="transcript-primary-action" href={manifest.archiveUrl} download>
+            <Button asChild className={styles['transcript-primary-action']} variant="outline">
+              <a href={manifest.archiveUrl} download>
               <Download aria-hidden="true" />
               <span>Download dataset</span>
               <small>{formatBytes(manifest.archiveBytes)}</small>
-            </a>
+              </a>
+            </Button>
           ) : (
-            <span className="transcript-primary-action is-disabled" aria-disabled="true">
+            <span className={cn(styles['transcript-primary-action'], styles['is-disabled'])} aria-disabled="true">
               <Download aria-hidden="true" />
               <span>Archive unavailable</span>
             </span>
@@ -445,55 +453,55 @@ export function TranscriptDataset() {
       />
 
       {manifest ? (
-        <dl className="transcript-summary" aria-label="Dataset summary">
+        <dl className={styles['transcript-summary']} aria-label="Dataset summary">
           <Summary label="Transcripts" value={formatInteger(manifest.transcriptCount)} />
           <Summary label="Date range" value={formatDateRange(manifest.dateRange)} />
           <Summary label="Total tokens" value={formatInteger(manifest.totalTokens)} />
           <Summary label="Tool calls" value={formatInteger(manifest.totalToolCalls)} />
         </dl>
       ) : (
-        <div className="transcript-summary-skeleton" aria-label="Dataset summary loading">Loading dataset summary</div>
+        <div className={styles['transcript-summary-skeleton']} aria-label="Dataset summary loading">Loading dataset summary</div>
       )}
 
-      <div className="transcript-controls" aria-label="Transcript filters">
-        <div className="transcript-search-wrap">
-          <label className="transcript-search">
+      <div className={styles['transcript-controls']} aria-label="Transcript filters">
+        <div className={styles['transcript-search-wrap']}>
+          <label className={styles['transcript-search']}>
             <Search aria-hidden="true" />
             <input value={queryDraft} onChange={(event) => setQueryDraft(event.target.value)} aria-label="Search transcript sessions" placeholder="Search titles, paths, session IDs" type="search" />
             {queryDraft ? (
-              <button type="button" aria-label="Clear transcript search" onClick={() => setQueryDraft('')}><X aria-hidden="true" /></button>
+              <Button type="button" aria-label="Clear transcript search" onClick={() => setQueryDraft('')} size="icon" variant="ghost"><X aria-hidden="true" /></Button>
             ) : null}
           </label>
-          <span className="transcript-search-feedback" role="status">
+          <StatusLabel className={styles['transcript-search-feedback']} role="status" tone={collectionBusy ? 'neutral' : collection.status === 'error' || collection.status === 'unavailable' ? 'danger' : 'success'}>
             {collectionBusy ? 'Searching' : `${formatInteger(total)} result${total === 1 ? '' : 's'}`}
-          </span>
+          </StatusLabel>
         </div>
 
-        <div className="transcript-date-filter" data-open={datePickerOpen ? 'true' : undefined} ref={datePickerRef}>
-          <button className="transcript-date-trigger" type="button" aria-expanded={datePickerOpen} aria-haspopup="dialog" ref={dateTriggerRef} onClick={() => setDatePickerOpen((open) => !open)}>
+        <div className={styles['transcript-date-filter']} data-open={datePickerOpen ? 'true' : undefined} ref={datePickerRef}>
+          <Button className={styles['transcript-date-trigger']} type="button" aria-expanded={datePickerOpen} aria-haspopup="dialog" ref={dateTriggerRef} onClick={() => setDatePickerOpen((open) => !open)} variant="outline">
             <CalendarDays aria-hidden="true" />
             <span><small>Date range</small><b>{formatDateFilterLabel(owned.from, owned.to)}</b></span>
             <ChevronDown aria-hidden="true" />
-          </button>
+          </Button>
           {datePickerOpen ? (
-            <div className="transcript-date-panel" role="dialog" aria-label="Transcript date range">
-              <div className="transcript-date-presets" role="group" aria-label="Quick date ranges">
-                <button type="button" data-active={!owned.from && !owned.to ? 'true' : undefined} onClick={() => { replaceFilters({ from: '', to: '' }); setDatePickerOpen(false); dateTriggerRef.current?.focus(); }}>All</button>
-                {datePresets.map((days) => <button key={days} type="button" data-active={isDatePresetActive(days, owned.from, owned.to, datePresetBase) ? 'true' : undefined} onClick={() => applyDatePreset(days)}>{days}D</button>)}
+            <div className={styles['transcript-date-panel']} role="dialog" aria-label="Transcript date range">
+              <div className={styles['transcript-date-presets']} role="group" aria-label="Quick date ranges">
+                <Button type="button" data-active={!owned.from && !owned.to ? 'true' : undefined} onClick={() => { replaceFilters({ from: '', to: '' }); setDatePickerOpen(false); dateTriggerRef.current?.focus(); }} variant="outline" size="sm">All</Button>
+                {datePresets.map((days) => <Button key={days} type="button" data-active={isDatePresetActive(days, owned.from, owned.to, datePresetBase) ? 'true' : undefined} onClick={() => applyDatePreset(days)} variant="outline" size="sm">{days}D</Button>)}
               </div>
-              <div className="transcript-date-fields">
-                <label><span>From</span><span className="transcript-date-input"><input aria-label="Filter transcripts from date" min={datasetDateMin || undefined} max={owned.to || datasetDateMax || undefined} onChange={(event) => replaceFilters({ from: event.target.value })} ref={dateFromInputRef} type="date" value={owned.from} /><button type="button" aria-label="Open from-date calendar" onClick={() => openNativeDatePicker(dateFromInputRef.current)}><CalendarDays aria-hidden="true" /></button></span></label>
-                <label><span>To</span><span className="transcript-date-input"><input aria-label="Filter transcripts to date" min={owned.from || datasetDateMin || undefined} max={datasetDateMax || undefined} onChange={(event) => replaceFilters({ to: event.target.value })} ref={dateToInputRef} type="date" value={owned.to} /><button type="button" aria-label="Open to-date calendar" onClick={() => openNativeDatePicker(dateToInputRef.current)}><CalendarDays aria-hidden="true" /></button></span></label>
+              <div className={styles['transcript-date-fields']}>
+                <label><span>From</span><span className={styles['transcript-date-input']}><input aria-label="Filter transcripts from date" min={datasetDateMin || undefined} max={owned.to || datasetDateMax || undefined} onChange={(event) => replaceFilters({ from: event.target.value })} ref={dateFromInputRef} type="date" value={owned.from} /><Button type="button" aria-label="Open from-date calendar" onClick={() => openNativeDatePicker(dateFromInputRef.current)} size="icon" variant="ghost"><CalendarDays aria-hidden="true" /></Button></span></label>
+                <label><span>To</span><span className={styles['transcript-date-input']}><input aria-label="Filter transcripts to date" min={owned.from || datasetDateMin || undefined} max={datasetDateMax || undefined} onChange={(event) => replaceFilters({ to: event.target.value })} ref={dateToInputRef} type="date" value={owned.to} /><Button type="button" aria-label="Open to-date calendar" onClick={() => openNativeDatePicker(dateToInputRef.current)} size="icon" variant="ghost"><CalendarDays aria-hidden="true" /></Button></span></label>
               </div>
             </div>
           ) : null}
         </div>
-        {hasFilters ? <button className="transcript-clear-filters" type="button" onClick={clearFilters}><RotateCcw aria-hidden="true" />Clear filters</button> : null}
+        {hasFilters ? <Button className={styles['transcript-clear-filters']} type="button" onClick={clearFilters} variant="outline"><RotateCcw aria-hidden="true" />Clear filters</Button> : null}
       </div>
 
-      <div className="transcript-workspace">
-        <aside className="transcript-list" aria-label="Transcript sessions" ref={listRef} tabIndex={0} onScroll={rememberListScroll}>
-          <div className="transcript-list-head"><b>{formatInteger(total)} sessions</b><span>{formatInteger(visibleStart)}-{formatInteger(visibleEnd)}</span></div>
+      <div className={styles['transcript-workspace']}>
+        <aside className={styles['transcript-list']} aria-label="Transcript sessions" ref={listRef} tabIndex={0} onScroll={rememberListScroll}>
+          <div className={styles['transcript-list-head']}><b>{formatInteger(total)} sessions</b><span>{formatInteger(visibleStart)}-{formatInteger(visibleEnd)}</span></div>
           {collection.status === 'idle' || (collection.status === 'loading' && !collection.previous) ? (
             <RequestState icon={<Database aria-hidden="true" />} title="Loading transcripts" reason="Fetching the current collection." />
           ) : null}
@@ -504,36 +512,36 @@ export function TranscriptDataset() {
             <RequestState title="No transcripts found" reason={hasFilters ? 'No transcript matches the current filters.' : 'The dataset contains no transcript sessions.'} action={hasFilters ? 'Clear filters' : undefined} onAction={hasFilters ? clearFilters : undefined} />
           ) : null}
           {sessions.map((session) => (
-            <button key={session.id} type="button" className="transcript-row" data-active={owned.session === session.id ? 'true' : undefined} aria-current={owned.session === session.id ? 'true' : undefined} onPointerDown={rememberListScroll} onClick={(event) => { if (event.detail === 0) rememberListScroll(); selectSession(session); }}>
-              <span className="transcript-row-marker" aria-hidden="true" />
-              <span className="transcript-row-top"><b>{session.title}</b><small>{formatBytes(session.bytes)}</small></span>
-              <span className="transcript-row-preview">{session.preview}</span>
-              <span className="transcript-row-meta">{formatDateTime(session.startedAt)}</span>
+            <button key={session.id} type="button" className={styles['transcript-row']} data-active={owned.session === session.id ? 'true' : undefined} aria-current={owned.session === session.id ? 'true' : undefined} onPointerDown={rememberListScroll} onClick={(event) => { if (event.detail === 0) rememberListScroll(); selectSession(session); }}>
+              <span className={styles['transcript-row-marker']} aria-hidden="true" />
+              <span className={styles['transcript-row-top']}><b>{session.title}</b><small>{formatBytes(session.bytes)}</small></span>
+              <span className={styles['transcript-row-preview']}>{session.preview}</span>
+              <span className={styles['transcript-row-meta']}>{formatDateTime(session.startedAt)}</span>
             </button>
           ))}
           {collectionData ? (
-            <div className="transcript-pagination" aria-label="Transcript pages">
-              <button type="button" disabled={owned.page <= 1 || collectionBusy} onClick={() => changePage(owned.page - 1)}>Previous</button>
+            <div className={styles['transcript-pagination']} aria-label="Transcript pages">
+              <Button type="button" disabled={owned.page <= 1 || collectionBusy} onClick={() => changePage(owned.page - 1)} variant="outline">Previous</Button>
               <label><span>Page</span><input value={pageDraft} aria-label={`Jump to transcript page, 1 through ${totalPages}`} inputMode="numeric" min={1} max={totalPages} type="number" disabled={collectionBusy || totalPages <= 1} onBlur={commitPageDraft} onChange={(event) => setPageDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} /><span>of {formatInteger(totalPages)}</span></label>
-              <button type="button" disabled={owned.page >= totalPages || collectionBusy} onClick={() => changePage(owned.page + 1)}>Next</button>
+              <Button type="button" disabled={owned.page >= totalPages || collectionBusy} onClick={() => changePage(owned.page + 1)} variant="outline">Next</Button>
             </div>
           ) : null}
         </aside>
 
-        <article className="transcript-viewer" aria-label="Selected transcript preview" tabIndex={0}>
+        <article className={styles['transcript-viewer']} aria-label="Selected transcript preview" tabIndex={0}>
           {!owned.session ? <RequestState title="Select a transcript" reason="Choose a session from the collection to inspect its records and downloads." /> : (
             <>
-              <button className="transcript-back" type="button" onClick={backToResults}><ArrowLeft aria-hidden="true" />Back to results</button>
-              <header className="transcript-viewer-head">
-                <div><span className="transcript-viewer-id">{owned.session}</span><h2>{selectedSession?.title ?? 'Transcript session'}</h2><p>{selectedSession?.preview ?? 'Deep-linked transcript detail.'}</p></div>
-                <div className="transcript-download-actions">
-                  <a href={`/transcript/api/session/${encodeURIComponent(owned.session)}/raw`} download><FileJson aria-hidden="true" /><span>JSONL</span></a>
-                  {manifest?.archiveBytes && manifest.archiveUrl ? <a href={manifest.archiveUrl} download><Download aria-hidden="true" /><span>ZIP</span></a> : <span aria-disabled="true"><Download aria-hidden="true" /><span>ZIP unavailable</span></span>}
+              <Button className={styles['transcript-back']} type="button" onClick={backToResults} variant="ghost"><ArrowLeft aria-hidden="true" />Back to results</Button>
+              <header className={styles['transcript-viewer-head']}>
+                <div><span className={styles['transcript-viewer-id']}>{owned.session}</span><h2>{selectedSession?.title ?? 'Transcript session'}</h2><p>{selectedSession?.preview ?? 'Deep-linked transcript detail.'}</p></div>
+                <div className={styles['transcript-download-actions']}>
+                  <Button asChild size="sm" variant="outline"><a href={`/transcript/api/session/${encodeURIComponent(owned.session)}/raw`} download><FileJson aria-hidden="true" /><span>JSONL</span></a></Button>
+                  {manifest?.archiveBytes && manifest.archiveUrl ? <Button asChild size="sm" variant="outline"><a href={manifest.archiveUrl} download><Download aria-hidden="true" /><span>ZIP</span></a></Button> : <span aria-disabled="true"><Download aria-hidden="true" /><span>ZIP unavailable</span></span>}
                 </div>
               </header>
 
               {selectedSession ? (
-                <dl className="transcript-meta-grid">
+                <dl className={styles['transcript-meta-grid']}>
                   <Meta label="Started" value={formatDateTime(selectedSession.startedAt)} />
                   <Meta label="Session ID" value={selectedSession.sessionId} />
                   <Meta label="Source" value={[selectedSession.originator, selectedSession.source].filter(Boolean).join(' / ')} />
@@ -541,20 +549,20 @@ export function TranscriptDataset() {
                 </dl>
               ) : null}
 
-              <div className="transcript-detail-body" aria-live="polite">
+              <div className={styles['transcript-detail-body']} aria-live="polite">
                 {selectedDetail.status === 'loading' && !selectedDetail.previous ? <RequestState title="Loading transcript" reason="Fetching up to 80 records." /> : null}
                 {selectedDetail.status === 'not-found' ? <RequestState title="Transcript not found" reason={`No public transcript matches ${selectedDetail.session}.`} /> : null}
                 {selectedDetail.status === 'unavailable' || selectedDetail.status === 'error' ? <RequestBanner tone="danger" message={`${selectedDetail.message}${selectedDetail.previous ? ` Showing records updated ${formatUpdatedAt(selectedDetail.previous.updatedAt)}.` : ''}`} action="Retry" onAction={() => setDetailRetry((value) => value + 1)} /> : null}
                 {detailData ? (
-                  <div className="chat-transcript transcript-preview-thread" aria-label="Complete transcript conversation" tabIndex={0}>
-                    {records.length > 0 ? <CodexTranscriptThread records={records} /> : selectedSession?.samples.length ? <CodexTranscriptThread records={samplesAsRecords(selectedSession.samples)} /> : <RequestState title="Metadata only" reason="This transcript has no displayable conversation records." />}
-                    {detailData.hasMore || loadMore.status === 'error' ? <div className="transcript-load-more-wrap"><button className="transcript-load-more" disabled={loadMore.status === 'loading'} onClick={loadMoreTranscript} type="button">{loadMore.status === 'loading' ? 'Loading more' : loadMore.status === 'error' ? 'Retry load more' : 'Load more'}</button>{loadMore.status === 'error' ? <span role="alert">{loadMore.message}</span> : null}</div> : <span className="transcript-end-note">End of loaded transcript</span>}
+                  <div className={styles['transcript-preview-thread']} aria-label="Complete transcript conversation" tabIndex={0}>
+                    {records.length > 0 ? <Prose className={styles['transcript-prose']} variant="fullWidth"><CodexTranscriptThread records={records} /></Prose> : selectedSession?.samples.length ? <Prose className={styles['transcript-prose']} variant="fullWidth"><CodexTranscriptThread records={samplesAsRecords(selectedSession.samples)} /></Prose> : <RequestState title="Metadata only" reason="This transcript has no displayable conversation records." />}
+                    {detailData.hasMore || loadMore.status === 'error' ? <div className={styles['transcript-load-more-wrap']}><Button className={styles['transcript-load-more']} disabled={loadMore.status === 'loading'} loading={loadMore.status === 'loading'} loadingLabel="Loading more transcript records" onClick={loadMoreTranscript} type="button" variant="outline">{loadMore.status === 'loading' ? 'Loading more' : loadMore.status === 'error' ? 'Retry load more' : 'Load more'}</Button>{loadMore.status === 'error' ? <span role="alert">{loadMore.message}</span> : null}</div> : <span className={styles['transcript-end-note']}>End of loaded transcript</span>}
                   </div>
                 ) : null}
               </div>
 
-              <footer className="transcript-viewer-foot"><span>Lines: <code>{formatInteger(detailData?.totalLines ?? selectedSession?.lines ?? 0)}</code></span><span>Displayed: <code>{formatInteger(conversationItemCount)}</code></span></footer>
-              {manifest?.sources?.length ? <p className="transcript-source-note">Source: {manifest.sources.map((source) => source.note).join(' ')}</p> : null}
+              <footer className={styles['transcript-viewer-foot']}><span>Lines: <code>{formatInteger(detailData?.totalLines ?? selectedSession?.lines ?? 0)}</code></span><span>Displayed: <code>{formatInteger(conversationItemCount)}</code></span></footer>
+              {manifest?.sources?.length ? <p className={styles['transcript-source-note']}>Source: {manifest.sources.map((source) => source.note).join(' ')}</p> : null}
             </>
           )}
         </article>
@@ -572,11 +580,11 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 function RequestState({ icon, title, reason, action, onAction }: { icon?: React.ReactNode; title: string; reason: string; action?: string; onAction?: () => void }) {
-  return <div className="transcript-request-state">{icon}<b>{title}</b><p>{reason}</p>{action && onAction ? <button type="button" onClick={onAction}>{action}</button> : null}</div>;
+  return <div className={styles['transcript-request-state']}>{icon}<b>{title}</b><p>{reason}</p>{action && onAction ? <Button type="button" onClick={onAction} variant="outline">{action}</Button> : null}</div>;
 }
 
 function RequestBanner({ tone, message, action, onAction }: { tone: 'danger'; message: string; action: string; onAction: () => void }) {
-  return <div className={`transcript-request-banner is-${tone}`} role="alert"><span>{message}</span><button type="button" onClick={onAction}>{action}</button></div>;
+  return <div className={styles['transcript-request-banner']} data-tone={tone} role="alert"><span>{message}</span><Button type="button" onClick={onAction} variant="outline">{action}</Button></div>;
 }
 
 function currentCollection(state: CollectionState) {

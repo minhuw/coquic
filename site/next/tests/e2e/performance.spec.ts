@@ -182,6 +182,39 @@ test.describe('performance evidence contracts', () => {
     expectNoPageErrors();
   });
 
+  test('shows trend tooltips from the keyboard under reduced motion', async ({ page }) => {
+    const expectNoPageErrors = collectPageErrors(page);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await loadReadyPerformance(page);
+    await expect(page.locator('#performance-history-state')).toHaveAttribute('data-state', 'ready');
+
+    const firstPoint = page.locator('.trend-hit-point').first();
+    await expect(firstPoint).toHaveAttribute('tabindex', '0');
+    await firstPoint.focus();
+    await expect(firstPoint).toBeFocused();
+
+    const tooltip = page.locator('.trend-tooltip');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText('coquic');
+    await expect(tooltip).toContainText('MiB/s');
+    await expect(tooltip).toContainText('2026-07-13');
+    await page.keyboard.press('Tab');
+    await expect(page.locator('.trend-hit-point').nth(1)).toBeFocused();
+    await expect(tooltip).toContainText('2026-07-14');
+
+    const reducedMotion = await page.getByRole('tab').first().evaluate((tab) => ({
+      matches: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      scrollBehavior: getComputedStyle(tab).scrollBehavior,
+      transitionDurations: getComputedStyle(tab).transitionDuration
+        .split(',')
+        .map((duration) => Number.parseFloat(duration)),
+    }));
+    expect(reducedMotion.matches).toBe(true);
+    expect(reducedMotion.scrollBehavior).toBe('auto');
+    expect(reducedMotion.transitionDurations.every((duration) => duration < 0.001)).toBe(true);
+    expectNoPageErrors();
+  });
+
   test('uses one mobile filter disclosure and restores focus when it closes', async ({ page }) => {
     const expectNoPageErrors = collectPageErrors(page);
     await page.setViewportSize(designViewports.phone375);
@@ -270,6 +303,17 @@ test.describe('performance evidence contracts', () => {
     await expect(flamegraphDialog).toBeVisible();
     await expect(flamegraphDialog.locator('iframe')).toHaveAttribute('title', /flamegraph/i);
     await expect(flamegraphDialog.getByRole('link', { name: 'coquic client flamegraph', exact: true })).toHaveAttribute('href', './perf-artifacts/coquic-client.svg');
+    await page.keyboard.press('Escape');
+    await expect(flamegraphDialog).toBeHidden();
+    await expect(fullscreenTrigger).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(detailDialog).toBeHidden();
+    await expect(detailTrigger).toBeFocused();
+
+    await detailTrigger.click();
+    await expect(detailDialog).toBeVisible();
+    await fullscreenTrigger.click();
+    await expect(flamegraphDialog).toBeVisible();
     await flamegraphDialog.locator('#perf-flamegraph-close').click();
     await expect(flamegraphDialog).toBeHidden();
     await expect(fullscreenTrigger).toBeFocused();
@@ -277,9 +321,6 @@ test.describe('performance evidence contracts', () => {
     await expect(detailDialog).toBeHidden();
     await expect(detailTrigger).toBeFocused();
 
-    await detailTrigger.click();
-    await expect(detailDialog).toBeVisible();
-    await detailDialog.locator('#perf-detail-close').click();
     await expect(page.locator('dialog')).toHaveCount(2);
     expect(fixture.requests).toContain('/perf-artifacts/coquic-client.svg');
     expectNoPageErrors();

@@ -401,6 +401,11 @@
   max-width: 100%;
 }
 
+.markdown-code-content {
+  width: max-content;
+  min-width: 100%;
+}
+
 .placeholder {
   display: grid;
   min-height: 112px;

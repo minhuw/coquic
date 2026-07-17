@@ -151,7 +151,7 @@ test.describe('QUIC specification QA', () => {
       await page.goto('/qa');
       await ask(page);
 
-      const codeSelector = '[data-qa-results-view="mobile"] [data-channel="direct"] [data-editorial-code-block] [data-slot="scroll-region"]';
+      const codeSelector = '[data-qa-results-view="mobile"] [data-channel="direct"] [data-qa-code-block]';
       const codeRegion = page.locator(codeSelector);
       await expect(codeRegion).toHaveAttribute('data-overflow', 'true');
       await expect(codeRegion).toHaveAccessibleName('typescript answer code');

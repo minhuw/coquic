@@ -1,6 +1,6 @@
 'use client';
 
-import { isValidElement, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { isValidElement, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowUp, Check, Copy, RotateCcw, ShieldAlert, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -842,19 +842,15 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 }
 
 function QaRawCodeBlock({ code, language }: { code: string; language: string }) {
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    rootRef.current?.querySelector<HTMLElement>('[data-slot="scroll-region"]')?.setAttribute(
-      'aria-label',
-      `${language} answer code`,
-    );
-  }, [language]);
-
   return (
-    <div ref={rootRef} className={styles['markdown-code']} data-qa-code-block="true">
-      <RawCodeBlock code={code} language={language} />
-    </div>
+    <ScrollRegion
+      aria-label={`${language} answer code`}
+      axis="horizontal"
+      className={styles['markdown-code']}
+      data-qa-code-block="true"
+    >
+      <RawCodeBlock className={styles['markdown-code-content']} code={code} language={language} />
+    </ScrollRegion>
   );
 }
 

@@ -9,7 +9,7 @@
     "prepare:site": "node scripts/prepare-public-assets.mjs && node scripts/build-transcript-dataset.mjs && node scripts/build-search-index.mjs",
     "predev": "npm run prepare:site",
     "dev": "next dev --hostname 127.0.0.1 --port 3001",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "lint:ts": "eslint . --max-warnings=0",
     "lint:css": "node scripts/check-stylelint-baseline.mjs",
     "lint:css:update": "node scripts/check-stylelint-baseline.mjs --update",

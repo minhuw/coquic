@@ -200,7 +200,12 @@ export default function WorkbenchPage() {
             </button>
           </span>
           <div className={styles.stageControls} aria-label="Debugger controls">
-            <button id="start" className={styles.controlButton} type="button" aria-label="Start protocol exchange">
+            <button
+              id="start"
+              className={`${styles.controlButton} ${styles.startButton}`}
+              type="button"
+              aria-label="Start protocol exchange"
+            >
               <span className={styles.controlIcon} aria-hidden="true">
                 <Play />
               </span>
@@ -208,13 +213,23 @@ export default function WorkbenchPage() {
                 Start
               </span>
             </button>
-            <button id="stop" className={styles.controlButton} type="button" aria-label="Pause protocol exchange">
+            <button
+              id="stop"
+              className={`${styles.controlButton} ${styles.secondaryControlButton}`}
+              type="button"
+              aria-label="Pause protocol exchange"
+            >
               <span className={styles.controlIcon} aria-hidden="true">
                 <Pause />
               </span>
               <span className="control-label">Pause</span>
             </button>
-            <button id="step" className={styles.controlButton} type="button" aria-label="Step one protocol action">
+            <button
+              id="step"
+              className={`${styles.controlButton} ${styles.secondaryControlButton}`}
+              type="button"
+              aria-label="Step one protocol action"
+            >
               <span className={styles.controlIcon} aria-hidden="true">
                 <StepForward />
               </span>
@@ -239,7 +254,15 @@ export default function WorkbenchPage() {
               <span>Loss</span>
               <strong id="network-loss-label">0%</strong>
             </span>
-            <input id="network-loss" type="range" min="0" max="40" step="5" defaultValue="0" />
+            <input
+              id="network-loss"
+              className={styles.lossRange}
+              type="range"
+              min="0"
+              max="40"
+              step="5"
+              defaultValue="0"
+            />
           </label>
           <label className={styles.networkRange} htmlFor="network-bandwidth">
             <span>
@@ -288,11 +311,11 @@ export default function WorkbenchPage() {
             <span id="relay-timer-label" className={styles.relayTimerLabel}>
               relay delay: 1000ms
             </span>
-            <div className={`${styles.packetLane} ${styles.c2s}`}>
+            <div className={`${styles.packetLane} ${styles.c2s} packet-lane c2s`}>
               <span className={styles.pipeBack} aria-hidden="true" />
               <span className={styles.pipeFront} aria-hidden="true" />
             </div>
-            <div className={`${styles.packetLane} ${styles.s2c}`}>
+            <div className={`${styles.packetLane} ${styles.s2c} packet-lane s2c`}>
               <span className={styles.pipeBack} aria-hidden="true" />
               <span className={styles.pipeFront} aria-hidden="true" />
             </div>

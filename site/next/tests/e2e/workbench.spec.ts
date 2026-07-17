@@ -45,6 +45,56 @@ async function runTransfer(page: Page) {
   });
 }
 
+async function disableLegacyGeneratedRules(page: Page) {
+  await page.evaluate(() => {
+    const legacySelectors = new Set([
+      '.empty-state, .diag-empty',
+      '.packet-lane .lane-end, .datagram-label',
+      '.datagram',
+      '.datagram-label',
+      '.packet',
+      '.packet::before',
+      '#start',
+      '#start:hover',
+      '#stop',
+      '#stop:hover',
+      '#step',
+      '.workbench-page #start',
+      '.workbench-page #start:hover:not(:disabled)',
+      '.workbench-page #stop, .workbench-page #step',
+    ]);
+
+    function clearRules(rules: CSSRuleList) {
+      for (const cssRule of Array.from(rules)) {
+        const rule = cssRule as CSSRule & {
+          cssRules?: CSSRuleList;
+          selectorText?: string;
+          style?: CSSStyleDeclaration;
+        };
+        if (rule.selectorText && legacySelectors.has(rule.selectorText) && rule.style) {
+          rule.style.cssText = '';
+        }
+        if (rule.cssRules) clearRules(rule.cssRules);
+      }
+    }
+
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        clearRules(sheet.cssRules);
+      } catch {
+        // Ignore browser-owned stylesheets that do not expose CSS rules.
+      }
+    }
+  });
+}
+
+async function prepareVisualSnapshot(page: Page) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
+  });
+}
+
 test.describe('protocol Workbench contracts', () => {
   test('keeps all presets and stable controls when WASM is unavailable', async ({ page }) => {
     const expectNoPageErrors = collectPageErrors(page);
@@ -100,6 +150,55 @@ test.describe('protocol Workbench contracts', () => {
       .toBeGreaterThan(0);
     await expect(start).toContainText('Start', { timeout: 30_000 });
     await expect(page.locator('#global-timer')).not.toHaveText('0ms');
+    expectNoPageErrors();
+  });
+
+  test('owns script bridges and generated presentation without legacy base rules', async ({ page }) => {
+    const expectNoPageErrors = collectPageErrors(page);
+    await loadReadyWorkbench(page);
+
+    await expect(page.locator('.packet-lane.c2s')).toHaveCount(1);
+    await expect(page.locator('.packet-lane.s2c')).toHaveCount(1);
+    await disableLegacyGeneratedRules(page);
+
+    const commandColors = await page.locator('#start').evaluate((button) => {
+      const probe = document.createElement('span');
+      probe.style.backgroundColor = 'var(--command)';
+      document.body.append(probe);
+      const expected = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return { actual: getComputedStyle(button).backgroundColor, expected };
+    });
+    expect(commandColors.actual).toBe(commandColors.expected);
+
+    const emptyState = page.locator('.diag-empty').first();
+    await expect(emptyState).toBeVisible();
+    expect(await emptyState.evaluate((element) => getComputedStyle(element).padding)).not.toBe('0px');
+    expect(await emptyState.evaluate((element) => getComputedStyle(element).borderStyle)).not.toBe('none');
+
+    await setRange(page, 'network-delay', '2500');
+    await setRange(page, 'network-bandwidth', '100');
+    await page.locator('#start').click();
+    const packet = page.locator('#packet-rail .packet').first();
+    const datagram = page.locator('#packet-rail .datagram').first();
+    await expect(packet).toBeAttached({ timeout: 15_000 });
+    await expect(datagram).toBeAttached({ timeout: 15_000 });
+    expect(await packet.evaluate((element) => getComputedStyle(element).position)).toBe('absolute');
+    expect(await datagram.evaluate((element) => getComputedStyle(element).position)).toBe('absolute');
+    expect(await packet.evaluate((element) => getComputedStyle(element, '::before').content)).toBe('""');
+    expect(await datagram.locator('.datagram-label').evaluate((element) => getComputedStyle(element).position)).toBe(
+      'absolute',
+    );
+
+    const laneOffset = await packet.evaluate((element) => {
+      const laneSelector = element.classList.contains('from-server') ? '.packet-lane.s2c' : '.packet-lane.c2s';
+      const lane = document.querySelector(laneSelector);
+      if (!lane) return Number.POSITIVE_INFINITY;
+      const packetBox = element.getBoundingClientRect();
+      const laneBox = lane.getBoundingClientRect();
+      return Math.abs(packetBox.top + packetBox.height / 2 - (laneBox.top + laneBox.height / 2));
+    });
+    expect(laneOffset).toBeLessThanOrEqual(1);
     expectNoPageErrors();
   });
 
@@ -186,5 +285,17 @@ test.describe('protocol Workbench contracts', () => {
       await expectNoGlobalOverflow(page);
     }
     expectNoPageErrors();
+  });
+
+  test('matches initial and populated packet visuals', async ({ page }) => {
+    await loadReadyWorkbench(page);
+    await prepareVisualSnapshot(page);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(page).toHaveScreenshot('workbench-initial.png', { fullPage: false });
+
+    await runTransfer(page);
+    await expect(page.locator('#start-label')).toHaveText('Start', { timeout: 30_000 });
+    await prepareVisualSnapshot(page);
+    await expect(page.locator('#workbench-panel-packets')).toHaveScreenshot('workbench-populated-packets.png');
   });
 });

@@ -1,0 +1,1330 @@
+/* Task presentation is scoped to its component-owned root. */
+
+.root {
+  min-width: 0;
+}
+@layer components {
+  .root :global(.steward-public-page) {
+    --task-canvas: var(--canvas);
+    --task-surface: var(--surface-subtle);
+    --task-surface-muted: var(--surface-subtle);
+    --task-surface-strong: var(--surface-strong);
+    --task-text: var(--text-strong);
+    --task-muted: var(--text-muted);
+    --task-border: var(--border);
+    --task-border-strong: var(--border-strong);
+    --task-control-border: var(--control-border, var(--task-border-strong));
+    --task-accent: var(--accent);
+    --task-accent-ink: var(--accent-ink);
+    --task-accent-soft: var(--accent-soft);
+    --task-success: var(--status-success-ink);
+    --task-success-surface: var(--status-success-surface);
+    --task-success-border: var(--status-success-border);
+    --task-warning: var(--status-warning-ink);
+    --task-warning-surface: var(--status-warning-surface);
+    --task-warning-border: var(--status-warning-border);
+    --task-danger: var(--status-danger-ink);
+    --task-danger-surface: var(--status-danger-surface);
+    --task-danger-border: var(--status-danger-border);
+    --task-neutral: var(--status-neutral-ink, var(--task-muted));
+    --task-neutral-surface: var(--status-neutral-surface, var(--task-surface-muted));
+    --task-neutral-border: var(--status-neutral-border, var(--task-border-strong));
+    --task-flow-grid: var(--task-border);
+    --task-flow-complete: var(--task-success);
+    --task-flow-pending: var(--task-neutral);
+    --task-flow-loop: var(--server-ink, var(--task-accent-ink));
+    --task-flow-loop-surface: var(--server-soft, var(--task-accent-soft));
+    --task-flow-label-surface: var(--task-surface-muted);
+    --task-flow-muted: var(--task-muted);
+  }
+
+  .root :global(.steward-public-page) :global(.task-page-frame) {
+    width: 100%;
+    min-width: 0;
+    min-height: calc(100vh - 56px);
+    overflow: clip;
+    background: var(--task-canvas);
+    color: var(--task-text);
+    padding: var(--space-4, 16px) 0 var(--space-7, 48px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-page-shell) {
+    display: grid;
+    width: min(var(--container-app, 1280px), 100%);
+    min-width: 0;
+    margin: 0 auto;
+    gap: var(--space-4, 16px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-page-topbar) {
+    position: sticky;
+    top: 56px;
+    z-index: var(--z-sticky, 10);
+    display: flex;
+    min-width: 0;
+    min-height: var(--control-coarse, 44px);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3, 12px);
+    border-bottom: 1px solid var(--task-border);
+    background: color-mix(in srgb, var(--task-surface) 92%, transparent);
+    padding: var(--space-2, 8px) 0;
+    backdrop-filter: blur(10px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-back-link) {
+    display: inline-flex;
+    min-height: var(--control-coarse, 44px);
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    border: 1px solid var(--task-control-border);
+    border-radius: 2px;
+    background: var(--task-surface);
+    padding: 0 var(--space-3, 12px);
+    color: var(--task-accent-ink);
+    font: var(--type-ui-label, 500 14px/1.4 var(--font-sans));
+    text-decoration: none;
+  }
+
+  .root :global(.steward-public-page) :global(.task-back-link):hover,.root :global(.steward-public-page) :global(.task-back-link):focus-visible {
+    border-color: var(--task-accent);
+    background: var(--task-accent-soft);
+  }
+
+  .root :global(.steward-public-page) :global(.task-snapshot) {
+    min-width: 0;
+    color: var(--task-muted);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+    text-align: right;
+  }
+
+  .root :global(.steward-public-page) :global(.task-page-header) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+    gap: var(--space-6, 32px);
+    align-items: start;
+    border-bottom: 2px solid var(--task-border-strong);
+    padding: var(--space-4, 16px) 0 var(--space-5, 24px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-page-header-main),.root :global(.steward-public-page) :global(.task-title-row),.root :global(.steward-public-page) :global(.task-conclusion) {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-kicker),.root :global(.steward-public-page) :global(.task-conclusion-label) {
+    display: block;
+    color: var(--task-muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    line-height: 1.35;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.task-title-row) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3, 12px);
+    margin-top: var(--space-2, 8px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-title-row) h1 {
+    min-width: 0;
+    margin: 0;
+    color: var(--task-text);
+    font-size: 42px;
+    font-weight: 500;
+    line-height: 1.08;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.task-summary) {
+    max-width: 760px;
+    margin: var(--space-3, 12px) 0 0;
+    color: var(--task-muted);
+    font-size: 15px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.task-status) {
+    display: inline-flex;
+    min-height: 32px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--task-neutral-border);
+    border-radius: 2px;
+    background: var(--task-neutral-surface);
+    padding: 4px 9px;
+    color: var(--task-neutral);
+    font-size: 12px;
+    font-weight: 750;
+    line-height: 1.3;
+  }
+
+  .root :global(.steward-public-page) :global(.task-status-success) {
+    border-color: var(--task-success-border);
+    background: var(--task-success-surface);
+    color: var(--task-success);
+  }
+
+  .root :global(.steward-public-page) :global(.task-status-warning) {
+    border-color: var(--task-warning-border);
+    background: var(--task-warning-surface);
+    color: var(--task-warning);
+  }
+
+  .root :global(.steward-public-page) :global(.task-status-danger) {
+    border-color: var(--task-danger-border);
+    background: var(--task-danger-surface);
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.task-conclusion) {
+    display: grid;
+    min-height: 92px;
+    align-content: start;
+    gap: 5px;
+    border-left: 3px solid var(--task-accent);
+    background: var(--task-accent-soft);
+    padding: var(--space-3, 12px) var(--space-4, 16px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-conclusion):global(.blocked) {
+    border-left-color: var(--task-danger);
+    background: var(--task-danger-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.task-conclusion) strong {
+    font-size: 16px;
+    font-weight: 750;
+    overflow-wrap: anywhere;
+    text-transform: capitalize;
+  }
+
+  .root :global(.steward-public-page) :global(.task-conclusion)>span:last-child {
+    color: var(--task-muted);
+    font-size: 13px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.task-refresh-note) {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    gap: var(--space-2, 8px);
+    border: 1px solid var(--task-warning-border);
+    background: var(--task-warning-surface);
+    padding: var(--space-3, 12px);
+    color: var(--task-warning);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .root :global(.steward-public-page) :global(.task-refresh-note):global(.invalid),.root :global(.steward-public-page) :global(.task-refresh-note):global(.incompatible),.root :global(.steward-public-page) :global(.task-refresh-note):global(.unavailable) {
+    border-color: var(--task-danger-border);
+    background: var(--task-danger-surface);
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.task-facts),.root :global(.steward-public-page) :global(.task-context-facts) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 0;
+    border-top: 1px solid var(--task-border);
+    border-left: 1px solid var(--task-border);
+    background: var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.task-facts)>div,.root :global(.steward-public-page) :global(.task-context-facts)>div {
+    display: grid;
+    min-width: 0;
+    align-content: start;
+    gap: 4px;
+    border-right: 1px solid var(--task-border);
+    border-bottom: 1px solid var(--task-border);
+    padding: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-facts) dt,.root :global(.steward-public-page) :global(.task-context-facts) dt {
+    color: var(--task-muted);
+    font-size: 11px;
+    font-weight: 750;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.task-facts) dd,.root :global(.steward-public-page) :global(.task-context-facts) dd {
+    min-width: 0;
+    margin: 0;
+    color: var(--task-text);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.task-breakable),.root :global(.steward-public-page) :global(.font-mono) {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+
+  .root :global(.steward-public-page) :global(.task-breakable) {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .root :global(.steward-public-page) :global(.task-inline-link) {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    gap: 5px;
+    color: var(--task-accent-ink);
+    text-decoration: none;
+  }
+
+  .root :global(.steward-public-page) :global(.task-inline-link):hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .root :global(.steward-public-page) :global(.task-detail-layout) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+    gap: var(--space-4, 16px);
+    align-items: start;
+  }
+
+  .root :global(.steward-public-page) :global(.task-detail-main),.root :global(.steward-public-page) :global(.task-detail-aside) {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-4, 16px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-detail-aside) {
+    position: sticky;
+    top: 120px;
+  }
+
+  .root :global(.steward-public-page) :global(.task-section),.root :global(.steward-public-page) :global(.task-context-panel),.root :global(.steward-public-page) :global(.task-state) {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--task-border);
+    border-radius: 3px;
+    background: var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-heading) {
+    display: flex;
+    min-width: 0;
+    min-height: 56px;
+    align-items: center;
+    gap: var(--space-3, 12px);
+    border-bottom: 1px solid var(--task-border);
+    background: var(--task-surface-muted);
+    padding: var(--space-3, 12px) var(--space-4, 16px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-heading)>div {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-heading):global(.compact) {
+    min-height: 50px;
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-icon) {
+    flex: 0 0 auto;
+    color: var(--task-accent-ink);
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-heading) h2 {
+    margin: 3px 0 0;
+    color: var(--task-text);
+    font-size: 17px;
+    font-weight: 750;
+    line-height: 1.25;
+  }
+
+  .root :global(.steward-public-page) :global(.task-section-count),.root :global(.steward-public-page) :global(.task-flow-current) {
+    min-width: 0;
+    margin-left: auto;
+    color: var(--task-muted);
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    text-align: right;
+  }
+
+  .root :global(.steward-public-page) :global(.task-flow-current) b {
+    color: var(--task-text);
+    font-weight: 750;
+    text-transform: capitalize;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-graph) {
+    width: min(684px, 100%);
+    height: 220px;
+    min-width: 0;
+    margin: 0 auto;
+    overflow: hidden;
+    border-bottom: 1px solid var(--task-border);
+    background: var(--task-surface-muted);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-graph) :global(.react-flow) {
+    width: 100% !important;
+    min-width: 0;
+    max-width: 100%;
+    background: var(--task-surface-muted);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-graph) :global(.react-flow__renderer),.root :global(.steward-public-page) :global(.pipeline-graph) :global(.react-flow__pane) {
+    cursor: default;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-graph) :global(.react-flow__attribution),.root :global(.steward-public-page) :global(.pipeline-bound-node) {
+    display: none;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node) {
+    position: relative;
+    display: grid;
+    width: 120px;
+    height: 82px;
+    overflow: hidden;
+    border: 1px solid var(--task-neutral-border);
+    border-radius: 2px;
+    background: var(--task-surface);
+    padding: 8px 9px;
+    color: var(--task-text);
+    box-shadow: none;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node):global(.active) {
+    border-color: var(--task-accent);
+    background: var(--task-accent-soft);
+    box-shadow: inset 3px 0 0 var(--task-accent);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node):global(.complete) {
+    border-color: var(--task-success-border);
+    background: var(--task-success-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node):global(.blocked) {
+    border-color: var(--task-danger-border);
+    background: var(--task-danger-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node-head) {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node-dot) {
+    display: inline-grid;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 1px solid var(--task-border-strong);
+    border-radius: 50%;
+    background: var(--task-surface);
+    color: var(--task-muted);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node):global(.active) :global(.pipeline-node-dot) {
+    border-color: var(--task-accent);
+    color: var(--task-accent-ink);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node):global(.complete) :global(.pipeline-node-dot) {
+    border-color: var(--task-success-border);
+    color: var(--task-success);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node):global(.blocked) :global(.pipeline-node-dot) {
+    border-color: var(--task-danger-border);
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node) b {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node) p {
+    display: -webkit-box;
+    min-width: 0;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    margin: 5px 0 0;
+    color: var(--task-muted);
+    font-size: 10px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+    text-overflow: ellipsis;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node-state) {
+    align-self: end;
+    color: var(--task-muted);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-node-handle) {
+    width: 1px;
+    height: 1px;
+    min-width: 1px;
+    min-height: 1px;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-edge) path {
+    stroke: var(--task-border-strong);
+    stroke-width: 2;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-edge):global(.complete) path,.root :global(.steward-public-page) :global(.pipeline-edge):global(.active) path {
+    stroke: var(--task-flow-complete);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-edge):global(.feedback) path {
+    stroke: var(--task-flow-loop);
+    stroke-dasharray: 5 5;
+    stroke-width: 2;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-edge):global(.feedback):global(.muted) path {
+    stroke: var(--task-flow-pending);
+    opacity: 0.72;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    margin: 0;
+    border-top: 1px solid var(--task-border);
+    background: var(--task-border);
+    padding: 1px;
+    list-style: none;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-stage),.root :global(.steward-public-page) :global(.pipeline-equivalent-loop) {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+    background: var(--task-surface);
+    padding: 9px 10px;
+    color: var(--task-muted);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-stage-label) {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-stage-label) b,.root :global(.steward-public-page) :global(.pipeline-equivalent-loop) b {
+    min-width: 0;
+    color: var(--task-text);
+    font-weight: 750;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-marker) {
+    display: inline-grid;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    place-items: center;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-state) {
+    margin-left: auto;
+    color: var(--task-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-stage):global(.active) :global(.pipeline-equivalent-marker) {
+    color: var(--task-accent-ink);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-stage):global(.complete) :global(.pipeline-equivalent-marker) {
+    color: var(--task-success);
+  }
+
+  .root :global(.steward-public-page) :global(.pipeline-equivalent-stage):global(.blocked) :global(.pipeline-equivalent-marker) {
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-stack):global(.page-stack) {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-3, 12px);
+    background: transparent;
+    padding: var(--space-4, 16px);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-card) {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--task-border);
+    border-radius: 3px;
+    background: var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-card):global(.active-run) {
+    border-color: var(--task-accent);
+    box-shadow: inset 3px 0 0 var(--task-accent);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-head) {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    min-height: var(--control-coarse, 44px);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3, 12px);
+    border: 0;
+    border-radius: 0;
+    background: var(--task-surface-muted);
+    padding: var(--space-3, 12px) var(--space-4, 16px);
+    color: var(--task-text);
+    text-align: left;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-head):hover,.root :global(.steward-public-page) :global(.attempt-head):focus-visible {
+    background: var(--task-accent-soft);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-head)[aria-expanded="true"] {
+    border-bottom: 1px solid var(--task-border);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-title),.root :global(.steward-public-page) :global(.attempt-meta) {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2, 8px);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-title)>div {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-chevron) {
+    flex: 0 0 auto;
+    color: var(--task-muted);
+    transition: transform var(--motion-standard, 180ms) var(--ease-standard, ease);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-head)[aria-expanded="true"] :global(.attempt-chevron) {
+    transform: rotate(90deg);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-kicker) {
+    display: block;
+    color: var(--task-muted);
+    font-size: 10px;
+    font-weight: 750;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-head) h3,.root :global(.steward-public-page) :global(.plan-runs-section) h3,.root :global(.steward-public-page) :global(.steward-integration-run) h3 {
+    min-width: 0;
+    margin: 2px 0 0;
+    color: var(--task-text);
+    font-size: 15px;
+    font-weight: 750;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-meta) {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-meta) span,.root :global(.steward-public-page) :global(.attempt-card-meta) span {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    border: 1px solid var(--task-border);
+    border-radius: 2px;
+    background: var(--task-surface);
+    padding: 3px 7px;
+    color: var(--task-muted);
+    font-size: 11px;
+    line-height: 1.25;
+    white-space: nowrap;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-body),.root :global(.steward-public-page) :global(.attempt-panel),.root :global(.steward-public-page) :global(.run-patch),.root :global(.steward-public-page) :global(.attempt-transcript),.root :global(.steward-public-page) :global(.artifact-content) {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-tabs) {
+    display: flex;
+    min-width: 0;
+    gap: 4px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--task-border);
+    background: var(--task-surface);
+    padding: 6px 8px;
+    scrollbar-width: thin;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-tabs) button {
+    display: inline-flex;
+    min-width: max-content;
+    min-height: var(--control-coarse, 44px);
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--task-border);
+    border-radius: 2px;
+    background: var(--task-surface);
+    padding: 5px 10px;
+    color: var(--task-muted);
+    font-size: 12px;
+    font-weight: 750;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-tabs) button:hover,.root :global(.steward-public-page) :global(.attempt-tabs) button:focus-visible,.root :global(.steward-public-page) :global(.attempt-tabs) button:global(.active) {
+    border-color: var(--task-accent);
+    background: var(--task-accent-soft);
+    color: var(--task-text);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-tabs) button b {
+    color: var(--task-muted);
+    font-size: 10px;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-panel) {
+    background: var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-panel):focus-visible,.root :global(.steward-public-page) :global(.task-timeline):focus-visible {
+    outline: 2px solid var(--task-accent-ink);
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 4px var(--task-accent-soft);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-section-head) {
+    display: flex;
+    min-width: 0;
+    min-height: 44px;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    border-bottom: 1px solid var(--task-border);
+    background: var(--task-surface-muted);
+    padding: 8px 10px;
+    color: var(--task-muted);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-section-head) svg {
+    flex: 0 0 auto;
+    color: var(--task-accent-ink);
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-section-head) h4,.root :global(.steward-public-page) :global(.validation-detail) h4,.root :global(.steward-public-page) :global(.review-card) h4 {
+    min-width: 0;
+    margin: 0;
+    color: var(--task-text);
+    font-size: 13px;
+    font-weight: 750;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-section-head) code {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--task-muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-review-stack) {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-3, 12px);
+    padding: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.review-card) {
+    min-width: 0;
+    border: 1px solid var(--task-border);
+    background: var(--task-surface-muted);
+    padding: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.review-head),.root :global(.steward-public-page) :global(.steward-integration-run-head),.root :global(.steward-public-page) :global(.attempt-card-head) {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.review-head)>div,.root :global(.steward-public-page) :global(.steward-integration-run-head)>div {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.review-verdict) {
+    display: inline-flex;
+    min-height: 28px;
+    align-items: center;
+    border: 1px solid var(--task-neutral-border);
+    border-radius: 2px;
+    padding: 3px 8px;
+    color: var(--task-neutral);
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.review-verdict):global(.approve) {
+    border-color: var(--task-success-border);
+    background: var(--task-success-surface);
+    color: var(--task-success);
+  }
+
+  .root :global(.steward-public-page) :global(.review-verdict):global(.block),.root :global(.steward-public-page) :global(.review-verdict):global(.fail) {
+    border-color: var(--task-danger-border);
+    background: var(--task-danger-surface);
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.review-facts),.root :global(.steward-public-page) :global(.validation-facts) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1px;
+    margin-top: var(--space-3, 12px);
+    background: var(--task-border);
+  }
+
+  .root :global(.steward-public-page) :global(.review-facts) :global(.key-value),.root :global(.steward-public-page) :global(.validation-facts)>div {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    background: var(--task-surface);
+    padding: 8px;
+  }
+
+  .root :global(.steward-public-page) :global(.key-value) span,.root :global(.steward-public-page) :global(.validation-facts) dt {
+    color: var(--task-muted);
+    font-size: 10px;
+    font-weight: 750;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.key-value) b,.root :global(.steward-public-page) :global(.validation-facts) dd {
+    min-width: 0;
+    margin: 0;
+    color: var(--task-text);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.review-note) {
+    margin-top: var(--space-3, 12px);
+    border-top: 1px solid var(--task-border);
+    padding-top: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.review-note) p,.root :global(.steward-public-page) :global(.review-card)>p,.root :global(.steward-public-page) :global(.review-gaps),.root :global(.steward-public-page) :global(.review-findings) {
+    color: var(--task-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.review-note) h4,.root :global(.steward-public-page) :global(.review-card)>h4 {
+    margin-bottom: 5px;
+  }
+
+  .root :global(.steward-public-page) :global(.review-finding) {
+    margin-top: 8px;
+    border-left: 2px solid var(--task-danger);
+    background: var(--task-surface);
+    padding: 8px 10px;
+  }
+
+  .root :global(.steward-public-page) :global(.review-finding-title) {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    gap: 7px;
+    color: var(--task-text);
+  }
+
+  .root :global(.steward-public-page) :global(.severity) {
+    flex: 0 0 auto;
+    color: var(--task-danger);
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-validation-list) {
+    min-width: 0;
+    padding: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.validation-list) {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .root :global(.steward-public-page) :global(.validation-row) {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    min-height: var(--control-coarse, 44px);
+    grid-template-columns: auto minmax(0, 1.2fr) minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    border: 1px solid var(--task-border);
+    border-radius: 2px;
+    background: var(--task-surface);
+    padding: 8px 10px;
+    color: var(--task-text);
+    text-align: left;
+  }
+
+  .root :global(.steward-public-page) :global(.validation-row):hover,.root :global(.steward-public-page) :global(.validation-row):focus-visible,.root :global(.steward-public-page) :global(.validation-row):global(.active) {
+    border-color: var(--task-accent);
+    background: var(--task-accent-soft);
+  }
+
+  .root :global(.steward-public-page) :global(.validation-result) {
+    display: inline-flex;
+    min-width: 46px;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.validation-result):global(.passed) {
+    color: var(--task-success);
+  }
+
+  .root :global(.steward-public-page) :global(.validation-result):global(.failed) {
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.validation-row) code,.root :global(.steward-public-page) :global(.validation-summary),.root :global(.steward-public-page) :global(.validation-time) {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.validation-row) code {
+    color: var(--task-text);
+    font-size: 11px;
+  }
+
+  .root :global(.steward-public-page) :global(.validation-summary),.root :global(.steward-public-page) :global(.validation-time) {
+    color: var(--task-muted);
+    font-size: 11px;
+    line-height: 1.3;
+  }
+
+  .root :global(.steward-public-page) :global(.validation-detail) {
+    margin-top: var(--space-3, 12px);
+    border-top: 1px solid var(--task-border);
+    padding-top: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.validation-detail)>p {
+    margin: var(--space-3, 12px) 0;
+    color: var(--task-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.artifact-metadata) {
+    margin: 0;
+    border-bottom: 1px solid var(--task-border);
+    background: var(--task-surface-muted);
+    padding: 7px 10px;
+    color: var(--task-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.artifact-error) {
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.task-timeline-panel) {
+    display: grid;
+    min-height: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.task-timeline) {
+    min-height: 0;
+    max-height: min(720px, calc(100vh - 250px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--space-4, 16px);
+    scrollbar-gutter: stable;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-item) {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-card),.root :global(.steward-public-page) :global(.timeline-message),.root :global(.steward-public-page) :global(.timeline-field) dd,.root :global(.steward-public-page) :global(.timeline-review) {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-card) {
+    border: 1px solid var(--task-border);
+    background: var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-head),.root :global(.steward-public-page) :global(.timeline-title-row) {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-kind),.root :global(.steward-public-page) :global(.timeline-time) {
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-title-row) h3 {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-fields) {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-field) dd:global(.path) {
+    word-break: break-word;
+  }
+
+  .root :global(.steward-public-page) :global(.steward-integration-detail-panel),.root :global(.steward-public-page) :global(.plan-runs-section) {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.steward-integration-runs) {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-3, 12px);
+    padding: var(--space-4, 16px);
+  }
+
+  .root :global(.steward-public-page) :global(.steward-integration-run),.root :global(.steward-public-page) :global(.plan-runs-section)>:global(.attempt-card) {
+    min-width: 0;
+    border: 1px solid var(--task-border);
+    background: var(--task-surface-muted);
+    padding: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.steward-integration-run-head) :global(.mono),.root :global(.steward-public-page) :global(.plan-runs-section) :global(.font-mono) {
+    color: var(--task-muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.steward-commit-link) {
+    display: inline-flex;
+    min-height: var(--control-coarse, 44px);
+    align-items: center;
+    gap: 6px;
+    color: var(--task-accent-ink);
+    text-decoration: none;
+  }
+
+  .root :global(.steward-public-page) :global(.steward-integration-artifacts) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3, 12px);
+    margin-top: var(--space-3, 12px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-context-facts) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-top: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.task-prompt) {
+    min-width: 0;
+    border: 1px solid var(--task-border);
+    background: var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.task-prompt) summary {
+    min-height: var(--control-coarse, 44px);
+    cursor: pointer;
+    padding: 12px;
+    color: var(--task-text);
+    font-size: 13px;
+    font-weight: 750;
+  }
+
+  .root :global(.steward-public-page) :global(.task-prompt) p {
+    margin: 0;
+    border-top: 1px solid var(--task-border);
+    padding: 12px;
+    color: var(--task-muted);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .root :global(.steward-public-page) :global(.task-state) {
+    display: grid;
+    min-height: 320px;
+    align-content: center;
+    justify-items: start;
+    gap: var(--space-3, 12px);
+    padding: var(--space-7, 48px);
+  }
+
+  .root :global(.steward-public-page) :global(.task-state-icon) {
+    display: inline-grid;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border: 1px solid var(--task-neutral-border);
+    border-radius: 50%;
+    color: var(--task-neutral);
+  }
+
+  .root :global(.steward-public-page) :global(.task-state-invalid) :global(.task-state-icon),.root :global(.steward-public-page) :global(.task-state-incompatible) :global(.task-state-icon),.root :global(.steward-public-page) :global(.task-state-unavailable) :global(.task-state-icon) {
+    border-color: var(--task-danger-border);
+    color: var(--task-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.task-state) h1 {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.task-state) p {
+    max-width: 680px;
+    margin: 0;
+    color: var(--task-muted);
+    font-size: 15px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.task-state) code {
+    max-width: 100%;
+    color: var(--task-muted);
+    overflow-wrap: anywhere;
+  }
+
+  @media (max-width: 1079px) {
+    .root :global(.steward-public-page) :global(.task-page-header) {
+      grid-template-columns: minmax(0, 1fr) minmax(200px, 260px);
+      gap: var(--space-4, 16px);
+    }
+
+    .root :global(.steward-public-page) :global(.task-facts) {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 899px) {
+    .root :global(.steward-public-page) :global(.task-detail-layout) {
+      grid-template-columns: 1fr;
+    }
+
+    .root :global(.steward-public-page) :global(.task-detail-aside) {
+      position: static;
+    }
+  }
+
+  @media (max-width: 767px) {
+    .root :global(.steward-public-page) :global(.task-page-frame) {
+      min-height: auto;
+      padding: var(--space-3, 12px) 0 var(--space-6, 32px);
+    }
+
+    .root :global(.steward-public-page) :global(.task-page-shell) {
+      gap: var(--space-3, 12px);
+    }
+
+    .root :global(.steward-public-page) :global(.task-page-topbar) {
+      position: static;
+      align-items: stretch;
+      flex-direction: column;
+      padding: 0 0 var(--space-2, 8px);
+    }
+
+    .root :global(.steward-public-page) :global(.task-snapshot) {
+      text-align: left;
+    }
+
+    .root :global(.steward-public-page) :global(.task-page-header) {
+      grid-template-columns: 1fr;
+      gap: var(--space-4, 16px);
+      padding-top: var(--space-3, 12px);
+    }
+
+    .root :global(.steward-public-page) :global(.task-title-row) {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .root :global(.steward-public-page) :global(.task-title-row) h1 {
+      font-size: 28px;
+    }
+
+    .root :global(.steward-public-page) :global(.task-conclusion) {
+      min-height: 0;
+    }
+
+    .root :global(.steward-public-page) :global(.task-facts) {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .root :global(.steward-public-page) :global(.pipeline-graph) {
+      display: none;
+    }
+
+    .root :global(.steward-public-page) :global(.pipeline-equivalent) {
+      grid-template-columns: 1fr;
+    }
+
+    .root :global(.steward-public-page) :global(.attempt-head),.root :global(.steward-public-page) :global(.attempt-card-head),.root :global(.steward-public-page) :global(.review-head),.root :global(.steward-public-page) :global(.steward-integration-run-head) {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .root :global(.steward-public-page) :global(.attempt-meta) {
+      justify-content: flex-start;
+    }
+
+    .root :global(.steward-public-page) :global(.validation-row) {
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .root :global(.steward-public-page) :global(.validation-summary),.root :global(.steward-public-page) :global(.validation-time) {
+      grid-column: 2;
+    }
+
+    .root :global(.steward-public-page) :global(.review-facts),.root :global(.steward-public-page) :global(.validation-facts),.root :global(.steward-public-page) :global(.steward-integration-artifacts) {
+      grid-template-columns: 1fr;
+    }
+
+    .root :global(.steward-public-page) :global(.task-timeline) {
+      max-height: none;
+      overflow: visible;
+      padding: var(--space-3, 12px);
+    }
+
+    .root :global(.steward-public-page) :global(.task-state) {
+      min-height: 260px;
+      padding: var(--space-5, 24px);
+    }
+  }
+
+  @media (max-width: 479px) {
+    .root :global(.steward-public-page) :global(.task-facts),.root :global(.steward-public-page) :global(.task-context-facts) {
+      grid-template-columns: 1fr;
+    }
+
+    .root :global(.steward-public-page) :global(.task-section-heading) {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .root :global(.steward-public-page) :global(.task-section-count),.root :global(.steward-public-page) :global(.task-flow-current) {
+      width: 100%;
+      margin-left: 0;
+      text-align: left;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .root :global(.steward-public-page) :global(.attempt-chevron),.root :global(.steward-public-page) :global(.live-spinner) {
+      transition: none;
+      animation: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .root :global(.steward-public-page) {
+      --task-canvas: Canvas;
+      --task-surface: Canvas;
+      --task-surface-muted: Canvas;
+      --task-text: CanvasText;
+      --task-muted: GrayText;
+      --task-border: GrayText;
+      --task-border-strong: CanvasText;
+      --task-accent: Highlight;
+      --task-accent-ink: Highlight;
+      --task-accent-soft: Canvas;
+      --task-success: CanvasText;
+      --task-success-surface: Canvas;
+      --task-success-border: CanvasText;
+      --task-warning: CanvasText;
+      --task-warning-surface: Canvas;
+      --task-warning-border: CanvasText;
+      --task-danger: CanvasText;
+      --task-danger-surface: Canvas;
+      --task-danger-border: CanvasText;
+      --task-neutral: GrayText;
+      --task-neutral-surface: Canvas;
+      --task-neutral-border: GrayText;
+    }
+
+    .root :global(.steward-public-page) :global(.task-conclusion),.root :global(.steward-public-page) :global(.task-refresh-note),.root :global(.steward-public-page) :global(.task-status),.root :global(.steward-public-page) :global(.pipeline-node),.root :global(.steward-public-page) :global(.pipeline-equivalent-stage),.root :global(.steward-public-page) :global(.pipeline-equivalent-loop),.root :global(.steward-public-page) :global(.attempt-card),.root :global(.steward-public-page) :global(.task-section),.root :global(.steward-public-page) :global(.task-context-panel),.root :global(.steward-public-page) :global(.task-state) {
+      forced-color-adjust: none;
+    }
+
+    .root :global(.steward-public-page) :global(.pipeline-edge) path {
+      stroke: CanvasText;
+    }
+  }
+}

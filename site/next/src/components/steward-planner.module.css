@@ -1,0 +1,513 @@
+/* Planner presentation is scoped to its component-owned root. */
+
+.root {
+  min-width: 0;
+}
+@layer components {
+  .root :global(.steward-planner-page) {
+    display: grid;
+    width: min(100%, var(--container-focused));
+    max-width: var(--container-focused);
+    margin: 0 auto;
+    gap: 0;
+    color: var(--text);
+  }
+
+  .root :global(.steward-planner-page) :global(.steward-planner-header) {
+    margin: 0;
+    border-bottom: 0;
+    padding-block: var(--space-6) var(--space-5);
+  }
+
+  .root :global(.steward-planner-header) :global(.page-header__container) {
+    align-items: end;
+  }
+
+  .root :global(.steward-planner-header) :global(.page-header__description) {
+    max-width: 620px;
+    font: var(--type-body);
+  }
+
+  .root :global(.steward-planner-summary) {
+    display: grid;
+    min-width: min(100%, 480px);
+    margin: 0;
+    grid-template-columns: repeat(3, minmax(112px, 1fr));
+    border-block: 1px solid var(--border);
+    color: var(--text);
+    text-align: left;
+  }
+
+  .root :global(.steward-planner-summary)>div {
+    display: grid;
+    min-width: 0;
+    align-content: center;
+    gap: var(--space-1);
+    padding: var(--space-3);
+    border-left: 1px solid var(--border);
+  }
+
+  .root :global(.steward-planner-summary)>div:first-child {
+    border-left: 0;
+  }
+
+  .root :global(.steward-planner-summary) dt {
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-summary) dd {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-weight: 600;
+  }
+
+  .root :global(.steward-planner-summary-warning) dd {
+    color: var(--status-warning-ink);
+  }
+
+  .root :global(.steward-planner-list) {
+    display: grid;
+    gap: 0;
+    border-top: 1px solid var(--border-strong);
+  }
+
+  .root :global(.steward-planner-run) {
+    min-width: 0;
+    border: 0;
+    border-bottom: 1px solid var(--border-strong);
+    border-left: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: var(--space-5) 0;
+  }
+
+  .root :global(.steward-planner-run):global(.planner-status-succeeded),.root :global(.steward-planner-run):global(.planner-status-failed),.root :global(.steward-planner-run):global(.planner-status-invalid) {
+    border-left: 0;
+  }
+
+  .root :global(.steward-planner-run-header) {
+    display: grid;
+    min-width: 0;
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-4);
+  }
+
+  .root :global(.steward-planner-run-title) {
+    display: grid;
+    min-width: 0;
+    align-items: start;
+    grid-template-columns: var(--icon-default) minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+
+  .root :global(.steward-planner-run-title)>svg {
+    width: var(--icon-default);
+    height: var(--icon-default);
+    margin-top: 2px;
+    color: var(--status-neutral-ink);
+  }
+
+  .root :global(.planner-status-succeeded) :global(.steward-planner-run-title)>svg {
+    color: var(--status-success-ink);
+  }
+
+  .root :global(.planner-status-failed) :global(.steward-planner-run-title)>svg,.root :global(.planner-status-invalid) :global(.steward-planner-run-title)>svg {
+    color: var(--status-danger-ink);
+  }
+
+  .root :global(.steward-planner-run-title) h2 {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-weight: 650;
+  }
+
+  .root :global(.steward-planner-run-time) {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-4);
+    margin-top: var(--space-1);
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-run-time) span {
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-planner-status) {
+    display: inline-flex;
+    min-height: 0;
+    align-items: center;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    color: var(--status-neutral-ink);
+    font: var(--type-metadata);
+    text-transform: uppercase;
+  }
+
+  .root :global(.planner-status-succeeded) :global(.steward-planner-status) {
+    color: var(--status-success-ink);
+  }
+
+  .root :global(.planner-status-failed) :global(.steward-planner-status),.root :global(.planner-status-invalid) :global(.steward-planner-status) {
+    color: var(--status-danger-ink);
+  }
+
+  .root :global(.steward-planner-metrics) {
+    display: grid;
+    margin: var(--space-4) 0 0;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-block: 1px solid var(--border);
+  }
+
+  .root :global(.steward-planner-metrics)>div {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-1);
+    border-right: 1px solid var(--border);
+    padding: var(--space-3);
+  }
+
+  .root :global(.steward-planner-metrics)>div:first-child {
+    padding-left: 0;
+  }
+
+  .root :global(.steward-planner-metrics)>div:last-child {
+    border-right: 0;
+  }
+
+  .root :global(.steward-planner-metrics) dt {
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-metrics) dd {
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-weight: 650;
+  }
+
+  .root :global(.steward-planner-run-context) {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root :global(.steward-planner-diagnostic),.root :global(.steward-planner-signals) {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-1);
+    margin: 0;
+    padding: var(--space-3);
+    color: var(--text-muted);
+    font: var(--type-metadata);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-planner-diagnostic) {
+    padding-left: 0;
+    border-right: 1px solid var(--border);
+  }
+
+  .root :global(.steward-planner-run-context) strong {
+    color: var(--text);
+    font: var(--type-code);
+    font-weight: 500;
+  }
+
+  .root :global(.steward-planner-artifacts) {
+    margin-top: var(--space-3);
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .root :global(.steward-planner-artifacts)>summary {
+    display: flex;
+    width: 100%;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    color: var(--text-strong);
+    cursor: pointer;
+    font: var(--type-ui-label);
+    list-style-position: outside;
+  }
+
+  .root :global(.steward-planner-artifacts)>summary>span {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .root :global(.steward-planner-artifacts)>summary>span:last-child {
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-artifact-grid) {
+    display: grid;
+    margin-top: var(--space-2);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0;
+    border-block: 1px solid var(--border);
+  }
+
+  .root :global(.steward-planner-artifact) {
+    display: grid;
+    min-width: 0;
+    align-content: start;
+    gap: var(--space-3);
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: var(--space-3) 0;
+  }
+
+  .root :global(.steward-planner-artifact)+:global(.steward-planner-artifact) {
+    border-left: 1px solid var(--border);
+    padding-left: var(--space-3);
+  }
+
+  .root :global(.steward-planner-artifact):first-child {
+    padding-right: var(--space-3);
+  }
+
+  .root :global(.steward-planner-artifact) header {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .root :global(.steward-planner-artifact) h3,.root :global(.steward-planner-artifact) header span {
+    display: block;
+    margin: 0;
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-artifact) h3 {
+    color: var(--text-strong);
+    font-weight: 650;
+  }
+
+  .root :global(.steward-planner-artifact)>p {
+    margin: 0;
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-artifact-scroll) {
+    max-height: 260px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: var(--code-surface);
+  }
+
+  .root :global(.steward-planner-artifact-code) {
+    border: 0;
+    border-radius: 0;
+  }
+
+  .root :global(.steward-planner-state) {
+    display: grid;
+    min-height: 280px;
+    place-items: center;
+    align-content: center;
+    gap: var(--space-2);
+    border: 0;
+    border-block: 1px solid var(--border-strong);
+    border-radius: 0;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .root :global(.steward-planner-state) svg {
+    color: var(--accent-ink);
+  }
+
+  .root :global(.steward-planner-state-error) svg {
+    color: var(--status-danger-ink);
+  }
+
+  .root :global(.steward-planner-state) strong {
+    color: var(--text-strong);
+    font: var(--type-panel-title);
+  }
+
+  .root :global(.steward-planner-state) span {
+    max-width: 560px;
+    padding-inline: var(--space-4);
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-pagination) {
+    display: grid;
+    min-height: 60px;
+    align-items: center;
+    justify-content: end;
+    grid-template-columns: auto 40px 40px;
+    gap: var(--space-2);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root :global(.steward-planner-pagination) button {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    place-items: center;
+    border: 1px solid var(--control-border);
+    border-radius: 2px;
+    background: var(--surface);
+    color: var(--text-strong);
+    cursor: pointer;
+  }
+
+  .root :global(.steward-planner-pagination) button:hover:not(:disabled) {
+    border-color: var(--accent-ink);
+    color: var(--accent-ink);
+  }
+
+  .root :global(.steward-planner-pagination) button:disabled {
+    border-color: var(--border);
+    background: var(--surface-strong);
+    color: var(--text-muted);
+    opacity: 1;
+  }
+
+  .root :global(.steward-planner-spinner) {
+    animation: steward-planner-spin 900ms linear infinite;
+  }
+
+  @keyframes steward-planner-spin {
+    to {
+      transform: rotate(1turn);
+    }
+  }
+
+  @media (max-width: 767px) {
+    .root :global(.steward-planner-page) :global(.steward-planner-header) {
+      padding-block: var(--space-5);
+    }
+
+    .root :global(.steward-planner-header) :global(.page-header__container) {
+      align-items: stretch;
+    }
+
+    .root :global(.steward-planner-summary) {
+      width: 100%;
+      min-width: 0;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .root :global(.steward-planner-summary)>div:nth-child(3) {
+      grid-column: 1 / -1;
+      border-top: 1px solid var(--border);
+      border-left: 0;
+    }
+
+    .root :global(.steward-planner-run) {
+      padding-block: var(--space-4);
+    }
+
+    .root :global(.steward-planner-run-header) {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .root :global(.steward-planner-status) {
+      padding-left: calc(var(--icon-default) + var(--space-3));
+    }
+
+    .root :global(.steward-planner-metrics) {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .root :global(.steward-planner-metrics)>div:first-child {
+      padding-left: var(--space-3);
+    }
+
+    .root :global(.steward-planner-metrics)>div:nth-child(2) {
+      border-right: 0;
+    }
+
+    .root :global(.steward-planner-metrics)>div:nth-child(-n+2) {
+      border-bottom: 1px solid var(--border);
+    }
+
+    .root :global(.steward-planner-run-context),.root :global(.steward-planner-artifact-grid) {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .root :global(.steward-planner-diagnostic) {
+      padding-left: var(--space-3);
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .root :global(.steward-planner-artifact):first-child {
+      padding-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .root :global(.steward-planner-artifact)+:global(.steward-planner-artifact) {
+      border-left: 0;
+      padding-left: 0;
+    }
+
+    .root :global(.steward-planner-artifacts)>summary {
+      align-items: flex-start;
+      flex-direction: column;
+      justify-content: center;
+      padding-block: var(--space-2);
+    }
+
+    .root :global(.steward-planner-pagination) {
+      justify-content: stretch;
+      grid-template-columns: minmax(0, 1fr) 40px 40px;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .root :global(.steward-planner-pagination) {
+      grid-template-columns: minmax(0, 1fr) 44px 44px;
+    }
+
+    .root :global(.steward-planner-pagination) button {
+      width: 44px;
+      height: 44px;
+    }
+
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .root :global(.steward-planner-spinner) {
+      animation-duration: 0.001ms;
+      animation-iteration-count: 1;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .root :global(.steward-planner-summary),.root :global(.steward-planner-list),.root :global(.steward-planner-run),.root :global(.steward-planner-metrics),.root :global(.steward-planner-run-context),.root :global(.steward-planner-artifact-grid),.root :global(.steward-planner-artifact-scroll),.root :global(.steward-planner-state),.root :global(.steward-planner-pagination) {
+      border-color: CanvasText;
+    }
+
+    .root :global(.steward-planner-run-title)>svg,.root :global(.steward-planner-status),.root :global(.steward-planner-summary-warning) dd {
+      color: CanvasText;
+    }
+  }
+}

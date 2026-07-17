@@ -47,6 +47,7 @@ describe('Steward task request states and anatomy', () => {
     );
 
     expect(screen.getByRole('heading', { name: heading, level: 1 })).toBeInTheDocument();
+    expect(container.querySelectorAll('[data-steward-module="task"]')).toHaveLength(1);
     expect(container.querySelectorAll('main')).toHaveLength(0);
   });
 

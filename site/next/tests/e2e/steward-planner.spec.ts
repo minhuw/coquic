@@ -29,7 +29,7 @@ test.describe('Steward planner history', () => {
     await disclosure.press('Enter');
     await expect(firstPage.first().getByText('artifact transcript 1')).toBeVisible();
     const transcript = firstPage.first().getByRole('region', { name: 'Transcript artifact' });
-    const artifactText = transcript.getByRole('region', { name: 'Transcript artifact text' });
+    const artifactText = transcript.getByRole('region', { name: 'Transcript code' });
     const code = artifactText.locator('.code-block-pre');
     await expect(code).toHaveCSS('white-space', 'pre');
     const codeGeometry = await artifactText.evaluate((element) => ({

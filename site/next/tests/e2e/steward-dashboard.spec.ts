@@ -1,5 +1,5 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 const viewHeadings = {
   overview: 'Operations state',
@@ -88,6 +88,31 @@ test.describe('Steward dashboard', () => {
     }
   });
 
+  test('retains every surface layout after legacy Steward rules are removed', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto('/steward');
+    await expect(page.locator('[data-steward-module="dashboard"]')).toBeVisible();
+    await removeLegacySurfaceRules(page, 'dashboard', '.steward-dashboard');
+    await expect(page.locator('#steward-view-select')).toBeVisible();
+    await expect(page.getByRole('tablist', { name: 'Steward views' })).toHaveCount(0);
+    await expect(page.locator('.steward-dashboard-workspace')).toHaveCSS('display', 'grid');
+
+    await page.goto('/steward/planner');
+    await expect(page.locator('.steward-planner-pagination')).toBeVisible();
+    await removeLegacySurfaceRules(page, 'planner', '.steward-planner');
+    await expect(page.locator('.steward-planner-pagination')).toHaveCSS('display', 'grid');
+    for (const button of await page.locator('.steward-planner-pagination button').all()) {
+      expect((await button.boundingBox())?.height).toBeGreaterThanOrEqual(40);
+    }
+
+    await page.goto('/steward/tasks/task-20260713115945-a1b2c3d4');
+    await expect(page.locator('[data-steward-module="task"]')).toBeVisible();
+    await removeLegacySurfaceRules(page, 'task', '.steward-public-page');
+    await expect(page.locator('.pipeline-graph')).toBeHidden();
+    await expect(page.getByRole('list', { name: 'Task pipeline stages and feedback loops' })).toBeVisible();
+    await expect(page.locator('.task-page-shell')).toHaveCSS('display', 'grid');
+  });
+
   test('keeps local table and graph overflow contained and passes serious Axe checks', async ({ page }) => {
     await page.goto('/steward');
     const viewSelect = page.locator('#steward-view-select');
@@ -135,3 +160,44 @@ test.describe('Steward dashboard', () => {
     expect(zoomed.right).toBeLessThanOrEqual(zoomed.viewportWidth * 2 + 1);
   });
 });
+
+async function removeLegacySurfaceRules(page: Page, moduleName: string, legacyRoot: string) {
+  const moduleClass = await page.locator(`[data-steward-module="${moduleName}"]`).evaluate((element) => (
+    [...element.classList].find((className) => className !== `steward-${element.getAttribute('data-steward-module')}-root`) ?? ''
+  ));
+  expect(moduleClass).not.toBe('');
+
+  const removed = await page.evaluate(({ legacyRootSelector, rootClass }) => {
+    type MutableRuleGroup = {
+      cssRules: CSSRuleList;
+      deleteRule(index: number): void;
+    };
+    function removeFromGroup(group: MutableRuleGroup): number {
+      let count = 0;
+      for (let index = group.cssRules.length - 1; index >= 0; index -= 1) {
+        const rule = group.cssRules[index];
+        if (rule instanceof CSSStyleRule
+          && rule.selectorText.includes(legacyRootSelector)
+          && !rule.selectorText.includes(`.${rootClass}`)) {
+          group.deleteRule(index);
+          count += 1;
+          continue;
+        }
+        const nested = rule as CSSRule & Partial<MutableRuleGroup>;
+        if (nested.cssRules && typeof nested.deleteRule === 'function') {
+          count += removeFromGroup(nested as MutableRuleGroup);
+        }
+      }
+      return count;
+    }
+
+    return [...document.styleSheets].reduce((count, sheet) => {
+      try {
+        return count + removeFromGroup(sheet);
+      } catch {
+        return count;
+      }
+    }, 0);
+  }, { legacyRootSelector: legacyRoot, rootClass: moduleClass });
+  expect(removed).toBeGreaterThan(0);
+}

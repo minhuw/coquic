@@ -37,18 +37,23 @@ describe('Steward dashboard state characterization', () => {
   });
 
   it('reserves a complete loading shell and explains unavailable publication states', () => {
-    const { rerender } = render(<StewardDashboard loading state={null} />);
+    const { container, rerender } = render(<StewardDashboard loading state={null} />);
+    expect(container.querySelectorAll('[data-steward-module="dashboard"]')).toHaveLength(1);
     expect(screen.getByTestId('steward-dashboard-loading')).toBeInTheDocument();
     expect(screen.getByText('Loading the latest Steward snapshot.')).toBeInTheDocument();
     expect(screen.getByText('Offline')).toBeInTheDocument();
 
     rerender(<StewardDashboard fetchError="incompatible" state={null} />);
+    expect(container.querySelectorAll('[data-steward-module="dashboard"]')).toHaveLength(1);
     expect(screen.getByText('The published Steward schema is incompatible with this monitor.')).toBeInTheDocument();
     rerender(<StewardDashboard fetchError="invalid" state={null} />);
+    expect(container.querySelectorAll('[data-steward-module="dashboard"]')).toHaveLength(1);
     expect(screen.getByText('The published Steward snapshot is invalid and cannot be displayed.')).toBeInTheDocument();
     rerender(<StewardDashboard fetchError="unavailable" state={null} />);
+    expect(container.querySelectorAll('[data-steward-module="dashboard"]')).toHaveLength(1);
     expect(screen.getByText('Steward status could not be reached; no public snapshot is available.')).toBeInTheDocument();
     rerender(<StewardDashboard state={asLegacyStewardState(producerFixture('empty'))} />);
+    expect(container.querySelectorAll('[data-steward-module="dashboard"]')).toHaveLength(1);
     expect(screen.getByText('No tasks are currently mirrored.')).toBeInTheDocument();
   });
 

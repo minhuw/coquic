@@ -39,6 +39,7 @@ import type {
   PublicStewardState,
   PublicStewardTask,
 } from './types';
+import styles from './dashboard.module.css';
 
 type StewardMirrorTab = 'overview' | 'tasks' | 'signals' | 'audit' | 'configuration';
 
@@ -110,7 +111,8 @@ export function StewardSnapshotCard({
   const activeTask = state?.tasks.find((task) => !isPublicIntegrationTask(task) && isActiveTask(task));
   const counts = state ? publicTaskCounts(state.tasks) : null;
   return (
-    <section className="steward-dashboard-snapshot" aria-label="Steward snapshot">
+    <div className={styles.root}>
+      <section className="steward-dashboard-snapshot" aria-label="Steward snapshot">
       <header className="steward-dashboard-snapshot-header">
         <div>
           <span className="steward-dashboard-eyebrow">Public snapshot</span>
@@ -139,7 +141,8 @@ export function StewardSnapshotCard({
           <p className="steward-dashboard-muted">Waiting for Steward to publish its first public snapshot.</p>
         )}
       </div>
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -166,7 +169,8 @@ export function StewardDashboard({
   const publication = state.publication;
 
   return (
-    <div className="steward-dashboard steward-dashboard-root steward-mirror-shell" data-steward-module="dashboard" data-steward-root="dashboard">
+    <DashboardSurface>
+      <div className="steward-dashboard steward-mirror-shell">
       <section className="steward-dashboard-summary" aria-label="Steward runtime status">
         <div className="steward-dashboard-summary-lead">
           <div>
@@ -262,13 +266,15 @@ export function StewardDashboard({
           </div>
         </section>
       </div>
-    </div>
+      </div>
+    </DashboardSurface>
   );
 }
 
 function StewardDashboardLoading() {
   return (
-    <div className="steward-dashboard steward-mirror-shell steward-dashboard-loading" aria-busy="true" data-testid="steward-dashboard-loading">
+    <DashboardSurface>
+      <div className="steward-dashboard steward-mirror-shell steward-dashboard-loading" aria-busy="true" data-testid="steward-dashboard-loading">
       <section className="steward-dashboard-summary steward-dashboard-summary-skeleton" aria-label="Loading Steward status">
         <div className="steward-dashboard-skeleton-block steward-dashboard-skeleton-block--lead" />
         <div className="steward-dashboard-skeleton-facts">
@@ -288,7 +294,8 @@ function StewardDashboardLoading() {
           <div className="steward-dashboard-skeleton-block steward-dashboard-skeleton-block--evidence" />
         </div>
       </div>
-    </div>
+      </div>
+    </DashboardSurface>
   );
 }
 
@@ -301,12 +308,22 @@ function StewardDashboardUnavailable({ fetchError }: { fetchError: StewardFetchE
         ? 'Steward status could not be reached; no public snapshot is available.'
         : 'Steward has not published a public snapshot yet.';
   return (
-    <div className="steward-dashboard steward-mirror-shell steward-dashboard-unavailable">
+    <DashboardSurface>
+      <div className="steward-dashboard steward-mirror-shell steward-dashboard-unavailable">
       <section className="steward-dashboard-unavailable-panel" aria-label="Steward publication status">
         <StewardFreshness state={null} />
         <h2>Public snapshot unavailable</h2>
         <p>{message}</p>
       </section>
+      </div>
+    </DashboardSurface>
+  );
+}
+
+function DashboardSurface({ children }: { children: ReactNode }) {
+  return (
+    <div className={`${styles.root} steward-dashboard-root`} data-steward-module="dashboard" data-steward-root="dashboard">
+      {children}
     </div>
   );
 }

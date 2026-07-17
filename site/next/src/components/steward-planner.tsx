@@ -5,11 +5,11 @@ import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from 'rea
 
 import { PageHeader } from '@/components/page-header';
 import { CodeBlock } from '@/components/steward-code-block';
-import { ScrollRegion } from '@/components/ui/scroll-region';
 import type { PublicArtifact, PublicPlannerRun } from '@/generated/steward-public';
 import { decodePublicStewardJson } from '@/lib/steward-schema';
 
 import { StewardStatusLabel } from './steward/shared';
+import styles from './steward-planner.module.css';
 
 const PAGE_SIZE = 10;
 
@@ -76,7 +76,8 @@ export function StewardPlannerLive() {
   }
 
   return (
-    <section aria-label="Planner history" className="steward-planner-page steward-planner-root" data-steward-module="planner" data-steward-root="planner">
+    <div className={`${styles.root} steward-planner-root`} data-steward-module="planner" data-steward-root="planner">
+      <section aria-label="Planner history" className="steward-planner-page">
       <PageHeader
         actions={(
           <dl aria-label="Planner history summary" className="steward-planner-summary">
@@ -152,7 +153,8 @@ export function StewardPlannerLive() {
           </nav>
         </>
       )}
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -230,39 +232,16 @@ function ArtifactSummary({ artifact, label }: { artifact: PublicArtifact; label:
       </header>
       {artifact.text
         ? (
-          <ArtifactScroll label={label}>
-            <CodeBlock
-              className="steward-planner-artifact-code !min-w-max !overflow-visible"
-              compact
-              showLineNumbers={false}
-              text={artifact.text}
-              title={label}
-            />
-          </ArtifactScroll>
+          <CodeBlock
+            className="steward-planner-artifact-code"
+            compact
+            showLineNumbers={false}
+            text={artifact.text}
+            title={label}
+          />
         )
         : <p>No public text was retained for this artifact.</p>}
     </section>
-  );
-}
-
-function ArtifactScroll({ children, label }: { children: ReactNode; label: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // Artifact evidence remains keyboard-addressable even before overflow measurement settles.
-    if (ref.current) ref.current.tabIndex = 0;
-  }, []);
-
-  return (
-    <ScrollRegion
-      aria-label={`${label} artifact text`}
-      axis="both"
-      className="steward-planner-artifact-scroll"
-      ref={ref}
-      role="region"
-    >
-      {children}
-    </ScrollRegion>
   );
 }
 

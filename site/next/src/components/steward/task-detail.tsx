@@ -47,6 +47,7 @@ import type {
   PublicTimelineModel,
   PublicTimelineTone,
 } from './types';
+import styles from './task-detail.module.css';
 
 export function StewardTaskDetailLive({ taskId }: { taskId: string }) {
   const monitor = usePublicStewardState();
@@ -252,7 +253,7 @@ function TaskPageState({ loaded, requestStatus, taskId }: { loaded: boolean; req
 
 function TaskSurface({ children }: { children: ReactNode }) {
   return (
-    <div className="steward-task-root" data-steward-module="task" data-steward-root="task">
+    <div className={`${styles.root} steward-task-root`} data-steward-module="task" data-steward-root="task">
       <div className="steward-public-page steward-task-style-scope">
         <div className="task-page-frame">
           {children}

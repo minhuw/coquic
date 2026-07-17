@@ -31,17 +31,17 @@ test('home uses a consistent wide composition on large screens', async ({ page }
 
   const layout = await page.evaluate(() => {
     const selectors = [
-      '.home-hero-inner',
-      '.home-evidence > .container-wide',
-      '.home-tools > .container-wide',
+      '[data-home-slot="hero-inner"]',
+      '[data-home-section="evidence"] > .container-wide',
+      '[data-home-section="tools"] > .container-wide',
     ];
     const bandWidths = selectors.map((selector) => {
       const element = document.querySelector<HTMLElement>(selector);
       if (!element) throw new Error(`Missing homepage band: ${selector}`);
       return element.getBoundingClientRect().width;
     });
-    const copy = document.querySelector<HTMLElement>('.home-hero-copy')?.getBoundingClientRect();
-    const steward = document.querySelector<HTMLElement>('.home-steward-feature')?.getBoundingClientRect();
+    const copy = document.querySelector<HTMLElement>('[data-home-slot="hero-copy"]')?.getBoundingClientRect();
+    const steward = document.querySelector<HTMLElement>('[data-home-destination="steward"]')?.getBoundingClientRect();
     if (!copy || !steward) throw new Error('Missing homepage hero column');
 
     return {
@@ -63,9 +63,9 @@ test('home orders evidence before its four project tools', async ({ page }) => {
   const home = page.locator('main.coquic-page');
   const bands = home.locator(':scope > section');
   await expect(bands).toHaveCount(3);
-  await expect(bands.nth(0)).toHaveClass(/home-hero/);
-  await expect(bands.nth(1)).toHaveClass(/home-evidence/);
-  await expect(bands.nth(2)).toHaveClass(/home-tools/);
+  await expect(bands.nth(0)).toHaveAttribute('data-home-section', 'hero');
+  await expect(bands.nth(1)).toHaveAttribute('data-home-section', 'evidence');
+  await expect(bands.nth(2)).toHaveAttribute('data-home-section', 'tools');
 
   const evidence = home.getByRole('region', { name: 'Evidence', exact: true });
   for (const [name, description, href] of [
@@ -91,14 +91,14 @@ test('home orders evidence before its four project tools', async ({ page }) => {
     await expect(link.getByText(description, { exact: true })).toBeVisible();
   }
 
-  await expect(evidence.locator('.home-index-links a')).toHaveCount(4);
-  await expect(tools.locator('.home-index-links a')).toHaveCount(4);
-  await expect(evidence.locator('.home-index-art')).toHaveCount(4);
-  await expect(tools.locator('.home-index-art')).toHaveCount(4);
+  await expect(evidence.locator('[data-home-slot="index-links"] a')).toHaveCount(4);
+  await expect(tools.locator('[data-home-slot="index-links"] a')).toHaveCount(4);
+  await expect(evidence.locator('[data-home-art]')).toHaveCount(4);
+  await expect(tools.locator('[data-home-art]')).toHaveCount(4);
   for (const variant of ['performance', 'interop', 'coverage', 'duvet', 'workbench', 'api', 'ask', 'dataset']) {
-    await expect(home.locator(`.home-index-art--${variant}`)).toHaveCount(1);
+    await expect(home.locator(`[data-home-art="${variant}"]`)).toHaveCount(1);
   }
-  const artworkDimensions = await home.locator('.home-index-art').evaluateAll((artworks) =>
+  const artworkDimensions = await home.locator('[data-home-art]').evaluateAll((artworks) =>
     artworks.map((artwork) => {
       const { width, height } = artwork.getBoundingClientRect();
       return { width, height };

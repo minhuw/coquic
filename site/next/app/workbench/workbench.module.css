@@ -1162,6 +1162,7 @@
   }
 
   .root .emptyDetail,
+  .root :global(.empty-detail),
   .root .log:empty::before,
   .root .packetList:empty::before {
     display: block;
@@ -1176,11 +1177,6 @@
 
   .root .packetList:empty::before {
     content: "No packets captured yet.";
-  }
-
-  :global(body.workbench-modal-open) {
-    overflow: hidden;
-    padding-right: var(--workbench-scrollbar-gap, 0);
   }
 
   @media (width <= 1023px) {

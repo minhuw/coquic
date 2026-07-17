@@ -141,6 +141,9 @@ for (const [theme, expectedCanvas] of [
     await expect(page.getByRole('region', { name: 'Evidence', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Tools', exact: true })).toBeVisible();
     await expectNoSeriousAxeViolations(page, 'main');
+    await page.evaluate(() => document.fonts.ready);
+    await page.locator('nextjs-portal').evaluateAll((portals) => portals.forEach((portal) => portal.remove()));
+    await expect(page).toHaveScreenshot(`home-${theme}.png`, { fullPage: true });
   });
 }
 

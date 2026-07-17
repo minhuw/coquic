@@ -153,7 +153,7 @@ test.describe('protocol Workbench contracts', () => {
     await expect(page.locator('[data-workbench-panel="packets"]')).toBeVisible();
     await expectLocalScrollRegion(page, '#packet-list');
     await expectNoGlobalOverflow(page);
-    await expectNoSeriousAxeViolations(page, '.workbench-page');
+    await expectNoSeriousAxeViolations(page, '[data-workbench-root]');
     expectNoPageErrors();
   });
 
@@ -178,7 +178,7 @@ test.describe('protocol Workbench contracts', () => {
         await expect(page.locator('[data-workbench-panel="server"]')).toBeVisible();
       }
       const truncatedLabels = await page
-        .locator('.network-range > span > span')
+        .locator('label[for^="network-"] > span > span')
         .evaluateAll((labels) =>
           labels.filter((label) => label.scrollWidth > label.clientWidth + 1).map((label) => label.textContent),
         );

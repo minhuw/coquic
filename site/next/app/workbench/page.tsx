@@ -4,6 +4,8 @@ import { Gauge, Info, ListChecks, Pause, Play, StepForward, X } from 'lucide-rea
 
 import { PageHeader } from '@/components/page-header';
 
+import styles from './workbench.module.css';
+
 export const metadata: Metadata = {
   title: 'CoQUIC Protocol Workbench',
   other: {
@@ -77,25 +79,25 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
 
   return (
     <section
-      className={`endpoint ${prefix}`}
+      className={`${styles.endpoint} ${prefix === 'client' ? styles.client : styles.server}`}
       id={`workbench-panel-${prefix}`}
       data-workbench-panel={prefix}
       aria-labelledby={`${prefix}-panel-title`}
     >
-      <div className="endpoint-head">
-        <div className="role">{prefix === 'client' ? 'C' : 'S'}</div>
-        <div className="endpoint-title">
+      <div className={styles.endpointHead}>
+        <div className={styles.role}>{prefix === 'client' ? 'C' : 'S'}</div>
+        <div className={styles.endpointTitle}>
           <h2 id={`${prefix}-panel-title`}>{endpoint.label}</h2>
           <span>{endpoint.role}</span>
         </div>
-        <div id={`${prefix}-endpoint-chip`} className="endpoint-chip">
+        <div id={`${prefix}-endpoint-chip`} className={styles.endpointChip}>
           no connection
         </div>
       </div>
 
-      <div id={`${prefix}-state-machine`} className="state-machine" />
+      <div id={`${prefix}-state-machine`} className={styles.stateMachine} />
 
-      <dl className="mini-stats">
+      <dl className={styles.miniStats}>
         {miniStats.map((stat) => (
           <div className="diag-stat" key={stat}>
             <dt>{statLabel(stat)}</dt>
@@ -104,52 +106,52 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
         ))}
       </dl>
 
-      <div className="diag-section">
-        <div className="diag-section-head">
+      <div className={styles.diagSection}>
+        <div className={styles.diagSectionHead}>
           <h3>Path And Recovery</h3>
-          <span id={`${prefix}-recovery-caption`} className="diag-caption">
+          <span id={`${prefix}-recovery-caption`} className={styles.diagCaption}>
             newreno
           </span>
         </div>
-        <dl id={`${prefix}-path-flags`} className="flag-grid" />
-        <dl id={`${prefix}-recovery`} className="recovery-grid" />
+        <dl id={`${prefix}-path-flags`} className={styles.flagGrid} />
+        <dl id={`${prefix}-recovery`} className={styles.recoveryGrid} />
       </div>
 
-      <div className="diag-section">
-        <div className="diag-section-head">
+      <div className={styles.diagSection}>
+        <div className={styles.diagSectionHead}>
           <h3>Packet Spaces</h3>
-          <span id={`${prefix}-packet-caption`} className="diag-caption">
+          <span id={`${prefix}-packet-caption`} className={styles.diagCaption}>
             Initial / Handshake / 1-RTT
           </span>
         </div>
         <div
           id={`${prefix}-packet-spaces`}
-          className="diag-table-wrap packet-space-table-wrap"
+          className={`${styles.diagTableWrap} ${styles.packetSpaceTableWrap}`}
           role="region"
           aria-label={`${endpoint.label} packet spaces`}
           tabIndex={0}
         />
       </div>
 
-      <div className="diag-section">
-        <div className="diag-section-head">
+      <div className={styles.diagSection}>
+        <div className={styles.diagSectionHead}>
           <h3>Flow Control</h3>
-          <span className="diag-caption">connection window</span>
+          <span className={styles.diagCaption}>connection window</span>
         </div>
-        <dl id={`${prefix}-flow`} className="flow-grid" />
-        <dl id={`${prefix}-stream-limits`} className="stream-limit-grid" />
+        <dl id={`${prefix}-flow`} className={styles.flowGrid} />
+        <dl id={`${prefix}-stream-limits`} className={styles.streamLimitGrid} />
       </div>
 
-      <div className="diag-section">
-        <div className="diag-section-head">
+      <div className={styles.diagSection}>
+        <div className={styles.diagSectionHead}>
           <h3>Streams</h3>
-          <span id={`${prefix}-stream-caption`} className="diag-caption">
+          <span id={`${prefix}-stream-caption`} className={styles.diagCaption}>
             none
           </span>
         </div>
         <div
           id={`${prefix}-streams`}
-          className="diag-table-wrap"
+          className={styles.diagTableWrap}
           role="region"
           aria-label={`${endpoint.label} streams`}
           tabIndex={0}
@@ -161,19 +163,24 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
 
 export default function WorkbenchPage() {
   return (
-    <main className="coquic-page workbench-page" id="workbench-page" data-workbench-view="client">
+    <main
+      className={`coquic-page workbench-page ${styles.root}`}
+      id="workbench-page"
+      data-workbench-root="true"
+      data-workbench-view="client"
+    >
       <PageHeader eyebrow="wasm QUIC laboratory" title="CoQUIC Protocol Workbench" variant="tool" />
 
-      <div className="scenario-toolbar" aria-label="Interop case controls">
-        <div className="scenario-control">
-          <label className="scenario-label" htmlFor="scenario-preset">
-            <span className="control-icon" aria-hidden="true">
+      <div className={styles.scenarioToolbar} aria-label="Interop case controls">
+        <div className={styles.scenarioControl}>
+          <label className={styles.scenarioLabel} htmlFor="scenario-preset">
+            <span className={styles.controlIcon} aria-hidden="true">
               <ListChecks />
             </span>
             <span>Interop Scenario</span>
           </label>
-          <span className="scenario-select-row">
-            <select id="scenario-preset" className="scenario-select" defaultValue="transfer">
+          <span className={styles.scenarioSelectRow}>
+            <select id="scenario-preset" className={styles.scenarioSelect} defaultValue="transfer">
               {interopPresets.map(([value, label]) => (
                 <option value={value} key={value}>
                   {label}
@@ -181,34 +188,34 @@ export default function WorkbenchPage() {
               ))}
             </select>
             <button
-              className="scenario-info"
+              className={styles.scenarioInfo}
               type="button"
               aria-label="Selected interop case details"
               aria-describedby="scenario-summary"
             >
               <Info />
-              <span id="scenario-summary" className="scenario-summary" role="tooltip">
+              <span id="scenario-summary" className={styles.scenarioSummary} role="tooltip">
                 Stream transfer with packet inspection.
               </span>
             </button>
           </span>
-          <div className="stage-controls" aria-label="Debugger controls">
-            <button id="start" className="control-button" type="button" aria-label="Start protocol exchange">
-              <span className="control-icon" aria-hidden="true">
+          <div className={styles.stageControls} aria-label="Debugger controls">
+            <button id="start" className={styles.controlButton} type="button" aria-label="Start protocol exchange">
+              <span className={styles.controlIcon} aria-hidden="true">
                 <Play />
               </span>
               <span id="start-label" className="control-label">
                 Start
               </span>
             </button>
-            <button id="stop" className="control-button" type="button" aria-label="Pause protocol exchange">
-              <span className="control-icon" aria-hidden="true">
+            <button id="stop" className={styles.controlButton} type="button" aria-label="Pause protocol exchange">
+              <span className={styles.controlIcon} aria-hidden="true">
                 <Pause />
               </span>
               <span className="control-label">Pause</span>
             </button>
-            <button id="step" className="control-button" type="button" aria-label="Step one protocol action">
-              <span className="control-icon" aria-hidden="true">
+            <button id="step" className={styles.controlButton} type="button" aria-label="Step one protocol action">
+              <span className={styles.controlIcon} aria-hidden="true">
                 <StepForward />
               </span>
               <span id="step-label" className="control-label">
@@ -217,9 +224,9 @@ export default function WorkbenchPage() {
             </button>
           </div>
         </div>
-        <div className="network-control" aria-label="Network environment">
-          <span className="network-control-head">
-            <span className="control-icon" aria-hidden="true">
+        <div className={styles.networkControl} aria-label="Network environment">
+          <span className={styles.networkControlHead}>
+            <span className={styles.controlIcon} aria-hidden="true">
               <Gauge />
             </span>
             <span>
@@ -227,21 +234,21 @@ export default function WorkbenchPage() {
               <small id="network-summary">1000ms / 20Mbps / 0% loss</small>
             </span>
           </span>
-          <label className="network-range" htmlFor="network-loss">
+          <label className={styles.networkRange} htmlFor="network-loss">
             <span>
               <span>Loss</span>
               <strong id="network-loss-label">0%</strong>
             </span>
             <input id="network-loss" type="range" min="0" max="40" step="5" defaultValue="0" />
           </label>
-          <label className="network-range" htmlFor="network-bandwidth">
+          <label className={styles.networkRange} htmlFor="network-bandwidth">
             <span>
               <span>Bandwidth</span>
               <strong id="network-bandwidth-label">20Mbps</strong>
             </span>
             <input id="network-bandwidth" type="range" min="0.5" max="100" step="0.5" defaultValue="20" />
           </label>
-          <label className="network-range" htmlFor="network-delay">
+          <label className={styles.networkRange} htmlFor="network-delay">
             <span>
               <span>Delay</span>
               <strong id="network-delay-label">1000ms</strong>
@@ -251,8 +258,8 @@ export default function WorkbenchPage() {
         </div>
       </div>
 
-      <div className="visualization-status" aria-label="Protocol status">
-        <div className="control-timer" aria-live="polite">
+      <div className={styles.visualizationStatus} aria-label="Protocol status">
+        <div className={styles.controlTimer} aria-live="polite">
           <span>Global Timer</span>
           <strong id="global-timer">0ms</strong>
         </div>
@@ -261,37 +268,37 @@ export default function WorkbenchPage() {
         </div>
       </div>
 
-      <section className="packet-stage-shell" aria-labelledby="packet-stage-title">
-        <header className="workbench-section-heading">
+      <section className={styles.packetStageShell} aria-labelledby="packet-stage-title">
+        <header className={styles.workbenchSectionHeading}>
           <div>
-            <span className="workbench-kicker">Live topology</span>
+            <span className={styles.workbenchKicker}>Live topology</span>
             <h2 id="packet-stage-title">Packet Exchange</h2>
           </div>
-          <span className="workbench-section-meta">client to server / server to client</span>
+          <span className={styles.workbenchSectionMeta}>client to server / server to client</span>
         </header>
 
-        <div className="packet-stage" aria-label="QUIC packet exchange">
-          <div className="stage-node stage-client">
+        <div className={styles.packetStage} aria-label="QUIC packet exchange">
+          <div className={`${styles.stageNode} ${styles.stageClient}`}>
             <span>C</span>
             <strong>Client</strong>
             <small>browser endpoint</small>
           </div>
 
-          <div id="packet-rail" className="packet-rail">
-            <span id="relay-timer-label" className="relay-timer-label">
+          <div id="packet-rail" className={styles.packetRail}>
+            <span id="relay-timer-label" className={styles.relayTimerLabel}>
               relay delay: 1000ms
             </span>
-            <div className="packet-lane c2s">
-              <span className="pipe-back" aria-hidden="true" />
-              <span className="pipe-front" aria-hidden="true" />
+            <div className={`${styles.packetLane} ${styles.c2s}`}>
+              <span className={styles.pipeBack} aria-hidden="true" />
+              <span className={styles.pipeFront} aria-hidden="true" />
             </div>
-            <div className="packet-lane s2c">
-              <span className="pipe-back" aria-hidden="true" />
-              <span className="pipe-front" aria-hidden="true" />
+            <div className={`${styles.packetLane} ${styles.s2c}`}>
+              <span className={styles.pipeBack} aria-hidden="true" />
+              <span className={styles.pipeFront} aria-hidden="true" />
             </div>
           </div>
 
-          <div className="stage-node stage-server">
+          <div className={`${styles.stageNode} ${styles.stageServer}`}>
             <span>S</span>
             <strong>Server</strong>
             <small>browser endpoint</small>
@@ -299,12 +306,12 @@ export default function WorkbenchPage() {
         </div>
       </section>
 
-      <section className="workbench-results" aria-label="Result Section">
-        <div className="workbench-view-tabs" id="workbench-view-tabs" role="tablist" aria-label="Workbench view">
+      <section className={styles.workbenchResults} aria-label="Result Section">
+        <div className={styles.workbenchViewTabs} id="workbench-view-tabs" role="tablist" aria-label="Workbench view">
           {(['client', 'server', 'trace', 'packets'] as const).map((view, index) => (
             <button
               id={`workbench-tab-${view}`}
-              className="workbench-view-tab"
+              className={styles.workbenchViewTab}
               type="button"
               role="tab"
               aria-controls={`workbench-panel-${view}`}
@@ -318,8 +325,8 @@ export default function WorkbenchPage() {
           ))}
         </div>
 
-        <section className="workbench" aria-label="Endpoint diagnostics">
-          <div className="endpoint-grid">
+        <section className={styles.workbench} aria-label="Endpoint diagnostics">
+          <div className={styles.endpointGrid}>
             {endpoints.map((endpoint) => (
               <EndpointPanel endpoint={endpoint} key={endpoint.key} />
             ))}
@@ -327,20 +334,20 @@ export default function WorkbenchPage() {
         </section>
 
         <section
-          className="timeline"
+          className={styles.timeline}
           id="workbench-panel-trace"
           data-workbench-panel="trace"
           aria-labelledby="workbench-trace-title"
         >
-          <div className="panel-head">
+          <div className={styles.panelHead}>
             <div>
-              <span className="workbench-kicker">Runtime trace</span>
+              <span className={styles.workbenchKicker}>Runtime trace</span>
               <h2 id="workbench-trace-title">Datagrams And Events</h2>
             </div>
           </div>
           <div
             id="log"
-            className="log"
+            className={styles.log}
             role="log"
             aria-label="Datagram and event trace"
             aria-live="polite"
@@ -349,25 +356,25 @@ export default function WorkbenchPage() {
         </section>
 
         <section
-          className="packet-inspector"
+          className={styles.packetInspector}
           id="workbench-panel-packets"
           data-workbench-panel="packets"
           aria-label="Packet capture inspector"
         >
-          <div className="capture-panel">
-            <div className="panel-head">
+          <div className={styles.capturePanel}>
+            <div className={styles.panelHead}>
               <div>
-                <span className="workbench-kicker">Wire evidence</span>
+                <span className={styles.workbenchKicker}>Wire evidence</span>
                 <h2>Packet Log</h2>
               </div>
-              <div className="panel-actions">
-                <button id="download-pcap" className="panel-button" type="button" disabled>
+              <div className={styles.panelActions}>
+                <button id="download-pcap" className={styles.panelButton} type="button" disabled>
                   Download PCAP
                 </button>
                 <span id="packet-count">0 captured</span>
               </div>
             </div>
-            <div id="packet-list" className="packet-list" role="region" aria-label="Captured packets" tabIndex={0} />
+            <div id="packet-list" className={styles.packetList} role="region" aria-label="Captured packets" tabIndex={0} />
           </div>
 
           <span id="packet-selected" hidden>
@@ -377,25 +384,25 @@ export default function WorkbenchPage() {
         </section>
       </section>
 
-      <dialog id="packet-modal" className="modal-backdrop" aria-labelledby="packet-modal-title">
-        <div className="packet-modal">
-          <div className="modal-head">
+      <dialog id="packet-modal" className={styles.modalBackdrop} aria-labelledby="packet-modal-title">
+        <div className={styles.packetModal}>
+          <div className={styles.modalHead}>
             <div>
               <h2 id="packet-modal-title">Packet Details</h2>
               <span id="packet-modal-selected">none selected</span>
             </div>
-            <button id="packet-modal-close" className="modal-close" type="button" aria-label="Close packet details">
+            <button id="packet-modal-close" className={styles.modalClose} type="button" aria-label="Close packet details">
               <X aria-hidden="true" className="size-4" />
             </button>
           </div>
           <div
             id="packet-modal-detail"
-            className="packet-detail modal-detail"
+            className={styles.modalDetail}
             role="region"
             aria-label="Selected packet detail"
             tabIndex={0}
           >
-            <p className="empty-detail">
+            <p className={styles.emptyDetail}>
               Select a packet to inspect its QUIC header, protected payload, and raw bytes.
             </p>
           </div>

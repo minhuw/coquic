@@ -1,0 +1,1432 @@
+/* Workbench owns its route presentation; generated script classes stay global below .root. */
+/* stylelint-disable no-descending-specificity, selector-class-pattern, selector-pseudo-class-no-unknown */
+
+@layer components {
+  .root {
+    width: 100%;
+    max-width: var(--container-app);
+    min-width: 0;
+    padding-bottom: var(--space-8);
+    background: transparent;
+    color: var(--text);
+  }
+
+  .root .scenarioToolbar {
+    display: grid;
+    grid-template-columns: minmax(280px, 0.8fr) minmax(460px, 1.2fr);
+    gap: var(--space-5);
+    align-items: stretch;
+    margin-top: var(--space-5);
+    padding-block: var(--space-4);
+    border-block: 1px solid var(--border);
+  }
+
+  .root .scenarioControl {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: var(--space-2);
+    padding: 0 var(--space-5) 0 0;
+    border: 0;
+    border-right: 1px solid var(--border);
+  }
+
+  .root .scenarioLabel,
+  .root .networkControlHead {
+    display: grid;
+    min-height: var(--control-default);
+    grid-template-columns: 28px minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0;
+    border: 0;
+    color: var(--text-strong);
+    font: var(--type-ui-label);
+  }
+
+  .root .scenarioSelectRow {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) var(--control-default);
+    gap: var(--space-2);
+  }
+
+  .root .scenarioSelect,
+  .root .scenarioInfo,
+  .root .controlButton,
+  .root .panelButton,
+  .root .workbenchViewTab,
+  .root .modalClose {
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-control);
+    background: var(--canvas);
+    color: var(--text-strong);
+    font: var(--type-ui-label);
+    transition:
+      border-color var(--motion-fast) var(--ease-standard),
+      background-color var(--motion-fast) var(--ease-standard),
+      color var(--motion-fast) var(--ease-standard);
+  }
+
+  .root .scenarioSelect {
+    width: 100%;
+    min-height: var(--control-default);
+    min-width: 0;
+    padding-inline: var(--space-3) 34px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .root .scenarioSelect:hover,
+  .root .scenarioSelect:focus-visible,
+  .root .scenarioInfo:hover,
+  .root .controlButton:hover:not(:disabled),
+  .root .panelButton:hover:not(:disabled),
+  .root .modalClose:hover {
+    border-color: var(--text-strong);
+    background: var(--surface-subtle);
+  }
+
+  .root .scenarioInfo {
+    position: relative;
+    display: grid;
+    width: var(--control-default);
+    height: var(--control-default);
+    place-items: center;
+    padding: 0;
+  }
+
+  .root .scenarioInfo svg,
+  .root .controlIcon svg,
+  .root .modalClose svg {
+    width: var(--icon-default);
+    height: var(--icon-default);
+    stroke: currentcolor;
+  }
+
+  .root .scenarioSummary {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + var(--space-2));
+    z-index: var(--z-dropdown);
+    display: none;
+    width: min(300px, calc(100vw - 32px));
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-panel);
+    background: var(--canvas);
+    box-shadow: var(--shadow-dropdown);
+    color: var(--text);
+    font: var(--type-code);
+    text-align: left;
+  }
+
+  .root .scenarioInfo:hover .scenarioSummary,
+  .root .scenarioInfo:focus-visible .scenarioSummary,
+  .root .scenarioInfo:focus-within .scenarioSummary {
+    display: block;
+  }
+
+  .root .stageControls {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-2);
+    margin-top: auto;
+    padding-top: var(--space-3);
+    border: 0;
+    border-top: 1px solid var(--border);
+    background: transparent;
+  }
+
+  .root .controlButton {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    min-height: var(--control-default);
+    grid-template-columns: var(--icon-default) minmax(0, max-content);
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    line-height: 1;
+  }
+
+  .root .controlButton:disabled,
+  .root .panelButton:disabled {
+    border-color: var(--border);
+    background: var(--surface-strong);
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 1;
+  }
+
+  .root #start {
+    border-color: var(--command);
+    background: var(--command);
+    color: var(--on-command);
+  }
+
+  .root #start:hover:not(:disabled) {
+    border-color: var(--command-hover);
+    background: var(--command-hover);
+    color: var(--on-command);
+  }
+
+  .root #stop,
+  .root #step {
+    border-color: var(--control-border);
+    background: var(--canvas);
+    color: var(--text-strong);
+  }
+
+  .root .controlIcon {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    color: currentcolor;
+  }
+
+  .root .networkControl {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0 var(--space-4);
+    padding: 0;
+  }
+
+  .root .networkControlHead {
+    grid-column: 1 / -1;
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root .networkControlHead > span:last-child {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .root .networkControlHead strong {
+    overflow: hidden;
+    color: var(--text-strong);
+    font: var(--type-ui-label);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .root .networkControlHead small {
+    overflow: hidden;
+    color: var(--text-muted);
+    font: var(--type-code);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .root .networkRange {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+    align-content: center;
+    padding-block: var(--space-2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root .networkRange > span {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .root .networkRange span span {
+    overflow: hidden;
+    color: var(--text-muted);
+    font: var(--type-metadata);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .root .networkRange strong {
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .root .networkRange input {
+    width: 100%;
+    min-width: 0;
+    height: 24px;
+    accent-color: var(--accent-ink);
+    cursor: pointer;
+  }
+
+  .root #network-loss {
+    accent-color: var(--status-danger-ink);
+  }
+
+  .root .visualizationStatus {
+    display: flex;
+    min-width: 0;
+    align-items: stretch;
+    justify-content: flex-end;
+    gap: 0;
+    padding-block: var(--space-2);
+    border: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root .controlTimer,
+  .root :global(.module-state) {
+    min-width: 156px;
+    min-height: var(--control-default);
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-left: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font: var(--type-code);
+  }
+
+  .root .controlTimer {
+    display: grid;
+    gap: 1px;
+  }
+
+  .root .controlTimer span {
+    color: var(--text-muted);
+    font: var(--type-metadata);
+    text-transform: uppercase;
+  }
+
+  .root .controlTimer strong {
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .root :global(.module-state) {
+    display: grid;
+    place-items: center;
+    text-align: center;
+    text-transform: uppercase;
+  }
+
+  .root :global(.module-state)[data-state="loading"] {
+    color: var(--status-neutral-ink);
+  }
+
+  .root :global(.module-state)[data-state="ready"] {
+    color: var(--status-success-ink);
+  }
+
+  .root :global(.module-state)[data-state="error"] {
+    color: var(--status-danger-ink);
+  }
+
+  .root .packetStageShell {
+    min-width: 0;
+    padding-block: var(--space-5);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root .workbenchSectionHeading,
+  .root .panelHead {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+  }
+
+  .root .workbenchSectionHeading {
+    padding-bottom: var(--space-3);
+  }
+
+  .root .workbenchSectionHeading > div,
+  .root .panelHead > div:first-child {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+  }
+
+  .root .workbenchSectionHeading h2,
+  .root .panelHead h2 {
+    color: var(--text-strong);
+    font: var(--type-panel-title);
+  }
+
+  .root .workbenchKicker,
+  .root .workbenchSectionMeta {
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root .workbenchKicker {
+    text-transform: uppercase;
+  }
+
+  .root .workbenchSectionMeta {
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .root .packetStage {
+    display: grid;
+    min-width: 0;
+    min-height: 300px;
+    grid-template-columns: minmax(112px, 0.16fr) minmax(0, 1fr) minmax(112px, 0.16fr);
+    align-items: stretch;
+    gap: var(--space-4);
+    padding: 0;
+  }
+
+  .root .stageNode {
+    display: grid;
+    min-width: 0;
+    align-content: center;
+    justify-items: center;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-2);
+    border-block: 1px solid var(--border);
+    background: transparent;
+    text-align: center;
+  }
+
+  .root .stageNode > span,
+  .root .endpoint .role {
+    display: inline-grid;
+    place-items: center;
+    border-radius: var(--radius-control);
+    color: white;
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
+  .root .stageNode > span {
+    width: 48px;
+    height: 48px;
+    font-size: 18px;
+  }
+
+  .root .stageClient > span,
+  .root .client .role {
+    background: var(--client);
+  }
+
+  .root .stageServer > span,
+  .root .server .role {
+    background: var(--server);
+  }
+
+  .root .stageNode strong {
+    color: var(--text-strong);
+    font: var(--type-panel-title);
+  }
+
+  .root .stageNode small,
+  .root .endpointTitle span,
+  .root .diagCaption {
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root .packetRail {
+    position: relative;
+    isolation: isolate;
+    min-width: 0;
+    min-height: 300px;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-panel);
+    background: var(--surface-subtle);
+    box-shadow: none;
+  }
+
+  .root .packetRail::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: var(--space-6);
+    left: var(--space-6);
+    height: 1px;
+    background: var(--border);
+    transform: translateY(-50%);
+  }
+
+  .root .relayTimerLabel {
+    position: absolute;
+    top: var(--space-3);
+    left: 50%;
+    z-index: 8;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--canvas);
+    color: var(--text-muted);
+    font: var(--type-code);
+    font-size: 11px;
+    white-space: nowrap;
+    transform: translateX(-50%);
+  }
+
+  .root .packetLane {
+    position: absolute;
+    right: 48px;
+    left: 48px;
+    height: 48px;
+    border: 0;
+    background: transparent;
+    pointer-events: none;
+  }
+
+  .root .packetLane.c2s {
+    top: 72px;
+  }
+
+  .root .packetLane.s2c {
+    bottom: 62px;
+  }
+
+  .root .pipeBack,
+  .root .pipeFront {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    left: 0;
+    border: 0;
+    border-radius: 0;
+    transform: translateY(-50%);
+  }
+
+  .root .pipeBack {
+    height: 1px;
+    background: var(--border-strong);
+  }
+
+  .root .pipeFront {
+    height: 3px;
+  }
+
+  .root .packetLane.c2s .pipeFront {
+    background: var(--client);
+  }
+
+  .root .packetLane.s2c .pipeFront {
+    background: var(--server);
+  }
+
+  .root .packetLane::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    z-index: 5;
+    width: 0;
+    height: 0;
+    border-block: 5px solid transparent;
+    transform: translateY(-50%);
+  }
+
+  .root .packetLane.c2s::after {
+    right: 0;
+    border-left: 9px solid var(--client);
+  }
+
+  .root .packetLane.s2c::after {
+    left: 0;
+    border-right: 9px solid var(--server);
+  }
+
+  .root :global(.lane-end),
+  .root :global(.datagram-label) {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--canvas);
+    color: var(--text-muted);
+    font: var(--type-code);
+    font-size: 10px;
+  }
+
+  .root :global(.packet),
+  .root :global(.datagram) {
+    border-radius: var(--radius-control);
+    background: var(--canvas);
+  }
+
+  .root :global(.datagram) {
+    border: 1px dashed var(--client);
+  }
+
+  .root :global(.packet) {
+    display: grid;
+    width: 120px;
+    min-height: 34px;
+    grid-template-columns: 6px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border: 1px solid var(--client);
+    box-shadow: inset 3px 0 0 var(--client);
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-size: 10px;
+  }
+
+  .root :global(.packet)::before {
+    width: 6px;
+    height: 18px;
+    border-radius: 0;
+    background: var(--client);
+  }
+
+  .root :global(.packet):global(.from-server) {
+    border-color: var(--server);
+    box-shadow: inset 3px 0 0 var(--server);
+  }
+
+  .root :global(.packet):global(.from-server)::before {
+    background: var(--server);
+  }
+
+  .root :global(.packet):global(.selected) {
+    outline: 2px solid var(--accent-ink);
+    outline-offset: 1px;
+  }
+
+  .root :global(.packet)[data-phase="lost"],
+  .root :global(.packet)[data-phase="corrupted"] {
+    border-color: var(--status-danger-border);
+    background: var(--status-danger-surface);
+    box-shadow: inset 3px 0 0 var(--status-danger-ink);
+    color: var(--status-danger-ink);
+  }
+
+  .root :global(.datagram)[data-phase="lost"],
+  .root :global(.datagram)[data-phase="corrupted"] {
+    border-color: var(--status-danger-border);
+    background: var(--status-danger-surface);
+  }
+
+  .root .workbenchResults {
+    display: grid;
+    min-width: 0;
+    gap: var(--space-5);
+    padding-top: var(--space-5);
+    border: 0;
+  }
+
+  .root .workbenchViewTabs {
+    display: none;
+  }
+
+  .root .workbenchViewTabs[hidden],
+  .root [data-workbench-panel][hidden] {
+    display: none;
+  }
+
+  .root .workbench {
+    display: block;
+    padding: 0;
+  }
+
+  .root .endpointGrid {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+  }
+
+  .root .endpoint,
+  .root .timeline,
+  .root .packetInspector {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-panel);
+    background: var(--canvas);
+  }
+
+  .root .endpoint.client {
+    border-top: 3px solid var(--client);
+  }
+
+  .root .endpoint.server {
+    border-top: 3px solid var(--server);
+  }
+
+  .root .endpointHead {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-subtle);
+  }
+
+  .root .endpoint .role {
+    width: 32px;
+    height: 32px;
+  }
+
+  .root .endpointTitle {
+    min-width: 0;
+  }
+
+  .root .endpointTitle h2 {
+    color: var(--text-strong);
+    font: var(--type-panel-title);
+  }
+
+  .root .endpointChip,
+  .root :global(.diag-pill) {
+    display: inline-flex;
+    min-height: 24px;
+    align-items: center;
+    padding-left: var(--space-3);
+    border: 0;
+    border-left: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font: var(--type-code);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .root .client .endpointChip,
+  .root .client :global(.diag-flag):global(.on) dd {
+    color: var(--client-ink);
+  }
+
+  .root .server .endpointChip,
+  .root .server :global(.diag-flag):global(.on) dd {
+    color: var(--server-ink);
+  }
+
+  .root .stateMachine,
+  .root .miniStats,
+  .root .recoveryGrid,
+  .root .flagGrid,
+  .root .flowGrid,
+  .root .streamLimitGrid {
+    display: grid;
+    min-width: 0;
+    gap: 0 var(--space-4);
+    padding-inline: var(--space-4);
+  }
+
+  .root .stateMachine,
+  .root .miniStats,
+  .root .recoveryGrid,
+  .root .flowGrid,
+  .root .streamLimitGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .root .flagGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .root .stateMachine {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root :global(.state-step),
+  .root :global(.diag-stat),
+  .root :global(.diag-flag) {
+    min-width: 0;
+    padding-block: var(--space-2);
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .root :global(.state-step) {
+    position: relative;
+    padding-left: 24px;
+  }
+
+  .root :global(.state-step)::before {
+    content: "";
+    position: absolute;
+    top: 14px;
+    left: 6px;
+    width: 8px;
+    height: 8px;
+    border: 1px solid var(--border-strong);
+    border-radius: 0;
+    background: var(--surface-strong);
+  }
+
+  .root .client :global(.state-step):global(.current)::before {
+    border-color: var(--client);
+    background: var(--client);
+  }
+
+  .root .server :global(.state-step):global(.current)::before {
+    border-color: var(--server);
+    background: var(--server);
+  }
+
+  .root :global(.state-step) strong,
+  .root :global(.state-step) span,
+  .root :global(.diag-stat) dt,
+  .root :global(.diag-stat) dd,
+  .root :global(.diag-flag) dt,
+  .root :global(.diag-flag) dd {
+    display: block;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .root :global(.state-step) strong,
+  .root :global(.diag-stat) dd,
+  .root :global(.diag-flag) dd {
+    color: var(--text-strong);
+  }
+
+  .root :global(.state-step) span,
+  .root :global(.diag-stat) dt,
+  .root :global(.diag-flag) dt {
+    color: var(--text-muted);
+  }
+
+  .root .diagSection {
+    padding: var(--space-4);
+    border: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .root .diagSectionHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+  }
+
+  .root .diagSection h3 {
+    color: var(--text-strong);
+    font: var(--type-panel-title);
+  }
+
+  .root .diagTableWrap,
+  .root .log,
+  .root .packetList,
+  .root .modalDetail,
+  .root :global(.hex-dump) {
+    max-width: 100%;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .root .diagTableWrap {
+    border-block: 1px solid var(--border);
+    background: transparent;
+  }
+
+  .root .diagTableWrap:global(.empty) {
+    border-block: 0;
+  }
+
+  .root :global(.diag-table) {
+    min-width: 100%;
+    border-collapse: collapse;
+    color: var(--text);
+    font: var(--type-code);
+    font-size: 11px;
+  }
+
+  .root .packetSpaceTableWrap :global(.diag-table) {
+    min-width: 760px;
+  }
+
+  .root :global(.diag-table) th,
+  .root :global(.diag-table) td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .root :global(.diag-table) th {
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .root :global(.diag-table) td {
+    color: var(--text);
+  }
+
+  .root .timeline,
+  .root .packetInspector {
+    padding: 0;
+    border-top: 3px solid var(--packet-neutral);
+  }
+
+  .root .timeline .panelHead,
+  .root .capturePanel .panelHead {
+    min-height: 60px;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-subtle);
+  }
+
+  .root .log,
+  .root .packetList {
+    min-height: 168px;
+    max-height: 420px;
+    background: transparent;
+  }
+
+  .root :global(.entry) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 76px minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    font: var(--type-code);
+  }
+
+  .root :global(.entry) :global(.time) {
+    color: var(--packet-neutral);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .root :global(.entry) :global(.text) {
+    color: var(--text);
+  }
+
+  .root :global(.entry):global(.error) :global(.time),
+  .root :global(.entry):global(.error) :global(.text),
+  .root :global(.entry):global(.loss) :global(.time),
+  .root :global(.entry):global(.loss) :global(.text) {
+    color: var(--status-danger-ink);
+  }
+
+  .root .panelActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .root .panelButton {
+    display: inline-flex;
+    min-height: var(--control-compact);
+    align-items: center;
+    justify-content: center;
+    padding-inline: var(--space-3);
+    white-space: nowrap;
+  }
+
+  .root .panelActions > span {
+    color: var(--text-muted);
+    font: var(--type-code);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .root :global(.packet-row) {
+    display: grid;
+    width: max(100%, 720px);
+    min-height: 44px;
+    grid-template-columns: 56px 72px minmax(140px, 1fr) minmax(220px, 2fr) 72px;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
+    color: var(--text);
+    font: var(--type-code);
+    text-align: left;
+  }
+
+  .root :global(.packet-row):hover,
+  .root :global(.packet-row):focus-visible {
+    background: var(--surface-subtle);
+  }
+
+  .root :global(.packet-row):global(.selected) {
+    background: var(--accent-soft);
+    box-shadow: inset 3px 0 0 var(--accent-ink);
+  }
+
+  .root :global(.packet-row) strong {
+    color: var(--text-strong);
+  }
+
+  .root :global(.packet-kind),
+  .root :global(.packet-frames) {
+    color: var(--packet-neutral);
+  }
+
+  .root :global(.packet-size) {
+    color: var(--text-muted);
+    text-align: right;
+  }
+
+  .root dialog.modalBackdrop {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    max-width: none;
+    height: 100vh;
+    max-height: none;
+    margin: 0;
+    padding: var(--space-4);
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  .root dialog.modalBackdrop[open] {
+    display: grid;
+    place-items: center;
+  }
+
+  .root dialog.modalBackdrop::backdrop {
+    background: var(--scrim);
+  }
+
+  .root .packetModal {
+    display: flex;
+    width: min(100%, var(--dialog-wide));
+    max-height: min(88vh, 760px);
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-overlay);
+    background: var(--canvas);
+    box-shadow: var(--elevation-modal);
+  }
+
+  .root .modalHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-subtle);
+  }
+
+  .root .modalHead h2 {
+    color: var(--text-strong);
+    font: var(--type-panel-title);
+  }
+
+  .root .modalHead span {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font: var(--type-code);
+  }
+
+  .root .modalClose {
+    display: inline-grid;
+    width: var(--control-default);
+    height: var(--control-default);
+    flex: 0 0 auto;
+    place-items: center;
+    padding: 0;
+  }
+
+  .root .modalDetail {
+    min-height: 0;
+    max-height: none;
+  }
+
+  .root :global(.detail-summary) {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0;
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .root :global(.summary-item) {
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-left: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .root :global(.summary-item):first-child {
+    border-left: 0;
+  }
+
+  .root :global(.summary-item) span,
+  .root :global(.field-meta) {
+    display: block;
+    color: var(--text-muted);
+    font: var(--type-code);
+    font-size: 11px;
+  }
+
+  .root :global(.summary-item) strong {
+    display: block;
+    margin-top: var(--space-1);
+    overflow-wrap: anywhere;
+    color: var(--text-strong);
+    font: var(--type-code);
+  }
+
+  .root :global(.packet-tree) {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+  }
+
+  .root :global(.packet-tree) details {
+    padding: var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-panel);
+    background: transparent;
+  }
+
+  .root :global(.packet-tree) summary {
+    color: var(--text-strong);
+    font: var(--type-code);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .root :global(.field-list) {
+    display: grid;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+  }
+
+  .root :global(.field-row) {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr);
+    gap: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border);
+  }
+
+  .root :global(.field-row) dt {
+    color: var(--text-muted);
+    font: var(--type-code);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .root :global(.field-row) dd {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font: var(--type-code);
+  }
+
+  .root :global(.frame-note) {
+    padding: var(--space-3);
+    border: 1px solid var(--status-warning-border);
+    border-radius: var(--radius-panel);
+    background: var(--status-warning-surface);
+    color: var(--status-warning-ink);
+  }
+
+  .root :global(.hex-dump) {
+    margin: 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-panel);
+    background: var(--code-surface);
+    color: var(--text);
+    font: var(--type-code);
+    white-space: pre;
+  }
+
+  .root .emptyDetail,
+  .root .log:empty::before,
+  .root .packetList:empty::before {
+    display: block;
+    padding: var(--space-4);
+    color: var(--text-muted);
+    font: var(--type-metadata);
+  }
+
+  .root .log:empty::before {
+    content: "No runtime events yet.";
+  }
+
+  .root .packetList:empty::before {
+    content: "No packets captured yet.";
+  }
+
+  :global(body.workbench-modal-open) {
+    overflow: hidden;
+    padding-right: var(--workbench-scrollbar-gap, 0);
+  }
+
+  @media (width <= 1023px) {
+    .root .scenarioToolbar {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-4);
+    }
+
+    .root .scenarioControl {
+      padding: 0 0 var(--space-4);
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .root .networkControl {
+      padding: 0;
+    }
+
+    .root .packetStage {
+      min-height: 260px;
+      grid-template-columns: minmax(84px, 0.16fr) minmax(0, 1fr) minmax(84px, 0.16fr);
+      gap: var(--space-2);
+    }
+
+    .root .packetRail {
+      min-height: 260px;
+    }
+
+    .root .workbenchViewTabs {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0;
+      border: 1px solid var(--control-border);
+      border-radius: var(--radius-control);
+      background: var(--canvas);
+    }
+
+    .root .workbenchViewTab {
+      min-width: 0;
+      min-height: var(--control-default);
+      padding-inline: var(--space-2);
+      border: 0;
+      border-left: 1px solid var(--border);
+      border-radius: 0;
+      background: transparent;
+      color: var(--text-muted);
+    }
+
+    .root .workbenchViewTab:first-child {
+      border-left: 0;
+    }
+
+    .root .workbenchViewTab[aria-selected="true"] {
+      background: var(--command);
+      color: var(--on-command);
+    }
+
+    .root .endpointGrid {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+
+    .root .workbenchResults {
+      gap: var(--space-4);
+    }
+  }
+
+  @media (width <= 680px) {
+    .root .scenarioToolbar {
+      margin-top: var(--space-4);
+    }
+
+    .root .networkControl {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .root .networkControlHead {
+      grid-column: auto;
+    }
+
+    .root .networkRange {
+      grid-template-columns: 156px minmax(0, 1fr);
+      align-items: center;
+    }
+
+    .root .visualizationStatus {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .root .controlTimer,
+    .root :global(.module-state) {
+      min-width: 0;
+    }
+
+    .root .controlTimer:first-child {
+      border-left: 0;
+    }
+
+    .root .workbenchSectionHeading {
+      align-items: flex-start;
+    }
+
+    .root .workbenchSectionMeta {
+      max-width: 132px;
+      white-space: normal;
+      text-align: right;
+    }
+
+    .root .packetStage {
+      min-height: 238px;
+      grid-template-columns: 64px minmax(0, 1fr) 64px;
+      gap: var(--space-2);
+    }
+
+    .root .packetRail {
+      min-height: 238px;
+    }
+
+    .root .stageNode {
+      padding-inline: var(--space-1);
+    }
+
+    .root .stageNode > span {
+      width: 36px;
+      height: 36px;
+      font-size: 14px;
+    }
+
+    .root .stageNode small {
+      display: none;
+    }
+
+    .root .packetLane {
+      right: 24px;
+      left: 24px;
+    }
+
+    .root :global(.packet) {
+      width: 96px;
+      grid-template-columns: 4px minmax(0, 1fr);
+    }
+
+    .root :global(.packet) > span:last-child {
+      display: none;
+    }
+
+    .root .endpointHead {
+      grid-template-columns: 32px minmax(0, 1fr);
+    }
+
+    .root .endpointChip {
+      grid-column: 1 / -1;
+      min-height: 28px;
+      padding: var(--space-1) 0 0;
+      border-left: 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .root .stateMachine,
+    .root .miniStats,
+    .root .recoveryGrid,
+    .root .flowGrid,
+    .root .streamLimitGrid,
+    .root .flagGrid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .root .panelHead {
+      align-items: flex-start;
+    }
+
+    .root .panelActions {
+      display: grid;
+      justify-items: end;
+    }
+
+    .root :global(.detail-summary) {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .root :global(.summary-item) {
+      border-top: 1px solid var(--border);
+    }
+
+    .root :global(.summary-item):nth-child(odd) {
+      border-left: 0;
+    }
+
+    .root :global(.field-row) {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .root dialog.modalBackdrop {
+      padding: var(--space-2);
+    }
+
+    .root .packetModal {
+      max-height: calc(100vh - 16px);
+    }
+  }
+
+  @media (pointer: coarse) {
+    .root .scenarioSelect,
+    .root .scenarioInfo,
+    .root .controlButton,
+    .root .panelButton,
+    .root .workbenchViewTab,
+    .root .modalClose {
+      min-height: var(--control-coarse);
+    }
+
+    .root .scenarioInfo,
+    .root .modalClose {
+      width: var(--control-coarse);
+      height: var(--control-coarse);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .root :global(.packet),
+    .root :global(.datagram),
+    .root .controlButton,
+    .root .panelButton,
+    .root .workbenchViewTab {
+      transition-duration: 0.01ms;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .root .packetLane .pipeFront,
+    .root .packetLane .pipeBack {
+      background: CanvasText;
+    }
+
+    .root :global(.packet),
+    .root :global(.datagram),
+    .root .endpoint,
+    .root .timeline,
+    .root .packetInspector {
+      border-color: CanvasText;
+    }
+
+    .root :global(.packet)[data-phase="lost"],
+    .root :global(.packet)[data-phase="corrupted"] {
+      outline: 2px dashed Mark;
+    }
+  }
+}

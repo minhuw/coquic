@@ -9,7 +9,54 @@ import {
   wideMarkdownQaEvents,
 } from './fixtures/qa';
 
+const themes = ['light', 'dark'] as const;
+const screenshotTime = new Date('2026-07-15T12:00:00Z');
+
 test.describe('QUIC specification QA', () => {
+  for (const theme of themes) {
+    test(`captures idle and streaming presentation in ${theme}`, async ({ page }) => {
+      await page.clock.setFixedTime(screenshotTime);
+      await setStoredTheme(page, theme);
+      await installQaFixture(page, {
+        events: successfulQaEvents().slice(1),
+        intervalMs: 30_000,
+      });
+      await page.goto('/qa');
+      await hideNextDevTools(page);
+
+      const workspace = page.locator('[data-qa-workspace]');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect(workspace).toHaveAttribute('data-qa-phase', 'ready');
+      await page.evaluate(() => document.fonts.ready);
+      await expectNoGlobalOverflow(page);
+      await expect(page).toHaveScreenshot(`qa-idle-${theme}.png`, { fullPage: true });
+
+      await ask(page);
+      await expect(workspace).toHaveAttribute('data-qa-phase', 'streaming');
+      await expect(page.locator('[data-channel="direct"]:visible')).toContainText('Direct partial');
+      await expect(page.getByRole('button', { name: 'Asking question' })).toHaveAttribute('aria-busy', 'true');
+      await expectNoGlobalOverflow(page);
+      await expect(page).toHaveScreenshot(`qa-streaming-${theme}.png`, { fullPage: true });
+    });
+
+    test(`captures populated presentation in ${theme}`, async ({ page }) => {
+      await page.clock.setFixedTime(screenshotTime);
+      await setStoredTheme(page, theme);
+      await installQaFixture(page, { events: successfulQaEvents() });
+      await page.goto('/qa');
+      await hideNextDevTools(page);
+      await ask(page);
+
+      const workspace = page.locator('[data-qa-workspace]');
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect(workspace).toHaveAttribute('data-qa-phase', 'completed');
+      await expect(page.locator('[data-qa-results]')).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      await expectNoGlobalOverflow(page);
+      await expect(page).toHaveScreenshot(`qa-populated-${theme}.png`, { fullPage: true });
+    });
+  }
+
   test('uses inline validation for an empty keyboard submission', async ({ page }) => {
     await installQaFixture(page, { events: successfulQaEvents() });
     await page.goto('/qa');
@@ -240,4 +287,8 @@ test.describe('QUIC specification QA', () => {
 async function ask(page: Parameters<typeof installQaFixture>[0]) {
   await page.getByRole('textbox', { name: 'Question' }).fill('How does QUIC loss recovery work?');
   await page.getByRole('button', { name: 'Ask' }).click();
+}
+
+async function hideNextDevTools(page: Parameters<typeof installQaFixture>[0]) {
+  await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
 }

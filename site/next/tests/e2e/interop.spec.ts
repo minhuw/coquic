@@ -30,8 +30,8 @@ function resultControl(row: Locator, column: number) {
 
 async function waitForSnapshot(page: Page) {
   await expect(page.locator('#data-source-label')).toHaveText('interop-results.json from 2026-07-14T12:34:56Z');
-  await expect(page.locator('.interop-page')).toHaveAttribute('data-interop-state', 'ready');
-  await expect(page.locator('.interop-page')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('[data-interop-root]')).toHaveAttribute('data-interop-state', 'ready');
+  await expect(page.locator('[data-interop-root]')).toHaveAttribute('aria-busy', 'false');
 }
 
 test('characterizes every result category, lane direction, and aggregate state', async ({ page }, testInfo) => {
@@ -43,9 +43,9 @@ test('characterizes every result category, lane direction, and aggregate state',
   expect(await page.locator('#matrix-head th').allTextContents()).toEqual(matrixHeaders);
   await expect(page.locator('#matrix-body tr')).toHaveCount(3);
   await expect(page.locator('#matrix-body')).not.toContainText('filtered-peer-lane');
-  await expect(page.locator('.interop-run-context')).toContainText('interop-fixture');
-  await expect(page.locator('.interop-run-context')).toContainText('fixture-011');
-  await expect(page.locator('.interop-conclusion')).toContainText('unannotated CoQUIC failure');
+  await expect(page.locator('[data-interop-context]')).toContainText('interop-fixture');
+  await expect(page.locator('[data-interop-context]')).toContainText('fixture-011');
+  await expect(page.locator('#interop-conclusion')).toContainText('unannotated CoQUIC failure');
   await expect(page.locator('#interop-matrix-region')).toHaveAccessibleName('CoQUIC interop results matrix');
 
   for (const [category, count] of [
@@ -174,8 +174,8 @@ test('uses a bounded, focusable matrix region without global overflow', async ({
 test('announces unavailable evidence without presenting an empty result as success', async ({ page }) => {
   await page.route('**/interop-results.json', (route) => route.fulfill({ status: 404, body: 'not found' }));
   await page.goto('/interop-results');
-  await expect(page.locator('.interop-page')).toHaveAttribute('data-interop-state', 'unavailable');
-  await expect(page.locator('.interop-page')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('[data-interop-root]')).toHaveAttribute('data-interop-state', 'unavailable');
+  await expect(page.locator('[data-interop-root]')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('#data-source-label')).toHaveText('interop-results.json not available yet');
   await expect(page.locator('#interop-state')).toContainText('Interop evidence unavailable');
   await expect(page.locator('#interop-conclusion')).toContainText('no conclusion can be drawn');

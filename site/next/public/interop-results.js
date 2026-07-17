@@ -42,11 +42,23 @@ let activeSnapshot = fallbackInteropSnapshot;
 let dataSource = "waiting for interop-results.json";
 let interopState = "loading";
 
+function interopRoot() {
+  return document.querySelector("[data-interop-root]");
+}
+
+function queryInterop(selector) {
+  return interopRoot()?.querySelector(selector) || null;
+}
+
+function interopElement(id) {
+  return queryInterop(`#${id}`);
+}
+
 function setInteropState(state, message) {
   interopState = state;
-  const page = document.querySelector(".interop-page");
-  const stateLabel = document.getElementById("interop-state");
-  const matrixRegion = document.getElementById("interop-matrix-region");
+  const page = interopRoot();
+  const stateLabel = interopElement("interop-state");
+  const matrixRegion = interopElement("interop-matrix-region");
   page?.setAttribute("data-interop-state", state);
   page?.setAttribute("aria-busy", state === "loading" ? "true" : "false");
   stateLabel?.replaceChildren(document.createTextNode(message));
@@ -61,9 +73,9 @@ function updateSnapshotContext(snapshot, available) {
         commit: snapshot.commit || "not reported",
       }
     : { generated: "not available", event: "not available", commit: "not available" };
-  const generated = document.querySelector("[data-interop-generated]");
-  const event = document.querySelector("[data-interop-event]");
-  const commit = document.querySelector("[data-interop-commit]");
+  const generated = queryInterop("[data-interop-generated]");
+  const event = queryInterop("[data-interop-event]");
+  const commit = queryInterop("[data-interop-commit]");
   generated?.replaceChildren(document.createTextNode(values.generated));
   event?.replaceChildren(document.createTextNode(values.event));
   commit?.replaceChildren(document.createTextNode(values.commit));
@@ -322,7 +334,11 @@ function consumeFocusScroll() {
 }
 
 function ensureInteropTooltip() {
-  let tooltip = document.querySelector(".interop-tooltip");
+  const root = interopRoot();
+  if (!root) {
+    return null;
+  }
+  let tooltip = root.querySelector(".interop-tooltip");
   if (!tooltip) {
     tooltip = document.createElement("div");
     tooltip.className = "interop-tooltip";
@@ -330,7 +346,7 @@ function ensureInteropTooltip() {
     tooltip.setAttribute("role", "tooltip");
     tooltip.setAttribute("aria-hidden", "true");
     tooltip.hidden = true;
-    (document.querySelector(".interop-page") || document.body).append(tooltip);
+    root.append(tooltip);
   }
   if (!tooltipDocumentListenersAttached) {
     tooltipDocumentListenersAttached = true;
@@ -357,6 +373,9 @@ function ensureInteropTooltip() {
 
 function positionInteropTooltip(target, event) {
   const tooltip = ensureInteropTooltip();
+  if (!tooltip) {
+    return;
+  }
   const targetRect = target.getBoundingClientRect();
   const anchorX = event && typeof event.clientX === "number" ? event.clientX : targetRect.left + targetRect.width / 2;
   const anchorY = event && typeof event.clientY === "number" ? event.clientY : targetRect.top + targetRect.height / 2;
@@ -379,6 +398,9 @@ function positionInteropTooltip(target, event) {
 
 function showInteropTooltip(target, details, event) {
   const tooltip = ensureInteropTooltip();
+  if (!tooltip) {
+    return;
+  }
   if (activeTooltipTarget && activeTooltipTarget !== target) {
     if (isAuthoritativeTooltipTarget(activeTooltipTarget)) {
       return;
@@ -417,7 +439,7 @@ function tooltipLine(label, value) {
 }
 
 function hideInteropTooltip(restoreFocus = false) {
-  const tooltip = document.querySelector(".interop-tooltip");
+  const tooltip = queryInterop(".interop-tooltip");
   const target = activeTooltipTarget;
   const returnFocus = restoreFocus && pinnedTooltipTarget === target;
   const targetsToCollapse = new Set([target]);
@@ -577,7 +599,7 @@ function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
   }
 
   for (const [category, count] of Object.entries(counts)) {
-    const target = document.querySelector(`[data-interop-count="${category}"]`);
+    const target = queryInterop(`[data-interop-count="${category}"]`);
     if (target) {
       target.textContent = count.toLocaleString();
     }
@@ -586,7 +608,7 @@ function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
 
 function clearLegendCounts() {
   for (const category of ["pass", "unsupported", "peer-broken", "known-peer-broken", "failed", "not-reported"]) {
-    const target = document.querySelector(`[data-interop-count="${category}"]`);
+    const target = queryInterop(`[data-interop-count="${category}"]`);
     if (target) {
       target.textContent = "-";
     }
@@ -594,7 +616,7 @@ function clearLegendCounts() {
 }
 
 function updateInteropConclusion(lanes, tests, rowByLaneAndTest) {
-  const conclusion = document.getElementById("interop-conclusion");
+  const conclusion = interopElement("interop-conclusion");
   if (!conclusion) {
     return;
   }
@@ -629,7 +651,7 @@ function updateInteropConclusion(lanes, tests, rowByLaneAndTest) {
 }
 
 function updateMatrixRegionFocus() {
-  const region = document.getElementById("interop-matrix-region");
+  const region = interopElement("interop-matrix-region");
   if (!region) {
     return;
   }
@@ -695,9 +717,9 @@ function renderParticipant(name) {
 function renderMatrix() {
   const sources = sourceRows().filter((source) => source.server === "coquic" || source.client === "coquic");
   const rows = loadedRows().filter((row) => row.server === "coquic" || row.client === "coquic");
-  const head = document.getElementById("matrix-head");
-  const body = document.getElementById("matrix-body");
-  const dataSourceLabel = document.getElementById("data-source-label");
+  const head = interopElement("matrix-head");
+  const body = interopElement("matrix-body");
+  const dataSourceLabel = interopElement("data-source-label");
   if (dataSourceLabel) {
     dataSourceLabel.textContent = dataSource;
   }

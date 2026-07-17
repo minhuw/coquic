@@ -89,13 +89,30 @@ test.describe('Steward dashboard', () => {
   });
 
   test('retains every surface layout after legacy Steward rules are removed', async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 812 });
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/steward');
     await expect(page.locator('[data-steward-module="dashboard"]')).toBeVisible();
     await removeLegacySurfaceRules(page, 'dashboard', '.steward-dashboard');
-    await expect(page.locator('#steward-view-select')).toBeVisible();
-    await expect(page.getByRole('tablist', { name: 'Steward views' })).toHaveCount(0);
+    await expect(page.getByRole('tablist', { name: 'Steward views' })).toBeVisible();
     await expect(page.locator('.steward-dashboard-workspace')).toHaveCSS('display', 'grid');
+    const dashboardGeometry = await page.locator('.steward-dashboard').evaluate((root) => {
+      const rootWidth = root.getBoundingClientRect().width;
+      const summaryWidth = root.querySelector('.steward-dashboard-summary')?.getBoundingClientRect().width ?? 0;
+      const workspaceWidth = root.querySelector('.steward-dashboard-workspace')?.getBoundingClientRect().width ?? 0;
+      const factWidths = [...root.querySelectorAll('.steward-dashboard-summary-fact')]
+        .map((fact) => fact.getBoundingClientRect().width);
+      return {
+        factWidths,
+        rootWidth,
+        summaryWidth,
+        workspaceWidth,
+      };
+    });
+    expect.soft(dashboardGeometry.rootWidth - dashboardGeometry.summaryWidth).toBeLessThanOrEqual(2);
+    expect.soft(dashboardGeometry.rootWidth - dashboardGeometry.workspaceWidth).toBeLessThanOrEqual(2);
+    expect.soft(Math.min(...dashboardGeometry.factWidths)).toBeGreaterThan(200);
+
+    await page.setViewportSize({ width: 375, height: 812 });
 
     await page.goto('/steward/planner');
     await expect(page.locator('.steward-planner-pagination')).toBeVisible();

@@ -15,6 +15,10 @@ const docs = docItems.map((item) => ({
 }));
 
 async function expectDocsAxe(page: Parameters<typeof setStoredTheme>[0]) {
+  await page.waitForFunction(() => {
+    const regions = Array.from(document.querySelectorAll<HTMLElement>('[data-scroll-region="true"]'));
+    return regions.every((region) => region.scrollWidth <= region.clientWidth + 1 || region.dataset.overflow === 'true');
+  });
   const results = await new AxeBuilder({ page }).include('main').analyze();
   expect(results.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);
   expect(results.violations.filter((violation) => violation.id === 'scrollable-region-focusable')).toEqual([]);
@@ -35,6 +39,8 @@ async function installClipboardProbe(page: Parameters<typeof setStoredTheme>[0])
 }
 
 test.describe('documentation routes', () => {
+  test.describe.configure({ mode: 'default' });
+
   for (const doc of docs) {
     test(`${doc.href} retains title, heading, current desktop navigation, and document bounds`, async ({ page }, testInfo) => {
       test.skip(testInfo.project.name === 'mobile', 'The canonical route loop uses the desktop navigator.');

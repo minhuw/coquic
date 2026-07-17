@@ -3,6 +3,8 @@ import { expect, test } from '@playwright/test';
 import { expectNoGlobalOverflow, expectNoSeriousAxeViolations } from './helpers/design-system';
 
 test.describe('blog characterization', () => {
+  test.describe.configure({ mode: 'default' });
+
   test('lists both known posts in descending date order with metadata and links', async ({ page }) => {
     await page.goto('/blog');
 

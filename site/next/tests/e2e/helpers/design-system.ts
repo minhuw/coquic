@@ -20,17 +20,24 @@ export async function setStoredTheme(page: Page, theme: 'light' | 'dark') {
   }, theme);
 }
 
+export async function waitForAppHydration(page: Page) {
+  await page.locator('html[data-coquic-hydrated="true"]').waitFor();
+}
+
 export async function waitForVisualAssets(page: Page) {
+  await waitForAppHydration(page);
   await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
   await page.evaluate(() => {
     document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
-    Array.from(document.images).forEach((image) => {
+    Array.from(document.images).filter((image) => image.getClientRects().length > 0).forEach((image) => {
       image.loading = 'eager';
     });
   });
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(
-    () => Array.from(document.images).every((image) => image.complete && image.naturalWidth > 0),
+    () => Array.from(document.images).every(
+      (image) => image.getClientRects().length === 0 || (image.complete && image.naturalWidth > 0),
+    ),
     undefined,
     { timeout: 15_000 },
   );

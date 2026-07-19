@@ -54,6 +54,13 @@ export function DemoNav() {
   const activeBenchmark = benchmarkViews.some((view) => view.route === active);
   const activeDevelopment = developmentViews.some((view) => view.route === active);
 
+  useEffect(() => {
+    document.documentElement.dataset.coquicHydrated = 'true';
+    return () => {
+      delete document.documentElement.dataset.coquicHydrated;
+    };
+  }, []);
+
   return (
     <nav className={styles.nav} aria-label="Demo views" data-slot="shell-nav">
       <Link className={styles.home} href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined} data-slot="nav-home">

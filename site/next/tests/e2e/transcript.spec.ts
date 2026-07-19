@@ -9,6 +9,7 @@ import {
   transcriptSearchResponse,
   transcriptSession,
 } from './fixtures/transcript';
+import { waitForAppHydration } from './helpers/design-system';
 
 type TranscriptMockOptions = {
   archiveMissing?: boolean;
@@ -186,6 +187,7 @@ test.describe('transcript master detail', () => {
     await mockTranscriptApi(page);
     await page.setViewportSize({ width: 320, height: 760 });
     await page.goto('/transcript');
+    await waitForAppHydration(page);
 
     const dateTrigger = page.getByRole('button', { name: /Date range/ });
     await dateTrigger.focus();

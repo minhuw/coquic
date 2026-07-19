@@ -135,9 +135,9 @@ test('compact slotted buttons preserve coarse pointer targets', async ({ baseURL
 
   try {
     await page.goto('/duvet');
-    const compactLink = page.getByRole('link', { name: 'Open HTML' });
-    await compactLink.evaluate((element) => document.body.append(element));
+    const compactLink = page.locator('[data-slot="page-header-actions"]').getByRole('link', { name: 'Open HTML' });
     const geometry = await compactLink.evaluate((element) => {
+      document.body.append(element);
       const style = getComputedStyle(element);
       return {
         coarse: matchMedia('(pointer: coarse)').matches,

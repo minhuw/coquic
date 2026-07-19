@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { expectLocalScrollRegion, expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
+import { expectLocalScrollRegion, expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForAppHydration, waitForVisualAssets } from './helpers/design-system';
 import {
   installQaFixture,
   qaRequests,
@@ -287,6 +287,7 @@ test.describe('QUIC specification QA', () => {
 });
 
 async function ask(page: Parameters<typeof installQaFixture>[0]) {
+  await waitForAppHydration(page);
   await page.getByRole('textbox', { name: 'Question' }).fill('How does QUIC loss recovery work?');
   await page.getByRole('button', { name: 'Ask' }).click();
 }

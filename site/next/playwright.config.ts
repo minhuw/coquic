@@ -44,6 +44,7 @@ export function createPlaywrightConfig(
 
   return defineConfig({
     testDir: './tests/e2e',
+    globalSetup: './tests/e2e/global-setup.ts',
     expect: {
       toHaveScreenshot: {
         animations: 'disabled',

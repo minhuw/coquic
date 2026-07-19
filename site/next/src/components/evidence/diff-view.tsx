@@ -27,7 +27,7 @@ export function DiffView({
 }) {
   const label = display === 'split' ? 'Side-by-side diff' : 'Unified diff';
   return (
-    <ScrollRegion aria-label={label} axis="both" className={cn(styles.root, 'evidence-diff-scroll', className)}>
+    <ScrollRegion aria-label={label} axis="both" className={cn(styles.root, className)}>
       {display === 'split' ? (
         <SplitDiffTable rows={rows} showLineNumbers={showLineNumbers} />
       ) : (

@@ -26,10 +26,8 @@ export function PageHeader({
   return (
     <header
       className={cn(
-        'page-header m-0 border-0 bg-transparent px-0 py-[var(--space-6)] max-md:py-[var(--space-5)] max-md:pb-[var(--space-4)]',
-        `page-header--${variant}`,
-        !eyebrow && 'page-header--without-context',
-        variant === 'tool' && 'page-header--tool py-[var(--space-5)] pb-[var(--space-4)]',
+        'm-0 border-0 bg-transparent px-0 py-[var(--space-6)] max-md:py-[var(--space-5)] max-md:pb-[var(--space-4)]',
+        variant === 'tool' && 'py-[var(--space-5)] pb-[var(--space-4)]',
         className,
       )}
       data-page-header-variant={variant}
@@ -37,14 +35,14 @@ export function PageHeader({
     >
       <div
         className={cn(
-          'page-header__container grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-[var(--space-6)] max-md:grid-cols-[minmax(0,1fr)] max-md:items-start max-md:gap-[var(--space-4)]',
+          'grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-[var(--space-6)] max-md:grid-cols-[minmax(0,1fr)] max-md:items-start max-md:gap-[var(--space-4)]',
           containerClassName,
         )}
         data-slot="page-header-container"
       >
         <div
           className={cn(
-            'page-header__measure grid min-w-0 max-w-[var(--measure-editorial)] gap-[7px] max-md:max-w-full',
+            'grid min-w-0 max-w-[var(--measure-editorial)] gap-[7px] max-md:max-w-full',
             (variant === 'editorial' || variant === 'standard') && 'max-w-[var(--measure-editorial)]',
             (variant === 'evidence' || variant === 'data') && 'max-w-[760px]',
             measureClassName,
@@ -52,13 +50,13 @@ export function PageHeader({
           data-slot="page-header-measure"
         >
           {eyebrow ? (
-            <div className="page-header__context min-w-0" data-slot="page-header-context">
+            <div className="min-w-0" data-slot="page-header-context">
               <span
-                className="eyebrow inline-flex max-w-full items-center gap-[var(--space-2)] text-[var(--accent-ink)] uppercase tracking-[0] [font:var(--type-metadata)] [&::before]:content-none [overflow-wrap:anywhere]"
+                className="inline-flex max-w-full items-center gap-[var(--space-2)] text-[var(--accent-ink)] uppercase tracking-[0] [font:var(--type-metadata)] [&::before]:content-none [overflow-wrap:anywhere]"
                 data-slot="page-header-eyebrow"
               >
                 <span
-                  className="page-header__eyebrow-marker size-[7px] shrink-0 bg-[var(--accent-ink)] forced-colors:[background-color:LinkText]"
+                  className="size-[7px] shrink-0 bg-[var(--accent-ink)] forced-colors:[background-color:LinkText]"
                   aria-hidden="true"
                   data-slot="page-header-eyebrow-marker"
                 />
@@ -67,14 +65,14 @@ export function PageHeader({
             </div>
           ) : null}
           <h1
-            className="page-title m-0 max-w-[var(--measure-editorial)] text-[var(--text-strong)] tracking-[0] [font:var(--type-page-title)] [overflow-wrap:anywhere] max-md:text-[30px] max-md:leading-[1.15]"
+            className="m-0 max-w-[var(--measure-editorial)] text-[var(--text-strong)] tracking-[0] [font:var(--type-page-title)] [overflow-wrap:anywhere] max-md:text-[30px] max-md:leading-[1.15]"
             data-slot="page-header-title"
           >
             {title}
           </h1>
           {description ? (
             <div
-              className="page-header__description max-w-[var(--measure-reading)] text-[var(--text-muted)] tracking-[0] [font:var(--type-body)]"
+              className="max-w-[var(--measure-reading)] text-[var(--text-muted)] tracking-[0] [font:var(--type-body)]"
               data-slot="page-header-description"
             >
               {description}
@@ -83,7 +81,7 @@ export function PageHeader({
         </div>
         {actions ? (
           <div
-            className="page-header__actions flex min-w-0 flex-wrap items-start justify-end gap-[var(--space-2)] pb-[2px] max-md:w-full max-md:justify-start max-md:pb-0"
+            className="flex min-w-0 flex-wrap items-start justify-end gap-[var(--space-2)] pb-[2px] max-md:w-full max-md:justify-start max-md:pb-0"
             data-slot="page-header-actions"
           >
             {actions}

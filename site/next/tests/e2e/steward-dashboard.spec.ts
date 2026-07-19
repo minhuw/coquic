@@ -216,5 +216,5 @@ async function removeLegacySurfaceRules(page: Page, moduleName: string, legacyRo
       }
     }, 0);
   }, { legacyRootSelector: legacyRoot, rootClass: moduleClass });
-  expect(removed).toBeGreaterThan(0);
+  expect(removed).toBe(0);
 }

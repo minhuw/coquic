@@ -36,7 +36,7 @@ describe('Stylelint baseline comparison', () => {
 
   it('accepts the exact checked-in inventory', async () => {
     const baseline = JSON.parse(await readFile(baselinePath, 'utf8')) as Finding[];
-    expect(baseline).toHaveLength(344);
+    expect(baseline).toHaveLength(3);
     const result = await checkBaseline();
     expect(result.newFindings).toEqual([]);
     expect(result.missingFindings).toEqual([]);

@@ -63,8 +63,7 @@ const ScrollRegion = React.forwardRef<HTMLDivElement, ScrollRegionProps>(
       <div
         ref={ref}
         className={cn(
-          'scroll-region relative max-w-full overscroll-contain data-[overflow=true]:shadow-[inset_-10px_0_10px_-12px_var(--text-muted)]',
-          `scroll-region--${axis}`,
+          'relative max-w-full overscroll-contain data-[overflow=true]:shadow-[inset_-10px_0_10px_-12px_var(--text-muted)]',
           axisClasses[axis],
           className,
         )}

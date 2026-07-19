@@ -4,10 +4,9 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const badgeVariants = cva(
-  'ui-badge inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-neutral-border)] bg-[var(--status-neutral-surface)] px-[var(--space-2)] text-[var(--status-neutral-ink)] tracking-[0] [font:var(--type-metadata)]',
+  'inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-neutral-border)] bg-[var(--status-neutral-surface)] px-[var(--space-2)] text-[var(--status-neutral-ink)] tracking-[0] [font:var(--type-metadata)]',
   {
     variants: {
-      // Keep historical values as neutral compatibility aliases until route consumers migrate.
       variant: {
         default: '',
         primary: '',

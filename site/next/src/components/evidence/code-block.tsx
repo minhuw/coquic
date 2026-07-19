@@ -109,10 +109,10 @@ export function CodeBlock({
   }
 
   return (
-    <div className={cn(styles.root, compact && styles.compact, 'evidence-code-block', 'code-block', compact && 'evidence-code-block--compact', className)} data-evidence-code-block="true" data-evidence-tokenized={highlightedTokens ? 'true' : 'false'}>
-      <div className={cn(styles.toolbar, 'evidence-code-toolbar', 'code-block-toolbar')}>
-        <span className={cn(styles.title, 'evidence-code-title', 'code-block-title')}>{label}</span>
-        <div className={cn(styles.actions, 'evidence-code-actions', 'code-block-actions')}>
+    <div className={cn(styles.root, compact && styles.compact, className)} data-evidence-code-block="true" data-evidence-tokenized={highlightedTokens ? 'true' : 'false'}>
+      <div className={styles.toolbar}>
+        <span className={styles.title}>{label}</span>
+        <div className={styles.actions}>
           {expandableDiff ? (
             <Dialog open={diffOpen} onOpenChange={(open) => {
               setDiffOpen(open);
@@ -121,7 +121,7 @@ export function CodeBlock({
               <DialogTrigger asChild>
                 <button
                   aria-label="Open side-by-side diff"
-                  className={cn(styles.iconButton, 'evidence-icon-button', 'code-copy-button')}
+                  className={styles.iconButton}
                   title="Open side-by-side diff"
                   ref={diffTriggerRef}
                   type="button"
@@ -129,57 +129,57 @@ export function CodeBlock({
                   <Maximize2 size={14} aria-hidden="true" />
                 </button>
               </DialogTrigger>
-              <DialogContent className={cn(styles.dialog, 'evidence-diff-dialog')} onCloseAutoFocus={(event) => {
+              <DialogContent className={styles.dialog} onCloseAutoFocus={(event) => {
                 event.preventDefault();
                 diffTriggerRef.current?.focus();
               }}>
-                <div className={cn(styles.dialogToolbar, 'evidence-diff-dialog__toolbar')}>
+                <div className={styles.dialogToolbar}>
                   <DialogTitle>{label} side-by-side</DialogTitle>
                   <DialogClose asChild>
-                    <button aria-label="Close side-by-side diff" className={cn(styles.iconButton, 'evidence-icon-button', 'code-copy-button')} title="Close" type="button">
+                    <button aria-label="Close side-by-side diff" className={styles.iconButton} title="Close" type="button">
                       <X size={14} aria-hidden="true" />
                     </button>
                   </DialogClose>
                 </div>
-                <DialogDescription className={cn(styles.visuallyHidden, 'evidence-visually-hidden')}>Inspect the side-by-side diff.</DialogDescription>
-                <div className={cn(styles.dialogBody, 'evidence-diff-dialog__body')}>
-                  <DiffView className={cn(styles.dialogScroll, 'evidence-diff-scroll--dialog')} display="split" rows={splitDiffRows} showLineNumbers={showLineNumbers} />
+                <DialogDescription className={styles.visuallyHidden}>Inspect the side-by-side diff.</DialogDescription>
+                <div className={styles.dialogBody}>
+                  <DiffView className={styles.dialogScroll} display="split" rows={splitDiffRows} showLineNumbers={showLineNumbers} />
                 </div>
               </DialogContent>
             </Dialog>
           ) : null}
           <button
             aria-label={copied ? 'Code copied' : 'Copy code'}
-            className={cn(styles.iconButton, 'evidence-icon-button', 'code-copy-button')}
+            className={styles.iconButton}
             onClick={copyCode}
             title={copied ? 'Copied' : 'Copy code'}
             type="button"
           >
             {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
           </button>
-          <span aria-live="polite" className={cn(styles.visuallyHidden, 'evidence-visually-hidden')}>{copied ? 'Code copied' : ''}</span>
+          <span aria-live="polite" className={styles.visuallyHidden}>{copied ? 'Code copied' : ''}</span>
         </div>
       </div>
       {normalizedLanguage === 'diff' ? (
         <DiffView display={inlineDiffDisplay} rows={splitDiffRows} showLineNumbers={showLineNumbers} />
       ) : (
-        <ScrollRegion aria-label={`${label} code`} axis="both" className={cn(styles.scroll, 'evidence-code-scroll')}>
-          <pre className={cn(styles.pre, 'evidence-code-pre', 'code-block-pre')}>
-            <code className={cn(styles.code, 'evidence-code-code', 'code-block-code', codeNumberMode(showLineNumbers))}>
+        <ScrollRegion aria-label={`${label} code`} axis="both" className={styles.scroll}>
+          <pre className={styles.pre}>
+            <code className={cn(styles.code, codeNumberMode(showLineNumbers))}>
               {Array.from({ length: lineCount }, (_, index) => {
                 const lineTokens = renderedTokens[index] ?? fallbackTokens[index] ?? [];
                 return (
-                  <span className={cn(styles.line, 'evidence-code-line', 'code-block-line')} key={index}>
-                    {showLineNumbers ? <span className={cn(styles.lineNumber, 'evidence-code-line-number', 'code-line-number')}>{index + 1}</span> : null}
-                    <span className={cn(styles.lineContent, 'evidence-code-line-content', 'code-line-content')}>
+                  <span className={styles.line} key={index}>
+                    {showLineNumbers ? <span className={styles.lineNumber}>{index + 1}</span> : null}
+                    <span className={styles.lineContent}>
                       {lineTokens.length ? (
                         lineTokens.map((token, tokenIndex) => (
-                          <span className={cn(styles.token, 'evidence-code-token', 'code-token')} data-evidence-token="true" key={`${index}-${tokenIndex}`} style={tokenStyle(token)}>
+                          <span className={styles.token} data-evidence-token="true" key={`${index}-${tokenIndex}`} style={tokenStyle(token)}>
                             {token.content}
                           </span>
                         ))
                       ) : (
-                        <span className={cn(styles.emptyLine, 'evidence-code-empty-line', 'code-empty-line')}> </span>
+                        <span className={styles.emptyLine}> </span>
                       )}
                     </span>
                   </span>

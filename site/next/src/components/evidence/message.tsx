@@ -32,20 +32,19 @@ export function EvidenceMessage({
       className={cn(
         styles.message,
         role === 'user' && styles.messageUser,
-        'evidence-message',
-        `evidence-message--${role}`,
-        `evidence-message--${tone}`,
         className,
       )}
       data-evidence-message="true"
+      data-role={role}
+      data-tone={tone}
     >
-      {icon ? <div className={cn(styles.messageIcon, 'evidence-message__icon')} aria-hidden="true">{icon}</div> : null}
-      <div className={cn(styles.messageBody, 'evidence-message__body')}>
-        <header className={cn(styles.messageHeader, 'evidence-message__header')}>
-          <h3 className={cn(styles.messageHeading, hideLabel && styles.visuallyHidden, hideLabel && 'evidence-visually-hidden')}>{label}</h3>
-          {metadata ? <span className={cn(styles.metadata, 'evidence-message__metadata')}>{metadata}</span> : null}
+      {icon ? <div className={styles.messageIcon} aria-hidden="true">{icon}</div> : null}
+      <div className={styles.messageBody}>
+        <header className={styles.messageHeader}>
+          <h3 className={cn(styles.messageHeading, hideLabel && styles.visuallyHidden)}>{label}</h3>
+          {metadata ? <span className={styles.metadata}>{metadata}</span> : null}
         </header>
-        <div className={cn(styles.messageContent, 'evidence-message__content')}>{children}</div>
+        <div className={styles.messageContent}>{children}</div>
       </div>
     </article>
   );

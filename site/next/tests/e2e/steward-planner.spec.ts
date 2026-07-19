@@ -30,7 +30,7 @@ test.describe('Steward planner history', () => {
     await expect(firstPage.first().getByText('artifact transcript 1')).toBeVisible();
     const transcript = firstPage.first().getByRole('region', { name: 'Transcript artifact' });
     const artifactText = transcript.getByRole('region', { name: 'Transcript code' });
-    const code = artifactText.locator('.code-block-pre');
+    const code = artifactText.locator('pre');
     await expect(code).toHaveCSS('white-space', 'pre');
     const codeGeometry = await artifactText.evaluate((element) => ({
       clientWidth: element.clientWidth,
@@ -44,7 +44,7 @@ test.describe('Steward planner history', () => {
     await artifactText.press('ArrowRight');
     await expect.poll(() => artifactText.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
 
-    const copy = transcript.locator('button.code-copy-button');
+    const copy = transcript.locator('[data-evidence-code-block="true"]').getByRole('button');
     await expect(copy).toBeVisible();
     await expect(copy).toHaveAccessibleName('Copy code');
     if (testInfo.project.name === 'mobile') {
@@ -87,6 +87,7 @@ test.describe('Steward planner history', () => {
     await page.goto('/steward/planner');
 
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await expect(page.getByRole('article')).toHaveCount(4);
     await expectNoGlobalOverflow(page);
     const spinnerMotion = await page.locator('.steward-planner-spinner').first().evaluate(
       (element) => ({

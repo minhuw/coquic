@@ -90,13 +90,15 @@ test.describe('documentation routes', () => {
 
     const trigger = page.getByRole('button', { name: 'Browse documentation' });
     await trigger.click();
-    await page.locator('.ui-dialog__overlay').click({ position: { x: 2, y: 2 } });
+    await page.locator('[data-slot="dialog-overlay"]').click({ position: { x: 2, y: 2 } });
     await expect(page.getByRole('dialog', { name: 'Documentation pages' })).toBeHidden();
     await expect(trigger).toBeFocused();
 
     await trigger.click();
-    await page.getByRole('dialog', { name: 'Documentation pages' }).getByRole('link', { name: 'Public API' }).click();
-    await expect(page).toHaveURL(/\/docs\/api\/public-api$/);
+    await Promise.all([
+      page.waitForURL(/\/docs\/api\/public-api$/),
+      page.getByRole('dialog', { name: 'Documentation pages' }).getByRole('link', { name: 'Public API' }).click(),
+    ]);
     await expect(page.getByRole('dialog', { name: 'Documentation pages' })).toBeHidden();
   });
 

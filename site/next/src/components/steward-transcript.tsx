@@ -89,7 +89,7 @@ export function TranscriptView({
 }) {
   if (!text) {
     return (
-      <div className="evidence-root chat-transcript" aria-label="Agent transcript" tabIndex={0}>
+      <div data-transcript-view="true" aria-label="Agent transcript" tabIndex={0}>
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
         <div className="empty-state">No transcript captured for the selected task.</div>
       </div>
@@ -99,18 +99,18 @@ export function TranscriptView({
   const records = parseCodexTranscriptText(text);
   if (!records.length) {
     return (
-      <div className="evidence-root chat-transcript" aria-label="Agent transcript" tabIndex={0}>
+      <div data-transcript-view="true" aria-label="Agent transcript" tabIndex={0}>
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
         {promptParts.boilerplate && <CollapsedPrompt text={promptParts.boilerplate} />}
         {promptParts.visible && (
-          <EvidenceMessage className="chat-bubble user" hideLabel={isPlannerInputPrompt(promptParts.visible)} icon={<UserRound size={16} />} label="Task prompt" role="user">
+          <EvidenceMessage hideLabel={isPlannerInputPrompt(promptParts.visible)} icon={<UserRound size={16} />} label="Task prompt" role="user">
             <TextBlocks taskId={taskId} text={promptParts.visible} />
           </EvidenceMessage>
         )}
         {metadataOnlyTranscript(text) ? (
           <div className="empty-state">No displayable agent output has been captured yet.</div>
         ) : (
-          <EvidenceMessage className="chat-bubble assistant" icon={<MessageSquareText size={16} />} label="Transcript text" role="assistant">
+          <EvidenceMessage icon={<MessageSquareText size={16} />} label="Transcript text" role="assistant">
             <TextBlocks taskId={taskId} text={text} />
           </EvidenceMessage>
         )}
@@ -118,11 +118,11 @@ export function TranscriptView({
     );
   }
   return (
-    <div className="evidence-root chat-transcript" aria-label="Agent transcript" tabIndex={0}>
+    <div data-transcript-view="true" aria-label="Agent transcript" tabIndex={0}>
       <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
       {promptParts.boilerplate && <CollapsedPrompt text={promptParts.boilerplate} />}
       {promptParts.visible && (
-        <EvidenceMessage className="chat-bubble user" hideLabel={isPlannerInputPrompt(promptParts.visible)} icon={<UserRound size={16} />} label="Task prompt" role="user">
+        <EvidenceMessage hideLabel={isPlannerInputPrompt(promptParts.visible)} icon={<UserRound size={16} />} label="Task prompt" role="user">
           <TextBlocks taskId={taskId} text={promptParts.visible} />
         </EvidenceMessage>
       )}
@@ -145,7 +145,6 @@ function SessionDiagnostics({
   const tail = diagnostics.last_item_type || diagnostics.last_event_type;
   return (
     <EvidenceDisclosure
-      className="tool-card danger"
       icon={<XCircle size={16} />}
       metadata={diagnostics.status.replaceAll("_", " ")}
       label="Session diagnostics"
@@ -239,7 +238,6 @@ function TextBlocks({ mode = "message", taskId, text }: { mode?: "message" | "to
         if (block.kind === "code") {
           return (
             <CodeBlock
-              className="chat-code"
               compact
               key={index}
               language={block.language}
@@ -250,7 +248,6 @@ function TextBlocks({ mode = "message", taskId, text }: { mode?: "message" | "to
         if (mode === "tool") {
           return (
             <CodeBlock
-              className="tool-output"
               compact
               key={index}
               text={block.text}
@@ -261,7 +258,7 @@ function TextBlocks({ mode = "message", taskId, text }: { mode?: "message" | "to
         const plannerInput = parsePlannerInput(block.text);
         if (plannerInput) return <PlannerInputCard input={plannerInput} key={index} />;
         return (
-          <p className="chat-text" key={index}>
+          <p data-evidence-text="true" key={index}>
             <EscapedText text={block.text} />
           </p>
         );
@@ -463,7 +460,7 @@ function shortDate(value: string) {
 }
 
 function DiffBlock({ text }: { text: string }) {
-  return <CodeBlock className="chat-diff" compact language="diff" text={text} title="Diff" />;
+  return <CodeBlock compact language="diff" text={text} title="Diff" />;
 }
 
 function ImageBlock({ path, taskId: _taskId }: { path: string; taskId: string }) {

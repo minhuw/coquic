@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 export default function InteropPage() {
   return (
     <main
-      className={`coquic-page ${styles.root}`}
+      className={styles.root}
       aria-label="CoQUIC interop evidence"
       aria-busy="true"
       data-interop-state="loading"

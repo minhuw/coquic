@@ -14,57 +14,57 @@ const probeMarkup = `
     class="mx-auto grid max-w-[var(--container-focused)] gap-[var(--space-4)] border border-[var(--border)] bg-[var(--canvas)] p-[var(--space-4)] text-[var(--text)]"
   >
     <header
-      class="page-header m-0 border-0 bg-transparent px-0 py-[var(--space-6)] max-md:py-[var(--space-5)] max-md:pb-[var(--space-4)]"
+      class="m-0 border-0 bg-transparent px-0 py-[var(--space-6)] max-md:py-[var(--space-5)] max-md:pb-[var(--space-4)]"
       data-page-header-variant="standard"
       data-slot="page-header"
     >
-      <div class="page-header__container grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-[var(--space-6)] max-md:grid-cols-[minmax(0,1fr)] max-md:items-start max-md:gap-[var(--space-4)]" data-slot="page-header-container">
-        <div class="page-header__measure grid min-w-0 max-w-[var(--measure-editorial)] gap-[7px]" data-slot="page-header-measure">
-          <div class="page-header__context min-w-0" data-slot="page-header-context">
-            <span class="eyebrow inline-flex max-w-full items-center gap-[var(--space-2)] text-[var(--accent-ink)] uppercase tracking-[0] [font:var(--type-metadata)] [&::before]:content-none [overflow-wrap:anywhere]" data-slot="page-header-eyebrow">
-              <span class="page-header__eyebrow-marker size-[7px] shrink-0 bg-[var(--accent-ink)] forced-colors:[background-color:LinkText]" aria-hidden="true" data-slot="page-header-eyebrow-marker"></span>
+      <div class="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-[var(--space-6)] max-md:grid-cols-[minmax(0,1fr)] max-md:items-start max-md:gap-[var(--space-4)]" data-slot="page-header-container">
+        <div class="grid min-w-0 max-w-[var(--measure-editorial)] gap-[7px]" data-slot="page-header-measure">
+          <div class="min-w-0" data-slot="page-header-context">
+            <span class="inline-flex max-w-full items-center gap-[var(--space-2)] text-[var(--accent-ink)] uppercase tracking-[0] [font:var(--type-metadata)] [&::before]:content-none [overflow-wrap:anywhere]" data-slot="page-header-eyebrow">
+              <span class="size-[7px] shrink-0 bg-[var(--accent-ink)] forced-colors:[background-color:LinkText]" aria-hidden="true" data-slot="page-header-eyebrow-marker"></span>
               Shared primitives
             </span>
           </div>
-          <h2 id="shared-primitive-heading" class="page-title m-0 max-w-[var(--measure-editorial)] text-[var(--text-strong)] tracking-[0] [font:var(--type-page-title)] [overflow-wrap:anywhere] max-md:text-[30px] max-md:leading-[1.15]" data-slot="page-header-title">Source-owned controls</h2>
-          <p class="page-header__description max-w-[var(--measure-reading)] text-[var(--text-muted)] tracking-[0] [font:var(--type-body)]" data-slot="page-header-description">Semantic tokens remain readable in both themes.</p>
+          <h2 id="shared-primitive-heading" class="m-0 max-w-[var(--measure-editorial)] text-[var(--text-strong)] tracking-[0] [font:var(--type-page-title)] [overflow-wrap:anywhere] max-md:text-[30px] max-md:leading-[1.15]" data-slot="page-header-title">Source-owned controls</h2>
+          <p class="max-w-[var(--measure-reading)] text-[var(--text-muted)] tracking-[0] [font:var(--type-body)]" data-slot="page-header-description">Semantic tokens remain readable in both themes.</p>
         </div>
-        <div class="page-header__actions flex min-w-0 flex-wrap items-start justify-end gap-[var(--space-2)] pb-[2px] max-md:w-full max-md:justify-start max-md:pb-0" data-slot="page-header-actions">
-          <button class="ui-button ui-button--default relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-[var(--command)] bg-[var(--command)] px-[var(--space-4)] text-[var(--on-command)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)] hover:border-[var(--command-hover)] hover:bg-[var(--command-hover)] active:border-[var(--command-active)] active:bg-[var(--command-active)] aria-busy:cursor-progress" data-slot="button" data-variant="default" type="button">Run probe</button>
+        <div class="flex min-w-0 flex-wrap items-start justify-end gap-[var(--space-2)] pb-[2px] max-md:w-full max-md:justify-start max-md:pb-0" data-slot="page-header-actions">
+          <button class="relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-[var(--command)] bg-[var(--command)] px-[var(--space-4)] text-[var(--on-command)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)] hover:border-[var(--command-hover)] hover:bg-[var(--command-hover)] active:border-[var(--command-active)] active:bg-[var(--command-active)] aria-busy:cursor-progress" data-slot="button" data-variant="default" type="button">Run probe</button>
         </div>
       </div>
     </header>
     <div class="flex flex-wrap items-center gap-[var(--space-2)]">
-      <button class="ui-button ui-button--default relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-[var(--command)] bg-[var(--command)] px-[var(--space-4)] text-[var(--on-command)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)] hover:border-[var(--command-hover)] hover:bg-[var(--command-hover)] active:border-[var(--command-active)] active:bg-[var(--command-active)]" data-slot="button" data-variant="default" type="button">Default</button>
-      <button class="ui-button ui-button--outline relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-[var(--control-border)] bg-[var(--surface)] px-[var(--space-4)] text-[var(--text-strong)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)] disabled:cursor-not-allowed" data-slot="button" data-variant="outline" type="button">Outline</button>
-      <button class="ui-button ui-button--ghost relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-transparent bg-transparent px-[var(--space-4)] text-[var(--text-strong)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)]" data-slot="button" data-variant="ghost" type="button">Ghost</button>
-      <span class="ui-badge inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-neutral-border)] bg-[var(--status-neutral-surface)] px-[var(--space-2)] text-[var(--status-neutral-ink)] tracking-[0] [font:var(--type-metadata)]" data-slot="badge" data-variant="success">metadata</span>
-      <span class="status-label status-label--success inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-success-border)] bg-[var(--status-success-surface)] px-[var(--space-2)] text-[var(--status-success-ink)] tracking-[0] [font:var(--type-metadata)]" data-slot="status-label" data-tone="success">PASS</span>
-      <span class="status-label status-label--warning inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-warning-border)] bg-[var(--status-warning-surface)] px-[var(--space-2)] text-[var(--status-warning-ink)] tracking-[0] [font:var(--type-metadata)]" data-slot="status-label" data-tone="warning">UNSUPPORTED</span>
+      <button class="relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-[var(--command)] bg-[var(--command)] px-[var(--space-4)] text-[var(--on-command)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)] hover:border-[var(--command-hover)] hover:bg-[var(--command-hover)] active:border-[var(--command-active)] active:bg-[var(--command-active)]" data-slot="button" data-variant="default" type="button">Default</button>
+      <button class="relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-[var(--control-border)] bg-[var(--surface)] px-[var(--space-4)] text-[var(--text-strong)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)] disabled:cursor-not-allowed" data-slot="button" data-variant="outline" type="button">Outline</button>
+      <button class="relative inline-flex min-w-0 shrink-0 cursor-pointer items-center justify-center gap-[var(--space-2)] rounded-[var(--radius-control)] border border-transparent bg-transparent px-[var(--space-4)] text-[var(--text-strong)] tracking-[0] [font:var(--type-ui-label)] h-[var(--control-default)]" data-slot="button" data-variant="ghost" type="button">Ghost</button>
+      <span class="inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-neutral-border)] bg-[var(--status-neutral-surface)] px-[var(--space-2)] text-[var(--status-neutral-ink)] tracking-[0] [font:var(--type-metadata)]" data-slot="badge" data-variant="success">metadata</span>
+      <span class="inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-success-border)] bg-[var(--status-success-surface)] px-[var(--space-2)] text-[var(--status-success-ink)] tracking-[0] [font:var(--type-metadata)]" data-slot="status-label" data-tone="success">PASS</span>
+      <span class="inline-flex min-h-[24px] items-center rounded-[var(--radius-control)] border border-[var(--status-warning-border)] bg-[var(--status-warning-surface)] px-[var(--space-2)] text-[var(--status-warning-ink)] tracking-[0] [font:var(--type-metadata)]" data-slot="status-label" data-tone="warning">UNSUPPORTED</span>
     </div>
-    <div class="ui-panel block rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] shadow-none" data-slot="card">
-      <div class="ui-panel__header grid gap-[var(--space-1)] border-b border-[var(--border)] p-[var(--space-4)]" data-slot="card-header">
-        <h3 class="ui-panel__title text-[var(--text-strong)] tracking-[0] [font:var(--type-panel-title)]" data-slot="card-title">Packet state</h3>
-        <p class="ui-panel__description text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]" data-slot="card-description">A compact semantic panel.</p>
+    <div class="block rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] shadow-none" data-slot="card">
+      <div class="grid gap-[var(--space-1)] border-b border-[var(--border)] p-[var(--space-4)]" data-slot="card-header">
+        <h3 class="text-[var(--text-strong)] tracking-[0] [font:var(--type-panel-title)]" data-slot="card-title">Packet state</h3>
+        <p class="text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]" data-slot="card-description">A compact semantic panel.</p>
       </div>
-      <div class="ui-panel__content p-[var(--space-4)]" data-slot="card-content">
-        <div class="ui-tabs__list flex min-w-0 gap-[var(--space-1)] border-b border-[var(--border)]" data-slot="tabs-list" role="tablist" aria-label="Packet direction">
-          <button class="ui-tabs__trigger inline-flex min-h-[var(--control-default)] min-w-0 items-center justify-center border-0 border-b-2 border-[var(--accent-ink)] bg-transparent px-[var(--space-3)] text-[var(--text-strong)] tracking-[0] [font:var(--type-ui-label)]" data-slot="tabs-trigger" data-state="active" role="tab" type="button">Client</button>
-          <button class="ui-tabs__trigger inline-flex min-h-[var(--control-default)] min-w-0 items-center justify-center border-0 border-b-2 border-transparent bg-transparent px-[var(--space-3)] text-[var(--text-muted)] tracking-[0] [font:var(--type-ui-label)]" data-slot="tabs-trigger" data-state="inactive" role="tab" type="button">Server</button>
+      <div class="p-[var(--space-4)]" data-slot="card-content">
+        <div class="flex min-w-0 gap-[var(--space-1)] border-b border-[var(--border)]" data-slot="tabs-list" role="tablist" aria-label="Packet direction">
+          <button class="inline-flex min-h-[var(--control-default)] min-w-0 items-center justify-center border-0 border-b-2 border-[var(--accent-ink)] bg-transparent px-[var(--space-3)] text-[var(--text-strong)] tracking-[0] [font:var(--type-ui-label)]" data-slot="tabs-trigger" data-state="active" role="tab" type="button">Client</button>
+          <button class="inline-flex min-h-[var(--control-default)] min-w-0 items-center justify-center border-0 border-b-2 border-transparent bg-transparent px-[var(--space-3)] text-[var(--text-muted)] tracking-[0] [font:var(--type-ui-label)]" data-slot="tabs-trigger" data-state="inactive" role="tab" type="button">Server</button>
         </div>
-        <div class="ui-tabs__content py-[var(--space-4)]" data-slot="tabs-content" role="tabpanel">Client packets</div>
-        <div class="table-scroll-region relative max-w-full overflow-x-auto overscroll-contain" data-slot="table-scroll-region" role="region" aria-label="Packet table" tabindex="0">
-          <table class="ui-table w-full border-collapse caption-bottom text-sm" data-slot="table">
-            <thead data-slot="table-header"><tr class="ui-table__row border-b border-[var(--border)]" data-slot="table-row"><th class="ui-table__head h-10 px-[var(--space-3)] text-left align-middle text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]" data-slot="table-head">Frame</th><th class="ui-table__head h-10 px-[var(--space-3)] text-left align-middle text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]" data-slot="table-head">State</th></tr></thead>
-            <tbody data-slot="table-body"><tr class="ui-table__row border-b border-[var(--border)]" data-slot="table-row"><td class="ui-table__cell p-[var(--space-3)] align-middle text-[var(--text)]" data-slot="table-cell">Initial</td><td class="ui-table__cell p-[var(--space-3)] align-middle text-[var(--text)]" data-slot="table-cell">Ready</td></tr></tbody>
+        <div class="py-[var(--space-4)]" data-slot="tabs-content" role="tabpanel">Client packets</div>
+        <div class="relative max-w-full overflow-x-auto overscroll-contain" data-slot="table-scroll-region" role="region" aria-label="Packet table" tabindex="0">
+          <table class="w-full border-collapse caption-bottom text-sm" data-slot="table">
+            <thead data-slot="table-header"><tr class="border-b border-[var(--border)]" data-slot="table-row"><th class="h-10 px-[var(--space-3)] text-left align-middle text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]" data-slot="table-head">Frame</th><th class="h-10 px-[var(--space-3)] text-left align-middle text-[var(--text-muted)] tracking-[0] [font:var(--type-metadata)]" data-slot="table-head">State</th></tr></thead>
+            <tbody data-slot="table-body"><tr class="border-b border-[var(--border)]" data-slot="table-row"><td class="p-[var(--space-3)] align-middle text-[var(--text)]" data-slot="table-cell">Initial</td><td class="p-[var(--space-3)] align-middle text-[var(--text)]" data-slot="table-cell">Ready</td></tr></tbody>
           </table>
         </div>
       </div>
     </div>
-    <div class="scroll-region relative max-w-full overflow-x-auto overscroll-contain" data-scroll-region="true" data-slot="scroll-region" aria-label="Packet timeline" tabindex="0">
+    <div class="relative max-w-full overflow-x-auto overscroll-contain" data-scroll-region="true" data-slot="scroll-region" aria-label="Packet timeline" tabindex="0">
       <div class="flex min-w-[720px] items-center gap-[var(--space-2)] bg-[var(--surface-subtle)] p-[var(--space-3)] text-[var(--text-muted)]" data-slot="scroll-content">packet timeline / 01 / 02 / 03 / 04</div>
     </div>
-    <div class="ui-skeleton min-h-[1em] w-full rounded-[var(--radius-control)] bg-[var(--surface-strong)] [animation:foundation-skeleton_1.4s_var(--ease-standard)_infinite_alternate] motion-reduce:[animation-duration:0.001ms]" data-skeleton="true" data-slot="skeleton" aria-hidden="true"></div>
+    <div class="min-h-[1em] w-full rounded-[var(--radius-control)] bg-[var(--surface-strong)] [animation:foundation-skeleton_1.4s_var(--ease-standard)_infinite_alternate] motion-reduce:[animation-duration:0.001ms]" data-skeleton="true" data-slot="skeleton" aria-hidden="true"></div>
   </section>
 `;
 

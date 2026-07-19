@@ -164,7 +164,7 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
 export default function WorkbenchPage() {
   return (
     <main
-      className={`coquic-page workbench-page ${styles.root}`}
+      className={`${styles.root} workbench-page`}
       id="workbench-page"
       data-workbench-root="true"
       data-workbench-view="client"

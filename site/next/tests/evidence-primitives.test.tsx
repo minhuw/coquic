@@ -293,7 +293,7 @@ describe('shared evidence primitives', () => {
     fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(close);
 
-    const overlay = document.querySelector('.ui-dialog__overlay');
+    const overlay = document.querySelector('[data-slot="dialog-overlay"]');
     expect(overlay).not.toBeNull();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
     fireEvent.pointerDown(overlay as Element, { button: 0 });

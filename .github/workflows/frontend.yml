@@ -41,6 +41,9 @@ jobs:
       - name: Lint
         run: nix develop -c npm --prefix site/next run lint
 
+      - name: Style boundary
+        run: nix develop -c npm --prefix site/next run check:styles
+
       - name: Typecheck
         run: nix develop -c npm --prefix site/next run typecheck
 

@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 
 export default function StewardPage() {
   return (
-    <main className={`coquic-page steward-dashboard-page steward-dashboard-route ${dashboardStyles.route}`} data-steward-surface="dashboard">
+    <main className={`steward-dashboard-page steward-dashboard-route ${dashboardStyles.route}`} data-steward-surface="dashboard">
       <PageHeader
         description="A read-only public publication of Steward runtime state, work evidence, and current freshness."
         eyebrow="public operations"

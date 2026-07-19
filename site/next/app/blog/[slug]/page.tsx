@@ -38,7 +38,7 @@ export default async function BlogPostPage({ params }: BlogPostPageProps) {
   if (!post) notFound();
 
   return (
-    <main className="coquic-page">
+    <main className={styles.page}>
       <BlogLanguageProvider>
         <article className={cn(styles.post, 'blog-post')}>
           <Link className={styles.backLink} href="/blog">

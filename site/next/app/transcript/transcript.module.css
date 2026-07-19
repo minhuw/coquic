@@ -5,6 +5,7 @@
     width: 100%;
     max-width: none;
     padding-inline: clamp(16px, 3vw, 40px);
+    padding-bottom: 18px;
   }
 
   .transcript-shell {
@@ -21,7 +22,7 @@
     padding-block: var(--space-5);
   }
 
-  .transcript-header .page-header__description {
+  .transcript-header [data-slot='page-header-description'] {
     font-size: 15px;
     line-height: 1.55;
   }

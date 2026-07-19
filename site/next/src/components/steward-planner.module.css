@@ -19,11 +19,11 @@
     padding-block: var(--space-6) var(--space-5);
   }
 
-  .root :global(.steward-planner-header) :global(.page-header__container) {
+  .root :global(.steward-planner-header) :global([data-slot='page-header-container']) {
     align-items: end;
   }
 
-  .root :global(.steward-planner-header) :global(.page-header__description) {
+  .root :global(.steward-planner-header) :global([data-slot='page-header-description']) {
     max-width: 620px;
     font: var(--type-body);
   }
@@ -405,7 +405,7 @@
       padding-block: var(--space-5);
     }
 
-    .root :global(.steward-planner-header) :global(.page-header__container) {
+    .root :global(.steward-planner-header) :global([data-slot='page-header-container']) {
       align-items: stretch;
     }
 

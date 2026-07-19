@@ -16,6 +16,7 @@
   max-height: none;
   overflow: visible;
   background: var(--code-surface);
+  font-size: 12px;
 }
 
 .split {

@@ -16,8 +16,9 @@ export default function BlogIndexPage() {
   const posts = getBlogPosts();
 
   return (
-    <main className="coquic-page">
+    <main className={styles.page}>
       <PageHeader
+        className={styles.indexHeader}
         eyebrow="project blog"
         title="CoQUIC Blog"
         variant="editorial"

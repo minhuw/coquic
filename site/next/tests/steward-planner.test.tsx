@@ -136,10 +136,10 @@ describe('Steward planner history', () => {
 
     expect(screen.getByText('redacted / truncated')).toBeInTheDocument();
     expect(screen.getByText((_, element) => (
-      element?.classList.contains('code-token') === true && element.textContent === 'first  line'
+      element?.getAttribute('data-evidence-token') === 'true' && element.textContent === 'first  line'
     ))).toBeInTheDocument();
     expect(screen.getByText((_, element) => (
-      element?.classList.contains('code-token') === true
+      element?.getAttribute('data-evidence-token') === 'true'
       && element.textContent === 'second    line with retained whitespace'
     ))).toBeInTheDocument();
     expect(screen.getByText('Not produced')).toBeInTheDocument();

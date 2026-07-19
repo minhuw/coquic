@@ -5,6 +5,8 @@ import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, w
 const themes = ['light', 'dark'] as const;
 const taskRoute = '/steward/tasks/task-20260713115945-a1b2c3d4';
 
+test.use({ launchOptions: { args: ['--disable-gpu'] } });
+
 function trackThirdPartyFontRequests(page: Parameters<typeof setStoredTheme>[0]) {
   const requests: string[] = [];
   page.on('request', (request) => {
@@ -15,6 +17,10 @@ function trackThirdPartyFontRequests(page: Parameters<typeof setStoredTheme>[0])
     }
   });
   return requests;
+}
+
+async function prepareVisualCapture(page: Parameters<typeof setStoredTheme>[0]) {
+  await waitForVisualAssets(page);
 }
 
 test.describe('content primitive compositions', () => {
@@ -30,9 +36,8 @@ test.describe('content primitive compositions', () => {
       const tableRegions = page.locator('[data-editorial-table-region="true"]');
       if (await tableRegions.count()) await expect(tableRegions.first()).toBeVisible();
       await expectNoGlobalOverflow(page);
-      await waitForVisualAssets(page);
+      await prepareVisualCapture(page);
       await expect(page).toHaveScreenshot(`prose-table-code-${theme}.png`, { fullPage: false });
-      await page.evaluate(() => document.fonts.ready);
       expect(thirdPartyFontRequests).toEqual([]);
     });
 
@@ -49,11 +54,11 @@ test.describe('content primitive compositions', () => {
       const transcriptTab = page.getByRole('tab', { name: 'Transcript' }).first();
       await expect(transcriptTab).toBeVisible();
       await transcriptTab.click();
-      await expect(page.locator('.evidence-root')).not.toHaveCount(0);
-      await expect(page.locator('.evidence-message, .evidence-disclosure')).not.toHaveCount(0);
+      await expect(page.locator('[data-transcript-view="true"], [data-transcript-thread="true"]')).not.toHaveCount(0);
+      await expect(page.locator('[data-evidence-message="true"], [data-evidence-disclosure="true"]')).not.toHaveCount(0);
       await expectNoGlobalOverflow(page);
       await expectNoSeriousAxeViolations(page, 'main');
-      await waitForVisualAssets(page);
+      await prepareVisualCapture(page);
       await expect(page).toHaveScreenshot(`evidence-transcript-${theme}.png`, { fullPage: false });
 
       const patchTab = page.getByRole('tab', { name: 'Patch' }).first();
@@ -62,9 +67,8 @@ test.describe('content primitive compositions', () => {
       await expect(page.locator('.diff-split, .diff-unified')).not.toHaveCount(0);
       await expectNoGlobalOverflow(page);
       await expectNoSeriousAxeViolations(page, 'main');
-      await waitForVisualAssets(page);
+      await prepareVisualCapture(page);
       await expect(page).toHaveScreenshot(`evidence-diff-${theme}.png`, { fullPage: false });
-      await page.evaluate(() => document.fonts.ready);
       expect(thirdPartyFontRequests).toEqual([]);
     });
   }

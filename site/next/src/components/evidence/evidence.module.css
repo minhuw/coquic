@@ -27,6 +27,7 @@
   background: var(--surface);
   color: var(--text);
   padding: 12px;
+  padding-bottom: var(--evidence-message-padding-bottom, 12px);
 }
 
 .messageUser {
@@ -95,6 +96,25 @@
   overflow-wrap: anywhere;
   font-size: 14px;
   line-height: 1.6;
+}
+
+.messageContent :global([data-evidence-text='true']) {
+  margin: 0;
+  color: #161616;
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+:global(html[data-theme='dark']) .messageContent :global([data-evidence-text='true']) {
+  color: #f4f7fb;
+}
+
+.messageContent :global([data-evidence-text='true'] + [data-evidence-text='true']),
+.messageContent :global([data-evidence-text='true'] + [data-evidence-code-block='true']),
+.messageContent :global([data-evidence-code-block='true'] + [data-evidence-text='true']) {
+  margin-top: 10px;
 }
 
 .markdown > :first-child {

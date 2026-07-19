@@ -8,7 +8,7 @@ export const metadata: Metadata = {
 
 export default function StewardPlannerPage() {
   return (
-    <main className="coquic-page steward-planner-route" data-steward-surface="planner">
+    <main className="steward-planner-route mx-auto w-full max-w-[1340px] px-3 pb-10 sm:px-[18px] lg:px-6 lg:pb-14 max-[680px]:px-3 max-[680px]:pb-8" data-steward-surface="planner">
       <StewardPlannerLive />
     </main>
   );

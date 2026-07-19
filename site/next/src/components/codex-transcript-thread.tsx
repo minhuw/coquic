@@ -33,10 +33,10 @@ export function CodexTranscriptThread({
   const conversationRecords = records.filter(isRenderableRecord);
   const conversationItems = groupConversationRecords(conversationRecords);
   if (!conversationItems.length) {
-    return <div className={cn(styles.root, 'evidence-root', 'evidence-thread')}><div className={cn(styles.empty, 'transcript-empty')}>{empty ?? 'No displayable transcript records.'}</div></div>;
+    return <div className={styles.root} data-transcript-thread="true"><div className={styles.empty}>{empty ?? 'No displayable transcript records.'}</div></div>;
   }
   return (
-    <div className={cn(styles.root, 'evidence-root', 'evidence-thread')}>
+    <div className={styles.root} data-transcript-thread="true">
       {conversationItems.map((item) => (
         <TranscriptItem key={item.key} item={item} />
       ))}
@@ -58,7 +58,7 @@ function TranscriptMessage({ record }: { record: TranscriptRecord }) {
   const kind = conversationKind(record);
   if (kind === 'reasoning') {
     return (
-      <EvidenceDisclosure className="tool-card neutral" icon={<Sparkles size={16} />} metadata={lineMeta(record)} label="Reasoning" tone="neutral">
+      <EvidenceDisclosure icon={<Sparkles size={16} />} metadata={lineMeta(record)} label="Reasoning" tone="neutral">
         <MarkdownText text={record.text} />
         {record.textTruncated ? <TranscriptNote /> : null}
       </EvidenceDisclosure>
@@ -66,14 +66,14 @@ function TranscriptMessage({ record }: { record: TranscriptRecord }) {
   }
   if (kind === 'event') {
     return (
-      <EvidenceDisclosure className={`tool-card ${record.payloadType === 'error' ? 'danger' : 'neutral'}`} icon={<XCircle size={16} />} metadata={lineMeta(record)} label={messageLabel(role, kind, record)} tone={record.payloadType === 'error' ? 'danger' : 'neutral'}>
+      <EvidenceDisclosure icon={<XCircle size={16} />} metadata={lineMeta(record)} label={messageLabel(role, kind, record)} tone={record.payloadType === 'error' ? 'danger' : 'neutral'}>
         <MarkdownText text={record.text} />
         {record.textTruncated ? <TranscriptNote /> : null}
       </EvidenceDisclosure>
     );
   }
   return (
-    <EvidenceMessage className={`chat-bubble ${role}`} icon={role === 'user' ? <UserRound size={16} /> : <MessageSquareText size={16} />} label={messageLabel(role, kind, record)} role={role}>
+    <EvidenceMessage icon={role === 'user' ? <UserRound size={16} /> : <MessageSquareText size={16} />} label={messageLabel(role, kind, record)} role={role}>
       <MarkdownText text={record.text} />
       {record.textTruncated ? <TranscriptNote /> : null}
     </EvidenceMessage>
@@ -90,13 +90,13 @@ function TranscriptToolCard({ group }: { group: TranscriptToolGroup }) {
   const payloadLabel = toolPayloadLabel(primaryRecord.payloadType);
   const meta = [toolGroupState(group), payloadLabel, toolLineLabel(group)].filter(Boolean).join(' / ');
   return (
-    <EvidenceDisclosure className={`tool-card ${compatibilityToneClass(toolTone(group))}`} icon={toolIcon(primaryRecord)} metadata={meta} label={toolName} tone={toolTone(group)}>
-      <div className={cn(styles.toolSections, 'transcript-tool-sections', 'steward-tool-sections')}>
+    <EvidenceDisclosure icon={toolIcon(primaryRecord)} metadata={meta} label={toolName} tone={toolTone(group)}>
+      <div className={styles.toolSections}>
         {group.call ? <ToolSection format={toolCallFormat(group.call)} label="Call" record={group.call} /> : null}
         {group.result ? (
           <ToolSection format="markdown" label="Result" record={group.result} />
         ) : (
-          <div className={cn(styles.emptyTool, 'tool-empty')}>Result is not loaded in the current preview page.</div>
+          <div className={styles.emptyTool}>Result is not loaded in the current preview page.</div>
         )}
       </div>
       {group.call?.textTruncated || group.result?.textTruncated ? <TranscriptNote /> : null}
@@ -108,9 +108,9 @@ function FileChangeCard({ record }: { record: TranscriptRecord }) {
   const parsed = parseJsonRecord(record.text) as { changes?: Array<{ kind?: string; path?: string }>; status?: string } | null;
   const changes = Array.isArray(parsed?.changes) ? parsed.changes : [];
   return (
-    <EvidenceDisclosure className="tool-card pending" icon={<FilePenLine size={16} />} metadata={parsed?.status || lineMeta(record)} label="File change" tone="warning">
+    <EvidenceDisclosure icon={<FilePenLine size={16} />} metadata={parsed?.status || lineMeta(record)} label="File change" tone="warning">
       {changes.length ? (
-        <ul className={cn(styles.fileList, 'file-list')}>
+        <ul className={styles.fileList}>
           {changes.map((change, index) => (
             <li key={`${change.path || 'file'}-${index}`}>
               <span>{change.kind || 'change'}</span>
@@ -130,12 +130,12 @@ function TodoListCard({ record }: { record: TranscriptRecord }) {
   const parsed = parseJsonRecord(record.text) as { items?: Array<{ completed?: boolean; text?: string }> } | null;
   const items = Array.isArray(parsed?.items) ? parsed.items : [];
   return (
-    <EvidenceDisclosure className="tool-card neutral" icon={<ListChecks size={16} />} metadata={`${items.length} items`} label="Task plan" tone="neutral">
+    <EvidenceDisclosure icon={<ListChecks size={16} />} metadata={`${items.length} items`} label="Task plan" tone="neutral">
       {items.length ? (
-        <ul className={cn(styles.todoList, 'todo-list')}>
+        <ul className={styles.todoList}>
           {items.map((todo, index) => (
-            <li className={cn(todo.completed && styles.done, todo.completed && 'done')} key={`${todo.text || 'todo'}-${index}`}>
-              {todo.completed ? <CheckCircle2 size={15} /> : <span className={cn(styles.todoDot, 'todo-dot')} />}
+            <li className={cn(todo.completed && styles.done)} key={`${todo.text || 'todo'}-${index}`}>
+              {todo.completed ? <CheckCircle2 size={15} /> : <span className={styles.todoDot} />}
               <span>{todo.text || '(empty item)'}</span>
             </li>
           ))}
@@ -150,8 +150,8 @@ function TodoListCard({ record }: { record: TranscriptRecord }) {
 
 function WebSearchCard({ record }: { record: TranscriptRecord }) {
   return (
-    <EvidenceDisclosure className="tool-card neutral" icon={<Search size={16} />} metadata={lineMeta(record)} label="Web search" tone="neutral">
-      <code className={cn(styles.inlineCode, 'transcript-inline-code')}>{record.text || '(empty query)'}</code>
+    <EvidenceDisclosure icon={<Search size={16} />} metadata={lineMeta(record)} label="Web search" tone="neutral">
+      <code className={styles.inlineCode}>{record.text || '(empty query)'}</code>
       {record.textTruncated ? <TranscriptNote /> : null}
     </EvidenceDisclosure>
   );
@@ -160,21 +160,20 @@ function WebSearchCard({ record }: { record: TranscriptRecord }) {
 function ToolSection({ format, label, record }: { format: 'bash' | 'json' | 'markdown' | 'text'; label: string; record: TranscriptRecord }) {
   if (format === 'markdown') {
     return (
-      <section className={cn(styles.section, 'steward-tool-section')}>
-        <div className={cn(styles.sectionHead, 'steward-tool-section-head')}>
+      <section className={styles.section}>
+        <div className={styles.sectionHead}>
           <span>{label}</span>
           <code>line {formatInteger(record.line)}</code>
         </div>
-        <div className={cn(styles.toolMarkdown, 'steward-tool-markdown')}>
+        <div className={styles.toolMarkdown}>
           <MarkdownText text={record.text} />
         </div>
       </section>
     );
   }
   return (
-    <section className={cn(styles.section, 'steward-tool-section')}>
+    <section className={styles.section}>
       <CodeBlock
-        className={format === 'bash' ? 'tool-command' : 'tool-output'}
         compact
         language={format === 'text' ? undefined : format}
         showLineNumbers={false}
@@ -187,14 +186,14 @@ function ToolSection({ format, label, record }: { format: 'bash' | 'json' | 'mar
 
 function MarkdownText({ text }: { text: string }) {
   return (
-    <div className={cn(styles.markdown, 'evidence-markdown', 'transcript-markdown')}>
+    <div className={styles.markdown}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   );
 }
 
 function TranscriptNote() {
-  return <small className={cn(styles.note, 'transcript-message-note')}>Preview truncated. Download the JSONL member for the full record.</small>;
+  return <small className={styles.note}>Preview truncated. Download the JSONL member for the full record.</small>;
 }
 
 function isRenderableRecord(record: TranscriptRecord) {
@@ -229,12 +228,6 @@ function toolTone(group: TranscriptToolGroup): EvidenceTone {
   if (group.result?.payloadType === 'error' || group.call?.payloadType === 'error') return 'danger';
   if (!group.result) return 'warning';
   return 'success';
-}
-
-function compatibilityToneClass(tone: EvidenceTone) {
-  if (tone === 'success') return 'ok';
-  if (tone === 'warning') return 'pending';
-  return tone;
 }
 
 function toolIcon(record: TranscriptRecord) {

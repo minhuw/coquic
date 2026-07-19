@@ -21,7 +21,7 @@ const toolItems = [
 
 export default function Home() {
   return (
-    <main className="coquic-page max-w-none p-0" data-home-route="home">
+    <main className="max-w-none p-0" data-home-route="home">
       <meta name="coquic-demo-marker" content="coquic-wasm-demo-v1" />
       <meta name="coquic-home-marker" content="coquic-demo-home-v1" />
 

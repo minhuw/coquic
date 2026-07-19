@@ -14,7 +14,7 @@ test.describe('Steward task evidence detail', () => {
   test('keeps the route main as the sole landmark and leads with current evidence', async ({ page }) => {
     await page.goto(taskRoute);
 
-    await expect(page.locator('main.coquic-page')).toHaveCount(1);
+    await expect(page.locator('main[data-steward-surface="task"]')).toHaveCount(1);
     await expect(page.locator('main main')).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Implement dashboard contract', level: 1 })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Current iteration', level: 2 })).toBeVisible();

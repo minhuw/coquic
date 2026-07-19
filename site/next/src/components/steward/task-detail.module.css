@@ -8,6 +8,10 @@
     --task-canvas: var(--canvas);
     --task-surface: var(--surface-subtle);
     --task-surface-muted: var(--surface-subtle);
+    --task-transcript-surface: #f4f4f4;
+    --task-empty-surface: #f4f4f4;
+    --task-code-surface: #fff;
+    --task-code-border: #e0e0e0;
     --task-surface-strong: var(--surface-strong);
     --task-text: var(--text-strong);
     --task-muted: var(--text-muted);
@@ -36,6 +40,57 @@
     --task-flow-loop-surface: var(--server-soft, var(--task-accent-soft));
     --task-flow-label-surface: var(--task-surface-muted);
     --task-flow-muted: var(--task-muted);
+    --task-timeline-primary: #0f62fe;
+    --task-timeline-surface: #f4f4f4;
+    --task-timeline-ink: #161616;
+    --task-timeline-muted: #6f6f6f;
+    --task-timeline-soft: #393939;
+    --task-timeline-line: #e0e0e0;
+    --task-timeline-line-strong: #c6c6c6;
+    --task-timeline-primary-soft: #edf5ff;
+    --task-timeline-primary-border: rgb(15 98 254 / 28%);
+    --task-timeline-success: #176b52;
+    --task-timeline-success-soft: #edf8f4;
+    --task-timeline-success-border: rgb(31 138 101 / 28%);
+    --task-timeline-danger: #cf2d56;
+    --task-timeline-danger-soft: #fff1f1;
+    --task-timeline-danger-border: rgb(207 45 86 / 28%);
+  }
+
+  :global(html[data-theme='dark']) .root :global(.steward-public-page) {
+    --task-transcript-surface: #161f2a;
+    --task-empty-surface: #161f2a;
+    --task-code-surface: #111820;
+    --task-code-border: #273241;
+    --task-timeline-primary: #78a9ff;
+    --task-timeline-surface: #161f2a;
+    --task-timeline-ink: #f4f7fb;
+    --task-timeline-muted: #9aa7b7;
+    --task-timeline-soft: #d2dae5;
+    --task-timeline-line: #273241;
+    --task-timeline-line-strong: #3b4656;
+    --task-timeline-primary-soft: rgb(120 169 255 / 16%);
+    --task-timeline-primary-border: rgb(120 169 255 / 28%);
+    --task-timeline-success: #42be65;
+    --task-timeline-success-soft: rgb(66 190 101 / 14%);
+    --task-timeline-success-border: rgb(66 190 101 / 28%);
+    --task-timeline-danger: #ff7eb6;
+    --task-timeline-danger-soft: rgb(255 126 182 / 14%);
+    --task-timeline-danger-border: rgb(255 126 182 / 28%);
+  }
+
+  .root :global(.steward-public-page) :global(.empty-state) {
+    border: 1px solid var(--task-code-border);
+    border-radius: 4px;
+    padding: 18px 12px;
+    background: var(--task-empty-surface);
+    color: #6f6f6f;
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  :global(html[data-theme='dark']) .root :global(.steward-public-page) :global(.empty-state) {
+    color: #9aa7b7;
   }
 
   .root :global(.steward-public-page) :global(.task-page-frame) {
@@ -684,6 +739,7 @@
     padding: 3px 7px;
     color: var(--task-muted);
     font-size: 11px;
+    font-weight: 750;
     line-height: 1.25;
     white-space: nowrap;
   }
@@ -727,6 +783,9 @@
   }
 
   .root :global(.steward-public-page) :global(.attempt-tabs) button b {
+    border-radius: 999px;
+    background: var(--task-code-surface);
+    padding: 1px 6px;
     color: var(--task-muted);
     font-size: 10px;
   }
@@ -769,9 +828,33 @@
   .root :global(.steward-public-page) :global(.attempt-section-head) code {
     min-width: 0;
     overflow: hidden;
+    border: 1px solid var(--task-code-border);
+    border-radius: 4px;
+    background: var(--task-code-surface);
+    padding: 2px 7px;
     color: var(--task-muted);
+    font-size: 0.92em;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-transcript) > :global([data-transcript-view='true']) {
+    display: flex;
+    min-height: 360px;
+    max-height: 660px;
+    flex-direction: column;
+    gap: 18px;
+    overflow: auto;
+    border-radius: 0;
+    background: var(--task-transcript-surface);
+    padding: 14px;
+    scroll-behavior: smooth;
+  }
+
+  .root :global(.steward-public-page) :global(.attempt-transcript) :global([data-evidence-message='true']),
+  .root :global(.steward-public-page) :global(.attempt-transcript) :global([data-evidence-disclosure='true']) {
+    width: 100%;
+    margin-left: 0;
   }
 
   .root :global(.steward-public-page) :global(.attempt-review-stack) {
@@ -999,6 +1082,8 @@
   .root :global(.steward-public-page) :global(.task-timeline-panel) {
     display: grid;
     min-height: 0;
+    max-height: calc(100vh - 210px);
+    overflow: hidden;
   }
 
   .root :global(.steward-public-page) :global(.task-timeline) {
@@ -1043,6 +1128,273 @@
 
   .root :global(.steward-public-page) :global(.timeline-field) dd:global(.path) {
     word-break: break-word;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline) {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    gap: 12px;
+    margin: 0;
+    padding: 0 12px 18px;
+    list-style: none;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline.compact) {
+    padding-bottom: 12px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-item) {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-item)::before {
+    position: absolute;
+    top: -12px;
+    bottom: -12px;
+    left: 13px;
+    width: 2px;
+    border-radius: 999px;
+    background: var(--task-timeline-line);
+    content: "";
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-item:first-child)::before {
+    top: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-item:last-child)::before {
+    bottom: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-marker) {
+    z-index: 1;
+    display: grid;
+    width: 28px;
+    height: 28px;
+    place-items: center;
+    border: 1px solid var(--task-timeline-line-strong);
+    border-radius: 50%;
+    background: var(--task-surface);
+    color: var(--task-timeline-muted);
+    box-shadow: 0 0 0 4px var(--task-surface);
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-card) {
+    min-width: 0;
+    border: 1px solid var(--task-border);
+    border-radius: 4px;
+    background: var(--task-surface);
+    padding: 10px 12px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-head) {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-title-row) {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 9px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-title-row) h3 {
+    min-width: 0;
+    color: var(--task-timeline-ink);
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.35;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-kind) {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--task-timeline-line);
+    border-radius: 4px;
+    background: var(--task-timeline-surface);
+    padding: 2px 8px;
+    color: var(--task-timeline-soft);
+    font-weight: 800;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-time) {
+    flex: 0 0 auto;
+    color: var(--task-timeline-muted);
+    font-weight: 650;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-message) {
+    margin-top: 7px;
+    color: var(--task-timeline-soft);
+    font-size: 12px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-chips) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 9px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-chip),
+  .root :global(.steward-public-page) :global(.timeline-verdict) {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--task-timeline-line);
+    border-radius: 4px;
+    background: var(--task-timeline-surface);
+    padding: 3px 8px;
+    color: var(--task-timeline-soft);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-chip) b {
+    color: var(--task-timeline-muted);
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-chip.success),
+  .root :global(.steward-public-page) :global(.timeline-verdict.approve),
+  .root :global(.steward-public-page) :global(.timeline-item.success) :global(.timeline-marker),
+  .root :global(.steward-public-page) :global(.timeline-item.success) :global(.timeline-kind) {
+    border-color: var(--task-timeline-success-border);
+    background: var(--task-timeline-success-soft);
+    color: var(--task-timeline-success);
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-chip.danger),
+  .root :global(.steward-public-page) :global(.timeline-verdict.block),
+  .root :global(.steward-public-page) :global(.timeline-verdict.failed),
+  .root :global(.steward-public-page) :global(.timeline-verdict.invalid),
+  .root :global(.steward-public-page) :global(.timeline-item.danger) :global(.timeline-marker),
+  .root :global(.steward-public-page) :global(.timeline-item.danger) :global(.timeline-kind) {
+    border-color: var(--task-timeline-danger-border);
+    background: var(--task-timeline-danger-soft);
+    color: var(--task-timeline-danger);
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-chip.review),
+  .root :global(.steward-public-page) :global(.timeline-verdict.review),
+  .root :global(.steward-public-page) :global(.timeline-item.review) :global(.timeline-marker),
+  .root :global(.steward-public-page) :global(.timeline-item.created) :global(.timeline-marker),
+  .root :global(.steward-public-page) :global(.timeline-item.review) :global(.timeline-kind),
+  .root :global(.steward-public-page) :global(.timeline-item.created) :global(.timeline-kind) {
+    border-color: var(--task-timeline-primary-border);
+    background: var(--task-timeline-primary-soft);
+    color: var(--task-timeline-primary);
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-fields) {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+    margin: 10px 0 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-field) {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(72px, 0.32fr) minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    border: 1px solid var(--task-timeline-line);
+    border-radius: 4px;
+    background: var(--task-timeline-surface);
+    padding: 7px 8px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-field) dt {
+    color: var(--task-timeline-muted);
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-field) dd {
+    min-width: 0;
+    margin: 0;
+    color: var(--task-timeline-soft);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-field) dd:global(.path) {
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-review) {
+    display: grid;
+    min-width: 0;
+    gap: 9px;
+    border: 1px solid var(--task-timeline-line);
+    border-radius: 4px;
+    background: var(--task-timeline-surface);
+    margin-top: 10px;
+    padding: 9px 10px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-review) > div,
+  .root :global(.steward-public-page) :global(.timeline-review) li {
+    min-width: 0;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-review) h4 {
+    margin: 0 0 5px;
+    color: var(--task-timeline-soft);
+    font-size: 11px;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-review) p,
+  .root :global(.steward-public-page) :global(.timeline-review) ul {
+    margin: 0;
+    color: var(--task-timeline-soft);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-review) ul {
+    display: grid;
+    gap: 5px;
+    padding-left: 17px;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline-review) li span {
+    display: block;
+    max-width: 100%;
+    margin-top: 2px;
+    color: var(--task-timeline-muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  .root :global(.steward-public-page) :global(.timeline.task-timeline) {
+    min-height: 0;
+    overflow-x: hidden;
+    border-top: 1px solid var(--task-border);
+    padding: var(--space-4, 16px);
   }
 
   .root :global(.steward-public-page) :global(.steward-integration-detail-panel),.root :global(.steward-public-page) :global(.plan-runs-section) {
@@ -1257,7 +1609,7 @@
       grid-template-columns: 1fr;
     }
 
-    .root :global(.steward-public-page) :global(.task-timeline) {
+    .root :global(.steward-public-page) :global(.timeline.task-timeline) {
       max-height: none;
       overflow: visible;
       padding: var(--space-3, 12px);

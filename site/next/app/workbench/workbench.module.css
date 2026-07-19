@@ -6,9 +6,30 @@
     width: 100%;
     max-width: var(--container-app);
     min-width: 0;
+    margin-inline: auto;
+    padding-inline: 12px;
     padding-bottom: var(--space-8);
     background: transparent;
     color: var(--text);
+  }
+
+  @media (min-width: 640px) {
+    .root {
+      padding-inline: 18px;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .root {
+      padding-inline: 24px;
+    }
+  }
+
+  @media (max-width: 680px) {
+    .root {
+      padding-inline: 12px;
+      padding-bottom: 32px;
+    }
   }
 
   .root .scenarioToolbar {
@@ -165,6 +186,12 @@
     opacity: 1;
   }
 
+  .root .controlButton.secondaryControlButton:disabled {
+    border-color: var(--control-border);
+    background: var(--canvas);
+    color: var(--text-strong);
+  }
+
   .root .startButton {
     border-color: var(--command);
     background: var(--command);
@@ -269,6 +296,10 @@
   }
 
   .root .lossRange {
+    accent-color: var(--status-danger-ink);
+  }
+
+  .root .networkRange input.lossRange {
     accent-color: var(--status-danger-ink);
   }
 
@@ -532,6 +563,7 @@
     width: 0;
     height: 0;
     border-block: 5px solid transparent;
+    translate: 0 -50% !important;
     transform: translateY(-50%);
   }
 
@@ -779,6 +811,7 @@
 
   .root :global(.state-step) {
     position: relative;
+    padding-right: var(--space-2);
     padding-left: 24px;
   }
 
@@ -823,10 +856,31 @@
     color: var(--text-strong);
   }
 
+  .root :global(.state-step) strong {
+    line-height: 1.3333;
+    font-weight: 600;
+  }
+
   .root :global(.state-step) span,
   .root :global(.diag-stat) dt,
   .root :global(.diag-flag) dt {
     color: var(--text-muted);
+  }
+
+  .root :global(.state-step) span {
+    margin-top: var(--space-1);
+  }
+
+  .root :global(.diag-stat) dt,
+  .root :global(.diag-flag) dt {
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .root :global(.diag-stat) dd,
+  .root :global(.diag-flag) dd {
+    line-height: 1.3333;
+    margin-top: var(--space-1);
   }
 
   .root .diagSection {
@@ -1330,6 +1384,32 @@
 
     .root .packetRail {
       min-height: 238px;
+    }
+
+    .root :global(.packet-row) {
+      grid-template-areas:
+        "id kind size"
+        "time frames frames";
+    }
+
+    .root :global(.packet-row .mono) {
+      grid-area: id;
+    }
+
+    .root :global(.packet-row span:nth-child(2)) {
+      grid-area: time;
+    }
+
+    .root :global(.packet-row .packet-kind) {
+      grid-area: kind;
+    }
+
+    .root :global(.packet-row .packet-frames) {
+      grid-area: frames;
+    }
+
+    .root :global(.packet-row .packet-size) {
+      grid-area: size;
     }
 
     .root .stageNode {

@@ -14,8 +14,8 @@ export const metadata: Metadata = {
 
 export default function QaPage() {
   return (
-    <main className={`coquic-page ${styles.root}`} data-qa-root="true">
-      <PageHeader className={styles['page-header']} eyebrow="QUIC RAG" title="CoQUIC Specification QA" variant="tool" />
+    <main className={styles.root} data-qa-root="true">
+      <PageHeader className={styles.header} eyebrow="QUIC RAG" title="CoQUIC Specification QA" variant="tool" />
       <QaClient />
     </main>
   );

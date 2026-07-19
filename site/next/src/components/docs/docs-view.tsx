@@ -19,7 +19,7 @@ export async function DocsView({ page }: DocsViewProps) {
   const navItems = getDocNavItems();
 
   return (
-    <main className="coquic-page docs-page">
+    <main className="docs-page mx-auto w-full max-w-[1340px] px-3 pb-10 sm:px-[18px] lg:px-6 lg:pb-14 max-[680px]:px-3 max-[680px]:pb-8">
       <PageHeader
         className={styles.header}
         containerClassName={styles.headerContainer}

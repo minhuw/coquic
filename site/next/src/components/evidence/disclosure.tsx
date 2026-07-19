@@ -41,9 +41,6 @@ export function EvidenceDisclosure({
         tone === 'warning' && styles.disclosureWarning,
         tone === 'danger' && styles.disclosureDanger,
         open && styles.disclosureOpen,
-        'evidence-disclosure',
-        `evidence-disclosure--${tone}`,
-        open && 'is-open',
         className,
       )}
       data-evidence-disclosure="true"
@@ -53,23 +50,23 @@ export function EvidenceDisclosure({
         aria-describedby={metadata || outcome ? metadataId : undefined}
         aria-expanded={open}
         aria-labelledby={titleId}
-        className={cn(styles.disclosureTrigger, 'evidence-disclosure__trigger')}
+        className={styles.disclosureTrigger}
         onClick={() => setOpen((current) => !current)}
         type="button"
       >
-        <span className={cn(styles.disclosureIcon, 'evidence-disclosure__icon')} aria-hidden="true">{icon}</span>
+        <span className={styles.disclosureIcon} aria-hidden="true">{icon}</span>
         <span className={styles.disclosureSummary}>
-          <span className={cn(styles.disclosureTitle, 'evidence-disclosure__title')} id={titleId} role="heading" aria-level={3}>{label}</span>
+          <span className={styles.disclosureTitle} id={titleId} role="heading" aria-level={3}>{label}</span>
           {metadata || outcome ? (
-            <span className={cn(styles.metadata, styles.disclosureMetadata, 'evidence-disclosure__metadata')} id={metadataId}>
+            <span className={cn(styles.metadata, styles.disclosureMetadata)} id={metadataId}>
               {metadata ? <span>{metadata}</span> : null}
-              {outcome ? <span className={cn(styles.outcome, outcome.tone && styles[`outcome${capitalize(outcome.tone)}`], 'evidence-disclosure__outcome')}>{outcome.icon}<span>{outcome.label}</span></span> : null}
+              {outcome ? <span className={cn(styles.outcome, outcome.tone && styles[`outcome${capitalize(outcome.tone)}`])}>{outcome.icon}<span>{outcome.label}</span></span> : null}
             </span>
           ) : null}
         </span>
-        <ChevronRight className={cn(styles.chevron, 'evidence-disclosure__chevron')} size={16} aria-hidden="true" />
+        <ChevronRight className={styles.chevron} size={16} aria-hidden="true" />
       </button>
-      {open ? <div className={cn(styles.body, 'evidence-disclosure__body')} id={bodyId}>{children}</div> : null}
+      {open ? <div className={styles.body} id={bodyId}>{children}</div> : null}
     </article>
   );
 }

@@ -90,17 +90,17 @@ test.describe('route identity', () => {
       expect(response?.ok(), `${route.path} returned ${response?.status() ?? 'no response'}`).toBe(true);
       await expect(page).toHaveTitle(route.title);
       await expect(page.getByRole('heading', { name: route.heading, level: route.headingLevel ?? 1 })).toBeVisible();
-      await expect(page.locator('main.coquic-page')).toHaveCount(1);
+      await expect(page.locator('main')).toHaveCount(1);
       await expect(page.getByRole('navigation', { name: 'Demo views' })).toHaveCount(1);
       await expect(page.getByRole('link', { name: 'Skip to content' })).toHaveCount(1);
       await expect(page.getByRole('contentinfo')).toHaveCount(1);
       const headerVariant = sharedHeaderRoutes.get(route.path);
       if (headerVariant) {
-        const header = page.locator('main .page-header');
+        const header = page.locator('main [data-slot="page-header"]');
         await expect(header).toHaveCount(1);
         await expect(header).toHaveAttribute('data-page-header-variant', headerVariant);
-        await expect(header.locator('.page-header__eyebrow-marker')).toHaveCount(1);
-        await expect(header.locator('.page-header__art')).toHaveCount(0);
+        await expect(header.locator('[data-slot="page-header-eyebrow-marker"]')).toHaveCount(1);
+        await expect(header.locator('[data-slot="page-header-art"]')).toHaveCount(0);
       }
     });
   }
@@ -109,18 +109,18 @@ test.describe('route identity', () => {
 test('shared page header keeps route context on the page content axis', async ({ page }) => {
   await page.goto('/docs');
 
-  const header = page.locator('main .page-header');
+  const header = page.locator('main [data-slot="page-header"]');
   const viewportWidth = page.viewportSize()?.width ?? 0;
   const geometry = await header.evaluate((element) => {
     const headerBounds = element.getBoundingClientRect();
-    const contextBounds = element.querySelector<HTMLElement>('.page-header__context')?.getBoundingClientRect();
-    const titleBounds = element.querySelector<HTMLElement>('.page-title')?.getBoundingClientRect();
+    const contextBounds = element.querySelector<HTMLElement>('[data-slot="page-header-context"]')?.getBoundingClientRect();
+    const titleBounds = element.querySelector<HTMLElement>('[data-slot="page-header-title"]')?.getBoundingClientRect();
     return {
       background: getComputedStyle(element).backgroundColor,
       contextBottom: contextBounds?.bottom ?? 0,
       contextLeft: contextBounds?.left ?? 0,
       headerHeight: headerBounds.height,
-      titleFontSize: Number.parseFloat(getComputedStyle(element.querySelector('.page-title')!).fontSize),
+      titleFontSize: Number.parseFloat(getComputedStyle(element.querySelector('[data-slot="page-header-title"]')!).fontSize),
       titleLeft: titleBounds?.left ?? 0,
       titleTop: titleBounds?.top ?? 0,
     };
@@ -130,7 +130,7 @@ test('shared page header keeps route context on the page content axis', async ({
   expect(geometry.titleFontSize).toBeGreaterThanOrEqual(28);
   expect(Math.abs(geometry.contextLeft - geometry.titleLeft)).toBeLessThanOrEqual(1);
   expect(geometry.contextBottom).toBeLessThanOrEqual(geometry.titleTop);
-  await expect(header.locator('.page-header__art')).toHaveCount(0);
+  await expect(header.locator('[data-slot="page-header-art"]')).toHaveCount(0);
   if (viewportWidth >= 768) {
     expect(geometry.headerHeight).toBeLessThan(190);
   } else {

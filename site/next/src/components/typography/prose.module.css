@@ -11,7 +11,7 @@
 
 .root > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)):not(:global(.docs-function-card)),
 .root > :global(.blog-language-panel) > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)),
-.root > :global(.article-content) > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)) {
+.root > [data-prose-variant] > :not(:global(.editorial-code-block)):not(:global(.editorial-table-region)) {
   width: min(100%, var(--measure-reading));
   min-width: 0;
   margin-inline: auto;
@@ -185,8 +185,8 @@
   min-width: 0;
 }
 
-.root :global(.article-content) :global(.editorial-code-block),
-.root :global(.article-content) :global(.editorial-table-region) {
+.root [data-prose-variant] :global(.editorial-code-block),
+.root [data-prose-variant] :global(.editorial-table-region) {
   width: 100%;
 }
 

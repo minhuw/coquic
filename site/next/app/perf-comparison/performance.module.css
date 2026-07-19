@@ -3,15 +3,47 @@
 /* Plan 010 owns the performance route surface. */
 
 .root {
+  --performance-family-color: #0f62fe;
+  --performance-line: #e0e0e0;
+  width: 100%;
+  max-width: 1340px;
   min-width: 0;
+  margin-inline: auto;
+  padding-inline: 12px;
+  padding-bottom: 40px;
   overflow-x: clip;
 }
 
-.root :global(.page-header) {
+:global(html[data-theme='dark']) .root {
+  --performance-family-color: #78a9ff;
+  --performance-line: #273241;
+}
+
+@media (min-width: 640px) {
+  .root {
+    padding-inline: 18px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .root {
+    padding-inline: 24px;
+    padding-bottom: 56px;
+  }
+}
+
+@media (max-width: 680px) {
+  .root {
+    padding-inline: 12px;
+    padding-bottom: 32px;
+  }
+}
+
+.root :global([data-slot='page-header']) {
   padding-bottom: 18px;
 }
 
-.root :global(.page-header__description) {
+.root :global([data-slot='page-header-description']) {
   max-width: 66ch;
 }
 
@@ -194,6 +226,13 @@
   line-height: 1.1;
 }
 
+.root :global(.plot-tab small) {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .root :global(.plot-tab span) {
   color: var(--accent-ink);
   font-weight: 700;
@@ -202,11 +241,15 @@
 
 .root :global(.plot-tab strong) {
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   overflow-wrap: anywhere;
   color: inherit;
   font-size: 13px;
   font-weight: 700;
   line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .root .filterToggle {
@@ -307,6 +350,7 @@
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
+  line-height: 1;
   text-align: left;
   text-transform: uppercase;
 }
@@ -317,9 +361,27 @@
 }
 
 .root :global(.plot-filter-group-title small) {
+  display: inline-flex;
+  min-width: 22px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border: 1px solid #e0e0e0;
+  border-radius: 999px;
   color: var(--text-muted);
+  background: #fff;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.root :global(.plot-filter-group-title span) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .root :global(.plot-filter-group-title i) {
@@ -330,6 +392,20 @@
   border-right: 1px solid currentcolor;
   border-bottom: 1px solid currentcolor;
   transform: rotate(45deg) translateY(-2px);
+}
+
+.root :global(.plot-filter-group-title i::before) {
+  position: absolute;
+  inset: 2px 1px 1px 2px;
+  border-right: 2px solid currentcolor;
+  border-bottom: 2px solid currentcolor;
+  content: "";
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.root :global(.plot-filter-group-title[aria-expanded="false"] i::before) {
+  transform: rotate(-45deg);
 }
 
 .root :global(.plot-filter-group-title[aria-expanded="false"] i) {
@@ -374,10 +450,13 @@
 
 .root :global(.filter-choice__label) {
   min-width: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 700;
   line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .root :global(.filter-choice__count) {
@@ -385,6 +464,47 @@
   font-family: var(--font-mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.root :global(.filter-choice small) {
+  display: inline-flex;
+  min-width: 22px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border: 1px solid #e0e0e0;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: #f4f4f4;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.root :global(.filter-choice[aria-pressed="true"] small) {
+  border-color: rgb(15 98 254 / 26%);
+  color: var(--text-muted);
+  background: #fff;
+}
+
+:global(html[data-theme='dark']) .root :global(.plot-filter-group-title small) {
+  border-color: #273241;
+  color: var(--text-muted);
+  background: var(--surface);
+}
+
+:global(html[data-theme='dark']) .root :global(.filter-choice small) {
+  border-color: #273241;
+  color: #9aa7b7;
+  background: #161f2a;
+}
+
+:global(html[data-theme='dark']) .root :global(.filter-choice[aria-pressed="true"] small) {
+  border-color: rgb(120 169 255 / 26%);
+  color: var(--text-muted);
+  background: var(--surface);
 }
 
 .root .result {
@@ -475,6 +595,7 @@
   display: grid;
   gap: 8px;
   min-width: 0;
+  margin-top: 12px;
 }
 
 .root :global(.performance-bar-row) {
@@ -492,6 +613,7 @@
 }
 
 .root :global(.performance-bar-row.coquic-family) {
+  isolation: isolate;
   border-color: color-mix(in srgb, var(--accent-ink) 30%, transparent);
   background: var(--accent-soft);
   box-shadow: inset 3px 0 var(--accent);
@@ -500,6 +622,23 @@
 .root :global(.performance-bar-row.coquic-family::before),
 .root :global(.performance-bar-row.coquic-family::after) {
   display: none;
+}
+
+.root :global(.performance-bar-row.coquic-family::after) {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--performance-family-color), transparent 54%);
+  content: "";
+  opacity: 0.14;
+  pointer-events: none;
+}
+
+.root :global(.performance-bar-row.coquic-family > *) {
+  position: relative;
+  z-index: 1;
 }
 
 .root :global(.performance-family-marker) {
@@ -586,6 +725,7 @@
 .root :global(.trend-family-chip) {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   min-width: 0;
   padding: 2px 5px;
   border: 1px solid color-mix(in srgb, var(--accent-ink) 30%, transparent);
@@ -600,6 +740,21 @@
   white-space: nowrap;
 }
 
+.root :global(.coquic-family-chip) {
+  flex: 0 0 auto;
+  max-width: 92px;
+  overflow: hidden;
+  height: 18px;
+  text-overflow: ellipsis;
+}
+
+.root :global(.trend-family-chip) {
+  max-width: 104px;
+  overflow: hidden;
+  height: 17px;
+  text-overflow: ellipsis;
+}
+
 .root :global(.bar-version),
 .root :global(.identity-separator) {
   color: var(--text-muted);
@@ -609,6 +764,7 @@
 }
 
 .root :global(.bar-version) {
+  font-weight: 800;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -654,7 +810,7 @@
   color: var(--text-strong);
   font-family: var(--font-mono);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 850;
 }
 
 .root :global(.bar-track) {
@@ -779,11 +935,14 @@
   display: grid;
   gap: 12px;
   min-width: 0;
+  margin-top: 16px;
   padding-top: 2px;
+  border-top: 1px solid var(--performance-line);
 }
 
 .root :global(.trend-head) {
   align-items: baseline;
+  margin-bottom: 10px;
 }
 
 .root :global(.trend-svg) {
@@ -890,6 +1049,7 @@
   flex-wrap: wrap;
   gap: 7px;
   min-width: 0;
+  margin-top: 10px;
 }
 
 .root :global(.trend-legend > span) {
@@ -905,8 +1065,23 @@
 }
 
 .root :global(.trend-legend > span.coquic-family) {
+  position: relative;
   border-color: color-mix(in srgb, var(--accent-ink) 30%, transparent);
   background: var(--accent-soft);
+}
+
+.root :global(.trend-legend > span.coquic-family::before) {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--performance-family-color);
+  border-radius: inherit;
+  content: "";
+  opacity: 0.34;
+  pointer-events: none;
+}
+
+.root :global(.trend-legend > span.coquic-family > *) {
+  position: relative;
 }
 
 .root :global(.trend-legend b),
@@ -1415,6 +1590,17 @@
     min-height: 42px;
   }
 
+  .root :global(.plot-filter-options) {
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 22px), transparent);
+  }
+
+  .root :global(.plot-filter-options::-webkit-scrollbar) {
+    display: none;
+  }
+
   .root :global(.performance-bar-row) {
     grid-template-columns: 8px minmax(0, 1fr) auto;
     grid-template-areas:
@@ -1465,6 +1651,10 @@
     white-space: normal;
   }
 
+  .root :global(.coquic-family-chip) {
+    max-width: 112px;
+  }
+
   .root :global(.trend-head) {
     align-items: flex-start;
     flex-direction: column;
@@ -1483,6 +1673,7 @@
   .root :global(.trend-legend) {
     display: grid;
     grid-template-columns: 1fr;
+    padding-right: 2px;
   }
 
   .root :global(.trend-legend > span) {
@@ -1493,6 +1684,10 @@
 
   .root :global(.trend-legend small) {
     grid-column: 2;
+  }
+
+  .root :global(.trend-family-chip) {
+    max-width: 92px;
   }
 
   .root :global(.perf-detail-summary),

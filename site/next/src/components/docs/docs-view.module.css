@@ -110,6 +110,8 @@
   min-height: var(--control-coarse);
   align-items: center;
   border-left: 2px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
   padding: var(--space-2) var(--space-2);
   color: var(--text);
   font: var(--type-ui-label);
@@ -125,8 +127,13 @@
 
 .navLink[aria-current='page'] {
   border-left-color: var(--accent-ink);
+  background: #edf5ff;
   color: var(--text-strong);
   font-weight: 700;
+}
+
+:global(html[data-theme='dark']) .navLink[aria-current='page'] {
+  background: rgb(120 169 255 / 16%);
 }
 
 .navLinkNested {

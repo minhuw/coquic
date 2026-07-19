@@ -84,7 +84,7 @@ test.describe('blog characterization', () => {
       'CoQUIC Steward: Letting an Agent Maintain the Repository',
     );
     await expect(page.locator('.blog-post-body')).toHaveCount(0);
-    await expect(page.locator('.blog-post > .article-content')).toHaveCount(1);
+    await expect(page.locator('.blog-post > [data-prose-variant="editorial"]')).toHaveCount(1);
     await expect(page.getByRole('img', { name: 'A robot groundskeeper tending a chip-shaped conservatory' })).toBeVisible();
     await expect(
       page.getByRole('img', {
@@ -96,7 +96,7 @@ test.describe('blog characterization', () => {
     await page.goto('/blog/why-coquic');
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Why CoQUIC?');
     await expect(page.locator('.blog-post-body')).toHaveCount(0);
-    await expect(page.locator('.blog-post > .article-content')).toHaveCount(1);
+    await expect(page.locator('.blog-post > [data-prose-variant="editorial"]')).toHaveCount(1);
     await expect(page.getByRole('heading', { level: 2 })).toHaveCount(9);
   });
 

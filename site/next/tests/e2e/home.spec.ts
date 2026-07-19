@@ -11,7 +11,7 @@ import {
 test('home presents CoQUIC with Steward as its primary destination', async ({ page }) => {
   await page.goto('/');
 
-  const home = page.locator('main.coquic-page');
+  const home = page.locator('main[data-home-route="home"]');
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
   await expect(page.getByRole('heading', { name: 'CoQUIC', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByText('From Prompt to Packet.', { exact: true })).toBeVisible();
@@ -60,7 +60,7 @@ test('home uses a consistent wide composition on large screens', async ({ page }
 test('home orders evidence before its four project tools', async ({ page }) => {
   await page.goto('/');
 
-  const home = page.locator('main.coquic-page');
+  const home = page.locator('main[data-home-route="home"]');
   const bands = home.locator(':scope > section');
   await expect(bands).toHaveCount(3);
   await expect(bands.nth(0)).toHaveAttribute('data-home-section', 'hero');
@@ -154,7 +154,7 @@ test('home destinations activate with keyboard-only focus and Enter', async ({ p
     ['Workbench', '/workbench'],
   ] as const) {
     await page.goto('/');
-    const link = page.locator('main.coquic-page').getByRole('link', { name: new RegExp(`^${name}`) });
+    const link = page.locator('main[data-home-route="home"]').getByRole('link', { name: new RegExp(`^${name}`) });
     await tabUntilFocused(page, link);
     await expect(link).toBeFocused();
     await link.press('Enter');

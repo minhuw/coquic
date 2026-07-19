@@ -32,52 +32,21 @@ const darkTokens = {
   '--chart-6': 'rgb(178, 193, 181)',
 } as const;
 
-// Temporary compatibility vocabulary for Plan 017 to reduce to zero.
-const legacyTokenAllowlist = [
-  '--bg',
-  '--ink',
-  '--soft',
-  '--muted',
-  '--line',
-  '--primary',
-  '--primary-action',
-] as const;
-
-const legacyLightTokens = {
-  '--bg': 'rgb(255, 255, 255)',
-  '--ink': 'rgb(22, 22, 22)',
-  '--soft': 'rgb(57, 57, 57)',
-  '--muted': 'rgb(111, 111, 111)',
-  '--line': 'rgb(224, 224, 224)',
-  '--primary': 'rgb(15, 98, 254)',
-  '--primary-action': 'rgb(15, 98, 254)',
-} as const;
-
-const legacyDarkTokens = {
-  '--bg': 'rgb(11, 15, 20)',
-  '--ink': 'rgb(244, 247, 251)',
-  '--soft': 'rgb(210, 218, 229)',
-  '--muted': 'rgb(154, 167, 183)',
-  '--line': 'rgb(39, 50, 65)',
-  '--primary': 'rgb(120, 169, 255)',
-  '--primary-action': 'rgb(15, 98, 254)',
-} as const;
-
 async function installFoundationProbe(page: Page) {
   await page.locator('body').evaluate((body) => {
     const probe = document.createElement('section');
     probe.id = 'foundation-probe';
     probe.innerHTML = `
       <button id="focus-probe">Focus probe</button>
-      <button id="loading-probe" class="ui-button ui-button--default ui-button--default-size">
-        <span class="ui-button__content">Connect endpoint</span>
+      <button id="loading-probe" data-slot="button" data-variant="default">
+        <span data-slot="button-content">Connect endpoint</span>
       </button>
       <code id="mono-probe">packet_number=42</code>
       <p id="cjk-probe" lang="zh-Hans">QUIC 协议状态</p>
       <div id="panel-probe" style="border-radius: var(--radius-panel)"></div>
       <div id="motion-probe" class="skeleton" style="width: 40px; height: 12px"></div>
       <div class="container-focused" id="container-probe"></div>
-      <div id="modal-shadow-probe" class="ui-dialog__content" aria-hidden="true"></div>
+      <div id="modal-shadow-probe" style="box-shadow: var(--elevation-modal)" aria-hidden="true"></div>
     `;
     body.append(probe);
   });
@@ -122,14 +91,12 @@ test('tokens, fonts, geometry, and interaction states resolve through the founda
     }
   });
 
-  await test.step('light semantic tokens resolve while migration aliases remain legacy-owned', async () => {
+  await test.step('light semantic tokens resolve through the canonical theme', async () => {
     await setStoredTheme(page, 'light');
     await page.goto('/');
     await installFoundationProbe(page);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
     await expect.poll(() => readTokens(page, Object.keys(lightTokens))).toEqual(lightTokens);
-    await expect.poll(() => readTokens(page, Object.keys(legacyLightTokens))).toEqual(legacyLightTokens);
-    expect(Object.keys(legacyLightTokens)).toEqual(legacyTokenAllowlist);
     const modalShadow = await page.locator('#modal-shadow-probe').evaluate((element) => getComputedStyle(element).boxShadow);
     expect(modalShadow).not.toBe('none');
     expect(modalShadow).toContain('24px 64px');
@@ -137,14 +104,12 @@ test('tokens, fonts, geometry, and interaction states resolve through the founda
     expect(contrastRatio(resolved['--command'], resolved['--on-command'])).toBeGreaterThanOrEqual(15);
   });
 
-  await test.step('dark semantic tokens resolve while migration aliases remain legacy-owned', async () => {
+  await test.step('dark semantic tokens resolve through the canonical theme', async () => {
     await page.evaluate(() => window.localStorage.setItem('coquic-theme', 'dark'));
     await page.reload();
     await installFoundationProbe(page);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     await expect.poll(() => readTokens(page, Object.keys(darkTokens))).toEqual(darkTokens);
-    await expect.poll(() => readTokens(page, Object.keys(legacyDarkTokens))).toEqual(legacyDarkTokens);
-    expect(Object.keys(legacyDarkTokens)).toEqual(legacyTokenAllowlist);
     const modalShadow = await page.locator('#modal-shadow-probe').evaluate((element) => getComputedStyle(element).boxShadow);
     expect(modalShadow).not.toBe('none');
     expect(modalShadow).toContain('28px 72px');
@@ -200,7 +165,7 @@ test('tokens, fonts, geometry, and interaction states resolve through the founda
       const loadingWidthBefore = loading.getBoundingClientRect().width;
       loading.dataset.loading = 'true';
       loading.disabled = true;
-      loading.insertAdjacentHTML('afterbegin', '<span class="ui-button__spinner" aria-hidden="true"></span>');
+      loading.insertAdjacentHTML('afterbegin', '<span data-slot="button-spinner" aria-hidden="true"></span>');
       const loadingWidthAfter = loading.getBoundingClientRect().width;
       await new Promise((resolve) => window.setTimeout(resolve, 160));
       const loadingStyle = getComputedStyle(loading);

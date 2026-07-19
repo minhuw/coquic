@@ -99,7 +99,7 @@ test.describe('transcript master detail', () => {
     await expect(page.getByRole('heading', { name: 'CoQUIC Transcript Dataset' })).toBeVisible();
     await expect(page.getByText('Select a transcript')).toBeVisible({ visible: desktopMaster });
     await expect(page.getByRole('complementary', { name: 'Transcript sessions' })).toBeVisible();
-    expect(api.requests[0]).toBe('/transcript/api/search?page=1');
+    await expect.poll(() => api.requests[0]).toBe('/transcript/api/search?page=1');
 
     const list = page.getByRole('complementary', { name: 'Transcript sessions' });
     await list.evaluate((element) => { element.scrollTop = 140; element.dispatchEvent(new Event('scroll')); });

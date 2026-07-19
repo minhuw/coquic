@@ -65,12 +65,12 @@ test.describe('editorial primitives', () => {
 
           await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
           await expect(page.locator('main h1')).toHaveCount(1);
-          await expect(page.locator('.article-content')).toHaveCount(1);
+          await expect(page.locator('[data-prose-variant="editorial"]')).toHaveCount(1);
           await waitForScrollRegionMeasurement(page);
           await expectNoGlobalOverflow(page);
           await expectNoEditorialAxeViolations(page);
 
-          const headings = page.locator('.article-content h2[id], .article-content h3[id]');
+          const headings = page.locator('[data-prose-variant="editorial"] h2[id], [data-prose-variant="editorial"] h3[id]');
           if ((await headings.count()) > 0) {
             const heading = headings.first();
             const permalink = heading.locator('..').locator('.anchored-heading__permalink');
@@ -97,7 +97,7 @@ test.describe('editorial primitives', () => {
             await expect(chinesePanel).toBeHidden();
             await expect(englishPanel).toHaveAttribute('lang', 'en');
             await expect(chinesePanel).toHaveAttribute('lang', 'zh-CN');
-            const images = page.locator('.article-content img');
+            const images = page.locator('[data-prose-variant="editorial"] img');
             const imageCount = await images.count();
             if (route.path === '/blog/coquic-steward') expect(imageCount).toBeGreaterThan(0);
             for (let imageIndex = 0; imageIndex < imageCount; imageIndex += 1) {

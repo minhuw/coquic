@@ -823,25 +823,17 @@ Meet WCAG 2.2 AA as the minimum target.
   the system, but it does not define route requirements or override this file.
 - `site/next/app/styles/theme.css` is the permanent minimal global entry point
   for Tailwind, canonical tokens, base elements, and layout foundations.
-- `site/next/app/globals.css` is a temporary compatibility manifest that imports
-  legacy, shared, and feature styles while their consumers migrate.
-- Delete the compatibility manifest only after there are zero legacy variable
-  consumers, zero emitted selectors owned only by compatibility sheets, and all
-  route and visual tests are green.
+- The global stylesheet surface is intentionally minimal: `theme.css` is the
+  sole first-party global entry point for Tailwind, canonical tokens, base
+  elements, accessibility, and layout foundations. Shared UI and content
+  primitives own their presentation in source-local modules, and routes own
+  route-specific presentation in their existing CSS Modules.
 - Shared React primitives live under `site/next/src/components/ui/`.
 - Feature styles may consume semantic tokens; they may not redefine the global
   brand palette.
-- Temporary migration aliases are acceptable:
-  - `--bg` -> `--canvas`
-  - `--ink` -> `--text-strong`
-  - `--soft` -> `--text`
-  - `--muted` -> `--text-muted`
-  - `--line` -> `--border`
-  - `--primary` -> `--command`
-- These mappings describe expected roles, not a blind text replacement. Audit
-  each old consumer when its meaning is ambiguous.
-- Remove aliases after all consumers move. Do not maintain two permanent token
-  vocabularies.
+- Keep one canonical token vocabulary. New and migrated components consume the
+  semantic names in this document; do not reintroduce aliases or a second
+  global design system.
 
 ### Local Exceptions
 

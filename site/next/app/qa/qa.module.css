@@ -1,10 +1,30 @@
 .root {
   width: min(100%, var(--container-app));
   min-width: 0;
+  margin-inline: auto;
+  padding-inline: 12px;
   padding-bottom: var(--space-8);
 }
 
-.page-header {
+@media (min-width: 640px) {
+  .root {
+    padding-inline: 18px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .root {
+    padding-inline: 24px;
+  }
+}
+
+@media (max-width: 680px) {
+  .root {
+    padding-inline: 12px;
+  }
+}
+
+.header {
   padding-block: var(--space-5);
 }
 
@@ -545,7 +565,7 @@
 }
 
 @media (max-width: 767px) {
-  .page-header {
+  .header {
     padding-block: var(--space-4);
   }
 

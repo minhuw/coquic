@@ -13,7 +13,7 @@ const TabsList = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <TabsPrimitive.List
     ref={ref}
-    className={cn('ui-tabs__list flex min-w-0 gap-[var(--space-1)] border-b border-[var(--border)]', className)}
+    className={cn('flex min-w-0 gap-[var(--space-1)] border-b border-[var(--border)]', className)}
     {...props}
     data-slot="tabs-list"
   />
@@ -27,7 +27,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      'ui-tabs__trigger inline-flex min-h-[var(--control-default)] min-w-0 items-center justify-center border-0 border-b-2 border-transparent bg-transparent px-[var(--space-3)] text-[var(--text-muted)] tracking-[0] [font:var(--type-ui-label)] focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[var(--accent-ink)] data-[state=active]:border-b-[var(--accent-ink)] data-[state=active]:text-[var(--text-strong)]',
+      'inline-flex min-h-[var(--control-default)] min-w-0 items-center justify-center border-0 border-b-2 border-transparent bg-transparent px-[var(--space-3)] text-[var(--text-muted)] tracking-[0] [font:var(--type-ui-label)] focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[var(--accent-ink)] data-[state=active]:border-b-[var(--accent-ink)] data-[state=active]:text-[var(--text-strong)]',
       className,
     )}
     {...props}
@@ -42,7 +42,7 @@ const TabsContent = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <TabsPrimitive.Content
     ref={ref}
-    className={cn('ui-tabs__content py-[var(--space-4)]', className)}
+    className={cn('py-[var(--space-4)]', className)}
     {...props}
     data-slot="tabs-content"
   />

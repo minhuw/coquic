@@ -1,5 +1,0 @@
-/*
- * Plan 006 moved evidence, diff, and transcript appearance to colocated
- * modules. Plan 017 owns removal after all route consumers leave these hooks.
- * Compatibility class names are retained in component output for that batch.
- */

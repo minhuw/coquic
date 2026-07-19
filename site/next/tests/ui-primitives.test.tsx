@@ -204,13 +204,13 @@ describe('PageHeader', () => {
     const { container } = render(<PageHeader eyebrow="Evidence" title="Interop" variant="evidence" />);
     expect(screen.getByText('Evidence')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: 'Interop' })).toBeInTheDocument();
-    expect(container.querySelector('.page-header__eyebrow-marker')).toHaveAttribute('aria-hidden', 'true');
-    expect(container.querySelector('.page-header')).toHaveAttribute('data-page-header-variant', 'evidence');
-    expect(container.querySelector('.page-header')).toHaveAttribute('data-slot', 'page-header');
-    expect(container.querySelector('.page-header__context')).toHaveAttribute('data-slot', 'page-header-context');
-    expect(container.querySelector('.page-title')).toHaveAttribute('data-slot', 'page-header-title');
-    expect(container.querySelector('.page-header__context')).toBeInTheDocument();
-    expect(container.querySelector('.page-header svg')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-slot="page-header-eyebrow-marker"]')).toHaveAttribute('aria-hidden', 'true');
+    expect(container.querySelector('[data-slot="page-header"]')).toHaveAttribute('data-page-header-variant', 'evidence');
+    expect(container.querySelector('[data-slot="page-header"]')).toHaveAttribute('data-slot', 'page-header');
+    expect(container.querySelector('[data-slot="page-header-context"]')).toHaveAttribute('data-slot', 'page-header-context');
+    expect(container.querySelector('[data-slot="page-header-title"]')).toHaveAttribute('data-slot', 'page-header-title');
+    expect(container.querySelector('[data-slot="page-header-context"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-slot="page-header"] svg')).not.toBeInTheDocument();
     expect(container.querySelectorAll('h1')).toHaveLength(1);
   });
 
@@ -228,10 +228,10 @@ describe('PageHeader', () => {
     expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument();
     expect(container.querySelector('.container-focused')).toBeInTheDocument();
     expect(container.querySelector('.measure-reading')).toBeInTheDocument();
-    expect(container.querySelector('.page-header')).toHaveClass('page-header--without-context');
-    expect(container.querySelector('.page-header__description')).toHaveAttribute('data-slot', 'page-header-description');
-    expect(container.querySelector('.page-header__actions')).toHaveAttribute('data-slot', 'page-header-actions');
-    expect(container.querySelector('article, .ui-panel')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-slot="page-header"]')).toHaveAttribute('data-page-header-variant', 'standard');
+    expect(container.querySelector('[data-slot="page-header-description"]')).toHaveAttribute('data-slot', 'page-header-description');
+    expect(container.querySelector('[data-slot="page-header-actions"]')).toHaveAttribute('data-slot', 'page-header-actions');
+    expect(container.querySelector('article, [data-slot="card"]')).not.toBeInTheDocument();
     expect(container.querySelectorAll('h1')).toHaveLength(1);
   });
 });

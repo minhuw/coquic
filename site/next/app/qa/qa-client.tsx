@@ -1025,9 +1025,18 @@ function getSessionId() {
   if (typeof window === 'undefined') return 'server';
   const existing = window.localStorage.getItem(storageNames.qaSession);
   if (existing) return existing;
-  const id = window.crypto.randomUUID();
+  const id = typeof window.crypto.randomUUID === 'function'
+    ? window.crypto.randomUUID()
+    : uuidFromRandomValues(window.crypto.getRandomValues(new Uint8Array(16)));
   window.localStorage.setItem(storageNames.qaSession, id);
   return id;
+}
+
+function uuidFromRandomValues(bytes: Uint8Array<ArrayBuffer>) {
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

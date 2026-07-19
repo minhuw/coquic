@@ -129,6 +129,20 @@ describe('QA reducer state model', () => {
 });
 
 describe('QA stream and form contract', () => {
+  it('generates and stores a session ID when randomUUID is unavailable', () => {
+    window.localStorage.removeItem('coquic-qa-session');
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.forEach((_byte, index) => { bytes[index] = index; });
+        return bytes;
+      },
+    });
+
+    render(<QaClient />);
+
+    expect(window.localStorage.getItem('coquic-qa-session')).toBe('00010203-0405-4607-8809-0a0b0c0d0e0f');
+  });
+
   it('posts the exact stream contract, renders metrics and citations, and supports Ctrl+Enter', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([

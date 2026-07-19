@@ -4,8 +4,14 @@
   .transcript-page {
     width: 100%;
     max-width: none;
-    padding-inline: clamp(16px, 3vw, 40px);
+    padding-inline: 12px;
     padding-bottom: 18px;
+  }
+
+  @media (max-width: 680px) {
+    .transcript-page {
+      overflow-x: hidden;
+    }
   }
 
   .transcript-shell {

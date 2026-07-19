@@ -67,6 +67,15 @@ describe('Style boundary checker', () => {
     );
   });
 
+  it('rejects an uppercase import of the retired global sheet', async () => {
+    const root = await createFixture({
+      'app/styles/theme.css': '@IMPORT url("../globals.css");\n',
+    });
+    await expect(collectStyleBoundaryViolations(root)).resolves.toContain(
+      'theme imports non-canonical sheet: ../globals.css',
+    );
+  });
+
   it('rejects a root route import from a child route CSS Module', async () => {
     const root = await createFixture({
       'app/blog/blog.module.css': '.root {}\n',
@@ -80,6 +89,15 @@ describe('Style boundary checker', () => {
   it('rejects a retired class after a template interpolation', async () => {
     const root = await createFixture({
       'app/page.tsx': "const styles = { root: 'root' };\nexport default () => <main className={`${styles.root} coquic-page`} />;\n",
+    });
+    await expect(collectStyleBoundaryViolations(root)).resolves.toContain(
+      'app/page.tsx consumes retired class coquic-page',
+    );
+  });
+
+  it('rejects a retired class referenced through a string constant', async () => {
+    const root = await createFixture({
+      'app/page.tsx': 'const rootClass = "coquic-page";\nexport default function Page() { return <main className={rootClass} />; }\n',
     });
     await expect(collectStyleBoundaryViolations(root)).resolves.toContain(
       'app/page.tsx consumes retired class coquic-page',

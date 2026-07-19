@@ -79,8 +79,27 @@ function sourceFiles(siteRoot, files) {
 }
 
 function importedSheets(content) {
-  return [...content.matchAll(/@import\s+(?:url\(\s*)?(?:["']([^"']+)["']|([^'"\s);]+))\s*\)?/g)]
+  return [...content.matchAll(/@import\s+(?:url\(\s*)?(?:["']([^"']+)["']|([^'"\s);]+))\s*\)?/gi)]
     .map((match) => match[1] ?? match[2]);
+}
+
+function stringVariableInitializers(content) {
+  const initializers = new Map();
+  for (const match of content.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g)) {
+    let start = match.index + match[0].length;
+    while (/\s/.test(content[start] ?? '')) start += 1;
+
+    const opening = content[start];
+    if (opening !== '"' && opening !== "'" && opening !== '`') continue;
+    let end = start + 1;
+    while (end < content.length) {
+      const character = content[end++];
+      if (character === '\\') end += 1;
+      else if (character === opening) break;
+    }
+    initializers.set(match[1], content.slice(start, end));
+  }
+  return initializers;
 }
 
 function classNameInitializers(content) {
@@ -130,7 +149,14 @@ function consumesRetiredClass(rel, content, className) {
   const selectorPattern = new RegExp(`(?:[\\"'\\\`]|\\s)\\.${className}(?![A-Za-z0-9_-])`);
   if (selectorPattern.test(content)) return true;
 
-  return classNameInitializers(content).some((initializer) => classNamePattern.test(initializer));
+  const initializers = classNameInitializers(content);
+  if (initializers.some((initializer) => classNamePattern.test(initializer))) return true;
+
+  for (const [identifier, value] of stringVariableInitializers(content)) {
+    const identifierPattern = new RegExp(`(?<![A-Za-z0-9_$])${identifier}(?![A-Za-z0-9_$])`);
+    if (classNamePattern.test(value) && initializers.some((initializer) => identifierPattern.test(initializer))) return true;
+  }
+  return false;
 }
 
 function add(violations, message) {

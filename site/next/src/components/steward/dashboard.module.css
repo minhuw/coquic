@@ -23,7 +23,6 @@
 @media (max-width: 680px) {
   .route {
     padding-inline: 12px;
-    padding-bottom: 32px;
   }
 }
 .route :global([data-slot='page-header']) {

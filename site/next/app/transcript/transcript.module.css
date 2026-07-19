@@ -128,16 +128,14 @@
     z-index: 3;
     display: flex;
     min-width: 0;
-    align-items: flex-end;
+    align-items: center;
     gap: var(--space-3);
     margin-bottom: var(--space-3);
   }
 
   .transcript-search-wrap {
-    display: grid;
     min-width: 240px;
     flex: 1 1 420px;
-    gap: var(--space-1);
   }
 
   .transcript-search {
@@ -192,16 +190,16 @@
   }
 
   .transcript-search-feedback {
-    display: inline-flex;
-    min-height: 16px;
-    align-items: center;
-    justify-self: start;
-    border: 0;
-    border-radius: 0;
-    padding: 0 2px;
-    background: transparent;
+    flex: 0 0 auto;
+    border-inline-start: 1px solid var(--border);
+    padding-inline-start: var(--space-3);
     color: var(--text-muted);
     font: var(--type-metadata);
+    white-space: nowrap;
+  }
+
+  .transcript-search-feedback[data-tone='danger'] {
+    color: var(--status-danger-ink);
   }
 
   .transcript-date-filter {

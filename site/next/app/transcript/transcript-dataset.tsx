@@ -18,7 +18,6 @@ import { CodexTranscriptThread, transcriptDisplayCount } from '@/components/code
 import { PageHeader } from '@/components/page-header';
 import { Prose } from '@/components/typography/prose';
 import { Button } from '@/components/ui/button';
-import { StatusLabel } from '@/components/ui/status-label';
 import type { TranscriptRecord, TranscriptRole } from '@/lib/codex-transcript';
 import { cn } from '@/lib/utils';
 
@@ -471,10 +470,10 @@ export function TranscriptDataset() {
             {queryDraft ? (
               <Button type="button" aria-label="Clear transcript search" onClick={() => setQueryDraft('')} size="icon" variant="ghost"><X aria-hidden="true" /></Button>
             ) : null}
+            <output className={styles['transcript-search-feedback']} role="status" data-tone={collection.status === 'error' || collection.status === 'unavailable' ? 'danger' : undefined}>
+              {collectionBusy ? 'Searching' : `${formatInteger(total)} result${total === 1 ? '' : 's'}`}
+            </output>
           </label>
-          <StatusLabel className={styles['transcript-search-feedback']} role="status" tone={collectionBusy ? 'neutral' : collection.status === 'error' || collection.status === 'unavailable' ? 'danger' : 'success'}>
-            {collectionBusy ? 'Searching' : `${formatInteger(total)} result${total === 1 ? '' : 's'}`}
-          </StatusLabel>
         </div>
 
         <div className={styles['transcript-date-filter']} data-open={datePickerOpen ? 'true' : undefined} ref={datePickerRef}>

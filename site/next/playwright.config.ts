@@ -53,6 +53,7 @@ export function createPlaywrightConfig(
     },
     snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{projectName}/{arg}{ext}',
     fullyParallel: true,
+    workers: Math.min(12, Math.max(1, Math.floor(os.availableParallelism() / 2))),
     forbidOnly: !!environment.CI,
     retries: environment.CI ? 2 : 0,
     reporter: environment.CI ? 'line' : 'list',

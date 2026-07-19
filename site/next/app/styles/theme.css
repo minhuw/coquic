@@ -219,6 +219,7 @@
     width: 100%;
     min-width: min(320px, 100%);
     background: var(--canvas);
+    overflow-x: clip;
     scroll-behavior: smooth;
   }
 

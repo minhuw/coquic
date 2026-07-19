@@ -61,6 +61,8 @@ try {
   }
 
   shiftTimestamps(monitor);
+  // Keep the fixed snapshot live for the complete browser-test matrix.
+  monitor.runtime.heartbeat_interval_seconds = 300;
   await writeFile(
     path.join(stagingRoot, 'public/steward/status.json'),
     JSON.stringify(monitor),

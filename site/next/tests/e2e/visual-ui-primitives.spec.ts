@@ -1,6 +1,6 @@
 import { devices, expect, test, type Page } from '@playwright/test';
 
-import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
+import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
 
 const viewports = [
   { name: 'mobile', width: 375, height: 812 },
@@ -78,7 +78,8 @@ async function installPrimitiveProbe(page: Page) {
 
 for (const theme of ['light', 'dark'] as const) {
   for (const viewport of viewports) {
-    test(`${theme} shared composition at ${viewport.name} viewport`, async ({ page }) => {
+    test(`${theme} shared composition at ${viewport.name} viewport`, async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name === 'mobile', 'Self-sized visual probes use the approved desktop baselines.');
       await setStoredTheme(page, theme);
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto('/');
@@ -87,6 +88,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(probe).toBeVisible();
       await expectNoGlobalOverflow(page);
       await expectNoSeriousAxeViolations(page, '#shared-primitive-probe');
+      await waitForVisualAssets(page);
       await expect(probe).toHaveScreenshot(`shared-${theme}-${viewport.name}.png`, {
         animations: 'disabled',
         caret: 'hide',
@@ -103,6 +105,7 @@ test('button owns hover, active, disabled, and loading states', async ({ page })
 
   const button = page.locator('#shared-primitive-probe [data-slot="button"]').nth(1);
   const before = await button.evaluate((element) => getComputedStyle(element).backgroundColor);
+  const supportsHover = await page.evaluate(() => matchMedia('(hover: hover)').matches);
   await button.hover();
   const hover = await button.evaluate((element) => getComputedStyle(element).backgroundColor);
   const box = await button.boundingBox();
@@ -111,7 +114,7 @@ test('button owns hover, active, disabled, and loading states', async ({ page })
   await page.mouse.down();
   const active = await button.evaluate((element) => getComputedStyle(element).backgroundColor);
   await page.mouse.up();
-  expect(hover).not.toBe(before);
+  if (supportsHover) expect(hover).not.toBe(before);
   expect(active).not.toBe(before);
 
   const disabled = page.locator('#shared-primitive-probe [data-slot="button"]').nth(2);

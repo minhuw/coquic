@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { expectLocalScrollRegion, expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
+import { expectLocalScrollRegion, expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
 import {
   installQaFixture,
   qaRequests,
@@ -292,7 +292,6 @@ async function ask(page: Parameters<typeof installQaFixture>[0]) {
 }
 
 async function hideNextDevTools(page: Parameters<typeof installQaFixture>[0]) {
-  await page.addStyleTag({
-    content: 'nextjs-portal { display: none !important; } nav[aria-label="Demo views"] { position: static !important; }',
-  });
+  await page.addStyleTag({ content: 'nav[aria-label="Demo views"] { position: static !important; }' });
+  await waitForVisualAssets(page);
 }

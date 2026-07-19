@@ -18,11 +18,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" data-scroll-behavior="smooth" suppressHydrationWarning>
+    <html lang="en" data-scroll-behavior="smooth" className={`${hostGrotesk.variable} ${googleSansCode.variable}`} suppressHydrationWarning>
       <head>
         <ThemeScript />
       </head>
-      <body className={`${hostGrotesk.variable} ${googleSansCode.variable} ${shellStyles.body}`}>
+      <body className={shellStyles.body}>
         <a className={shellStyles.skipLink} href="#shell-main" data-slot="skip-link">
           Skip to content
         </a>

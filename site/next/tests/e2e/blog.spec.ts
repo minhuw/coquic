@@ -1,14 +1,11 @@
 import { expect, test } from '@playwright/test';
 
-import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
+import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
 
 const themes = ['light', 'dark'] as const;
 
 async function prepareVisualSnapshot(page: Parameters<typeof setStoredTheme>[0]) {
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
-  });
+  await waitForVisualAssets(page);
 }
 
 test.describe('blog characterization', () => {

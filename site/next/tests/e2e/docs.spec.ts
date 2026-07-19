@@ -7,6 +7,7 @@ import {
   expectLocalScrollRegion,
   expectNoGlobalOverflow,
   setStoredTheme,
+  waitForVisualAssets,
 } from './helpers/design-system';
 
 const docs = docItems.map((item) => ({
@@ -16,10 +17,7 @@ const docs = docItems.map((item) => ({
 const themes = ['light', 'dark'] as const;
 
 async function prepareVisualSnapshot(page: Parameters<typeof setStoredTheme>[0]) {
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
-  });
+  await waitForVisualAssets(page);
 }
 
 async function expectDocsAxe(page: Parameters<typeof setStoredTheme>[0]) {

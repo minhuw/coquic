@@ -5,6 +5,7 @@ import {
   expectNoGlobalOverflow,
   expectNoSeriousAxeViolations,
   setStoredTheme,
+  waitForVisualAssets,
 } from './helpers/design-system';
 import { installPerformanceFixture } from './fixtures/performance';
 
@@ -22,9 +23,7 @@ async function loadReadyPerformance(page: Page, path = '/perf-comparison') {
 }
 
 async function removeNextDevTools(page: Page) {
-  await page.locator('body').evaluate((body) => {
-    body.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
-  });
+  await waitForVisualAssets(page);
 }
 
 test.describe('performance evidence contracts', () => {

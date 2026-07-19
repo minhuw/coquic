@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme } from './helpers/design-system';
+import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
 
 const themes = ['light', 'dark'] as const;
 const taskRoute = '/steward/tasks/task-20260713115945-a1b2c3d4';
@@ -30,6 +30,7 @@ test.describe('content primitive compositions', () => {
       const tableRegions = page.locator('[data-editorial-table-region="true"]');
       if (await tableRegions.count()) await expect(tableRegions.first()).toBeVisible();
       await expectNoGlobalOverflow(page);
+      await waitForVisualAssets(page);
       await expect(page).toHaveScreenshot(`prose-table-code-${theme}.png`, { fullPage: false });
       await page.evaluate(() => document.fonts.ready);
       expect(thirdPartyFontRequests).toEqual([]);
@@ -37,6 +38,10 @@ test.describe('content primitive compositions', () => {
 
     test(`evidence transcript and diff stay bounded in ${theme}`, async ({ page }) => {
       const thirdPartyFontRequests = trackThirdPartyFontRequests(page);
+      await page.addInitScript(() => {
+        const fixedNow = Date.parse('2026-07-17T12:00:00.000Z');
+        Date.now = () => fixedNow;
+      });
       await setStoredTheme(page, theme);
       await page.goto(taskRoute);
 
@@ -48,6 +53,7 @@ test.describe('content primitive compositions', () => {
       await expect(page.locator('.evidence-message, .evidence-disclosure')).not.toHaveCount(0);
       await expectNoGlobalOverflow(page);
       await expectNoSeriousAxeViolations(page, 'main');
+      await waitForVisualAssets(page);
       await expect(page).toHaveScreenshot(`evidence-transcript-${theme}.png`, { fullPage: false });
 
       const patchTab = page.getByRole('tab', { name: 'Patch' }).first();
@@ -56,6 +62,7 @@ test.describe('content primitive compositions', () => {
       await expect(page.locator('.diff-split, .diff-unified')).not.toHaveCount(0);
       await expectNoGlobalOverflow(page);
       await expectNoSeriousAxeViolations(page, 'main');
+      await waitForVisualAssets(page);
       await expect(page).toHaveScreenshot(`evidence-diff-${theme}.png`, { fullPage: false });
       await page.evaluate(() => document.fonts.ready);
       expect(thirdPartyFontRequests).toEqual([]);

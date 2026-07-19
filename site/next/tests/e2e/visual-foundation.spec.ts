@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { setStoredTheme } from './helpers/design-system';
+import { setStoredTheme, waitForVisualAssets } from './helpers/design-system';
 
 for (const theme of ['light', 'dark'] as const) {
   test(`${theme} shared shell foundation`, async ({ page }) => {
@@ -11,7 +11,7 @@ for (const theme of ['light', 'dark'] as const) {
       'aria-pressed',
       theme === 'dark' ? 'true' : 'false',
     );
-    await page.evaluate(() => document.fonts.ready);
+    await waitForVisualAssets(page);
 
     await expect(page).toHaveScreenshot(`foundation-${theme}.png`, {
       animations: 'disabled',

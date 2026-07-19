@@ -5,6 +5,7 @@ import {
   expectLocalScrollRegion,
   expectNoGlobalOverflow,
   expectNoSeriousAxeViolations,
+  waitForVisualAssets,
 } from './helpers/design-system';
 
 function collectPageErrors(page: Page) {
@@ -89,10 +90,7 @@ async function disableLegacyGeneratedRules(page: Page) {
 }
 
 async function prepareVisualSnapshot(page: Page) {
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
-  });
+  await waitForVisualAssets(page);
 }
 
 test.describe('protocol Workbench contracts', () => {

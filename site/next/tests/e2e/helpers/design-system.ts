@@ -20,6 +20,22 @@ export async function setStoredTheme(page: Page, theme: 'light' | 'dark') {
   }, theme);
 }
 
+export async function waitForVisualAssets(page: Page) {
+  await page.addStyleTag({ content: 'nextjs-portal { display: none !important; }' });
+  await page.evaluate(() => {
+    document.querySelectorAll('nextjs-portal').forEach((portal) => portal.remove());
+    Array.from(document.images).forEach((image) => {
+      image.loading = 'eager';
+    });
+  });
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForFunction(
+    () => Array.from(document.images).every((image) => image.complete && image.naturalWidth > 0),
+    undefined,
+    { timeout: 15_000 },
+  );
+}
+
 export async function expectNoGlobalOverflow(page: Page) {
   const overflow = await page.evaluate(() => {
     const viewportWidth = window.innerWidth;

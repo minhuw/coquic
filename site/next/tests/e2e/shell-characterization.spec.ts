@@ -127,6 +127,11 @@ test('system theme changes update the document without persistence', async ({ pa
 });
 
 test('theme script sets the first-frame system and saved themes', async ({ page }) => {
+  const scriptErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error' && message.text().includes('Encountered a script tag')) scriptErrors.push(message.text());
+  });
+
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.addInitScript(() => {
     localStorage.removeItem('coquic-theme');
@@ -142,6 +147,8 @@ test('theme script sets the first-frame system and saved themes', async ({ page 
   });
   await page.reload();
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __coquicFirstFrame: Promise<unknown> }).__coquicFirstFrame)).toEqual({ theme: 'light', colorScheme: 'light' });
+  await expect(page.locator('script#coquic-theme')).toHaveCount(1);
+  expect(scriptErrors).toEqual([]);
 });
 
 test('plan 003 provides complete mobile menu access', async ({ page }) => {

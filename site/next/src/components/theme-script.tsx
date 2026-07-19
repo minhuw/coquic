@@ -1,3 +1,8 @@
+'use client';
+
+import { useServerInsertedHTML } from 'next/navigation';
+import { useRef } from 'react';
+
 const themeScript = `
 (() => {
   try {
@@ -22,5 +27,11 @@ const themeScript = `
 `;
 
 export function ThemeScript() {
-  return <script>{themeScript}</script>;
+  const inserted = useRef(false);
+  useServerInsertedHTML(() => {
+    if (inserted.current) return null;
+    inserted.current = true;
+    return <script id="coquic-theme" dangerouslySetInnerHTML={{ __html: themeScript }} />;
+  });
+  return null;
 }

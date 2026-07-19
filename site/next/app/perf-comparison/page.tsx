@@ -1,8 +1,8 @@
 import type { Metadata } from 'next';
-import Script from 'next/script';
 
 import { PageHeader } from '@/components/page-header';
 
+import { PerformanceLoader } from './performance-loader';
 import styles from './performance.module.css';
 
 export const metadata: Metadata = {
@@ -15,12 +15,17 @@ export const metadata: Metadata = {
 export default function PerformancePage() {
   return (
     <main className={styles.root} id="performance-page" data-testid="performance-page">
-      <PageHeader eyebrow="QUIC performance" title="CoQUIC Performance Comparison" variant="evidence" />
+      <PageHeader
+        eyebrow="QUIC performance"
+        title="CoQUIC Performance Comparison"
+        description="Compare throughput and request rates across QUIC implementations, then inspect retained runs for performance changes over time."
+        variant="evidence"
+      />
 
       <section className={styles.summary} aria-label="Benchmark scope and availability">
         <div className={styles.summaryScope}>
           <span className={styles.kicker}>Evidence surface</span>
-          <p>Current benchmark results are shown first. Historical comparisons hydrate separately.</p>
+          <p>Reproducible host benchmarks with current rankings and retained historical evidence.</p>
         </div>
         <dl className={styles.summaryFacts}>
           <div>
@@ -164,7 +169,7 @@ export default function PerformancePage() {
         </div>
       </dialog>
 
-      <Script src="/perf-comparison.js" strategy="afterInteractive" type="module" />
+      <PerformanceLoader />
     </main>
   );
 }

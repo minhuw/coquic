@@ -6,7 +6,7 @@
   --performance-family-color: #0f62fe;
   --performance-line: #e0e0e0;
   width: 100%;
-  max-width: 1340px;
+  max-width: 1440px;
   min-width: 0;
   margin-inline: auto;
   padding-inline: 12px;
@@ -126,8 +126,9 @@
 
 .root :global(#plot-grid) {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 250px minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -137,14 +138,20 @@
 .root .controls,
 .root .result {
   min-width: 0;
-  border: 1px solid var(--border);
   background: var(--surface);
 }
 
 .root .controls {
+  position: sticky;
+  top: 76px;
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  grid-row: 1 / span 2;
+  gap: 16px;
+  max-height: calc(100vh - 96px);
+  padding: 4px 20px 20px 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  scrollbar-width: thin;
 }
 
 .root .controlsHead,
@@ -164,7 +171,7 @@
 .root .result h2 {
   margin-top: 4px;
   color: var(--text-strong);
-  font-size: 19px;
+  font-size: 18px;
   font-weight: 700;
   line-height: 1.15;
 }
@@ -182,18 +189,19 @@
 
 .root :global(#performance-mode-tabs) {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
   min-width: 0;
 }
 
 .root :global(.plot-tab) {
   display: grid;
-  justify-items: start;
-  gap: 4px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
-  min-height: 58px;
-  padding: 10px 12px;
+  min-height: 48px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
@@ -215,7 +223,7 @@
   border-color: var(--accent);
   color: var(--text-strong);
   background: var(--accent-soft);
-  box-shadow: inset 3px 0 var(--accent);
+  box-shadow: inset 2px 0 var(--accent);
 }
 
 .root :global(.plot-tab span),
@@ -227,7 +235,7 @@
 }
 
 .root :global(.plot-tab small) {
-  max-width: 100%;
+  max-width: 58px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -282,7 +290,8 @@
   justify-content: space-between;
   gap: 8px 16px;
   min-width: 0;
-  padding-top: 4px;
+  padding-block: 10px;
+  border-block: 1px solid var(--border);
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -292,6 +301,10 @@
 .root :global(#performance-filter-count) {
   color: var(--text-strong);
   font-weight: 700;
+}
+
+.root :global(#performance-filter-selection) {
+  display: none;
 }
 
 .root .filterPanel {
@@ -304,12 +317,11 @@
 
 .root :global(#performance-filters) {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 16px;
+  gap: 14px;
   min-width: 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
+  padding-top: 0;
 }
 
 .root :global(.plot-filter-reset) {
@@ -511,7 +523,9 @@
   display: grid;
   align-content: start;
   gap: 14px;
-  padding: 16px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .root .resultRanking {
@@ -593,30 +607,29 @@
 
 .root :global(.performance-bar-list) {
   display: grid;
-  gap: 8px;
+  gap: 0;
   min-width: 0;
-  margin-top: 12px;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
 .root :global(.performance-bar-row) {
   position: relative;
   display: grid;
-  grid-template-columns: 8px 32px minmax(180px, 250px) minmax(120px, 1fr) minmax(130px, auto);
+  grid-template-columns: 24px minmax(190px, 260px) minmax(120px, 1fr) minmax(126px, auto);
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
-  min-height: 58px;
-  padding: 7px 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--surface-subtle);
+  min-height: 50px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .root :global(.performance-bar-row.coquic-family) {
   isolation: isolate;
-  border-color: color-mix(in srgb, var(--accent-ink) 30%, transparent);
   background: var(--accent-soft);
-  box-shadow: inset 3px 0 var(--accent);
+  box-shadow: inset 2px 0 var(--accent);
 }
 
 .root :global(.performance-bar-row.coquic-family::before),
@@ -628,7 +641,7 @@
   position: absolute;
   inset: 0;
   z-index: 0;
-  display: block;
+  display: none;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--performance-family-color), transparent 54%);
   content: "";
@@ -642,11 +655,7 @@
 }
 
 .root :global(.performance-family-marker) {
-  display: block;
-  width: 6px;
-  height: 24px;
-  border-radius: 2px;
-  background: transparent;
+  display: none;
 }
 
 .root :global(.performance-bar-row.coquic-family .performance-family-marker) {
@@ -657,12 +666,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border-strong);
-  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 0;
   color: var(--text-muted);
-  background: var(--surface);
+  background: transparent;
   font-family: var(--font-mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -686,7 +695,7 @@
   grid-template-columns: minmax(0, 1fr) 70px;
   align-items: center;
   gap: 8px;
-  min-height: 42px;
+  min-height: 36px;
 }
 
 .root :global(.bar-identity-text) {
@@ -816,10 +825,10 @@
 .root :global(.bar-track) {
   position: relative;
   min-width: 0;
-  height: 12px;
+  height: 8px;
   overflow: hidden;
   border: 1px solid var(--border-strong);
-  border-radius: 2px;
+  border-radius: 0;
   background: var(--surface-strong);
 }
 
@@ -861,8 +870,8 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: 4px;
@@ -933,11 +942,9 @@
 .root :global(.performance-trend-chart) {
   position: relative;
   display: grid;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
-  margin-top: 16px;
-  padding-top: 2px;
-  border-top: 1px solid var(--performance-line);
+  margin-top: 10px;
 }
 
 .root :global(.trend-head) {
@@ -949,12 +956,15 @@
   display: block;
   width: 100%;
   height: auto;
-  min-height: 240px;
+  min-height: 300px;
+  padding: 14px 10px 6px;
   overflow: visible;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
 }
 
 .root :global(.trend-grid-line) {
-  stroke: var(--border);
+  stroke: var(--performance-line);
   stroke-width: 1;
 }
 
@@ -970,17 +980,18 @@
   stroke: var(--series-color, var(--border-strong));
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 2.2;
+  stroke-width: 1.8;
 }
 
 .root :global(.trend-line.coquic-family) {
-  stroke-width: 3;
+  stroke-width: 2.8;
 }
 
 .root :global(.trend-line.performance-series-secondary) {
   stroke: var(--text-muted);
-  stroke-dasharray: 5 4;
-  stroke-width: 1.7;
+  stroke-dasharray: 4 5;
+  stroke-width: 1.4;
+  opacity: 0.45;
 }
 
 .root :global(.trend-point) {
@@ -998,6 +1009,7 @@
 .root :global(.trend-point.performance-series-secondary) {
   fill: var(--text-muted);
   stroke: var(--surface);
+  opacity: 0.6;
 }
 
 .root :global(.trend-hit-point) {
@@ -1045,36 +1057,34 @@
 }
 
 .root :global(.trend-legend) {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
   min-width: 0;
-  margin-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
 .root :global(.trend-legend > span) {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  min-height: 28px;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--surface-subtle);
+  min-height: 38px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .root :global(.trend-legend > span.coquic-family) {
   position: relative;
-  border-color: color-mix(in srgb, var(--accent-ink) 30%, transparent);
   background: var(--accent-soft);
 }
 
 .root :global(.trend-legend > span.coquic-family::before) {
   position: absolute;
   inset: 0;
-  border: 1px solid var(--performance-family-color);
-  border-radius: inherit;
+  border-left: 2px solid var(--performance-family-color);
   content: "";
   opacity: 0.34;
   pointer-events: none;
@@ -1103,6 +1113,7 @@
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 12px;
+  text-align: right;
 }
 
 .root :global(.trend-marker) {
@@ -1528,7 +1539,53 @@
   }
 
   .root :global(.performance-bar-row) {
-    grid-template-columns: 8px 30px minmax(160px, 220px) minmax(100px, 1fr) minmax(120px, auto);
+    grid-template-columns: 24px minmax(160px, 220px) minmax(100px, 1fr) minmax(120px, auto);
+  }
+}
+
+@media (width <= 900px) {
+  .root :global(#plot-grid) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .root .controls {
+    position: static;
+    grid-row: auto;
+    max-height: none;
+    padding: 16px;
+    overflow: visible;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .root .filterToggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .root :global(#performance-mode-tabs) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .root :global(.plot-tab) {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: center;
+    min-height: 58px;
+  }
+
+  .root :global(.plot-tab small) {
+    max-width: 100%;
+  }
+
+  .root :global(#performance-filter-selection) {
+    display: inline;
+  }
+
+  .root :global(#performance-filters) {
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
   }
 }
 
@@ -1602,19 +1659,17 @@
   }
 
   .root :global(.performance-bar-row) {
-    grid-template-columns: 8px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "marker label value"
-      "marker track track";
+      "label value"
+      "track track";
     gap: 8px 10px;
     min-height: 0;
     padding: 10px;
   }
 
   .root :global(.performance-family-marker) {
-    grid-area: marker;
-    align-self: stretch;
-    height: auto;
+    display: none;
   }
 
   .root :global(.performance-bar-row .rank-badge) {
@@ -1661,13 +1716,15 @@
   }
 
   .root :global(.trend-svg) {
-    min-width: 560px;
-    min-height: 214px;
+    min-width: 0;
+    min-height: 0;
+    aspect-ratio: 680 / 260;
+    padding: 6px 2px 2px;
   }
 
   .root :global(.performance-trend-chart) {
-    overflow-x: auto;
-    padding-bottom: 3px;
+    overflow-x: visible;
+    padding-bottom: 0;
   }
 
   .root :global(.trend-legend) {
@@ -1678,12 +1735,12 @@
 
   .root :global(.trend-legend > span) {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
   }
 
   .root :global(.trend-legend small) {
-    grid-column: 2;
+    grid-column: auto;
   }
 
   .root :global(.trend-family-chip) {
@@ -1716,7 +1773,7 @@
   }
 
   .root :global(.performance-bar-row) {
-    grid-template-columns: 8px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .root :global(.bar-value > span) {

@@ -150,7 +150,7 @@ const activePlotFilters = {
 };
 const filterGroupsOpen = {
   languages: true,
-  vendors: true,
+  vendors: false,
 };
 
 function byId(id) {
@@ -662,7 +662,7 @@ function ensureControls() {
     const open = filterTrigger.getAttribute("aria-expanded") !== "true";
     setFilterPanelOpen(open);
   });
-  if (!window.matchMedia("(max-width: 680px)").matches) {
+  if (!window.matchMedia("(max-width: 900px)").matches) {
     setFilterPanelOpen(true);
   }
   controlsReady = true;
@@ -1243,6 +1243,9 @@ function renderTrendChart(mode) {
     return chart;
   }
 
+  const chartValues = featuredTrendSeries(valuesByImplementation);
+  subtitle.textContent = `${config.metricDetail} over ${snapshots.length} retained snapshot${snapshots.length === 1 ? "" : "s"} | ${chartValues.size} of ${valuesByImplementation.size} series`;
+
   const width = 680;
   const height = 260;
   const margin = { top: 18, right: 18, bottom: 34, left: 58 };
@@ -1312,7 +1315,7 @@ function renderTrendChart(mode) {
     tooltip.classList.remove("visible");
   }
 
-  for (const [seriesIndex, [implementation, points]] of [...valuesByImplementation.entries()].entries()) {
+  for (const [seriesIndex, [implementation, points]] of [...chartValues.entries()].entries()) {
     const filtered = points.filter((point) => point.value !== null);
     const pathData = filtered.map((point, index) => `${index === 0 ? "M" : "L"} ${xForIndex(point.index).toFixed(2)} ${yForValue(point.value).toFixed(2)}`).join(" ");
     const path = makeSvgElement("path");
@@ -1367,7 +1370,7 @@ function renderTrendChart(mode) {
 
   const legend = document.createElement("div");
   legend.className = "trend-legend";
-  for (const [seriesIndex, implementation] of [...valuesByImplementation.keys()].entries()) {
+  for (const [seriesIndex, implementation] of [...chartValues.keys()].entries()) {
     const info = implementationInfo(implementation);
     const item = document.createElement("span");
     if (isCoquicFamilyImplementation(implementation)) item.classList.add("coquic-family");
@@ -1391,6 +1394,23 @@ function renderTrendChart(mode) {
   }
   chart.append(heading, svg, tooltip, legend, renderTrendDataTable(mode, snapshots, valuesByImplementation));
   return chart;
+}
+
+function featuredTrendSeries(valuesByImplementation) {
+  if (activePlotFilters.languages.size || activePlotFilters.vendors.size || valuesByImplementation.size <= 10) {
+    return valuesByImplementation;
+  }
+  const entries = [...valuesByImplementation.entries()];
+  const family = entries.filter(([implementation]) => isCoquicFamilyImplementation(implementation));
+  const competitors = entries
+    .filter(([implementation]) => !isCoquicFamilyImplementation(implementation))
+    .sort(([, first], [, second]) => latestSeriesValue(second) - latestSeriesValue(first))
+    .slice(0, 5);
+  return new Map([...family, ...competitors]);
+}
+
+function latestSeriesValue(points) {
+  return [...points].reverse().find((point) => point.value !== null)?.value ?? 0;
 }
 
 function renderHistoryChart() {
@@ -1539,6 +1559,11 @@ function setupDialogs() {
 }
 
 function startLoading() {
+  controlsReady = false;
+  dialogListenersReady = false;
+  filterTrigger = null;
+  perfDetailTrigger = null;
+  perfFlamegraphTrigger = null;
   const token = ++loadToken;
   currentState = "loading";
   historyState = "loading";
@@ -1580,11 +1605,11 @@ function startLoading() {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     const filterPanel = byId("performance-filter-panel");
-    if (filterPanel && !filterPanel.hidden && window.matchMedia("(max-width: 680px)").matches) {
+    if (filterPanel && !filterPanel.hidden && window.matchMedia("(max-width: 900px)").matches) {
       event.preventDefault();
       setFilterPanelOpen(false, true);
     }
   }
 });
 
-startLoading();
+window.coquicStartPerformance = startLoading;

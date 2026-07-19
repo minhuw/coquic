@@ -38,6 +38,8 @@ test.describe('performance evidence contracts', () => {
       await expect(page.locator('#performance-source')).toContainText('nightly-performance');
       await expect(page.locator('#performance-timestamp')).toContainText('2026-07-14');
       await expect(page.locator('#performance-ranking')).toContainText('coquic');
+      await expect(page.locator('#performance-current-state')).toContainText('4 of 4 completed implementation results shown.');
+      await expect(page.locator('#performance-ranking .performance-bar-row')).toHaveCount(4);
       await expect(page.locator('#performance-current-skeleton')).toBeHidden();
       expect(fixture.requests).toContain('/perf-results.json');
       expect(fixture.requests).toContain('/perf-history/index.json');

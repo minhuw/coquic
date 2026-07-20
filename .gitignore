@@ -12,6 +12,7 @@ coverage/
 .remote-ci/
 .coquic/
 .coquic-steward/
+.orca/
 vibe-references/
 design-reference/
 .fuzz/

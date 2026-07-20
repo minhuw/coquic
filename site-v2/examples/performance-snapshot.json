@@ -1,0 +1,116 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-19T12:00:00Z",
+  "provenance": {
+    "producer": "github-actions/perf",
+    "event": "schedule",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "runId": "29676688665",
+    "sourceUrl": "https://github.com/minhuw/coquic/actions/runs/29676688665",
+    "completeness": "complete",
+    "warnings": []
+  },
+  "data": {
+    "snapshotId": "perf-20260719-29676688665",
+    "environment": {
+      "id": "coquic-perf-2",
+      "label": "Dedicated LAN performance runner",
+      "operatingSystem": "Linux",
+      "architecture": "x86_64",
+      "cpu": "Example 16-core CPU",
+      "logicalCpuCount": 16,
+      "notes": ["Client and server pinned to separate logical CPUs."]
+    },
+    "implementations": [
+      {
+        "id": "coquic",
+        "label": "CoQUIC",
+        "version": "0123456789abcdef0123456789abcdef01234567",
+        "language": "C++",
+        "vendor": "CoQUIC",
+        "repositoryUrl": "https://github.com/minhuw/coquic",
+        "availability": "available",
+        "availabilityReason": null
+      }
+    ],
+    "measurements": [
+      {
+        "id": "coquic-bbr-bulk",
+        "implementationId": "coquic",
+        "scenario": "bulk",
+        "status": "ok",
+        "congestionControl": "bbr",
+        "durationMs": 60000,
+        "metrics": {
+          "throughputBitsPerSecond": 655000000,
+          "requestsPerSecond": null,
+          "latencyP50Us": null,
+          "latencyP99Us": null
+        },
+        "client": {
+          "utilization": {
+            "cpuAverage": 0.6146,
+            "cpuMaximum": 0.6719,
+            "memoryBytesAverage": 1732317,
+            "memoryBytesMaximum": 1769996,
+            "samples": 15
+          },
+          "flamegraph": {
+            "availability": "unavailable",
+            "url": null,
+            "mediaType": "image/svg+xml",
+            "filename": null,
+            "byteSize": null,
+            "originalByteSize": null,
+            "sha256": null,
+            "truncated": false,
+            "reason": "Profile conversion failed."
+          },
+          "profileLog": {
+            "availability": "available",
+            "url": "/perf-artifacts/coquic-bbr-bulk.client.perf.log",
+            "mediaType": "text/plain",
+            "filename": "coquic-bbr-bulk.client.perf.log",
+            "byteSize": 2048,
+            "originalByteSize": 2048,
+            "sha256": null,
+            "truncated": false,
+            "reason": null
+          }
+        },
+        "server": {
+          "utilization": {
+            "cpuAverage": 0.9954,
+            "cpuMaximum": 1.0017,
+            "memoryBytesAverage": 3225908,
+            "memoryBytesMaximum": 3227516,
+            "samples": 15
+          },
+          "flamegraph": {
+            "availability": "notProduced",
+            "url": null,
+            "mediaType": "image/svg+xml",
+            "filename": null,
+            "byteSize": null,
+            "originalByteSize": null,
+            "sha256": null,
+            "truncated": false,
+            "reason": "No SVG was produced."
+          },
+          "profileLog": {
+            "availability": "notProduced",
+            "url": null,
+            "mediaType": "text/plain",
+            "filename": null,
+            "byteSize": null,
+            "originalByteSize": null,
+            "sha256": null,
+            "truncated": false,
+            "reason": "No profile log was produced."
+          }
+        },
+        "failure": null
+      }
+    ]
+  }
+}

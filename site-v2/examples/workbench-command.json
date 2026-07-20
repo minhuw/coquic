@@ -1,0 +1,11 @@
+{
+  "command": "scenario.load",
+  "runId": "workbench-run-01",
+  "scenarioId": "transfer",
+  "network": {
+    "lossRatio": 0,
+    "bandwidthBitsPerSecond": 20000000,
+    "oneWayDelayMs": 1000
+  },
+  "seed": 42
+}

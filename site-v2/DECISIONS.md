@@ -1,0 +1,124 @@
+# Contract Decisions
+
+## D-001: Visual clean room
+
+V2 preserves behavior but has no dependency on legacy presentation. This avoids
+turning accidental markup and styling into design requirements.
+
+## D-002: Separate application
+
+V2 SHOULD be implemented as an independent application rooted in `site-v2/`.
+Sharing a route group inside the legacy Next.js application would reintroduce
+global CSS, component, and build-time coupling.
+
+## D-003: Canonical V2 envelopes
+
+All first-party JSON resources use a common envelope with `schemaVersion`,
+`generatedAt`, and `data`. Snapshot provenance is explicit. Missing resources
+use HTTP errors; missing optional measurements use `null` or an availability
+enum. Missing values are never encoded as numeric zero.
+
+## D-004: Base units in data
+
+Canonical payloads use unscaled units in field names: bits per second,
+requests per second, microseconds, milliseconds, bytes, and ratios from 0 to 1.
+The UI chooses human-readable scaling. This prevents unit strings and display
+rounding from contaminating domain data.
+
+## D-005: Stable identifiers
+
+Implementations, measurements, sessions, tasks, artifacts, and snapshots have
+stable opaque IDs. Human labels are separate and may change without breaking
+URLs or joins.
+
+## D-006: Errors are data, not fake success
+
+HTTP failures use a shared problem format. Partial collections declare their
+completeness. A valid empty collection is distinct from an unavailable or
+malformed resource.
+
+## D-007: Data-driven catalogs
+
+Documentation navigation, Workbench scenarios, benchmark implementations, and
+search entries SHOULD come from validated catalogs rather than duplicated UI
+constants.
+
+## D-008: Prototype stack
+
+The non-normative prototype uses Next.js 16, React 19, TypeScript, Tailwind CSS
+4, source-owned shadcn-style Radix primitives, Motion, and Lucide icons. Staying
+with React preserves repository operating familiarity; Nuxt would add a second
+frontend runtime without a product benefit for this site.
+
+Visual decisions are no longer recorded in this stack decision. See D-009 and
+the normative `DESIGN.md`.
+
+## D-009: Calm scientific instrumentation
+
+The approved visual foundation is a calm scientific evidence interface with top
+navigation, system sans for interface/prose, and Google Sans Code for exact
+technical data. Complete measurements, synchronized analytical figures, exact
+rankings, visible ranking rules, provenance, and method form the visual identity.
+
+This supersedes the rejected Archivo/Instrument/IBM typography and the earlier
+flight-recorder-led proposal in D-008. `DESIGN.md` is the normative visual source
+and contains the review ledger for decisions that remain open.
+
+## D-010: Futurism through working evidence
+
+Research of the official xAI homepage, API and company pages, and developer
+documentation on 2026-07-19 refined the direction from calm scientific
+instrumentation to calm scientific futurism. CoQUIC adopts xAI's reduction,
+black/white polarity, purposeful spatial pauses, direct product artifacts, and
+restrained transitions as principles rather than visual assets.
+
+CoQUIC does not adopt xAI's proprietary typography, branding, marketing-scale
+whitespace, pill-heavy calls to action, or large rounded documentation panels.
+The approved font pairing and complete-evidence requirements remain unchanged.
+An optional single contrast field may hold a route's primary working artifact;
+it must never be decorative or replace exact accessible evidence.
+
+## D-011: Metadata does not balance page openings
+
+Page-opening status and provenance sit in one compact line beneath the page
+purpose. They do not occupy an isolated right column merely to fill negative
+space. A right-aligned element in this row must be a real page action. This
+preserves useful operational context without making metadata look decorative.
+
+## D-012: Versioned DESIGN.md contract
+
+The approved visual direction is fixed as DESIGN.md version 1.0.0 using the
+awesome-design-md structure: machine-readable YAML tokens followed by human
+guidance for theme, color, typography, layout, components, visualization,
+responsive behavior, guardrails, and agent implementation.
+
+This is a documentation and synchronization change, not a new visual direction.
+It replaces the working-draft label, records the implemented 64px shell height,
+and makes token and prose updates an atomic requirement for future changes.
+
+## D-013: Tailwind, shadcn/ui, and shadcn/typeset
+
+The Site V2 implementation foundation uses Tailwind CSS 4 with semantic tokens
+derived from DESIGN.md. Tailwind is an implementation vocabulary and does not
+permit default or arbitrary visual decisions to supersede the design contract.
+
+shadcn/ui supplies source-owned accessible components through the shadcn CLI.
+Generated component behavior is retained while generated visual styling is
+retokenized for CoQUIC. shadcn/typeset supplies a source-owned CSS file for
+sanitized prose and rendered Markdown. It is not an npm runtime dependency and
+does not style operational UI or evidence fields.
+
+This decision supersedes the provisional component wording in D-008. STACK.md
+is the normative implementation reference.
+
+## D-014: Daily growth report as the Home thesis
+
+Home leads with the established CoQUIC mark, product name, and a concise project
+slogan beside a Steward daily summary. The report groups model usage, repository
+output, and fixes landed for one explicit UTC date. This makes autonomous growth
+inspectable without turning Home into either a marketing hero or a full monitor.
+
+Daily values come from a dedicated sanitized contract. Git-derived
+`fixesLanded` counts Conventional Commit subjects with the `fix` type and is not
+presented as a complete regression count. Missing producer data remains
+unavailable rather than zero.

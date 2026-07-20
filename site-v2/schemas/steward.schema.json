@@ -1,0 +1,808 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/steward.schema.json",
+  "title": "CoQUIC V2 public Steward publication",
+  "$defs": {
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "reviewing",
+        "integrating",
+        "blocked",
+        "failed",
+        "cancelled",
+        "succeeded",
+        "pushed",
+        "noChanges"
+      ]
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "passed",
+        "exitCode",
+        "summary",
+        "iteration",
+        "startedAt",
+        "completedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "passed": { "type": "boolean" },
+        "exitCode": { "type": "integer" },
+        "summary": { "type": "string" },
+        "iteration": { "type": ["integer", "null"], "minimum": 1 },
+        "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+      }
+    },
+    "taskSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "workflow",
+        "worker",
+        "priority",
+        "risk",
+        "status",
+        "summary",
+        "source",
+        "createdAt",
+        "updatedAt",
+        "validations"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^task-[0-9]{14}-[a-z0-9]{8}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "workflow": { "type": "string", "minLength": 1 },
+        "worker": { "type": ["string", "null"] },
+        "priority": { "type": "string", "minLength": 1 },
+        "risk": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "summary": { "type": "string" },
+        "source": { "type": "string" },
+        "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "validations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validation" }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instanceId",
+        "startedAt",
+        "heartbeatAt",
+        "state",
+        "currentCycle",
+        "heartbeatIntervalSeconds"
+      ],
+      "properties": {
+        "instanceId": { "$ref": "common.schema.json#/$defs/id" },
+        "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "heartbeatAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "state": { "enum": ["starting", "idle", "active", "stopping"] },
+        "currentCycle": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["reason", "startedAt"],
+          "properties": {
+            "reason": { "type": "string" },
+            "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+          }
+        },
+        "heartbeatIntervalSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "snapshotId",
+        "lastAttemptAt",
+        "lastSuccessAt",
+        "lastFailureAt",
+        "failureCategory",
+        "retryCount"
+      ],
+      "properties": {
+        "state": { "enum": ["disabled", "pending", "published", "failed"] },
+        "snapshotId": { "type": ["string", "null"] },
+        "lastAttemptAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "lastSuccessAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "lastFailureAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "failureCategory": { "type": ["string", "null"] },
+        "retryCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "pollIntervalMinutes",
+        "retryMinutes",
+        "lastFetchAt",
+        "lastStatus",
+        "lastError",
+        "nextDueAt",
+        "due"
+      ],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "pollIntervalMinutes": { "type": "integer", "minimum": 1 },
+        "retryMinutes": { "type": "integer", "minimum": 1 },
+        "lastFetchAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "lastStatus": { "type": ["string", "null"] },
+        "lastError": { "type": ["string", "null"] },
+        "nextDueAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "due": { "type": "boolean" }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "providerId",
+        "kind",
+        "title",
+        "summary",
+        "severity",
+        "status",
+        "createdAt",
+        "updatedAt",
+        "plannedTaskId",
+        "links"
+      ],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "providerId": { "$ref": "common.schema.json#/$defs/id" },
+        "kind": { "type": "string" },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "severity": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "plannedTaskId": { "type": ["string", "null"] },
+        "links": {
+          "type": "array",
+          "items": { "$ref": "common.schema.json#/$defs/link" }
+        }
+      }
+    },
+    "signalFetch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "providerId",
+        "status",
+        "startedAt",
+        "completedAt",
+        "itemCount",
+        "newItemCount",
+        "hasMore",
+        "summary",
+        "error"
+      ],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "providerId": { "$ref": "common.schema.json#/$defs/id" },
+        "status": { "enum": ["ok", "error"] },
+        "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "completedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "itemCount": { "type": "integer", "minimum": 0 },
+        "newItemCount": { "type": "integer", "minimum": 0 },
+        "hasMore": { "type": "boolean" },
+        "summary": { "type": "string" },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "plannerRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "startedAt",
+        "completedAt",
+        "acceptedCount",
+        "proposedCount",
+        "consumedSignalIds",
+        "diagnostics",
+        "artifacts"
+      ],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "status": { "enum": ["running", "succeeded", "failed", "invalid"] },
+        "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "completedAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "acceptedCount": { "type": "integer", "minimum": 0 },
+        "proposedCount": { "type": "integer", "minimum": 0 },
+        "consumedSignalIds": {
+          "type": "array",
+          "items": { "$ref": "common.schema.json#/$defs/id" },
+          "uniqueItems": true
+        },
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["summary", "exitCode", "category"],
+          "properties": {
+            "summary": { "type": "string" },
+            "exitCode": { "type": ["integer", "null"] },
+            "category": {
+              "enum": [
+                "none",
+                "timeout",
+                "invalidOutput",
+                "providerError",
+                "executionError"
+              ]
+            }
+          }
+        },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transcript", "lastMessage"],
+          "properties": {
+            "transcript": { "$ref": "common.schema.json#/$defs/artifact" },
+            "lastMessage": { "$ref": "common.schema.json#/$defs/artifact" }
+          }
+        }
+      }
+    },
+    "monitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compatibility",
+            "repository",
+            "mainBranch",
+            "state",
+            "counts",
+            "runtime",
+            "publication",
+            "tasks",
+            "tasksTruncated",
+            "providers",
+            "signals",
+            "signalsTruncated",
+            "fetches",
+            "fetchesTruncated",
+            "plannerRuns",
+            "plannerRunsTruncated",
+            "audit",
+            "configuration",
+            "scheduler",
+            "integration"
+          ],
+          "properties": {
+            "compatibility": {
+              "enum": ["compatible", "unknownAdditive", "incompatible"]
+            },
+            "repository": { "type": "string", "minLength": 1 },
+            "mainBranch": { "type": "string", "minLength": 1 },
+            "state": { "enum": ["idle", "queued", "working", "attention"] },
+            "counts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tasks",
+                "active",
+                "queued",
+                "attention",
+                "completed",
+                "signals",
+                "pendingSignals"
+              ],
+              "properties": {
+                "tasks": { "type": "integer", "minimum": 0 },
+                "active": { "type": "integer", "minimum": 0 },
+                "queued": { "type": "integer", "minimum": 0 },
+                "attention": { "type": "integer", "minimum": 0 },
+                "completed": { "type": "integer", "minimum": 0 },
+                "signals": { "type": "integer", "minimum": 0 },
+                "pendingSignals": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "runtime": { "$ref": "#/$defs/runtime" },
+            "publication": { "$ref": "#/$defs/publication" },
+            "tasks": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/taskSummary" }
+            },
+            "tasksTruncated": { "type": "boolean" },
+            "providers": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/provider" }
+            },
+            "signals": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/signal" }
+            },
+            "signalsTruncated": { "type": "boolean" },
+            "fetches": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/signalFetch" }
+            },
+            "fetchesTruncated": { "type": "boolean" },
+            "plannerRuns": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/plannerRun" }
+            },
+            "plannerRunsTruncated": { "type": "boolean" },
+            "audit": { "type": "array", "items": { "type": "string" } },
+            "configuration": { "type": "object" },
+            "scheduler": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "sourceActive",
+                "sourceCapacity",
+                "sourceQueued",
+                "integrationActive",
+                "integrationQueued"
+              ],
+              "properties": {
+                "sourceActive": { "type": "integer", "minimum": 0 },
+                "sourceCapacity": { "type": "integer", "minimum": 0 },
+                "sourceQueued": { "type": "integer", "minimum": 0 },
+                "integrationActive": { "type": "integer", "minimum": 0 },
+                "integrationQueued": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "integration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["activeTaskIds", "queuedTaskIds", "commits"],
+              "properties": {
+                "activeTaskIds": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                },
+                "queuedTaskIds": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "uniqueItems": true
+                },
+                "commits": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["commit", "url", "title", "createdAt"],
+                    "properties": {
+                      "commit": {
+                        "$ref": "common.schema.json#/$defs/gitCommit"
+                      },
+                      "url": { "type": "string", "format": "uri" },
+                      "title": { "type": "string" },
+                      "createdAt": {
+                        "$ref": "common.schema.json#/$defs/timestamp"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "dailySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "date",
+            "timeZone",
+            "modelUsage",
+            "repository",
+            "outcomes",
+            "live",
+            "provenance"
+          ],
+          "properties": {
+            "date": { "$ref": "common.schema.json#/$defs/date" },
+            "timeZone": { "const": "UTC" },
+            "modelUsage": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "availability",
+                "sessions",
+                "requests",
+                "toolCalls",
+                "inputTokens",
+                "cachedInputTokens",
+                "outputTokens",
+                "reasoningOutputTokens",
+                "totalTokens"
+              ],
+              "properties": {
+                "availability": {
+                  "enum": ["available", "notReported", "unavailable"]
+                },
+                "sessions": { "type": ["integer", "null"], "minimum": 0 },
+                "requests": { "type": ["integer", "null"], "minimum": 0 },
+                "toolCalls": { "type": ["integer", "null"], "minimum": 0 },
+                "inputTokens": { "type": ["integer", "null"], "minimum": 0 },
+                "cachedInputTokens": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "outputTokens": { "type": ["integer", "null"], "minimum": 0 },
+                "reasoningOutputTokens": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "totalTokens": { "type": ["integer", "null"], "minimum": 0 }
+              }
+            },
+            "repository": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "availability",
+                "branch",
+                "commits",
+                "additions",
+                "deletions",
+                "changedLines"
+              ],
+              "properties": {
+                "availability": {
+                  "enum": ["available", "notReported", "unavailable"]
+                },
+                "branch": { "type": "string", "minLength": 1 },
+                "commits": { "type": ["integer", "null"], "minimum": 0 },
+                "additions": { "type": ["integer", "null"], "minimum": 0 },
+                "deletions": { "type": ["integer", "null"], "minimum": 0 },
+                "changedLines": { "type": ["integer", "null"], "minimum": 0 }
+              }
+            },
+            "outcomes": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "availability",
+                "issuesResolved",
+                "validationsPassed",
+                "validationsCompleted"
+              ],
+              "properties": {
+                "availability": {
+                  "enum": ["available", "notReported", "unavailable"]
+                },
+                "issuesResolved": { "type": ["integer", "null"], "minimum": 0 },
+                "validationsPassed": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "validationsCompleted": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              }
+            },
+            "live": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "availability",
+                "observedAt",
+                "windowSeconds",
+                "tokens",
+                "requests",
+                "activeSessions",
+                "toolCalls",
+                "commitsToday",
+                "additionsToday",
+                "deletionsToday",
+                "changedLinesToday",
+                "issuesResolvedToday",
+                "validationsRunning"
+              ],
+              "properties": {
+                "availability": {
+                  "enum": ["available", "stale", "notReported", "unavailable"]
+                },
+                "observedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+                "windowSeconds": { "type": "integer", "minimum": 1 },
+                "tokens": { "type": ["integer", "null"], "minimum": 0 },
+                "requests": { "type": ["integer", "null"], "minimum": 0 },
+                "activeSessions": { "type": ["integer", "null"], "minimum": 0 },
+                "toolCalls": { "type": ["integer", "null"], "minimum": 0 },
+                "commitsToday": { "type": ["integer", "null"], "minimum": 0 },
+                "additionsToday": { "type": ["integer", "null"], "minimum": 0 },
+                "deletionsToday": { "type": ["integer", "null"], "minimum": 0 },
+                "changedLinesToday": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "issuesResolvedToday": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "validationsRunning": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              }
+            },
+            "provenance": { "$ref": "common.schema.json#/$defs/provenance" }
+          }
+        }
+      }
+    },
+    "growthRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "startDate",
+        "endDate",
+        "completeness",
+        "coverage",
+        "modelUsage",
+        "repository",
+        "outcomes",
+        "warnings"
+      ],
+      "properties": {
+        "id": { "enum": ["day", "7d", "30d", "all"] },
+        "startDate": { "$ref": "common.schema.json#/$defs/date" },
+        "endDate": { "$ref": "common.schema.json#/$defs/date" },
+        "completeness": { "enum": ["complete", "partial", "unknown"] },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "modelUsageStartDate",
+            "repositoryStartDate",
+            "outcomesStartDate"
+          ],
+          "properties": {
+            "modelUsageStartDate": {
+              "$ref": "common.schema.json#/$defs/date"
+            },
+            "repositoryStartDate": {
+              "$ref": "common.schema.json#/$defs/date"
+            },
+            "outcomesStartDate": {
+              "$ref": "common.schema.json#/$defs/date"
+            }
+          }
+        },
+        "modelUsage": {
+          "$ref": "#/$defs/dailySummary/properties/data/properties/modelUsage"
+        },
+        "repository": {
+          "$ref": "#/$defs/dailySummary/properties/data/properties/repository"
+        },
+        "outcomes": {
+          "$ref": "#/$defs/dailySummary/properties/data/properties/outcomes"
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "growthSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["throughDate", "ranges", "provenance"],
+          "properties": {
+            "throughDate": { "$ref": "common.schema.json#/$defs/date" },
+            "ranges": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": { "$ref": "#/$defs/growthRange" }
+            },
+            "provenance": { "$ref": "common.schema.json#/$defs/provenance" }
+          }
+        }
+      }
+    },
+    "timelineEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "at", "stage", "kind", "title", "detail", "fields"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "at": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "stage": {
+          "enum": [
+            "plan",
+            "codeGeneration",
+            "validation",
+            "review",
+            "integration"
+          ]
+        },
+        "kind": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "number", "boolean", "null"]
+          }
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "status",
+        "startedAt",
+        "completedAt",
+        "artifacts",
+        "validations",
+        "review"
+      ],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "label": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "completedAt": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transcript", "patch"],
+          "properties": {
+            "transcript": { "$ref": "common.schema.json#/$defs/artifact" },
+            "patch": { "$ref": "common.schema.json#/$defs/artifact" }
+          }
+        },
+        "validations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validation" }
+        },
+        "review": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["verdict", "findings", "gaps"],
+          "properties": {
+            "verdict": { "enum": ["approve", "requestChanges", "unavailable"] },
+            "findings": { "type": "array", "items": { "type": "string" } },
+            "gaps": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "taskDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task",
+            "conclusion",
+            "plan",
+            "pipeline",
+            "attempts",
+            "timeline"
+          ],
+          "properties": {
+            "task": { "$ref": "#/$defs/taskSummary" },
+            "conclusion": { "type": "string" },
+            "plan": { "$ref": "common.schema.json#/$defs/artifact" },
+            "pipeline": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["stage", "status", "summary"],
+                "properties": {
+                  "stage": {
+                    "enum": [
+                      "plan",
+                      "codeGeneration",
+                      "validation",
+                      "review",
+                      "integration"
+                    ]
+                  },
+                  "status": { "type": "string" },
+                  "summary": { "type": "string" }
+                }
+              }
+            },
+            "attempts": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/attempt" }
+            },
+            "timeline": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/timelineEvent" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

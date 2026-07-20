@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/evidence.schema.json",
+  "title": "CoQUIC V2 generated engineering evidence",
+  "$defs": {
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "operatingSystem", "architecture", "cpu", "logicalCpuCount"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "label": { "type": "string", "minLength": 1 },
+        "operatingSystem": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 },
+        "cpu": { "type": "string", "minLength": 1 },
+        "logicalCpuCount": { "type": "integer", "minimum": 1 },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "version", "language", "vendor", "availability"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "label": { "type": "string", "minLength": 1 },
+        "version": { "type": ["string", "null"] },
+        "language": { "type": ["string", "null"] },
+        "vendor": { "type": ["string", "null"] },
+        "repositoryUrl": { "type": ["string", "null"], "format": "uri" },
+        "availability": { "enum": ["available", "missing", "failedSetup"] },
+        "availabilityReason": { "type": ["string", "null"] }
+      }
+    },
+    "utilization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpuAverage", "cpuMaximum", "memoryBytesAverage", "memoryBytesMaximum", "samples"],
+      "properties": {
+        "cpuAverage": { "type": ["number", "null"], "minimum": 0 },
+        "cpuMaximum": { "type": ["number", "null"], "minimum": 0 },
+        "memoryBytesAverage": { "type": ["integer", "null"], "minimum": 0 },
+        "memoryBytesMaximum": { "type": ["integer", "null"], "minimum": 0 },
+        "samples": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "endpointEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["utilization", "flamegraph", "profileLog"],
+      "properties": {
+        "utilization": {
+          "anyOf": [
+            { "$ref": "#/$defs/utilization" },
+            { "type": "null" }
+          ]
+        },
+        "flamegraph": { "$ref": "common.schema.json#/$defs/artifact" },
+        "profileLog": { "$ref": "common.schema.json#/$defs/artifact" }
+      }
+    },
+    "performanceMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "implementationId", "scenario", "status", "congestionControl", "durationMs", "metrics", "client", "server", "failure"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "implementationId": { "$ref": "common.schema.json#/$defs/id" },
+        "scenario": { "enum": ["bulk", "streamRequestResponse", "persistentRequestResponse", "connectionRequestResponse"] },
+        "status": { "enum": ["ok", "failed", "skipped"] },
+        "congestionControl": { "type": ["string", "null"] },
+        "durationMs": { "type": ["integer", "null"], "minimum": 0 },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["throughputBitsPerSecond", "requestsPerSecond", "latencyP50Us", "latencyP99Us"],
+          "properties": {
+            "throughputBitsPerSecond": { "type": ["number", "null"], "minimum": 0 },
+            "requestsPerSecond": { "type": ["number", "null"], "minimum": 0 },
+            "latencyP50Us": { "type": ["number", "null"], "minimum": 0 },
+            "latencyP99Us": { "type": ["number", "null"], "minimum": 0 }
+          }
+        },
+        "client": { "$ref": "#/$defs/endpointEvidence" },
+        "server": { "$ref": "#/$defs/endpointEvidence" },
+        "failure": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+            "message": { "type": "string" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "ok" } } },
+          "then": { "properties": { "failure": { "type": "null" } } }
+        }
+      ]
+    },
+    "performanceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "provenance", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "provenance": { "$ref": "common.schema.json#/$defs/provenance" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["snapshotId", "environment", "implementations", "measurements"],
+          "properties": {
+            "snapshotId": { "$ref": "common.schema.json#/$defs/id" },
+            "environment": { "$ref": "#/$defs/environment" },
+            "implementations": { "type": "array", "items": { "$ref": "#/$defs/implementation" }, "minItems": 1 },
+            "measurements": { "type": "array", "items": { "$ref": "#/$defs/performanceMeasurement" } }
+          }
+        }
+      }
+    },
+    "historyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshotId", "generatedAt", "url", "completeness"],
+      "properties": {
+        "snapshotId": { "$ref": "common.schema.json#/$defs/id" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "url": { "type": "string", "format": "uri-reference" },
+        "completeness": { "enum": ["complete", "partial", "unknown"] }
+      }
+    },
+    "historyIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["retentionDays", "snapshots", "truncated"],
+          "properties": {
+            "retentionDays": { "type": "integer", "minimum": 1 },
+            "snapshots": { "type": "array", "items": { "$ref": "#/$defs/historyEntry" } },
+            "truncated": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "knownPeerEvidence": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["peerId", "peerRole", "testcaseId", "source", "runUrl"],
+      "properties": {
+        "peerId": { "$ref": "common.schema.json#/$defs/id" },
+        "peerRole": { "enum": ["client", "server"] },
+        "testcaseId": { "$ref": "common.schema.json#/$defs/id" },
+        "source": { "type": "string", "minLength": 1 },
+        "runUrl": { "type": ["string", "null"], "format": "uri" },
+        "supportedPeerCount": { "type": ["integer", "null"], "minimum": 0 },
+        "failedSupportedPeerCount": { "type": ["integer", "null"], "minimum": 0 },
+        "unsupportedPeerCount": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "interopResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["testcaseId", "status", "rawStatus", "details", "knownPeerEvidence"],
+      "properties": {
+        "testcaseId": { "$ref": "common.schema.json#/$defs/id" },
+        "status": { "enum": ["pass", "unsupported", "peerFailure", "knownPeerIssue", "fail", "notReported"] },
+        "rawStatus": { "type": ["string", "null"] },
+        "details": { "type": ["string", "null"] },
+        "knownPeerEvidence": { "$ref": "#/$defs/knownPeerEvidence" }
+      }
+    },
+    "interopLane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "clientId", "serverId", "results"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "clientId": { "$ref": "common.schema.json#/$defs/id" },
+        "serverId": { "$ref": "common.schema.json#/$defs/id" },
+        "results": { "type": "array", "items": { "$ref": "#/$defs/interopResult" } }
+      }
+    },
+    "interopSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "provenance", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "provenance": { "$ref": "common.schema.json#/$defs/provenance" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["snapshotId", "subjectImplementationId", "participants", "testcases", "testcaseOrder", "lanes"],
+          "properties": {
+            "snapshotId": { "$ref": "common.schema.json#/$defs/id" },
+            "subjectImplementationId": { "$ref": "common.schema.json#/$defs/id" },
+            "participants": { "type": "array", "items": { "$ref": "#/$defs/implementation" }, "minItems": 1 },
+            "testcases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label", "description"],
+                "properties": {
+                  "id": { "$ref": "common.schema.json#/$defs/id" },
+                  "label": { "type": "string", "minLength": 1 },
+                  "description": { "type": ["string", "null"] }
+                }
+              }
+            },
+            "testcaseOrder": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/id" }, "uniqueItems": true },
+            "lanes": { "type": "array", "items": { "$ref": "#/$defs/interopLane" } }
+          }
+        }
+      }
+    },
+    "coverageMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["functions", "lines", "branches"],
+      "properties": {
+        "functions": { "$ref": "common.schema.json#/$defs/coveredTotal" },
+        "lines": { "$ref": "common.schema.json#/$defs/coveredTotal" },
+        "branches": { "$ref": "common.schema.json#/$defs/coveredTotal" }
+      }
+    },
+    "coverageSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "provenance", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "provenance": { "$ref": "common.schema.json#/$defs/provenance" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["snapshotId", "totals", "components", "leastCoveredFiles", "htmlReport", "jsonReport"],
+          "properties": {
+            "snapshotId": { "$ref": "common.schema.json#/$defs/id" },
+            "totals": { "$ref": "#/$defs/coverageMetrics" },
+            "components": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label", "metrics"],
+                "properties": {
+                  "id": { "$ref": "common.schema.json#/$defs/id" },
+                  "label": { "type": "string", "minLength": 1 },
+                  "metrics": { "$ref": "#/$defs/coverageMetrics" }
+                }
+              }
+            },
+            "leastCoveredFiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "metrics"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "metrics": { "$ref": "#/$defs/coverageMetrics" }
+                }
+              }
+            },
+            "htmlReport": { "$ref": "common.schema.json#/$defs/artifact" },
+            "jsonReport": { "$ref": "common.schema.json#/$defs/artifact" }
+          }
+        }
+      }
+    }
+  }
+}

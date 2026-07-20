@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-19T12:00:00Z",
+  "provenance": {
+    "producer": "github-actions/interop",
+    "event": "schedule",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "runId": "29670000000",
+    "sourceUrl": "https://github.com/minhuw/coquic/actions/runs/29670000000",
+    "completeness": "complete",
+    "warnings": []
+  },
+  "data": {
+    "snapshotId": "interop-20260719-29670000000",
+    "subjectImplementationId": "coquic",
+    "participants": [
+      {
+        "id": "coquic",
+        "label": "CoQUIC",
+        "version": "0123456789abcdef0123456789abcdef01234567",
+        "language": "C++",
+        "vendor": "CoQUIC",
+        "repositoryUrl": "https://github.com/minhuw/coquic",
+        "availability": "available",
+        "availabilityReason": null
+      },
+      {
+        "id": "quinn",
+        "label": "quinn",
+        "version": "0.11.9",
+        "language": "Rust",
+        "vendor": null,
+        "repositoryUrl": "https://github.com/quinn-rs/quinn",
+        "availability": "available",
+        "availabilityReason": null
+      }
+    ],
+    "testcases": [
+      { "id": "handshake", "label": "Handshake", "description": "Establish a QUIC connection." },
+      { "id": "retry", "label": "Retry", "description": "Complete a Retry exchange." }
+    ],
+    "testcaseOrder": ["handshake", "retry"],
+    "lanes": [
+      {
+        "id": "coquic-to-quinn",
+        "clientId": "coquic",
+        "serverId": "quinn",
+        "results": [
+          {
+            "testcaseId": "handshake",
+            "status": "pass",
+            "rawStatus": "succeeded",
+            "details": null,
+            "knownPeerEvidence": null
+          },
+          {
+            "testcaseId": "retry",
+            "status": "knownPeerIssue",
+            "rawStatus": "failed",
+            "details": "Upstream Retry limitation.",
+            "knownPeerEvidence": {
+              "peerId": "quinn",
+              "peerRole": "server",
+              "testcaseId": "retry",
+              "source": "upstream interop matrix",
+              "runUrl": "https://interop.seemann.io/",
+              "supportedPeerCount": 1,
+              "failedSupportedPeerCount": 1,
+              "unsupportedPeerCount": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-20T03:14:17Z",
+  "data": {
+    "date": "2026-07-19",
+    "timeZone": "UTC",
+    "modelUsage": {
+      "availability": "available",
+      "sessions": 12,
+      "requests": 1907,
+      "toolCalls": 1835,
+      "inputTokens": 222058917,
+      "cachedInputTokens": 210639104,
+      "outputTokens": 907927,
+      "reasoningOutputTokens": 272028,
+      "totalTokens": 222966844
+    },
+    "repository": {
+      "availability": "available",
+      "branch": "main",
+      "commits": 9,
+      "additions": 1746,
+      "deletions": 22470,
+      "changedLines": 24216
+    },
+    "outcomes": {
+      "availability": "available",
+      "issuesResolved": 0,
+      "validationsPassed": 2,
+      "validationsCompleted": 3
+    },
+    "live": {
+      "availability": "available",
+      "observedAt": "2026-07-20T03:14:17Z",
+      "windowSeconds": 60,
+      "tokens": 420858,
+      "requests": 2,
+      "activeSessions": 1,
+      "toolCalls": 3,
+      "commitsToday": 0,
+      "additionsToday": 0,
+      "deletionsToday": 0,
+      "changedLinesToday": 0,
+      "issuesResolvedToday": 0,
+      "validationsRunning": 0
+    },
+    "provenance": {
+      "producer": "codex-rollout-and-git-summary",
+      "event": "daily",
+      "commit": "7f638cadcfc0fc80d8db5175622615896c45bda9",
+      "runId": null,
+      "sourceUrl": null,
+      "completeness": "complete",
+      "warnings": [
+        "Daily validation includes completed engineering workflows and excludes Steward Synthetic Monitor and queued runs."
+      ]
+    }
+  }
+}

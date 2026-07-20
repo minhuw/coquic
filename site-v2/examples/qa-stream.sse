@@ -1,0 +1,18 @@
+event: metadata
+data: {"schemaVersion":"2.0","requestId":"qa-01JZTEST","event":"metadata","confidence":0.84,"citations":[{"id":"rfc9000-13.2","documentId":"rfc9000","title":"Generating Acknowledgements","section":"13.2","label":"RFC 9000 Section 13.2","url":"https://www.rfc-editor.org/rfc/rfc9000.html#section-13.2","excerpt":"An endpoint SHOULD send an ACK frame after receiving at least two ack-eliciting packets.","similarity":0.913}]}
+
+event: answer.delta
+data: {"schemaVersion":"2.0","requestId":"qa-01JZTEST","event":"answer.delta","channel":"direct","sequence":0,"delta":"ACK delay affects ","model":"example-model"}
+
+event: answer.delta
+data: {"schemaVersion":"2.0","requestId":"qa-01JZTEST","event":"answer.delta","channel":"grounded","sequence":0,"delta":"RFC 9000 limits ","model":"example-model"}
+
+event: answer.complete
+data: {"schemaVersion":"2.0","requestId":"qa-01JZTEST","event":"answer.complete","result":{"channel":"direct","markdown":"ACK delay affects loss detection.","model":"example-model","usage":{"prompt":10,"completion":6,"total":16}}}
+
+event: answer.complete
+data: {"schemaVersion":"2.0","requestId":"qa-01JZTEST","event":"answer.complete","result":{"channel":"grounded","markdown":"RFC 9000 limits acknowledgement delay reporting.","model":"example-model","usage":{"prompt":24,"completion":9,"total":33}}}
+
+event: complete
+data: {"schemaVersion":"2.0","requestId":"qa-01JZTEST","event":"complete","accepted":true,"reason":"answered","results":[{"channel":"direct","markdown":"ACK delay affects loss detection.","model":"example-model","usage":{"prompt":10,"completion":6,"total":16}},{"channel":"grounded","markdown":"RFC 9000 limits acknowledgement delay reporting.","model":"example-model","usage":{"prompt":24,"completion":9,"total":33}}],"confidence":0.84,"citations":[{"id":"rfc9000-13.2","documentId":"rfc9000","title":"Generating Acknowledgements","section":"13.2","label":"RFC 9000 Section 13.2","url":"https://www.rfc-editor.org/rfc/rfc9000.html#section-13.2","excerpt":"An endpoint SHOULD send an ACK frame after receiving at least two ack-eliciting packets.","similarity":0.913}]}
+

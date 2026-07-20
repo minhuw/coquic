@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/workbench.schema.json",
+  "title": "CoQUIC V2 Workbench engine protocol",
+  "$defs": {
+    "network": { "$ref": "catalog.schema.json#/$defs/network" },
+    "command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command", "runId", "scenarioId", "network", "seed"],
+          "properties": {
+            "command": { "const": "scenario.load" },
+            "runId": { "$ref": "common.schema.json#/$defs/id" },
+            "scenarioId": { "$ref": "common.schema.json#/$defs/id" },
+            "network": { "$ref": "#/$defs/network" },
+            "seed": { "type": "integer", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command", "runId", "network"],
+          "properties": {
+            "command": { "const": "network.update" },
+            "runId": { "$ref": "common.schema.json#/$defs/id" },
+            "network": { "$ref": "#/$defs/network" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command", "runId"],
+          "properties": {
+            "command": { "enum": ["simulation.run", "simulation.pause", "simulation.step", "simulation.reset", "capture.export"] },
+            "runId": { "$ref": "common.schema.json#/$defs/id" }
+          }
+        }
+      ]
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "state", "connectionId", "nextWakeupMs", "quicVersion", "sentPackets", "sentBytes", "receivedPackets", "receivedBytes", "eventCount", "activeStreams", "packetSpaces", "limits", "streams"],
+      "properties": {
+        "role": { "enum": ["client", "server"] },
+        "state": { "type": "string" },
+        "connectionId": { "type": ["string", "null"] },
+        "nextWakeupMs": { "type": ["integer", "null"], "minimum": 0 },
+        "quicVersion": { "type": ["string", "null"] },
+        "sentPackets": { "type": "integer", "minimum": 0 },
+        "sentBytes": { "type": "integer", "minimum": 0 },
+        "receivedPackets": { "type": "integer", "minimum": 0 },
+        "receivedBytes": { "type": "integer", "minimum": 0 },
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "activeStreams": { "type": "integer", "minimum": 0 },
+        "packetSpaces": { "type": "array", "items": { "type": "object" } },
+        "limits": { "type": "object" },
+        "streams": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "capturedAtMs", "direction", "packetType", "headerType", "packetNumber", "rawHex", "protectedPayloadHex", "frames"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "capturedAtMs": { "type": "integer", "minimum": 0 },
+        "direction": { "enum": ["clientToServer", "serverToClient"] },
+        "packetType": { "type": "string" },
+        "headerType": { "type": "string" },
+        "packetNumber": { "type": ["integer", "null"], "minimum": 0 },
+        "rawHex": { "type": "string", "pattern": "^(?:[0-9a-f]{2})*$" },
+        "protectedPayloadHex": { "type": ["string", "null"], "pattern": "^(?:[0-9a-f]{2})*$" },
+        "frames": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "fields"],
+            "properties": {
+              "type": { "type": "string", "minLength": 1 },
+              "fields": { "type": "object" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["event", "runId", "sequence"],
+      "properties": {
+        "event": { "enum": ["engine.state", "simulation.snapshot", "clock.updated", "endpoint.updated", "packet.captured", "trace.appended", "simulation.state", "capture.ready", "engine.error"] },
+        "runId": { "$ref": "common.schema.json#/$defs/id" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "engineState": { "enum": ["loading", "ready", "unavailable"] },
+        "simulationState": { "enum": ["ready", "running", "paused", "completed", "failed"] },
+        "elapsedMs": { "type": "integer", "minimum": 0 },
+        "endpoint": { "$ref": "#/$defs/endpoint" },
+        "packet": { "$ref": "#/$defs/packet" },
+        "trace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["atMs", "level", "source", "message"],
+          "properties": {
+            "atMs": { "type": "integer", "minimum": 0 },
+            "level": { "enum": ["debug", "info", "warning", "error"] },
+            "source": { "enum": ["client", "server", "network", "engine"] },
+            "message": { "type": "string" }
+          }
+        },
+        "artifact": { "$ref": "common.schema.json#/$defs/artifact" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "recoverable", "command"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+            "message": { "type": "string" },
+            "recoverable": { "type": "boolean" },
+            "command": { "type": ["string", "null"] }
+          }
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scenarioId", "network", "elapsedMs", "state", "client", "server", "packets", "trace"],
+          "properties": {
+            "scenarioId": { "$ref": "common.schema.json#/$defs/id" },
+            "network": { "$ref": "#/$defs/network" },
+            "elapsedMs": { "type": "integer", "minimum": 0 },
+            "state": { "enum": ["ready", "running", "paused", "completed", "failed"] },
+            "client": { "$ref": "#/$defs/endpoint" },
+            "server": { "$ref": "#/$defs/endpoint" },
+            "packets": { "type": "array", "items": { "$ref": "#/$defs/packet" } },
+            "trace": { "type": "array", "items": { "type": "object" } }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

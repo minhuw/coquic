@@ -1,0 +1,89 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-19T12:00:00Z",
+  "data": {
+    "compatibility": "compatible",
+    "repository": "minhuw/coquic",
+    "mainBranch": "main",
+    "state": "idle",
+    "counts": {
+      "tasks": 1,
+      "active": 0,
+      "queued": 0,
+      "attention": 0,
+      "completed": 1,
+      "signals": 0,
+      "pendingSignals": 0
+    },
+    "runtime": {
+      "instanceId": "steward-public-example",
+      "startedAt": "2026-07-19T08:00:00Z",
+      "heartbeatAt": "2026-07-19T11:59:55Z",
+      "state": "idle",
+      "currentCycle": null,
+      "heartbeatIntervalSeconds": 30
+    },
+    "publication": {
+      "state": "published",
+      "snapshotId": "steward-20260719T120000Z",
+      "lastAttemptAt": "2026-07-19T12:00:00Z",
+      "lastSuccessAt": "2026-07-19T12:00:00Z",
+      "lastFailureAt": null,
+      "failureCategory": null,
+      "retryCount": 0
+    },
+    "tasks": [
+      {
+        "id": "task-20260719100000-a1b2c3d4",
+        "title": "Example retained task",
+        "kind": "implementation",
+        "workflow": "steward",
+        "worker": "codex",
+        "priority": "normal",
+        "risk": "low",
+        "status": "succeeded",
+        "summary": "Completed with validation.",
+        "source": "manual",
+        "createdAt": "2026-07-19T10:00:00Z",
+        "updatedAt": "2026-07-19T10:30:00Z",
+        "validations": [
+          {
+            "id": "validation-1",
+            "passed": true,
+            "exitCode": 0,
+            "summary": "Tests passed.",
+            "iteration": 1,
+            "startedAt": "2026-07-19T10:20:00Z",
+            "completedAt": "2026-07-19T10:25:00Z"
+          }
+        ]
+      }
+    ],
+    "tasksTruncated": false,
+    "providers": [],
+    "signals": [],
+    "signalsTruncated": false,
+    "fetches": [],
+    "fetchesTruncated": false,
+    "plannerRuns": [],
+    "plannerRunsTruncated": false,
+    "audit": [],
+    "configuration": {
+      "integrationMode": "local",
+      "localOnly": true,
+      "enabledSignals": []
+    },
+    "scheduler": {
+      "sourceActive": 0,
+      "sourceCapacity": 1,
+      "sourceQueued": 0,
+      "integrationActive": 0,
+      "integrationQueued": 0
+    },
+    "integration": {
+      "activeTaskIds": [],
+      "queuedTaskIds": [],
+      "commits": []
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-19T12:00:00Z",
+  "data": {
+    "manifest": {
+      "datasetId": "coquic-public-transcripts-2026-06-30",
+      "title": "CoQUIC public development transcripts",
+      "archive": {
+        "availability": "available",
+        "url": "/dataset/coquic-transcripts-20260630.zip",
+        "mediaType": "application/zip",
+        "filename": "coquic-transcripts-20260630.zip",
+        "byteSize": 2048000,
+        "originalByteSize": 5000000,
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "truncated": false,
+        "reason": null
+      },
+      "counts": {
+        "transcripts": 28,
+        "bytes": 5000000,
+        "lines": 400,
+        "messages": 240,
+        "userMessages": 100,
+        "assistantMessages": 130,
+        "developerMessages": 10,
+        "toolCalls": 84,
+        "tokens": 125400
+      },
+      "dateRange": {
+        "start": "2026-05-01T08:00:00Z",
+        "end": "2026-06-30T12:00:00Z"
+      },
+      "sources": [
+        {
+          "name": "Codex CLI",
+          "url": "https://github.com/openai/codex",
+          "note": "Exported from public CoQUIC development sessions."
+        }
+      ]
+    },
+    "query": "performance",
+    "range": { "from": "2026-06-01", "to": "2026-06-30" },
+    "sessions": [
+      {
+        "id": "public-session-1",
+        "publicSessionId": "session-uuid-1",
+        "title": "Investigate performance evidence",
+        "preview": "Inspect benchmark results and retained snapshots.",
+        "startedAt": "2026-06-29T10:00:00Z",
+        "modifiedAt": "2026-06-30T12:00:00Z",
+        "workingDirectory": "/work/coquic",
+        "source": { "originator": "codex_cli_rs", "kind": "cli", "cliVersion": "0.100.0" },
+        "model": { "provider": "openai", "name": "gpt-5" },
+        "byteSize": 4097,
+        "compressedByteSize": 2049,
+        "rawFilename": "public-session-1.jsonl",
+        "counts": {
+          "lines": 120,
+          "messages": 20,
+          "userMessages": 8,
+          "assistantMessages": 11,
+          "developerMessages": 1,
+          "events": 5,
+          "toolCalls": 6,
+          "compactions": 0,
+          "tokens": 12400
+        }
+      }
+    ]
+  },
+  "page": { "number": 1, "size": 25, "totalItems": 1, "totalPages": 1 }
+}

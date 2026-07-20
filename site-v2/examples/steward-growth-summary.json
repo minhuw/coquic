@@ -1,0 +1,170 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-20T03:14:17Z",
+  "data": {
+    "throughDate": "2026-07-19",
+    "ranges": [
+      {
+        "id": "day",
+        "startDate": "2026-07-19",
+        "endDate": "2026-07-19",
+        "completeness": "complete",
+        "coverage": {
+          "modelUsageStartDate": "2026-07-19",
+          "repositoryStartDate": "2026-07-19",
+          "outcomesStartDate": "2026-07-19"
+        },
+        "modelUsage": {
+          "availability": "available",
+          "sessions": 12,
+          "requests": 1907,
+          "toolCalls": 1835,
+          "inputTokens": 222058917,
+          "cachedInputTokens": 210639104,
+          "outputTokens": 907927,
+          "reasoningOutputTokens": 272028,
+          "totalTokens": 222966844
+        },
+        "repository": {
+          "availability": "available",
+          "branch": "main",
+          "commits": 9,
+          "additions": 1746,
+          "deletions": 22470,
+          "changedLines": 24216
+        },
+        "outcomes": {
+          "availability": "available",
+          "issuesResolved": 0,
+          "validationsPassed": 2,
+          "validationsCompleted": 3
+        },
+        "warnings": []
+      },
+      {
+        "id": "7d",
+        "startDate": "2026-07-13",
+        "endDate": "2026-07-19",
+        "completeness": "complete",
+        "coverage": {
+          "modelUsageStartDate": "2026-07-13",
+          "repositoryStartDate": "2026-07-13",
+          "outcomesStartDate": "2026-07-13"
+        },
+        "modelUsage": {
+          "availability": "available",
+          "sessions": 278,
+          "requests": 39003,
+          "toolCalls": 30299,
+          "inputTokens": 5875875409,
+          "cachedInputTokens": 5669117184,
+          "outputTokens": 17252717,
+          "reasoningOutputTokens": 6671255,
+          "totalTokens": 5893128126
+        },
+        "repository": {
+          "availability": "available",
+          "branch": "main",
+          "commits": 166,
+          "additions": 82896,
+          "deletions": 69964,
+          "changedLines": 152860
+        },
+        "outcomes": {
+          "availability": "available",
+          "issuesResolved": 3,
+          "validationsPassed": 25,
+          "validationsCompleted": 45
+        },
+        "warnings": []
+      },
+      {
+        "id": "30d",
+        "startDate": "2026-06-20",
+        "endDate": "2026-07-19",
+        "completeness": "partial",
+        "coverage": {
+          "modelUsageStartDate": "2026-06-24",
+          "repositoryStartDate": "2026-06-20",
+          "outcomesStartDate": "2026-06-20"
+        },
+        "modelUsage": {
+          "availability": "available",
+          "sessions": 1406,
+          "requests": 77018,
+          "toolCalls": 98255,
+          "inputTokens": 9976458371,
+          "cachedInputTokens": 9456259840,
+          "outputTokens": 44375206,
+          "reasoningOutputTokens": 22792011,
+          "totalTokens": 10020833577
+        },
+        "repository": {
+          "availability": "available",
+          "branch": "main",
+          "commits": 373,
+          "additions": 157868,
+          "deletions": 78069,
+          "changedLines": 235937
+        },
+        "outcomes": {
+          "availability": "available",
+          "issuesResolved": 24,
+          "validationsPassed": 450,
+          "validationsCompleted": 513
+        },
+        "warnings": [
+          "Model-usage records begin on 2026-06-24; repository and outcome coverage spans the full selected period."
+        ]
+      },
+      {
+        "id": "all",
+        "startDate": "2026-03-17",
+        "endDate": "2026-07-19",
+        "completeness": "partial",
+        "coverage": {
+          "modelUsageStartDate": "2026-06-24",
+          "repositoryStartDate": "2026-03-17",
+          "outcomesStartDate": "2026-03-17"
+        },
+        "modelUsage": {
+          "availability": "available",
+          "sessions": 1406,
+          "requests": 77018,
+          "toolCalls": 98255,
+          "inputTokens": 9976458371,
+          "cachedInputTokens": 9456259840,
+          "outputTokens": 44375206,
+          "reasoningOutputTokens": 22792011,
+          "totalTokens": 10020833577
+        },
+        "repository": {
+          "availability": "available",
+          "branch": "main",
+          "commits": 1546,
+          "additions": 874295,
+          "deletions": 416849,
+          "changedLines": 1291144
+        },
+        "outcomes": {
+          "availability": "available",
+          "issuesResolved": 29,
+          "validationsPassed": 711,
+          "validationsCompleted": 883
+        },
+        "warnings": [
+          "Model-usage records begin on 2026-06-24; repository and outcome coverage begins with the public repository on 2026-03-17."
+        ]
+      }
+    ],
+    "provenance": {
+      "producer": "codex-rollout-git-and-github-summary",
+      "event": "range-summary",
+      "commit": "7f638cadcfc0fc80d8db5175622615896c45bda9",
+      "runId": null,
+      "sourceUrl": null,
+      "completeness": "partial",
+      "warnings": ["Model-usage history begins on 2026-06-24."]
+    }
+  }
+}

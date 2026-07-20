@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/qa.schema.json",
+  "title": "CoQUIC V2 specification QA",
+  "$defs": {
+    "questionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question"],
+      "properties": {
+        "question": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      }
+    },
+    "suggestionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["question"],
+          "properties": {
+            "question": { "type": "string", "minLength": 1, "maxLength": 4000 }
+          }
+        }
+      }
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "documentId", "title", "section", "label", "url", "excerpt", "similarity"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "documentId": { "$ref": "common.schema.json#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "section": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri" },
+        "excerpt": { "type": "string" },
+        "similarity": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "channelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "markdown", "model", "usage"],
+      "properties": {
+        "channel": { "enum": ["direct", "grounded"] },
+        "markdown": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "usage": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/tokenUsage" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "streamEvent": {
+      "oneOf": [
+        { "$ref": "#/$defs/metadataEvent" },
+        { "$ref": "#/$defs/deltaEvent" },
+        { "$ref": "#/$defs/channelCompleteEvent" },
+        { "$ref": "#/$defs/completeEvent" },
+        { "$ref": "#/$defs/errorEvent" }
+      ]
+    },
+    "eventBase": {
+      "type": "object",
+      "required": ["schemaVersion", "requestId", "event"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "requestId": { "$ref": "common.schema.json#/$defs/id" },
+        "event": { "type": "string" }
+      }
+    },
+    "metadataEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "requestId", "event", "confidence", "citations"],
+          "properties": {
+            "schemaVersion": { "const": "2.0" },
+            "requestId": { "$ref": "common.schema.json#/$defs/id" },
+            "event": { "const": "metadata" },
+            "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+            "citations": { "type": "array", "items": { "$ref": "#/$defs/citation" } }
+          }
+        }
+      ]
+    },
+    "deltaEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "event", "channel", "sequence", "delta"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "requestId": { "$ref": "common.schema.json#/$defs/id" },
+        "event": { "const": "answer.delta" },
+        "channel": { "enum": ["direct", "grounded"] },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "delta": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "channelCompleteEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "event", "result"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "requestId": { "$ref": "common.schema.json#/$defs/id" },
+        "event": { "const": "answer.complete" },
+        "result": { "$ref": "#/$defs/channelResult" }
+      }
+    },
+    "completeEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "event", "accepted", "reason", "results", "confidence", "citations"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "requestId": { "$ref": "common.schema.json#/$defs/id" },
+        "event": { "const": "complete" },
+        "accepted": { "type": "boolean" },
+        "reason": { "enum": ["answered", "outOfScope", "lowRetrievalConfidence", "generationError"] },
+        "results": { "type": "array", "items": { "$ref": "#/$defs/channelResult" }, "maxItems": 2 },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "citations": { "type": "array", "items": { "$ref": "#/$defs/citation" } }
+      }
+    },
+    "errorEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "event", "code", "message", "recoverable", "retainedChannels"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "requestId": { "$ref": "common.schema.json#/$defs/id" },
+        "event": { "const": "error" },
+        "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1 },
+        "recoverable": { "type": "boolean" },
+        "retainedChannels": { "type": "array", "items": { "enum": ["direct", "grounded"] }, "uniqueItems": true }
+      }
+    }
+  }
+}

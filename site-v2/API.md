@@ -1,0 +1,100 @@
+# HTTP and Streaming Contract
+
+## General HTTP behavior
+
+- JSON media type: `application/json; charset=utf-8`.
+- Problems: `application/problem+json` using RFC 9457-compatible fields.
+- QA streaming: `text/event-stream; charset=utf-8` with buffering disabled.
+- Dynamic evidence and status endpoints: `Cache-Control: no-store`.
+- Immutable snapshot URLs MAY use long-lived public caching and immutable ETags.
+- Dataset and raw transcript downloads include safe `Content-Disposition`.
+- `HEAD` on dataset archives returns the same metadata headers as `GET` without a body.
+- Successful responses include `X-Schema-Version: 2.0`.
+
+## Status codes
+
+| Status | Meaning                                                                |
+| ------ | ---------------------------------------------------------------------- |
+| 200    | Valid complete, partial, or empty resource. Inspect envelope metadata. |
+| 400    | Invalid query/body syntax.                                             |
+| 404    | Unknown safe resource identifier or unpublished artifact.              |
+| 409    | Resource exists but cannot satisfy the requested state transition.     |
+| 422    | Well-formed input that violates domain constraints.                    |
+| 429    | Rate limited; include `Retry-After` when known.                        |
+| 500    | Producer or transformation failure.                                    |
+| 503    | Required backend/publication unavailable.                              |
+
+## QA
+
+`GET /api/v2/qa/suggestion` returns a suggestion envelope.
+
+`POST /api/v2/qa/stream` accepts:
+
+```json
+{ "question": "How does ACK delay affect loss recovery?" }
+```
+
+Required headers: `Accept: text/event-stream`, `Content-Type: application/json`,
+and an opaque `X-Session-ID`. The server emits named SSE events. Each `data:` line
+is a JSON `streamEvent`:
+
+- `metadata`: request ID, citations, and initial retrieval confidence.
+- `answer.delta`: channel (`direct` or `grounded`), ordered sequence, text delta,
+  and model when known.
+- `answer.complete`: channel, final Markdown, model, and token usage.
+- `complete`: accepted/rejected outcome, reason, final channel values, evidence.
+- `error`: recoverable flag, stable code, message, and channels retained so far.
+
+Sequence values are monotonic per channel. Consumers MUST ignore duplicates and
+MUST NOT reorder deltas. A stream ending without `complete` or `error` is an
+interrupted transport, not a completed empty answer.
+
+## Transcript search
+
+`GET /api/v2/transcripts` query parameters:
+
+| Name       | Type    | Rule                                   |
+| ---------- | ------- | -------------------------------------- |
+| `q`        | string  | Trimmed, max 200 characters.           |
+| `from`     | date    | Inclusive; defaults to manifest start. |
+| `to`       | date    | Inclusive; defaults to manifest end.   |
+| `page`     | integer | Minimum 1; defaults 1.                 |
+| `pageSize` | integer | 1-100; defaults 25.                    |
+
+Results are sorted by `startedAt` descending then `byteSize` descending then `id`.
+Out-of-range pages clamp to the last valid page and report the canonical page.
+
+`GET /api/v2/transcripts/{id}?cursor={opaque}&limit={1..200}` returns an ordered
+record chunk. Cursors are opaque and scoped to the session. Reusing a cursor is
+idempotent. Unknown sessions return 404; an expired/invalid cursor returns 400.
+
+`GET /api/v2/transcripts/{id}/raw` returns the original JSONL bytes. The server
+MUST NOT reconstruct a lossy transcript from normalized display records.
+
+## Evidence
+
+Current endpoints return validated canonical snapshots. History returns metadata
+and snapshot URLs, not embedded full snapshots. Consumers fetch only required
+snapshots and preserve index order.
+
+Performance measurements are immutable within a snapshot. Interop result order
+comes from `testcaseOrder`. Coverage collection order comes from the producer.
+
+## Steward
+
+Steward endpoints are read-only. `GET /api/v2/steward/status` returns the latest
+sanitized monitor publication. `GET /api/v2/steward/tasks/{id}` returns retained
+task evidence. Artifact URLs are explicit and MAY return 404 when the publication
+declares `notProduced` or `unavailable`; redacted artifacts have no URL.
+
+`GET /api/v2/steward/daily/{date}` returns the UTC daily aggregate used by the
+Home report. The date uses `YYYY-MM-DD`. Usage and repository groups declare
+availability independently so a missing model-usage source never becomes zero.
+
+## Legacy compatibility
+
+During migration, these paths remain stable: `/perf-results.json`,
+`/perf-history/index.json`, `/interop-results.json`, `/coverage-results.json`,
+`/coverage/index.html`, `/duvet/report.html`, `/duvet/report.json`,
+`/duvet/snapshot.txt`, `/steward/status`, `/steward/status.json`, transcript raw
+downloads, and published dataset archive URLs.

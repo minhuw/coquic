@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/transcript.schema.json",
+  "title": "CoQUIC V2 transcript dataset",
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url", "note"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri" },
+        "note": { "type": "string" }
+      }
+    },
+    "dateRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "end": { "$ref": "common.schema.json#/$defs/timestamp" }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["datasetId", "title", "archive", "counts", "dateRange", "sources"],
+      "properties": {
+        "datasetId": { "$ref": "common.schema.json#/$defs/id" },
+        "title": { "type": "string", "minLength": 1 },
+        "archive": { "$ref": "common.schema.json#/$defs/artifact" },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transcripts", "bytes", "lines", "messages", "userMessages", "assistantMessages", "developerMessages", "toolCalls", "tokens"],
+          "properties": {
+            "transcripts": { "type": "integer", "minimum": 0 },
+            "bytes": { "type": "integer", "minimum": 0 },
+            "lines": { "type": "integer", "minimum": 0 },
+            "messages": { "type": "integer", "minimum": 0 },
+            "userMessages": { "type": "integer", "minimum": 0 },
+            "assistantMessages": { "type": "integer", "minimum": 0 },
+            "developerMessages": { "type": "integer", "minimum": 0 },
+            "toolCalls": { "type": "integer", "minimum": 0 },
+            "tokens": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "dateRange": {
+          "anyOf": [
+            { "$ref": "#/$defs/dateRange" },
+            { "type": "null" }
+          ]
+        },
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/source" } }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "publicSessionId", "title", "preview", "startedAt", "modifiedAt", "workingDirectory", "source", "model", "byteSize", "compressedByteSize", "counts", "rawFilename"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "publicSessionId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "preview": { "type": "string" },
+        "startedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "modifiedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "workingDirectory": { "type": "string" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["originator", "kind", "cliVersion"],
+          "properties": {
+            "originator": { "type": "string" },
+            "kind": { "type": "string" },
+            "cliVersion": { "type": ["string", "null"] }
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "name"],
+          "properties": {
+            "provider": { "type": ["string", "null"] },
+            "name": { "type": ["string", "null"] }
+          }
+        },
+        "byteSize": { "type": "integer", "minimum": 0 },
+        "compressedByteSize": { "type": ["integer", "null"], "minimum": 0 },
+        "rawFilename": { "type": "string", "minLength": 1 },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lines", "messages", "userMessages", "assistantMessages", "developerMessages", "events", "toolCalls", "compactions", "tokens"],
+          "properties": {
+            "lines": { "type": "integer", "minimum": 0 },
+            "messages": { "type": "integer", "minimum": 0 },
+            "userMessages": { "type": "integer", "minimum": 0 },
+            "assistantMessages": { "type": "integer", "minimum": 0 },
+            "developerMessages": { "type": "integer", "minimum": 0 },
+            "events": { "type": "integer", "minimum": 0 },
+            "toolCalls": { "type": "integer", "minimum": 0 },
+            "compactions": { "type": "integer", "minimum": 0 },
+            "tokens": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        }
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "timestamp", "kind", "role", "payloadType", "text", "textTruncated", "tool"],
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "timestamp": {
+          "anyOf": [
+            { "$ref": "common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ]
+        },
+        "kind": { "enum": ["message", "event", "toolCall", "toolResult", "compaction", "unknown"] },
+        "role": { "enum": ["user", "assistant", "developer", "system", "tool", "unknown"] },
+        "payloadType": { "type": "string" },
+        "text": { "type": "string" },
+        "textTruncated": { "type": "boolean" },
+        "tool": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["name", "callId"],
+          "properties": {
+            "name": { "type": "string" },
+            "callId": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "searchResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data", "page"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["manifest", "query", "range", "sessions"],
+          "properties": {
+            "manifest": { "$ref": "#/$defs/manifest" },
+            "query": { "type": "string" },
+            "range": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["from", "to"],
+              "properties": {
+                "from": { "type": ["string", "null"], "format": "date" },
+                "to": { "type": ["string", "null"], "format": "date" }
+              }
+            },
+            "sessions": { "type": "array", "items": { "$ref": "#/$defs/session" } }
+          }
+        },
+        "page": { "$ref": "common.schema.json#/$defs/page" }
+      }
+    },
+    "detailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionId", "totalLines", "records", "nextCursor", "scanLimited"],
+          "properties": {
+            "sessionId": { "$ref": "common.schema.json#/$defs/id" },
+            "totalLines": { "type": "integer", "minimum": 0 },
+            "records": { "type": "array", "items": { "$ref": "#/$defs/record" } },
+            "nextCursor": { "type": ["string", "null"] },
+            "scanLimited": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

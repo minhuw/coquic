@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-07-19T12:00:00Z",
+  "data": [
+    {
+      "id": "transfer",
+      "label": "Transfer",
+      "description": "Complete a stream transfer with packet inspection.",
+      "defaultNetwork": {
+        "lossRatio": 0,
+        "bandwidthBitsPerSecond": 20000000,
+        "oneWayDelayMs": 1000
+      },
+      "controls": ["loss", "bandwidth", "delay", "pause", "step"],
+      "milestones": ["handshake complete", "stream opened", "payload delivered", "connection closed"]
+    }
+  ]
+}

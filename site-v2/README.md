@@ -44,10 +44,10 @@ accidental layout constraints are intentionally excluded.
 
 ## Implementation state
 
-No V2 user-facing route is implemented yet. The approved foundation is Next.js
-16, React 19, strict TypeScript, Tailwind CSS 4, source-owned shadcn/ui
-components, shadcn/typeset, Motion, and Lucide. Route implementation must follow
-the contracts in this directory.
+The global shell and Home route are the first implemented V2 surfaces. Other
+routes remain intentionally absent until they are rebuilt against their
+contracts. The foundation is Next.js 16, React 19, strict TypeScript, Tailwind
+CSS 4, source-owned shadcn/ui components, shadcn/typeset, Motion, and Lucide.
 
 ## Definition of done
 

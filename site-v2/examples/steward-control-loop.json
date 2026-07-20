@@ -1,0 +1,151 @@
+{
+  "schemaVersion": "2.1",
+  "generatedAt": "2026-07-14T14:10:27.215955Z",
+  "data": {
+    "repository": "minhuw/coquic",
+    "mainBranch": "main",
+    "state": "working",
+    "counts": {
+      "signals": 80,
+      "pendingSignals": 26,
+      "plannerRuns": 40,
+      "tasks": 80,
+      "active": 1,
+      "queued": 1,
+      "attention": 25
+    },
+    "truncation": {
+      "signals": true,
+      "plannerRuns": true,
+      "tasks": false
+    },
+    "signals": [
+      {
+        "id": "wi-github-issues-features-feature-request-3db489c4d0bc",
+        "provider": "github-issues:features",
+        "kind": "feature-request",
+        "title": "RFC 9001 0-RTT: rejection, replay protection, and application profile policy",
+        "summary": "GitHub issue #39 requests explicit rejection behavior, replay protection, and an application policy boundary for 0-RTT.",
+        "severity": "medium",
+        "status": "planned",
+        "updatedAt": "2026-07-14T12:02:12.656731Z",
+        "plannedTaskId": "task-20260714120212-d46ab9aa",
+        "plannerRunId": "planner-task-20260714120128-2500859f",
+        "context": [
+          { "label": "Source", "value": "GitHub issue #39" },
+          { "label": "Scope", "value": "RFC 9001 / 0-RTT policy" },
+          { "label": "Risk", "value": "High" }
+        ],
+        "links": [
+          { "label": "Open issue", "url": "https://github.com/minhuw/coquic/issues/39" }
+        ]
+      },
+      {
+        "id": "wi-code-scanning-alert-2c3e07c2bf2e",
+        "provider": "code-scanning",
+        "kind": "code-scanning.alert",
+        "title": "Local variable shadows global in connection_send.cpp",
+        "summary": "CodeQL alert 6006 identifies a local/global name collision in the connection send path.",
+        "severity": "note",
+        "status": "planned",
+        "updatedAt": "2026-07-14T12:02:12.710211Z",
+        "plannedTaskId": "task-20260714120212-872bdc1f",
+        "plannerRunId": "planner-task-20260714120128-2500859f",
+        "context": [
+          { "label": "Rule", "value": "cpp/local-variable-hides-global-variable" },
+          { "label": "File", "value": "src/quic/connection/connection_send.cpp" },
+          { "label": "Alert", "value": "6006" }
+        ],
+        "links": [
+          { "label": "Open alert", "url": "https://github.com/minhuw/coquic/security/code-scanning/6006" }
+        ]
+      },
+      {
+        "id": "wi-github-actions-interop-29308192091",
+        "provider": "github-actions:interop",
+        "kind": "workflow.failure",
+        "title": "Interop workflow run 29308192091 failed",
+        "summary": "The provider sampled one failed interop.yml run and preserved the run URL as source evidence.",
+        "severity": "high",
+        "status": "pending",
+        "updatedAt": "2026-07-14T09:35:31.318463Z",
+        "plannedTaskId": null,
+        "plannerRunId": null,
+        "context": [
+          { "label": "Workflow", "value": "interop.yml" },
+          { "label": "Run", "value": "29308192091" },
+          { "label": "Conclusion", "value": "Failure" }
+        ],
+        "links": [
+          { "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/29308192091" }
+        ]
+      },
+      {
+        "id": "wi-codacy-open-finding-b603",
+        "provider": "codacy",
+        "kind": "codacy.finding",
+        "title": "Subprocess invocation flagged in migration guard",
+        "summary": "Codacy sampled an open Bandit B603 finding in Steward migration verification.",
+        "severity": "warning",
+        "status": "pending",
+        "updatedAt": "2026-07-14T09:35:45.200728Z",
+        "plannedTaskId": null,
+        "plannerRunId": null,
+        "context": [
+          { "label": "Rule", "value": "Bandit_B603" },
+          { "label": "File", "value": "steward/tests/test_migration_guard.py" },
+          { "label": "Provider batch", "value": "12 findings" }
+        ],
+        "links": []
+      }
+    ],
+    "providers": [
+      { "id": "github-actions:ci", "state": "due", "lastFetchAt": "2026-07-14T09:35:27.379920Z", "nextDueAt": "2026-07-14T10:08:27.379920Z", "summary": "Latest ci.yml run concluded success", "error": null },
+      { "id": "github-actions:interop", "state": "ready", "lastFetchAt": "2026-07-14T09:35:31.318463Z", "nextDueAt": "2026-07-15T09:47:31.318463Z", "summary": "Sampled one failed interop.yml run", "error": null },
+      { "id": "github-actions:perf", "state": "error", "lastFetchAt": "2026-07-14T08:52:17.327522Z", "nextDueAt": "2026-07-14T09:36:17.327522Z", "summary": "The latest fetch did not complete", "error": "provider error" },
+      { "id": "code-scanning", "state": "ready", "lastFetchAt": "2026-07-14T09:35:40.913743Z", "nextDueAt": "2026-07-14T15:44:40.913743Z", "summary": "Sampled 12 open CodeQL findings", "error": null }
+    ],
+    "wakeups": [
+      { "id": "wakeup-20260714124121-3efec476", "reason": "task.status", "status": "pending", "createdAt": "2026-07-14T12:41:21.594290Z", "context": "Worker remains active on Issue #39", "taskId": "task-20260714120212-d46ab9aa" },
+      { "id": "wakeup-20260714120242-984405df", "reason": "task.status", "status": "pending", "createdAt": "2026-07-14T12:02:42.647837Z", "context": "Implementation plan entered running state", "taskId": "task-20260714120212-d46ab9aa" },
+      { "id": "wakeup-20260714120212-1b3ab7d0", "reason": "task.created", "status": "pending", "createdAt": "2026-07-14T12:02:12.713679Z", "context": "Code-quality task entered the source queue", "taskId": "task-20260714120212-872bdc1f" }
+    ],
+    "plannerRuns": [
+      {
+        "id": "planner-task-20260714120128-2500859f",
+        "status": "running",
+        "startedAt": "2026-07-14T12:02:11.321046Z",
+        "completedAt": null,
+        "consumedSignals": [
+          "wi-github-issues-features-feature-request-3db489c4d0bc",
+          "wi-code-scanning-alert-2c3e07c2bf2e"
+        ],
+        "proposedTasks": [
+          { "id": "task-20260714120212-d46ab9aa", "title": "Issue #39 RFC 9001 0-RTT policy", "worker": "feature-implementer", "priority": "medium", "risk": "high", "accepted": true },
+          { "id": "task-20260714120212-872bdc1f", "title": "connection_send.cpp CodeQL local-variable shadowing alert 6006", "worker": "code-quality-janitor", "priority": "low", "risk": "low", "accepted": true }
+        ],
+        "canonicalCounts": { "proposed": 0, "accepted": 0 },
+        "diagnostic": "The published run is still marked running. Its output contains two proposals, while canonical counters remain zero because no completion event was recorded.",
+        "transcript": { "availability": "available", "mode": "redacted", "sizeBytes": 2460, "truncated": false }
+      },
+      {
+        "id": "planner-task-20260714120222-e05c7b0a",
+        "status": "running",
+        "startedAt": "2026-07-14T12:02:38.495797Z",
+        "completedAt": null,
+        "consumedSignals": [],
+        "proposedTasks": [],
+        "canonicalCounts": { "proposed": 0, "accepted": 0 },
+        "diagnostic": "Planner completed with an empty decision; the producer has not recorded a terminal event.",
+        "transcript": { "availability": "available", "mode": "redacted", "sizeBytes": 371, "truncated": false }
+      }
+    ],
+    "tasks": [
+      { "id": "task-20260714120212-d46ab9aa", "title": "Issue #39 RFC 9001 0-RTT policy", "kind": "feature", "worker": "feature-implementer", "status": "running", "summary": "Implementation plan ready; worker started", "updatedAt": "2026-07-14T14:10:25.240833Z", "stages": ["complete", "active", "pending", "pending", "pending"], "detailAvailable": true },
+      { "id": "task-20260712124934-e08ef7c8", "title": "Issue #20 exact CONNECTION_CLOSE packet replay", "kind": "feature", "worker": "feature-implementer", "status": "pushed", "summary": "Five attempts resolved two validation failures and two blocked reviews before approval and integration", "updatedAt": "2026-07-12T17:06:01.488441Z", "stages": ["complete", "complete", "complete", "complete", "complete"], "detailAvailable": true },
+      { "id": "task-20260714120212-872bdc1f", "title": "connection_send.cpp CodeQL local-variable shadowing alert 6006", "kind": "code-quality", "worker": "code-quality-janitor", "status": "queued", "summary": "Waiting for source execution capacity", "updatedAt": "2026-07-14T12:02:12.710215Z", "stages": ["pending", "pending", "pending", "pending", "pending"], "detailAvailable": false },
+      { "id": "task-20260625083823-fe54560a", "title": "Investigate Test workflow run 27362846640", "kind": "ci", "worker": "ci-doctor", "status": "pushed", "summary": "Review rejected the initial hypothesis; revision fixed the actual timeout path and reached main", "updatedAt": "2026-06-25T09:49:03.196132Z", "stages": ["complete", "complete", "complete", "complete", "complete"], "detailAvailable": true },
+      { "id": "task-20260714104929-80e199da", "title": "Issue #38 RFC 9001 TLS policy hardening", "kind": "feature", "worker": "feature-implementer", "status": "blocked", "summary": "Validation revision produced no patch changes; four required checks remain unresolved", "updatedAt": "2026-07-14T12:01:17.777891Z", "stages": ["complete", "complete", "blocked", "pending", "pending"], "detailAvailable": false }
+    ]
+  }
+}

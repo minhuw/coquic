@@ -21,6 +21,11 @@ EXAMPLE_TARGETS = {
     "performance-snapshot.json": ("evidence.schema.json", "performanceSnapshot"),
     "scenario-catalog.json": ("catalog.schema.json", "scenarioCatalog"),
     "steward-daily-summary.json": ("steward.schema.json", "dailySummary"),
+    "steward-dashboard.json": ("steward-dashboard.schema.json", "snapshot"),
+    "steward-control-loop.json": ("steward-observability.schema.json", "controlLoop"),
+    "steward-active-task-detail.json": ("steward-observability.schema.json", "taskDetail"),
+    "steward-real-task-detail.json": ("steward-observability.schema.json", "taskDetail"),
+    "steward-task-detail.json": ("steward-observability.schema.json", "taskDetail"),
     "steward-growth-summary.json": ("steward.schema.json", "growthSummary"),
     "steward-status.json": ("steward.schema.json", "monitor"),
     "transcript-search.json": ("transcript.schema.json", "searchResponse"),
@@ -149,10 +154,163 @@ def validate_steward_growth() -> int:
     return failures
 
 
+def validate_steward_dashboard() -> int:
+    dashboard = read_json(EXAMPLE_DIR / "steward-dashboard.json")["data"]
+    failures = 0
+
+    outcome_total = sum(item["count"] for item in dashboard["outcomes"])
+    if outcome_total != dashboard["archive"]["tasks"]:
+        failures += 1
+        print(
+            "example steward-dashboard.json: outcome counts must sum to archive tasks"
+        )
+
+    validations = dashboard["archive"]["validations"]
+    if validations["passed"] + validations["failed"] != validations["total"]:
+        failures += 1
+        print(
+            "example steward-dashboard.json: passed and failed validations must sum to total"
+        )
+
+    tasks = dashboard["tasks"]
+    if tasks["total"] != dashboard["archive"]["tasks"]:
+        failures += 1
+        print(
+            "example steward-dashboard.json: task aggregate must match archive tasks"
+        )
+    if tasks["publishedCount"] != len(tasks["items"]):
+        failures += 1
+        print(
+            "example steward-dashboard.json: published task count must match task items"
+        )
+
+    signals = dashboard["signals"]
+    if signals["providerCount"] != len(signals["providers"]):
+        failures += 1
+        print(
+            "example steward-dashboard.json: provider count must match provider items"
+        )
+    if signals["publishedCount"] != len(signals["items"]):
+        failures += 1
+        print(
+            "example steward-dashboard.json: published signal count must match signal items"
+        )
+    if signals["publishedWakeupCount"] != len(signals["wakeups"]):
+        failures += 1
+        print(
+            "example steward-dashboard.json: published wakeup count must match wakeup items"
+        )
+
+    return failures
+
+
+def validate_steward_observability() -> int:
+    loop = read_json(EXAMPLE_DIR / "steward-control-loop.json")["data"]
+    details = [
+        read_json(EXAMPLE_DIR / "steward-active-task-detail.json")["data"],
+        read_json(EXAMPLE_DIR / "steward-task-detail.json")["data"],
+        read_json(EXAMPLE_DIR / "steward-real-task-detail.json")["data"],
+    ]
+    failures = 0
+
+    if loop["counts"]["signals"] < len(loop["signals"]):
+        failures += 1
+        print("example steward-control-loop.json: signal total is smaller than published items")
+    if loop["counts"]["plannerRuns"] < len(loop["plannerRuns"]):
+        failures += 1
+        print("example steward-control-loop.json: planner-run total is smaller than published items")
+    if loop["counts"]["tasks"] < len(loop["tasks"]):
+        failures += 1
+        print("example steward-control-loop.json: task total is smaller than published items")
+
+    published_task_ids = {item["id"] for item in loop["tasks"]}
+    for signal in loop["signals"]:
+        task_id = signal["plannedTaskId"]
+        if task_id is not None and task_id not in published_task_ids:
+            failures += 1
+            print(
+                f"example steward-control-loop.json signal {signal['id']}: planned task is not published"
+            )
+
+    for detail in details:
+        task_id = detail["task"]["id"]
+        attempts = {item["number"] for item in detail["attempts"]}
+        if task_id not in published_task_ids:
+            failures += 1
+            print(f"example task detail {task_id}: task is not in control-loop index")
+        transition_pairs: set[tuple[str, str]] = set()
+        for transition in detail["pipeline"]["transitions"]:
+            pair = (transition["from"], transition["to"])
+            if pair in transition_pairs:
+                failures += 1
+                print(f"example task detail {task_id}: pipeline transition {pair} is duplicated")
+            transition_pairs.add(pair)
+            transition_attempts = set(transition["attempts"])
+            if transition["count"] != len(transition["attempts"]):
+                failures += 1
+                print(f"example task detail {task_id}: pipeline transition {pair} count is inconsistent")
+            if not transition_attempts <= attempts:
+                failures += 1
+                print(f"example task detail {task_id}: pipeline transition {pair} references unknown attempt")
+            cause_attempts = {cause["attempt"] for cause in transition["causes"] if cause["attempt"] is not None}
+            if not cause_attempts <= transition_attempts:
+                failures += 1
+                print(f"example task detail {task_id}: pipeline transition {pair} cause references an unrelated attempt")
+        for item in detail["transcript"]:
+            if item["attempt"] not in attempts:
+                failures += 1
+                print(f"example task detail {task_id}: transcript references unknown attempt")
+        for record in detail["validations"]:
+            if record["attempt"] not in attempts:
+                failures += 1
+                print(f"example task detail {task_id}: validation references unknown attempt")
+        for record in detail["reviews"]:
+            if record["attempt"] not in attempts:
+                failures += 1
+                print(f"example task detail {task_id}: review references unknown attempt")
+        patch_attempts: set[int] = set()
+        for patch in detail["patches"]:
+            if patch["attempt"] not in attempts:
+                failures += 1
+                print(f"example task detail {task_id}: patch references unknown attempt")
+            if patch["attempt"] in patch_attempts:
+                failures += 1
+                print(f"example task detail {task_id}: attempt has duplicate patches")
+            patch_attempts.add(patch["attempt"])
+            files = patch["files"]
+            if patch["filesChanged"] != len(files):
+                failures += 1
+                print(f"example task detail {task_id}: patch file count is inconsistent")
+            for field in ("additions", "deletions"):
+                if patch[field] != sum(item[field] for item in files):
+                    failures += 1
+                    print(f"example task detail {task_id}: patch {field} total is inconsistent")
+            paths = [item["path"] for item in files]
+            if len(paths) != len(set(paths)):
+                failures += 1
+                print(f"example task detail {task_id}: patch paths must be unique")
+            for file in files:
+                for hunk in file["hunks"]:
+                    for line in hunk["lines"]:
+                        if line["type"] == "addition" and line["oldLine"] is not None:
+                            failures += 1
+                            print(f"example task detail {task_id}: added line has an old line number")
+                        if line["type"] == "deletion" and line["newLine"] is not None:
+                            failures += 1
+                            print(f"example task detail {task_id}: deleted line has a new line number")
+        if detail["task"]["status"] == "running" and detail["completeness"]["state"] != "partial":
+            failures += 1
+            print(f"example task detail {task_id}: running task must declare partial completeness")
+
+    return failures
+
+
 def main() -> int:
     failures = (
         validate_json_contracts()
         + validate_markdown_links()
+        + validate_steward_dashboard()
+        + validate_steward_observability()
         + validate_steward_growth()
     )
     if failures:

@@ -324,7 +324,6 @@
             "plannerRuns",
             "plannerRunsTruncated",
             "audit",
-            "configuration",
             "scheduler",
             "integration"
           ],
@@ -384,7 +383,6 @@
             },
             "plannerRunsTruncated": { "type": "boolean" },
             "audit": { "type": "array", "items": { "type": "string" } },
-            "configuration": { "type": "object" },
             "scheduler": {
               "type": "object",
               "additionalProperties": false,

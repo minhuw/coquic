@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "2.1",
+  "generatedAt": "2026-07-14T14:10:27.215955Z",
+  "data": {
+    "task": {
+      "id": "task-20260714120212-d46ab9aa",
+      "title": "Issue #39 RFC 9001 0-RTT policy",
+      "kind": "feature",
+      "workflow": "feature",
+      "worker": "feature-implementer",
+      "priority": "medium",
+      "risk": "high",
+      "status": "running",
+      "summary": "The implementation plan is complete and the worker is editing the 0-RTT rejection, replay-protection, and application-policy paths.",
+      "createdAt": "2026-07-14T12:02:12.656731Z",
+      "updatedAt": "2026-07-14T14:10:25.240833Z",
+      "sourceSignalIds": ["wi-github-issues-features-feature-request-3db489c4d0bc"],
+      "issueUrl": "https://github.com/minhuw/coquic/issues/39",
+      "plannerRunId": "planner-task-20260714120128-2500859f",
+      "commit": null,
+      "commitUrl": null
+    },
+    "pipeline": {
+      "stages": [
+        { "id": "plan", "label": "Plan", "state": "complete", "detail": "7 implementation steps" },
+        { "id": "implementation", "label": "Implement", "state": "active", "detail": "Worker active" },
+        { "id": "validation", "label": "Validate", "state": "pending", "detail": "Not started" },
+        { "id": "review", "label": "Review", "state": "pending", "detail": "Not started" },
+        { "id": "integration", "label": "Integrate", "state": "pending", "detail": "Not started" }
+      ],
+      "transitions": [
+        { "from": "plan", "to": "implementation", "count": 1, "label": "Plan to implementation", "attempts": [0], "causes": [{ "attempt": 0, "detail": "The completed plan released the active worker attempt." }] },
+        { "from": "implementation", "to": "validation", "count": 0, "label": "Implementation to validation", "attempts": [], "causes": [] },
+        { "from": "validation", "to": "implementation", "count": 0, "label": "Validation returned to implementation", "attempts": [], "causes": [] },
+        { "from": "validation", "to": "review", "count": 0, "label": "Validation to review", "attempts": [], "causes": [] },
+        { "from": "review", "to": "implementation", "count": 0, "label": "Review returned to implementation", "attempts": [], "causes": [] },
+        { "from": "review", "to": "integration", "count": 0, "label": "Review to integration", "attempts": [], "causes": [] }
+      ]
+    },
+    "plan": {
+      "objective": "Make 0-RTT rejection a first-class connection transition, restore rejected writes for 1-RTT, reject acknowledgments of rejected packets, prevent server processing, and define safe replay policies.",
+      "sourceContext": "GitHub issue #39 / RFC 9001 Sections 4.6.2, 4.9.3, 5.6, and 9.2 / 13 Duvet requirements",
+      "constraints": [
+        "Do not build a distributed replay database or cross-process anti-replay protocol.",
+        "Keep HTTP/3 application data and extensions handshake-gated.",
+        "Do not update the issue, commit, push, or modify generated reports."
+      ],
+      "validationCommands": [
+        "focused 0-RTT connection, TLS, HTTP/0.9, and HTTP/3 tests",
+        "nix develop .#boringssl -c zig build test -Dtls_backend=boringssl",
+        "nix develop -c zig build",
+        "nix develop -c zig build test"
+      ],
+      "completeness": "complete",
+      "steps": [
+        { "title": "Track terminal 0-RTT outcomes", "detail": "Record every sent 0-RTT packet number, emit one terminal outcome, and discard the client write key on rejection.", "files": ["connection.h", "connection_effects.cpp", "connection_send.cpp"] },
+        { "title": "Enforce rejection semantics", "detail": "Restore reliable stream data for 1-RTT, reject ACKs for rejected packets, and prevent server processing or acknowledgment.", "files": ["connection_inbound_recovery.cpp", "connection_timers.cpp"] },
+        { "title": "Define retry and key-discard policy", "detail": "Preserve new packet numbers after Retry and use conservative server key discard when packet history has gaps.", "files": ["core.cpp", "recovery.cpp", "retry_version_test.cpp"] },
+        { "title": "Restore TLS anti-replay", "detail": "Use shared QuicTLS context state and reject unsafe BoringSSL server early-data acceptance.", "files": ["tls_adapter_quictls.cpp", "tls_adapter_boringssl.cpp"] },
+        { "title": "Define application profiles", "detail": "Keep HTTP/3 handshake-gated and document HTTP/0.9 GET-only replay tolerance.", "files": ["core.h", "http09.cpp", "http3_connection.cpp"] },
+        { "title": "Cover behavior and Duvet requirements", "detail": "Add focused connection, recovery, TLS, and application tests for all 13 tracked requirements.", "files": ["zero_rtt_test.cpp", "tls_adapter_contract_test.cpp"] },
+        { "title": "Validate the patch", "detail": "Run both TLS backend suites and the repository build and test gates.", "files": [] }
+      ]
+    },
+    "attempts": [
+      {
+        "number": 0,
+        "label": "Implementation",
+        "status": "running",
+        "startedAt": "2026-07-14T12:02:40.079174Z",
+        "completedAt": null,
+        "summary": "Worker has edited transport, TLS, HTTP/0.9, HTTP/3, documentation, and focused tests. Final validation and message are not yet published.",
+        "workerRun": { "events": 687, "exitCode": null, "status": "running" },
+        "reviewerRun": null,
+        "artifacts": { "transcriptBytes": 49485, "patchBytes": 0, "lastMessageBytes": 0, "transcriptTruncated": true }
+      }
+    ],
+    "transcript": [
+      { "id": "a1", "attempt": 0, "kind": "user", "label": "Task prompt", "timestamp": "2026-07-14T12:02:40Z", "text": "Implement issue #39 as a focused patch. Add tests and Duvet annotations, run required validation, and do not commit or push." },
+      { "id": "a2", "attempt": 0, "kind": "reasoning", "label": "Implementation strategy", "timestamp": "2026-07-14T12:28:14Z", "text": "Rejection needs exact packet bookkeeping so recovery accounting can be removed without declaring congestion loss while reliable STREAM data returns to the unsent path." },
+      { "id": "a3", "attempt": 0, "kind": "tool", "label": "Repository search", "timestamp": "2026-07-14T12:41:20Z", "durationSeconds": 0.4, "command": "rg -n \"zero_rtt|early_data_accepted\" src tests include", "output": "Matched connection, TLS adapter, HTTP/0.9, HTTP/3, and focused test paths.", "exitCode": 0 },
+      { "id": "a4", "attempt": 0, "kind": "assistant", "label": "Progress", "timestamp": "2026-07-14T13:22:07Z", "text": "The connection now records sent 0-RTT packet numbers and has an explicit terminal rejection transition. I am aligning TLS backend policy and tests next." },
+      { "id": "a5", "attempt": 0, "kind": "tool", "label": "Formatting and diff check", "timestamp": "2026-07-14T14:02:51Z", "durationSeconds": 12.8, "command": "git diff --check && clang-format --dry-run --Werror <changed files>", "output": "Completed without output.", "exitCode": 0 },
+      { "id": "a6", "attempt": 0, "kind": "tool", "label": "Changed paths", "timestamp": "2026-07-14T14:09:55Z", "durationSeconds": 0.1, "command": "git diff --name-only", "output": "23 scoped source, test, documentation, and Duvet paths.", "exitCode": 0 }
+    ],
+    "patches": [],
+    "validations": [],
+    "reviews": [],
+    "timeline": [
+      { "id": "ae1", "stage": "plan", "kind": "task.created", "timestamp": "2026-07-14T12:02:12.656731Z", "title": "Task scheduled", "detail": "Planner selected GitHub issue #39 and assigned feature-implementer." },
+      { "id": "ae2", "stage": "plan", "kind": "plan.started", "timestamp": "2026-07-14T12:02:42.647837Z", "title": "Implementation planning started", "detail": "Planner inspected the issue scope, RFC requirements, and existing implementation." },
+      { "id": "ae3", "stage": "plan", "kind": "plan.completed", "timestamp": "2026-07-14T12:41:21.594290Z", "title": "Seven-step plan completed", "detail": "Plan recorded assumptions, non-goals, risks, files, and validation commands." },
+      { "id": "ae4", "stage": "implementation", "kind": "worker.started", "timestamp": "2026-07-14T12:41:22Z", "title": "Worker started", "detail": "Implementation began from clean commit 83667a0d." },
+      { "id": "ae5", "stage": "implementation", "kind": "patch.in-progress", "timestamp": "2026-07-14T14:09:55Z", "title": "Patch in progress", "detail": "23 scoped paths changed; no final patch artifact has been published." }
+    ],
+    "completeness": {
+      "state": "partial",
+      "transcript": "The published redacted transcript contains 687 events and is truncated to 49,485 bytes.",
+      "warnings": ["Task was running at publication time.", "Patch, validation, review, and final-message artifacts are not yet available."]
+    }
+  }
+}

@@ -68,11 +68,6 @@
     "plannerRuns": [],
     "plannerRunsTruncated": false,
     "audit": [],
-    "configuration": {
-      "integrationMode": "local",
-      "localOnly": true,
-      "enabledSignals": []
-    },
     "scheduler": {
       "sourceActive": 0,
       "sourceCapacity": 1,

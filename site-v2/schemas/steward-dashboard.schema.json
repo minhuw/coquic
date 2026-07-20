@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.dev/site-v2/schemas/steward-dashboard.schema.json",
+  "title": "CoQUIC V2 Steward dashboard snapshot",
+  "$defs": {
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "count"],
+      "properties": {
+        "id": { "enum": ["pushed", "noChanges", "blocked", "failed"] },
+        "label": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "worker",
+        "status",
+        "summary",
+        "priority",
+        "risk",
+        "updatedAt",
+        "validationCount",
+        "validationsPassed",
+        "detailPath"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^task-[0-9]{14}-[a-z0-9]{8}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "worker": { "type": ["string", "null"] },
+        "status": { "enum": ["pushed", "noChanges", "blocked", "failed"] },
+        "summary": { "type": "string" },
+        "priority": { "type": "string", "minLength": 1 },
+        "risk": { "type": "string", "minLength": 1 },
+        "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "validationCount": { "type": "integer", "minimum": 0 },
+        "validationsPassed": { "type": "integer", "minimum": 0 },
+        "detailPath": { "type": "string", "pattern": "^/steward/tasks/task-[0-9]{14}-[a-z0-9]{8}\\.json$" }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "due", "lastFetchAt", "nextDueAt", "pollIntervalMinutes", "lastError"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "due": { "type": "boolean" },
+        "lastFetchAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "nextDueAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "pollIntervalMinutes": { "type": "integer", "minimum": 1 },
+        "lastError": { "type": ["string", "null"] }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "title", "kind", "severity", "status", "summary", "updatedAt", "plannedTaskId", "links"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "provider": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "severity": { "type": ["string", "null"] },
+        "status": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "plannedTaskId": { "type": ["string", "null"] },
+        "links": { "type": "array", "items": { "$ref": "common.schema.json#/$defs/link" } }
+      }
+    },
+    "wakeup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "reason", "status", "createdAt", "consumedAt", "taskId", "provider"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "reason": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 },
+        "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "consumedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "taskId": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "mainBranch", "state", "archive", "outcomes", "activity", "tasks", "signals", "audit", "provenance"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "mainBranch": { "type": "string", "minLength": 1 },
+            "state": { "enum": ["idle", "queued", "working", "attention"] },
+            "archive": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["tasks", "attempts", "validations", "runTranscripts", "patches", "lastMessages", "taskEvents", "sourceEvents", "completeness"],
+              "properties": {
+                "tasks": { "type": "integer", "minimum": 0 },
+                "attempts": { "type": "integer", "minimum": 0 },
+                "validations": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["total", "passed", "failed"],
+                  "properties": {
+                    "total": { "type": "integer", "minimum": 0 },
+                    "passed": { "type": "integer", "minimum": 0 },
+                    "failed": { "type": "integer", "minimum": 0 }
+                  }
+                },
+                "runTranscripts": { "type": "integer", "minimum": 0 },
+                "patches": { "type": "integer", "minimum": 0 },
+                "lastMessages": { "type": "integer", "minimum": 0 },
+                "taskEvents": { "type": "integer", "minimum": 0 },
+                "sourceEvents": { "type": "integer", "minimum": 0 },
+                "completeness": { "enum": ["complete", "partial"] }
+              }
+            },
+            "outcomes": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/outcome" },
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "activity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["active", "queued", "attention", "pendingSignals", "sourceCapacity", "integrationActive", "integrationQueued"],
+              "properties": {
+                "active": { "type": "integer", "minimum": 0 },
+                "queued": { "type": "integer", "minimum": 0 },
+                "attention": { "type": "integer", "minimum": 0 },
+                "pendingSignals": { "type": "integer", "minimum": 0 },
+                "sourceCapacity": { "type": "integer", "minimum": 0 },
+                "integrationActive": { "type": "integer", "minimum": 0 },
+                "integrationQueued": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "tasks": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["total", "publishedCount", "truncated", "items"],
+              "properties": {
+                "total": { "type": "integer", "minimum": 0 },
+                "publishedCount": { "type": "integer", "minimum": 0 },
+                "truncated": { "type": "boolean" },
+                "items": { "type": "array", "items": { "$ref": "#/$defs/task" } }
+              }
+            },
+            "signals": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["total", "pending", "providerCount", "fetchCount", "providers", "publishedCount", "items", "wakeupCount", "publishedWakeupCount", "wakeups", "wakeupsTruncated"],
+              "properties": {
+                "total": { "type": "integer", "minimum": 0 },
+                "pending": { "type": "integer", "minimum": 0 },
+                "providerCount": { "type": "integer", "minimum": 0 },
+                "fetchCount": { "type": "integer", "minimum": 0 },
+                "providers": { "type": "array", "items": { "$ref": "#/$defs/provider" } },
+                "publishedCount": { "type": "integer", "minimum": 0 },
+                "items": { "type": "array", "items": { "$ref": "#/$defs/signal" } },
+                "wakeupCount": { "type": "integer", "minimum": 0 },
+                "publishedWakeupCount": { "type": "integer", "minimum": 0 },
+                "wakeups": { "type": "array", "items": { "$ref": "#/$defs/wakeup" } },
+                "wakeupsTruncated": { "type": "boolean" }
+              }
+            },
+            "audit": { "type": "array", "items": { "type": "string" } },
+            "provenance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sourceSchemaVersion", "sourceGeneratedAt", "taskArchiveBytes", "completeness", "warnings"],
+              "properties": {
+                "sourceSchemaVersion": { "type": "string", "minLength": 1 },
+                "sourceGeneratedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+                "taskArchiveBytes": { "type": "integer", "minimum": 0 },
+                "completeness": { "enum": ["complete", "partial"] },
+                "warnings": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$ref": "#/$defs/snapshot"
+}

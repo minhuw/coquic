@@ -1,0 +1,234 @@
+{
+  "schemaVersion": "2.0",
+  "generatedAt": "2026-06-25T14:04:09.288521Z",
+  "data": {
+    "repository": "minhuw/coquic",
+    "mainBranch": "main",
+    "state": "attention",
+    "archive": {
+      "tasks": 44,
+      "attempts": 60,
+      "validations": { "total": 120, "passed": 118, "failed": 2 },
+      "runTranscripts": 142,
+      "patches": 36,
+      "lastMessages": 23,
+      "taskEvents": 540,
+      "sourceEvents": 108,
+      "completeness": "complete"
+    },
+    "outcomes": [
+      { "id": "pushed", "label": "Pushed", "count": 24 },
+      { "id": "noChanges", "label": "No changes", "count": 10 },
+      { "id": "blocked", "label": "Blocked", "count": 8 },
+      { "id": "failed", "label": "Failed", "count": 2 }
+    ],
+    "activity": {
+      "active": 0,
+      "queued": 0,
+      "attention": 10,
+      "pendingSignals": 0,
+      "sourceCapacity": 5,
+      "integrationActive": 0,
+      "integrationQueued": 0
+    },
+    "tasks": {
+      "total": 44,
+      "publishedCount": 10,
+      "truncated": true,
+      "items": [
+        {
+          "id": "task-20260625111213-32c418ca",
+          "title": "Integrate Investigate Deploy Demo workflow run 27091339896",
+          "kind": "integration",
+          "worker": "integration-manager",
+          "status": "pushed",
+          "summary": "pushed dabbc68071b4030b73fc72fee56f1f6a4cdb5618",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T11:17:12.819067Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625111213-32c418ca.json"
+        },
+        {
+          "id": "task-20260625104347-c872ea53",
+          "title": "Integrate Investigate Deploy Demo workflow run 27468607841",
+          "kind": "integration",
+          "worker": "integration-manager",
+          "status": "pushed",
+          "summary": "pushed 3df5a03fb6b2d92d6547ed22316a0437501aaba1",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T10:47:30.529605Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625104347-c872ea53.json"
+        },
+        {
+          "id": "task-20260625102717-f6142da6",
+          "title": "Investigate Deploy Demo workflow run 27091339896",
+          "kind": "ci",
+          "worker": "ci-doctor",
+          "status": "pushed",
+          "summary": "pushed dabbc68071b4030b73fc72fee56f1f6a4cdb5618",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T11:17:13.629087Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625102717-f6142da6.json"
+        },
+        {
+          "id": "task-20260625102717-afc33b07",
+          "title": "Investigate Deploy Demo workflow run 27468607841",
+          "kind": "ci",
+          "worker": "ci-doctor",
+          "status": "pushed",
+          "summary": "pushed 3df5a03fb6b2d92d6547ed22316a0437501aaba1",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T10:47:31.276020Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625102717-afc33b07.json"
+        },
+        {
+          "id": "task-20260625102258-33bc39e3",
+          "title": "Integrate Investigate Deploy Demo workflow run 28123631693",
+          "kind": "integration",
+          "worker": "integration-manager",
+          "status": "pushed",
+          "summary": "pushed bd1276c233407a800dfd52189c00e981a15b7575",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T10:26:44.886046Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625102258-33bc39e3.json"
+        },
+        {
+          "id": "task-20260625093946-9cb34ce4",
+          "title": "Integrate Investigate Test workflow run 27362846640",
+          "kind": "integration",
+          "worker": "integration-manager",
+          "status": "pushed",
+          "summary": "pushed dc5eec20ea673896c851f47a3098058461a76d94",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T09:49:01.787551Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625093946-9cb34ce4.json"
+        },
+        {
+          "id": "task-20260625083823-62b89443",
+          "title": "Investigate Deploy Demo workflow run 28123631693",
+          "kind": "ci",
+          "worker": "ci-doctor",
+          "status": "pushed",
+          "summary": "pushed bd1276c233407a800dfd52189c00e981a15b7575",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T10:26:45.692949Z",
+          "validationCount": 3,
+          "validationsPassed": 3,
+          "detailPath": "/steward/tasks/task-20260625083823-62b89443.json"
+        },
+        {
+          "id": "task-20260625083823-30802351",
+          "title": "Investigate Nightly CI workflow run 27464996219",
+          "kind": "ci",
+          "worker": "ci-doctor",
+          "status": "noChanges",
+          "summary": "worker produced no source changes",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T10:06:02.868180Z",
+          "validationCount": 0,
+          "validationsPassed": 0,
+          "detailPath": "/steward/tasks/task-20260625083823-30802351.json"
+        },
+        {
+          "id": "task-20260625083823-fe54560a",
+          "title": "Investigate Test workflow run 27362846640",
+          "kind": "ci",
+          "worker": "ci-doctor",
+          "status": "pushed",
+          "summary": "pushed dc5eec20ea673896c851f47a3098058461a76d94",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T09:49:03.196132Z",
+          "validationCount": 5,
+          "validationsPassed": 5,
+          "detailPath": "/steward/tasks/task-20260625083823-fe54560a.json"
+        },
+        {
+          "id": "task-20260625081246-acab11b6",
+          "title": "Investigate Duvet workflow run 27399361046",
+          "kind": "rfc-audit",
+          "worker": "rfc-auditor",
+          "status": "noChanges",
+          "summary": "worker produced no source changes",
+          "priority": "high",
+          "risk": "medium",
+          "updatedAt": "2026-06-25T08:44:14.368696Z",
+          "validationCount": 0,
+          "validationsPassed": 0,
+          "detailPath": "/steward/tasks/task-20260625081246-acab11b6.json"
+        }
+      ]
+    },
+    "signals": {
+      "total": 31,
+      "pending": 0,
+      "providerCount": 9,
+      "fetchCount": 40,
+      "publishedCount": 8,
+      "wakeupCount": 20,
+      "publishedWakeupCount": 8,
+      "providers": [
+        { "id": "github-actions:ci", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T13:49:20.384317Z", "nextDueAt": "2026-06-25T14:22:20.384317Z", "pollIntervalMinutes": 30, "lastError": null },
+        { "id": "github-actions:test", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T13:49:24.206595Z", "nextDueAt": "2026-06-25T14:23:24.206595Z", "pollIntervalMinutes": 30, "lastError": null },
+        { "id": "github-actions:duvet", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T08:11:35.773839Z", "nextDueAt": "2026-06-26T08:21:35.773839Z", "pollIntervalMinutes": 1440, "lastError": null },
+        { "id": "github-actions:nightly-ci", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T08:11:38.896329Z", "nextDueAt": "2026-06-26T08:22:38.896329Z", "pollIntervalMinutes": 1440, "lastError": null },
+        { "id": "github-actions:deploy-demo", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T13:55:13.156467Z", "nextDueAt": "2026-06-25T14:40:13.156467Z", "pollIntervalMinutes": 30, "lastError": null },
+        { "id": "github-actions:interop", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T08:04:07.530892Z", "nextDueAt": "2026-06-26T08:16:07.530892Z", "pollIntervalMinutes": 1440, "lastError": null },
+        { "id": "github-actions:perf", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T08:04:11.049799Z", "nextDueAt": "2026-06-26T08:18:11.049799Z", "pollIntervalMinutes": 1440, "lastError": null },
+        { "id": "code-scanning", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T14:03:05.660246Z", "nextDueAt": "2026-06-25T20:12:05.660246Z", "pollIntervalMinutes": 360, "lastError": null },
+        { "id": "codacy", "status": "ok", "due": false, "lastFetchAt": "2026-06-25T14:01:10.098719Z", "nextDueAt": "2026-06-25T20:07:10.098719Z", "pollIntervalMinutes": 360, "lastError": null }
+      ],
+      "items": [
+        { "id": "wi-signal-item-d981755fe5cf", "provider": "codacy", "title": "Open Codacy findings", "kind": "codacy.summary", "severity": null, "status": "superseded", "summary": "Codacy issuesCount=71", "updatedAt": "2026-06-25T12:42:14.786985Z", "plannedTaskId": null, "links": [] },
+        { "id": "wi-github-actions-deploy-demo-deploy-demo-failure-2df6ba692624", "provider": "github-actions:deploy-demo", "title": "Deploy Demo workflow failed", "kind": "github-actions.deploy-demo-failure", "severity": "high", "status": "planned", "summary": "Deploy Demo run 27091339896 failed", "updatedAt": "2026-06-25T13:56:13.549901Z", "plannedTaskId": "task-20260625102717-f6142da6", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/27091339896" }] },
+        { "id": "wi-github-actions-deploy-demo-deploy-demo-failure-1473d052caab", "provider": "github-actions:deploy-demo", "title": "Deploy Demo workflow failed", "kind": "github-actions.deploy-demo-failure", "severity": "high", "status": "planned", "summary": "Deploy Demo run 27468607841 failed", "updatedAt": "2026-06-25T13:55:46.840477Z", "plannedTaskId": "task-20260625102717-afc33b07", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/27468607841" }] },
+        { "id": "wi-github-actions-deploy-demo-deploy-demo-failure-930cc6753acf", "provider": "github-actions:deploy-demo", "title": "Deploy Demo workflow failed", "kind": "github-actions.deploy-demo-failure", "severity": "high", "status": "planned", "summary": "Deploy Demo run 28123631693 failed", "updatedAt": "2026-06-25T13:55:18.767199Z", "plannedTaskId": "task-20260625083823-62b89443", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/28123631693" }] },
+        { "id": "wi-github-actions-nightly-ci-nightly-ci-failure-9fe990853c34", "provider": "github-actions:nightly-ci", "title": "Nightly CI workflow failed", "kind": "github-actions.nightly-ci-failure", "severity": "high", "status": "planned", "summary": "Nightly CI run 27464996219 failed", "updatedAt": "2026-06-25T08:38:23.744427Z", "plannedTaskId": "task-20260625083823-30802351", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/27464996219" }] },
+        { "id": "wi-github-actions-duvet-duvet-failure-a5f0325f14bb", "provider": "github-actions:duvet", "title": "Duvet workflow failed", "kind": "github-actions.duvet-failure", "severity": "high", "status": "planned", "summary": "Duvet run 27399361046 failed", "updatedAt": "2026-06-25T08:12:46.398702Z", "plannedTaskId": "task-20260625081246-acab11b6", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/27399361046" }] },
+        { "id": "wi-github-actions-test-test-failure-f0ab58e4d46a", "provider": "github-actions:test", "title": "Test workflow failed", "kind": "github-actions.test-failure", "severity": "high", "status": "planned", "summary": "Test run 27362846640 failed", "updatedAt": "2026-06-25T13:52:24.181000Z", "plannedTaskId": "task-20260625083823-fe54560a", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/27362846640" }] },
+        { "id": "wi-github-actions-test-test-failure-42f24d3c30c6", "provider": "github-actions:test", "title": "Test workflow failed", "kind": "github-actions.test-failure", "severity": "high", "status": "planned", "summary": "Test run 27468607846 failed", "updatedAt": "2026-06-25T13:51:54.475001Z", "plannedTaskId": "task-20260625081225-7462c698", "links": [{ "label": "Open workflow run", "url": "https://github.com/minhuw/coquic/actions/runs/27468607846" }] }
+      ],
+      "wakeups": [
+        { "id": "wakeup-20260625124202-0b1756c4", "reason": "signal.pending", "status": "consumed", "createdAt": "2026-06-25T12:42:02.185104Z", "consumedAt": "2026-06-25T12:42:14.794969Z", "taskId": null, "provider": "codacy" },
+        { "id": "wakeup-20260625111713-67292d4b", "reason": "task.status", "status": "consumed", "createdAt": "2026-06-25T11:17:13.631635Z", "consumedAt": "2026-06-25T11:17:15.548065Z", "taskId": "task-20260625102717-f6142da6", "provider": null },
+        { "id": "wakeup-20260625111712-db779aa4", "reason": "task.status", "status": "consumed", "createdAt": "2026-06-25T11:17:12.821459Z", "consumedAt": "2026-06-25T11:17:15.548065Z", "taskId": "task-20260625111213-32c418ca", "provider": null },
+        { "id": "wakeup-20260625111530-a870bf1a", "reason": "task.status", "status": "consumed", "createdAt": "2026-06-25T11:15:30.254659Z", "consumedAt": "2026-06-25T11:17:15.548065Z", "taskId": "task-20260625111213-32c418ca", "provider": null },
+        { "id": "wakeup-20260625111213-2e295917", "reason": "task.status", "status": "consumed", "createdAt": "2026-06-25T11:12:13.620166Z", "consumedAt": "2026-06-25T11:17:15.548065Z", "taskId": "task-20260625111213-32c418ca", "provider": null },
+        { "id": "wakeup-20260625111213-8006edc2", "reason": "task.status", "status": "consumed", "createdAt": "2026-06-25T11:12:13.600180Z", "consumedAt": "2026-06-25T11:12:13.606723Z", "taskId": "task-20260625102717-f6142da6", "provider": null },
+        { "id": "wakeup-20260625111213-234ef683", "reason": "task.created", "status": "consumed", "createdAt": "2026-06-25T11:12:13.596333Z", "consumedAt": "2026-06-25T11:12:13.606723Z", "taskId": "task-20260625111213-32c418ca", "provider": null },
+        { "id": "wakeup-20260625111213-8a2c729e", "reason": "task.status", "status": "consumed", "createdAt": "2026-06-25T11:12:13.589575Z", "consumedAt": "2026-06-25T11:12:13.606723Z", "taskId": "task-20260625102717-f6142da6", "provider": null }
+      ],
+      "wakeupsTruncated": true
+    },
+    "audit": [],
+    "provenance": {
+      "sourceSchemaVersion": "1",
+      "sourceGeneratedAt": "2026-06-25T14:04:09.288521Z",
+      "taskArchiveBytes": 92274688,
+      "completeness": "complete",
+      "warnings": [
+        "The dashboard publishes the 10 most recent of 44 retained tasks.",
+        "The source publication is stale and is used here as sanitized design evidence."
+      ]
+    }
+  }
+}

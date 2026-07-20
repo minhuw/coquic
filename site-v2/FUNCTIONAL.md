@@ -189,26 +189,37 @@ announced without replacing retained valid evidence with an error message.
 
 - This surface is a read-only sanitized publication; it MUST NOT expose mutation
   controls or secrets.
-- Show repository/main branch, aggregate state, monitor freshness, daemon state,
-  heartbeat, current cycle, last publication, pending signals, and active task.
-- Views: State, Tasks, Signals, Audit, and Configuration. Desktop and compact
-  selectors must provide equivalent content and preserve selection.
-- State includes scheduler capacity/queues, pending/recent wakeups, publication,
-  and recent integration activity/commits.
-- Tasks group queued, active, attention, and completed states; support stable
-  pagination and links to retained detail.
-- Signals support provider selection, provider health/cadence, normalized inbox,
-  external links, and fetch history.
-- Audit exposes sanitized invariant findings. Configuration exposes only values
-  explicitly allowed by the publication schema.
+- Lead with the public control loop `Signals → Planning → Tasks → Integration`.
+  The control loop is an instrument and navigation device, not an aggregate
+  health score.
+- Views are exactly Signals, Planning, and Tasks. Tasks is the default because
+  execution evidence is the primary public value.
+- At wide desktop widths, Tasks uses parallel queue, selected execution, and
+  current-evidence panes; Signals uses provider, pending, and scheduled panes;
+  Planning uses wakeup, selected-run, and diagnostics panes. These panes return
+  to source order as one readable column on compact screens.
+- Signals separate pending evidence from scheduled evidence. Every signal keeps
+  source/provider, severity, timestamps, external links, contextual facts, and
+  related planner/task IDs. Provider fetch errors, due state, and truncation are
+  explicit.
+- Planning shows pending wakeups and planner runs with input signals, parsed
+  task proposals, accepted results, diagnostics, transcript completeness, and
+  links to resulting tasks. Mismatches between output proposals and canonical
+  counters are shown as incomplete producer state.
+- Tasks separate active, queued, attention, and retained counts. Every row shows
+  the five-stage pipeline and links to detail only when detail is published.
+- Archive inventory and aggregate outcomes may remain supporting evidence, but
+  they do not displace the three control-loop domains.
+- Daemon and operator configuration MUST NOT be published or rendered.
 - Stale, incompatible, missing, and malformed publications are distinct.
 
-## Steward planner `/steward/planner`
+## Steward planning `/steward?view=planning`
 
-- Show retained planner runs newest first, 10 per page, with pagination focus
-  management.
+- Show retained planner runs newest first with an explicit published-window
+  count and truncation state.
 - Expose run ID, status, start/completion, accepted/proposed counts, consumed
-  signal count, diagnostics, transcript, and final-message artifact.
+  signal IDs, output proposals, diagnostics, transcript, and final-message
+  artifact.
 - Declare whether the published window is complete or truncated.
 - Distinguish loading, empty, unavailable, running, succeeded, failed, and invalid.
 
@@ -216,11 +227,22 @@ announced without replacing retained valid evidence with an error message.
 
 - Validate task IDs before reading public artifacts; invalid/unknown IDs return 404.
 - Show title, state, current conclusion, source, priority/risk, creation/update,
-  implementation plan, attempts, ordered pipeline, and event timeline.
-- Pipeline stages: Plan, Code Generation, Validation, Review, and Integration,
+  structured implementation plan, attempts, ordered pipeline, and event timeline.
+- Show implementation-planning runs before attempts, including retry order,
+  status, duration, model settings, exit state, transcript completeness, model
+  usage and cadence when available, and the accepted structured plan result.
+- Pipeline stages: Plan, Implementation, Validation, Review, and Integration,
   including feedback loops and a text equivalent.
-- Each attempt is dismissible and exposes Transcript, Patch, Validation, and
-  Review tabs with roving keyboard focus.
+- Each attempt is selectable and exposes shareable Transcript, Patch,
+  Validation, and Review URL views with native keyboard navigation.
+- At wide desktop widths, implementation plan, selected attempt evidence, and
+  ordered timeline remain visible as three parallel panes. Compact screens keep
+  the same evidence in plan, attempt, timeline order.
+- Transcript records distinguish task/user messages, agent messages, reasoning,
+  tool or command calls, outputs, exit codes, and truncation.
+- Validation exposes exact commands, result, exit code, duration, summary, and
+  log artifact state. Review exposes verdict, structured findings, validation
+  gaps, required changes, and remaining risk.
 - Patch supports unified and side-by-side diff; large code/timelines scroll
   locally; closing expanded diff restores focus.
 - Artifact states distinguish available, not produced, unavailable, redacted,

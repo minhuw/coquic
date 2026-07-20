@@ -86,6 +86,20 @@ Steward endpoints are read-only. `GET /api/v2/steward/status` returns the latest
 sanitized monitor publication. `GET /api/v2/steward/tasks/{id}` returns retained
 task evidence. Artifact URLs are explicit and MAY return 404 when the publication
 declares `notProduced` or `unavailable`; redacted artifacts have no URL.
+Daemon and operator configuration is excluded from every public Steward payload.
+
+`GET /api/v2/steward/control-loop` returns the linked public index used by the
+Signals, Planning, and Tasks views. Signal records retain source context and link
+to planner runs and tasks where those relationships exist. Planner runs retain
+both canonical counters and parsed output proposals so incomplete producer state
+is observable. Task summaries include the five pipeline stage states and declare
+whether detail is published.
+
+`GET /api/v2/steward/dashboard` returns a compact index derived from the monitor
+and retained task publications. Archive totals cover the declared complete
+archive even when recent task, signal, or wakeup lists are truncated. Raw task
+publications remain authoritative for attempts, patches, transcripts,
+validations, reviews, and event timelines.
 
 `GET /api/v2/steward/daily/{date}` returns the UTC daily aggregate used by the
 Home report. The date uses `YYYY-MM-DD`. Usage and repository groups declare

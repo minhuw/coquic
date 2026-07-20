@@ -122,3 +122,66 @@ Daily values come from a dedicated sanitized contract. Git-derived
 `fixesLanded` counts Conventional Commit subjects with the `fix` type and is not
 presented as a complete regression count. Missing producer data remains
 unavailable rather than zero.
+
+## D-015: Steward dashboard as a derived archive index
+
+The Steward dashboard consumes a compact snapshot derived from sanitized monitor
+and retained task publications. It exposes archive-wide outcomes and public
+artifact counts while embedding bounded recent task, signal, provider, and wakeup
+records for fast rendering.
+
+The dashboard is an index, not a second source of truth. Raw task publications
+remain authoritative for attempts, transcripts, patches, validation logs, review
+findings, and event timelines. Aggregate totals remain explicit when embedded
+lists are truncated, and unavailable runtime state is never synthesized from
+archival evidence.
+
+## D-016: Steward configuration remains private
+
+Public Steward payloads exclude daemon and operator configuration. Integration
+policy, mutation limits, timeouts, and other control-plane values are not needed
+to inspect public work evidence and create avoidable operational disclosure.
+
+Observed state such as queue occupancy, active work, and available source
+capacity remains public because it describes the sanitized publication boundary,
+not how an operator configured the daemon. Audit findings remain producer data;
+they surface beside the affected domain only when actionable and do not receive
+an empty dedicated view.
+
+## D-017: Steward follows the causal control loop
+
+The primary Steward information architecture is Signals, Planning, and Tasks,
+with Tasks as the default and deepest surface. This mirrors the causal model in
+the public producer: source evidence enters as a signal, a planner run consumes
+evidence and proposes bounded work, and a task advances through plan,
+implementation, validation, review, and integration.
+
+A generic State view, a dedicated Audit view, and public Configuration are not
+top-level destinations. Operational counts remain visible inside the control
+loop, while non-empty invariant findings may appear beside the domain evidence
+they affect.
+
+Task detail preserves feedback rather than presenting execution as a simple
+linear success path. Validation, review, and integration can return work to
+implementation; attempts, transcripts, tool calls, patches, checks, findings,
+and timeline events remain connected. Partial and contradictory publications are
+shown as producer evidence, not repaired in the presentation layer.
+
+Wide Steward surfaces use a master/detail dashboard geometry because the core
+inspection task is comparative: queue beside execution beside evidence, source
+beside pending and scheduled signals, or wakeups beside a planner decision and
+its diagnostics. Mobile preserves the same semantic order as a single column;
+the desktop layout does not create a separate reduced data model.
+
+## D-018: Task planning is first-class execution evidence
+
+Task detail exposes implementation-planning runs separately from implementation
+attempts. A planning run records retry order, status, timing, model settings,
+diagnostics, transcript completeness, and locally available usage and cadence.
+The accepted structured plan remains the Run brief immediately after this run
+history.
+
+This preserves Steward's actual lifecycle: planning can retry until it produces
+one valid plan, then implementation, validation, and review revisions reuse that
+plan. The interface must not imply that each worker attempt received a new plan,
+and unavailable planning telemetry remains unavailable rather than zero.

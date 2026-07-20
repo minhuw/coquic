@@ -79,10 +79,12 @@ include `warnings` identifying omissions.
 | Performance snapshot   | `/api/v2/evidence/performance/snapshots/{id}` | performance snapshot                              |
 | Interop snapshot       | `/api/v2/evidence/interop/current`            | `evidence.schema.json#/$defs/interopSnapshot`     |
 | Coverage snapshot      | `/api/v2/evidence/coverage/current`           | `evidence.schema.json#/$defs/coverageSnapshot`    |
+| Steward dashboard      | `/api/v2/steward/dashboard`                   | `steward-dashboard.schema.json#/$defs/snapshot`   |
+| Steward control loop   | `/api/v2/steward/control-loop`                | `steward-observability.schema.json#/$defs/controlLoop` |
 | Steward monitor        | `/api/v2/steward/status`                      | `steward.schema.json#/$defs/monitor`              |
 | Steward daily summary  | `/api/v2/steward/daily/{date}`                | `steward.schema.json#/$defs/dailySummary`         |
 | Steward growth summary | `/api/v2/steward/growth/current`              | `steward.schema.json#/$defs/growthSummary`        |
-| Steward task           | `/api/v2/steward/tasks/{id}`                  | `steward.schema.json#/$defs/taskDetail`           |
+| Steward task           | `/api/v2/steward/tasks/{id}`                  | `steward-observability.schema.json#/$defs/taskDetail` |
 
 The browser-local Workbench command/event protocol is defined by
 `workbench.schema.json` and [WORKBENCH.md](WORKBENCH.md); it is not an HTTP API.
@@ -127,6 +129,35 @@ isolated in server adapters.
 
 ### Steward
 
+- Derive the dashboard snapshot from the sanitized monitor and retained task
+  publications. It is a compact archive index, not a replacement for raw task
+  evidence.
+- Normalize the public control loop into three linked domains: signal evidence,
+  planner decisions, and task execution. Preserve the IDs connecting each
+  signal to its planner run and resulting task.
+- Preserve planner output proposals separately from canonical accepted/proposed
+  counters. When a run output contains tasks but the producer has no completion
+  event, publish both values and a diagnostic; never silently reconcile them.
+- Normalize task detail into five ordered stages: plan, implementation,
+  validation, review, and integration. Every observed state transition carries
+  a count, the contributing attempt IDs, and evidence-derived causes. Validation,
+  review, or integration may return work to implementation.
+- Task detail schema version 2.2 adds optional `planRuns` evidence with retry
+  order, lifecycle timestamps, model settings, diagnostics, and transcript
+  state. The structured `plan` remains the accepted output; planning runs do
+  not imply one plan per implementation attempt.
+- Preserve attempt-scoped worker and reviewer runs, parsed transcript records,
+  patch statistics/content, validation commands/results/log availability,
+  structured review findings/gaps, and the complete ordered event timeline.
+- Every artifact declares availability, size, redaction, and truncation at its
+  own boundary. A running task uses empty arrays or `null` for stages that have
+  not produced evidence; it never synthesizes pending evidence as success.
+- Exclude daemon and operator configuration, including integration policy,
+  mutation limits, and timeouts. Observed queue occupancy and available source
+  capacity remain working-state evidence rather than configuration disclosure.
+- Preserve archive-wide task outcomes and artifact counts even when embedded
+  recent task, signal, or wakeup lists are truncated. Published counts describe
+  the embedded lists; totals describe the complete retained archive.
 - Adapt public Steward schema v3 into the V2 envelope without reading private
   daemon state. Preserve the source compatibility state and truncation flags.
 - Convert loose external links and commit records to typed link/commit objects.

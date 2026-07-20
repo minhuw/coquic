@@ -51,8 +51,10 @@ Dynamic routes:
 
 - `/docs/[...slug]`
 - `/blog/[slug]`
-- `/steward/planner`
 - `/steward/tasks/[taskId]`
+
+Steward domain selection is shareable query state on `/steward`: `signals`,
+`planning`, or `tasks` (default).
 
 ## Content inventory
 

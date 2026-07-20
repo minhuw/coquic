@@ -3,6 +3,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ChevronDown, Menu, Star, X } from "lucide-react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   type FocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -90,6 +91,7 @@ function keepHoveredDisclosureOpen(event: MouseEvent<HTMLElement>) {
 
 export function SiteHeader({ githubStars }: SiteHeaderProps) {
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const firstLinkRef = useRef<HTMLAnchorElement>(null);
   const reducedMotion = useReducedMotion();
@@ -135,7 +137,16 @@ export function SiteHeader({ githubStars }: SiteHeaderProps) {
             <Link
               key={link.href}
               href={link.href}
-              className="flex h-full items-center border-b-2 border-transparent text-sm font-medium text-muted no-underline transition-colors hover:text-ink"
+              className={`flex h-full items-center border-b-2 text-sm font-medium no-underline transition-colors hover:text-ink ${
+                pathname === link.href || pathname.startsWith(`${link.href}/`)
+                  ? "border-accent text-accent"
+                  : "border-transparent text-muted"
+              }`}
+              aria-current={
+                pathname === link.href || pathname.startsWith(`${link.href}/`)
+                  ? "page"
+                  : undefined
+              }
             >
               {link.label}
             </Link>
@@ -243,7 +254,16 @@ export function SiteHeader({ githubStars }: SiteHeaderProps) {
                   ref={index === 0 ? firstLinkRef : undefined}
                   href={link.href}
                   onClick={closeMenu}
-                  className="flex min-h-11 items-center border-b border-line text-base font-medium text-ink no-underline"
+                  className={`flex min-h-11 items-center border-b border-line text-base font-medium no-underline ${
+                    pathname === link.href || pathname.startsWith(`${link.href}/`)
+                      ? "text-accent"
+                      : "text-ink"
+                  }`}
+                  aria-current={
+                    pathname === link.href || pathname.startsWith(`${link.href}/`)
+                      ? "page"
+                      : undefined
+                  }
                 >
                   {link.label}
                 </Link>

@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from coquic_steward.agents.tool_changes import (
     LOCK_TIMEOUT_SECONDS,
     MAX_TOOL_INPUT_BYTES,
@@ -319,6 +321,91 @@ def test_runner_only_exports_context_for_code_stage(config, tmp_path: Path) -> N
     assert result.diagnostics["tool_change_capture"]["captured"] == 1
     assert result.diagnostics["tool_change_capture"]["state"] == "complete"
     assert (result.transcript_path.parent / "tool-changes" / "manifest.jsonl").exists()
+
+
+@pytest.mark.parametrize("archive_failure", ["collision", "rename"])
+def test_retry_archive_failure_isolated_from_next_capture(
+    config, tmp_path: Path, monkeypatch, archive_failure: str
+) -> None:
+    fake = tmp_path / "codex"
+    calls = tmp_path / "calls.txt"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'count=$(wc -l < "{calls}" 2>/dev/null || printf 0)\n'
+        "count=$((count + 1))\n"
+        f'printf "%s\\n" "$count" >> "{calls}"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'tool_id="tool_$count"\n'
+        'printf \'%s\\n\' \'{"hook_event_name":"PreToolUse","session_id":"session_1","turn_id":"turn_1","cwd":"\'"$PWD"\'","tool_name":"Bash","tool_use_id":"\'"$tool_id"\'","tool_input":{"command":"change README"}}\' | python -m coquic_steward.agents.tool_changes\n'
+        'printf "%s\\n" "$tool_id" > README.md\n'
+        'printf \'%s\\n\' \'{"hook_event_name":"PostToolUse","session_id":"session_1","turn_id":"turn_1","cwd":"\'"$PWD"\'","tool_name":"Bash","tool_use_id":"\'"$tool_id"\'","tool_input":{"command":"change README"},"tool_response":{"success":true}}\' | python -m coquic_steward.agents.tool_changes\n'
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'stream disconnected before completion\\n' > \"$last\"\n"
+        '  printf \'%s\\n\' \'{"type":"thread.started","thread_id":"thread-transient"}\'\n'
+        "  exit 1\n"
+        "fi\n"
+        "printf 'done\\n' > \"$last\"\n"
+        "printf '%s\\n' '{\"message\":\"done\"}'\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+    runner = CodexRunner(config)
+    transcript_path, _ = runner.paths(task)
+    run_dir = transcript_path.parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    collision = run_dir / "tool-changes.retry-1"
+    if archive_failure == "collision":
+        collision.mkdir()
+        (collision / "existing").write_text("keep\n", encoding="utf-8")
+    else:
+        original_replace = Path.replace
+
+        def fail_tool_change_replace(self: Path, target: Path) -> Path:
+            if self.name == "tool-changes":
+                raise OSError("forced tool change archive failure")
+            return original_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", fail_tool_change_replace)
+    monkeypatch.setattr("coquic_steward.agents.runner.time.sleep", lambda _delay: None)
+
+    result = runner.run(task, "hello", config.repo_root)
+
+    assert result.completed
+    assert calls.read_text(encoding="utf-8").splitlines() == ["1", "2"]
+    retry = result.diagnostics["retries"][0]
+    assert retry["tool_changes_archive_failed"] is True
+    current = run_dir / "tool-changes"
+    if archive_failure == "collision":
+        assert (collision / "existing").read_text(encoding="utf-8") == "keep\n"
+        preserved = Path(retry["tool_changes_preserved_path"])
+        assert [item["tool_use_id"] for item in _manifest(preserved)] == ["tool_1"]
+        assert (
+            ToolChangeCapture.from_context(preserved / "context.json").summary.state
+            == "partial"
+        )
+        current_records = _manifest(current)
+        assert [item["tool_use_id"] for item in current_records] == ["tool_2"]
+        assert [item["start_sequence"] for item in current_records] == [1]
+        assert result.diagnostics["tool_change_capture"]["state"] == "partial"
+    else:
+        assert retry["tool_changes_preserve_failed"] is True
+        assert [item["tool_use_id"] for item in _manifest(current)] == ["tool_1"]
+        assert (
+            ToolChangeCapture.from_context(current / "context.json").summary.state
+            == "partial"
+        )
+        assert result.diagnostics["tool_change_capture"]["state"] == "unavailable"
+    assert "context_unavailable" in result.diagnostics["tool_change_capture"]["reasons"]
 
 
 def test_non_code_stage_has_no_context_artifacts(config, tmp_path: Path, monkeypatch) -> None:

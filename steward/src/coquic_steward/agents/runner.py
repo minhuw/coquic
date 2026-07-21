@@ -18,6 +18,7 @@ from .tool_changes import ToolChangeCapture
 
 
 CODEX_RETRY_DELAYS_SECONDS = (5.0, 20.0)
+_RETRY_PRESERVATION_LIMIT = 16
 _CODEX_RETRY_PROMPT = (
     "Continue the interrupted turn. Complete the original task and return the "
     "required final response."
@@ -158,6 +159,8 @@ class CodexRunner:
         retries: list[dict[str, object]] = []
         active_resume_session = resume_session
         attempt_prompt = prompt
+        capture_enabled = True
+        capture_degraded = False
         for attempt in range(len(CODEX_RETRY_DELAYS_SECONDS) + 1):
             args = self._args(
                 cwd,
@@ -179,6 +182,8 @@ class CodexRunner:
                     stage=stage,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    capture_enabled=capture_enabled,
+                    capture_degraded=capture_degraded,
                 )
             except FileNotFoundError as exc:
                 result = self._missing_executable_result(
@@ -202,7 +207,15 @@ class CodexRunner:
                 )
 
             delay = CODEX_RETRY_DELAYS_SECONDS[attempt]
-            archived = _archive_retry_artifacts(result, attempt + 1)
+            archived = _archive_retry_artifacts(
+                result,
+                attempt + 1,
+                archive_tool_changes=capture_enabled,
+            )
+            if archived.get("tool_changes_archive_failed"):
+                capture_degraded = True
+            if archived.get("tool_changes_preserve_failed"):
+                capture_enabled = False
             next_resume_session = result.thread_id or active_resume_session
             retries.append(
                 {
@@ -324,9 +337,11 @@ class CodexRunner:
         stage: CodexStage,
         model: str | None,
         reasoning_effort: str | None,
+        capture_enabled: bool,
+        capture_degraded: bool,
     ) -> WorkerResult:
         capture: ToolChangeCapture | None = None
-        if stage == CodexStage.code:
+        if stage == CodexStage.code and capture_enabled:
             try:
                 capture = ToolChangeCapture.start(
                     cwd, transcript_path.parent / "tool-changes"
@@ -337,13 +352,15 @@ class CodexRunner:
                 capture = ToolChangeCapture.unavailable(
                     cwd, transcript_path.parent / "tool-changes"
                 )
+            if capture_degraded:
+                capture._record_reason("context_unavailable")
         child_env = None
         if capture is not None:
             child_env = os.environ.copy()
             child_env["COQUIC_STEWARD_HOOK_CONTEXT"] = str(capture.context_path)
-        elif stage != CodexStage.code and "COQUIC_STEWARD_HOOK_CONTEXT" in os.environ:
+        elif "COQUIC_STEWARD_HOOK_CONTEXT" in os.environ:
             # A caller's ambient value must not accidentally enable capture for
-            # planning, review, signal, or commit-message processes.
+            # non-code stages or a retry whose prior context could not be moved.
             child_env = os.environ.copy()
             child_env.pop("COQUIC_STEWARD_HOOK_CONTEXT", None)
         # CodexRunner builds args as an argv list and never enables a shell.
@@ -403,6 +420,14 @@ class CodexRunner:
         )
         if capture_diagnostics is not None:
             diagnostics_json["tool_change_capture"] = capture_diagnostics
+        elif stage == CodexStage.code:
+            diagnostics_json["tool_change_capture"] = {
+                "schema_version": 1,
+                "state": "unavailable",
+                "completeness": "unavailable",
+                "reasons": ["context_unavailable"],
+                "reason_categories": ["context_unavailable"],
+            }
         return WorkerResult(
             completed=proc.returncode == 0,
             command=args,
@@ -460,7 +485,10 @@ def _is_transient_codex_message(message: str) -> bool:
 
 
 def _archive_retry_artifacts(
-    result: WorkerResult, retry_number: int
+    result: WorkerResult,
+    retry_number: int,
+    *,
+    archive_tool_changes: bool = True,
 ) -> dict[str, object]:
     archived: dict[str, object] = {}
     if result.transcript_path.exists():
@@ -480,16 +508,25 @@ def _archive_retry_artifacts(
         else:
             archived["last_message_path"] = str(last_message_path)
     tool_changes = result.transcript_path.with_name("tool-changes")
-    if tool_changes.exists():
+    if archive_tool_changes and tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
-        try:
-            tool_changes.replace(archived_tool_changes)
-        except OSError:
-            archived["tool_changes_archive_failed"] = True
-        else:
+        if _move_retry_directory(tool_changes, archived_tool_changes):
             archived["tool_changes_path"] = str(archived_tool_changes)
             if not _retarget_archived_context(archived_tool_changes):
                 archived["tool_changes_context_update_failed"] = True
+        else:
+            archived["tool_changes_archive_failed"] = True
+            preserved_tool_changes = _preserve_retry_directory(
+                tool_changes, archived_tool_changes
+            )
+            if preserved_tool_changes is None:
+                archived["tool_changes_preserve_failed"] = True
+                _degrade_capture_context(tool_changes)
+            else:
+                archived["tool_changes_preserved_path"] = str(preserved_tool_changes)
+                if not _retarget_archived_context(preserved_tool_changes):
+                    archived["tool_changes_context_update_failed"] = True
+                _degrade_capture_context(preserved_tool_changes)
     return archived
 
 
@@ -499,6 +536,35 @@ def _retry_artifact_path(path: Path, retry_number: int) -> Path:
 
 def _retry_directory_path(path: Path, retry_number: int) -> Path:
     return path.with_name(f"{path.name}.retry-{retry_number}")
+
+
+def _move_retry_directory(source: Path, destination: Path) -> bool:
+    try:
+        if os.path.lexists(destination):
+            return False
+        source.replace(destination)
+        return True
+    except OSError:
+        return False
+
+
+def _preserve_retry_directory(source: Path, archive_path: Path) -> Path | None:
+    for suffix in range(1, _RETRY_PRESERVATION_LIMIT + 1):
+        candidate = archive_path.with_name(f"{archive_path.name}.unavailable-{suffix}")
+        if _move_retry_directory(source, candidate):
+            return candidate
+    return None
+
+
+def _degrade_capture_context(run_dir: Path) -> None:
+    try:
+        capture = ToolChangeCapture.from_context(run_dir / "context.json")
+        capture._record_reason("context_unavailable")
+        capture.reconcile()
+    except Exception:
+        # The final retry result is still reported as unavailable. Evidence
+        # degradation must not influence Codex retry behavior.
+        pass
 
 
 def _retarget_archived_context(run_dir: Path) -> bool:

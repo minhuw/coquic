@@ -54,6 +54,8 @@ def test_marker_parser_requires_exact_closed_shape() -> None:
 
 def test_recorder_writes_ordered_private_records_and_bounded_counters(tmp_path: Path) -> None:
     path = tmp_path / "worker" / "activities.jsonl"
+    path.parent.mkdir(parents=True)
+    path.with_name("codex.jsonl").write_text("{}\n", encoding="utf-8")
     recorder = ActivityRecorder(path, max_events=1)
     assert recorder.observe(
         _event(
@@ -191,6 +193,7 @@ def test_retry_archive_failure_cannot_publish_previous_activity(config) -> None:
     assert not sidecar.exists()
     assert _public_activities(config, transcript)["availability"] == "not_produced"
 
+    transcript.write_text("{}\n", encoding="utf-8")
     current = ActivityRecorder(sidecar)
     assert current.observe(
         _event(
@@ -242,6 +245,88 @@ def test_retry_invalidation_fails_closed_without_private_diagnostics(config) -> 
     assert sidecar.exists()
     assert sidecar.stat().st_mode & 0o777 == 0
     assert _public_activities(config, transcript)["availability"] == "unavailable"
+
+
+def test_retry_invalidation_failure_cannot_publish_stale_activity(
+    config, monkeypatch
+) -> None:
+    transcript = config.transcripts_dir / "task" / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"attempt":1}\n', encoding="utf-8")
+    sidecar = transcript.with_name("activities.jsonl")
+    recorder = ActivityRecorder(sidecar)
+    assert recorder.observe(
+        _event(
+            "old_1",
+            'STEWARD_ACTIVITY {"activity":"report","summary":"Old attempt"}',
+        )
+    )
+    recorder.finalize()
+    result = WorkerResult(
+        completed=False,
+        command=[],
+        cwd=config.repo_root,
+        exit_code=1,
+        transcript_path=transcript,
+        last_message_path=transcript.with_name("last-message.md"),
+    )
+    original_replace = Path.replace
+    original_unlink = Path.unlink
+    original_open = Path.open
+
+    def replace(path: Path, target: Path) -> Path:
+        if path == sidecar:
+            raise PermissionError("injected activity rename failure")
+        return original_replace(path, target)
+
+    def unlink(path: Path, *args, **kwargs) -> None:
+        if path == sidecar:
+            raise PermissionError("injected activity unlink failure")
+        original_unlink(path, *args, **kwargs)
+
+    def open_file(path: Path, mode: str = "r", *args, **kwargs):
+        if path == sidecar and mode == "wb":
+            raise PermissionError("injected activity truncate failure")
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "replace", replace)
+        fault.setattr(Path, "unlink", unlink)
+        fault.setattr(Path, "open", open_file)
+        fault.setattr(
+            "coquic_steward.agents.runner.os.chmod",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PermissionError("injected activity chmod failure")
+            ),
+        )
+        fault.setattr(
+            "coquic_steward.agents.runner.os.fchmod",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                PermissionError("injected activity fchmod failure")
+            ),
+        )
+
+        archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
+        transcript.write_text('{"attempt":2}\n', encoding="utf-8")
+
+        assert archived["activities_archive_failed"] is True
+        assert archived["activities_preserve_failed"] is True
+        assert archived["activities_invalidate_failed"] is True
+        assert sidecar.stat().st_mode & 0o777 == 0o600
+        assert _public_activities(config, transcript)["availability"] == "unavailable"
+
+    sidecar.unlink()
+    current = ActivityRecorder(sidecar)
+    assert current.observe(
+        _event(
+            "new_1",
+            'STEWARD_ACTIVITY {"activity":"edit","summary":"New attempt"}',
+        )
+    )
+    current.finalize()
+    public = _public_activities(config, transcript)
+    assert public["availability"] == "available"
+    assert [event["summary"] for event in public["events"]] == ["New attempt"]
 
 
 def test_retry_activity_diagnostics_do_not_expose_archive_path(config) -> None:

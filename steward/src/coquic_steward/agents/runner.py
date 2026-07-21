@@ -11,6 +11,7 @@ import subprocess  # nosec B404
 import tempfile
 import threading
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
@@ -371,11 +372,14 @@ class CodexRunner:
     ) -> WorkerResult:
         capture: ToolChangeCapture | None = None
         activity_recorder: ActivityRecorder | None = None
+        activity_transcript_digest = None
         if stage == CodexStage.code:
             try:
                 activity_recorder = ActivityRecorder(
-                    activity_sidecar_path(transcript_path)
+                    activity_sidecar_path(transcript_path),
+                    transcript_path=transcript_path,
                 )
+                activity_transcript_digest = sha256()
             except Exception:
                 # Activity recording is observational and must not prevent
                 # Codex from starting or alter process behavior.
@@ -434,13 +438,25 @@ class CodexRunner:
                 observer_abandon=(
                     activity_recorder.abandon if activity_recorder is not None else None
                 ),
+                transcript_digest_update=(
+                    activity_transcript_digest.update
+                    if activity_transcript_digest is not None
+                    else None
+                ),
             )
         finally:
             capture_diagnostics = (
                 capture.finalize().diagnostics_dict() if capture is not None else None
             )
             activity_diagnostics = (
-                _finalize_activity_recorder(activity_recorder)
+                _finalize_activity_recorder(
+                    activity_recorder,
+                    transcript_sha256=(
+                        activity_transcript_digest.hexdigest()
+                        if activity_transcript_digest is not None
+                        else None
+                    ),
+                )
                 if activity_recorder is not None
                 else activity_diagnostics_unavailable()
             )
@@ -756,6 +772,7 @@ def _communicate_streaming(
     metadata_observer: Callable[[dict[str, object]], object] | None = None,
     on_event: Callable[[dict[str, object]], object] | None = None,
     observer_abandon: Callable[[], object] | None = None,
+    transcript_digest_update: Callable[[bytes], object] | None = None,
 ) -> str:
     if proc.stdin is None or proc.stdout is None or proc.stderr is None:
         raise RuntimeError("codex process pipes were not initialized")
@@ -780,8 +797,10 @@ def _communicate_streaming(
                     timeout_message = (
                         f"codex process timed out after {timeout_seconds // 60} minute(s)"
                     )
-                    transcript.write(
-                        json.dumps({"type": "stderr", "text": timeout_message}) + "\n"
+                    _write_transcript_chunk(
+                        transcript,
+                        json.dumps({"type": "stderr", "text": timeout_message}) + "\n",
+                        transcript_digest_update,
                     )
                     proc.wait()
                     proc.returncode = 124
@@ -793,7 +812,9 @@ def _communicate_streaming(
                         continue
                     if key.data == "stdout":
                         stdout_parts.append(line)
-                        transcript.write(line)
+                        _write_transcript_chunk(
+                            transcript, line, transcript_digest_update
+                        )
                         transcript.flush()
                         if dispatcher is not None:
                             try:
@@ -803,9 +824,11 @@ def _communicate_streaming(
                             if isinstance(decoded, dict):
                                 dispatcher.submit(decoded)
                     else:
-                        transcript.write(
+                        _write_transcript_chunk(
+                            transcript,
                             json.dumps({"type": "stderr", "text": line.rstrip("\n")})
-                            + "\n"
+                            + "\n",
+                            transcript_digest_update,
                         )
                     transcript.flush()
             if proc.returncode is None:
@@ -820,6 +843,20 @@ def _communicate_streaming(
                 except Exception:
                     pass
     return "".join(stdout_parts)
+
+
+def _write_transcript_chunk(
+    transcript,
+    text: str,
+    digest_update: Callable[[bytes], object] | None,
+) -> None:
+    transcript.write(text)
+    if digest_update is not None:
+        try:
+            digest_update(text.encode("utf-8"))
+        except Exception:
+            # Activity binding is best effort and cannot affect transcript capture.
+            pass
 
 
 class _MetadataDispatcher:
@@ -897,16 +934,18 @@ def _prompt_with_activity_rules(prompt: str, stage: CodexStage) -> str:
     return f"{prompt.rstrip()}\n\n{ACTIVITY_REPORTING_RULES}"
 
 
-def _finalize_activity_recorder(recorder: ActivityRecorder) -> dict[str, object]:
+def _finalize_activity_recorder(
+    recorder: ActivityRecorder, *, transcript_sha256: str | None = None
+) -> dict[str, object]:
     try:
-        return recorder.finalize()
+        return recorder.finalize(transcript_sha256=transcript_sha256)
     except Exception:
         return activity_diagnostics_unavailable()
 
 
 def _new_activity_diagnostics(path: Path) -> dict[str, object]:
     try:
-        recorder = ActivityRecorder(path)
+        recorder = ActivityRecorder(path, transcript_path=path.with_name("codex.jsonl"))
         return _finalize_activity_recorder(recorder)
     except Exception:
         return activity_diagnostics_unavailable()

@@ -21,6 +21,7 @@ from .agents.activity import (
     ACTIVITY_SOURCE,
     ACTIVITY_STAGE,
     activity_sidecar_path,
+    activity_transcript_sha256,
     is_safe_source_event_id,
     parse_activity_marker,
     validate_activity_summary,
@@ -1070,6 +1071,8 @@ def _public_activities(
         except OSError:
             return _activity_empty("unavailable", capture_state="partial")
         return _activity_empty("unavailable", capture_state="partial")
+    if not _activity_safe_file(transcript_path, config.state_dir, required_mode=None):
+        return _activity_empty("unavailable", capture_state="partial")
     try:
         payload = _read_activity_sidecar(sidecar)
         records = payload["events"]
@@ -1077,6 +1080,12 @@ def _public_activities(
         header = payload["header"]
         if not isinstance(records, list) or not isinstance(summary, dict):
             raise ValueError("invalid records")
+        transcript_sha256 = activity_transcript_sha256(transcript_path)
+        if (
+            transcript_sha256 is None
+            or summary["transcript_sha256"] != transcript_sha256
+        ):
+            raise ValueError("activity transcript binding")
         projected: list[dict[str, object]] = []
         for record in records:
             if not isinstance(record, dict):
@@ -1118,7 +1127,9 @@ def _public_activities(
         return _activity_empty("unavailable", capture_state="partial")
 
 
-def _activity_safe_file(path: Path, root: Path) -> bool:
+def _activity_safe_file(
+    path: Path, root: Path, *, required_mode: int | None = 0o600
+) -> bool:
     try:
         if not os.path.lexists(path):
             return False
@@ -1127,7 +1138,10 @@ def _activity_safe_file(path: Path, root: Path) -> bool:
             path.is_symlink()
             or not path.is_file()
             or info.st_nlink != 1
-            or info.st_mode & 0o777 != 0o600
+            or (
+                required_mode is not None
+                and info.st_mode & 0o777 != required_mode
+            )
         ):
             return False
         resolved_root = root.resolve(strict=True)
@@ -1208,6 +1222,7 @@ def _validate_activity_summary_record(value: dict[str, object]) -> None:
         "duplicate",
         "omitted",
         "truncated",
+        "transcript_sha256",
     }:
         raise ValueError("activity summary keys")
     if (
@@ -1224,6 +1239,10 @@ def _validate_activity_summary_record(value: dict[str, object]) -> None:
             raise ValueError("activity summary count")
     if not isinstance(value["truncated"], bool):
         raise ValueError("activity summary truncation")
+    if not isinstance(value["transcript_sha256"], str) or re.fullmatch(
+        r"[0-9a-f]{64}", value["transcript_sha256"]
+    ) is None:
+        raise ValueError("activity transcript binding")
     if value["recorded"] > ACTIVITY_MAX_CAPTURE:
         raise ValueError("activity summary bound")
     if value["omitted"] and not value["truncated"]:

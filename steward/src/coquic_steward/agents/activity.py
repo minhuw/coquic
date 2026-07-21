@@ -14,6 +14,7 @@ import threading
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
@@ -157,6 +158,19 @@ def activity_sidecar_path(transcript_path: Path) -> Path:
     return transcript_path.with_name("activities.jsonl")
 
 
+def activity_transcript_sha256(path: Path) -> str | None:
+    """Return a transcript digest without allowing binding failure to escape."""
+
+    digest = sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(64 * 1024):
+                digest.update(chunk)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
 class ActivityRecorder:
     """Append validated declarations and a final bounded summary.
 
@@ -172,8 +186,14 @@ class ActivityRecorder:
         stage: str = ACTIVITY_STAGE,
         max_events: int = ACTIVITY_MAX_CAPTURE,
         clock: Callable[[], datetime] | None = None,
+        transcript_path: Path | None = None,
     ) -> None:
         self.path = Path(path)
+        self.transcript_path = (
+            Path(transcript_path)
+            if transcript_path is not None
+            else self.path.with_name("codex.jsonl")
+        )
         self.stage = stage
         self.max_events = max(0, min(int(max_events), ACTIVITY_MAX_CAPTURE))
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -339,13 +359,18 @@ class ActivityRecorder:
             finally:
                 self._io_lock.release()
 
-    def finalize(self) -> dict[str, object]:
+    def finalize(self, *, transcript_sha256: str | None = None) -> dict[str, object]:
         if self._finalized:
             return self.diagnostics_dict()
         with self._io_lock:
             if self._finalized:
                 return self.diagnostics_dict()
             self._finalized = True
+            transcript_sha256 = transcript_sha256 or activity_transcript_sha256(
+                self.transcript_path
+            )
+            if transcript_sha256 is None:
+                self._write_failed = True
             summary = {
                 "record_type": "summary",
                 "schema_version": ACTIVITY_SCHEMA_VERSION,
@@ -355,6 +380,7 @@ class ActivityRecorder:
                 "duplicate": self._duplicate,
                 "omitted": self._omitted,
                 "truncated": self._truncated,
+                "transcript_sha256": transcript_sha256,
             }
             if self._header_written and not self._summary_written:
                 try:
@@ -414,6 +440,7 @@ __all__ = [
     "ActivityRecorder",
     "activity_diagnostics_unavailable",
     "activity_sidecar_path",
+    "activity_transcript_sha256",
     "decode_activity_marker",
     "is_safe_activity_id",
     "is_safe_source_event_id",

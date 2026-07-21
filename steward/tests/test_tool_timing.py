@@ -151,16 +151,18 @@ def test_hook_timing_marks_missing_post_without_zero_duration(config) -> None:
 def test_hook_timing_joins_retries_before_final_and_allows_reused_ids(config) -> None:
     task_id = "task-tool-timing-retry"
     _write_run(config, task_id, [_record(1, tool_id="tool_1", duration_ms=2)], retry=1)
-    transcript = _write_run(config, task_id, [_record(1, tool_id="tool_1", duration_ms=4)])
+    _write_run(config, task_id, [_record(1, tool_id="tool_1", duration_ms=4)], retry=2)
+    transcript = _write_run(config, task_id, [_record(1, tool_id="tool_1", duration_ms=8)])
 
     timing = _public_tool_timing(config, transcript)
 
-    assert timing["published_count"] == 2
+    assert timing["published_count"] == 3
     assert [(item["retry_ordinal"], item["sequence"], item["tool_call_id"]) for item in timing["records"]] == [
         (0, 1, "tool_1"),
         (1, 1, "tool_1"),
+        (2, 1, "tool_1"),
     ]
-    assert [item["duration_ms"] for item in timing["records"]] == [4, 2]
+    assert [item["duration_ms"] for item in timing["records"]] == [2, 4, 8]
 
 
 def test_hook_timing_orders_by_start_and_retains_out_of_order_completion(config) -> None:
@@ -243,3 +245,18 @@ def test_timing_value_model_rejects_credential_shaped_identity() -> None:
 
     with pytest.raises(ValueError):
         validate_tool_timing_record(record)
+
+
+def test_timing_rejects_credential_shaped_id_without_publication(config) -> None:
+    credential = "api_key_contract-seeded-secret"
+    transcript = _write_run(
+        config,
+        "task-tool-timing-credential-id",
+        [_record(1, tool_id=credential)],
+    )
+
+    timing = _public_tool_timing(config, transcript)
+
+    assert timing["availability"] == "unavailable"
+    assert timing["unavailable_reason"] == "invalid_evidence"
+    assert credential not in json.dumps(timing)

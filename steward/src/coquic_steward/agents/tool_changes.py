@@ -36,7 +36,9 @@ MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 SUPPORTED_TOOLS = frozenset({"Bash", "apply_patch"})
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:_\-]{0,127}\Z")
 _CREDENTIAL_ID_RE = re.compile(
-    r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,})"
+    r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}"
+    r"|(?:^|[._:-])(?:api[_-]?key|access[_-]?token|authorization|bearer|credential|password|secret|token)"
+    r"(?:[._:-]|$))"
 )
 TREE_RE = re.compile(r"[0-9a-f]{40,64}\Z")
 PRIVATE_FILE_MODE = 0o600

@@ -1926,17 +1926,19 @@ def _public_tool_timing(
         )
 
 
-def _tool_timing_run_ordinal(run: dict[str, object]) -> int:
+def _tool_timing_run_ordinal(
+    run: dict[str, object], *, final_retry_ordinal: int
+) -> int:
     name = Path(str(run["run_dir"])).name
     match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
-    return int(match.group(1)) if match is not None else 0
+    return int(match.group(1)) - 1 if match is not None else final_retry_ordinal
 
 
 def _tool_timing_public_record(
-    run: dict[str, object], record: ToolTimingRecord
+    record: ToolTimingRecord, *, retry_ordinal: int
 ) -> dict[str, object]:
     timing: dict[str, object] = {
-        "retry_ordinal": _tool_timing_run_ordinal(run),
+        "retry_ordinal": retry_ordinal,
         "sequence": record.start_sequence,
         "tool_call_id": record.tool_use_id,
         "tool_name": record.tool_name,
@@ -1969,6 +1971,12 @@ def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
     unavailable = 0
     omitted = 0
     states: list[str] = []
+    final_retry_ordinal = 0
+    for run in runs:
+        name = Path(str(run["run_dir"])).name
+        match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
+        if match is not None:
+            final_retry_ordinal = max(final_retry_ordinal, int(match.group(1)))
     for run_index, run in enumerate(runs):
         summary = run["summary"]
         state = str(run["state"])
@@ -1992,7 +2000,9 @@ def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
                 incomplete += 1
             records.append(
                 (
-                    _tool_timing_run_ordinal(run),
+                    _tool_timing_run_ordinal(
+                        run, final_retry_ordinal=final_retry_ordinal
+                    ),
                     validated.start_sequence,
                     run_index,
                     validated,
@@ -2012,9 +2022,8 @@ def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
     else:
         coverage = "complete"
     public_records = [
-        _tool_timing_public_record(run, record)
-        for _retry_ordinal, _sequence, run_index, record in selected
-        for run in [runs[run_index]]
+        _tool_timing_public_record(record, retry_ordinal=retry_ordinal)
+        for retry_ordinal, _sequence, _run_index, record in selected
     ]
     return {
         "availability": "available",

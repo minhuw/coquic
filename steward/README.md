@@ -485,8 +485,6 @@ beside `codex.jsonl` and `last-message.md`:
 tool-changes/
 ├── manifest.jsonl       paired PreToolUse/PostToolUse behavior records
 ├── summary.json         bounded completeness and reconciliation evidence
-├── inputs/              private, bounded tool_input values
-├── responses/           private, bounded tool_response values
 ├── patches/             canonical binary Git patches for tree transitions
 └── .objects/            private Git objects used only for replay
 ```
@@ -498,6 +496,9 @@ temporary index and object directory and never stages the real index, changes
 `HEAD`, or writes to the repository object database. A successful call with no
 tree change is recorded as `empty`; the canonical Git patch, rather than a
 shell command or `apply_patch` syntax, is the replay artifact.
+Tool input and response payloads are size-checked at the hook boundary but are
+not persisted; the manifest retains only metadata needed for pairing, timing,
+and tree reconciliation.
 
 Capture is complete only when the serial pre/post transitions replay to the
 final captured tree without gaps, overlaps, unmatched hooks, or external

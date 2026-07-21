@@ -14,6 +14,7 @@ import pytest
 from coquic_steward.agents.tool_changes import (
     LOCK_TIMEOUT_SECONDS,
     MAX_TOOL_INPUT_BYTES,
+    MAX_TOOL_RESPONSE_BYTES,
     ToolChangeCapture,
     handle_hook,
 )
@@ -144,7 +145,7 @@ def test_successful_no_change_is_empty(repo: Path, tmp_path: Path) -> None:
     assert record["patch"] is None
 
 
-def test_apply_patch_input_preserves_non_command_shape(repo: Path, tmp_path: Path) -> None:
+def test_hook_manifest_omits_tool_input_and_response(repo: Path, tmp_path: Path) -> None:
     capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
     value = {
         "hook_event_name": "PreToolUse",
@@ -153,16 +154,41 @@ def test_apply_patch_input_preserves_non_command_shape(repo: Path, tmp_path: Pat
         "cwd": str(repo),
         "tool_name": "apply_patch",
         "tool_use_id": "tool_1",
-        "tool_input": "*** Begin Patch\n*** End Patch",
+        "tool_input": "authorization=private-input",
     }
     handle_hook(json.dumps(value), context_path=capture.context_path)
     value["hook_event_name"] = "PostToolUse"
-    value["tool_response"] = {"success": True}
+    value["tool_response"] = {"success": True, "output": "private-response"}
     handle_hook(json.dumps(value), context_path=capture.context_path)
     capture.finalize()
     record = _manifest(capture.run_dir)[0]
-    input_path = capture.run_dir / str(record["input_artifact"]["path"])
-    assert json.loads(input_path.read_text(encoding="utf-8")) == value["tool_input"]
+    serialized = json.dumps(record, sort_keys=True)
+    assert "private-input" not in serialized
+    assert "private-response" not in serialized
+    assert not (capture.run_dir / "inputs").exists()
+    assert not (capture.run_dir / "responses").exists()
+
+
+def test_hook_response_remains_bounded_without_persistence(
+    repo: Path, tmp_path: Path
+) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    handle_hook(
+        _envelope(
+            repo,
+            "PostToolUse",
+            "tool_1",
+            response={"output": "x" * (MAX_TOOL_RESPONSE_BYTES + 1)},
+        ),
+        context_path=capture.context_path,
+    )
+
+    summary = capture.finalize()
+    assert summary.state == "partial"
+    assert "oversized_response" in summary.reasons
+    assert "missing_post" in summary.reasons
+    assert not (capture.run_dir / "responses").exists()
 
 
 def test_lock_contention_is_bounded(repo: Path, tmp_path: Path) -> None:
@@ -258,8 +284,9 @@ def test_hook_cli_reads_large_bounded_pipe_input(repo: Path, tmp_path: Path) -> 
     assert summary.state == "complete"
     assert summary.discovered == 1
     record = _manifest(capture.run_dir)[0]
-    input_path = capture.run_dir / str(record["input_artifact"]["path"])
-    assert json.loads(input_path.read_text(encoding="utf-8")) == {"command": command}
+    assert "input" not in record
+    assert "input_artifact" not in record
+    assert not (capture.run_dir / "inputs").exists()
 
     oversized = ToolChangeCapture.start(repo, tmp_path / "oversized-tool-changes")
     oversized_env = {

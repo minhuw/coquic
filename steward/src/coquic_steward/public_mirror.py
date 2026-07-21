@@ -113,7 +113,12 @@ WORKING_STATUSES = {
     TaskStatus.integrating,
 }
 PRIVATE_DATA_KEY_PARTS = (
+    "authorization",
+    "certificate",
+    "cookie",
+    "credential",
     "path",
+    "password",
     "prompt",
     "transcript",
     "worktree",
@@ -141,6 +146,14 @@ _TRAJECTORY_SENSITIVE_PATH_RE = re.compile(
     r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:secret|token|credential|password|private|api[_-]?key).*)"
 )
 _TRAJECTORY_CREDENTIAL_RE = TOOL_CHANGE_CREDENTIAL_VALUE_RE
+_TRAJECTORY_OBJECT_ID_RE = re.compile(
+    r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40,64}(?![0-9A-Fa-f])"
+)
+_PUBLIC_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?:api[_ -]?key|access[_ -]?token|authorization|"
+    r"client[_ -]?(?:certificate|secret)|credential|password|secret|"
+    r"set[-_ ]?cookie|cookie|session[_ -]?id|token)\b\s*[:=][^\r\n]*"
+)
 _TRAJECTORY_PRIVATE_MARKER_RE = re.compile(
     r"(?i)\bprivate[-_ ]+(?:prompt|context|session|turn|payload|response|input|secret|token|key)\b.*"
 )
@@ -2759,20 +2772,6 @@ def _validate_trajectory_manifest(
             raise _TrajectoryReadError("changed paths not canonical")
         if type(value.get("gap_before")) is not bool or type(value.get("overlap")) is not bool:
             raise _TrajectoryReadError("invalid continuity metadata")
-        if not isinstance(value.get("input"), dict):
-            raise _TrajectoryReadError("invalid private input metadata")
-        if status in _TRAJECTORY_COMPLETED_STATUSES and value.get("input_artifact") != value.get("input"):
-            raise _TrajectoryReadError("input metadata alias mismatch")
-        if status == "incomplete" and "input_artifact" in value and value.get("input_artifact") != value.get("input"):
-            raise _TrajectoryReadError("input metadata alias mismatch")
-        if status in _TRAJECTORY_COMPLETED_STATUSES and (
-            "response" not in value or "response_artifact" not in value
-        ):
-            raise _TrajectoryReadError("missing response metadata")
-        if value.get("response") is not None and not isinstance(value.get("response"), dict):
-            raise _TrajectoryReadError("invalid private response metadata")
-        if value.get("response_artifact") != value.get("response"):
-            raise _TrajectoryReadError("response metadata alias mismatch")
         completion = value.get("completion_sequence")
         if status in _TRAJECTORY_COMPLETED_STATUSES:
             if type(completion) is not int or completion <= 0 or completion > TOOL_CHANGE_MAX_COMPLETED_RECORDS:
@@ -2908,6 +2907,7 @@ def _trajectory_public_patch_line(config: StewardConfig, value: str) -> str:
     projected = _trajectory_redact_windows_paths(projected)
     projected = _trajectory_redact_urls(projected)
     projected = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", projected)
+    projected = _TRAJECTORY_OBJECT_ID_RE.sub("[redacted-object]", projected)
     projected = _TRAJECTORY_PRIVATE_MARKER_RE.sub("[redacted-private]", projected)
     return _trajectory_redact_private_assignment(projected)
 
@@ -3143,8 +3143,6 @@ def _public_trajectory_change(
             "paths": [
                 _trajectory_public_path(config, path) for path in record["paths"]
             ],
-            "base_tree": record["base_tree"],
-            "result_tree": record.get("result_tree"),
             "patch": patch_artifact,
             "error_category": error_category or "",
         },
@@ -4254,12 +4252,7 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
     )
     text = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", text)
     text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted-secret]", text)
-    text = re.sub(
-        r"(?i)(?:api[_-]?key|access[_-]?token|secret|password|authorization)"
-        r"\s*[:=](?:\s*[^\s,;]+)?",
-        "[redacted-secret]",
-        text,
-    )
+    text = _PUBLIC_CREDENTIAL_ASSIGNMENT_RE.sub("[redacted-secret]", text)
     text = re.sub(r"(?i)\bthread[_-][A-Za-z0-9._-]+", "[redacted-thread]", text)
     return text
 

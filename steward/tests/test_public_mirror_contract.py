@@ -672,8 +672,6 @@ def _trajectory_record(
         "base_tree_id": tree,
         "gap_before": False,
         "overlap": False,
-        "input": {"path": "inputs/private.json", "bytes": 20, "sha256": "b" * 64},
-        "input_artifact": {"path": "inputs/private.json", "bytes": 20, "sha256": "b" * 64},
         "completion_sequence": sequence,
         "completion_order": sequence,
         "completed_at": completed_at,
@@ -686,8 +684,6 @@ def _trajectory_record(
         "patch_path": patch["path"] if patch else None,
         "patch_size_bytes": patch["bytes"] if patch else 0,
         "patch_sha256": patch["sha256"] if patch else None,
-        "response": {"path": "responses/private.json"},
-        "response_artifact": {"path": "responses/private.json"},
         "error_category": None,
     }
     return record
@@ -755,11 +751,16 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
         task_id="task-20260713120010-trajectory",
         status=TaskStatus.succeeded,
     )
+    base_tree = "a" * 40
+    result_tree = "b" * 40
     patch_text = (
         "diff --git a/include/coquic/core.h b/include/coquic/core.h\n"
+        f"index {base_tree}..{result_tree} 100644\n"
         "+safe_call()\n"
         '+endpoint = "https://private.example.test/v1"\n'
         '+credential = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"\n'
+        "+Cookie: sessionid=private-cookie\n"
+        '+client_certificate="private-certificate"\n'
         '+prompt = "private prompt text that must not publish"\n'
         '+connect("ssh://deploy:topsecret@example.test/repository")\n'
         '+authenticate("glpat-0123456789abcdefghijklmnop")\n'
@@ -773,7 +774,6 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
         "bytes": len(patch_text.encode()),
         "sha256": sha256(patch_text.encode()).hexdigest(),
     }
-    result_tree = "b" * 40
     record = _trajectory_record(
         sequence=1,
         patch=patch_meta,
@@ -812,9 +812,18 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
     assert "topsecret" not in public_patch
     assert "ghp_" not in public_patch
     assert "glpat-" not in public_patch
+    assert "private-cookie" not in public_patch
+    assert "private-certificate" not in public_patch
+    assert base_tree not in public_patch
+    assert result_tree not in public_patch
+    assert "index [redacted-object]..[redacted-object] 100644" in public_patch
     assert r"C:\Users" not in public_patch
     assert r"C:\Users\alice\private\key.pem" not in public_patch
     assert "private prompt" not in public_patch
+    assert "base_tree" not in trajectory["changes"][0]
+    assert "result_tree" not in trajectory["changes"][0]
+    assert base_tree not in json.dumps(trajectory)
+    assert result_tree not in json.dumps(trajectory)
     assert "private-session" not in json.dumps(trajectory)
     assert "inputs/private.json" not in json.dumps(trajectory)
     assert "responses/private.json" not in json.dumps(trajectory)

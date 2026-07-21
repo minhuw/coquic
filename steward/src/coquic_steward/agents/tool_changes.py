@@ -320,10 +320,7 @@ class _Envelope:
     cwd: Path
     tool_name: str
     tool_use_id: str
-    tool_input: Any
     tool_response: Any | None
-    raw_input_bytes: bytes
-    raw_response_bytes: bytes | None
 
 
 def _utc_now() -> str:
@@ -391,17 +388,13 @@ def _parse_envelope(raw: bytes, expected_event: str | None = None) -> _Envelope:
         raise _CaptureFailure("unsupported_tool")
     if "tool_input" not in value:
         raise _CaptureFailure("invalid_envelope")
-    tool_input = value["tool_input"]
-    input_bytes = _bounded_json_bytes(tool_input, MAX_TOOL_INPUT_BYTES, "oversized_input")
+    _bounded_json_bytes(value["tool_input"], MAX_TOOL_INPUT_BYTES, "oversized_input")
     response = None
-    response_bytes = None
     if event == "PostToolUse":
         if "tool_response" not in value:
             raise _CaptureFailure("invalid_envelope")
         response = value["tool_response"]
-        response_bytes = _bounded_json_bytes(
-            response, MAX_TOOL_RESPONSE_BYTES, "oversized_response"
-        )
+        _bounded_json_bytes(response, MAX_TOOL_RESPONSE_BYTES, "oversized_response")
     return _Envelope(
         event=event,
         session_id=session_id,
@@ -409,10 +402,7 @@ def _parse_envelope(raw: bytes, expected_event: str | None = None) -> _Envelope:
         cwd=cwd,
         tool_name=tool_name,
         tool_use_id=tool_use_id,
-        tool_input=tool_input,
         tool_response=response,
-        raw_input_bytes=input_bytes,
-        raw_response_bytes=response_bytes,
     )
 
 
@@ -657,8 +647,6 @@ class ToolChangeCapture:
         self.pending_path = self.run_dir / "pending.json"
         self.state_path = self.run_dir / "state.json"
         self.degradation_path = self.run_dir / ".degraded"
-        self.input_dir = self.run_dir / "inputs"
-        self.response_dir = self.run_dir / "responses"
         self.patch_dir = self.run_dir / "patches"
         self.object_dir = self.run_dir / ".objects"
         self._closed = False
@@ -751,8 +739,6 @@ class ToolChangeCapture:
         instance.pending_path = resolved_run_dir / "pending.json"
         instance.state_path = resolved_run_dir / "state.json"
         instance.degradation_path = resolved_run_dir / ".degraded"
-        instance.input_dir = resolved_run_dir / "inputs"
-        instance.response_dir = resolved_run_dir / "responses"
         instance.patch_dir = resolved_run_dir / "patches"
         instance.object_dir = resolved_run_dir / ".objects"
         instance._closed = False
@@ -866,18 +852,6 @@ class ToolChangeCapture:
         if expected_turn is not None and envelope.turn_id != expected_turn:
             raise _CaptureFailure("wrong_context")
 
-    def _persist_behavior(self, directory: Path, sequence: int, tool_id: str, data: bytes) -> dict[str, Any]:
-        # The file name contains only validated identity values.  The payload is
-        # private and is never copied to public diagnostics.
-        name = f"{sequence}-{tool_id}.json"
-        path = directory / name
-        _atomic_write(path, data)
-        return {
-            "path": f"{directory.name}/{name}",
-            "bytes": len(data),
-            "sha256": _hash_bytes(data),
-        }
-
     def _snapshot(self) -> str:
         snapshot = _GitSnapshot(
             self.cwd, self.run_dir, object_directory=self.object_dir
@@ -932,19 +906,15 @@ class ToolChangeCapture:
                     state["reasons"] = _append_reason(state, "overlap_detected")
                     for existing in pending.values():
                         existing["overlap"] = True
-                input_meta = self._persist_behavior(self.input_dir, sequence, envelope.tool_use_id, envelope.raw_input_bytes)
                 record = {
                     "tool_use_id": envelope.tool_use_id,
                     "tool_name": envelope.tool_name,
-                    "session_id": envelope.session_id,
-                    "turn_id": envelope.turn_id,
                     "start_sequence": sequence,
                     "start_monotonic_ns": start_mono_ns,
                     "started_at": started_at,
                     "base_tree": current_tree,
                     "gap_before": gap,
                     "overlap": bool(pending),
-                    "input": input_meta,
                 }
                 pending[envelope.tool_use_id] = record
                 state["pending"] = pending
@@ -985,14 +955,6 @@ class ToolChangeCapture:
                     snapshot.close()
                 completion_sequence = int(state.get("next_completion_sequence", 0)) + 1
                 state["next_completion_sequence"] = completion_sequence
-                response_meta = None
-                if envelope.raw_response_bytes is not None:
-                    response_meta = self._persist_behavior(
-                        self.response_dir,
-                        int(record["start_sequence"]),
-                        envelope.tool_use_id,
-                        envelope.raw_response_bytes,
-                    )
                 success = _response_success(envelope.tool_response)
                 changed = bool(patch)
                 status = "captured" if success and changed else "empty" if success else "failed"
@@ -1027,9 +989,6 @@ class ToolChangeCapture:
                     "patch_path": patch_meta["path"] if patch_meta else None,
                     "patch_size_bytes": patch_meta["bytes"] if patch_meta else 0,
                     "patch_sha256": patch_meta["sha256"] if patch_meta else None,
-                    "response": response_meta,
-                    "response_artifact": response_meta,
-                    "input_artifact": record["input"],
                     "gap_before": bool(record.get("gap_before")),
                     "error_category": None if success else "tool_failed",
                 }
@@ -1081,8 +1040,6 @@ class ToolChangeCapture:
                                     "patch_path": None,
                                     "patch_size_bytes": 0,
                                     "patch_sha256": None,
-                                    "response": None,
-                                    "response_artifact": None,
                                     "error_category": "missing_post",
                                 },
                             )
@@ -1243,8 +1200,8 @@ ToolChangeRecorder = ToolChangeCapture
 HookCaptureContext = ToolChangeCapture
 
 # Public-mirror readers may import these contracts without reaching into the
-# capture implementation.  The captured inputs, responses, and context files
-# remain private; these exports only describe the bounded evidence layout.
+# capture implementation. These exports only describe the bounded evidence
+# layout; tool input and response payloads are validated but never persisted.
 TOOL_CHANGE_SCHEMA_VERSION = SCHEMA_VERSION
 TOOL_CHANGE_MAX_COMPLETED_RECORDS = MAX_COMPLETED_RECORDS
 TOOL_CHANGE_MAX_DURATION_MS = MAX_DURATION_MS

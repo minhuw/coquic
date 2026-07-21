@@ -105,6 +105,9 @@ MIRROR_TELEMETRY_SIDECAR_BYTES = TELEMETRY_MAX_SIDECAR_BYTES
 MODEL_TELEMETRY_SCHEMA_VERSION = 1
 MODEL_TELEMETRY_RECENT_DAYS = 400
 _TELEMETRY_NAME_RE = re.compile(r"telemetry(?:\.retry-([1-9][0-9]*))?\.json$")
+_TELEMETRY_UNAVAILABLE_NAME_RE = re.compile(
+    r"telemetry\.retry-([1-9][0-9]*)\.unavailable-([1-9][0-9]*)\.json$"
+)
 _CODEX_TRANSCRIPT_RE = re.compile(r"codex(?:\.retry-([1-9][0-9]*))?\.jsonl$")
 _RawTranscriptArtifacts = dict[str, dict[str, object]]
 WORKING_STATUSES = {
@@ -150,9 +153,11 @@ _TRAJECTORY_OBJECT_ID_RE = re.compile(
     r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40,64}(?![0-9A-Fa-f])"
 )
 _PUBLIC_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(?:api[_ -]?key|access[_ -]?token|authorization|"
+    r"(?i)(?P<prefix>(?<![A-Za-z0-9_])(?P<key_quote>[\"']?)"
+    r"(?:api[_ -]?key|access[_ -]?token|authorization|"
     r"client[_ -]?(?:certificate|secret)|credential|password|secret|"
-    r"set[-_ ]?cookie|cookie|session[_ -]?id|token)\b\s*[:=][^\r\n]*"
+    r"set[-_ ]?cookie|cookie|session[_ -]?id|token)\b(?P=key_quote)\s*[:=]\s*)"
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n,;}]+)"
 )
 _TRAJECTORY_PRIVATE_MARKER_RE = re.compile(
     r"(?i)\bprivate[-_ ]+(?:prompt|context|session|turn|payload|response|input|secret|token|key)\b.*"
@@ -1091,6 +1096,9 @@ def _read_telemetry_for_transcript(
     values: list[dict[str, object]] = []
     issues: list[dict[str, object]] = []
     for path in sorted(candidates, key=_telemetry_sort_key):
+        if _TELEMETRY_UNAVAILABLE_NAME_RE.fullmatch(path.name) is not None:
+            issues.append({"category": "archive_unavailable", "count": 1})
+            continue
         if _TELEMETRY_NAME_RE.fullmatch(path.name) is None:
             issues.append({"category": "malformed_sidecar_name", "count": 1})
             continue
@@ -1260,7 +1268,8 @@ def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, obje
                 len(item.get("turns", []))
                 for item in available
                 if isinstance(item.get("turns"), list)
-            ) > MIRROR_TELEMETRY_TURNS,
+            ) > MIRROR_TELEMETRY_TURNS
+            or any(item.get("turns_truncated") is True for item in available),
             "timing": {
                 "first_agent_message_completed_ms": min(
                     (
@@ -1548,6 +1557,9 @@ def _scan_telemetry_tree(
     except (OSError, RuntimeError):
         issues.append({"category": "directory_unavailable", "count": 1})
     for path in sorted(sidecar_paths, key=str):
+        if _TELEMETRY_UNAVAILABLE_NAME_RE.fullmatch(path.name) is not None:
+            issues.append({"category": "archive_unavailable", "count": 1})
+            continue
         if _TELEMETRY_NAME_RE.fullmatch(path.name) is None:
             issues.append({"category": "malformed_sidecar_name", "count": 1})
             continue

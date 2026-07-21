@@ -34,6 +34,7 @@ from coquic_steward.public_mirror import (
     MIRROR_TRAJECTORY_AGGREGATE_PATCH_BYTES,
     MIRROR_TRAJECTORY_PATCH_BYTES,
     _public_change_trajectory,
+    _trajectory_public_patch_line,
     _trajectory_redacted_patch,
     model_telemetry_payload,
     public_mirror_digest,
@@ -68,6 +69,38 @@ PRIVATE_MARKERS = (
     "api_key",
     "Authorization: Bearer",
 )
+
+
+@pytest.mark.parametrize(
+    ("line", "secret", "safe_suffix"),
+    [
+        (
+            '+{"client_certificate":"private-certificate","enabled":true}',
+            "private-certificate",
+            ',"enabled":true}',
+        ),
+        (
+            '+{"Cookie":"auth=private-cookie","enabled":true}',
+            "private-cookie",
+            ',"enabled":true}',
+        ),
+        (
+            '+client_certificate = "private-certificate"; safe_call()',
+            "private-certificate",
+            "; safe_call()",
+        ),
+    ],
+)
+def test_trajectory_patch_redacts_quoted_and_unquoted_sensitive_assignments(
+    config: StewardConfig, line: str, secret: str, safe_suffix: str
+) -> None:
+    projected = _trajectory_public_patch_line(config, line)
+
+    assert secret not in projected
+    assert "[redacted-secret]" in projected
+    assert safe_suffix in projected
+
+
 ARTIFACT_REQUIRED = {
     "availability",
     "mode",

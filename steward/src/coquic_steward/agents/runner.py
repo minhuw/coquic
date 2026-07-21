@@ -689,10 +689,18 @@ def _archive_retry_artifacts(
         try:
             telemetry_path.replace(archived_telemetry_path)
         except OSError:
-            # Telemetry is observational.  Leave the current file in place so
-            # the next invocation can atomically replace it; public readers
-            # will mark any duplicate invocation evidence conservatively.
             archived["telemetry_archive_failed"] = True
+            preserved_telemetry = _preserve_retry_artifact(
+                telemetry_path, archived_telemetry_path
+            )
+            if preserved_telemetry is None:
+                archived["telemetry_preserve_failed"] = True
+                if _mark_telemetry_archive_unavailable(archived_telemetry_path):
+                    archived["telemetry_unavailable_marked"] = True
+                else:
+                    archived["telemetry_unavailable_mark_failed"] = True
+            else:
+                archived["telemetry_preserved"] = True
     tool_changes = result.transcript_path.with_name("tool-changes")
     if archive_tool_changes and tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
@@ -767,6 +775,33 @@ def _preserve_retry_artifact(source: Path, archive_path: Path) -> Path | None:
         except OSError:
             continue
     return None
+
+
+def _mark_telemetry_archive_unavailable(archive_path: Path) -> bool:
+    payload = b'{"availability":"unavailable","reason":"archive_failed"}\n'
+    for suffix in range(1, _RETRY_PRESERVATION_LIMIT + 1):
+        candidate = archive_path.with_name(
+            f"{archive_path.stem}.unavailable-{suffix}{archive_path.suffix}"
+        )
+        descriptor: int | None = None
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(candidate, flags, 0o600)
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+            return True
+        except FileExistsError:
+            continue
+        except OSError:
+            return False
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    return False
 
 
 def _invalidate_activity_sidecar(path: Path) -> bool:
@@ -1110,6 +1145,16 @@ def _new_telemetry_recorder(
             catalog = PriceCatalog.from_path(selected)
         except Exception:
             catalog_error = True
+    clock_error = False
+    monotonic_ns = time.monotonic_ns
+    try:
+        started_monotonic_ns = int(monotonic_ns())
+        if started_monotonic_ns < 0:
+            raise ValueError("negative monotonic timestamp")
+    except Exception:
+        clock_error = True
+        started_monotonic_ns = 0
+        monotonic_ns = _unavailable_monotonic_ns
     recorder = TelemetryRecorder(
         telemetry_sidecar_path(transcript_path),
         task_id=task_id,
@@ -1121,11 +1166,18 @@ def _new_telemetry_recorder(
         billing_mode=config.telemetry.billing_mode,
         catalog=catalog,
         started_at=datetime.now(timezone.utc),
-        started_monotonic_ns=time.monotonic_ns(),
+        started_monotonic_ns=started_monotonic_ns,
+        monotonic_ns=monotonic_ns,
     )
     if catalog_error:
         recorder.add_issue("price_catalog_unavailable")
+    if clock_error:
+        recorder.add_issue("telemetry_clock_unavailable")
     return recorder
+
+
+def _unavailable_monotonic_ns() -> int:
+    return 0
 
 
 def _finalize_telemetry(

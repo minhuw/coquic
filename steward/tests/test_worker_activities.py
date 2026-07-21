@@ -8,8 +8,18 @@ from coquic_steward.agents.activity import (
     ActivityRecorder,
     parse_activity_marker,
 )
-from coquic_steward.agents.runner import CodexRunner, _prompt_with_activity_rules
-from coquic_steward.core.models import CodexStage, TaskKind, TaskSpec, WorkerKind
+from coquic_steward.agents.runner import (
+    CodexRunner,
+    _archive_retry_artifacts,
+    _prompt_with_activity_rules,
+)
+from coquic_steward.core.models import (
+    CodexStage,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+    WorkerResult,
+)
 from coquic_steward.public_mirror import _public_activities, _render_agent_message_item
 from coquic_steward.storage import TaskStore
 
@@ -123,6 +133,49 @@ def test_code_runner_injects_rules_and_records_marker(config, tmp_path: Path) ->
     assert records[1]["activity"] == "edit"
     assert result.diagnostics["activities"]["recorded"] == 1
     assert result.transcript_path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_retry_archive_failure_cannot_publish_previous_activity(config) -> None:
+    transcript = config.transcripts_dir / "task" / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    sidecar = transcript.with_name("activities.jsonl")
+    recorder = ActivityRecorder(sidecar)
+    assert recorder.observe(
+        _event(
+            "old_1",
+            'STEWARD_ACTIVITY {"activity":"report","summary":"Old attempt"}',
+        )
+    )
+    recorder.finalize()
+    transcript.with_name("activities.retry-1.jsonl").mkdir()
+    result = WorkerResult(
+        completed=False,
+        command=[],
+        cwd=config.repo_root,
+        exit_code=1,
+        transcript_path=transcript,
+        last_message_path=transcript.with_name("last-message.md"),
+    )
+
+    archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
+
+    assert archived["activities_archive_failed"] is True
+    assert Path(str(archived["activities_preserved_path"])).exists()
+    assert not sidecar.exists()
+    assert _public_activities(config, transcript)["availability"] == "not_produced"
+
+    current = ActivityRecorder(sidecar)
+    assert current.observe(
+        _event(
+            "new_1",
+            'STEWARD_ACTIVITY {"activity":"edit","summary":"New attempt"}',
+        )
+    )
+    current.finalize()
+    public = _public_activities(config, transcript)
+    assert public["availability"] == "available"
+    assert [event["summary"] for event in public["events"]] == ["New attempt"]
 
 
 def test_non_code_prompts_do_not_receive_activity_rules() -> None:

@@ -561,6 +561,14 @@ def _archive_retry_artifacts(
             activities_path.replace(archived_activities_path)
         except OSError:
             archived["activities_archive_failed"] = True
+            preserved_activities = _preserve_retry_artifact(
+                activities_path, archived_activities_path
+            )
+            if preserved_activities is None:
+                if not _invalidate_activity_sidecar(activities_path):
+                    archived["activities_invalidate_failed"] = True
+            else:
+                archived["activities_preserved_path"] = str(preserved_activities)
         else:
             archived["activities_path"] = str(archived_activities_path)
     tool_changes = result.transcript_path.with_name("tool-changes")
@@ -592,6 +600,37 @@ def _retry_artifact_path(path: Path, retry_number: int) -> Path:
 
 def _retry_directory_path(path: Path, retry_number: int) -> Path:
     return path.with_name(f"{path.name}.retry-{retry_number}")
+
+
+def _preserve_retry_artifact(source: Path, archive_path: Path) -> Path | None:
+    for suffix in range(1, _RETRY_PRESERVATION_LIMIT + 1):
+        candidate = archive_path.with_name(
+            f"{archive_path.stem}.unavailable-{suffix}{archive_path.suffix}"
+        )
+        try:
+            if os.path.lexists(candidate):
+                continue
+            source.replace(candidate)
+            return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _invalidate_activity_sidecar(path: Path) -> bool:
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError:
+        pass
+    try:
+        if path.is_symlink() or not path.is_file():
+            return True
+        with path.open("wb"):
+            pass
+        return True
+    except OSError:
+        return False
 
 
 def _move_retry_directory(source: Path, destination: Path) -> bool:

@@ -334,6 +334,49 @@ $COQUIC_HOME/steward/
 Keep this state directory private. The public mirror is intentionally limited
 and redacted, but local prompts and transcripts are not public artifacts.
 
+### Codex change trajectories
+
+Code-stage Codex runs may also contain a private `tool-changes/` directory
+beside `codex.jsonl` and `last-message.md`:
+
+```text
+tool-changes/
+├── manifest.jsonl       paired PreToolUse/PostToolUse behavior records
+├── summary.json         bounded completeness and reconciliation evidence
+├── inputs/              private, bounded tool_input values
+├── responses/           private, bounded tool_response values
+└── patches/             canonical binary Git patches for tree transitions
+```
+
+The recorder is evidence-only. It snapshots the worktree at synchronous
+`PreToolUse` and `PostToolUse` boundaries for the supported `Bash` and
+`apply_patch` tools, matching records by Codex `tool_use_id`. It uses a private
+temporary index and object directory and never stages the real index, changes
+`HEAD`, or writes to the repository object database. A successful call with no
+tree change is recorded as `empty`; the canonical Git patch, rather than a
+shell command or `apply_patch` syntax, is the replay artifact.
+
+Capture is complete only when the serial pre/post transitions replay to the
+final captured tree without gaps, overlaps, unmatched hooks, or external
+mutations. Missing or untrusted hooks, unsupported or specialized tools,
+background writers, and recorder failures are reported as bounded
+`partial`/`unavailable` evidence and never change Codex output, retry
+classification, or task state. The final attempt patch remains authoritative
+for the worktree result.
+
+Project hooks live in `.codex/hooks.json`. Codex normally asks the operator to
+review and trust project hooks; complete that `/hooks` trust review before a
+code run when trajectory evidence is required. Steward does not edit the
+operator's `~/.codex` configuration and does not pass
+`--dangerously-bypass-hook-trust`. If the trust review is skipped, the run
+still proceeds and its diagnostics expose `unavailable`/`not_produced`
+trajectory evidence only.
+
+Each transient Codex retry archives its complete trajectory as
+`tool-changes.retry-<n>/` alongside the matching transcript and last-message
+artifacts. A resumed process starts a fresh private capture context and
+sequence space; the unsuffixed directory always belongs to the final attempt.
+
 ## Troubleshooting
 
 ### The site is stale or has no snapshot

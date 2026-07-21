@@ -13,6 +13,7 @@ from pathlib import Path
 from ..core.config import StewardConfig
 from ..core.models import CodexStage, TaskRecord, WorkerResult
 from .diagnostics import diagnostics_for_result
+from .tool_changes import ToolChangeCapture
 
 
 CODEX_RETRY_DELAYS_SECONDS = (5.0, 20.0)
@@ -222,6 +223,20 @@ class CodexRunner:
             last_message_path=last_message_path,
             final_message=message,
         )
+        diagnostics_json = diagnostics.model_dump(mode="json")
+        if stage == CodexStage.code:
+            capture_summary = transcript_path.parent / "tool-changes" / "summary.json"
+            try:
+                if capture_summary.exists():
+                    value = json.loads(capture_summary.read_text(encoding="utf-8"))
+                    if isinstance(value, dict):
+                        diagnostics_json["tool_change_capture"] = _bounded_capture_diagnostics(value)
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                diagnostics_json["tool_change_capture"] = {
+                    "schema_version": 1,
+                    "state": "unavailable",
+                    "reasons": ["context_unavailable"],
+                }
         return WorkerResult(
             completed=False,
             command=args,
@@ -234,7 +249,7 @@ class CodexRunner:
             stage=stage,
             model=model,
             reasoning_effort=reasoning_effort,
-            diagnostics=diagnostics.model_dump(mode="json"),
+            diagnostics=diagnostics_json,
         )
 
     def _args(
@@ -289,24 +304,56 @@ class CodexRunner:
         model: str | None,
         reasoning_effort: str | None,
     ) -> WorkerResult:
+        capture: ToolChangeCapture | None = None
+        if stage == CodexStage.code:
+            try:
+                capture = ToolChangeCapture.start(
+                    cwd, transcript_path.parent / "tool-changes"
+                )
+            except Exception:
+                # Capture is observational and must never prevent Codex from
+                # starting.  The runner still reports unavailable evidence.
+                capture = ToolChangeCapture.unavailable(
+                    cwd, transcript_path.parent / "tool-changes"
+                )
+        child_env = None
+        if capture is not None:
+            child_env = os.environ.copy()
+            child_env["COQUIC_STEWARD_HOOK_CONTEXT"] = str(capture.context_path)
+        elif stage != CodexStage.code and "COQUIC_STEWARD_HOOK_CONTEXT" in os.environ:
+            # A caller's ambient value must not accidentally enable capture for
+            # planning, review, signal, or commit-message processes.
+            child_env = os.environ.copy()
+            child_env.pop("COQUIC_STEWARD_HOOK_CONTEXT", None)
         # CodexRunner builds args as an argv list and never enables a shell.
-        proc = subprocess.Popen(  # nosec B603
-            args,
-            cwd=cwd,
-            shell=False,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
-        stdout = _communicate_streaming(
-            proc,
-            prompt,
-            transcript_path,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            proc = subprocess.Popen(  # nosec B603
+                args,
+                cwd=cwd,
+                env=child_env,
+                shell=False,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except OSError:
+            if capture is not None:
+                capture.finalize()
+            raise
+        try:
+            stdout = _communicate_streaming(
+                proc,
+                prompt,
+                transcript_path,
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            capture_diagnostics = (
+                capture.finalize().diagnostics_dict() if capture is not None else None
+            )
         final_message = (
             last_message_path.read_text(encoding="utf-8")
             if last_message_path.exists()
@@ -333,6 +380,8 @@ class CodexRunner:
                 "reasoning_effort": reasoning_effort,
             }
         )
+        if capture_diagnostics is not None:
+            diagnostics_json["tool_change_capture"] = capture_diagnostics
         return WorkerResult(
             completed=proc.returncode == 0,
             command=args,
@@ -348,6 +397,25 @@ class CodexRunner:
             reasoning_effort=reasoning_effort,
             diagnostics=diagnostics_json,
         )
+
+
+def _bounded_capture_diagnostics(value: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        "schema_version",
+        "state",
+        "completeness",
+        "discovered",
+        "captured",
+        "empty",
+        "failed",
+        "incomplete",
+        "gaps",
+        "overlaps",
+        "omitted",
+        "reasons",
+        "reason_categories",
+    }
+    return {key: value[key] for key in allowed if key in value}
 
 
 def _transient_codex_failure_reason(result: WorkerResult) -> str | None:
@@ -382,11 +450,22 @@ def _archive_retry_artifacts(
         last_message_path = _retry_artifact_path(result.last_message_path, retry_number)
         result.last_message_path.replace(last_message_path)
         archived["last_message_path"] = str(last_message_path)
+    tool_changes = result.transcript_path.with_name("tool-changes")
+    if tool_changes.exists():
+        archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
+        try:
+            tool_changes.replace(archived_tool_changes)
+        except OSError:
+            pass
     return archived
 
 
 def _retry_artifact_path(path: Path, retry_number: int) -> Path:
     return path.with_name(f"{path.stem}.retry-{retry_number}{path.suffix}")
+
+
+def _retry_directory_path(path: Path, retry_number: int) -> Path:
+    return path.with_name(f"{path.name}.retry-{retry_number}")
 
 
 def _with_retry_diagnostics(

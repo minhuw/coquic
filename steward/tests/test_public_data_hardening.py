@@ -8,7 +8,11 @@ import pytest
 
 from coquic_steward.core.config import PublicMirrorConfig
 from coquic_steward.core.models import Event, SignalItem
-from coquic_steward.public_mirror import public_mirror_payload, write_public_mirror
+from coquic_steward.public_mirror import (
+    _public_change_trajectory,
+    public_mirror_payload,
+    write_public_mirror,
+)
 from coquic_steward.storage import TaskStore
 
 
@@ -120,3 +124,24 @@ def test_public_planner_history_is_bounded_and_sanitized(config) -> None:
     assert planner[0]["artifacts"]["transcript"]["availability"] == "available"
     assert "private-thread" not in json.dumps(planner)
     assert str(config.state_dir) not in json.dumps(planner)
+
+
+def test_malformed_private_trajectory_fails_closed_without_private_text(config) -> None:
+    transcript = config.transcripts_dir / "task-private" / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("worker\n", encoding="utf-8")
+    run_dir = transcript.parent / "tool-changes"
+    run_dir.mkdir()
+    (run_dir / "summary.json").write_text(
+        '{"schema_version":1,"state":"complete","completeness":"complete",'
+        '"reasons":["private prompt /home/private/key.pem"],'
+        '"reason_categories":[],"discovered":1}',
+        encoding="utf-8",
+    )
+
+    trajectory = _public_change_trajectory(config, transcript)
+    assert trajectory["availability"] == "unavailable"
+    assert trajectory["completeness"] == "unavailable"
+    serialized = json.dumps(trajectory)
+    assert "private prompt" not in serialized
+    assert "/home/private" not in serialized

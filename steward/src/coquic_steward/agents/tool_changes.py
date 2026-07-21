@@ -1097,6 +1097,41 @@ class ToolChangeCapture:
 ToolChangeRecorder = ToolChangeCapture
 HookCaptureContext = ToolChangeCapture
 
+# Public-mirror readers may import these contracts without reaching into the
+# capture implementation.  The captured inputs, responses, and context files
+# remain private; these exports only describe the bounded evidence layout.
+TOOL_CHANGE_SCHEMA_VERSION = SCHEMA_VERSION
+TOOL_CHANGE_MAX_COMPLETED_RECORDS = MAX_COMPLETED_RECORDS
+TOOL_CHANGE_MAX_MANIFEST_BYTES = MAX_MANIFEST_BYTES
+TOOL_CHANGE_SUPPORTED_TOOLS = SUPPORTED_TOOLS
+TOOL_CHANGE_SAFE_ID_RE = SAFE_ID_RE
+TOOL_CHANGE_TREE_RE = TREE_RE
+TOOL_CHANGE_ERROR_CATEGORIES = _ERROR_CATEGORIES
+
+
+def tool_change_run_directories(transcript_path: Path | None) -> tuple[Path, ...]:
+    """Return the final and retry evidence directories for a worker run.
+
+    This helper performs no file reads.  Callers must still validate the
+    returned paths and their contents before opening private evidence.
+    """
+
+    if transcript_path is None:
+        return ()
+    parent = Path(transcript_path).parent
+    final = parent / "tool-changes"
+    candidates: list[tuple[int, Path]] = []
+    try:
+        if os.path.lexists(final):
+            candidates.append((0, final))
+        for path in parent.iterdir():
+            match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", path.name)
+            if match is not None:
+                candidates.append((int(match.group(1)), path))
+    except OSError:
+        return (final,)
+    return tuple(path for _, path in sorted(candidates, key=lambda item: item[0]))
+
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1298,9 +1333,17 @@ __all__ = [
     "HookSummary",
     "ToolChangeCapture",
     "ToolChangeRecorder",
+    "TOOL_CHANGE_ERROR_CATEGORIES",
+    "TOOL_CHANGE_MAX_COMPLETED_RECORDS",
+    "TOOL_CHANGE_MAX_MANIFEST_BYTES",
+    "TOOL_CHANGE_SAFE_ID_RE",
+    "TOOL_CHANGE_SCHEMA_VERSION",
+    "TOOL_CHANGE_SUPPORTED_TOOLS",
+    "TOOL_CHANGE_TREE_RE",
     "handle_hook",
     "main",
     "parse_hook_envelope",
     "process_hook",
     "reconcile_tool_changes",
+    "tool_change_run_directories",
 ]

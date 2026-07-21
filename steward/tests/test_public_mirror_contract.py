@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -488,6 +489,229 @@ def test_rich_detail_and_public_records_are_schema_shaped_and_redacted(
     serialized = json.dumps({"payload": payload, "detail": detail}, sort_keys=True)
     for marker in PRIVATE_MARKERS:
         assert marker not in serialized
+
+
+def _trajectory_record(
+    *,
+    sequence: int,
+    status: str = "captured",
+    patch: dict[str, object] | None = None,
+    completed_at: str = "2026-07-13T12:00:01+00:00",
+) -> dict[str, object]:
+    tree = "a" * 40
+    record: dict[str, object] = {
+        "tool_use_id": f"tool_{sequence}",
+        "tool_name": "apply_patch",
+        "session_id": "private-session",
+        "turn_id": "private-turn",
+        "start_sequence": sequence,
+        "start_order": sequence,
+        "start_monotonic_ns": sequence,
+        "started_at": "2026-07-13T12:00:00+00:00",
+        "base_tree": tree,
+        "base_tree_id": tree,
+        "gap_before": False,
+        "overlap": False,
+        "input": {"path": "inputs/private.json", "bytes": 20, "sha256": "b" * 64},
+        "input_artifact": {"path": "inputs/private.json", "bytes": 20, "sha256": "b" * 64},
+        "completion_sequence": sequence,
+        "completion_order": sequence,
+        "completed_at": completed_at,
+        "duration_ms": 1,
+        "result_tree": tree,
+        "result_tree_id": tree,
+        "status": status,
+        "paths": ["include/coquic/core.h"] if status == "captured" else [],
+        "patch": patch,
+        "patch_path": patch["path"] if patch else None,
+        "patch_size_bytes": patch["bytes"] if patch else 0,
+        "patch_sha256": patch["sha256"] if patch else None,
+        "response": {"path": "responses/private.json"},
+        "response_artifact": {"path": "responses/private.json"},
+        "error_category": None,
+    }
+    return record
+
+
+def _write_trajectory_fixture(
+    config: StewardConfig,
+    task_id: str,
+    *,
+    records: list[dict[str, object]],
+    retry: bool = False,
+) -> Path:
+    transcript = _write(
+        config.transcripts_dir / task_id / "worker" / "codex.jsonl", "worker\n"
+    )
+    _write(config.transcripts_dir / task_id / "worker" / "last-message.md", "done\n")
+    run_dir = transcript.parent / ("tool-changes.retry-1" if retry else "tool-changes")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    captured = sum(item["status"] == "captured" for item in records)
+    empty = sum(item["status"] == "empty" for item in records)
+    failed = sum(item["status"] == "failed" for item in records)
+    tree = "a" * 40
+    _write(
+        run_dir / "summary.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "complete",
+                "completeness": "complete",
+                "discovered": len(records),
+                "captured": captured,
+                "empty": empty,
+                "failed": failed,
+                "incomplete": 0,
+                "gaps": 0,
+                "overlaps": 0,
+                "omitted": 0,
+                "reasons": [],
+                "reason_categories": [],
+                "run_start_tree": tree,
+                "final_tree": tree,
+                "replayed_tree": tree,
+                "run_start_tree_id": tree,
+                "final_tree_id": tree,
+                "replayed_tree_id": tree,
+            }
+        ),
+    )
+    _write(
+        run_dir / "manifest.jsonl",
+        "".join(json.dumps(item, sort_keys=True) + "\n" for item in records),
+    )
+    return transcript
+
+
+def test_worker_change_trajectory_is_bounded_redacted_and_additive(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    store = TaskStore(config.db_path)
+    task = _add_task(
+        store,
+        task_id="task-20260713120010-trajectory",
+        status=TaskStatus.succeeded,
+    )
+    patch_text = "diff --git a/include/coquic/core.h b/include/coquic/core.h\n+safe\n"
+    patch_path = config.transcripts_dir / task.id / "worker" / "tool-changes" / "patches" / "1-tool_1.patch"
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(patch_text, encoding="utf-8")
+    patch_meta = {
+        "path": "patches/1-tool_1.patch",
+        "bytes": len(patch_text.encode()),
+        "sha256": sha256(patch_text.encode()).hexdigest(),
+    }
+    record = _trajectory_record(sequence=1, patch=patch_meta)
+    transcript = _write_trajectory_fixture(config, task.id, records=[record])
+    # The fixture writer uses the same transcript path and run directory.
+    store.begin_iteration(
+        task.id,
+        0,
+        "Worker attempt",
+        worker_name="worker",
+        worker_prompt_path=None,
+        worker_transcript_path=transcript,
+        worker_last_message_path=transcript.with_name("last-message.md"),
+    )
+    store.finish_iteration_worker(task.id, 0, _worker_result(config, transcript, transcript.with_name("last-message.md")))
+
+    detail = public_task_detail_payload(config, store, task.id)
+    trajectory = detail["attempts"][0]["worker"]["change_trajectory"]
+    assert trajectory["availability"] == "available"
+    assert trajectory["completeness"] == "complete"
+    assert trajectory["published_count"] == 1
+    assert trajectory["changes"][0]["paths"] == ["include/coquic/core.h"]
+    assert trajectory["changes"][0]["patch"]["availability"] == "available"
+    assert "private-session" not in json.dumps(trajectory)
+    assert "inputs/private.json" not in json.dumps(trajectory)
+    assert "responses/private.json" not in json.dumps(trajectory)
+
+
+def test_worker_change_trajectory_truncates_records_without_upgrading_completeness(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    store = TaskStore(config.db_path)
+    task = _add_task(
+        store,
+        task_id="task-20260713120011-trajectory",
+        status=TaskStatus.succeeded,
+    )
+    records = [_trajectory_record(sequence=index, status="empty") for index in range(1, 102)]
+    transcript = _write_trajectory_fixture(config, task.id, records=records)
+    store.begin_iteration(
+        task.id,
+        0,
+        "Worker attempt",
+        worker_name="worker",
+        worker_prompt_path=None,
+        worker_transcript_path=transcript,
+        worker_last_message_path=transcript.with_name("last-message.md"),
+    )
+    store.finish_iteration_worker(task.id, 0, _worker_result(config, transcript, transcript.with_name("last-message.md")))
+
+    trajectory = public_task_detail_payload(config, store, task.id)["attempts"][0]["worker"]["change_trajectory"]
+    assert trajectory["published_count"] == 100
+    assert trajectory["omitted_count"] == 1
+    assert trajectory["truncated"] is True
+    assert trajectory["completeness"] == "partial"
+    assert [item["sequence"] for item in trajectory["changes"]] == list(range(1, 101))
+
+
+def test_worker_change_trajectory_restores_retry_records_chronologically(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    store = TaskStore(config.db_path)
+    task = _add_task(
+        store,
+        task_id="task-20260713120012-trajectory",
+        status=TaskStatus.succeeded,
+    )
+    _write_trajectory_fixture(
+        config,
+        task.id,
+        records=[
+            _trajectory_record(
+                sequence=1,
+                status="empty",
+                completed_at="2026-07-13T12:00:01+00:00",
+            )
+        ],
+        retry=True,
+    )
+    transcript = _write_trajectory_fixture(
+        config,
+        task.id,
+        records=[
+            _trajectory_record(
+                sequence=1,
+                status="empty",
+                completed_at="2026-07-13T12:00:02+00:00",
+            )
+        ],
+    )
+    store.begin_iteration(
+        task.id,
+        0,
+        "Worker attempt",
+        worker_name="worker",
+        worker_prompt_path=None,
+        worker_transcript_path=transcript,
+        worker_last_message_path=transcript.with_name("last-message.md"),
+    )
+    store.finish_iteration_worker(
+        task.id,
+        0,
+        _worker_result(config, transcript, transcript.with_name("last-message.md")),
+    )
+
+    trajectory = public_task_detail_payload(config, store, task.id)["attempts"][0]["worker"]["change_trajectory"]
+    assert trajectory["discovered_count"] == 2
+    assert trajectory["published_count"] == 2
+    assert [item["tool_call_id"] for item in trajectory["changes"]] == ["tool_1", "tool_1"]
+    assert [item["sequence"] for item in trajectory["changes"]] == [1, 2]
 
 
 def _resolve_schema(root: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

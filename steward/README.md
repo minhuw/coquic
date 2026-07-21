@@ -105,6 +105,30 @@ projection:
 | `connect_timeout_seconds` | SSH connection timeout. |
 | `retry_initial_seconds`, `retry_max_seconds` | Exponential retry bounds after a failed publication. |
 
+Code-stage worker artifacts may also contain an additive `change_trajectory`
+projection. It is evidence of supported Codex tool-call behavior, not a
+continuous monitor or a replacement for the executor-owned final patch. The
+projection reports `available`, `not_produced`, or `unavailable` evidence and
+keeps capture `complete`, `partial`, and `unavailable` completeness distinct;
+publication never upgrades a private completeness state. Each worker exposes
+at most the most recent 100 completed records, with at most 128 KiB of
+redacted canonical Git delta per record and 512 KiB of patch text per worker.
+Record counts and reconciliation counters remain visible when patch text is
+truncated or omitted.
+
+Trajectory records contain only a bounded opaque tool-call ID, supported tool
+name/status, sanitized relative paths, validated tree IDs, safe error
+categories, and a recursively redacted Git delta. Private tool inputs,
+responses, commands, prompts, context, session/turn IDs, raw exceptions,
+credential material, filesystem paths, and URLs are never published. The
+authoritative final attempt patch remains independent of this projection and
+is the source of truth for the resulting change.
+
+Planner and reviewer artifacts expose `change_trajectory: null`: capture is
+enabled only for code-stage workers. Consumers should render trajectory
+provenance and completeness explicitly and must not infer continuous
+monitoring from its reconciliation fields.
+
 For the checked-in deployment, the expected values are:
 
 - SSH destination `minhuw@coquic.minhuw.dev:22`.

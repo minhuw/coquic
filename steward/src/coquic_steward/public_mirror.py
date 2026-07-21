@@ -13,6 +13,16 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .agents.diagnostics import diagnostics_for_paths
+from .agents.tool_changes import (
+    TOOL_CHANGE_ERROR_CATEGORIES,
+    TOOL_CHANGE_MAX_COMPLETED_RECORDS,
+    TOOL_CHANGE_MAX_MANIFEST_BYTES,
+    TOOL_CHANGE_SAFE_ID_RE,
+    TOOL_CHANGE_SCHEMA_VERSION,
+    TOOL_CHANGE_SUPPORTED_TOOLS,
+    TOOL_CHANGE_TREE_RE,
+    tool_change_run_directories,
+)
 from .core.config import (
     DEFAULT_PUBLIC_MIRROR_OUTPUT,
     PublicMirrorConfig,
@@ -49,6 +59,16 @@ REMOTE_MIRROR_ROOT = ".cache/coquic-steward/public-mirror"
 REMOTE_MIRROR_HELPER = f"{REMOTE_MIRROR_ROOT}/publish-helper-v1"
 REMOTE_MIRROR_LOCK = f"{REMOTE_MIRROR_ROOT}/publish.lock"
 MIRROR_PATCH_BYTES = 128 * 1024
+MIRROR_TRAJECTORY_PATCH_BYTES = MIRROR_PATCH_BYTES
+MIRROR_TRAJECTORY_AGGREGATE_PATCH_BYTES = 512 * 1024
+MIRROR_TRAJECTORY_RECORDS = 100
+MIRROR_TRAJECTORY_SUMMARY_BYTES = 64 * 1024
+MIRROR_TRAJECTORY_MAX_RUNS = 128
+MIRROR_TRAJECTORY_MAX_DURATION_MS = 24 * 60 * 60 * 1000
+MIRROR_TRAJECTORY_MAX_PATHS = 256
+MIRROR_TRAJECTORY_MAX_PATH_BYTES = 4096
+MIRROR_TRAJECTORY_MAX_PATCH_BYTES = 16 * 1024 * 1024
+MIRROR_TRAJECTORY_MAX_HASH_BYTES = 64 * 1024 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
 MIRROR_LAST_MESSAGE_BYTES = 24 * 1024
@@ -80,6 +100,12 @@ PUBLIC_METADATA_KEYS = {
     "run_id",
     "dedupe_key",
 }
+_TRAJECTORY_STATUSES = frozenset({"captured", "empty", "failed", "incomplete"})
+_TRAJECTORY_COMPLETED_STATUSES = frozenset({"captured", "empty", "failed"})
+_TRAJECTORY_SAFE_PATH_RE = re.compile(r"^[^\x00\\]+(?:/[^\x00\\]+)*$")
+_TRAJECTORY_SENSITIVE_PATH_RE = re.compile(
+    r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:secret|token|credential|password|private|api[_-]?key).*)"
+)
 
 
 def public_mirror_payload(
@@ -761,6 +787,7 @@ def _public_attempts(
         name="worker",
         exit_code=None,
         completed=None,
+        include_change_trajectory=True,
         raw_transcript_artifacts=raw_transcript_artifacts,
     )
     if worker is None and not task.validations:
@@ -811,6 +838,7 @@ def _public_plan_runs(
                 completed=item.completed,
                 model=item.model,
                 reasoning_effort=item.reasoning_effort,
+                include_change_trajectory=False,
                 raw_transcript_artifacts=raw_transcript_artifacts,
             ),
         }
@@ -842,6 +870,7 @@ def _public_iteration_attempt(
             completed=item.worker_completed,
             model=item.worker_model,
             reasoning_effort=item.worker_reasoning_effort,
+            include_change_trajectory=True,
             raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "reviewer": _public_run_artifact(
@@ -856,6 +885,7 @@ def _public_iteration_attempt(
             completed=item.reviewer_completed,
             model=item.reviewer_model,
             reasoning_effort=item.reviewer_reasoning_effort,
+            include_change_trajectory=False,
             raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "review": _public_review(config, item.review_json),
@@ -881,6 +911,7 @@ def _public_run_artifact(
     completed: bool | None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    include_change_trajectory: bool = True,
     raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object] | None:
     transcript = _public_text_artifact(
@@ -901,7 +932,14 @@ def _public_run_artifact(
         max_bytes=MIRROR_LAST_MESSAGE_BYTES,
         line_aligned=False,
     )
-    if transcript is None and last_message is None:
+    include_change_trajectory = include_change_trajectory and role == "worker"
+    change_trajectory = (
+        _public_change_trajectory(config, transcript_path)
+        if include_change_trajectory
+        and (transcript_path is not None or last_message_path is not None)
+        else None
+    )
+    if transcript is None and last_message is None and change_trajectory is None:
         return None
     diagnostics = diagnostics_for_paths(
         transcript_path=transcript_path,
@@ -933,6 +971,746 @@ def _public_run_artifact(
         "diagnostics": diagnostic_payload,
         "transcript": transcript,
         "last_message": last_message,
+        "change_trajectory": change_trajectory,
+    }
+
+
+class _TrajectoryReadError(ValueError):
+    """Private trajectory evidence failed a trust boundary."""
+
+
+def _trajectory_empty(
+    availability: str,
+    completeness: str = "unavailable",
+) -> dict[str, object]:
+    return {
+        "availability": availability,
+        "completeness": completeness,
+        "discovered_count": 0,
+        "published_count": 0,
+        "omitted_count": 0,
+        "truncated": False,
+        "reconciliation": {
+            "continuous": False,
+            "replay_matches_final": False,
+            "gap_count": 0,
+            "overlap_count": 0,
+            "incomplete_count": 0,
+        },
+        "changes": [],
+    }
+
+
+def _public_change_trajectory(
+    config: StewardConfig, transcript_path: Path | None
+) -> dict[str, object]:
+    """Read and project bounded code-stage change evidence.
+
+    Only the private summary, manifest metadata, and referenced canonical Git
+    deltas are considered.  Inputs, responses, context, and state files are
+    deliberately never opened.
+    """
+
+    if transcript_path is None:
+        return _trajectory_empty("not_produced")
+    if not _trajectory_path_beneath(transcript_path.parent, config.state_dir):
+        return _trajectory_empty("unavailable")
+    try:
+        if os.path.lexists(transcript_path):
+            transcript_info = transcript_path.lstat()
+            if transcript_path.is_symlink() or not transcript_path.is_file() or transcript_info.st_nlink != 1:
+                return _trajectory_empty("unavailable")
+    except OSError:
+        return _trajectory_empty("unavailable")
+    try:
+        candidates = _trajectory_candidates(transcript_path)
+        if not candidates:
+            return _trajectory_empty("not_produced")
+        if len(candidates) > MIRROR_TRAJECTORY_MAX_RUNS:
+            raise _TrajectoryReadError("too many runs")
+        runs = [_read_trajectory_run(path) for path in candidates]
+        return _project_trajectory(config, runs)
+    except _TrajectoryReadError:
+        return _trajectory_empty("unavailable")
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        UnicodeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+        OverflowError,
+    ):
+        return _trajectory_empty("unavailable")
+    except Exception:
+        return _trajectory_empty("unavailable")
+
+
+def _trajectory_path_beneath(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve(strict=False)
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _trajectory_candidates(transcript_path: Path) -> list[Path]:
+    parent = transcript_path.parent
+    try:
+        if not parent.exists():
+            return []
+        if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
+            raise _TrajectoryReadError("unsafe run parent")
+        names = list(parent.iterdir()) if parent.exists() else []
+    except OSError as exc:
+        raise _TrajectoryReadError("run parent unavailable") from exc
+    for path in names:
+        if path.name.startswith("tool-changes.retry-") and not re.fullmatch(
+            r"tool-changes\.retry-[1-9][0-9]*", path.name
+        ):
+            raise _TrajectoryReadError("malformed retry directory")
+    # The dependency helper only derives the exact final/retry names; this
+    # wrapper adds the fail-closed checks for malformed and symlinked entries.
+    candidates = list(tool_change_run_directories(transcript_path))
+    unique: dict[str, Path] = {}
+    for path in candidates:
+        unique[str(path)] = path
+    return [unique[key] for key in sorted(unique, key=_trajectory_run_sort_key)]
+
+
+def _trajectory_run_sort_key(path: str) -> tuple[int, str]:
+    name = Path(path).name
+    if name == "tool-changes":
+        return (0, name)
+    match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
+    return (int(match.group(1)) if match else 10**9, name)
+
+
+def _read_trajectory_run(run_dir: Path) -> dict[str, object]:
+    _trajectory_directory(run_dir)
+    summary_path = run_dir / "summary.json"
+    manifest_path = run_dir / "manifest.jsonl"
+    summary = _trajectory_json_file(summary_path, MIRROR_TRAJECTORY_SUMMARY_BYTES)
+    manifest_data = _trajectory_manifest_bytes(manifest_path)
+    summary_state = _validate_trajectory_summary(summary)
+    records = _validate_trajectory_manifest(manifest_data, summary)
+    hash_budget = 0
+    for record in records:
+        patch = record.get("patch")
+        if isinstance(patch, dict):
+            hash_budget += int(patch["bytes"])
+            if hash_budget > MIRROR_TRAJECTORY_MAX_HASH_BYTES:
+                raise _TrajectoryReadError("patch hash budget")
+            _trajectory_validate_patch_file(run_dir, patch)
+    return {
+        "run_dir": run_dir,
+        "summary": summary,
+        "state": summary_state,
+        "records": records,
+    }
+
+
+def _trajectory_directory(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise _TrajectoryReadError("missing run directory") from exc
+    if path.is_symlink() or not path.is_dir() or not _trajectory_no_symlink_parents(path):
+        raise _TrajectoryReadError("unsafe run directory")
+    if info.st_size < 0:
+        raise _TrajectoryReadError("invalid run directory")
+
+
+def _trajectory_no_symlink_parents(path: Path) -> bool:
+    current = path
+    try:
+        while True:
+            if current.is_symlink():
+                return False
+            if current == current.parent:
+                return True
+            current = current.parent
+    except OSError:
+        return False
+
+
+def _trajectory_regular_file(path: Path, max_bytes: int) -> int:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise _TrajectoryReadError("missing evidence file") from exc
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or int(info.st_nlink) != 1
+        or not _trajectory_no_symlink_parents(path.parent)
+    ):
+        raise _TrajectoryReadError("unsafe evidence file")
+    size = int(info.st_size)
+    if size < 0 or size > max_bytes:
+        raise _TrajectoryReadError("evidence file exceeds bound")
+    return size
+
+
+def _trajectory_json_file(path: Path, max_bytes: int) -> dict[str, object]:
+    _trajectory_regular_file(path, max_bytes)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise _TrajectoryReadError("malformed summary") from exc
+    if not isinstance(value, dict):
+        raise _TrajectoryReadError("summary must be an object")
+    return value
+
+
+def _trajectory_manifest_bytes(path: Path) -> list[bytes]:
+    size = _trajectory_regular_file(path, TOOL_CHANGE_MAX_MANIFEST_BYTES)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise _TrajectoryReadError("manifest unavailable") from exc
+    if len(data) != size:
+        raise _TrajectoryReadError("manifest changed during read")
+    lines = data.splitlines()
+    if len(lines) > TOOL_CHANGE_MAX_COMPLETED_RECORDS:
+        raise _TrajectoryReadError("manifest record bound")
+    return lines
+
+
+def _trajectory_nonnegative(value: object, *, maximum: int) -> int:
+    if type(value) is not int or value < 0 or value > maximum:
+        raise _TrajectoryReadError("invalid count")
+    return value
+
+
+def _trajectory_tree(value: object, *, allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or TOOL_CHANGE_TREE_RE.fullmatch(value) is None:
+        raise _TrajectoryReadError("invalid tree id")
+    return value
+
+
+def _trajectory_timestamp(value: object, *, allow_none: bool = False) -> datetime | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or len(value) > 80:
+        raise _TrajectoryReadError("invalid timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise _TrajectoryReadError("invalid timestamp") from exc
+    if parsed.tzinfo is None:
+        raise _TrajectoryReadError("timestamp lacks timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_trajectory_summary(summary: dict[str, object]) -> str:
+    if summary.get("schema_version") != TOOL_CHANGE_SCHEMA_VERSION:
+        raise _TrajectoryReadError("unsupported summary schema")
+    state = summary.get("state")
+    completeness = summary.get("completeness")
+    if state not in {"complete", "partial", "unavailable"} or completeness != state:
+        raise _TrajectoryReadError("invalid summary state")
+    counts = {
+        key: _trajectory_nonnegative(
+            summary.get(key), maximum=TOOL_CHANGE_MAX_COMPLETED_RECORDS
+        )
+        for key in (
+            "discovered",
+            "captured",
+            "empty",
+            "failed",
+            "incomplete",
+            "gaps",
+            "overlaps",
+            "omitted",
+        )
+    }
+    if counts["captured"] + counts["empty"] + counts["failed"] + counts["incomplete"] > counts["discovered"]:
+        raise _TrajectoryReadError("summary counts exceed discovered")
+    reasons = summary.get("reasons")
+    reason_categories = summary.get("reason_categories")
+    if not isinstance(reasons, list) or not isinstance(reason_categories, list):
+        raise _TrajectoryReadError("invalid summary reasons")
+    if any(
+        not isinstance(item, str) or item not in TOOL_CHANGE_ERROR_CATEGORIES
+        for item in reasons + reason_categories
+    ):
+        raise _TrajectoryReadError("unsupported summary reason")
+    if reasons != reason_categories:
+        raise _TrajectoryReadError("summary reason mismatch")
+    run_start = _trajectory_tree(summary.get("run_start_tree"), allow_none=True)
+    final_tree = _trajectory_tree(summary.get("final_tree"), allow_none=True)
+    replayed_tree = _trajectory_tree(summary.get("replayed_tree"), allow_none=True)
+    for alias, value in (
+        ("run_start_tree_id", run_start),
+        ("final_tree_id", final_tree),
+        ("replayed_tree_id", replayed_tree),
+    ):
+        if alias not in summary or summary.get(alias) != value:
+            raise _TrajectoryReadError("summary tree alias mismatch")
+    if state == "unavailable":
+        if any(counts.values()) or any(value is not None for value in (run_start, final_tree, replayed_tree)):
+            raise _TrajectoryReadError("unavailable summary contains evidence")
+    elif state == "complete":
+        if reasons or counts["failed"] or counts["incomplete"] or counts["gaps"] or counts["overlaps"] or counts["omitted"]:
+            raise _TrajectoryReadError("complete summary has degradation")
+        if run_start is None or final_tree is None or replayed_tree != final_tree:
+            raise _TrajectoryReadError("complete summary lacks reconciliation")
+        if counts["captured"] + counts["empty"] + counts["failed"] != counts["discovered"]:
+            raise _TrajectoryReadError("complete summary count mismatch")
+    return state
+
+
+def _trajectory_safe_path(value: object) -> str:
+    if not isinstance(value, str) or len(value) > MIRROR_TRAJECTORY_MAX_PATH_BYTES:
+        raise _TrajectoryReadError("unsafe path")
+    if (
+        not value
+        or value.startswith("/")
+        or value.startswith("./")
+        or value == "."
+        or "/../" in f"/{value}/"
+        or value.endswith("/..")
+        or not _TRAJECTORY_SAFE_PATH_RE.fullmatch(value)
+        or any(ord(character) < 0x20 for character in value)
+    ):
+        raise _TrajectoryReadError("unsafe path")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise _TrajectoryReadError("unsafe path")
+    return value
+
+
+def _trajectory_patch_metadata(patch: object) -> dict[str, object] | None:
+    if patch is None:
+        return None
+    if not isinstance(patch, dict):
+        raise _TrajectoryReadError("invalid patch metadata")
+    path = _trajectory_safe_path(patch.get("path"))
+    if not path.startswith("patches/") or path.count("/") != 1:
+        raise _TrajectoryReadError("patch outside patch directory")
+    size = _trajectory_nonnegative(
+        patch.get("bytes"), maximum=MIRROR_TRAJECTORY_MAX_PATCH_BYTES
+    )
+    if size <= 0:
+        raise _TrajectoryReadError("empty patch metadata")
+    digest = patch.get("sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise _TrajectoryReadError("invalid patch digest")
+    return {"path": path, "bytes": size, "sha256": digest}
+
+
+def _validate_trajectory_manifest(
+    lines: list[bytes], summary: dict[str, object]
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    seen_starts: set[int] = set()
+    seen_completions: set[int] = set()
+    last_completion = 0
+    counts = {status: 0 for status in _TRAJECTORY_STATUSES}
+    for raw_line in lines:
+        if not raw_line:
+            raise _TrajectoryReadError("blank manifest record")
+        try:
+            value = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _TrajectoryReadError("malformed manifest record") from exc
+        if not isinstance(value, dict):
+            raise _TrajectoryReadError("manifest record must be an object")
+        status = value.get("status")
+        if status not in _TRAJECTORY_STATUSES:
+            raise _TrajectoryReadError("unsupported record status")
+        tool_name = value.get("tool_name")
+        if tool_name not in TOOL_CHANGE_SUPPORTED_TOOLS:
+            raise _TrajectoryReadError("unsupported tool")
+        tool_id = value.get("tool_use_id")
+        if not isinstance(tool_id, str) or TOOL_CHANGE_SAFE_ID_RE.fullmatch(tool_id) is None:
+            raise _TrajectoryReadError("unsafe tool id")
+        if tool_id in seen_ids:
+            raise _TrajectoryReadError("duplicate tool id")
+        seen_ids.add(tool_id)
+        start = value.get("start_sequence")
+        if type(start) is not int or start <= 0 or start > TOOL_CHANGE_MAX_COMPLETED_RECORDS or start in seen_starts:
+            raise _TrajectoryReadError("invalid start sequence")
+        seen_starts.add(start)
+        if value.get("start_order") not in (None, start):
+            raise _TrajectoryReadError("start order mismatch")
+        if status in _TRAJECTORY_COMPLETED_STATUSES and value.get("start_order") != start:
+            raise _TrajectoryReadError("completed record lacks start order")
+        start_monotonic = value.get("start_monotonic_ns")
+        if type(start_monotonic) is not int or start_monotonic < 0 or start_monotonic > 10**20:
+            raise _TrajectoryReadError("invalid monotonic timestamp")
+        _trajectory_timestamp(value.get("started_at"))
+        _trajectory_tree(value.get("base_tree"))
+        if value.get("base_tree_id") not in (None, value.get("base_tree")):
+            raise _TrajectoryReadError("base tree alias mismatch")
+        if status in _TRAJECTORY_COMPLETED_STATUSES and value.get("base_tree_id") != value.get("base_tree"):
+            raise _TrajectoryReadError("completed record lacks base tree alias")
+        paths = value.get("paths")
+        if not isinstance(paths, list) or len(paths) > MIRROR_TRAJECTORY_MAX_PATHS:
+            raise _TrajectoryReadError("invalid changed paths")
+        validated_paths = [_trajectory_safe_path(item) for item in paths]
+        if validated_paths != sorted(set(validated_paths)):
+            raise _TrajectoryReadError("changed paths not canonical")
+        if not isinstance(value.get("input"), dict):
+            raise _TrajectoryReadError("invalid private input metadata")
+        if status in _TRAJECTORY_COMPLETED_STATUSES and value.get("input_artifact") != value.get("input"):
+            raise _TrajectoryReadError("input metadata alias mismatch")
+        if status == "incomplete" and "input_artifact" in value and value.get("input_artifact") != value.get("input"):
+            raise _TrajectoryReadError("input metadata alias mismatch")
+        if status in _TRAJECTORY_COMPLETED_STATUSES and (
+            "response" not in value or "response_artifact" not in value
+        ):
+            raise _TrajectoryReadError("missing response metadata")
+        if value.get("response") is not None and not isinstance(value.get("response"), dict):
+            raise _TrajectoryReadError("invalid private response metadata")
+        if value.get("response_artifact") != value.get("response"):
+            raise _TrajectoryReadError("response metadata alias mismatch")
+        completion = value.get("completion_sequence")
+        if status in _TRAJECTORY_COMPLETED_STATUSES:
+            if type(completion) is not int or completion <= 0 or completion > TOOL_CHANGE_MAX_COMPLETED_RECORDS:
+                raise _TrajectoryReadError("invalid completion sequence")
+            if completion in seen_completions or completion <= last_completion:
+                raise _TrajectoryReadError("non-monotonic completion sequence")
+            seen_completions.add(completion)
+            last_completion = completion
+            if value.get("completion_order") != completion:
+                raise _TrajectoryReadError("completion order mismatch")
+            _trajectory_timestamp(value.get("completed_at"))
+            _trajectory_nonnegative(value.get("duration_ms"), maximum=MIRROR_TRAJECTORY_MAX_DURATION_MS)
+            _trajectory_tree(value.get("result_tree"))
+            if value.get("result_tree_id") != value.get("result_tree"):
+                raise _TrajectoryReadError("result tree alias mismatch")
+        else:
+            if completion is not None or value.get("completion_order") is not None:
+                raise _TrajectoryReadError("incomplete completion sequence")
+            if value.get("completed_at") is not None or value.get("duration_ms") is not None:
+                raise _TrajectoryReadError("incomplete completion metadata")
+            if value.get("result_tree") is not None or value.get("result_tree_id") is not None:
+                raise _TrajectoryReadError("incomplete result tree")
+        patch = _trajectory_patch_metadata(value.get("patch"))
+        if status == "captured" and patch is None:
+            raise _TrajectoryReadError("captured record lacks patch")
+        if status == "empty" and patch is not None:
+            raise _TrajectoryReadError("empty record has patch")
+        if not {"patch_path", "patch_size_bytes", "patch_sha256"}.issubset(value):
+            raise _TrajectoryReadError("missing patch aliases")
+        if value.get("patch_path") != (patch.get("path") if patch else None):
+            raise _TrajectoryReadError("patch path alias mismatch")
+        if value.get("patch_size_bytes") != (patch.get("bytes") if patch else 0):
+            raise _TrajectoryReadError("patch size alias mismatch")
+        if value.get("patch_sha256") != (patch.get("sha256") if patch else None):
+            raise _TrajectoryReadError("patch digest alias mismatch")
+        error_category = value.get("error_category")
+        if error_category is not None and error_category not in TOOL_CHANGE_ERROR_CATEGORIES:
+            raise _TrajectoryReadError("unsupported error category")
+        if status == "incomplete" and error_category != "missing_post":
+            raise _TrajectoryReadError("incomplete error mismatch")
+        if status == "failed" and error_category != "tool_failed":
+            raise _TrajectoryReadError("failed error mismatch")
+        counts[status] += 1
+        value["paths"] = validated_paths
+        value["patch"] = patch
+        value["_completed_at"] = (
+            _trajectory_timestamp(value.get("completed_at"))
+            if status in _TRAJECTORY_COMPLETED_STATUSES
+            else None
+        )
+        records.append(value)
+    for status in _TRAJECTORY_STATUSES:
+        if summary.get(status) != counts[status]:
+            raise _TrajectoryReadError("manifest count mismatch")
+    return records
+
+
+def _trajectory_validate_patch_file(run_dir: Path, patch: dict[str, object]) -> None:
+    relative = str(patch["path"])
+    candidate = run_dir.joinpath(*relative.split("/"))
+    declared_size = int(patch["bytes"])
+    size = _trajectory_regular_file(candidate, MIRROR_TRAJECTORY_MAX_PATCH_BYTES)
+    if size != declared_size:
+        raise _TrajectoryReadError("patch size mismatch")
+    digest = sha256()
+    read = 0
+    try:
+        with candidate.open("rb") as handle:
+            while read < declared_size:
+                chunk = handle.read(min(1024 * 1024, declared_size - read))
+                if not chunk:
+                    break
+                read += len(chunk)
+                digest.update(chunk)
+            if handle.read(1):
+                raise _TrajectoryReadError("patch grew during read")
+    except _TrajectoryReadError:
+        raise
+    except OSError as exc:
+        raise _TrajectoryReadError("patch unavailable") from exc
+    if read != declared_size or digest.hexdigest() != patch["sha256"]:
+        raise _TrajectoryReadError("patch digest mismatch")
+
+
+def _trajectory_read_patch(run_dir: Path, patch: dict[str, object]) -> bytes:
+    candidate = run_dir.joinpath(*str(patch["path"]).split("/"))
+    limit = MIRROR_TRAJECTORY_PATCH_BYTES + 1
+    try:
+        with candidate.open("rb") as handle:
+            data = handle.read(limit)
+    except OSError as exc:
+        raise _TrajectoryReadError("patch unavailable") from exc
+    if not data:
+        raise _TrajectoryReadError("patch unexpectedly empty")
+    return data
+
+
+def _trajectory_public_path(config: StewardConfig, value: str) -> str:
+    if _TRAJECTORY_SENSITIVE_PATH_RE.search(value):
+        return "[redacted-path]"
+    return _public_text(config, value)
+
+
+def _trajectory_redacted_patch(config: StewardConfig, data: bytes) -> str:
+    # Canonical patches are generated by Git; only their text is projected.
+    # Tool inputs and responses are in separate private files and never enter
+    # this function.
+    text = data.decode("utf-8", errors="replace")
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" ")
+            if len(parts) >= 4:
+                parts[2] = _trajectory_public_patch_path(config, parts[2])
+                parts[3] = _trajectory_public_patch_path(config, parts[3])
+                line = " ".join(parts)
+        elif line.startswith(("--- ", "+++ ")):
+            prefix, _, path = line.partition(" ")
+            line = f"{prefix} {_trajectory_public_patch_path(config, path)}"
+        line = _public_text(config, line)
+        line = re.sub(
+            r"(?<![A-Za-z0-9:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+",
+            "[local-path]",
+            line,
+        )
+        lines.append(line)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _trajectory_public_patch_path(config: StewardConfig, value: str) -> str:
+    # Preserve Git's a/ and b/ markers while avoiding private absolute paths
+    # and credential-looking filenames in the public delta.
+    marker = ""
+    path = value
+    if value[:2] in {"a/", "b/"}:
+        marker, path = value[:2], value[2:]
+    if path.startswith("/") or _TRAJECTORY_SENSITIVE_PATH_RE.search(path):
+        return marker + "[redacted-path]"
+    return marker + _public_text(config, path)
+
+
+def _trajectory_bound_text(text: str, max_bytes: int) -> tuple[str, bool]:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    bounded = encoded[:max_bytes]
+    # Avoid publishing a partial UTF-8 code point and keep a canonical line
+    # boundary where possible.
+    bounded = bounded.decode("utf-8", errors="ignore").encode("utf-8")
+    newline = bounded.rfind(b"\n")
+    if newline >= 0:
+        bounded = bounded[: newline + 1]
+    return bounded.decode("utf-8", errors="ignore"), True
+
+
+def _trajectory_patch_artifact(
+    config: StewardConfig,
+    run_dir: Path,
+    record: dict[str, object],
+    remaining_budget: int,
+) -> tuple[dict[str, object], int, bool]:
+    patch = record.get("patch")
+    status = str(record.get("status"))
+    if patch is None:
+        availability = "not_produced" if status == "empty" else "unavailable"
+        return (
+            {
+                "availability": availability,
+                "mode": "redacted",
+                "text": "",
+                "size_bytes": 0,
+                "original_size_bytes": None,
+                "truncated": False,
+            },
+            0,
+            False,
+        )
+    if remaining_budget <= 0:
+        return (
+            {
+                "availability": "unavailable",
+                "mode": "redacted",
+                "text": "",
+                "size_bytes": 0,
+                "original_size_bytes": patch["bytes"],
+                "truncated": True,
+            },
+            0,
+            True,
+        )
+    data = _trajectory_read_patch(run_dir, patch)
+    text = _trajectory_redacted_patch(config, data)
+    bounded, per_patch_truncated = _trajectory_bound_text(
+        text, MIRROR_TRAJECTORY_PATCH_BYTES
+    )
+    encoded = bounded.encode("utf-8")
+    aggregate_truncated = False
+    if len(encoded) > remaining_budget:
+        bounded, aggregate_truncated = _trajectory_bound_text(
+            bounded, remaining_budget
+        )
+        encoded = bounded.encode("utf-8")
+    truncated = per_patch_truncated or aggregate_truncated or len(data) > MIRROR_TRAJECTORY_PATCH_BYTES
+    artifact = {
+        "availability": "available",
+        "mode": "redacted",
+        "text": bounded,
+        "size_bytes": len(encoded),
+        "original_size_bytes": patch["bytes"],
+        "truncated": truncated,
+    }
+    return artifact, len(encoded), False
+
+
+def _public_trajectory_change(
+    config: StewardConfig,
+    run: dict[str, object],
+    record: dict[str, object],
+    remaining_budget: int,
+) -> tuple[dict[str, object], int, bool]:
+    patch_artifact, used, omitted = _trajectory_patch_artifact(
+        config, run["run_dir"], record, remaining_budget
+    )
+    status = str(record["status"])
+    error_category = record.get("error_category")
+    return (
+        {
+            "sequence": 0,
+            "tool_call_id": record["tool_use_id"],
+            "tool_name": record["tool_name"],
+            "status": status,
+            "paths": [
+                _trajectory_public_path(config, path) for path in record["paths"]
+            ],
+            "base_tree": record["base_tree"],
+            "result_tree": record.get("result_tree"),
+            "patch": patch_artifact,
+            "error_category": error_category or "",
+        },
+        used,
+        omitted,
+    )
+
+
+def _project_trajectory(
+    config: StewardConfig, runs: list[dict[str, object]]
+) -> dict[str, object]:
+    states = [str(run["state"]) for run in runs]
+    if any(state == "unavailable" for state in states):
+        return _trajectory_empty("unavailable")
+    records: list[tuple[datetime, int, int, dict[str, object], dict[str, object]]] = []
+    discovered = 0
+    omitted_count = 0
+    gap_count = 0
+    overlap_count = 0
+    incomplete_count = 0
+    replay_matches = True
+    continuous = True
+    summary_truncated = False
+    for run_index, run in enumerate(runs):
+        summary = run["summary"]
+        discovered += int(summary["discovered"])
+        omitted_count += int(summary["omitted"])
+        gap_count += int(summary["gaps"])
+        overlap_count += int(summary["overlaps"])
+        incomplete_count += int(summary["incomplete"])
+        final_tree = summary.get("final_tree")
+        replayed_tree = summary.get("replayed_tree")
+        if final_tree is None or replayed_tree is None or final_tree != replayed_tree:
+            replay_matches = False
+        if summary["gaps"] or summary["overlaps"] or summary["incomplete"] or summary["omitted"]:
+            continuous = False
+        if summary["omitted"]:
+            summary_truncated = True
+        for record in run["records"]:
+            if record["status"] not in _TRAJECTORY_COMPLETED_STATUSES:
+                continue
+            completed_at = record.get("_completed_at")
+            if not isinstance(completed_at, datetime):
+                raise _TrajectoryReadError("completed record lacks timestamp")
+            records.append(
+                (
+                    completed_at,
+                    int(record["completion_sequence"]),
+                    run_index,
+                    run,
+                    record,
+                )
+            )
+    records.sort(key=lambda item: (item[0], item[2], item[1]))
+    record_truncated = len(records) > MIRROR_TRAJECTORY_RECORDS
+    selected = records[-MIRROR_TRAJECTORY_RECORDS:]
+    if record_truncated:
+        omitted_count += len(records) - len(selected)
+        continuous = False
+    aggregate_budget = MIRROR_TRAJECTORY_AGGREGATE_PATCH_BYTES
+    changes: list[dict[str, object]] = []
+    omitted_patches = 0
+    any_patch_truncated = False
+    for sequence, (_completed_at, _completion, _run_index, run, record) in enumerate(
+        selected, start=1
+    ):
+        change, used, patch_omitted = _public_trajectory_change(
+            config, run, record, aggregate_budget
+        )
+        change["sequence"] = sequence
+        aggregate_budget -= used
+        omitted_patches += int(patch_omitted)
+        patch = change.get("patch")
+        if isinstance(patch, dict) and patch.get("truncated"):
+            any_patch_truncated = True
+        changes.append(change)
+    if omitted_patches:
+        omitted_count += omitted_patches
+        continuous = False
+    truncated = (
+        summary_truncated
+        or record_truncated
+        or omitted_patches > 0
+        or any_patch_truncated
+    )
+    completeness = "partial" if any(state == "partial" for state in states) else "complete"
+    if truncated:
+        completeness = "partial"
+    return {
+        "availability": "available",
+        "completeness": completeness,
+        "discovered_count": discovered,
+        "published_count": len(changes),
+        "omitted_count": omitted_count,
+        "truncated": truncated,
+        "reconciliation": {
+            "continuous": continuous,
+            "replay_matches_final": replay_matches,
+            "gap_count": gap_count,
+            "overlap_count": overlap_count,
+            "incomplete_count": incomplete_count,
+        },
+        "changes": changes,
     }
 
 

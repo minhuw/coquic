@@ -31,12 +31,16 @@ from .agents.diagnostics import diagnostics_for_paths
 from .agents.tool_changes import (
     TOOL_CHANGE_ERROR_CATEGORIES,
     TOOL_CHANGE_MAX_COMPLETED_RECORDS,
+    TOOL_CHANGE_MAX_DURATION_MS,
     TOOL_CHANGE_MAX_MANIFEST_BYTES,
     TOOL_CHANGE_SAFE_ID_RE,
     TOOL_CHANGE_SCHEMA_VERSION,
     TOOL_CHANGE_SUPPORTED_TOOLS,
+    TOOL_CHANGE_TIMING_SOURCE,
     TOOL_CHANGE_TREE_RE,
+    ToolTimingRecord,
     tool_change_run_directories,
+    validate_tool_timing_record,
 )
 from .agents.telemetry import (
     TELEMETRY_MAX_SIDECAR_BYTES,
@@ -86,11 +90,12 @@ MIRROR_TRAJECTORY_AGGREGATE_PATCH_BYTES = 512 * 1024
 MIRROR_TRAJECTORY_RECORDS = 100
 MIRROR_TRAJECTORY_SUMMARY_BYTES = 64 * 1024
 MIRROR_TRAJECTORY_MAX_RUNS = 128
-MIRROR_TRAJECTORY_MAX_DURATION_MS = 24 * 60 * 60 * 1000
+MIRROR_TRAJECTORY_MAX_DURATION_MS = TOOL_CHANGE_MAX_DURATION_MS
 MIRROR_TRAJECTORY_MAX_PATHS = 256
 MIRROR_TRAJECTORY_MAX_PATH_BYTES = 4096
 MIRROR_TRAJECTORY_MAX_PATCH_BYTES = 16 * 1024 * 1024
 MIRROR_TRAJECTORY_MAX_HASH_BYTES = 64 * 1024 * 1024
+MIRROR_TOOL_TIMING_RECORDS = TOOL_CHANGE_MAX_COMPLETED_RECORDS
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
 MIRROR_LAST_MESSAGE_BYTES = 24 * 1024
@@ -1787,12 +1792,18 @@ def _public_run_artifact(
         if role == "worker"
         else None
     )
+    tool_timing = (
+        _public_tool_timing(config, transcript_path)
+        if role == "worker"
+        else None
+    )
     telemetry = _public_telemetry(config, transcript_path)
     if (
         transcript is None
         and last_message is None
         and change_trajectory is None
         and activities is None
+        and tool_timing is None
         and telemetry.get("availability") == "not_produced"
     ):
         return None
@@ -1828,7 +1839,199 @@ def _public_run_artifact(
         "last_message": last_message,
         "change_trajectory": change_trajectory,
         "activities": activities,
+        "tool_timing": tool_timing,
         "telemetry": telemetry,
+    }
+
+
+def _tool_timing_empty(
+    availability: str,
+    coverage: str,
+    *,
+    reason: str | None = None,
+    unavailable_count: int = 0,
+) -> dict[str, object]:
+    return {
+        "availability": availability,
+        "source": TOOL_CHANGE_TIMING_SOURCE,
+        "coverage": coverage,
+        "completeness": coverage,
+        "discovered_count": 0,
+        "supported_count": 0,
+        "completed_count": 0,
+        "failed_count": 0,
+        "incomplete_count": 0,
+        "unavailable_count": unavailable_count,
+        "omitted_count": 0,
+        "published_count": 0,
+        "truncated": False,
+        "unavailable_reason": reason,
+        "records": [],
+    }
+
+
+def _public_tool_timing(
+    config: StewardConfig, transcript_path: Path | None
+) -> dict[str, object]:
+    """Project validated synchronous hook intervals without private payloads."""
+
+    if transcript_path is None:
+        return _tool_timing_empty("not_produced", "not_recorded", reason="not_recorded")
+    if not _trajectory_path_beneath(transcript_path.parent, config.state_dir):
+        return _tool_timing_empty("unavailable", "unavailable", reason="unsafe_path", unavailable_count=1)
+    try:
+        if os.path.lexists(transcript_path):
+            info = transcript_path.lstat()
+            if (
+                transcript_path.is_symlink()
+                or not transcript_path.is_file()
+                or info.st_nlink != 1
+            ):
+                return _tool_timing_empty(
+                    "unavailable", "unavailable", reason="unsafe_path", unavailable_count=1
+                )
+    except OSError:
+        return _tool_timing_empty(
+            "unavailable", "unavailable", reason="unavailable", unavailable_count=1
+        )
+    try:
+        candidates = _trajectory_candidates(transcript_path)
+        if not candidates:
+            return _tool_timing_empty("unavailable", "not_recorded", reason="not_recorded")
+        if len(candidates) > MIRROR_TRAJECTORY_MAX_RUNS:
+            raise _TrajectoryReadError("too many runs")
+        runs = [_read_trajectory_run(path) for path in candidates]
+        return _project_tool_timing(runs)
+    except _TrajectoryReadError:
+        return _tool_timing_empty(
+            "unavailable", "unavailable", reason="invalid_evidence", unavailable_count=1
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        UnicodeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+        OverflowError,
+    ):
+        return _tool_timing_empty(
+            "unavailable", "unavailable", reason="invalid_evidence", unavailable_count=1
+        )
+    except Exception:
+        return _tool_timing_empty(
+            "unavailable", "unavailable", reason="invalid_evidence", unavailable_count=1
+        )
+
+
+def _tool_timing_run_ordinal(run: dict[str, object]) -> int:
+    name = Path(str(run["run_dir"])).name
+    match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
+    return int(match.group(1)) if match is not None else 0
+
+
+def _tool_timing_public_record(
+    run: dict[str, object], record: ToolTimingRecord
+) -> dict[str, object]:
+    timing: dict[str, object] = {
+        "retry_ordinal": _tool_timing_run_ordinal(run),
+        "sequence": record.start_sequence,
+        "tool_call_id": record.tool_use_id,
+        "tool_name": record.tool_name,
+        "started_at": _public_timestamp(_trajectory_timestamp(record.started_at)),
+        "completed_at": (
+            _public_timestamp(_trajectory_timestamp(record.completed_at))
+            if record.completed_at is not None
+            else None
+        ),
+        "duration_ms": record.duration_ms,
+        "status": record.status,
+        "source": TOOL_CHANGE_TIMING_SOURCE,
+        "unavailable_reason": record.unavailable_reason,
+    }
+    if (
+        record.completion_sequence is not None
+        and record.completion_sequence != record.start_sequence
+    ):
+        timing["completion_order"] = record.completion_sequence
+    return timing
+
+
+def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
+    records: list[tuple[int, int, int, ToolTimingRecord]] = []
+    discovered = 0
+    supported = 0
+    completed = 0
+    failed = 0
+    incomplete = 0
+    unavailable = 0
+    omitted = 0
+    states: list[str] = []
+    for run_index, run in enumerate(runs):
+        summary = run["summary"]
+        state = str(run["state"])
+        if state == "unavailable":
+            raise _TrajectoryReadError("timing run unavailable")
+        reasons = summary.get("reasons", [])
+        if isinstance(reasons, list) and "clock_failed" in reasons:
+            raise _TrajectoryReadError("timing clock unavailable")
+        states.append(state)
+        discovered += int(summary["discovered"])
+        omitted += int(summary["omitted"])
+        run_records = run["records"]
+        for raw_record in run_records:
+            validated = validate_tool_timing_record(raw_record)
+            supported += 1
+            if validated.status in {"captured", "empty"}:
+                completed += 1
+            if validated.status == "failed":
+                failed += 1
+            elif validated.status == "incomplete":
+                incomplete += 1
+            records.append(
+                (
+                    _tool_timing_run_ordinal(run),
+                    validated.start_sequence,
+                    run_index,
+                    validated,
+                )
+            )
+        supported += int(summary["omitted"])
+        accounted = len(run_records) + int(summary["omitted"])
+        if int(summary["discovered"]) > accounted:
+            unavailable += int(summary["discovered"]) - accounted
+    records.sort(key=lambda item: (item[0], item[1], item[2]))
+    eligible_count = len(records)
+    selected = records[:MIRROR_TOOL_TIMING_RECORDS]
+    omitted += max(0, eligible_count - len(selected))
+    truncated = omitted > 0
+    if any(state == "partial" for state in states) or incomplete or truncated:
+        coverage = "partial"
+    else:
+        coverage = "complete"
+    public_records = [
+        _tool_timing_public_record(run, record)
+        for _retry_ordinal, _sequence, run_index, record in selected
+        for run in [runs[run_index]]
+    ]
+    return {
+        "availability": "available",
+        "source": TOOL_CHANGE_TIMING_SOURCE,
+        "coverage": coverage,
+        "completeness": coverage,
+        "discovered_count": discovered,
+        "supported_count": supported,
+        "completed_count": completed,
+        "failed_count": failed,
+        "incomplete_count": incomplete,
+        "unavailable_count": unavailable,
+        "omitted_count": omitted,
+        "published_count": len(public_records),
+        "truncated": truncated,
+        "unavailable_reason": None,
+        "records": public_records,
     }
 
 

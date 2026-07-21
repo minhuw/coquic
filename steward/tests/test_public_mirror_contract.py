@@ -528,7 +528,9 @@ def test_rich_detail_and_public_records_are_schema_shaped_and_redacted(
     assert detail["integration"]["is_integration_task"] is True
     assert detail["integration"]["runs"][0]["remote"]["commit"] == "c" * 40
     assert detail["attempts"][0]["worker"]["transcript"]["availability"] == "available"
+    assert detail["attempts"][0]["worker"]["tool_timing"]["coverage"] == "not_recorded"
     assert detail["plan_runs"][0]["planner"]["transcript"]["mode"] == "redacted"
+    assert detail["plan_runs"][0]["planner"]["tool_timing"] is None
     assert detail["attempts"][0]["validations"][0]["log"]["original_size_bytes"] > 0
     assert detail["artifacts"]["patch"]["truncated"] is False
     _assert_utc_timestamps(payload)
@@ -815,6 +817,15 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
     assert "private-session" not in json.dumps(trajectory)
     assert "inputs/private.json" not in json.dumps(trajectory)
     assert "responses/private.json" not in json.dumps(trajectory)
+    timing = detail["attempts"][0]["worker"]["tool_timing"]
+    assert timing["source"] == "codex_hook_boundary"
+    assert timing["coverage"] == "complete"
+    assert timing["published_count"] == 1
+    assert timing["records"][0]["retry_ordinal"] == 0
+    assert timing["records"][0]["duration_ms"] == 1
+    assert "private-session" not in json.dumps(timing)
+    assert "inputs/private.json" not in json.dumps(timing)
+    assert "responses/private.json" not in json.dumps(timing)
 
 
 def test_worker_change_trajectory_truncates_records_without_upgrading_completeness(
@@ -901,6 +912,13 @@ def test_worker_change_trajectory_restores_retry_records_chronologically(
     assert trajectory["published_count"] == 2
     assert [item["tool_call_id"] for item in trajectory["changes"]] == ["tool_1", "tool_1"]
     assert [item["sequence"] for item in trajectory["changes"]] == [1, 2]
+    timing = public_task_detail_payload(config, store, task.id)["attempts"][0]["worker"]["tool_timing"]
+    assert [(item["retry_ordinal"], item["tool_call_id"]) for item in timing["records"]] == [
+        (0, "tool_1"),
+        (1, "tool_1"),
+    ]
+    assert timing["published_count"] == 2
+    assert timing["records"][0]["duration_ms"] == 1
 
 
 def test_worker_change_trajectory_rejects_retry_tree_discontinuity(

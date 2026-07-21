@@ -22,17 +22,22 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 
 SCHEMA_VERSION = 1
 MAX_COMPLETED_RECORDS = 4096
+MAX_DURATION_MS = 24 * 60 * 60 * 1000
+MAX_MONOTONIC_NS = 10**20
 MAX_TOOL_INPUT_BYTES = 1024 * 1024
 MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
 MAX_HOOK_ENVELOPE_BYTES = MAX_TOOL_INPUT_BYTES + MAX_TOOL_RESPONSE_BYTES + 64 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 SUPPORTED_TOOLS = frozenset({"Bash", "apply_patch"})
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:_\-]{0,127}\Z")
+_CREDENTIAL_ID_RE = re.compile(
+    r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,})"
+)
 TREE_RE = re.compile(r"[0-9a-f]{40,64}\Z")
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
@@ -165,6 +170,133 @@ class HookSummary:
             "reasons": list(self.reasons),
             "reason_categories": list(self.reasons),
         }
+
+
+@dataclass(frozen=True)
+class ToolTimingRecord:
+    """Validated, public-safe fields from one hook manifest record.
+
+    The capture manifest contains additional private fields.  This value model
+    deliberately carries only the lifecycle and timing values that a public
+    reader may project.
+    """
+
+    tool_use_id: str
+    tool_name: str
+    start_sequence: int
+    completion_sequence: int | None
+    started_at: str
+    completed_at: str | None
+    duration_ms: int | float | None
+    status: str
+    unavailable_reason: str | None
+
+
+def _validated_timing_timestamp(value: object, *, allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or len(value) > 80:
+        raise ValueError("invalid timing timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid timing timestamp") from None
+    if parsed.tzinfo is None:
+        raise ValueError("timing timestamp lacks timezone")
+    normalized = parsed.astimezone(dt.timezone.utc)
+    if normalized < dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) or normalized > dt.datetime(
+        2100, 1, 1, tzinfo=dt.timezone.utc
+    ):
+        raise ValueError("timing timestamp outside bound")
+    return value
+
+
+def _validated_timing_duration(value: object) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("invalid timing duration")
+    if isinstance(value, float):
+        if not time.isfinite(value):
+            raise ValueError("invalid timing duration")
+    if value < 0 or value > MAX_DURATION_MS:
+        raise ValueError("invalid timing duration")
+    return value
+
+
+def validate_tool_timing_record(value: Mapping[str, Any]) -> ToolTimingRecord:
+    """Validate a private manifest record's timing fields.
+
+    This function does not inspect command, patch, input, response, path, or
+    identity fields beyond the safe tool name and call ID required for joining.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValueError("timing record must be an object")
+    tool_name = value.get("tool_name")
+    if not isinstance(tool_name, str) or tool_name not in SUPPORTED_TOOLS:
+        raise ValueError("unsupported timing tool")
+    tool_use_id = value.get("tool_use_id")
+    if (
+        not isinstance(tool_use_id, str)
+        or SAFE_ID_RE.fullmatch(tool_use_id) is None
+        or _CREDENTIAL_ID_RE.search(tool_use_id) is not None
+    ):
+        raise ValueError("unsafe timing tool id")
+    status = value.get("status")
+    if status not in {"captured", "empty", "failed", "incomplete"}:
+        raise ValueError("unsupported timing status")
+    start_sequence = value.get("start_sequence")
+    if type(start_sequence) is not int or not 0 < start_sequence <= MAX_COMPLETED_RECORDS:
+        raise ValueError("invalid timing start sequence")
+    if value.get("start_order") not in (None, start_sequence):
+        raise ValueError("timing start order mismatch")
+    start_monotonic = value.get("start_monotonic_ns")
+    if type(start_monotonic) is not int or not 0 <= start_monotonic <= MAX_MONOTONIC_NS:
+        raise ValueError("invalid timing monotonic clock")
+    started_at = _validated_timing_timestamp(value.get("started_at"))
+    completion_sequence = value.get("completion_sequence")
+    completion_order = value.get("completion_order")
+    completed_at = value.get("completed_at")
+    duration = value.get("duration_ms")
+    if status == "incomplete":
+        if completion_sequence is not None or completion_order is not None:
+            raise ValueError("incomplete timing completion sequence")
+        if completed_at is not None or duration is not None:
+            raise ValueError("incomplete timing completion values")
+        unavailable_reason = value.get("error_category", "missing_post")
+        if unavailable_reason != "missing_post":
+            raise ValueError("incomplete timing reason")
+        return ToolTimingRecord(
+            tool_use_id,
+            tool_name,
+            start_sequence,
+            None,
+            str(started_at),
+            None,
+            None,
+            status,
+            "missing_post",
+        )
+    if type(completion_sequence) is not int or not 0 < completion_sequence <= MAX_COMPLETED_RECORDS:
+        raise ValueError("invalid timing completion sequence")
+    if completion_order != completion_sequence:
+        raise ValueError("timing completion order mismatch")
+    completed_at = _validated_timing_timestamp(completed_at)
+    duration = _validated_timing_duration(duration)
+    expected_reason = "tool_failed" if status == "failed" else None
+    error_category = value.get("error_category")
+    if error_category != expected_reason:
+        raise ValueError("timing error category mismatch")
+    return ToolTimingRecord(
+        tool_use_id,
+        tool_name,
+        start_sequence,
+        completion_sequence,
+        str(started_at),
+        str(completed_at),
+        duration,
+        status,
+        None,
+    )
 
 
 @dataclass(frozen=True)
@@ -1102,11 +1234,14 @@ HookCaptureContext = ToolChangeCapture
 # remain private; these exports only describe the bounded evidence layout.
 TOOL_CHANGE_SCHEMA_VERSION = SCHEMA_VERSION
 TOOL_CHANGE_MAX_COMPLETED_RECORDS = MAX_COMPLETED_RECORDS
+TOOL_CHANGE_MAX_DURATION_MS = MAX_DURATION_MS
 TOOL_CHANGE_MAX_MANIFEST_BYTES = MAX_MANIFEST_BYTES
+TOOL_CHANGE_MAX_MONOTONIC_NS = MAX_MONOTONIC_NS
 TOOL_CHANGE_SUPPORTED_TOOLS = SUPPORTED_TOOLS
 TOOL_CHANGE_SAFE_ID_RE = SAFE_ID_RE
 TOOL_CHANGE_TREE_RE = TREE_RE
 TOOL_CHANGE_ERROR_CATEGORIES = _ERROR_CATEGORIES
+TOOL_CHANGE_TIMING_SOURCE = "codex_hook_boundary"
 
 
 def tool_change_run_directories(transcript_path: Path | None) -> tuple[Path, ...]:
@@ -1333,12 +1468,16 @@ __all__ = [
     "HookSummary",
     "ToolChangeCapture",
     "ToolChangeRecorder",
+    "ToolTimingRecord",
     "TOOL_CHANGE_ERROR_CATEGORIES",
     "TOOL_CHANGE_MAX_COMPLETED_RECORDS",
+    "TOOL_CHANGE_MAX_DURATION_MS",
     "TOOL_CHANGE_MAX_MANIFEST_BYTES",
+    "TOOL_CHANGE_MAX_MONOTONIC_NS",
     "TOOL_CHANGE_SAFE_ID_RE",
     "TOOL_CHANGE_SCHEMA_VERSION",
     "TOOL_CHANGE_SUPPORTED_TOOLS",
+    "TOOL_CHANGE_TIMING_SOURCE",
     "TOOL_CHANGE_TREE_RE",
     "handle_hook",
     "main",
@@ -1346,4 +1485,5 @@ __all__ = [
     "process_hook",
     "reconcile_tool_changes",
     "tool_change_run_directories",
+    "validate_tool_timing_record",
 ]

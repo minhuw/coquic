@@ -207,6 +207,45 @@ enabled only for code-stage workers. Consumers should render trajectory
 provenance and completeness explicitly and must not infer continuous
 monitoring from its reconciliation fields.
 
+### Hook-bound tool timing
+
+Worker artifacts also expose an additive `tool_timing` object for the supported
+`apply_patch` and `Bash` hooks. It is the elapsed interval between the valid
+`PreToolUse` and matching `PostToolUse` receipts in Steward's synchronous hook
+boundary. The source is always `codex_hook_boundary`. Durations use the private
+manifest's `time.monotonic_ns()` arithmetic and are published as bounded,
+non-negative `duration_ms` values. UTC start and completion timestamps are
+correlation metadata only; they are never subtracted to calculate elapsed
+time. The interval can include Codex dispatch and approval latency. It is not
+child CPU time, shell-reported wall time, provider time, or network-only time.
+
+| Evidence | Authority |
+| --- | --- |
+| Plan 001 trajectory | Supported tool intent and worktree transition |
+| Plan 004 telemetry | Whole Codex invocation/model usage and duration |
+| Plan 005 `tool_timing` | Steward-observed synchronous hook interval per supported tool |
+| Final attempt patch | Authoritative initial-to-final worktree result |
+
+Timing joins use `retry_ordinal` plus the opaque `tool_call_id`; IDs may repeat
+after a Codex resume. Records are ordered by retry ordinal and hook start
+sequence, with completion order retained only when it differs. The public
+projection reports discovered, supported, completed, failed, incomplete,
+unavailable, omitted, and published counts, a coverage state, and a
+`truncated` flag. It publishes at most 4,096 records across retries and the
+final invocation. A missing duration is unknown, never zero. Legacy runs
+without hook evidence are `unavailable` with coverage `not_recorded`; Steward
+does not backfill timing from host-local sessions, transcript mtimes, nearby
+messages, or command output. Consumers should show the timing source and
+coverage state explicitly.
+
+`tool_timing` contains no command or response text, patches, prompts, paths,
+private filenames, session or turn identifiers, raw exceptions, or credentials.
+Failed and empty tools retain valid hook-bound durations, while unmatched,
+invalid, unavailable, and omitted records remain incomplete rather than being
+represented as zero. Planner and reviewer artifacts expose
+`tool_timing: null`; model telemetry and `change_trajectory` remain independent
+contracts.
+
 For the checked-in deployment, the expected values are:
 
 - SSH destination `minhuw@coquic.minhuw.dev:22`.

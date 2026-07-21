@@ -35,8 +35,14 @@ MAX_HOOK_ENVELOPE_BYTES = MAX_TOOL_INPUT_BYTES + MAX_TOOL_RESPONSE_BYTES + 64 * 
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 SUPPORTED_TOOLS = frozenset({"Bash", "apply_patch"})
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:_\-]{0,127}\Z")
+_CREDENTIAL_VALUE_RE = re.compile(
+    r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    r"|glpat-[A-Za-z0-9_-]{8,}"
+    r"|(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|AGPA|ASCA)[A-Z0-9]{16}"
+    r"|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}|whsec_[A-Za-z0-9]{8,})"
+)
 _CREDENTIAL_ID_RE = re.compile(
-    r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}"
+    rf"(?i)(?:{_CREDENTIAL_VALUE_RE.pattern.removeprefix('(?i)')}"
     r"|(?:^|[._:-])(?:api[_-]?key|access[_-]?token|authorization|bearer|credential|password|secret|token)"
     r"(?:[._:-]|$))"
 )
@@ -224,6 +230,14 @@ def _validated_timing_duration(value: object) -> int | float:
     return value
 
 
+def is_safe_public_tool_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and SAFE_ID_RE.fullmatch(value) is not None
+        and _CREDENTIAL_ID_RE.search(value) is None
+    )
+
+
 def validate_tool_timing_record(value: Mapping[str, Any]) -> ToolTimingRecord:
     """Validate a private manifest record's timing fields.
 
@@ -237,12 +251,9 @@ def validate_tool_timing_record(value: Mapping[str, Any]) -> ToolTimingRecord:
     if not isinstance(tool_name, str) or tool_name not in SUPPORTED_TOOLS:
         raise ValueError("unsupported timing tool")
     tool_use_id = value.get("tool_use_id")
-    if (
-        not isinstance(tool_use_id, str)
-        or SAFE_ID_RE.fullmatch(tool_use_id) is None
-        or _CREDENTIAL_ID_RE.search(tool_use_id) is not None
-    ):
+    if not is_safe_public_tool_id(tool_use_id):
         raise ValueError("unsafe timing tool id")
+    assert isinstance(tool_use_id, str)
     status = value.get("status")
     if status not in {"captured", "empty", "failed", "incomplete"}:
         raise ValueError("unsupported timing status")
@@ -1241,6 +1252,7 @@ TOOL_CHANGE_MAX_MANIFEST_BYTES = MAX_MANIFEST_BYTES
 TOOL_CHANGE_MAX_MONOTONIC_NS = MAX_MONOTONIC_NS
 TOOL_CHANGE_SUPPORTED_TOOLS = SUPPORTED_TOOLS
 TOOL_CHANGE_SAFE_ID_RE = SAFE_ID_RE
+TOOL_CHANGE_CREDENTIAL_VALUE_RE = _CREDENTIAL_VALUE_RE
 TOOL_CHANGE_TREE_RE = TREE_RE
 TOOL_CHANGE_ERROR_CATEGORIES = _ERROR_CATEGORIES
 TOOL_CHANGE_TIMING_SOURCE = "codex_hook_boundary"
@@ -1472,6 +1484,7 @@ __all__ = [
     "ToolChangeRecorder",
     "ToolTimingRecord",
     "TOOL_CHANGE_ERROR_CATEGORIES",
+    "TOOL_CHANGE_CREDENTIAL_VALUE_RE",
     "TOOL_CHANGE_MAX_COMPLETED_RECORDS",
     "TOOL_CHANGE_MAX_DURATION_MS",
     "TOOL_CHANGE_MAX_MANIFEST_BYTES",
@@ -1482,6 +1495,7 @@ __all__ = [
     "TOOL_CHANGE_TIMING_SOURCE",
     "TOOL_CHANGE_TREE_RE",
     "handle_hook",
+    "is_safe_public_tool_id",
     "main",
     "parse_hook_envelope",
     "process_hook",

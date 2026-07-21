@@ -240,15 +240,34 @@ def test_timing_rejects_non_finite_boolean_and_overflow_duration(config, duratio
     assert timing["records"] == []
 
 
-def test_timing_value_model_rejects_credential_shaped_identity() -> None:
-    record = _record(1, tool_id="tool_ghp_0123456789abcdef")
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "tool_ghp_0123456789abcdef",
+        "AKIAIOSFODNN7EXAMPLE",
+        "sk_live_51N4Y0ExampleCredential",
+    ],
+)
+def test_timing_value_model_rejects_credential_shaped_identity(
+    credential: str,
+) -> None:
+    record = _record(1, tool_id=credential)
 
     with pytest.raises(ValueError):
         validate_tool_timing_record(record)
 
 
-def test_timing_rejects_credential_shaped_id_without_publication(config) -> None:
-    credential = "api_key_contract-seeded-secret"
+@pytest.mark.parametrize(
+    "credential",
+    [
+        "api_key_contract-seeded-secret",
+        "AKIAIOSFODNN7EXAMPLE",
+        "sk_live_51N4Y0ExampleCredential",
+    ],
+)
+def test_timing_rejects_credential_shaped_id_without_publication(
+    config, credential: str
+) -> None:
     transcript = _write_run(
         config,
         "task-tool-timing-credential-id",

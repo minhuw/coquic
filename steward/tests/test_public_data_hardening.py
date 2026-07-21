@@ -34,11 +34,11 @@ def test_recursive_public_redaction_and_link_allowlist(config) -> None:
                 provider="test",
                 kind="finding",
                 fingerprint="fingerprint-is-not-public",
-                title="API_KEY=should-not-leak",
+                title="API_KEY=should-not-leak AKIAIOSFODNN7EXAMPLE",
                 summary=(
                     "thread_private and /home/private/key.pem "
                     "/worktrees/task /transcripts/task /patches/task "
-                    "secret = client_secret ="
+                    "secret = client_secret = sk_live_51N4Y0ExampleCredential"
                 ),
                 links=[
                     {"label": "safe", "url": "https://github.com/minhuw/coquic/issues/1"},
@@ -66,6 +66,8 @@ def test_recursive_public_redaction_and_link_allowlist(config) -> None:
     serialized = json.dumps(payload, sort_keys=True)
     assert "private prompt" not in serialized
     assert "private-token" not in serialized
+    assert "AKIAIOSFODNN7EXAMPLE" not in serialized
+    assert "sk_live_51N4Y0ExampleCredential" not in serialized
     assert "/home/private" not in serialized
     assert "/worktrees/" not in serialized
     assert "/transcripts/" not in serialized

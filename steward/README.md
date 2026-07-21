@@ -194,9 +194,9 @@ redacted canonical Git delta per record and 512 KiB of patch text per worker.
 Record counts and reconciliation counters remain visible when patch text is
 truncated or omitted.
 
-Trajectory records contain only a bounded opaque tool-call ID, supported tool
-name/status, sanitized relative paths, validated tree IDs, safe error
-categories, and a recursively redacted Git delta. Private tool inputs,
+Trajectory records contain only a retry ordinal, bounded opaque tool-call ID,
+supported tool name/status, sanitized relative paths, validated tree IDs, safe
+error categories, and a recursively redacted Git delta. Private tool inputs,
 responses, commands, prompts, context, session/turn IDs, raw exceptions,
 credential material, filesystem paths, and URLs are never published. The
 authoritative final attempt patch remains independent of this projection and
@@ -226,8 +226,9 @@ child CPU time, shell-reported wall time, provider time, or network-only time.
 | Plan 005 `tool_timing` | Steward-observed synchronous hook interval per supported tool |
 | Final attempt patch | Authoritative initial-to-final worktree result |
 
-Timing joins use `retry_ordinal` plus the opaque `tool_call_id`; IDs may repeat
-after a Codex resume. Records are ordered by retry ordinal and hook start
+Timing joins use the `retry_ordinal` plus opaque `tool_call_id` published on
+both timing and trajectory records; IDs may repeat after a Codex resume.
+Records are ordered by retry ordinal and hook start
 sequence, with completion order retained only when it differs. The public
 projection reports discovered, supported, completed, failed, incomplete,
 unavailable, omitted, and published counts, a coverage state, and a

@@ -29,16 +29,17 @@ from .agents.activity import (
 )
 from .agents.diagnostics import diagnostics_for_paths
 from .agents.tool_changes import (
+    TOOL_CHANGE_CREDENTIAL_VALUE_RE,
     TOOL_CHANGE_ERROR_CATEGORIES,
     TOOL_CHANGE_MAX_COMPLETED_RECORDS,
     TOOL_CHANGE_MAX_DURATION_MS,
     TOOL_CHANGE_MAX_MANIFEST_BYTES,
-    TOOL_CHANGE_SAFE_ID_RE,
     TOOL_CHANGE_SCHEMA_VERSION,
     TOOL_CHANGE_SUPPORTED_TOOLS,
     TOOL_CHANGE_TIMING_SOURCE,
     TOOL_CHANGE_TREE_RE,
     ToolTimingRecord,
+    is_safe_public_tool_id,
     tool_change_run_directories,
     validate_tool_timing_record,
 )
@@ -139,10 +140,7 @@ _TRAJECTORY_SAFE_PATH_RE = re.compile(r"^[^\x00\\]+(?:/[^\x00\\]+)*$")
 _TRAJECTORY_SENSITIVE_PATH_RE = re.compile(
     r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:secret|token|credential|password|private|api[_-]?key).*)"
 )
-_TRAJECTORY_CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}"
-    r"|glpat-[A-Za-z0-9_-]{8,})\b"
-)
+_TRAJECTORY_CREDENTIAL_RE = TOOL_CHANGE_CREDENTIAL_VALUE_RE
 _TRAJECTORY_PRIVATE_MARKER_RE = re.compile(
     r"(?i)\bprivate[-_ ]+(?:prompt|context|session|turn|payload|response|input|secret|token|key)\b.*"
 )
@@ -1901,7 +1899,7 @@ def _public_tool_timing(
         if len(candidates) > MIRROR_TRAJECTORY_MAX_RUNS:
             raise _TrajectoryReadError("too many runs")
         runs = [_read_trajectory_run(path) for path in candidates]
-        return _project_tool_timing(runs)
+        return _project_tool_timing(config, runs)
     except _TrajectoryReadError:
         return _tool_timing_empty(
             "unavailable", "unavailable", reason="invalid_evidence", unavailable_count=1
@@ -1926,7 +1924,17 @@ def _public_tool_timing(
         )
 
 
-def _tool_timing_run_ordinal(
+def _tool_change_final_retry_ordinal(runs: list[dict[str, object]]) -> int:
+    final_retry_ordinal = 0
+    for run in runs:
+        name = Path(str(run["run_dir"])).name
+        match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
+        if match is not None:
+            final_retry_ordinal = max(final_retry_ordinal, int(match.group(1)))
+    return final_retry_ordinal
+
+
+def _tool_change_run_ordinal(
     run: dict[str, object], *, final_retry_ordinal: int
 ) -> int:
     name = Path(str(run["run_dir"])).name
@@ -1934,13 +1942,23 @@ def _tool_timing_run_ordinal(
     return int(match.group(1)) - 1 if match is not None else final_retry_ordinal
 
 
+def _public_tool_call_id(config: StewardConfig, value: object) -> str:
+    if not is_safe_public_tool_id(value):
+        raise _TrajectoryReadError("unsafe tool id")
+    assert isinstance(value, str)
+    projected = _public_json(config, {"tool_call_id": value})
+    if projected != {"tool_call_id": value}:
+        raise _TrajectoryReadError("unsafe tool id")
+    return value
+
+
 def _tool_timing_public_record(
-    record: ToolTimingRecord, *, retry_ordinal: int
+    config: StewardConfig, record: ToolTimingRecord, *, retry_ordinal: int
 ) -> dict[str, object]:
     timing: dict[str, object] = {
         "retry_ordinal": retry_ordinal,
         "sequence": record.start_sequence,
-        "tool_call_id": record.tool_use_id,
+        "tool_call_id": _public_tool_call_id(config, record.tool_use_id),
         "tool_name": record.tool_name,
         "started_at": _public_timestamp(_trajectory_timestamp(record.started_at)),
         "completed_at": (
@@ -1961,7 +1979,9 @@ def _tool_timing_public_record(
     return timing
 
 
-def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
+def _project_tool_timing(
+    config: StewardConfig, runs: list[dict[str, object]]
+) -> dict[str, object]:
     records: list[tuple[int, int, int, ToolTimingRecord]] = []
     discovered = 0
     supported = 0
@@ -1971,12 +1991,7 @@ def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
     unavailable = 0
     omitted = 0
     states: list[str] = []
-    final_retry_ordinal = 0
-    for run in runs:
-        name = Path(str(run["run_dir"])).name
-        match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
-        if match is not None:
-            final_retry_ordinal = max(final_retry_ordinal, int(match.group(1)))
+    final_retry_ordinal = _tool_change_final_retry_ordinal(runs)
     for run_index, run in enumerate(runs):
         summary = run["summary"]
         state = str(run["state"])
@@ -2000,7 +2015,7 @@ def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
                 incomplete += 1
             records.append(
                 (
-                    _tool_timing_run_ordinal(
+                    _tool_change_run_ordinal(
                         run, final_retry_ordinal=final_retry_ordinal
                     ),
                     validated.start_sequence,
@@ -2022,7 +2037,7 @@ def _project_tool_timing(runs: list[dict[str, object]]) -> dict[str, object]:
     else:
         coverage = "complete"
     public_records = [
-        _tool_timing_public_record(record, retry_ordinal=retry_ordinal)
+        _tool_timing_public_record(config, record, retry_ordinal=retry_ordinal)
         for retry_ordinal, _sequence, _run_index, record in selected
     ]
     return {
@@ -2713,8 +2728,9 @@ def _validate_trajectory_manifest(
         if tool_name not in TOOL_CHANGE_SUPPORTED_TOOLS:
             raise _TrajectoryReadError("unsupported tool")
         tool_id = value.get("tool_use_id")
-        if not isinstance(tool_id, str) or TOOL_CHANGE_SAFE_ID_RE.fullmatch(tool_id) is None:
+        if not is_safe_public_tool_id(tool_id):
             raise _TrajectoryReadError("unsafe tool id")
+        assert isinstance(tool_id, str)
         if tool_id in seen_ids:
             raise _TrajectoryReadError("duplicate tool id")
         seen_ids.add(tool_id)
@@ -3109,6 +3125,8 @@ def _public_trajectory_change(
     run: dict[str, object],
     record: dict[str, object],
     remaining_budget: int,
+    *,
+    retry_ordinal: int,
 ) -> tuple[dict[str, object], int, bool]:
     patch_artifact, used, omitted = _trajectory_patch_artifact(
         config, run["run_dir"], record, remaining_budget
@@ -3118,7 +3136,8 @@ def _public_trajectory_change(
     return (
         {
             "sequence": 0,
-            "tool_call_id": record["tool_use_id"],
+            "retry_ordinal": retry_ordinal,
+            "tool_call_id": _public_tool_call_id(config, record["tool_use_id"]),
             "tool_name": record["tool_name"],
             "status": status,
             "paths": [
@@ -3150,6 +3169,7 @@ def _project_trajectory(
     continuous = True
     summary_truncated = False
     previous_final_tree: object = None
+    final_retry_ordinal = _tool_change_final_retry_ordinal(runs)
     for run_index, run in enumerate(runs):
         summary = run["summary"]
         run_start_tree = summary.get("run_start_tree")
@@ -3202,7 +3222,13 @@ def _project_trajectory(
         selected, start=1
     ):
         change, used, patch_omitted = _public_trajectory_change(
-            config, run, record, aggregate_budget
+            config,
+            run,
+            record,
+            aggregate_budget,
+            retry_ordinal=_tool_change_run_ordinal(
+                run, final_retry_ordinal=final_retry_ordinal
+            ),
         )
         change["sequence"] = sequence
         aggregate_budget -= used
@@ -4226,6 +4252,7 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
         "[redacted-secret]",
         text,
     )
+    text = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", text)
     text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted-secret]", text)
     text = re.sub(
         r"(?i)(?:api[_-]?key|access[_-]?token|secret|password|authorization)"

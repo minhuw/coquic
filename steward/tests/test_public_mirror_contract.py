@@ -802,6 +802,7 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
     assert trajectory["availability"] == "available"
     assert trajectory["completeness"] == "complete"
     assert trajectory["published_count"] == 1
+    assert trajectory["changes"][0]["retry_ordinal"] == 0
     assert trajectory["changes"][0]["paths"] == ["include/coquic/core.h"]
     assert trajectory["changes"][0]["patch"]["availability"] == "available"
     public_patch = trajectory["changes"][0]["patch"]["text"]
@@ -912,10 +913,21 @@ def test_worker_change_trajectory_restores_retry_records_chronologically(
     assert trajectory["published_count"] == 2
     assert [item["tool_call_id"] for item in trajectory["changes"]] == ["tool_1", "tool_1"]
     assert [item["sequence"] for item in trajectory["changes"]] == [1, 2]
-    timing = public_task_detail_payload(config, store, task.id)["attempts"][0]["worker"]["tool_timing"]
-    assert [(item["retry_ordinal"], item["tool_call_id"]) for item in timing["records"]] == [
+    assert [(item["retry_ordinal"], item["tool_call_id"]) for item in trajectory["changes"]] == [
         (0, "tool_1"),
         (1, "tool_1"),
+    ]
+    timing = public_task_detail_payload(config, store, task.id)["attempts"][0]["worker"]["tool_timing"]
+    timing_join_keys = [
+        (item["retry_ordinal"], item["tool_call_id"]) for item in timing["records"]
+    ]
+    assert timing_join_keys == [
+        (0, "tool_1"),
+        (1, "tool_1"),
+    ]
+    assert timing_join_keys == [
+        (item["retry_ordinal"], item["tool_call_id"])
+        for item in trajectory["changes"]
     ]
     assert timing["published_count"] == 2
     assert timing["records"][0]["duration_ms"] == 1

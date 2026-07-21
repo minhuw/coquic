@@ -420,7 +420,7 @@ class StewardExecutor:
             return PatchPreparationResult.terminal_failure
 
         patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
-        self.worktrees.save_patch(task.worktree_path, patch_path)
+        self._save_authoritative_patch(task, iteration, patch_path)
         self.store.record_iteration_patch(task.id, iteration, patch_path)
         self.store.start_validation(task.id, f"validation running: {label}")
         validations = self._run_gates_for_iteration(
@@ -430,7 +430,7 @@ class StewardExecutor:
         if self._block_task_for_frozen_paths(task, task.worktree_path):
             return PatchPreparationResult.terminal_failure
         if any(not validation.passed for validation in validations):
-            self.worktrees.save_patch(task.worktree_path, patch_path)
+            self._save_authoritative_patch(task, iteration, patch_path)
             self.store.record_iteration_patch(task.id, iteration, patch_path)
             failed = [validation for validation in validations if not validation.passed]
             self._latest_failed_validations[task.id] = failed
@@ -455,13 +455,32 @@ class StewardExecutor:
             return PatchPreparationResult.validation_failed
 
         self._latest_failed_validations.pop(task.id, None)
-        self.worktrees.save_patch(task.worktree_path, patch_path)
+        self._save_authoritative_patch(task, iteration, patch_path)
         task = self.store.get(task.id)
         task.patch_path = patch_path
         self.store.save(task)
         self.store.record_iteration_patch(task.id, iteration, patch_path)
         self.store.add_event(task.id, "patch.saved", str(patch_path), {"label": label})
         return PatchPreparationResult.ready
+
+    def _save_authoritative_patch(
+        self, task: TaskRecord, iteration: int, patch_path: Path
+    ) -> None:
+        """Save the executor-owned patch, then refresh private trajectory evidence."""
+
+        assert task.worktree_path is not None
+        self.worktrees.save_patch(task.worktree_path, patch_path)
+        try:
+            iteration_record = self.store.get_iteration(task.id, iteration)
+            transcript_path = iteration_record.worker_transcript_path or task.transcript_path
+            if transcript_path is not None:
+                self.runner.reconcile_tool_changes(
+                    transcript_path, final_patch_path=patch_path
+                )
+        except Exception:
+            # Trajectory capture is evidence-only and must never alter patch
+            # ownership, validation, retries, or task state.
+            return
 
     def _block_task_for_frozen_paths(self, task: TaskRecord, worktree: Path) -> bool:
         frozen = self.worktrees.frozen_paths(worktree, task)

@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -23,6 +22,7 @@ from typer.testing import CliRunner
 import coquic_steward.public_mirror as public_mirror_module
 from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
+from coquic_steward.agents.tool_changes import ToolChangeCapture, handle_hook
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
 from coquic_steward.agents.runner import _is_transient_codex_message
 from coquic_steward.core.config import (
@@ -4455,6 +4455,74 @@ def test_codex_runner_places_resume_options_before_session(
     assert "--sandbox" not in args
 
 
+def test_executor_reconciles_late_write_after_authoritative_patch(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree, branch = Worktrees(config).create(task)
+    task.worktree_path = worktree
+    task.branch_name = branch
+    store.save(task)
+    transcript_path = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=None,
+        worker_transcript_path=transcript_path,
+        worker_last_message_path=transcript_path.with_name("last-message.md"),
+    )
+    capture = ToolChangeCapture.start(worktree, transcript_path.parent / "tool-changes")
+    envelope = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session_1",
+        "turn_id": "turn_1",
+        "cwd": str(worktree),
+        "tool_name": "Bash",
+        "tool_use_id": "tool_1",
+        "tool_input": {"command": "printf changed > README.md"},
+    }
+    handle_hook(json.dumps(envelope), context_path=capture.context_path)
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    handle_hook(
+        json.dumps(
+            {
+                **envelope,
+                "hook_event_name": "PostToolUse",
+                "tool_response": {"success": True},
+            }
+        ),
+        context_path=capture.context_path,
+    )
+    assert capture.finalize().state == "complete"
+
+    executor = StewardExecutor(config, store)
+    original_save = executor.worktrees.save_patch
+
+    def save_then_write(path: Path, patch_path: Path) -> None:
+        original_save(path, patch_path)
+        (path / "late.txt").write_text("late\n", encoding="utf-8")
+
+    monkeypatch.setattr(executor.worktrees, "save_patch", save_then_write)
+    monkeypatch.setattr(executor, "_run_gates_for_iteration", lambda *_args: [])
+
+    assert executor._prepare_patch(
+        task.id,
+        "initial",
+        iteration=0,
+        no_changes_status=TaskStatus.no_changes,
+    ).value == "ready"
+    summary = json.loads(
+        (transcript_path.parent / "tool-changes" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["state"] == "partial"
+    assert "external_mutation" in summary["reasons"]
+
+
 def test_codex_runner_review_uses_structured_exec(
     config: StewardConfig, tmp_path: Path
 ) -> None:
@@ -6351,6 +6419,8 @@ def test_codex_runner_retries_transient_failure_and_resumes(
     assert Path(retry["last_message_path"]).read_text(encoding="utf-8") == (
         "stream disconnected before completion\n"
     )
+    archived_context = Path(retry["tool_changes_path"]) / "context.json"
+    assert ToolChangeCapture.from_context(archived_context).summary.state == "unavailable"
     assert delays == [5.0]
     assert "exec resume" in calls.read_text(encoding="utf-8").splitlines()[1]
     assert "thread-transient" in calls.read_text(encoding="utf-8").splitlines()[1]

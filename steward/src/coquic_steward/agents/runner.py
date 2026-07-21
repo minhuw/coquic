@@ -7,6 +7,7 @@ import selectors
 import signal
 # subprocess is required to stream Codex stdio; launches use explicit argv and shell=False.
 import subprocess  # nosec B404
+import tempfile
 import time
 from pathlib import Path
 
@@ -117,6 +118,26 @@ class CodexRunner:
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
         )
+
+    def reconcile_tool_changes(
+        self, transcript_path: Path, *, final_patch_path: Path | None = None
+    ) -> dict[str, object]:
+        """Refresh code-stage trajectory evidence after an executor patch save."""
+
+        context_path = transcript_path.parent / "tool-changes" / "context.json"
+        try:
+            summary = ToolChangeCapture.from_context(context_path).reconcile(
+                final_patch_path=final_patch_path
+            )
+            return summary.diagnostics_dict()
+        except Exception:
+            return {
+                "schema_version": 1,
+                "state": "unavailable",
+                "completeness": "unavailable",
+                "reasons": ["context_unavailable"],
+                "reason_categories": ["context_unavailable"],
+            }
 
     def _run_with_retries(
         self,
@@ -444,19 +465,31 @@ def _archive_retry_artifacts(
     archived: dict[str, object] = {}
     if result.transcript_path.exists():
         transcript_path = _retry_artifact_path(result.transcript_path, retry_number)
-        result.transcript_path.replace(transcript_path)
-        archived["transcript_path"] = str(transcript_path)
+        try:
+            result.transcript_path.replace(transcript_path)
+        except OSError:
+            archived["transcript_archive_failed"] = True
+        else:
+            archived["transcript_path"] = str(transcript_path)
     if result.last_message_path.exists():
         last_message_path = _retry_artifact_path(result.last_message_path, retry_number)
-        result.last_message_path.replace(last_message_path)
-        archived["last_message_path"] = str(last_message_path)
+        try:
+            result.last_message_path.replace(last_message_path)
+        except OSError:
+            archived["last_message_archive_failed"] = True
+        else:
+            archived["last_message_path"] = str(last_message_path)
     tool_changes = result.transcript_path.with_name("tool-changes")
     if tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
         try:
             tool_changes.replace(archived_tool_changes)
         except OSError:
-            pass
+            archived["tool_changes_archive_failed"] = True
+        else:
+            archived["tool_changes_path"] = str(archived_tool_changes)
+            if not _retarget_archived_context(archived_tool_changes):
+                archived["tool_changes_context_update_failed"] = True
     return archived
 
 
@@ -466,6 +499,36 @@ def _retry_artifact_path(path: Path, retry_number: int) -> Path:
 
 def _retry_directory_path(path: Path, retry_number: int) -> Path:
     return path.with_name(f"{path.name}.retry-{retry_number}")
+
+
+def _retarget_archived_context(run_dir: Path) -> bool:
+    context_path = run_dir / "context.json"
+    temporary: Path | None = None
+    try:
+        value = json.loads(context_path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return False
+        value["context"] = str(context_path)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=run_dir, prefix=".context-", delete=False, encoding="utf-8"
+        ) as handle:
+            temporary = Path(handle.name)
+            os.chmod(temporary, 0o600)
+            json.dump(value, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, context_path)
+        os.chmod(context_path, 0o600)
+        return True
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    finally:
+        if temporary is not None and temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def _with_retry_diagnostics(

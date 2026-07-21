@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess  # nosec B404 - all invocations use an argv list
 import tempfile
 import time
@@ -34,6 +35,7 @@ SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:_\-]{0,127}\Z")
 TREE_RE = re.compile(r"[0-9a-f]{40,64}\Z")
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
+LOCK_TIMEOUT_SECONDS = 0.05
 
 _ERROR_CATEGORIES = frozenset(
     {
@@ -62,6 +64,40 @@ _ERROR_CATEGORIES = frozenset(
         "tool_failed",
     }
 )
+
+
+def _require_private_file(path: Path) -> None:
+    try:
+        info = path.stat()
+    except (OSError, ValueError):
+        raise _CaptureFailure("context_unavailable")
+    if path.is_symlink() or info.st_uid != os.getuid():
+        raise _CaptureFailure("context_unavailable")
+    if stat.S_IMODE(info.st_mode) != PRIVATE_FILE_MODE:
+        raise _CaptureFailure("context_unavailable")
+
+
+def _require_private_directory(path: Path) -> None:
+    try:
+        info = path.stat()
+    except (OSError, ValueError):
+        raise _CaptureFailure("context_unavailable")
+    if path.is_symlink() or info.st_uid != os.getuid():
+        raise _CaptureFailure("context_unavailable")
+    if stat.S_IMODE(info.st_mode) != PRIVATE_DIR_MODE:
+        raise _CaptureFailure("context_unavailable")
+
+
+def _contains_symlink(path: Path) -> bool:
+    current = path
+    try:
+        while current != current.parent:
+            if current.is_symlink():
+                return True
+            current = current.parent
+    except OSError:
+        return True
+    return False
 
 
 class _CaptureFailure(Exception):
@@ -145,7 +181,10 @@ class _Envelope:
 
 
 def _utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
+    try:
+        return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
+    except (OSError, RuntimeError, OverflowError, TypeError, ValueError):
+        raise _CaptureFailure("clock_failed")
 
 
 def _monotonic_ns() -> int:
@@ -176,12 +215,16 @@ def _bounded_json_bytes(value: Any, limit: int, category: str) -> bytes:
     return data
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(value)
+
+
 def _parse_envelope(raw: bytes, expected_event: str | None = None) -> _Envelope:
     if len(raw) > MAX_TOOL_INPUT_BYTES + MAX_TOOL_RESPONSE_BYTES + 64 * 1024:
         raise _CaptureFailure("invalid_envelope")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         raise _CaptureFailure("invalid_envelope")
     if not isinstance(value, dict):
         raise _CaptureFailure("invalid_envelope")
@@ -203,8 +246,6 @@ def _parse_envelope(raw: bytes, expected_event: str | None = None) -> _Envelope:
     if "tool_input" not in value:
         raise _CaptureFailure("invalid_envelope")
     tool_input = value["tool_input"]
-    if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
-        raise _CaptureFailure("invalid_envelope")
     input_bytes = _bounded_json_bytes(tool_input, MAX_TOOL_INPUT_BYTES, "oversized_input")
     response = None
     response_bytes = None
@@ -235,11 +276,33 @@ parse_hook_envelope = _parse_envelope
 @contextlib.contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
     handle = None
+    acquired = False
     try:
         path.parent.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
         handle = path.open("a+b")
         os.chmod(path, PRIVATE_FILE_MODE)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        except (OSError, RuntimeError, OverflowError, ValueError):
+            raise _CaptureFailure("clock_failed")
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (BlockingIOError, OSError) as exc:
+                if (
+                    not isinstance(exc, BlockingIOError)
+                    and getattr(exc, "errno", None) not in {11, 13}
+                ):
+                    raise _CaptureFailure("lock_failed")
+                try:
+                    expired = time.monotonic() >= deadline
+                except (OSError, RuntimeError, OverflowError, ValueError):
+                    raise _CaptureFailure("clock_failed")
+                if expired:
+                    raise _CaptureFailure("lock_failed")
+                time.sleep(0.001)
         yield
     except _CaptureFailure:
         raise
@@ -247,10 +310,11 @@ def _file_lock(path: Path) -> Iterator[None]:
         raise _CaptureFailure("lock_failed")
     finally:
         if handle is not None:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
+            if acquired:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
             handle.close()
 
 
@@ -439,6 +503,7 @@ class ToolChangeCapture:
         self.lock_path = self.run_dir / ".lock"
         self.pending_path = self.run_dir / "pending.json"
         self.state_path = self.run_dir / "state.json"
+        self.degradation_path = self.run_dir / ".degraded"
         self.input_dir = self.run_dir / "inputs"
         self.response_dir = self.run_dir / "responses"
         self.patch_dir = self.run_dir / "patches"
@@ -448,8 +513,11 @@ class ToolChangeCapture:
     @classmethod
     def start(cls, cwd: Path, run_dir: Path, *, session_id: str | None = None, turn_id: str | None = None) -> "ToolChangeCapture":
         run_dir = Path(run_dir)
-        run_dir.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
-        os.chmod(run_dir, PRIVATE_DIR_MODE)
+        try:
+            run_dir.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+            os.chmod(run_dir, PRIVATE_DIR_MODE)
+        except (OSError, ValueError):
+            return cls.unavailable(cwd, run_dir)
         context_path = run_dir / "context.json"
         instance = cls(cwd, run_dir, context_path)
         try:
@@ -480,6 +548,7 @@ class ToolChangeCapture:
                 "omitted": 0,
                 "reasons": [],
                 "pending": {},
+                "completed_tool_use_ids": [],
                 "start_mono_ns": now_mono,
                 "start_utc": _utc_now(),
                 "finalized": False,
@@ -528,6 +597,7 @@ class ToolChangeCapture:
         instance.lock_path = resolved_run_dir / ".lock"
         instance.pending_path = resolved_run_dir / "pending.json"
         instance.state_path = resolved_run_dir / "state.json"
+        instance.degradation_path = resolved_run_dir / ".degraded"
         instance.input_dir = resolved_run_dir / "inputs"
         instance.response_dir = resolved_run_dir / "responses"
         instance.patch_dir = resolved_run_dir / "patches"
@@ -538,10 +608,22 @@ class ToolChangeCapture:
 
     @classmethod
     def from_context(cls, context_path: Path) -> "ToolChangeCapture":
-        path = Path(context_path).resolve(strict=False)
+        candidate = Path(context_path)
+        try:
+            if not candidate.is_absolute():
+                raise _CaptureFailure("context_unavailable")
+            if ".." in candidate.parts:
+                raise _CaptureFailure("context_unavailable")
+            if _contains_symlink(candidate):
+                raise _CaptureFailure("context_unavailable")
+        except OSError:
+            raise _CaptureFailure("context_unavailable")
+        path = candidate.resolve(strict=False)
         if not path.name == "context.json":
             raise _CaptureFailure("context_unavailable")
         try:
+            _require_private_file(path)
+            _require_private_directory(path.parent)
             context = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(context, dict) or context.get("schema_version") != SCHEMA_VERSION:
                 raise _CaptureFailure("context_unavailable")
@@ -567,8 +649,27 @@ class ToolChangeCapture:
                     reasons.append(reason)
                 state["reasons"] = reasons[:32]
                 _atomic_write(self.state_path, _json_bytes(state))
+        except _CaptureFailure as exc:
+            self._write_degradation(exc.category)
+        except Exception:
+            self._write_degradation(reason)
+
+    def _write_degradation(self, reason: str) -> None:
+        if reason not in _ERROR_CATEGORIES:
+            reason = "write_failed"
+        try:
+            _atomic_write(self.degradation_path, _json_bytes({"reason": reason}))
         except Exception:
             pass
+
+    def _consume_degradation(self, state: dict[str, Any]) -> None:
+        try:
+            value = json.loads(self.degradation_path.read_text(encoding="utf-8"))
+            reason = value.get("reason") if isinstance(value, dict) else None
+            if isinstance(reason, str):
+                state["reasons"] = _append_reason(state, reason)
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            return
 
     def _load_state(self) -> dict[str, Any]:
         try:
@@ -646,7 +747,16 @@ class ToolChangeCapture:
                     state["turn_id"] = envelope.turn_id
                 state["discovered"] = int(state.get("discovered", 0)) + 1
                 pending = dict(state.get("pending", {}))
-                if envelope.tool_use_id in pending:
+                completed_value = state.get("completed_tool_use_ids", [])
+                completed_ids = (
+                    {item for item in completed_value if isinstance(item, str)}
+                    if isinstance(completed_value, list)
+                    else set()
+                )
+                if (
+                    envelope.tool_use_id in pending
+                    or envelope.tool_use_id in completed_ids
+                ):
                     state["reasons"] = _append_reason(state, "duplicate_tool_use")
                     _atomic_write(self.state_path, _json_bytes(state))
                     return
@@ -697,10 +807,19 @@ class ToolChangeCapture:
             with _file_lock(self.lock_path):
                 state = self._load_state()
                 self._validate_context(envelope, state)
+                if state.get("finalized"):
+                    raise _CaptureFailure("context_unavailable")
                 pending = dict(state.get("pending", {}))
                 record = pending.get(envelope.tool_use_id)
                 if not isinstance(record, dict):
-                    state["reasons"] = _append_reason(state, "missing_pre")
+                    completed_value = state.get("completed_tool_use_ids", [])
+                    duplicate = (
+                        isinstance(completed_value, list)
+                        and envelope.tool_use_id in completed_value
+                    )
+                    state["reasons"] = _append_reason(
+                        state, "duplicate_tool_use" if duplicate else "missing_pre"
+                    )
                     _atomic_write(self.state_path, _json_bytes(state))
                     return
                 result_tree = self._snapshot()
@@ -763,6 +882,7 @@ class ToolChangeCapture:
                 }
                 if not success:
                     state["failed"] = int(state.get("failed", 0)) + 1
+                    state["reasons"] = _append_reason(state, "tool_failed")
                 elif changed:
                     state["captured"] = int(state.get("captured", 0)) + 1
                 else:
@@ -770,6 +890,9 @@ class ToolChangeCapture:
                 state["last_tree"] = result_tree
                 pending.pop(envelope.tool_use_id, None)
                 state["pending"] = pending
+                completed_ids = list(state.get("completed_tool_use_ids", []))
+                completed_ids.append(envelope.tool_use_id)
+                state["completed_tool_use_ids"] = completed_ids[-MAX_COMPLETED_RECORDS:]
                 _append_jsonl(self.manifest_path, complete_record)
                 _atomic_write(self.state_path, _json_bytes(state))
                 _atomic_write(self.pending_path, _json_bytes(pending))
@@ -779,13 +902,14 @@ class ToolChangeCapture:
             self._record_reason("snapshot_failed")
 
     def finalize(self, *, final_patch_path: Path | None = None) -> HookSummary:
-        if self._closed and self.summary_path.exists():
+        if self._closed and self.summary_path.exists() and final_patch_path is None:
             return _summary_from_file(self.summary_path)
         try:
             with _file_lock(self.lock_path):
                 state = self._load_state()
+                self._consume_degradation(state)
                 pending = dict(state.get("pending", {}))
-                if pending:
+                if pending and not state.get("finalized"):
                     state["incomplete"] = int(state.get("incomplete", 0)) + len(pending)
                     state["reasons"] = _append_reason(state, "missing_post")
                     for pending_record in pending.values():
@@ -822,7 +946,7 @@ class ToolChangeCapture:
                     state["reasons"] = _append_reason(state, "external_mutation")
                 if replayed_tree is None or final_tree is None or replayed_tree != final_tree:
                     state["reasons"] = _append_reason(state, "replay_mismatch")
-                if final_patch_path is not None and final_patch_path.exists():
+                if final_patch_path is not None:
                     try:
                         final_bytes = final_patch_path.read_bytes()
                         if state.get("run_start_tree") and final_tree:
@@ -860,6 +984,18 @@ class ToolChangeCapture:
         self._closed = True
         return summary
 
+    def reconcile(self, final_patch_path: Path | None = None) -> HookSummary:
+        """Refresh the private summary against the current worktree and patch.
+
+        Executor-owned patches are saved after Codex exits.  Reconciliation is
+        deliberately idempotent so that the runner's initial finalization can
+        be corrected without reopening a Codex hook context or appending
+        duplicate incomplete records.
+        """
+
+        self._closed = False
+        return self.finalize(final_patch_path=final_patch_path)
+
     close = finalize
 
     def _replay(self, state: dict[str, Any]) -> str | None:
@@ -870,7 +1006,7 @@ class ToolChangeCapture:
                     item = json.loads(line)
                     if (
                         isinstance(item, dict)
-                        and item.get("status") in {"captured", "failed"}
+                        and item.get("status") == "captured"
                         and item.get("patch")
                         and not item.get("gap_before")
                         and not item.get("overlap")
@@ -1023,9 +1159,21 @@ def _summary_for_state(state: dict[str, Any]) -> HookSummary:
 def _summary_from_file(path: Path) -> HookSummary:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        state_value = data.get("state", "unavailable")
+        state = (
+            state_value
+            if state_value in {"complete", "partial", "unavailable"}
+            else "unavailable"
+        )
+        raw_reasons = data.get("reasons", [])
+        reasons = (
+            tuple(str(item) for item in raw_reasons if item in _ERROR_CATEGORIES)
+            if isinstance(raw_reasons, list)
+            else ()
+        )
         return HookSummary(
             int(data.get("schema_version", SCHEMA_VERSION)),
-            str(data.get("state", "unavailable")),
+            state,
             int(data.get("discovered", 0)),
             int(data.get("captured", 0)),
             int(data.get("empty", 0)),
@@ -1034,7 +1182,7 @@ def _summary_from_file(path: Path) -> HookSummary:
             int(data.get("gaps", 0)),
             int(data.get("overlaps", 0)),
             int(data.get("omitted", 0)),
-            tuple(str(item) for item in data.get("reasons", [])),
+            reasons,
             data.get("run_start_tree"),
             data.get("final_tree"),
             data.get("replayed_tree"),
@@ -1102,6 +1250,25 @@ def main(argv: list[str] | None = None) -> int:
 process_hook = handle_hook
 
 
+def reconcile_tool_changes(
+    context_path: Path, *, final_patch_path: Path | None = None
+) -> HookSummary:
+    """Reconcile a runner-owned hook context without exposing private data."""
+
+    try:
+        return ToolChangeCapture.from_context(context_path).reconcile(
+            final_patch_path=final_patch_path
+        )
+    except _CaptureFailure as exc:
+        capture = ToolChangeCapture.unavailable(Path.cwd(), Path(context_path).parent)
+        capture._record_reason(exc.category)
+        return capture.summary
+    except Exception:
+        capture = ToolChangeCapture.unavailable(Path.cwd(), Path(context_path).parent)
+        capture._record_reason("write_failed")
+        return capture.summary
+
+
 if __name__ == "__main__":  # pragma: no cover - exercised by Codex
     raise SystemExit(main())
 
@@ -1115,4 +1282,5 @@ __all__ = [
     "main",
     "parse_hook_envelope",
     "process_hook",
+    "reconcile_tool_changes",
 ]

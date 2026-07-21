@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import stat
+import time
 from pathlib import Path
 
 from coquic_steward.agents.tool_changes import (
+    LOCK_TIMEOUT_SECONDS,
     ToolChangeCapture,
     handle_hook,
 )
@@ -97,6 +100,16 @@ def test_gap_and_unmatched_post_are_explicit(repo: Path, tmp_path: Path) -> None
     assert "missing_post" in summary.reasons
 
 
+def test_duplicate_tool_use_id_is_partial(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    handle_hook(_envelope(repo, "PostToolUse", "tool_1"), context_path=capture.context_path)
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    summary = capture.finalize()
+    assert summary.state == "partial"
+    assert "duplicate_tool_use" in summary.reasons
+
+
 def test_failed_tool_is_behavior_only(repo: Path, tmp_path: Path) -> None:
     capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
     handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
@@ -106,7 +119,80 @@ def test_failed_tool_is_behavior_only(repo: Path, tmp_path: Path) -> None:
     )
     summary = capture.finalize()
     assert summary.failed == 1
+    assert summary.state == "partial"
+    assert "tool_failed" in summary.reasons
     assert _manifest(capture.run_dir)[0]["status"] == "failed"
+
+
+def test_successful_no_change_is_empty(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    handle_hook(_envelope(repo, "PostToolUse", "tool_1"), context_path=capture.context_path)
+    summary = capture.finalize()
+
+    assert summary.state == "complete"
+    assert summary.empty == 1
+    record = _manifest(capture.run_dir)[0]
+    assert record["status"] == "empty"
+    assert record["patch"] is None
+
+
+def test_apply_patch_input_preserves_non_command_shape(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    value = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session_1",
+        "turn_id": "turn_1",
+        "cwd": str(repo),
+        "tool_name": "apply_patch",
+        "tool_use_id": "tool_1",
+        "tool_input": "*** Begin Patch\n*** End Patch",
+    }
+    handle_hook(json.dumps(value), context_path=capture.context_path)
+    value["hook_event_name"] = "PostToolUse"
+    value["tool_response"] = {"success": True}
+    handle_hook(json.dumps(value), context_path=capture.context_path)
+    capture.finalize()
+    record = _manifest(capture.run_dir)[0]
+    input_path = capture.run_dir / str(record["input_artifact"]["path"])
+    assert json.loads(input_path.read_text(encoding="utf-8")) == value["tool_input"]
+
+
+def test_lock_contention_is_bounded(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    with capture.lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        started = time.monotonic()
+        handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+        elapsed = time.monotonic() - started
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    assert elapsed < LOCK_TIMEOUT_SECONDS * 10
+    summary = capture.finalize()
+    assert summary.state == "unavailable"
+    assert "lock_failed" in summary.reasons
+
+
+def test_context_requires_private_file(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    capture.context_path.chmod(0o644)
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    assert capture.finalize().state == "unavailable"
+
+
+def test_reconcile_refreshes_after_late_write(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    (repo / "README.md").write_text("changed\n", encoding="utf-8")
+    handle_hook(_envelope(repo, "PostToolUse", "tool_1"), context_path=capture.context_path)
+    assert capture.finalize().state == "complete"
+
+    (repo / "late.txt").write_text("unhooked\n", encoding="utf-8")
+    final_patch = tmp_path / "final.patch"
+    Worktrees.__new__(Worktrees).save_patch(repo, final_patch)
+    summary = capture.reconcile(final_patch_path=final_patch)
+    assert summary.state == "partial"
+    assert "external_mutation" in summary.reasons
+    assert capture.reconcile(final_patch_path=final_patch).state == "partial"
 
 
 def test_authoritative_final_patch_is_reconciled(repo: Path, tmp_path: Path) -> None:

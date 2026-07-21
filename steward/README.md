@@ -345,7 +345,8 @@ tool-changes/
 ├── summary.json         bounded completeness and reconciliation evidence
 ├── inputs/              private, bounded tool_input values
 ├── responses/           private, bounded tool_response values
-└── patches/             canonical binary Git patches for tree transitions
+├── patches/             canonical binary Git patches for tree transitions
+└── .objects/            private Git objects used only for replay
 ```
 
 The recorder is evidence-only. It snapshots the worktree at synchronous
@@ -362,7 +363,15 @@ mutations. Missing or untrusted hooks, unsupported or specialized tools,
 background writers, and recorder failures are reported as bounded
 `partial`/`unavailable` evidence and never change Codex output, retry
 classification, or task state. The final attempt patch remains authoritative
-for the worktree result.
+for the worktree result. Steward reconciles that patch after every executor
+iteration save, so a late worktree write cannot leave an earlier `complete`
+summary in place; reconciliation is idempotent.
+
+Manifest updates use a private lock with a short bounded acquisition deadline.
+Contention, snapshot, clock, parse, and write failures become allowlisted
+diagnostic categories and the synchronous hook exits successfully. Private
+files are mode `0600` under mode `0700` directories. No trajectory artifact is
+copied to the public mirror.
 
 Project hooks live in `.codex/hooks.json`. Codex normally asks the operator to
 review and trust project hooks; complete that `/hooks` trust review before a

@@ -2037,8 +2037,8 @@ EOF
         clangFormatExtraPackages = [ llvmPkgs.clang-tools ];
         clangTidyEntry = "${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh";
         clangTidyExtraPackages = [ ];
-        frontendEntry = "${pkgs.bash}/bin/bash -c 'npm --prefix site/next run lint && npm --prefix site/next run typecheck'";
-        frontendExtraPackages = [ nodejs ];
+        frontendEntry = "${frontendNixCheckHook}/bin/coquic-frontend-check";
+        frontendExtraPackages = [ ];
       };
       pre-commit-check = mkPreCommitCheck {
         clangFormatEntry = "${llvmPkgs.clang-tools}/bin/clang-format -style=file -i";

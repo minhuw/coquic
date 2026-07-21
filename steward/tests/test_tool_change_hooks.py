@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import stat
+import subprocess
+import sys
 import time
 from pathlib import Path
 
 from coquic_steward.agents.tool_changes import (
     LOCK_TIMEOUT_SECONDS,
+    MAX_TOOL_INPUT_BYTES,
     ToolChangeCapture,
     handle_hook,
 )
@@ -27,13 +31,14 @@ def _envelope(
     response: object | None = None,
     session: str = "session_1",
     turn: str = "turn_1",
+    tool_name: str = "apply_patch",
 ) -> bytes:
     value: dict[str, object] = {
         "hook_event_name": event,
         "session_id": session,
         "turn_id": turn,
         "cwd": str(repo),
-        "tool_name": "apply_patch",
+        "tool_name": tool_name,
         "tool_use_id": tool_id,
         "tool_input": {"command": command},
     }
@@ -205,6 +210,76 @@ def test_authoritative_final_patch_is_reconciled(repo: Path, tmp_path: Path) -> 
     Worktrees.__new__(Worktrees).save_patch(repo, final_patch)
     summary = capture.finalize(final_patch_path=final_patch)
     assert summary.state == "complete"
+
+
+def test_authoritative_final_patch_uses_head_base_for_dirty_revision(
+    repo: Path, tmp_path: Path
+) -> None:
+    (repo / "README.md").write_text("prior revision\n", encoding="utf-8")
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    handle_hook(_envelope(repo, "PreToolUse", "tool_1"), context_path=capture.context_path)
+    (repo / "later.txt").write_text("later revision\n", encoding="utf-8")
+    handle_hook(_envelope(repo, "PostToolUse", "tool_1"), context_path=capture.context_path)
+    assert capture.finalize().state == "complete"
+
+    final_patch = tmp_path / "final.patch"
+    Worktrees.__new__(Worktrees).save_patch(repo, final_patch)
+    summary = capture.reconcile(final_patch_path=final_patch)
+
+    assert summary.state == "complete"
+    assert "final_patch_mismatch" not in summary.reasons
+
+
+def test_hook_cli_reads_large_bounded_pipe_input(repo: Path, tmp_path: Path) -> None:
+    capture = ToolChangeCapture.start(repo, tmp_path / "tool-changes")
+    command = "x" * (128 * 1024)
+    env = {
+        **os.environ,
+        "COQUIC_STEWARD_HOOK_CONTEXT": str(capture.context_path),
+    }
+    for event in ("PreToolUse", "PostToolUse"):
+        subprocess.run(
+            [sys.executable, "-m", "coquic_steward.agents.tool_changes"],
+            cwd=repo,
+            env=env,
+            input=_envelope(
+                repo,
+                event,
+                "tool_1",
+                command=command,
+                tool_name="Bash",
+            ),
+            check=True,
+        )
+
+    summary = capture.finalize()
+    assert summary.state == "complete"
+    assert summary.discovered == 1
+    record = _manifest(capture.run_dir)[0]
+    input_path = capture.run_dir / str(record["input_artifact"]["path"])
+    assert json.loads(input_path.read_text(encoding="utf-8")) == {"command": command}
+
+    oversized = ToolChangeCapture.start(repo, tmp_path / "oversized-tool-changes")
+    oversized_env = {
+        **os.environ,
+        "COQUIC_STEWARD_HOOK_CONTEXT": str(oversized.context_path),
+    }
+    subprocess.run(
+        [sys.executable, "-m", "coquic_steward.agents.tool_changes"],
+        cwd=repo,
+        env=oversized_env,
+        input=_envelope(
+            repo,
+            "PreToolUse",
+            "tool_2",
+            command="x" * (MAX_TOOL_INPUT_BYTES + 1),
+            tool_name="Bash",
+        ),
+        check=True,
+    )
+    oversized_summary = oversized.finalize()
+    assert oversized_summary.state == "unavailable"
+    assert "oversized_input" in oversized_summary.reasons
 
 
 def test_context_artifacts_are_private(repo: Path, tmp_path: Path) -> None:

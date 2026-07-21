@@ -29,6 +29,7 @@ SCHEMA_VERSION = 1
 MAX_COMPLETED_RECORDS = 4096
 MAX_TOOL_INPUT_BYTES = 1024 * 1024
 MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
+MAX_HOOK_ENVELOPE_BYTES = MAX_TOOL_INPUT_BYTES + MAX_TOOL_RESPONSE_BYTES + 64 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 SUPPORTED_TOOLS = frozenset({"Bash", "apply_patch"})
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:_\-]{0,127}\Z")
@@ -220,7 +221,7 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _parse_envelope(raw: bytes, expected_event: str | None = None) -> _Envelope:
-    if len(raw) > MAX_TOOL_INPUT_BYTES + MAX_TOOL_RESPONSE_BYTES + 64 * 1024:
+    if len(raw) > MAX_HOOK_ENVELOPE_BYTES:
         raise _CaptureFailure("invalid_envelope")
     try:
         value = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
@@ -444,6 +445,13 @@ class _GitSnapshot:
         self._run(["read-tree", "HEAD"], check=True)
         self._run(["add", "-A", "--", "."], check=True)
         result = self._run(["write-tree"], check=True)
+        value = result.stdout.strip()
+        if not TREE_RE.fullmatch(value):
+            raise _CaptureFailure("snapshot_failed")
+        return value
+
+    def head_tree(self) -> str:
+        result = self._run(["rev-parse", "HEAD^{tree}"], check=True)
         value = result.stdout.strip()
         if not TREE_RE.fullmatch(value):
             raise _CaptureFailure("snapshot_failed")
@@ -956,11 +964,12 @@ class ToolChangeCapture:
                                 object_directory=self.object_dir,
                             )
                             try:
+                                head_tree = snap.head_tree()
                                 patched_tree = (
-                                    str(state["run_start_tree"])
+                                    head_tree
                                     if not final_bytes
                                     else self._apply_patch_tree(
-                                        snap, str(state["run_start_tree"]), final_bytes
+                                        snap, head_tree, final_bytes
                                     )
                                 )
                             finally:
@@ -1224,6 +1233,17 @@ def handle_hook(raw: bytes | str, *, context_path: Path | None = None) -> None:
             pass
 
 
+def _read_hook_envelope(fd: int = 0) -> bytes:
+    data = bytearray()
+    read_limit = MAX_HOOK_ENVELOPE_BYTES + 1
+    while len(data) < read_limit:
+        chunk = os.read(fd, min(64 * 1024, read_limit - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
+
+
 def main(argv: list[str] | None = None) -> int:
     if not os.environ.get("COQUIC_STEWARD_HOOK_CONTEXT"):
         return 0
@@ -1241,7 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.finalize:
             ToolChangeCapture.from_context(context_path).finalize()
         else:
-            handle_hook(os.read(0, MAX_TOOL_INPUT_BYTES + MAX_TOOL_RESPONSE_BYTES + 64 * 1024), context_path=context_path)
+            handle_hook(_read_hook_envelope(), context_path=context_path)
     except Exception:
         pass
     return 0

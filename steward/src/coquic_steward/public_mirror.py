@@ -12,6 +12,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .agents.activity import (
+    ACTIVITIES,
+    ACTIVITY_MAX_CAPTURE,
+    ACTIVITY_MAX_SUMMARY_BYTES,
+    ACTIVITY_PUBLIC_MAX_EVENTS,
+    ACTIVITY_SCHEMA_VERSION,
+    ACTIVITY_SOURCE,
+    ACTIVITY_STAGE,
+    activity_sidecar_path,
+    is_safe_source_event_id,
+    parse_activity_marker,
+    validate_activity_summary,
+)
 from .agents.diagnostics import diagnostics_for_paths
 from .agents.tool_changes import (
     TOOL_CHANGE_ERROR_CATEGORIES,
@@ -955,7 +968,17 @@ def _public_run_artifact(
         and (transcript_path is not None or last_message_path is not None)
         else None
     )
-    if transcript is None and last_message is None and change_trajectory is None:
+    activities = (
+        _public_activities(config, transcript_path)
+        if role == "worker"
+        else None
+    )
+    if (
+        transcript is None
+        and last_message is None
+        and change_trajectory is None
+        and activities is None
+    ):
         return None
     diagnostics = diagnostics_for_paths(
         transcript_path=transcript_path,
@@ -988,11 +1011,275 @@ def _public_run_artifact(
         "transcript": transcript,
         "last_message": last_message,
         "change_trajectory": change_trajectory,
+        "activities": activities,
     }
 
 
 class _TrajectoryReadError(ValueError):
     """Private trajectory evidence failed a trust boundary."""
+
+
+_ACTIVITY_MAX_SIDECAR_BYTES = 512 * 1024
+_ACTIVITY_PUBLIC_KEYS = {
+    "sequence",
+    "source_event_id",
+    "recorded_at",
+    "stage",
+    "activity",
+    "summary",
+    "source",
+}
+
+
+def _activity_empty(
+    availability: str,
+    *,
+    capture_state: str = "complete",
+    invalid_count: int = 0,
+    event_count: int = 0,
+    omitted_event_count: int = 0,
+    truncated: bool = False,
+) -> dict[str, object]:
+    return {
+        "availability": availability,
+        "source": ACTIVITY_SOURCE,
+        "capture_state": capture_state,
+        "event_count": event_count,
+        "published_count": 0,
+        "omitted_event_count": omitted_event_count,
+        "invalid_count": invalid_count,
+        "truncated": truncated,
+        "events": [],
+    }
+
+
+def _public_activities(
+    config: StewardConfig, transcript_path: Path | None
+) -> dict[str, object]:
+    """Project a validated private activity sidecar into the public contract."""
+
+    if config.public_mirror.transcript_mode == "none":
+        return _activity_empty("withheld")
+    if transcript_path is None:
+        return _activity_empty("not_produced")
+    sidecar = activity_sidecar_path(transcript_path)
+    if not _activity_safe_file(sidecar, config.state_dir):
+        try:
+            if not os.path.lexists(sidecar):
+                return _activity_empty("not_produced")
+        except OSError:
+            return _activity_empty("unavailable", capture_state="partial")
+        return _activity_empty("unavailable", capture_state="partial")
+    try:
+        payload = _read_activity_sidecar(sidecar)
+        records = payload["events"]
+        summary = payload["summary"]
+        header = payload["header"]
+        if not isinstance(records, list) or not isinstance(summary, dict):
+            raise ValueError("invalid records")
+        projected: list[dict[str, object]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("invalid event")
+            summary_text = _public_activity_summary(config, record["summary"])
+            projected.append(
+                {
+                    "sequence": record["sequence"],
+                    "source_event_id": record["source_event_id"],
+                    "recorded_at": record["recorded_at"],
+                    "stage": record["stage"],
+                    "activity": record["activity"],
+                    "summary": summary_text,
+                    "source": record["source"],
+                }
+            )
+        recorded = summary["recorded"]
+        omitted = summary["omitted"]
+        invalid = summary["invalid"]
+        published = projected[-ACTIVITY_PUBLIC_MAX_EVENTS:]
+        omitted_public = max(0, len(projected) - len(published))
+        omitted_total = omitted + omitted_public
+        if recorded == 0 and omitted == 0:
+            availability = "not_declared"
+        else:
+            availability = "available"
+        return {
+            "availability": availability,
+            "source": ACTIVITY_SOURCE,
+            "capture_state": summary["capture_state"],
+            "event_count": recorded + omitted,
+            "published_count": len(published),
+            "omitted_event_count": omitted_total,
+            "invalid_count": invalid,
+            "truncated": bool(summary["truncated"] or omitted_public),
+            "events": published,
+        }
+    except Exception:
+        return _activity_empty("unavailable", capture_state="partial")
+
+
+def _activity_safe_file(path: Path, root: Path) -> bool:
+    try:
+        if not os.path.lexists(path):
+            return False
+        info = path.lstat()
+        if path.is_symlink() or not path.is_file() or info.st_nlink != 1:
+            return False
+        resolved_root = root.resolve(strict=True)
+        resolved_path = path.resolve(strict=True)
+        if resolved_root != resolved_path and resolved_root not in resolved_path.parents:
+            return False
+        current = path.parent
+        while current != root and root in current.parents:
+            if current.is_symlink():
+                return False
+            current = current.parent
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _read_activity_sidecar(path: Path) -> dict[str, object]:
+    if path.stat().st_size > _ACTIVITY_MAX_SIDECAR_BYTES:
+        raise ValueError("activity sidecar too large")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 2:
+        raise ValueError("activity sidecar incomplete")
+    values: list[dict[str, object]] = []
+    for line in lines:
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError("activity record is not an object")
+        values.append(value)
+    header = values[0]
+    summary = values[-1]
+    if header.get("record_type") != "header" or summary.get("record_type") != "summary":
+        raise ValueError("activity sidecar boundaries")
+    if len(values) != 2 + sum(value.get("record_type") == "event" for value in values[1:-1]):
+        raise ValueError("activity sidecar record type")
+    _validate_activity_header(header)
+    _validate_activity_summary_record(summary)
+    events: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    expected_sequence = 1
+    for value in values[1:-1]:
+        _validate_activity_event_record(value, expected_sequence, seen_ids)
+        events.append(value)
+        expected_sequence += 1
+        if len(events) > ACTIVITY_MAX_CAPTURE:
+            raise ValueError("activity capture bound")
+    if summary["recorded"] != len(events):
+        raise ValueError("activity record count")
+    return {"header": header, "events": events, "summary": summary}
+
+
+def _validate_activity_header(value: dict[str, object]) -> None:
+    if set(value) != {
+        "record_type",
+        "schema_version",
+        "stage",
+        "capture_started_at",
+        "source",
+    }:
+        raise ValueError("activity header keys")
+    if (
+        not isinstance(value["schema_version"], int)
+        or isinstance(value["schema_version"], bool)
+        or value["schema_version"] != ACTIVITY_SCHEMA_VERSION
+    ):
+        raise ValueError("activity schema")
+    if value["stage"] != ACTIVITY_STAGE or value["source"] != ACTIVITY_SOURCE:
+        raise ValueError("activity header provenance")
+    _validate_activity_timestamp(value["capture_started_at"])
+
+
+def _validate_activity_summary_record(value: dict[str, object]) -> None:
+    if set(value) != {
+        "record_type",
+        "schema_version",
+        "capture_state",
+        "recorded",
+        "invalid",
+        "duplicate",
+        "omitted",
+        "truncated",
+    }:
+        raise ValueError("activity summary keys")
+    if (
+        not isinstance(value["schema_version"], int)
+        or isinstance(value["schema_version"], bool)
+        or value["schema_version"] != ACTIVITY_SCHEMA_VERSION
+    ):
+        raise ValueError("activity summary schema")
+    if value["capture_state"] not in {"complete", "partial"}:
+        raise ValueError("activity capture state")
+    for key in ("recorded", "invalid", "duplicate", "omitted"):
+        number = value[key]
+        if not isinstance(number, int) or isinstance(number, bool) or number < 0:
+            raise ValueError("activity summary count")
+    if not isinstance(value["truncated"], bool):
+        raise ValueError("activity summary truncation")
+    if value["recorded"] > ACTIVITY_MAX_CAPTURE:
+        raise ValueError("activity summary bound")
+    if value["omitted"] and not value["truncated"]:
+        raise ValueError("activity summary omission")
+
+
+def _validate_activity_event_record(
+    value: dict[str, object], expected_sequence: int, seen_ids: set[str]
+) -> None:
+    if set(value) != _ACTIVITY_PUBLIC_KEYS | {"record_type", "schema_version"}:
+        raise ValueError("activity event keys")
+    if value["record_type"] != "event":
+        raise ValueError("activity event schema")
+    if (
+        not isinstance(value["schema_version"], int)
+        or isinstance(value["schema_version"], bool)
+        or value["schema_version"] != ACTIVITY_SCHEMA_VERSION
+    ):
+        raise ValueError("activity event schema")
+    if (
+        not isinstance(value["sequence"], int)
+        or isinstance(value["sequence"], bool)
+        or value["sequence"] != expected_sequence
+    ):
+        raise ValueError("activity event order")
+    source_event_id = value["source_event_id"]
+    if not is_safe_source_event_id(source_event_id) or source_event_id in seen_ids:
+        raise ValueError("activity event id")
+    seen_ids.add(str(source_event_id))
+    if value["stage"] != ACTIVITY_STAGE or value["source"] != ACTIVITY_SOURCE:
+        raise ValueError("activity event provenance")
+    if value["activity"] not in ACTIVITIES:
+        raise ValueError("activity event enum")
+    if validate_activity_summary(value["summary"]) is None:
+        raise ValueError("activity event summary")
+    _validate_activity_timestamp(value["recorded_at"])
+
+
+def _validate_activity_timestamp(value: object) -> None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError("activity timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except (TypeError, ValueError):
+        raise ValueError("activity timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError("activity timestamp")
+
+
+def _public_activity_summary(config: StewardConfig, value: object) -> str:
+    text = _public_text(config, str(value))
+    text = _trajectory_redact_absolute_paths(text)
+    text = _trajectory_redact_windows_paths(text)
+    text = _trajectory_redact_urls(text)
+    text = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", text)
+    text = _TRAJECTORY_PRIVATE_MARKER_RE.sub("[redacted-private]", text)
+    text = _trajectory_redact_private_assignment(text)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= ACTIVITY_MAX_SUMMARY_BYTES:
+        return text
+    return encoded[:ACTIVITY_MAX_SUMMARY_BYTES].decode("utf-8", errors="ignore")
 
 
 def _trajectory_empty(
@@ -2182,7 +2469,11 @@ def _render_transcript_item(item: dict[str, Any]) -> str:
 
 
 def _render_agent_message_item(item: dict[str, Any]) -> str:
-    return str(item.get("text") or "")
+    text = str(item.get("text") or "")
+    if parse_activity_marker(text) is None:
+        return text
+    lines = text.splitlines(keepends=True)
+    return "".join(lines[1:])
 
 
 def _render_reasoning_item(item: dict[str, Any]) -> str:

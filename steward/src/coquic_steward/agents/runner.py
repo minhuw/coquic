@@ -10,9 +10,16 @@ import subprocess  # nosec B404
 import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 
 from ..core.config import StewardConfig
 from ..core.models import CodexStage, TaskRecord, WorkerResult
+from .activity import (
+    ACTIVITY_REPORTING_RULES,
+    ActivityRecorder,
+    activity_diagnostics_unavailable,
+    activity_sidecar_path,
+)
 from .diagnostics import diagnostics_for_result
 from .tool_changes import ToolChangeCapture
 
@@ -62,16 +69,18 @@ class CodexRunner:
         stage: CodexStage = CodexStage.code,
         sandbox: str | None = None,
     ) -> WorkerResult:
+        stage = CodexStage(stage)
         transcript_path, last_message_path = self.paths(task, name=name)
         run_dir = transcript_path.parent
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = self.config.prompts_dir / task.id / f"{name}.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text(prompt, encoding="utf-8")
+        prompt_for_run = _prompt_with_activity_rules(prompt, stage)
+        prompt_path.write_text(prompt_for_run, encoding="utf-8")
         settings = self.config.codex_settings(stage)
         return self._run_with_retries(
             cwd=cwd,
-            prompt=prompt,
+            prompt=prompt_for_run,
             prompt_path=prompt_path,
             transcript_path=transcript_path,
             last_message_path=last_message_path,
@@ -229,7 +238,14 @@ class CodexRunner:
             )
             time.sleep(delay)
             active_resume_session = next_resume_session
-            attempt_prompt = _CODEX_RETRY_PROMPT if active_resume_session else prompt
+            if active_resume_session:
+                attempt_prompt = (
+                    _CODEX_RETRY_PROMPT
+                    if stage != CodexStage.code
+                    else _prompt_with_activity_rules(_CODEX_RETRY_PROMPT, stage)
+                )
+            else:
+                attempt_prompt = prompt
         raise AssertionError("unreachable Codex retry loop")
 
     def _missing_executable_result(
@@ -271,6 +287,15 @@ class CodexRunner:
                     "state": "unavailable",
                     "reasons": ["context_unavailable"],
                 }
+            try:
+                sidecar = activity_sidecar_path(transcript_path)
+                diagnostics_json["activities"] = (
+                    _activity_file_diagnostics(sidecar)
+                    if sidecar.exists()
+                    else _new_activity_diagnostics(sidecar)
+                )
+            except Exception:
+                diagnostics_json["activities"] = activity_diagnostics_unavailable()
         return WorkerResult(
             completed=False,
             command=args,
@@ -341,6 +366,16 @@ class CodexRunner:
         capture_degraded: bool,
     ) -> WorkerResult:
         capture: ToolChangeCapture | None = None
+        activity_recorder: ActivityRecorder | None = None
+        if stage == CodexStage.code:
+            try:
+                activity_recorder = ActivityRecorder(
+                    activity_sidecar_path(transcript_path)
+                )
+            except Exception:
+                # Activity recording is observational and must not prevent
+                # Codex from starting or alter process behavior.
+                activity_recorder = None
         if stage == CodexStage.code and capture_enabled:
             try:
                 capture = ToolChangeCapture.start(
@@ -380,6 +415,8 @@ class CodexRunner:
         except OSError:
             if capture is not None:
                 capture.finalize()
+            if activity_recorder is not None:
+                _finalize_activity_recorder(activity_recorder)
             raise
         try:
             stdout = _communicate_streaming(
@@ -387,10 +424,18 @@ class CodexRunner:
                 prompt,
                 transcript_path,
                 timeout_seconds=timeout_seconds,
+                event_observer=(
+                    activity_recorder.observe if activity_recorder is not None else None
+                ),
             )
         finally:
             capture_diagnostics = (
                 capture.finalize().diagnostics_dict() if capture is not None else None
+            )
+            activity_diagnostics = (
+                _finalize_activity_recorder(activity_recorder)
+                if activity_recorder is not None
+                else activity_diagnostics_unavailable()
             )
         final_message = (
             last_message_path.read_text(encoding="utf-8")
@@ -428,6 +473,8 @@ class CodexRunner:
                 "reasons": ["context_unavailable"],
                 "reason_categories": ["context_unavailable"],
             }
+        if stage == CodexStage.code:
+            diagnostics_json["activities"] = activity_diagnostics
         return WorkerResult(
             completed=proc.returncode == 0,
             command=args,
@@ -507,6 +554,15 @@ def _archive_retry_artifacts(
             archived["last_message_archive_failed"] = True
         else:
             archived["last_message_path"] = str(last_message_path)
+    activities_path = activity_sidecar_path(result.transcript_path)
+    if activities_path.exists():
+        archived_activities_path = _retry_artifact_path(activities_path, retry_number)
+        try:
+            activities_path.replace(archived_activities_path)
+        except OSError:
+            archived["activities_archive_failed"] = True
+        else:
+            archived["activities_path"] = str(archived_activities_path)
     tool_changes = result.transcript_path.with_name("tool-changes")
     if archive_tool_changes and tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
@@ -628,6 +684,9 @@ def _communicate_streaming(
     transcript_path: Path,
     *,
     timeout_seconds: int,
+    event_observer: Callable[[dict[str, object]], object] | None = None,
+    metadata_observer: Callable[[dict[str, object]], object] | None = None,
+    on_event: Callable[[dict[str, object]], object] | None = None,
 ) -> str:
     if proc.stdin is None or proc.stdout is None or proc.stderr is None:
         raise RuntimeError("codex process pipes were not initialized")
@@ -640,6 +699,7 @@ def _communicate_streaming(
     selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
     selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
     transcript_path.write_text("", encoding="utf-8")
+    observer = event_observer or metadata_observer or on_event
     with transcript_path.open("a", encoding="utf-8") as transcript:
         while selector.get_map():
             if time.monotonic() > deadline:
@@ -661,6 +721,19 @@ def _communicate_streaming(
                 if key.data == "stdout":
                     stdout_parts.append(line)
                     transcript.write(line)
+                    transcript.flush()
+                    if observer is not None:
+                        try:
+                            decoded = json.loads(line)
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            decoded = None
+                        if isinstance(decoded, dict):
+                            try:
+                                observer(decoded)
+                            except Exception:
+                                # Metadata consumers are strictly best effort;
+                                # raw transcript capture has already succeeded.
+                                pass
                 else:
                     transcript.write(
                         json.dumps({"type": "stderr", "text": line.rstrip("\n")}) + "\n"
@@ -669,6 +742,59 @@ def _communicate_streaming(
         if proc.returncode is None:
             proc.wait()
     return "".join(stdout_parts)
+
+
+def _prompt_with_activity_rules(prompt: str, stage: CodexStage) -> str:
+    if stage != CodexStage.code or ACTIVITY_REPORTING_RULES in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n{ACTIVITY_REPORTING_RULES}"
+
+
+def _finalize_activity_recorder(recorder: ActivityRecorder) -> dict[str, object]:
+    try:
+        return recorder.finalize()
+    except Exception:
+        return activity_diagnostics_unavailable()
+
+
+def _new_activity_diagnostics(path: Path) -> dict[str, object]:
+    try:
+        recorder = ActivityRecorder(path)
+        return _finalize_activity_recorder(recorder)
+    except Exception:
+        return activity_diagnostics_unavailable()
+
+
+def _activity_file_diagnostics(path: Path) -> dict[str, object]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        value = json.loads(lines[-1]) if lines else None
+        if not isinstance(value, dict) or value.get("record_type") != "summary":
+            return activity_diagnostics_unavailable()
+        result = {
+            "schema_version": value.get("schema_version"),
+            "capture_state": value.get("capture_state"),
+            "recorded": value.get("recorded"),
+            "invalid": value.get("invalid"),
+            "duplicate": value.get("duplicate"),
+            "omitted": value.get("omitted"),
+            "truncated": value.get("truncated"),
+        }
+        if (
+            result["schema_version"] != 1
+            or result["capture_state"] not in {"complete", "partial"}
+            or any(
+                not isinstance(result[key], int)
+                or isinstance(result[key], bool)
+                or result[key] < 0
+                for key in ("recorded", "invalid", "duplicate", "omitted")
+            )
+            or not isinstance(result["truncated"], bool)
+        ):
+            return activity_diagnostics_unavailable()
+        return result
+    except Exception:
+        return activity_diagnostics_unavailable()
 
 
 def _text(value: str | bytes | None) -> str:

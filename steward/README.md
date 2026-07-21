@@ -58,6 +58,47 @@ The public dashboard is `https://coquic.minhuw.dev/steward`. Planner history is
 at `https://coquic.minhuw.dev/steward/planner`. The dashboard is read-only;
 use the CLI commands below to control Steward.
 
+## Worker activities and evidence authority
+
+Each code-stage worker run may produce a private `activities.jsonl` beside its
+`codex.jsonl` transcript. A retry archives that sidecar as
+`activities.retry-<n>.jsonl`; the final run owns the unsuffixed file. The
+sidecar is mode `0600`, is never served directly, and is best-effort metadata.
+The canonical transcript remains byte-for-byte unchanged.
+
+When a worker's internal intent changes, it may begin an agent message with one
+standalone first line such as:
+
+```text
+STEWARD_ACTIVITY {"activity":"investigate","summary":"Trace closing-state packet generation"}
+```
+
+The closed activity vocabulary is `orient`, `investigate`, `edit`,
+`self_validate`, `self_review`, and `report`. A declaration states current
+agent intent only; it does not assert completion, success, validation, or
+review. Steward supplies the schema version, sequence, receipt timestamp,
+source event ID, stage, and `agent_declared` provenance. Invalid or missing
+markers never change process outcomes, retries, lifecycle status, validation,
+review, integration, or transcript bytes.
+
+The public worker artifact exposes at most the 64 most recent declarations in
+chronological order. Summaries are redacted and bounded to 240 UTF-8 bytes.
+Availability is explicit: `available`, `not_declared`, `not_produced`,
+`unavailable`, or `withheld` when transcripts are disabled. Planner and formal
+reviewer artifacts have `activities: null` because this protocol describes
+code-stage workers only.
+
+| Evidence | Authority |
+| --- | --- |
+| Steward lifecycle phase | Canonical producer-observed task status; never inferred from worker output |
+| Worker activity | Optional agent-declared intent; not a Steward gate |
+| Command, file, and todo records | Codex-observed factual event types; purpose is not inferred |
+| Command exit, validation, reviewer verdict, and patch | Outcome evidence |
+
+Consumers should show the activity source and availability rather than
+silently inferring a phase or outcome. In particular, `self_validate` is not a
+Steward validation phase.
+
 ## Configuration
 
 Only the global file `$COQUIC_HOME/steward.toml` is loaded. A file named

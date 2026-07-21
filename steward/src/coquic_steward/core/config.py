@@ -56,6 +56,7 @@ DEFAULT_PUBLIC_MIRROR_REMOTE_PATH = (
 )
 VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES = {"none", "redacted", "raw"}
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,20 @@ class CodexRunSettings:
 
 
 @dataclass(frozen=True)
+class TelemetryConfig:
+    billing_mode: str = "unknown"
+    price_catalog_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.billing_mode not in VALID_TELEMETRY_BILLING_MODES:
+            choices = ", ".join(sorted(VALID_TELEMETRY_BILLING_MODES))
+            raise ValueError(
+                f"invalid telemetry.billing_mode {self.billing_mode!r}; "
+                f"expected {choices}"
+            )
+
+
+@dataclass(frozen=True)
 class StewardConfig:
     repo_root: Path
     codex_bin: str = "codex"
@@ -144,6 +159,7 @@ class StewardConfig:
     scheduler_wait_interval_sec: float = 1.0
     limits: StewardLimits = field(default_factory=StewardLimits)
     public_mirror: PublicMirrorConfig = field(default_factory=PublicMirrorConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
 
     def __post_init__(self) -> None:
@@ -246,6 +262,7 @@ def load_config(
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
     mirror_data = steward.get("public_mirror", {})
+    telemetry_data = steward.get("telemetry", {})
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
     enabled_signals = _string_tuple(
@@ -295,6 +312,7 @@ def load_config(
             ),
         ),
         public_mirror=_public_mirror_config(mirror_data),
+        telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
     )
     config.ensure_dirs()
@@ -479,6 +497,14 @@ def _public_mirror_config(raw: object) -> PublicMirrorConfig:
             int(data.get("retry_initial_seconds", 30)),
             int(data.get("retry_max_seconds", 300)),
         ),
+    )
+
+
+def _telemetry_config(raw: object) -> TelemetryConfig:
+    data = raw if isinstance(raw, dict) else {}
+    return TelemetryConfig(
+        billing_mode=str(data.get("billing_mode", "unknown")).strip().lower(),
+        price_catalog_path=_optional_path(data.get("price_catalog_path")),
     )
 
 

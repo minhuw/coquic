@@ -130,6 +130,39 @@ The main `[steward]` settings are:
   may not change. Generated state such as `.remote-ci/` and `.rag/` should
   remain outside committed source.
 
+### Model telemetry
+
+Every Codex `exec --json` invocation writes a private mode-`0600` `telemetry.json`
+sidecar beside its transcript. Transient retries are moved with their transcript
+to `telemetry.retry-N.json`; the raw `codex.jsonl` bytes are never rewritten.
+The sidecar records the configured model and reasoning effort, UTC start and
+completion, monotonic duration, the first completed agent-message timing, every
+valid `turn.completed.usage` record, exact input/cache/output/reasoning totals,
+and bounded issue categories. A Codex turn is not an upstream request:
+`model_requests`, TTFT, output streaming duration, and tokens per second are
+explicitly unavailable with provenance `not_exposed_by_codex_exec`.
+
+The optional `[steward.telemetry]` table accepts `billing_mode = "unknown"`,
+`"chatgpt"`, or `"api"`, plus an operator-owned `price_catalog_path`. ChatGPT
+and unknown billing never produce a cost. API cost is only an integer micro-USD
+estimate when the configured model exactly matches one catalog entry covering
+the invocation start time; cached input is a subset of input, reasoning is a
+component of output, and the estimate is `uncached_input * input_rate +
+cached_input * cached_rate + output * output_rate`, rounded with integer
+arithmetic. Missing, stale, overlapping, malformed, or unmatched catalog data
+leaves cost unavailable without affecting capture or task outcomes. The checked
+in [`model-prices.example.json`](model-prices.example.json) catalog is
+conspicuously fictional and non-operative.
+
+Public run artifacts project bounded telemetry and retain totals when turns are
+limited to 100. Worker and reviewer retries roll up once per invocation; task
+detail has a separate aggregate. Full mirror writes also rebuild
+`data/model-telemetry.json` (schema v1) by scanning all retained transcript
+directories, independent of the 80-task display window. It reports all-time
+coverage, oldest/newest evidence, and up to 400 ascending UTC days of completed
+activity. Missing or invalid sidecars, legacy transcripts, and in-flight runs
+keep coverage incomplete; numeric totals never imply complete coverage.
+
 ### Public mirror
 
 The `[steward.public_mirror]` section controls the sanitized v3 monitor

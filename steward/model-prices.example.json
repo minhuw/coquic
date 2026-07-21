@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "fictional-example-model-2026-01",
+      "model": "fictional-example-model",
+      "effective_from": "2026-01-01T00:00:00Z",
+      "effective_until": null,
+      "input_micro_usd_per_million": 123456,
+      "cached_input_micro_usd_per_million": 12345,
+      "output_micro_usd_per_million": 654321,
+      "source": {
+        "label": "Fictional example; not an operational price source",
+        "url": "https://example.invalid/coquic-steward/model-prices"
+      }
+    }
+  ]
+}

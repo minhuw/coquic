@@ -11,6 +11,7 @@ import subprocess  # nosec B404
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable
@@ -25,6 +26,11 @@ from .activity import (
     activity_sidecar_path,
 )
 from .diagnostics import diagnostics_for_result
+from .telemetry import (
+    PriceCatalog,
+    TelemetryRecorder,
+    telemetry_sidecar_path,
+)
 from .tool_changes import ToolChangeCapture
 
 
@@ -102,6 +108,8 @@ class CodexRunner:
             * 60,
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
+            task_id=task.id,
+            run_name=name,
         )
 
     def run_review(
@@ -133,6 +141,8 @@ class CodexRunner:
             timeout_seconds=self.config.limits.review_timeout_minutes * 60,
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
+            task_id=task.id,
+            run_name=name,
         )
 
     def reconcile_tool_changes(
@@ -170,6 +180,8 @@ class CodexRunner:
         timeout_seconds: int,
         model: str | None,
         reasoning_effort: str | None,
+        task_id: str,
+        run_name: str,
     ) -> WorkerResult:
         retries: list[dict[str, object]] = []
         active_resume_session = resume_session
@@ -199,6 +211,9 @@ class CodexRunner:
                     reasoning_effort=reasoning_effort,
                     capture_enabled=capture_enabled,
                     capture_degraded=capture_degraded,
+                    task_id=task_id,
+                    run_name=run_name,
+                    retry_ordinal=attempt,
                 )
             except FileNotFoundError as exc:
                 result = self._missing_executable_result(
@@ -210,6 +225,9 @@ class CodexRunner:
                     stage=stage,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    task_id=task_id,
+                    run_name=run_name,
+                    retry_ordinal=attempt,
                     exc=exc,
                 )
 
@@ -272,6 +290,9 @@ class CodexRunner:
         stage: CodexStage,
         model: str | None,
         reasoning_effort: str | None,
+        task_id: str,
+        run_name: str,
+        retry_ordinal: int,
         exc: FileNotFoundError,
     ) -> WorkerResult:
         message = (
@@ -279,6 +300,19 @@ class CodexRunner:
             f"{exc.strerror or exc}"
         )
         _write_transcript(transcript_path, "", message)
+        telemetry = _new_telemetry_recorder(
+            self.config,
+            transcript_path,
+            task_id=task_id,
+            run_name=run_name,
+            stage=stage,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            retry_ordinal=retry_ordinal,
+        )
+        telemetry_payload = _finalize_telemetry(
+            telemetry, process_outcome="launch_failed"
+        )
         diagnostics = diagnostics_for_result(
             completed=False,
             exit_code=127,
@@ -287,6 +321,7 @@ class CodexRunner:
             final_message=message,
         )
         diagnostics_json = diagnostics.model_dump(mode="json")
+        diagnostics_json["telemetry"] = _telemetry_diagnostics(telemetry_payload)
         if stage == CodexStage.code:
             capture_summary = transcript_path.parent / "tool-changes" / "summary.json"
             try:
@@ -377,6 +412,9 @@ class CodexRunner:
         reasoning_effort: str | None,
         capture_enabled: bool,
         capture_degraded: bool,
+        task_id: str,
+        run_name: str,
+        retry_ordinal: int,
     ) -> WorkerResult:
         capture: ToolChangeCapture | None = None
         activity_recorder: ActivityRecorder | None = None
@@ -415,6 +453,16 @@ class CodexRunner:
             child_env = os.environ.copy()
             child_env.pop("COQUIC_STEWARD_HOOK_CONTEXT", None)
         # CodexRunner builds args as an argv list and never enables a shell.
+        telemetry = _new_telemetry_recorder(
+            self.config,
+            transcript_path,
+            task_id=task_id,
+            run_name=run_name,
+            stage=stage,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            retry_ordinal=retry_ordinal,
+        )
         try:
             proc = subprocess.Popen(  # nosec B603
                 args,
@@ -430,21 +478,37 @@ class CodexRunner:
             )
         except OSError:
             if capture is not None:
-                capture.finalize()
+                try:
+                    capture.finalize()
+                except Exception:
+                    pass
             if activity_recorder is not None:
                 _finalize_activity_recorder(activity_recorder)
+            telemetry_payload = _finalize_telemetry(
+                telemetry, process_outcome="launch_failed"
+            )
             raise
         try:
+            def observe_event(event: dict[str, object]) -> None:
+                if activity_recorder is not None:
+                    try:
+                        activity_recorder.observe(event)
+                    except Exception:
+                        telemetry.note_observer_failure()
+                try:
+                    telemetry.observe(event)
+                except Exception:
+                    telemetry.note_observer_failure()
+
             stdout = _communicate_streaming(
                 proc,
                 prompt,
                 transcript_path,
                 timeout_seconds=timeout_seconds,
-                event_observer=(
-                    activity_recorder.observe if activity_recorder is not None else None
-                ),
-                observer_abandon=(
-                    activity_recorder.abandon if activity_recorder is not None else None
+                event_observer=observe_event,
+                malformed_observer=telemetry.note_malformed_line,
+                observer_abandon=lambda: _abandon_observers(
+                    activity_recorder, telemetry
                 ),
                 transcript_digest_update=(
                     activity_transcript_digest.update
@@ -453,9 +517,12 @@ class CodexRunner:
                 ),
             )
         finally:
-            capture_diagnostics = (
-                capture.finalize().diagnostics_dict() if capture is not None else None
-            )
+            try:
+                capture_diagnostics = (
+                    capture.finalize().diagnostics_dict() if capture is not None else None
+                )
+            except Exception:
+                capture_diagnostics = None
             activity_diagnostics = (
                 _finalize_activity_recorder(
                     activity_recorder,
@@ -470,6 +537,16 @@ class CodexRunner:
             )
             if activity_recorder is not None and activity_recorder.sidecar_finalized:
                 _clear_activity_retry_pending(transcript_path)
+            telemetry_payload = _finalize_telemetry(
+                telemetry,
+                process_outcome=(
+                    "completed"
+                    if proc.returncode == 0
+                    else "timeout"
+                    if proc.returncode == 124
+                    else "failed"
+                ),
+            )
         final_message = (
             last_message_path.read_text(encoding="utf-8")
             if last_message_path.exists()
@@ -489,6 +566,7 @@ class CodexRunner:
             thread_id=thread_id,
         )
         diagnostics_json = diagnostics.model_dump(mode="json")
+        diagnostics_json["telemetry"] = _telemetry_diagnostics(telemetry_payload)
         diagnostics_json.update(
             {
                 "stage": stage.value,
@@ -605,6 +683,16 @@ def _archive_retry_artifacts(
                     archived["activities_invalidated"] = True
             else:
                 archived["activities_preserved"] = True
+    telemetry_path = telemetry_sidecar_path(result.transcript_path)
+    if telemetry_path.exists():
+        archived_telemetry_path = _retry_artifact_path(telemetry_path, retry_number)
+        try:
+            telemetry_path.replace(archived_telemetry_path)
+        except OSError:
+            # Telemetry is observational.  Leave the current file in place so
+            # the next invocation can atomically replace it; public readers
+            # will mark any duplicate invocation evidence conservatively.
+            archived["telemetry_archive_failed"] = True
     tool_changes = result.transcript_path.with_name("tool-changes")
     if archive_tool_changes and tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
@@ -809,6 +897,7 @@ def _communicate_streaming(
     *,
     timeout_seconds: int,
     event_observer: Callable[[dict[str, object]], object] | None = None,
+    malformed_observer: Callable[[], object] | None = None,
     metadata_observer: Callable[[dict[str, object]], object] | None = None,
     on_event: Callable[[dict[str, object]], object] | None = None,
     observer_abandon: Callable[[], object] | None = None,
@@ -861,6 +950,11 @@ def _communicate_streaming(
                                 decoded = json.loads(line)
                             except (json.JSONDecodeError, TypeError, ValueError):
                                 decoded = None
+                                if malformed_observer is not None:
+                                    try:
+                                        malformed_observer()
+                                    except Exception:
+                                        pass
                             if isinstance(decoded, dict):
                                 dispatcher.submit(decoded)
                     else:
@@ -981,6 +1075,91 @@ def _finalize_activity_recorder(
         return recorder.finalize(transcript_sha256=transcript_sha256)
     except Exception:
         return activity_diagnostics_unavailable()
+
+
+def _abandon_observers(
+    activity_recorder: ActivityRecorder | None, telemetry: TelemetryRecorder
+) -> None:
+    if activity_recorder is not None:
+        try:
+            activity_recorder.abandon()
+        except Exception:
+            pass
+    telemetry.note_observer_failure()
+
+
+def _new_telemetry_recorder(
+    config: StewardConfig,
+    transcript_path: Path,
+    *,
+    task_id: str,
+    run_name: str,
+    stage: CodexStage,
+    model: str | None,
+    reasoning_effort: str | None,
+    retry_ordinal: int,
+) -> TelemetryRecorder:
+    catalog: PriceCatalog | None = None
+    catalog_error = False
+    catalog_path = config.telemetry.price_catalog_path
+    if catalog_path is not None:
+        selected = catalog_path
+        if not selected.is_absolute():
+            selected = config.repo_root / selected
+        try:
+            catalog = PriceCatalog.from_path(selected)
+        except Exception:
+            catalog_error = True
+    recorder = TelemetryRecorder(
+        telemetry_sidecar_path(transcript_path),
+        task_id=task_id,
+        run_name=run_name,
+        stage=stage.value,
+        retry_ordinal=retry_ordinal,
+        configured_model=model,
+        reasoning_effort=reasoning_effort,
+        billing_mode=config.telemetry.billing_mode,
+        catalog=catalog,
+        started_at=datetime.now(timezone.utc),
+        started_monotonic_ns=time.monotonic_ns(),
+    )
+    if catalog_error:
+        recorder.add_issue("price_catalog_unavailable")
+    return recorder
+
+
+def _finalize_telemetry(
+    recorder: TelemetryRecorder, *, process_outcome: str
+) -> dict[str, object]:
+    try:
+        return recorder.finalize(process_outcome=process_outcome)
+    except Exception:
+        # Telemetry cannot alter a Codex outcome.  Return a bounded diagnostic
+        # envelope and let public projection report the evidence unavailable.
+        return {
+            "schema_version": 1,
+            "completeness": "unavailable",
+            "aggregate": {"completed_turns": len(recorder.turns)},
+            "issues": [{"category": "sidecar_finalize_failure", "count": 1}],
+        }
+
+
+def _telemetry_diagnostics(value: dict[str, object]) -> dict[str, object]:
+    aggregate = value.get("aggregate")
+    turns = aggregate.get("completed_turns") if isinstance(aggregate, dict) else 0
+    try:
+        turns = int(turns)
+    except (TypeError, ValueError):
+        turns = 0
+    issues = value.get("issues")
+    issue_count = len(issues) if isinstance(issues, list) else 1
+    completeness = value.get("completeness")
+    return {
+        "schema_version": value.get("schema_version", 1),
+        "completeness": str(completeness or "unavailable"),
+        "completed_turns": max(0, turns),
+        "issue_count": max(0, int(issue_count)),
+    }
 
 
 def _new_activity_diagnostics(path: Path) -> dict[str, object]:

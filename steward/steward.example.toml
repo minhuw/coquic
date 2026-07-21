@@ -12,6 +12,14 @@ git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"
 
+# Usage telemetry is observational. Codex exec exposes turns, not upstream
+# requests, billing, TTFT, or token streaming rates. Leave billing_mode=unknown
+# unless an operator deliberately selects an API catalog with exact model and
+# effective-date coverage. Never put credentials in a catalog.
+# [steward.telemetry]
+# billing_mode = "unknown" # unknown, chatgpt, or api
+# price_catalog_path = "model-prices.example.json" # fictional example only
+
 # The daemon writes a sanitized v3 snapshot locally and publishes it to the
 # read-only site with an atomic SSH/rsync mirror. Keep transcript_mode=redacted
 # for any public target; raw transcripts are rejected when publish=true.

@@ -38,6 +38,13 @@ from .agents.tool_changes import (
     TOOL_CHANGE_TREE_RE,
     tool_change_run_directories,
 )
+from .agents.telemetry import (
+    TELEMETRY_MAX_SIDECAR_BYTES,
+    TELEMETRY_PROVENANCE,
+    TelemetryAggregate,
+    aggregate_sidecars,
+    load_sidecar,
+)
 from .core.config import (
     DEFAULT_PUBLIC_MIRROR_OUTPUT,
     PublicMirrorConfig,
@@ -87,6 +94,12 @@ MIRROR_TRAJECTORY_MAX_HASH_BYTES = 64 * 1024 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
 MIRROR_LAST_MESSAGE_BYTES = 24 * 1024
+MIRROR_TELEMETRY_TURNS = 100
+MIRROR_TELEMETRY_SIDECAR_BYTES = TELEMETRY_MAX_SIDECAR_BYTES
+MODEL_TELEMETRY_SCHEMA_VERSION = 1
+MODEL_TELEMETRY_RECENT_DAYS = 400
+_TELEMETRY_NAME_RE = re.compile(r"telemetry(?:\.retry-([1-9][0-9]*))?\.json$")
+_CODEX_TRANSCRIPT_RE = re.compile(r"codex(?:\.retry-([1-9][0-9]*))?\.jsonl$")
 _RawTranscriptArtifacts = dict[str, dict[str, object]]
 WORKING_STATUSES = {
     TaskStatus.running,
@@ -281,6 +294,11 @@ def write_public_mirror(
         )
         + "\n",
     )
+    _atomic_write_text(
+        mirror_dir / "data" / "model-telemetry.json",
+        json.dumps(_safe_model_telemetry_payload(config), sort_keys=True, separators=(",", ":"))
+        + "\n",
+    )
     return path
 
 
@@ -300,6 +318,11 @@ def write_public_mirror_status(
     _atomic_write_text(
         path,
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+    )
+    _atomic_write_text(
+        path.parent / "data" / "model-telemetry.json",
+        json.dumps(_safe_model_telemetry_payload(config), sort_keys=True, separators=(",", ":"))
+        + "\n",
     )
     return path
 
@@ -348,6 +371,19 @@ def public_task_detail_payload(
         if source_task is not None and source_task.id != record.id
         else []
     )
+    attempts = _public_attempts(
+        config,
+        store,
+        record,
+        raw_transcript_artifacts=raw_transcript_artifacts,
+    )
+    plan_runs = _public_plan_runs(
+        config,
+        store,
+        record,
+        raw_transcript_artifacts=raw_transcript_artifacts,
+    )
+    task_telemetry = _public_task_telemetry(config, record)
     return {
         "schema_version": PUBLIC_TASK_DETAIL_SCHEMA_VERSION,
         "generated_at": _public_timestamp(utc_now()),
@@ -365,18 +401,9 @@ def public_task_detail_payload(
             for event in source_events
             if event.kind.startswith("integration.") or event.kind == "main.pushed"
         ],
-        "attempts": _public_attempts(
-            config,
-            store,
-            record,
-            raw_transcript_artifacts=raw_transcript_artifacts,
-        ),
-        "plan_runs": _public_plan_runs(
-            config,
-            store,
-            record,
-            raw_transcript_artifacts=raw_transcript_artifacts,
-        ),
+        "attempts": attempts,
+        "plan_runs": plan_runs,
+        "telemetry": task_telemetry,
         "validations": [
             _public_validation(config, validation, index)
             for index, validation in enumerate(record.validations)
@@ -823,6 +850,11 @@ def _public_attempts(
     )
     if worker is None and not task.validations:
         return []
+    telemetry = (
+        worker.get("telemetry")
+        if isinstance(worker, dict) and isinstance(worker.get("telemetry"), dict)
+        else _telemetry_empty("not_produced")
+    )
     return [
         {
             "attempt": 0,
@@ -835,6 +867,7 @@ def _public_attempts(
                 _public_validation(config, validation, index)
                 for index, validation in enumerate(task.validations)
             ],
+            "telemetry": telemetry,
         }
     ]
 
@@ -884,41 +917,50 @@ def _public_iteration_attempt(
     *,
     raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object]:
+    worker = _public_run_artifact(
+        config,
+        item.worker_transcript_path,
+        item.worker_last_message_path,
+        task_id=task.id,
+        label=item.label,
+        role="worker",
+        name=item.worker_name or f"worker-{item.iteration}",
+        exit_code=item.worker_exit_code,
+        completed=item.worker_completed,
+        model=item.worker_model,
+        reasoning_effort=item.worker_reasoning_effort,
+        include_change_trajectory=True,
+        raw_transcript_artifacts=raw_transcript_artifacts,
+    )
+    reviewer = _public_run_artifact(
+        config,
+        item.reviewer_transcript_path,
+        item.reviewer_last_message_path,
+        task_id=task.id,
+        label=f"Reviewer {item.iteration}",
+        role="reviewer",
+        name=item.reviewer_name or f"reviewer-{item.iteration}",
+        exit_code=item.reviewer_exit_code,
+        completed=item.reviewer_completed,
+        model=item.reviewer_model,
+        reasoning_effort=item.reviewer_reasoning_effort,
+        include_change_trajectory=False,
+        raw_transcript_artifacts=raw_transcript_artifacts,
+    )
+    telemetry = _combine_public_telemetry(
+        [
+            artifact["telemetry"]
+            for artifact in (worker, reviewer)
+            if isinstance(artifact, dict) and isinstance(artifact.get("telemetry"), dict)
+        ]
+    )
     return {
         "attempt": item.iteration,
         "label": _public_text(config, item.label),
         "started_at": _public_timestamp(item.started_at),
         "updated_at": _public_timestamp(item.updated_at),
-        "worker": _public_run_artifact(
-            config,
-            item.worker_transcript_path,
-            item.worker_last_message_path,
-            task_id=task.id,
-            label=item.label,
-            role="worker",
-            name=item.worker_name or f"worker-{item.iteration}",
-            exit_code=item.worker_exit_code,
-            completed=item.worker_completed,
-            model=item.worker_model,
-            reasoning_effort=item.worker_reasoning_effort,
-            include_change_trajectory=True,
-            raw_transcript_artifacts=raw_transcript_artifacts,
-        ),
-        "reviewer": _public_run_artifact(
-            config,
-            item.reviewer_transcript_path,
-            item.reviewer_last_message_path,
-            task_id=task.id,
-            label=f"Reviewer {item.iteration}",
-            role="reviewer",
-            name=item.reviewer_name or f"reviewer-{item.iteration}",
-            exit_code=item.reviewer_exit_code,
-            completed=item.reviewer_completed,
-            model=item.reviewer_model,
-            reasoning_effort=item.reviewer_reasoning_effort,
-            include_change_trajectory=False,
-            raw_transcript_artifacts=raw_transcript_artifacts,
-        ),
+        "worker": worker,
+        "reviewer": reviewer,
         "review": _public_review(config, item.review_json),
         "patch": _public_patch(config, item.patch_path),
         "validations": [
@@ -926,7 +968,636 @@ def _public_iteration_attempt(
             for index, validation in enumerate(task.validations)
             if validation.iteration == item.iteration
         ],
+        "telemetry": telemetry,
     }
+
+
+def _public_telemetry(
+    config: StewardConfig, transcript_path: Path | None
+) -> dict[str, object]:
+    """Read only bounded regular telemetry sidecars beside one transcript."""
+
+    base = _telemetry_empty("not_produced")
+    if transcript_path is None:
+        return base
+    values, issues = _read_telemetry_for_transcript(config, transcript_path)
+    if not values:
+        if issues:
+            base["availability"] = "unavailable"
+            base["issues"] = issues
+        elif _safe_transcript_file(config, transcript_path):
+            base["availability"] = "not_produced"
+        return base
+    projected = aggregate_sidecars(values)
+    projected["availability"] = "available" if not issues else "partial"
+    projected["issues"] = _merge_issue_payload(projected.get("issues"), issues)
+    projected["turns"] = list(projected.get("turns", []))[:MIRROR_TELEMETRY_TURNS]
+    projected["turns_truncated"] = bool(
+        projected.get("turns_truncated")
+        or len(projected.get("turns", [])) > MIRROR_TELEMETRY_TURNS
+    )
+    projected["timing"] = {
+        "first_agent_message_completed_ms": _first_message_ms(values)
+    }
+    projected["unavailable"] = {
+        "model_requests": {
+            "availability": "unavailable",
+            "reason": "not_exposed_by_codex_exec",
+        },
+        "ttft_ms": {
+            "availability": "unavailable",
+            "reason": "not_exposed_by_codex_exec",
+        },
+        "output_tokens_per_second": {
+            "availability": "unavailable",
+            "reason": "not_exposed_by_codex_exec",
+        },
+    }
+    projected["retry_count"] = max(0, len(values) - 1)
+    projected["provenance"] = TELEMETRY_PROVENANCE
+    projected["configured_model"] = _sanitize_public_model(
+        config, projected.get("configured_model")
+    )
+    projected["cost"] = _sanitize_public_cost(config, projected.get("cost"))
+    return projected
+
+
+def _telemetry_empty(availability: str) -> dict[str, object]:
+    return {
+        "availability": availability,
+        "provenance": TELEMETRY_PROVENANCE,
+        "configured_model": None,
+        "reasoning_effort": None,
+        "billing_mode": "unknown",
+        "started_at": None,
+        "completed_at": None,
+        "duration_ms": None,
+        "aggregate": None,
+        "turns": [],
+        "turns_truncated": False,
+        "timing": {"first_agent_message_completed_ms": None},
+        "cost": {"status": "unavailable", "reason": "telemetry_unavailable"},
+        "completeness": "unavailable",
+        "issues": [],
+        "unavailable": {
+            "model_requests": {
+                "availability": "unavailable",
+                "reason": "not_exposed_by_codex_exec",
+            },
+            "ttft_ms": {
+                "availability": "unavailable",
+                "reason": "not_exposed_by_codex_exec",
+            },
+            "output_tokens_per_second": {
+                "availability": "unavailable",
+                "reason": "not_exposed_by_codex_exec",
+            },
+        },
+    }
+
+
+def _read_telemetry_for_transcript(
+    config: StewardConfig, transcript_path: Path
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    if not _telemetry_path_beneath(transcript_path, config.transcripts_dir):
+        return [], [{"category": "path_outside_transcripts", "count": 1}]
+    parent = transcript_path.parent
+    try:
+        if parent.is_symlink() or not parent.is_dir() or not _no_symlink_parents(parent):
+            return [], [{"category": "unsafe_parent", "count": 1}]
+        candidates = [
+            item
+            for item in parent.iterdir()
+            if item.name == "telemetry.json" or item.name.startswith("telemetry.")
+        ]
+    except OSError:
+        return [], [{"category": "directory_unavailable", "count": 1}]
+    values: list[dict[str, object]] = []
+    issues: list[dict[str, object]] = []
+    for path in sorted(candidates, key=_telemetry_sort_key):
+        if _TELEMETRY_NAME_RE.fullmatch(path.name) is None:
+            issues.append({"category": "malformed_sidecar_name", "count": 1})
+            continue
+        try:
+            value = load_sidecar(path)
+        except Exception:
+            issues.append({"category": "invalid_sidecar", "count": 1})
+            continue
+        if not _telemetry_binds_to_transcript(value, transcript_path):
+            issues.append({"category": "sidecar_binding", "count": 1})
+            continue
+        values.append(value)
+    unique: dict[str, dict[str, object]] = {}
+    for value in values:
+        invocation_id = str(value["invocation_id"])
+        if invocation_id in unique:
+            issues.append({"category": "duplicate_invocation", "count": 1})
+            continue
+        unique[invocation_id] = value
+    return list(unique.values()), issues
+
+
+def _safe_transcript_file(config: StewardConfig, path: Path) -> bool:
+    try:
+        info = path.lstat()
+        return (
+            path.is_file()
+            and not path.is_symlink()
+            and info.st_nlink == 1
+            and _telemetry_path_beneath(path, config.transcripts_dir)
+            and _no_symlink_parents(path.parent)
+        )
+    except OSError:
+        return False
+
+
+def _telemetry_binds_to_transcript(
+    value: dict[str, object], transcript_path: Path
+) -> bool:
+    try:
+        return (
+            value.get("task_id") == transcript_path.parent.parent.name
+            and value.get("run_name") == transcript_path.parent.name
+        )
+    except (AttributeError, ValueError):
+        return False
+
+
+def _telemetry_path_beneath(path: Path, root: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved == resolved_root or resolved_root in resolved.parents
+
+
+def _no_symlink_parents(path: Path) -> bool:
+    try:
+        current = path
+        while True:
+            if current.is_symlink():
+                return False
+            if current == current.parent:
+                return True
+            current = current.parent
+    except OSError:
+        return False
+
+
+def _telemetry_sort_key(path: Path) -> tuple[int, str]:
+    match = _TELEMETRY_NAME_RE.fullmatch(path.name)
+    return (int(match.group(1)) if match and match.group(1) else 0, path.name)
+
+
+def _first_message_ms(values: list[dict[str, object]]) -> int | None:
+    selected = [
+        value["first_agent_message_completed_ms"]
+        for value in values
+        if isinstance(value.get("first_agent_message_completed_ms"), int)
+    ]
+    return min(selected) if selected else None
+
+
+def _merge_issue_payload(
+    existing: object, extra: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    merged: dict[str, int] = {}
+    if isinstance(existing, list):
+        for issue in existing:
+            if isinstance(issue, dict) and isinstance(issue.get("category"), str):
+                try:
+                    merged[str(issue["category"])] = int(issue.get("count", 0))
+                except (TypeError, ValueError):
+                    continue
+    for issue in extra:
+        category = issue.get("category")
+        if isinstance(category, str):
+            merged[category] = merged.get(category, 0) + int(issue.get("count", 1))
+    return [
+        {"category": category, "count": count}
+        for category, count in sorted(merged.items())
+        if count > 0
+    ][:32]
+
+
+def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, object]:
+    available = [item for item in values if item.get("availability") in {"available", "partial"}]
+    if not available:
+        return _telemetry_empty("not_produced")
+    aggregates: list[TelemetryAggregate] = []
+    issues: list[dict[str, object]] = []
+    for item in available:
+        aggregate = item.get("aggregate")
+        if isinstance(aggregate, dict):
+            try:
+                aggregates.append(TelemetryAggregate.from_dict(aggregate))
+            except ValueError:
+                issues.append({"category": "invalid_aggregate", "count": 1})
+        item_issues = item.get("issues")
+        if isinstance(item_issues, list):
+            issues.extend(item_issues)
+    merged = TelemetryAggregate()
+    for aggregate in aggregates:
+        merged = merged.add(aggregate)
+    statuses = {str(item.get("availability")) for item in available}
+    result = _telemetry_empty("partial" if "partial" in statuses or issues else "available")
+    result.update(
+        {
+            "configured_model": _public_common_value(available, "configured_model"),
+            "reasoning_effort": _public_common_value(available, "reasoning_effort"),
+            "billing_mode": _public_common_value(available, "billing_mode") or "unknown",
+            "started_at": min(
+                (item["started_at"] for item in available if item.get("started_at")),
+                default=None,
+            ),
+            "completed_at": max(
+                (item["completed_at"] for item in available if item.get("completed_at")),
+                default=None,
+            ),
+            "duration_ms": sum(
+                int(item["duration_ms"])
+                for item in available
+                if isinstance(item.get("duration_ms"), int)
+            ),
+            "aggregate": merged.to_dict(),
+            "turns": [
+                turn
+                for item in available
+                for turn in item.get("turns", [])
+            ][:MIRROR_TELEMETRY_TURNS],
+            "turns_truncated": sum(
+                len(item.get("turns", []))
+                for item in available
+                if isinstance(item.get("turns"), list)
+            ) > MIRROR_TELEMETRY_TURNS,
+            "timing": {
+                "first_agent_message_completed_ms": min(
+                    (
+                        item["timing"]["first_agent_message_completed_ms"]
+                        for item in available
+                        if isinstance(item.get("timing"), dict)
+                        and isinstance(
+                            item["timing"].get("first_agent_message_completed_ms"), int
+                        )
+                    ),
+                    default=None,
+                )
+            },
+            "cost": _combine_public_costs(available),
+            "completeness": "complete"
+            if all(item.get("completeness") == "complete" for item in available)
+            else "partial",
+            "issues": _merge_issue_payload([], issues),
+            "retry_count": max(0, len(available) - 1),
+        }
+    )
+    return result
+
+
+def _public_common_value(values: list[dict[str, object]], key: str) -> object:
+    selected = {item.get(key) for item in values}
+    return next(iter(selected)) if len(selected) == 1 else None
+
+
+def _sanitize_public_model(config: StewardConfig, value: object) -> str | None:
+    if value is None:
+        return None
+    text = _public_text(config, str(value))
+    if not text or len(text.encode()) > 256 or any(
+        character in text for character in "\x00\r\n"
+    ):
+        return "[redacted-model]"
+    return text
+
+
+def _sanitize_public_cost(config: StewardConfig, value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {"status": "unavailable", "reason": "telemetry_unavailable"}
+    result: dict[str, object] = {
+        "status": str(value.get("status", "unavailable")),
+    }
+    if isinstance(value.get("reason"), str):
+        result["reason"] = _public_text(config, str(value["reason"]))[:96]
+    if type(value.get("micro_usd")) is int and int(value["micro_usd"]) >= 0:
+        result["micro_usd"] = int(value["micro_usd"])
+    for key in ("price_entry", "price_entries"):
+        raw = value.get(key)
+        if isinstance(raw, dict):
+            result[key] = _sanitize_price_provenance(config, raw)
+        elif isinstance(raw, list):
+            result[key] = [
+                _sanitize_price_provenance(config, item)
+                for item in raw
+                if isinstance(item, dict)
+            ][:32]
+    return result
+
+
+def _sanitize_price_provenance(config: StewardConfig, value: dict[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key in ("entry_id", "model", "effective_from", "effective_until"):
+        item = value.get(key)
+        if item is None:
+            result[key] = None
+        elif isinstance(item, str):
+            result[key] = (
+                _sanitize_public_model(config, item)
+                if key in {"model", "entry_id"}
+                else _public_text(config, item)[:128]
+            )
+    source = value.get("source")
+    if isinstance(source, dict):
+        label = source.get("label")
+        url = source.get("url")
+        if isinstance(label, str) and isinstance(url, str) and url.startswith("https://"):
+            result["source"] = {
+                "label": _public_text(config, label)[:160],
+                "url": url[:512],
+            }
+    return result
+
+
+def _combine_public_costs(values: list[dict[str, object]]) -> dict[str, object]:
+    costs = [item.get("cost") for item in values]
+    if not costs or any(not isinstance(item, dict) or item.get("status") != "estimated" for item in costs):
+        reasons = {
+            str(item.get("reason"))
+            for item in costs
+            if isinstance(item, dict)
+            and item.get("status") == "unavailable"
+            and isinstance(item.get("reason"), str)
+        }
+        return {
+            "status": "unavailable",
+            "reason": next(iter(reasons)) if len(reasons) == 1 else "incomplete_cost_basis",
+        }
+    result: dict[str, object] = {
+        "status": "estimated",
+        "micro_usd": sum(int(item.get("micro_usd", 0)) for item in costs if isinstance(item, dict)),
+    }
+    entries = [
+        item.get("price_entry")
+        for item in costs
+        if isinstance(item, dict) and isinstance(item.get("price_entry"), dict)
+    ]
+    if len(entries) == 1:
+        result["price_entry"] = entries[0]
+    elif entries:
+        result["price_entries"] = entries[:32]
+    return result
+
+
+def _public_task_telemetry(
+    config: StewardConfig, task: TaskRecord
+) -> dict[str, object]:
+    root = config.transcripts_dir / task.id
+    values, issues, _transcripts, _legacy = _scan_telemetry_tree(config, root)
+    if not values:
+        result = _telemetry_empty("unavailable" if issues else "not_produced")
+        result["issues"] = issues
+        return result
+    projected = aggregate_sidecars(values)
+    projected["availability"] = "partial" if issues else "available"
+    projected["issues"] = _merge_issue_payload(projected.get("issues"), issues)
+    projected["turns"] = list(projected.get("turns", []))[:MIRROR_TELEMETRY_TURNS]
+    projected["timing"] = {
+        "first_agent_message_completed_ms": _first_message_ms(values)
+    }
+    projected["unavailable"] = _telemetry_empty("unavailable")["unavailable"]
+    projected["retry_count"] = max(0, len(values) - 1)
+    projected["configured_model"] = _sanitize_public_model(
+        config, projected.get("configured_model")
+    )
+    projected["cost"] = _sanitize_public_cost(config, projected.get("cost"))
+    return projected
+
+
+def _scan_telemetry_tree(
+    config: StewardConfig, root: Path | None = None
+) -> tuple[list[dict[str, object]], list[dict[str, object]], int, int]:
+    selected_root = root or config.transcripts_dir
+    if not _telemetry_path_beneath(selected_root, config.transcripts_dir):
+        return [], [{"category": "path_outside_transcripts", "count": 1}], 0, 0
+    values: list[dict[str, object]] = []
+    issues: list[dict[str, object]] = []
+    transcripts: list[Path] = []
+    sidecar_paths: list[Path] = []
+    try:
+        for path in selected_root.rglob("*"):
+            if not _no_symlink_parents(path.parent) or path.is_symlink():
+                continue
+            if _CODEX_TRANSCRIPT_RE.fullmatch(path.name) is not None:
+                try:
+                    info = path.lstat()
+                    if path.is_file() and info.st_nlink == 1:
+                        transcripts.append(path)
+                except OSError:
+                    continue
+            elif path.name.startswith("telemetry") and path.name.endswith(".json"):
+                sidecar_paths.append(path)
+    except (OSError, RuntimeError):
+        issues.append({"category": "directory_unavailable", "count": 1})
+    for path in sorted(sidecar_paths, key=str):
+        if _TELEMETRY_NAME_RE.fullmatch(path.name) is None:
+            issues.append({"category": "malformed_sidecar_name", "count": 1})
+            continue
+        try:
+            value = load_sidecar(path)
+            match = _TELEMETRY_NAME_RE.fullmatch(path.name)
+            retry = match.group(1) if match is not None else None
+            transcript = path.with_name(
+                f"codex{f'.retry-{retry}' if retry else ''}.jsonl"
+            )
+            if not _telemetry_binds_to_transcript(value, transcript):
+                issues.append({"category": "sidecar_binding", "count": 1})
+                continue
+            values.append(value)
+        except Exception:
+            issues.append({"category": "invalid_sidecar", "count": 1})
+    unique: dict[str, dict[str, object]] = {}
+    for value in values:
+        invocation_id = str(value["invocation_id"])
+        if invocation_id in unique:
+            issues.append({"category": "duplicate_invocation", "count": 1})
+            continue
+        unique[invocation_id] = value
+    matched_transcripts = 0
+    matched_sidecars: set[Path] = set()
+    for transcript in transcripts:
+        match = _CODEX_TRANSCRIPT_RE.fullmatch(transcript.name)
+        retry = match.group(1) if match is not None else None
+        sibling = transcript.with_name(f"telemetry{f'.retry-{retry}' if retry else ''}.json")
+        if sibling in sidecar_paths:
+            matched_transcripts += 1
+            matched_sidecars.add(sibling)
+    orphan_count = len(
+        [path for path in sidecar_paths if _TELEMETRY_NAME_RE.fullmatch(path.name) and path not in matched_sidecars]
+    )
+    if orphan_count:
+        issues.append({"category": "orphan_sidecar", "count": orphan_count})
+    return list(unique.values()), issues, len(transcripts), max(0, len(transcripts) - matched_transcripts)
+
+
+def model_telemetry_payload(config: StewardConfig) -> dict[str, object]:
+    """Build the rebuildable global telemetry document from retained evidence."""
+
+    values, issues, discovered, legacy = _scan_telemetry_tree(config)
+    values.sort(key=lambda item: (str(item.get("started_at")), str(item.get("invocation_id"))))
+    valid_usage = sum(
+        isinstance(item.get("aggregate"), dict)
+        and int(item["aggregate"].get("completed_turns", 0)) > 0
+        for item in values
+    )
+    partial = sum(item.get("completeness") == "partial" for item in values)
+    unavailable = sum(item.get("completeness") == "unavailable" for item in values)
+    complete_values = [item for item in values if item.get("completeness") == "complete"]
+    completed_activity_values = [
+        item for item in complete_values if item.get("process_outcome") == "completed"
+    ]
+    all_time = _global_period(complete_values)
+    all_observed = _global_period(values)
+    days: dict[str, list[dict[str, object]]] = {}
+    for item in completed_activity_values:
+        started = str(item.get("started_at", ""))
+        day = started[:10] if len(started) >= 10 else ""
+        if day:
+            days.setdefault(day, []).append(item)
+    recent_days = [
+        {
+            "utc_day": day,
+            "completed_activity": _global_period(day_values),
+        }
+        for day, day_values in sorted(days.items())[-MODEL_TELEMETRY_RECENT_DAYS:]
+    ]
+    now = datetime.now(timezone.utc)
+    week_values = [
+        item
+        for item in complete_values
+        if _same_iso_week(item.get("started_at"), now)
+    ]
+    month_values = [
+        item
+        for item in complete_values
+        if _same_month(item.get("started_at"), now)
+    ]
+    oldest = values[0].get("started_at") if values else None
+    newest = values[-1].get("started_at") if values else None
+    coverage_complete = not issues and legacy == 0 and partial == 0 and unavailable == 0
+    return {
+        "schema_version": MODEL_TELEMETRY_SCHEMA_VERSION,
+        "provenance": TELEMETRY_PROVENANCE,
+        "generated_at": _public_timestamp(now),
+        "coverage": {
+            "complete": coverage_complete,
+            "discovered_invocations": discovered,
+            "valid_usage_invocations": valid_usage,
+            "partial_invocations": partial,
+            "unavailable_invocations": unavailable,
+            "legacy_without_telemetry": legacy,
+            "invalid_or_unsafe": sum(int(issue.get("count", 0)) for issue in issues),
+            "oldest_started_at": oldest,
+            "newest_started_at": newest,
+        },
+        "all_time": all_time,
+        "observed": all_observed,
+        "week": _global_period(week_values),
+        "month": _global_period(month_values),
+        "life": all_time,
+        "recent_days": recent_days,
+        "recent_completed_activity": recent_days,
+    }
+
+
+def _safe_model_telemetry_payload(config: StewardConfig) -> dict[str, object]:
+    try:
+        return model_telemetry_payload(config)
+    except Exception:
+        return {
+            "schema_version": MODEL_TELEMETRY_SCHEMA_VERSION,
+            "provenance": TELEMETRY_PROVENANCE,
+            "generated_at": _public_timestamp(datetime.now(timezone.utc)),
+            "coverage": {
+                "complete": False,
+                "discovered_invocations": 0,
+                "valid_usage_invocations": 0,
+                "partial_invocations": 0,
+                "unavailable_invocations": 0,
+                "legacy_without_telemetry": 0,
+                "invalid_or_unsafe": 1,
+                "oldest_started_at": None,
+                "newest_started_at": None,
+            },
+            "all_time": _global_period([]),
+            "observed": _global_period([]),
+            "week": _global_period([]),
+            "month": _global_period([]),
+            "life": _global_period([]),
+            "recent_days": [],
+            "recent_completed_activity": [],
+        }
+
+
+def _global_period(values: list[dict[str, object]]) -> dict[str, object]:
+    aggregate = TelemetryAggregate()
+    for item in values:
+        raw = item.get("aggregate")
+        if isinstance(raw, dict):
+            try:
+                aggregate = aggregate.add(TelemetryAggregate.from_dict(raw))
+            except ValueError:
+                continue
+    return {
+        "invocations": len(values),
+        "aggregate": aggregate.to_dict(),
+        "cost": _global_cost(values),
+    }
+
+
+def _global_cost(values: list[dict[str, object]]) -> dict[str, object]:
+    costs = [item.get("cost") for item in values]
+    if not values or any(not isinstance(item, dict) or item.get("status") != "estimated" for item in costs):
+        reasons = {
+            str(item.get("reason"))
+            for item in costs
+            if isinstance(item, dict)
+            and item.get("status") == "unavailable"
+            and isinstance(item.get("reason"), str)
+        }
+        return {
+            "status": "unavailable",
+            "reason": next(iter(reasons)) if len(reasons) == 1 else "incomplete_cost_basis",
+        }
+    result: dict[str, object] = {
+        "status": "estimated",
+        "micro_usd": sum(int(item.get("micro_usd", 0)) for item in costs if isinstance(item, dict)),
+    }
+    entries = [
+        item.get("price_entry")
+        for item in costs
+        if isinstance(item, dict) and isinstance(item.get("price_entry"), dict)
+    ]
+    if len(entries) == 1:
+        result["price_entry"] = entries[0]
+    elif entries:
+        result["price_entries"] = entries[:32]
+    return result
+
+
+def _same_iso_week(value: object, now: datetime) -> bool:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.isocalendar()[:2] == now.isocalendar()[:2]
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_month(value: object, now: datetime) -> bool:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.year == now.year and parsed.month == now.month
+    except (TypeError, ValueError):
+        return False
 
 
 def _public_run_artifact(
@@ -975,11 +1646,13 @@ def _public_run_artifact(
         if role == "worker"
         else None
     )
+    telemetry = _public_telemetry(config, transcript_path)
     if (
         transcript is None
         and last_message is None
         and change_trajectory is None
         and activities is None
+        and telemetry.get("availability") == "not_produced"
     ):
         return None
     diagnostics = diagnostics_for_paths(
@@ -1014,6 +1687,7 @@ def _public_run_artifact(
         "last_message": last_message,
         "change_trajectory": change_trajectory,
         "activities": activities,
+        "telemetry": telemetry,
     }
 
 
@@ -3051,9 +3725,10 @@ def _public_commit_message_artifact(
         max_bytes=MIRROR_LAST_MESSAGE_BYTES,
         line_aligned=False,
     )
-    if transcript is None and last_message is None:
+    telemetry = _public_telemetry(config, run_dir / "codex.jsonl")
+    if transcript is None and last_message is None and telemetry.get("availability") == "not_produced":
         return None
-    return {"transcript": transcript, "last_message": last_message}
+    return {"transcript": transcript, "last_message": last_message, "telemetry": telemetry}
 
 
 def _public_push_log(

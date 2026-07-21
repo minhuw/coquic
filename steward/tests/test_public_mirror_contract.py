@@ -29,6 +29,7 @@ from coquic_steward.core.models import (
     WorkerResult,
 )
 from coquic_steward.public_mirror import (
+    _public_change_trajectory,
     public_mirror_digest,
     public_mirror_payload,
     public_task_detail_payload,
@@ -497,8 +498,8 @@ def _trajectory_record(
     status: str = "captured",
     patch: dict[str, object] | None = None,
     completed_at: str = "2026-07-13T12:00:01+00:00",
+    tree: str = "a" * 40,
 ) -> dict[str, object]:
-    tree = "a" * 40
     record: dict[str, object] = {
         "tool_use_id": f"tool_{sequence}",
         "tool_name": "apply_patch",
@@ -539,6 +540,7 @@ def _write_trajectory_fixture(
     *,
     records: list[dict[str, object]],
     retry: bool = False,
+    tree: str = "a" * 40,
 ) -> Path:
     transcript = _write(
         config.transcripts_dir / task_id / "worker" / "codex.jsonl", "worker\n"
@@ -549,7 +551,6 @@ def _write_trajectory_fixture(
     captured = sum(item["status"] == "captured" for item in records)
     empty = sum(item["status"] == "empty" for item in records)
     failed = sum(item["status"] == "failed" for item in records)
-    tree = "a" * 40
     _write(
         run_dir / "summary.json",
         json.dumps(
@@ -593,7 +594,13 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
         task_id="task-20260713120010-trajectory",
         status=TaskStatus.succeeded,
     )
-    patch_text = "diff --git a/include/coquic/core.h b/include/coquic/core.h\n+safe\n"
+    patch_text = (
+        "diff --git a/include/coquic/core.h b/include/coquic/core.h\n"
+        "+safe_call()\n"
+        '+endpoint = "https://private.example.test/v1"\n'
+        '+credential = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"\n'
+        '+prompt = "private prompt text that must not publish"\n'
+    )
     patch_path = config.transcripts_dir / task.id / "worker" / "tool-changes" / "patches" / "1-tool_1.patch"
     patch_path.parent.mkdir(parents=True, exist_ok=True)
     patch_path.write_text(patch_text, encoding="utf-8")
@@ -623,6 +630,11 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
     assert trajectory["published_count"] == 1
     assert trajectory["changes"][0]["paths"] == ["include/coquic/core.h"]
     assert trajectory["changes"][0]["patch"]["availability"] == "available"
+    public_patch = trajectory["changes"][0]["patch"]["text"]
+    assert "safe_call()" in public_patch
+    assert "https://" not in public_patch
+    assert "ghp_" not in public_patch
+    assert "private prompt" not in public_patch
     assert "private-session" not in json.dumps(trajectory)
     assert "inputs/private.json" not in json.dumps(trajectory)
     assert "responses/private.json" not in json.dumps(trajectory)
@@ -712,6 +724,34 @@ def test_worker_change_trajectory_restores_retry_records_chronologically(
     assert trajectory["published_count"] == 2
     assert [item["tool_call_id"] for item in trajectory["changes"]] == ["tool_1", "tool_1"]
     assert [item["sequence"] for item in trajectory["changes"]] == [1, 2]
+
+
+def test_worker_change_trajectory_rejects_retry_tree_discontinuity(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    task_id = "task-20260713120013-trajectory"
+    retry_tree = "a" * 40
+    final_tree = "b" * 40
+    _write_trajectory_fixture(
+        config,
+        task_id,
+        records=[_trajectory_record(sequence=1, status="empty", tree=retry_tree)],
+        retry=True,
+        tree=retry_tree,
+    )
+    transcript = _write_trajectory_fixture(
+        config,
+        task_id,
+        records=[_trajectory_record(sequence=1, status="empty", tree=final_tree)],
+        tree=final_tree,
+    )
+
+    trajectory = _public_change_trajectory(config, transcript)
+
+    assert trajectory["availability"] == "unavailable"
+    assert trajectory["completeness"] == "unavailable"
+    assert trajectory["changes"] == []
 
 
 def _resolve_schema(root: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

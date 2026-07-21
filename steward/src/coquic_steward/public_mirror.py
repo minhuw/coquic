@@ -106,6 +106,19 @@ _TRAJECTORY_SAFE_PATH_RE = re.compile(r"^[^\x00\\]+(?:/[^\x00\\]+)*$")
 _TRAJECTORY_SENSITIVE_PATH_RE = re.compile(
     r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:secret|token|credential|password|private|api[_-]?key).*)"
 )
+_TRAJECTORY_URL_RE = re.compile(
+    r"(?i)\b(?:https?|file)://[^\s'\"`),;]+"
+)
+_TRAJECTORY_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
+)
+_TRAJECTORY_PRIVATE_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?P<prefix>[\"']?(?:[A-Za-z0-9_]*(?:prompt|secret|token|credential|password)"
+    r"[A-Za-z0-9_]*|api[_-]?key|authorization)[\"']?\s*[:=]\s*)(?P<value>.*)"
+)
+_TRAJECTORY_PRIVATE_MARKER_RE = re.compile(
+    r"(?i)\bprivate[-_ ]+(?:prompt|context|session|turn|payload|response|input|secret|token|key)\b.*"
+)
 
 
 def public_mirror_payload(
@@ -1084,9 +1097,11 @@ def _trajectory_candidates(transcript_path: Path) -> list[Path]:
 def _trajectory_run_sort_key(path: str) -> tuple[int, str]:
     name = Path(path).name
     if name == "tool-changes":
-        return (0, name)
+        return (1, name)
     match = re.fullmatch(r"tool-changes\.retry-([1-9][0-9]*)", name)
-    return (int(match.group(1)) if match else 10**9, name)
+    if match is not None:
+        return (0, f"{int(match.group(1)):020d}")
+    return (2, name)
 
 
 def _read_trajectory_run(run_dir: Path) -> dict[str, object]:
@@ -1097,6 +1112,7 @@ def _read_trajectory_run(run_dir: Path) -> dict[str, object]:
     manifest_data = _trajectory_manifest_bytes(manifest_path)
     summary_state = _validate_trajectory_summary(summary)
     records = _validate_trajectory_manifest(manifest_data, summary)
+    _validate_trajectory_run_trees(summary_state, summary, records)
     hash_budget = 0
     for record in records:
         patch = record.get("patch")
@@ -1305,6 +1321,26 @@ def _trajectory_patch_metadata(patch: object) -> dict[str, object] | None:
     return {"path": path, "bytes": size, "sha256": digest}
 
 
+def _validate_trajectory_run_trees(
+    state: str,
+    summary: dict[str, object],
+    records: list[dict[str, object]],
+) -> None:
+    if state != "complete":
+        return
+    current_tree = summary["run_start_tree"]
+    for record in records:
+        if record["status"] not in _TRAJECTORY_COMPLETED_STATUSES:
+            raise _TrajectoryReadError("complete run contains incomplete record")
+        if record["gap_before"] or record["overlap"]:
+            raise _TrajectoryReadError("complete run contains discontinuity")
+        if record["base_tree"] != current_tree:
+            raise _TrajectoryReadError("record tree discontinuity")
+        current_tree = record["result_tree"]
+    if current_tree != summary["final_tree"]:
+        raise _TrajectoryReadError("summary final tree mismatch")
+
+
 def _validate_trajectory_manifest(
     lines: list[bytes], summary: dict[str, object]
 ) -> list[dict[str, object]]:
@@ -1358,6 +1394,8 @@ def _validate_trajectory_manifest(
         validated_paths = [_trajectory_safe_path(item) for item in paths]
         if validated_paths != sorted(set(validated_paths)):
             raise _TrajectoryReadError("changed paths not canonical")
+        if type(value.get("gap_before")) is not bool or type(value.get("overlap")) is not bool:
+            raise _TrajectoryReadError("invalid continuity metadata")
         if not isinstance(value.get("input"), dict):
             raise _TrajectoryReadError("invalid private input metadata")
         if status in _TRAJECTORY_COMPLETED_STATUSES and value.get("input_artifact") != value.get("input"):
@@ -1491,14 +1529,26 @@ def _trajectory_redacted_patch(config: StewardConfig, data: bytes) -> str:
         elif line.startswith(("--- ", "+++ ")):
             prefix, _, path = line.partition(" ")
             line = f"{prefix} {_trajectory_public_patch_path(config, path)}"
-        line = _public_text(config, line)
-        line = re.sub(
-            r"(?<![A-Za-z0-9:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+",
-            "[local-path]",
-            line,
-        )
-        lines.append(line)
+        lines.append(_trajectory_public_patch_line(config, line))
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _trajectory_public_patch_line(config: StewardConfig, value: str) -> str:
+    projected = _public_json(config, value)
+    if not isinstance(projected, str):
+        raise _TrajectoryReadError("invalid public patch line")
+    projected = re.sub(
+        r"(?<![A-Za-z0-9:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+",
+        "[local-path]",
+        projected,
+    )
+    projected = _TRAJECTORY_URL_RE.sub("[redacted-url]", projected)
+    projected = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", projected)
+    projected = _TRAJECTORY_PRIVATE_MARKER_RE.sub("[redacted-private]", projected)
+    return _TRAJECTORY_PRIVATE_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('prefix')}[redacted-private]",
+        projected,
+    )
 
 
 def _trajectory_public_patch_path(config: StewardConfig, value: str) -> str:
@@ -1631,8 +1681,17 @@ def _project_trajectory(
     replay_matches = True
     continuous = True
     summary_truncated = False
+    previous_final_tree: object = None
     for run_index, run in enumerate(runs):
         summary = run["summary"]
+        run_start_tree = summary.get("run_start_tree")
+        if (
+            previous_final_tree is not None
+            and run_start_tree is not None
+            and run_start_tree != previous_final_tree
+        ):
+            raise _TrajectoryReadError("retry tree discontinuity")
+        previous_final_tree = summary.get("final_tree")
         discovered += int(summary["discovered"])
         omitted_count += int(summary["omitted"])
         gap_count += int(summary["gaps"])

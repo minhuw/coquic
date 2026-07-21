@@ -12,6 +12,7 @@ from coquic_steward.core.config import PublicMirrorConfig
 from coquic_steward.core.models import Event, SignalItem
 from coquic_steward.public_mirror import (
     _public_change_trajectory,
+    _public_telemetry,
     _sanitize_public_cost,
     model_telemetry_payload,
     public_mirror_payload,
@@ -135,6 +136,52 @@ def test_catalog_credentials_do_not_reach_public_cost_provenance(config) -> None
     global_payload = model_telemetry_payload(config)
     assert "TOPSECRET" not in json.dumps(global_payload)
     assert "api_key" not in json.dumps(global_payload)
+
+
+def test_sidecar_text_is_sanitized_from_public_telemetry(config) -> None:
+    task_id = "task-public-telemetry-text-hardening"
+    run_dir = config.transcripts_dir / task_id / "worker"
+    run_dir.mkdir(parents=True)
+    transcript_path = run_dir / "codex.jsonl"
+    transcript_path.write_text("{}\n", encoding="utf-8")
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    recorder = TelemetryRecorder(
+        run_dir / "telemetry.json",
+        task_id=task_id,
+        run_name="worker",
+        stage="code",
+        retry_ordinal=0,
+        configured_model="contract-model",
+        reasoning_effort="low",
+        started_at=started_at,
+        started_monotonic_ns=1,
+        wall_clock=lambda: started_at + timedelta(seconds=1),
+        monotonic_ns=lambda: 1_000_001,
+    )
+    recorder.observe(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 1,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 0,
+            },
+        }
+    )
+    recorder.finalize(process_outcome="completed")
+    sidecar_path = run_dir / "telemetry.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["reasoning_effort"] = "api_key=TOPSECRET"
+    sidecar["issues"] = [{"category": "client_secret=TOPSECRET", "count": 1}]
+    sidecar["completeness"] = "partial"
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    serialized = json.dumps(_public_telemetry(config, transcript_path), sort_keys=True)
+
+    assert "TOPSECRET" not in serialized
+    assert "api_key" not in serialized
+    assert "client_secret" not in serialized
 
 
 def test_public_artifacts_have_explicit_size_and_restrictive_permissions(

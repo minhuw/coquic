@@ -1016,11 +1016,7 @@ def _public_telemetry(
     projected["retry_count"] = _telemetry_retry_count(values)
     projected["component_counts"] = _public_component_counts(config, values)
     projected["provenance"] = TELEMETRY_PROVENANCE
-    projected["configured_model"] = _sanitize_public_model(
-        config, projected.get("configured_model")
-    )
-    projected["cost"] = _sanitize_public_cost(config, projected.get("cost"))
-    return projected
+    return _sanitize_public_telemetry(config, projected)
 
 
 def _telemetry_empty(availability: str) -> dict[str, object]:
@@ -1325,6 +1321,42 @@ def _sanitize_public_model(config: StewardConfig, value: object) -> str | None:
     return text
 
 
+def _sanitize_public_telemetry(
+    config: StewardConfig, value: dict[str, object]
+) -> dict[str, object]:
+    value["configured_model"] = _sanitize_public_model(
+        config, value.get("configured_model")
+    )
+    reasoning_effort = value.get("reasoning_effort")
+    value["reasoning_effort"] = (
+        _public_text(config, str(reasoning_effort))[:64]
+        if reasoning_effort is not None
+        else None
+    )
+    value["issues"] = _sanitize_public_telemetry_issues(config, value.get("issues"))
+    value["cost"] = _sanitize_public_cost(config, value.get("cost"))
+    return value
+
+
+def _sanitize_public_telemetry_issues(
+    config: StewardConfig, value: object
+) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    issues: dict[str, int] = {}
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("category"), str):
+            continue
+        category = _public_text(config, str(item["category"]))[:80]
+        count = item.get("count")
+        if category and type(count) is int and count > 0:
+            issues[category] = issues.get(category, 0) + count
+    return [
+        {"category": category, "count": count}
+        for category, count in sorted(issues.items())
+    ][:32]
+
+
 def _sanitize_public_cost(config: StewardConfig, value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {"status": "unavailable", "reason": "telemetry_unavailable"}
@@ -1448,11 +1480,7 @@ def _public_task_telemetry(
     projected["coverage"] = coverage
     if not coverage["complete"]:
         projected["completeness"] = "partial"
-    projected["configured_model"] = _sanitize_public_model(
-        config, projected.get("configured_model")
-    )
-    projected["cost"] = _sanitize_public_cost(config, projected.get("cost"))
-    return projected
+    return _sanitize_public_telemetry(config, projected)
 
 
 def _task_telemetry_coverage(
@@ -1558,11 +1586,7 @@ def model_telemetry_payload(config: StewardConfig) -> dict[str, object]:
     )
     partial = sum(item.get("completeness") == "partial" for item in values)
     unavailable = sum(item.get("completeness") == "unavailable" for item in values)
-    completed_activity_values = [
-        item
-        for item in values
-        if item.get("process_outcome") == "completed" and _has_valid_usage(item)
-    ]
+    completed_activity_values = [item for item in values if _has_valid_usage(item)]
     all_time = _global_period(values)
     all_observed = _global_period(values)
     days: dict[str, list[dict[str, object]]] = {}

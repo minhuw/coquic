@@ -168,6 +168,7 @@ def _write_telemetry(
     *,
     partial: bool = False,
     retry_ordinal: int = 0,
+    process_outcome: str = "completed",
 ) -> None:
     run_dir = config.transcripts_dir / task_id / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +200,7 @@ def _write_telemetry(
     )
     if partial:
         recorder.note_malformed_line()
-    recorder.finalize(process_outcome="completed")
+    recorder.finalize(process_outcome=process_outcome)
 
 
 def _worker_result(config: StewardConfig, transcript: Path, last_message: Path) -> WorkerResult:
@@ -556,6 +557,33 @@ def test_partial_invocations_contribute_to_global_totals(config: StewardConfig) 
     assert payload["all_time"]["aggregate"]["total_tokens"] == 13
     assert payload["coverage"]["partial_invocations"] == 1
     assert payload["coverage"]["complete"] is False
+
+
+def test_failed_retry_usage_contributes_to_utc_day_bucket(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    task_id = "task-20260713120023-failed-retry-usage"
+    _write_telemetry(
+        config,
+        task_id,
+        "worker",
+        "code",
+        process_outcome="failed",
+    )
+    run_dir = config.transcripts_dir / task_id / "worker"
+    (run_dir / "codex.jsonl").rename(run_dir / "codex.retry-1.jsonl")
+    (run_dir / "telemetry.json").rename(run_dir / "telemetry.retry-1.json")
+
+    payload = model_telemetry_payload(config)
+
+    assert payload["all_time"]["aggregate"]["total_tokens"] == 13
+    assert payload["recent_days"] == [
+        {
+            "utc_day": "2026-07-13",
+            "completed_activity": payload["all_time"],
+        }
+    ]
 
 
 def test_task_telemetry_counts_components_and_actual_retries(

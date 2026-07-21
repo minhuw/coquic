@@ -20,6 +20,7 @@ from .agents.activity import (
     ACTIVITY_SCHEMA_VERSION,
     ACTIVITY_SOURCE,
     ACTIVITY_STAGE,
+    activity_retry_pending_path,
     activity_sidecar_path,
     activity_transcript_sha256,
     is_safe_source_event_id,
@@ -1063,6 +1064,11 @@ def _public_activities(
         return _activity_empty("withheld")
     if transcript_path is None:
         return _activity_empty("not_produced")
+    try:
+        if os.path.lexists(activity_retry_pending_path(transcript_path)):
+            return _activity_empty("unavailable", capture_state="partial")
+    except OSError:
+        return _activity_empty("unavailable", capture_state="partial")
     sidecar = activity_sidecar_path(transcript_path)
     if not _activity_safe_file(sidecar, config.state_dir):
         try:

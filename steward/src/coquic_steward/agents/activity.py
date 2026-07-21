@@ -158,6 +158,10 @@ def activity_sidecar_path(transcript_path: Path) -> Path:
     return transcript_path.with_name("activities.jsonl")
 
 
+def activity_retry_pending_path(transcript_path: Path) -> Path:
+    return transcript_path.with_name("activities.retry-pending")
+
+
 def activity_transcript_sha256(path: Path) -> str | None:
     """Return a transcript digest without allowing binding failure to escape."""
 
@@ -217,6 +221,10 @@ class ActivityRecorder:
     @property
     def finalized(self) -> bool:
         return self._finalized
+
+    @property
+    def sidecar_finalized(self) -> bool:
+        return self._header_written and self._summary_written
 
     @property
     def recorded(self) -> int:
@@ -439,6 +447,7 @@ __all__ = [
     "ActivityDeclaration",
     "ActivityRecorder",
     "activity_diagnostics_unavailable",
+    "activity_retry_pending_path",
     "activity_sidecar_path",
     "activity_transcript_sha256",
     "decode_activity_marker",

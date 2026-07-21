@@ -64,7 +64,9 @@ Each code-stage worker run may produce a private `activities.jsonl` beside its
 `codex.jsonl` transcript. A retry archives that sidecar as
 `activities.retry-<n>.jsonl`; the final run owns the unsuffixed file. The
 sidecar is mode `0600`, is never served directly, and is best-effort metadata.
-The canonical transcript remains byte-for-byte unchanged.
+During the retry delay, private transition state withholds the unsuffixed
+sidecar until the next attempt finalizes its own evidence. The canonical
+transcript remains byte-for-byte unchanged.
 
 When a worker's internal intent changes, it may begin an agent message with one
 standalone first line such as:

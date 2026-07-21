@@ -11,6 +11,7 @@ from pathlib import Path
 from coquic_steward.agents.activity import (
     ACTIVITY_REPORTING_RULES,
     ActivityRecorder,
+    activity_retry_pending_path,
     parse_activity_marker,
 )
 from coquic_steward.agents.runner import (
@@ -160,6 +161,48 @@ def test_code_runner_injects_rules_and_records_marker(config, tmp_path: Path) ->
     assert records[1]["activity"] == "edit"
     assert result.diagnostics["activities"]["recorded"] == 1
     assert result.transcript_path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_successful_retry_publishes_only_current_finalized_activity(
+    config, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    count = tmp_path / "count.txt"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'count=$(cat "{count}" 2>/dev/null || printf 0)\n'
+        "count=$((count + 1))\n"
+        f'printf "%s" "$count" > "{count}"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'stream disconnected before completion\\n' > \"$last\"\n"
+        "  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-transient\"}'\n"
+        "  printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"old_1\",\"type\":\"agent_message\",\"text\":\"STEWARD_ACTIVITY {\\\"activity\\\":\\\"report\\\",\\\"summary\\\":\\\"Old attempt\\\"}\"}}'\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'done\\n' > \"$last\"\n"
+        "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"id\":\"new_1\",\"type\":\"agent_message\",\"text\":\"STEWARD_ACTIVITY {\\\"activity\\\":\\\"edit\\\",\\\"summary\\\":\\\"New attempt\\\"}\"}}'\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+    monkeypatch.setattr("coquic_steward.agents.runner.time.sleep", lambda _delay: None)
+
+    result = CodexRunner(config).run(task, "hello", config.repo_root)
+
+    assert result.completed
+    assert not activity_retry_pending_path(result.transcript_path).exists()
+    public = _public_activities(config, result.transcript_path)
+    assert public["availability"] == "available"
+    assert [event["summary"] for event in public["events"]] == ["New attempt"]
 
 
 def test_retry_archive_failure_cannot_publish_previous_activity(config) -> None:
@@ -327,6 +370,105 @@ def test_retry_invalidation_failure_cannot_publish_stale_activity(
     public = _public_activities(config, transcript)
     assert public["availability"] == "available"
     assert [event["summary"] for event in public["events"]] == ["New attempt"]
+
+
+def test_retry_delay_withholds_stale_activity_when_all_artifact_mutations_fail(
+    config, monkeypatch
+) -> None:
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+    runner = CodexRunner(config)
+    transcript, _ = runner.paths(task)
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"attempt":1}\n', encoding="utf-8")
+    sidecar = transcript.with_name("activities.jsonl")
+    recorder = ActivityRecorder(sidecar)
+    assert recorder.observe(
+        _event(
+            "old_1",
+            'STEWARD_ACTIVITY {"activity":"report","summary":"Old attempt"}',
+        )
+    )
+    recorder.finalize()
+    attempts = 0
+
+    def run_process(*_args, **_kwargs) -> WorkerResult:
+        nonlocal attempts
+        attempts += 1
+        return WorkerResult(
+            completed=attempts == 2,
+            command=[],
+            cwd=config.repo_root,
+            exit_code=0 if attempts == 2 else 1,
+            transcript_path=transcript,
+            last_message_path=transcript.with_name("last-message.md"),
+            final_message=(
+                "done" if attempts == 2 else "stream disconnected before completion"
+            ),
+        )
+
+    original_replace = Path.replace
+    original_unlink = Path.unlink
+    original_open = Path.open
+
+    def replace(path: Path, target: Path) -> Path:
+        if path in {transcript, sidecar}:
+            raise PermissionError("injected artifact rename failure")
+        return original_replace(path, target)
+
+    def unlink(path: Path, *args, **kwargs) -> None:
+        if path == sidecar:
+            raise PermissionError("injected activity unlink failure")
+        original_unlink(path, *args, **kwargs)
+
+    def open_file(path: Path, mode: str = "r", *args, **kwargs):
+        if path == sidecar and mode == "wb":
+            raise PermissionError("injected activity truncate failure")
+        return original_open(path, mode, *args, **kwargs)
+
+    during_delay: list[dict[str, object]] = []
+
+    def inspect_retry_delay(_delay: float) -> None:
+        during_delay.append(_public_activities(config, transcript))
+
+    monkeypatch.setattr(runner, "_run_process", run_process)
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(
+        "coquic_steward.agents.runner.os.chmod",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError("injected activity chmod failure")
+        ),
+    )
+    monkeypatch.setattr(
+        "coquic_steward.agents.runner.os.fchmod",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError("injected activity fchmod failure")
+        ),
+    )
+    monkeypatch.setattr("coquic_steward.agents.runner.time.sleep", inspect_retry_delay)
+
+    result = runner.run(task, "hello", config.repo_root)
+
+    assert result.completed
+    assert result.diagnostics["retries"][0] == {
+        "attempt": 1,
+        "next_attempt": 2,
+        "delay_seconds": 5.0,
+        "reason": "stream disconnected before completion",
+        "resume_session": None,
+        "transcript_archive_failed": True,
+        "activities_archive_failed": True,
+        "activities_preserve_failed": True,
+        "activities_invalidate_failed": True,
+    }
+    assert len(during_delay) == 1
+    assert during_delay[0]["availability"] == "unavailable"
+    assert during_delay[0]["events"] == []
+    assert "Old attempt" not in json.dumps(during_delay[0])
+    assert activity_retry_pending_path(transcript).exists()
 
 
 def test_retry_activity_diagnostics_do_not_expose_archive_path(config) -> None:

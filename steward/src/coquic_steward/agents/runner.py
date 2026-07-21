@@ -21,6 +21,7 @@ from .activity import (
     ACTIVITY_REPORTING_RULES,
     ActivityRecorder,
     activity_diagnostics_unavailable,
+    activity_retry_pending_path,
     activity_sidecar_path,
 )
 from .diagnostics import diagnostics_for_result
@@ -221,11 +222,18 @@ class CodexRunner:
                 )
 
             delay = CODEX_RETRY_DELAYS_SECONDS[attempt]
+            retry_pending = (
+                _mark_activity_retry_pending(transcript_path)
+                if stage == CodexStage.code
+                else True
+            )
             archived = _archive_retry_artifacts(
                 result,
                 attempt + 1,
                 archive_tool_changes=capture_enabled,
             )
+            if not retry_pending:
+                archived["activities_retry_pending_failed"] = True
             if archived.get("tool_changes_archive_failed"):
                 capture_degraded = True
             if archived.get("tool_changes_preserve_failed"):
@@ -460,6 +468,8 @@ class CodexRunner:
                 if activity_recorder is not None
                 else activity_diagnostics_unavailable()
             )
+            if activity_recorder is not None and activity_recorder.sidecar_finalized:
+                _clear_activity_retry_pending(transcript_path)
         final_message = (
             last_message_path.read_text(encoding="utf-8")
             if last_message_path.exists()
@@ -616,6 +626,36 @@ def _archive_retry_artifacts(
                     archived["tool_changes_context_update_failed"] = True
                 _degrade_capture_context(preserved_tool_changes)
     return archived
+
+
+def _mark_activity_retry_pending(transcript_path: Path) -> bool:
+    path = activity_retry_pending_path(transcript_path)
+    descriptor: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        os.write(descriptor, b"retry pending\n")
+        os.fsync(descriptor)
+        return True
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _clear_activity_retry_pending(transcript_path: Path) -> bool:
+    try:
+        activity_retry_pending_path(transcript_path).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def _retry_artifact_path(path: Path, retry_number: int) -> Path:

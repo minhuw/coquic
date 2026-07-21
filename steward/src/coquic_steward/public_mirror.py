@@ -1123,7 +1123,12 @@ def _activity_safe_file(path: Path, root: Path) -> bool:
         if not os.path.lexists(path):
             return False
         info = path.lstat()
-        if path.is_symlink() or not path.is_file() or info.st_nlink != 1:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or info.st_nlink != 1
+            or info.st_mode & 0o777 != 0o600
+        ):
             return False
         resolved_root = root.resolve(strict=True)
         resolved_path = path.resolve(strict=True)

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 from coquic_steward.agents.activity import (
@@ -11,6 +16,7 @@ from coquic_steward.agents.activity import (
 from coquic_steward.agents.runner import (
     CodexRunner,
     _archive_retry_artifacts,
+    _communicate_streaming,
     _prompt_with_activity_rules,
 )
 from coquic_steward.core.models import (
@@ -84,6 +90,25 @@ def test_recorder_writes_ordered_private_records_and_bounded_counters(tmp_path: 
     assert records[-1]["record_type"] == "summary"
     assert records[1]["source_event_id"] == "item_1"
     assert "outcome" not in records[1]
+
+
+def test_recorder_creates_private_file_without_chmod(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "worker" / "activities.jsonl"
+    previous_umask = os.umask(0o022)
+    monkeypatch.setattr(
+        os,
+        "chmod",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+    try:
+        recorder = ActivityRecorder(path)
+        recorder.finalize()
+    finally:
+        os.umask(previous_umask)
+
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_recorder_rejects_non_agent_and_malformed_markers(tmp_path: Path) -> None:
@@ -161,7 +186,8 @@ def test_retry_archive_failure_cannot_publish_previous_activity(config) -> None:
     archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
 
     assert archived["activities_archive_failed"] is True
-    assert Path(str(archived["activities_preserved_path"])).exists()
+    assert archived["activities_preserved"] is True
+    assert transcript.with_name("activities.retry-1.unavailable-1.jsonl").exists()
     assert not sidecar.exists()
     assert _public_activities(config, transcript)["availability"] == "not_produced"
 
@@ -176,6 +202,108 @@ def test_retry_archive_failure_cannot_publish_previous_activity(config) -> None:
     public = _public_activities(config, transcript)
     assert public["availability"] == "available"
     assert [event["summary"] for event in public["events"]] == ["New attempt"]
+
+
+def test_retry_invalidation_fails_closed_without_private_diagnostics(config) -> None:
+    transcript = config.transcripts_dir / "task" / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    sidecar = transcript.with_name("activities.jsonl")
+    recorder = ActivityRecorder(sidecar)
+    assert recorder.observe(
+        _event(
+            "old_1",
+            'STEWARD_ACTIVITY {"activity":"report","summary":"Old attempt"}',
+        )
+    )
+    recorder.finalize()
+    transcript.with_name("activities.retry-1.jsonl").mkdir()
+    result = WorkerResult(
+        completed=False,
+        command=[],
+        cwd=config.repo_root,
+        exit_code=1,
+        transcript_path=transcript,
+        last_message_path=transcript.with_name("last-message.md"),
+    )
+    sidecar.chmod(0o400)
+    transcript.parent.chmod(0o500)
+    try:
+        archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
+    finally:
+        transcript.parent.chmod(0o700)
+
+    assert archived == {
+        "transcript_archive_failed": True,
+        "activities_archive_failed": True,
+        "activities_preserve_failed": True,
+        "activities_invalidated": True,
+    }
+    assert sidecar.exists()
+    assert sidecar.stat().st_mode & 0o777 == 0
+    assert _public_activities(config, transcript)["availability"] == "unavailable"
+
+
+def test_retry_activity_diagnostics_do_not_expose_archive_path(config) -> None:
+    transcript = config.transcripts_dir / "task" / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    recorder = ActivityRecorder(transcript.with_name("activities.jsonl"))
+    recorder.finalize()
+    result = WorkerResult(
+        completed=False,
+        command=[],
+        cwd=config.repo_root,
+        exit_code=1,
+        transcript_path=transcript,
+        last_message_path=transcript.with_name("last-message.md"),
+    )
+
+    archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
+
+    assert not any(key.startswith("activities_") for key in archived)
+
+
+def test_slow_metadata_observer_does_not_extend_process_timeout(tmp_path: Path) -> None:
+    raw_line = '{"type":"item.completed","item":{"type":"agent_message"}}\n'
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; "
+            f"sys.stdout.write({raw_line!r}); sys.stdout.flush(); time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    observer_started = threading.Event()
+    release_observer = threading.Event()
+
+    def slow_observer(_event: dict[str, object]) -> None:
+        observer_started.set()
+        release_observer.wait(timeout=2)
+
+    started = time.monotonic()
+    try:
+        stdout = _communicate_streaming(
+            proc,
+            "",
+            tmp_path / "codex.jsonl",
+            timeout_seconds=0.1,
+            event_observer=slow_observer,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release_observer.set()
+
+    assert observer_started.is_set()
+    assert elapsed < 1.0
+    assert proc.returncode == 124
+    assert stdout == raw_line
+    assert (tmp_path / "codex.jsonl").read_text(encoding="utf-8").startswith(raw_line)
 
 
 def test_non_code_prompts_do_not_receive_activity_rules() -> None:

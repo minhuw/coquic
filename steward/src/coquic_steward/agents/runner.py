@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import selectors
 import signal
 # subprocess is required to stream Codex stdio; launches use explicit argv and shell=False.
 import subprocess  # nosec B404
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -26,6 +28,8 @@ from .tool_changes import ToolChangeCapture
 
 CODEX_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 _RETRY_PRESERVATION_LIMIT = 16
+_METADATA_QUEUE_LIMIT = 256
+_METADATA_DRAIN_GRACE_SECONDS = 0.05
 _CODEX_RETRY_PROMPT = (
     "Continue the interrupted turn. Complete the original task and return the "
     "required final response."
@@ -427,6 +431,9 @@ class CodexRunner:
                 event_observer=(
                     activity_recorder.observe if activity_recorder is not None else None
                 ),
+                observer_abandon=(
+                    activity_recorder.abandon if activity_recorder is not None else None
+                ),
             )
         finally:
             capture_diagnostics = (
@@ -565,12 +572,13 @@ def _archive_retry_artifacts(
                 activities_path, archived_activities_path
             )
             if preserved_activities is None:
+                archived["activities_preserve_failed"] = True
                 if not _invalidate_activity_sidecar(activities_path):
                     archived["activities_invalidate_failed"] = True
+                else:
+                    archived["activities_invalidated"] = True
             else:
-                archived["activities_preserved_path"] = str(preserved_activities)
-        else:
-            archived["activities_path"] = str(archived_activities_path)
+                archived["activities_preserved"] = True
     tool_changes = result.transcript_path.with_name("tool-changes")
     if archive_tool_changes and tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)
@@ -630,7 +638,28 @@ def _invalidate_activity_sidecar(path: Path) -> bool:
             pass
         return True
     except OSError:
+        pass
+    try:
+        os.chmod(path, 0)
+        if path.lstat().st_mode & 0o777 != 0o600:
+            return True
+    except OSError:
+        pass
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        os.fchmod(descriptor, 0)
+        return os.fstat(descriptor).st_mode & 0o777 != 0o600
+    except OSError:
         return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _move_retry_directory(source: Path, destination: Path) -> bool:
@@ -726,6 +755,7 @@ def _communicate_streaming(
     event_observer: Callable[[dict[str, object]], object] | None = None,
     metadata_observer: Callable[[dict[str, object]], object] | None = None,
     on_event: Callable[[dict[str, object]], object] | None = None,
+    observer_abandon: Callable[[], object] | None = None,
 ) -> str:
     if proc.stdin is None or proc.stdout is None or proc.stderr is None:
         raise RuntimeError("codex process pipes were not initialized")
@@ -739,48 +769,126 @@ def _communicate_streaming(
     selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
     transcript_path.write_text("", encoding="utf-8")
     observer = event_observer or metadata_observer or on_event
-    with transcript_path.open("a", encoding="utf-8") as transcript:
-        while selector.get_map():
-            if time.monotonic() > deadline:
-                _terminate_process_tree(proc)
-                timeout_message = (
-                    f"codex process timed out after {timeout_seconds // 60} minute(s)"
-                )
-                transcript.write(
-                    json.dumps({"type": "stderr", "text": timeout_message}) + "\n"
-                )
-                proc.wait()
-                proc.returncode = 124
-                break
-            for key, _ in selector.select(timeout=0.2):
-                line = key.fileobj.readline()
-                if line == "":
-                    selector.unregister(key.fileobj)
-                    continue
-                if key.data == "stdout":
-                    stdout_parts.append(line)
-                    transcript.write(line)
-                    transcript.flush()
-                    if observer is not None:
-                        try:
-                            decoded = json.loads(line)
-                        except (json.JSONDecodeError, TypeError, ValueError):
-                            decoded = None
-                        if isinstance(decoded, dict):
-                            try:
-                                observer(decoded)
-                            except Exception:
-                                # Metadata consumers are strictly best effort;
-                                # raw transcript capture has already succeeded.
-                                pass
-                else:
-                    transcript.write(
-                        json.dumps({"type": "stderr", "text": line.rstrip("\n")}) + "\n"
+    dispatcher = _MetadataDispatcher(observer) if observer is not None else None
+    timed_out = False
+    try:
+        with transcript_path.open("a", encoding="utf-8") as transcript:
+            while selector.get_map():
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    _terminate_process_tree(proc)
+                    timeout_message = (
+                        f"codex process timed out after {timeout_seconds // 60} minute(s)"
                     )
-                transcript.flush()
-        if proc.returncode is None:
-            proc.wait()
+                    transcript.write(
+                        json.dumps({"type": "stderr", "text": timeout_message}) + "\n"
+                    )
+                    proc.wait()
+                    proc.returncode = 124
+                    break
+                for key, _ in selector.select(timeout=0.2):
+                    line = key.fileobj.readline()
+                    if line == "":
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.data == "stdout":
+                        stdout_parts.append(line)
+                        transcript.write(line)
+                        transcript.flush()
+                        if dispatcher is not None:
+                            try:
+                                decoded = json.loads(line)
+                            except (json.JSONDecodeError, TypeError, ValueError):
+                                decoded = None
+                            if isinstance(decoded, dict):
+                                dispatcher.submit(decoded)
+                    else:
+                        transcript.write(
+                            json.dumps({"type": "stderr", "text": line.rstrip("\n")})
+                            + "\n"
+                        )
+                    transcript.flush()
+            if proc.returncode is None:
+                proc.wait()
+    finally:
+        if dispatcher is not None and not dispatcher.finish(
+            timeout=0.0 if timed_out else _METADATA_DRAIN_GRACE_SECONDS
+        ):
+            if observer_abandon is not None:
+                try:
+                    observer_abandon()
+                except Exception:
+                    pass
     return "".join(stdout_parts)
+
+
+class _MetadataDispatcher:
+    """Run decoded metadata callbacks without blocking transcript capture."""
+
+    _STOP = object()
+
+    def __init__(self, observer: Callable[[dict[str, object]], object]) -> None:
+        self._observer = observer
+        self._queue: queue.Queue[dict[str, object] | object] = queue.Queue(
+            maxsize=_METADATA_QUEUE_LIMIT
+        )
+        self._condition = threading.Condition()
+        self._pending = 0
+        self._accepting = True
+        self._complete = True
+        self._abandoned = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def submit(self, event: dict[str, object]) -> None:
+        with self._condition:
+            if not self._accepting:
+                self._complete = False
+                return
+            self._pending += 1
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            with self._condition:
+                self._pending -= 1
+                self._complete = False
+                self._condition.notify_all()
+
+    def finish(self, *, timeout: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            self._accepting = False
+            while self._pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=remaining)
+            complete = self._complete and self._pending == 0
+            if not complete:
+                self._abandoned = True
+        try:
+            self._queue.put_nowait(self._STOP)
+        except queue.Full:
+            pass
+        return complete
+
+    def _run(self) -> None:
+        while True:
+            event = self._queue.get()
+            if event is self._STOP:
+                return
+            try:
+                with self._condition:
+                    abandoned = self._abandoned
+                if not abandoned and isinstance(event, dict):
+                    self._observer(event)
+            except Exception:
+                with self._condition:
+                    self._complete = False
+            finally:
+                with self._condition:
+                    self._pending -= 1
+                    self._condition.notify_all()
 
 
 def _prompt_with_activity_rules(prompt: str, stage: CodexStage) -> str:

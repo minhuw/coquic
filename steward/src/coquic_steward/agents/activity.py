@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, BinaryIO, Callable
 
 
 ACTIVITY_SCHEMA_VERSION = 1
@@ -187,6 +188,9 @@ class ActivityRecorder:
         self._header_written = False
         self._finalized = False
         self._summary_written = False
+        self._handle: BinaryIO | None = None
+        self._io_lock = threading.Lock()
+        self._abandoned = threading.Event()
         self._start_time = utc_timestamp(self._clock())
         self._open_header()
 
@@ -232,69 +236,89 @@ class ActivityRecorder:
                 os.chmod(self.path.parent, PRIVATE_DIR_MODE)
             except OSError:
                 pass
-            if self.path.exists() and self.path.stat().st_size:
-                # A retry archive should have moved the prior sidecar.  Never
-                # append a second header to an existing run.
-                self._write_failed = True
-                return
+            flags = os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags, PRIVATE_FILE_MODE)
+            try:
+                os.fchmod(descriptor, PRIVATE_FILE_MODE)
+                if os.fstat(descriptor).st_mode & 0o777 != PRIVATE_FILE_MODE:
+                    raise PermissionError("activity sidecar permissions are not private")
+                self._handle = os.fdopen(descriptor, "ab")
+            except Exception:
+                os.close(descriptor)
+                raise
             self._append_record(header)
             self._header_written = True
         except Exception:
             self._write_failed = True
+            self._close_handle()
 
     def _append_record(self, value: dict[str, Any]) -> None:
         encoded = (
             json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
             + "\n"
         ).encode("utf-8")
-        with self.path.open("ab") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
+        if self._handle is None:
+            raise OSError("activity sidecar is not open")
+        self._handle.write(encoded)
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+
+    def _close_handle(self) -> None:
+        if self._handle is None:
+            return
         try:
-            os.chmod(self.path, PRIVATE_FILE_MODE)
+            self._handle.close()
         except OSError:
             pass
+        self._handle = None
 
     def observe(self, event: object) -> bool:
         """Observe one decoded transcript event; return whether it was recorded."""
 
-        if self._finalized or self._write_failed or not self._header_written:
-            return False
-        try:
-            decoded = validate_activity_event(event)
-            if decoded is None:
-                self._invalid += 1
+        with self._io_lock:
+            if self._finalized or self._write_failed or not self._header_written:
                 return False
-            source_event_id, declaration = decoded
-            if source_event_id in self._seen:
-                self._duplicate += 1
+            try:
+                decoded = validate_activity_event(event)
+                if decoded is None:
+                    self._invalid += 1
+                    return False
+                source_event_id, declaration = decoded
+                if source_event_id in self._seen:
+                    self._duplicate += 1
+                    return False
+                self._seen.add(source_event_id)
+                if self._recorded >= self.max_events:
+                    self._omitted += 1
+                    self._truncated = True
+                    return False
+                self._sequence += 1
+                record = {
+                    "record_type": "event",
+                    "schema_version": ACTIVITY_SCHEMA_VERSION,
+                    "sequence": self._sequence,
+                    "source_event_id": source_event_id,
+                    "recorded_at": utc_timestamp(self._clock()),
+                    "stage": self.stage,
+                    "activity": declaration.activity,
+                    "summary": declaration.summary,
+                    "source": ACTIVITY_SOURCE,
+                }
+                self._append_record(record)
+                if self._abandoned.is_set():
+                    self._write_failed = True
+                    return False
+                self._recorded += 1
+                return True
+            except Exception:
+                # A malformed marker or sidecar write failure must not leak raw
+                # input, paths, or exception details into Codex diagnostics.
+                self._write_failed = True
                 return False
-            self._seen.add(source_event_id)
-            if self._recorded >= self.max_events:
-                self._omitted += 1
-                self._truncated = True
-                return False
-            self._sequence += 1
-            record = {
-                "record_type": "event",
-                "schema_version": ACTIVITY_SCHEMA_VERSION,
-                "sequence": self._sequence,
-                "source_event_id": source_event_id,
-                "recorded_at": utc_timestamp(self._clock()),
-                "stage": self.stage,
-                "activity": declaration.activity,
-                "summary": declaration.summary,
-                "source": ACTIVITY_SOURCE,
-            }
-            self._append_record(record)
-            self._recorded += 1
-            return True
-        except Exception:
-            # A malformed marker or sidecar write failure must not leak raw
-            # input, paths, or exception details into Codex diagnostics.
-            self._write_failed = True
-            return False
+            finally:
+                if self._abandoned.is_set():
+                    self._close_handle()
 
     record_event = observe
     record = observe
@@ -303,27 +327,43 @@ class ActivityRecorder:
     on_event = observe
     observe_event = observe
 
+    def abandon(self) -> None:
+        """Stop capture without waiting for a blocked metadata write."""
+
+        self._abandoned.set()
+        self._write_failed = True
+        self._finalized = True
+        if self._io_lock.acquire(blocking=False):
+            try:
+                self._close_handle()
+            finally:
+                self._io_lock.release()
+
     def finalize(self) -> dict[str, object]:
         if self._finalized:
             return self.diagnostics_dict()
-        self._finalized = True
-        summary = {
-            "record_type": "summary",
-            "schema_version": ACTIVITY_SCHEMA_VERSION,
-            "capture_state": "partial" if self._write_failed else "complete",
-            "recorded": self._recorded,
-            "invalid": self._invalid,
-            "duplicate": self._duplicate,
-            "omitted": self._omitted,
-            "truncated": self._truncated,
-        }
-        if self._header_written and not self._summary_written:
-            try:
-                self._append_record(summary)
-                self._summary_written = True
-            except Exception:
-                self._write_failed = True
-        return self.diagnostics_dict()
+        with self._io_lock:
+            if self._finalized:
+                return self.diagnostics_dict()
+            self._finalized = True
+            summary = {
+                "record_type": "summary",
+                "schema_version": ACTIVITY_SCHEMA_VERSION,
+                "capture_state": "partial" if self._write_failed else "complete",
+                "recorded": self._recorded,
+                "invalid": self._invalid,
+                "duplicate": self._duplicate,
+                "omitted": self._omitted,
+                "truncated": self._truncated,
+            }
+            if self._header_written and not self._summary_written:
+                try:
+                    self._append_record(summary)
+                    self._summary_written = True
+                except Exception:
+                    self._write_failed = True
+            self._close_handle()
+            return self.diagnostics_dict()
 
     close = finalize
 

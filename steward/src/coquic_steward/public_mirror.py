@@ -110,9 +110,6 @@ _TRAJECTORY_CREDENTIAL_RE = re.compile(
     r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}"
     r"|glpat-[A-Za-z0-9_-]{8,})\b"
 )
-_TRAJECTORY_WINDOWS_PATH_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])(?:[A-Z]:(?:\\+|/)|\\{2,})[^\s'\"`),;]+"
-)
 _TRAJECTORY_PRIVATE_MARKER_RE = re.compile(
     r"(?i)\bprivate[-_ ]+(?:prompt|context|session|turn|payload|response|input|secret|token|key)\b.*"
 )
@@ -1548,7 +1545,7 @@ def _trajectory_public_patch_line(config: StewardConfig, value: str) -> str:
     if not isinstance(projected, str):
         raise _TrajectoryReadError("invalid public patch line")
     projected = _trajectory_redact_absolute_paths(projected)
-    projected = _TRAJECTORY_WINDOWS_PATH_RE.sub("[local-path]", projected)
+    projected = _trajectory_redact_windows_paths(projected)
     projected = _trajectory_redact_urls(projected)
     projected = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", projected)
     projected = _TRAJECTORY_PRIVATE_MARKER_RE.sub("[redacted-private]", projected)
@@ -1579,6 +1576,38 @@ def _trajectory_redact_absolute_paths(value: str) -> str:
         index = end
     output.append(value[copied:])
     return "".join(output)
+
+
+def _trajectory_redact_windows_paths(value: str) -> str:
+    output: list[str] = []
+    copied = 0
+    index = 0
+    while index < len(value):
+        if not _trajectory_windows_path_start(value, index):
+            index += 1
+            continue
+        end = index + 2
+        while end < len(value) and value[end] not in _PUBLIC_TOKEN_TERMINATORS:
+            end += 1
+        output.extend((value[copied:index], "[local-path]"))
+        copied = end
+        index = end
+    output.append(value[copied:])
+    return "".join(output)
+
+
+def _trajectory_windows_path_start(value: str, index: int) -> bool:
+    if index > 0 and (value[index - 1].isalnum() or value[index - 1] == "_"):
+        return False
+    if (
+        index + 2 < len(value)
+        and value[index].isascii()
+        and value[index].isalpha()
+        and value[index + 1] == ":"
+        and value[index + 2] in {"\\", "/"}
+    ):
+        return True
+    return index + 1 < len(value) and value[index : index + 2] == "\\\\"
 
 
 def _trajectory_redact_urls(value: str) -> str:

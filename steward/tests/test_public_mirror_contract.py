@@ -852,6 +852,33 @@ def test_trajectory_patch_redaction_has_bounded_runtime(
     assert elapsed < 1.0
 
 
+@pytest.mark.parametrize(
+    ("patch_text", "expected"),
+    [
+        (
+            r"+path=C:\Users\Alice Smith\private\key.pem",
+            "+path=[local-path]",
+        ),
+        (
+            r'+load_key(r"C:\\Users\\Alice Smith\\private\\key.pem"); safe_call()',
+            '+load_key(r"[local-path]"); safe_call()',
+        ),
+        (
+            r"+copy(\\server\private share\key.pem, safe_target)",
+            "+copy([local-path], safe_target)",
+        ),
+    ],
+)
+def test_trajectory_patch_redacts_windows_paths_with_spaces_and_preserves_delimited_code(
+    config: StewardConfig,
+    patch_text: str,
+    expected: str,
+) -> None:
+    projected = _trajectory_redacted_patch(config, f"{patch_text}\n".encode())
+
+    assert projected == f"{expected}\n"
+
+
 def test_worker_change_trajectory_counts_per_patch_truncation_as_omitted(
     config: StewardConfig,
 ) -> None:

@@ -106,19 +106,25 @@ _TRAJECTORY_SAFE_PATH_RE = re.compile(r"^[^\x00\\]+(?:/[^\x00\\]+)*$")
 _TRAJECTORY_SENSITIVE_PATH_RE = re.compile(
     r"(?i)(?:^|/)(?:\.env(?:\.|$)|.*(?:secret|token|credential|password|private|api[_-]?key).*)"
 )
-_TRAJECTORY_URL_RE = re.compile(
-    r"(?i)\b(?:https?|file)://[^\s'\"`),;]+"
-)
 _TRAJECTORY_CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})\b"
+    r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    r"|glpat-[A-Za-z0-9_-]{8,})\b"
 )
-_TRAJECTORY_PRIVATE_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<prefix>[\"']?(?:[A-Za-z0-9_]*(?:prompt|secret|token|credential|password)"
-    r"[A-Za-z0-9_]*|api[_-]?key|authorization)[\"']?\s*[:=]\s*)(?P<value>.*)"
+_TRAJECTORY_WINDOWS_PATH_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:[A-Z]:(?:\\+|/)|\\{2,})[^\s'\"`),;]+"
 )
 _TRAJECTORY_PRIVATE_MARKER_RE = re.compile(
     r"(?i)\bprivate[-_ ]+(?:prompt|context|session|turn|payload|response|input|secret|token|key)\b.*"
 )
+_TRAJECTORY_PRIVATE_ASSIGNMENT_PARTS = (
+    "prompt",
+    "secret",
+    "token",
+    "credential",
+    "password",
+    "authorization",
+)
+_PUBLIC_TOKEN_TERMINATORS = frozenset("'\"`),;")
 
 
 def public_mirror_payload(
@@ -1437,6 +1443,10 @@ def _validate_trajectory_manifest(
             raise _TrajectoryReadError("captured record lacks patch")
         if status == "empty" and patch is not None:
             raise _TrajectoryReadError("empty record has patch")
+        if status in _TRAJECTORY_COMPLETED_STATUSES:
+            changed = value.get("base_tree") != value.get("result_tree")
+            if (patch is not None) != changed or bool(validated_paths) != changed:
+                raise _TrajectoryReadError("record change evidence mismatch")
         if not {"patch_path", "patch_size_bytes", "patch_sha256"}.issubset(value):
             raise _TrajectoryReadError("missing patch aliases")
         if value.get("patch_path") != (patch.get("path") if patch else None):
@@ -1537,18 +1547,103 @@ def _trajectory_public_patch_line(config: StewardConfig, value: str) -> str:
     projected = _public_json(config, value)
     if not isinstance(projected, str):
         raise _TrajectoryReadError("invalid public patch line")
-    projected = re.sub(
-        r"(?<![A-Za-z0-9:])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+",
-        "[local-path]",
-        projected,
-    )
-    projected = _TRAJECTORY_URL_RE.sub("[redacted-url]", projected)
+    projected = _trajectory_redact_absolute_paths(projected)
+    projected = _TRAJECTORY_WINDOWS_PATH_RE.sub("[local-path]", projected)
+    projected = _trajectory_redact_urls(projected)
     projected = _TRAJECTORY_CREDENTIAL_RE.sub("[redacted-secret]", projected)
     projected = _TRAJECTORY_PRIVATE_MARKER_RE.sub("[redacted-private]", projected)
-    return _TRAJECTORY_PRIVATE_ASSIGNMENT_RE.sub(
-        lambda match: f"{match.group('prefix')}[redacted-private]",
-        projected,
-    )
+    return _trajectory_redact_private_assignment(projected)
+
+
+def _trajectory_redact_absolute_paths(value: str) -> str:
+    output: list[str] = []
+    copied = 0
+    index = 0
+    while index < len(value):
+        if value[index] != "/" or (
+            index > 0 and (value[index - 1].isalnum() or value[index - 1] == ":")
+        ):
+            index += 1
+            continue
+        end = index + 1
+        while end < len(value) and (
+            value[end].isascii()
+            and (value[end].isalnum() or value[end] in {".", "_", "-", "/"})
+        ):
+            end += 1
+        path = value[index + 1 : end].rstrip("/")
+        parts = path.split("/")
+        if len(parts) >= 2 and all(parts):
+            output.extend((value[copied:index], "[local-path]"))
+            copied = index + 1 + len(path)
+        index = end
+    output.append(value[copied:])
+    return "".join(output)
+
+
+def _trajectory_redact_urls(value: str) -> str:
+    output: list[str] = []
+    copied = 0
+    search_from = 0
+    while True:
+        marker = value.find("://", search_from)
+        if marker < 0:
+            break
+        run_start = marker
+        while run_start > copied and _trajectory_scheme_character(value[run_start - 1]):
+            run_start -= 1
+        scheme_start = run_start
+        while scheme_start < marker and not (
+            value[scheme_start].isascii() and value[scheme_start].isalpha()
+        ):
+            scheme_start += 1
+        end = marker + 3
+        while end < len(value) and not _public_token_terminator(value[end]):
+            end += 1
+        if scheme_start == marker:
+            search_from = marker + 3
+            continue
+        output.extend((value[copied:scheme_start], "[redacted-url]"))
+        copied = end
+        search_from = end
+    output.append(value[copied:])
+    return "".join(output)
+
+
+def _trajectory_scheme_character(value: str) -> bool:
+    return value.isascii() and (value.isalnum() or value in {"+", ".", "-"})
+
+
+def _public_token_terminator(value: str) -> bool:
+    return value.isspace() or value in _PUBLIC_TOKEN_TERMINATORS
+
+
+def _trajectory_redact_private_assignment(value: str) -> str:
+    for separator, character in enumerate(value):
+        if character not in {":", "="}:
+            continue
+        key_end = separator
+        while key_end > 0 and value[key_end - 1].isspace():
+            key_end -= 1
+        if key_end > 0 and value[key_end - 1] in {"\"", "'"}:
+            key_end -= 1
+        key_start = key_end
+        while key_start > 0 and (
+            value[key_start - 1].isalnum() or value[key_start - 1] in {"_", "-"}
+        ):
+            key_start -= 1
+        key = value[key_start:key_end].lower()
+        normalized_key = key.replace("_", "").replace("-", "")
+        if not (
+            any(part in key for part in _TRAJECTORY_PRIVATE_ASSIGNMENT_PARTS)
+            or "apikey" in normalized_key
+        ):
+            continue
+        value_start = separator + 1
+        while value_start < len(value) and value[value_start].isspace():
+            value_start += 1
+        return f"{value[:value_start]}[redacted-private]"
+    return value
 
 
 def _trajectory_public_patch_path(config: StewardConfig, value: str) -> str:
@@ -1633,7 +1728,7 @@ def _trajectory_patch_artifact(
         "original_size_bytes": patch["bytes"],
         "truncated": truncated,
     }
-    return artifact, len(encoded), False
+    return artifact, len(encoded), truncated
 
 
 def _public_trajectory_change(
@@ -2747,12 +2842,7 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
     for original, replacement in generated_state_replacements.items():
         text = text.replace(original, replacement)
     text = re.sub(r"/(?:home|media|tmp|var|opt)/[^\s'\"`),;]+", "[local-path]", text)
-    text = re.sub(
-        r"(?i)(?:file://|[^\s'\"`),;]*(?:/worktrees/|/transcripts/|/patches/))"
-        r"[^\s'\"`),;]*",
-        "[local-path]",
-        text,
-    )
+    text = _redact_private_location_tokens(text)
     text = re.sub(
         r"(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
         "[redacted-secret]",
@@ -2767,6 +2857,28 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
     )
     text = re.sub(r"(?i)\bthread[_-][A-Za-z0-9._-]+", "[redacted-thread]", text)
     return text
+
+
+def _redact_private_location_tokens(value: str) -> str:
+    output: list[str] = []
+    copied = 0
+    index = 0
+    while index < len(value):
+        if _public_token_terminator(value[index]):
+            index += 1
+            continue
+        start = index
+        while index < len(value) and not _public_token_terminator(value[index]):
+            index += 1
+        lowered = value[start:index].lower()
+        if "file://" in lowered or any(
+            marker in lowered
+            for marker in ("/worktrees/", "/transcripts/", "/patches/")
+        ):
+            output.extend((value[copied:start], "[local-path]"))
+            copied = index
+    output.append(value[copied:])
+    return "".join(output)
 
 
 def _looks_like_link(key: str) -> bool:

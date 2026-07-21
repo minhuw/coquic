@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -29,7 +30,10 @@ from coquic_steward.core.models import (
     WorkerResult,
 )
 from coquic_steward.public_mirror import (
+    MIRROR_TRAJECTORY_AGGREGATE_PATCH_BYTES,
+    MIRROR_TRAJECTORY_PATCH_BYTES,
     _public_change_trajectory,
+    _trajectory_redacted_patch,
     public_mirror_digest,
     public_mirror_payload,
     public_task_detail_payload,
@@ -499,7 +503,9 @@ def _trajectory_record(
     patch: dict[str, object] | None = None,
     completed_at: str = "2026-07-13T12:00:01+00:00",
     tree: str = "a" * 40,
+    result_tree: str | None = None,
 ) -> dict[str, object]:
+    result_tree = tree if result_tree is None else result_tree
     record: dict[str, object] = {
         "tool_use_id": f"tool_{sequence}",
         "tool_name": "apply_patch",
@@ -519,8 +525,8 @@ def _trajectory_record(
         "completion_order": sequence,
         "completed_at": completed_at,
         "duration_ms": 1,
-        "result_tree": tree,
-        "result_tree_id": tree,
+        "result_tree": result_tree,
+        "result_tree_id": result_tree,
         "status": status,
         "paths": ["include/coquic/core.h"] if status == "captured" else [],
         "patch": patch,
@@ -541,7 +547,9 @@ def _write_trajectory_fixture(
     records: list[dict[str, object]],
     retry: bool = False,
     tree: str = "a" * 40,
+    final_tree: str | None = None,
 ) -> Path:
+    final_tree = tree if final_tree is None else final_tree
     transcript = _write(
         config.transcripts_dir / task_id / "worker" / "codex.jsonl", "worker\n"
     )
@@ -569,11 +577,11 @@ def _write_trajectory_fixture(
                 "reasons": [],
                 "reason_categories": [],
                 "run_start_tree": tree,
-                "final_tree": tree,
-                "replayed_tree": tree,
+                "final_tree": final_tree,
+                "replayed_tree": final_tree,
                 "run_start_tree_id": tree,
-                "final_tree_id": tree,
-                "replayed_tree_id": tree,
+                "final_tree_id": final_tree,
+                "replayed_tree_id": final_tree,
             }
         ),
     )
@@ -600,6 +608,9 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
         '+endpoint = "https://private.example.test/v1"\n'
         '+credential = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"\n'
         '+prompt = "private prompt text that must not publish"\n'
+        '+connect("ssh://deploy:topsecret@example.test/repository")\n'
+        '+authenticate("glpat-0123456789abcdefghijklmnop")\n'
+        '+load_key(r"C:\\Users\\alice\\private\\key.pem")\n'
     )
     patch_path = config.transcripts_dir / task.id / "worker" / "tool-changes" / "patches" / "1-tool_1.patch"
     patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -609,8 +620,18 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
         "bytes": len(patch_text.encode()),
         "sha256": sha256(patch_text.encode()).hexdigest(),
     }
-    record = _trajectory_record(sequence=1, patch=patch_meta)
-    transcript = _write_trajectory_fixture(config, task.id, records=[record])
+    result_tree = "b" * 40
+    record = _trajectory_record(
+        sequence=1,
+        patch=patch_meta,
+        result_tree=result_tree,
+    )
+    transcript = _write_trajectory_fixture(
+        config,
+        task.id,
+        records=[record],
+        final_tree=result_tree,
+    )
     # The fixture writer uses the same transcript path and run directory.
     store.begin_iteration(
         task.id,
@@ -633,7 +654,12 @@ def test_worker_change_trajectory_is_bounded_redacted_and_additive(
     public_patch = trajectory["changes"][0]["patch"]["text"]
     assert "safe_call()" in public_patch
     assert "https://" not in public_patch
+    assert "ssh://" not in public_patch
+    assert "topsecret" not in public_patch
     assert "ghp_" not in public_patch
+    assert "glpat-" not in public_patch
+    assert r"C:\Users" not in public_patch
+    assert r"C:\Users\alice\private\key.pem" not in public_patch
     assert "private prompt" not in public_patch
     assert "private-session" not in json.dumps(trajectory)
     assert "inputs/private.json" not in json.dumps(trajectory)
@@ -752,6 +778,178 @@ def test_worker_change_trajectory_rejects_retry_tree_discontinuity(
     assert trajectory["availability"] == "unavailable"
     assert trajectory["completeness"] == "unavailable"
     assert trajectory["changes"] == []
+
+
+@pytest.mark.parametrize(
+    ("status", "result_tree", "with_patch", "paths"),
+    [
+        ("empty", "b" * 40, False, []),
+        ("captured", "a" * 40, True, ["include/coquic/core.h"]),
+        ("empty", "a" * 40, False, ["include/coquic/core.h"]),
+    ],
+)
+def test_worker_change_trajectory_rejects_inconsistent_status_tree_evidence(
+    config: StewardConfig,
+    status: str,
+    result_tree: str,
+    with_patch: bool,
+    paths: list[str],
+) -> None:
+    config = _contract_config(config)
+    task_id = f"task-20260713120014-{status}-{int(with_patch)}-{len(paths)}"
+    patch = None
+    if with_patch:
+        patch_text = "+safe_call()\n"
+        patch_path = (
+            config.transcripts_dir
+            / task_id
+            / "worker"
+            / "tool-changes"
+            / "patches"
+            / "1-tool_1.patch"
+        )
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(patch_text, encoding="utf-8")
+        patch = {
+            "path": "patches/1-tool_1.patch",
+            "bytes": len(patch_text.encode()),
+            "sha256": sha256(patch_text.encode()).hexdigest(),
+        }
+    record = _trajectory_record(
+        sequence=1,
+        status=status,
+        patch=patch,
+        result_tree=result_tree,
+    )
+    record["paths"] = paths
+    transcript = _write_trajectory_fixture(
+        config,
+        task_id,
+        records=[record],
+        final_tree=result_tree,
+    )
+
+    trajectory = _public_change_trajectory(config, transcript)
+
+    assert trajectory["availability"] == "unavailable"
+    assert trajectory["completeness"] == "unavailable"
+    assert trajectory["changes"] == []
+
+
+@pytest.mark.parametrize("line_bytes", [32 * 1024, MIRROR_TRAJECTORY_PATCH_BYTES])
+def test_trajectory_patch_redaction_has_bounded_runtime(
+    config: StewardConfig,
+    line_bytes: int,
+) -> None:
+    data = ("+" + "x" * (line_bytes - 2) + "\n").encode()
+
+    started = monotonic()
+    projected = _trajectory_redacted_patch(config, data)
+    elapsed = monotonic() - started
+
+    assert len(data) == line_bytes
+    assert projected == data.decode()
+    assert elapsed < 1.0
+
+
+def test_worker_change_trajectory_counts_per_patch_truncation_as_omitted(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    task_id = "task-20260713120015-per-patch-budget"
+    patch_text = "+safe\n" * 25_000 + "+" * 81
+    patch_path = (
+        config.transcripts_dir
+        / task_id
+        / "worker"
+        / "tool-changes"
+        / "patches"
+        / "1-tool_1.patch"
+    )
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(patch_text, encoding="utf-8")
+    patch = {
+        "path": "patches/1-tool_1.patch",
+        "bytes": len(patch_text.encode()),
+        "sha256": sha256(patch_text.encode()).hexdigest(),
+    }
+    final_tree = "b" * 40
+    record = _trajectory_record(
+        sequence=1,
+        patch=patch,
+        result_tree=final_tree,
+    )
+    transcript = _write_trajectory_fixture(
+        config,
+        task_id,
+        records=[record],
+        final_tree=final_tree,
+    )
+
+    trajectory = _public_change_trajectory(config, transcript)
+
+    public_patch = trajectory["changes"][0]["patch"]
+    assert len(patch_text.encode()) == 150_081
+    assert public_patch["original_size_bytes"] == len(patch_text.encode())
+    assert public_patch["size_bytes"] <= MIRROR_TRAJECTORY_PATCH_BYTES
+    assert public_patch["truncated"] is True
+    assert trajectory["omitted_count"] == 1
+    assert trajectory["truncated"] is True
+    assert trajectory["completeness"] == "partial"
+
+
+def test_worker_change_trajectory_counts_aggregate_patch_omissions_exactly(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    task_id = "task-20260713120016-aggregate-budget"
+    patch_text = "+safe\n" * 20_000
+    trees = [f"{index:040x}" for index in range(6)]
+    records = []
+    for sequence in range(1, 6):
+        patch_path = (
+            config.transcripts_dir
+            / task_id
+            / "worker"
+            / "tool-changes"
+            / "patches"
+            / f"{sequence}-tool_{sequence}.patch"
+        )
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(patch_text, encoding="utf-8")
+        patch = {
+            "path": f"patches/{sequence}-tool_{sequence}.patch",
+            "bytes": len(patch_text.encode()),
+            "sha256": sha256(patch_text.encode()).hexdigest(),
+        }
+        records.append(
+            _trajectory_record(
+                sequence=sequence,
+                patch=patch,
+                tree=trees[sequence - 1],
+                result_tree=trees[sequence],
+            )
+        )
+    transcript = _write_trajectory_fixture(
+        config,
+        task_id,
+        records=records,
+        tree=trees[0],
+        final_tree=trees[-1],
+    )
+
+    trajectory = _public_change_trajectory(config, transcript)
+
+    patches = [change["patch"] for change in trajectory["changes"]]
+    assert sum(patch["size_bytes"] for patch in patches) <= (
+        MIRROR_TRAJECTORY_AGGREGATE_PATCH_BYTES
+    )
+    assert [patch["truncated"] for patch in patches] == [False] * 4 + [True]
+    assert all(patch["original_size_bytes"] == len(patch_text.encode()) for patch in patches)
+    assert trajectory["published_count"] == 5
+    assert trajectory["omitted_count"] == 1
+    assert trajectory["truncated"] is True
+    assert trajectory["completeness"] == "partial"
 
 
 def _resolve_schema(root: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

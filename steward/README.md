@@ -155,13 +155,15 @@ in [`model-prices.example.json`](model-prices.example.json) catalog is
 conspicuously fictional and non-operative.
 
 Public run artifacts project bounded telemetry and retain totals when turns are
-limited to 100. Worker and reviewer retries roll up once per invocation; task
-detail has a separate aggregate. Full mirror writes also rebuild
+limited to 100. Task detail groups invocation counts by stage and run name,
+counts only positive retry ordinals as retries, and reports legacy transcript
+coverage separately. Full mirror writes also rebuild
 `data/model-telemetry.json` (schema v1) by scanning all retained transcript
 directories, independent of the 80-task display window. It reports all-time
 coverage, oldest/newest evidence, and up to 400 ascending UTC days of completed
-activity. Missing or invalid sidecars, legacy transcripts, and in-flight runs
-keep coverage incomplete; numeric totals never imply complete coverage.
+activity. Valid turns from partial captures remain in numeric totals while
+missing or invalid sidecars, legacy transcripts, and in-flight runs keep
+coverage incomplete; numeric totals never imply complete coverage.
 
 ### Public mirror
 

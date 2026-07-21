@@ -346,6 +346,8 @@ def estimate_cost(
         return CostEstimate(CostStatus.unavailable, "chatgpt_cost_unavailable")
     if mode == BillingMode.unknown:
         return CostEstimate(CostStatus.unavailable, "billing_mode_unknown")
+    if aggregate.completed_turns == 0:
+        return CostEstimate(CostStatus.unavailable, "usage_unavailable")
     if not isinstance(configured_model, str) or not configured_model:
         return CostEstimate(CostStatus.unavailable, "configured_model_missing")
     if catalog is None:
@@ -803,7 +805,14 @@ def _parse_price_entry(value: object) -> PriceEntry:
     ):
         raise ValueError("price entry source")
     parsed_url = urlsplit(url)
-    if not parsed_url.hostname or parsed_url.username or parsed_url.password:
+    if (
+        parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username
+        or parsed_url.password
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
         raise ValueError("price entry source")
     return PriceEntry(
         entry_id=entry_id,

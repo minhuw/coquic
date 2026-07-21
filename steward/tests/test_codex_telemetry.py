@@ -157,6 +157,63 @@ def test_catalog_intervals_and_integer_cost() -> None:
         )
 
 
+def test_catalog_rejects_source_urls_with_credentials() -> None:
+    with pytest.raises(ValueError, match="price entry source"):
+        PriceCatalog.from_dict(
+            {
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "id": "credentialed-source",
+                        "model": "m",
+                        "effective_from": "2026-01-01T00:00:00Z",
+                        "input_micro_usd_per_million": 1,
+                        "cached_input_micro_usd_per_million": 1,
+                        "output_micro_usd_per_million": 1,
+                        "source": {
+                            "label": "unsafe",
+                            "url": "https://example.invalid/prices?api_key=TOPSECRET",
+                        },
+                    }
+                ],
+            }
+        )
+
+
+def test_api_cost_without_completed_turns_is_unavailable() -> None:
+    catalog = PriceCatalog.from_dict(
+        {
+            "schema_version": 1,
+            "entries": [
+                {
+                    "id": "model-2026",
+                    "model": "m",
+                    "effective_from": "2026-01-01T00:00:00Z",
+                    "input_micro_usd_per_million": 1,
+                    "cached_input_micro_usd_per_million": 1,
+                    "output_micro_usd_per_million": 1,
+                    "source": {
+                        "label": "Example",
+                        "url": "https://example.invalid/prices",
+                    },
+                }
+            ],
+        }
+    )
+
+    estimate = estimate_cost(
+        TelemetryAggregate(),
+        billing_mode=BillingMode.api,
+        configured_model="m",
+        started_at=datetime(2026, 2, 1, tzinfo=UTC),
+        catalog=catalog,
+    )
+
+    assert estimate.status is CostStatus.unavailable
+    assert estimate.reason == "usage_unavailable"
+    assert estimate.micro_usd is None
+
+
 def test_chatgpt_and_unknown_cost_are_explicitly_unavailable() -> None:
     aggregate = TelemetryAggregate()
     for mode, reason in (

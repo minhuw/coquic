@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from coquic_steward.agents.telemetry import TelemetryRecorder
 from coquic_steward.core.config import PublicMirrorConfig
 from coquic_steward.core.models import Event, SignalItem
 from coquic_steward.public_mirror import (
     _public_change_trajectory,
+    _sanitize_public_cost,
+    model_telemetry_payload,
     public_mirror_payload,
     write_public_mirror,
 )
@@ -72,6 +76,65 @@ def test_recursive_public_redaction_and_link_allowlist(config) -> None:
     assert payload["signals"]["items"][0]["links"] == [
         {"label": "safe", "url": "https://github.com/minhuw/coquic/issues/1"}
     ]
+
+
+def test_catalog_credentials_do_not_reach_public_cost_provenance(config) -> None:
+    unsafe_cost = {
+        "status": "estimated",
+        "micro_usd": 1,
+        "price_entry": {
+            "entry_id": "unsafe-source",
+            "model": "contract-model",
+            "effective_from": "2026-01-01T00:00:00.000Z",
+            "effective_until": None,
+            "source": {
+                "label": "Catalog",
+                "url": "https://example.invalid/prices?api_key=TOPSECRET",
+            },
+        },
+    }
+    sanitized = _sanitize_public_cost(config, unsafe_cost)
+    assert "source" not in sanitized["price_entry"]
+    assert "TOPSECRET" not in json.dumps(sanitized)
+
+    task_id = "task-public-cost-hardening"
+    run_dir = config.transcripts_dir / task_id / "worker"
+    run_dir.mkdir(parents=True)
+    (run_dir / "codex.jsonl").write_text("{}\n", encoding="utf-8")
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    recorder = TelemetryRecorder(
+        run_dir / "telemetry.json",
+        task_id=task_id,
+        run_name="worker",
+        stage="code",
+        retry_ordinal=0,
+        configured_model="contract-model",
+        reasoning_effort="low",
+        started_at=started_at,
+        started_monotonic_ns=1,
+        wall_clock=lambda: started_at + timedelta(seconds=1),
+        monotonic_ns=lambda: 1_000_001,
+    )
+    recorder.observe(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 1,
+                "cached_input_tokens": 0,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 0,
+            },
+        }
+    )
+    recorder.finalize(process_outcome="completed")
+    sidecar_path = run_dir / "telemetry.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar["cost"] = unsafe_cost
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    global_payload = model_telemetry_payload(config)
+    assert "TOPSECRET" not in json.dumps(global_payload)
+    assert "api_key" not in json.dumps(global_payload)
 
 
 def test_public_artifacts_have_explicit_size_and_restrictive_permissions(

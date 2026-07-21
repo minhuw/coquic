@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from coquic_steward.agents.telemetry import TelemetryRecorder
 from coquic_steward.core.config import PublicMirrorConfig, StewardConfig
 from coquic_steward.core.models import (
     DaemonRuntime,
@@ -34,6 +35,7 @@ from coquic_steward.public_mirror import (
     MIRROR_TRAJECTORY_PATCH_BYTES,
     _public_change_trajectory,
     _trajectory_redacted_patch,
+    model_telemetry_payload,
     public_mirror_digest,
     public_mirror_payload,
     public_task_detail_payload,
@@ -156,6 +158,48 @@ def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _write_telemetry(
+    config: StewardConfig,
+    task_id: str,
+    run_name: str,
+    stage: str,
+    *,
+    partial: bool = False,
+    retry_ordinal: int = 0,
+) -> None:
+    run_dir = config.transcripts_dir / task_id / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write(run_dir / "codex.jsonl", "{}\n")
+    started_at = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    recorder = TelemetryRecorder(
+        run_dir / "telemetry.json",
+        task_id=task_id,
+        run_name=run_name,
+        stage=stage,
+        retry_ordinal=retry_ordinal,
+        configured_model="contract-model",
+        reasoning_effort="low",
+        started_at=started_at,
+        started_monotonic_ns=1,
+        wall_clock=lambda: started_at + timedelta(seconds=1),
+        monotonic_ns=lambda: 1_000_001,
+    )
+    assert recorder.observe(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 8,
+                "cached_input_tokens": 3,
+                "output_tokens": 5,
+                "reasoning_output_tokens": 2,
+            },
+        }
+    )
+    if partial:
+        recorder.note_malformed_line()
+    recorder.finalize(process_outcome="completed")
 
 
 def _worker_result(config: StewardConfig, transcript: Path, last_message: Path) -> WorkerResult:
@@ -494,6 +538,85 @@ def test_rich_detail_and_public_records_are_schema_shaped_and_redacted(
     serialized = json.dumps({"payload": payload, "detail": detail}, sort_keys=True)
     for marker in PRIVATE_MARKERS:
         assert marker not in serialized
+
+
+def test_partial_invocations_contribute_to_global_totals(config: StewardConfig) -> None:
+    config = _contract_config(config)
+    _write_telemetry(
+        config,
+        "task-20260713120020-partial-telemetry",
+        "worker",
+        "code",
+        partial=True,
+    )
+
+    payload = model_telemetry_payload(config)
+
+    assert payload["all_time"]["aggregate"]["completed_turns"] == 1
+    assert payload["all_time"]["aggregate"]["total_tokens"] == 13
+    assert payload["coverage"]["partial_invocations"] == 1
+    assert payload["coverage"]["complete"] is False
+
+
+def test_task_telemetry_counts_components_and_actual_retries(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    store = TaskStore(config.db_path)
+    task = _add_task(store, task_id="task-20260713120021-components")
+    for run_name, stage in (
+        ("plan", "implementation_plan"),
+        ("worker", "code"),
+        ("reviewer", "review"),
+    ):
+        _write_telemetry(config, task.id, run_name, stage)
+
+    telemetry = public_task_detail_payload(config, store, task.id)["telemetry"]
+
+    assert telemetry["invocation_count"] == 3
+    assert telemetry["retry_count"] == 0
+    assert telemetry["component_counts"] == {
+        "code:worker": 1,
+        "implementation_plan:plan": 1,
+        "review:reviewer": 1,
+    }
+
+    worker_dir = config.transcripts_dir / task.id / "worker"
+    (worker_dir / "codex.jsonl").rename(worker_dir / "codex.retry-1.jsonl")
+    (worker_dir / "telemetry.json").rename(worker_dir / "telemetry.retry-1.json")
+    _write_telemetry(config, task.id, "worker", "code", retry_ordinal=1)
+    retried = public_task_detail_payload(config, store, task.id)["telemetry"]
+    assert retried["invocation_count"] == 4
+    assert retried["retry_count"] == 1
+    assert retried["component_counts"]["code:worker"] == 2
+
+
+def test_task_telemetry_reports_legacy_component_coverage(
+    config: StewardConfig,
+) -> None:
+    config = _contract_config(config)
+    store = TaskStore(config.db_path)
+    task = _add_task(store, task_id="task-20260713120022-legacy")
+    _write(
+        config.transcripts_dir / task.id / "worker" / "codex.jsonl",
+        "legacy transcript\n",
+    )
+    _write_telemetry(config, task.id, "reviewer", "review")
+
+    telemetry = public_task_detail_payload(config, store, task.id)["telemetry"]
+
+    assert telemetry["availability"] == "partial"
+    assert telemetry["completeness"] == "partial"
+    assert telemetry["coverage"] == {
+        "complete": False,
+        "discovered_invocations": 2,
+        "telemetry_invocations": 1,
+        "valid_usage_invocations": 1,
+        "partial_invocations": 0,
+        "unavailable_invocations": 0,
+        "legacy_without_telemetry": 1,
+        "invalid_or_unsafe": 0,
+    }
 
 
 def _trajectory_record(

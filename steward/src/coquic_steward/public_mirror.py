@@ -1013,7 +1013,8 @@ def _public_telemetry(
             "reason": "not_exposed_by_codex_exec",
         },
     }
-    projected["retry_count"] = max(0, len(values) - 1)
+    projected["retry_count"] = _telemetry_retry_count(values)
+    projected["component_counts"] = _public_component_counts(config, values)
     projected["provenance"] = TELEMETRY_PROVENANCE
     projected["configured_model"] = _sanitize_public_model(
         config, projected.get("configured_model")
@@ -1026,6 +1027,9 @@ def _telemetry_empty(availability: str) -> dict[str, object]:
     return {
         "availability": availability,
         "provenance": TELEMETRY_PROVENANCE,
+        "invocation_count": 0,
+        "retry_count": 0,
+        "component_counts": {},
         "configured_model": None,
         "reasoning_effort": None,
         "billing_mode": "unknown",
@@ -1184,7 +1188,12 @@ def _merge_issue_payload(
 def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, object]:
     available = [item for item in values if item.get("availability") in {"available", "partial"}]
     if not available:
-        return _telemetry_empty("not_produced")
+        availability = (
+            "unavailable"
+            if any(item.get("availability") == "unavailable" for item in values)
+            else "not_produced"
+        )
+        return _telemetry_empty(availability)
     aggregates: list[TelemetryAggregate] = []
     issues: list[dict[str, object]] = []
     for item in available:
@@ -1201,7 +1210,12 @@ def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, obje
     for aggregate in aggregates:
         merged = merged.add(aggregate)
     statuses = {str(item.get("availability")) for item in available}
-    result = _telemetry_empty("partial" if "partial" in statuses or issues else "available")
+    incomplete_components = len(available) != len(values)
+    result = _telemetry_empty(
+        "partial"
+        if "partial" in statuses or issues or incomplete_components
+        else "available"
+    )
     result.update(
         {
             "configured_model": _public_common_value(available, "configured_model"),
@@ -1220,6 +1234,10 @@ def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, obje
                 for item in available
                 if isinstance(item.get("duration_ms"), int)
             ),
+            "invocation_count": sum(
+                int(item.get("invocation_count", 0)) for item in available
+            ),
+            "component_counts": _merge_component_counts(available),
             "aggregate": merged.to_dict(),
             "turns": [
                 turn
@@ -1246,10 +1264,13 @@ def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, obje
             },
             "cost": _combine_public_costs(available),
             "completeness": "complete"
-            if all(item.get("completeness") == "complete" for item in available)
+            if not incomplete_components
+            and all(item.get("completeness") == "complete" for item in available)
             else "partial",
             "issues": _merge_issue_payload([], issues),
-            "retry_count": max(0, len(available) - 1),
+            "retry_count": sum(
+                int(item.get("retry_count", 0)) for item in available
+            ),
         }
     )
     return result
@@ -1258,6 +1279,39 @@ def _combine_public_telemetry(values: list[dict[str, object]]) -> dict[str, obje
 def _public_common_value(values: list[dict[str, object]], key: str) -> object:
     selected = {item.get(key) for item in values}
     return next(iter(selected)) if len(selected) == 1 else None
+
+
+def _merge_component_counts(values: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        components = value.get("component_counts")
+        if not isinstance(components, dict):
+            continue
+        for key, count in components.items():
+            if isinstance(key, str) and type(count) is int and count > 0:
+                counts[key] = counts.get(key, 0) + count
+    return dict(sorted(counts.items()))
+
+
+def _telemetry_retry_count(values: list[dict[str, object]]) -> int:
+    return sum(
+        type(value.get("retry_ordinal")) is int and int(value["retry_ordinal"]) > 0
+        for value in values
+    )
+
+
+def _public_component_counts(
+    config: StewardConfig, values: list[dict[str, object]]
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        stage = _public_text(config, str(value.get("stage", "")))[:80]
+        run_name = _public_text(config, str(value.get("run_name", "")))[:160]
+        if not stage or not run_name:
+            continue
+        key = f"{stage}:{run_name}"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _sanitize_public_model(config: StewardConfig, value: object) -> str | None:
@@ -1310,12 +1364,34 @@ def _sanitize_price_provenance(config: StewardConfig, value: dict[str, object]) 
     if isinstance(source, dict):
         label = source.get("label")
         url = source.get("url")
-        if isinstance(label, str) and isinstance(url, str) and url.startswith("https://"):
+        safe_url = _safe_catalog_source_url(url)
+        if isinstance(label, str) and safe_url is not None:
             result["source"] = {
                 "label": _public_text(config, label)[:160],
-                "url": url[:512],
+                "url": safe_url,
             }
     return result
+
+
+def _safe_catalog_source_url(value: object) -> str | None:
+    if not isinstance(value, str) or len(value.encode()) > 512:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or "\\" in value
+        or any(character in value for character in "\x00\r\n")
+    ):
+        return None
+    return value
 
 
 def _combine_public_costs(values: list[dict[str, object]]) -> dict[str, object]:
@@ -1352,25 +1428,54 @@ def _public_task_telemetry(
     config: StewardConfig, task: TaskRecord
 ) -> dict[str, object]:
     root = config.transcripts_dir / task.id
-    values, issues, _transcripts, _legacy = _scan_telemetry_tree(config, root)
+    values, issues, transcripts, legacy = _scan_telemetry_tree(config, root)
+    coverage = _task_telemetry_coverage(values, issues, transcripts, legacy)
     if not values:
         result = _telemetry_empty("unavailable" if issues else "not_produced")
         result["issues"] = issues
+        result["coverage"] = coverage
         return result
     projected = aggregate_sidecars(values)
-    projected["availability"] = "partial" if issues else "available"
+    projected["availability"] = "partial" if not coverage["complete"] else "available"
     projected["issues"] = _merge_issue_payload(projected.get("issues"), issues)
     projected["turns"] = list(projected.get("turns", []))[:MIRROR_TELEMETRY_TURNS]
     projected["timing"] = {
         "first_agent_message_completed_ms": _first_message_ms(values)
     }
     projected["unavailable"] = _telemetry_empty("unavailable")["unavailable"]
-    projected["retry_count"] = max(0, len(values) - 1)
+    projected["retry_count"] = _telemetry_retry_count(values)
+    projected["component_counts"] = _public_component_counts(config, values)
+    projected["coverage"] = coverage
+    if not coverage["complete"]:
+        projected["completeness"] = "partial"
     projected["configured_model"] = _sanitize_public_model(
         config, projected.get("configured_model")
     )
     projected["cost"] = _sanitize_public_cost(config, projected.get("cost"))
     return projected
+
+
+def _task_telemetry_coverage(
+    values: list[dict[str, object]],
+    issues: list[dict[str, object]],
+    transcripts: int,
+    legacy: int,
+) -> dict[str, object]:
+    partial = sum(value.get("completeness") == "partial" for value in values)
+    unavailable = sum(
+        value.get("completeness") == "unavailable" for value in values
+    )
+    invalid = sum(int(issue.get("count", 0)) for issue in issues)
+    return {
+        "complete": not issues and legacy == 0 and partial == 0 and unavailable == 0,
+        "discovered_invocations": transcripts,
+        "telemetry_invocations": len(values),
+        "valid_usage_invocations": sum(_has_valid_usage(value) for value in values),
+        "partial_invocations": partial,
+        "unavailable_invocations": unavailable,
+        "legacy_without_telemetry": legacy,
+        "invalid_or_unsafe": invalid,
+    }
 
 
 def _scan_telemetry_tree(
@@ -1444,18 +1549,21 @@ def model_telemetry_payload(config: StewardConfig) -> dict[str, object]:
 
     values, issues, discovered, legacy = _scan_telemetry_tree(config)
     values.sort(key=lambda item: (str(item.get("started_at")), str(item.get("invocation_id"))))
-    valid_usage = sum(
-        isinstance(item.get("aggregate"), dict)
-        and int(item["aggregate"].get("completed_turns", 0)) > 0
+    values = [
+        {**item, "cost": _sanitize_public_cost(config, item.get("cost"))}
         for item in values
+    ]
+    valid_usage = sum(
+        _has_valid_usage(item) for item in values
     )
     partial = sum(item.get("completeness") == "partial" for item in values)
     unavailable = sum(item.get("completeness") == "unavailable" for item in values)
-    complete_values = [item for item in values if item.get("completeness") == "complete"]
     completed_activity_values = [
-        item for item in complete_values if item.get("process_outcome") == "completed"
+        item
+        for item in values
+        if item.get("process_outcome") == "completed" and _has_valid_usage(item)
     ]
-    all_time = _global_period(complete_values)
+    all_time = _global_period(values)
     all_observed = _global_period(values)
     days: dict[str, list[dict[str, object]]] = {}
     for item in completed_activity_values:
@@ -1473,12 +1581,12 @@ def model_telemetry_payload(config: StewardConfig) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     week_values = [
         item
-        for item in complete_values
+        for item in values
         if _same_iso_week(item.get("started_at"), now)
     ]
     month_values = [
         item
-        for item in complete_values
+        for item in values
         if _same_month(item.get("started_at"), now)
     ]
     oldest = values[0].get("started_at") if values else None
@@ -1507,6 +1615,15 @@ def model_telemetry_payload(config: StewardConfig) -> dict[str, object]:
         "recent_days": recent_days,
         "recent_completed_activity": recent_days,
     }
+
+
+def _has_valid_usage(value: dict[str, object]) -> bool:
+    aggregate = value.get("aggregate")
+    return (
+        isinstance(aggregate, dict)
+        and type(aggregate.get("completed_turns")) is int
+        and int(aggregate["completed_turns"]) > 0
+    )
 
 
 def _safe_model_telemetry_payload(config: StewardConfig) -> dict[str, object]:

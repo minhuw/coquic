@@ -3,19 +3,22 @@ import { appendFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, s
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { getArchiveConfig, validateArchivePaths } from "@/lib/steward-archive/config";
 import { StewardArchiveImporter } from "@/lib/steward-archive/importer";
 import { StewardArchiveRepository } from "@/lib/steward-archive/repository";
-import { validatePipeline } from "@/lib/steward-archive/schema";
+import { validatePipeline, validateRun, validateTask } from "@/lib/steward-archive/schema";
 import { loadArchiveTaskView, loadInitialTranscript } from "@/lib/steward-archive/view-model";
 
 async function fixtureImporter() {
   const root = await mkdtemp(join(tmpdir(), "coquic-steward-"));
   const tasksRoot = join(root, "tasks");
+  const cachePath = join(root, "cache", "index.sqlite");
   await cp(new URL("../../examples/steward-dataset", import.meta.url), tasksRoot, { recursive: true });
-  const importer = new StewardArchiveImporter(getArchiveConfig({ NODE_ENV: "test", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CACHE_PATH: join(root, "cache", "index.sqlite"), COQUIC_STEWARD_BATCH_SIZE: "1" }));
+  const config = getArchiveConfig({ NODE_ENV: "test", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_BATCH_SIZE: "1" });
+  const importer = new StewardArchiveImporter(config);
   await importer.reconcile();
-  return { root, tasksRoot, importer, repository: new StewardArchiveRepository(importer) };
+  return { root, tasksRoot, cachePath, config, importer, repository: new StewardArchiveRepository(importer) };
 }
 
 async function json(path: string) { return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>; }
@@ -86,6 +89,12 @@ test("F004 transcript view loading is bounded, lazy, and cursor-bearing", async 
   const run = selected.workerRun as Record<string, unknown>;
   const initial = await loadInitialTranscript(fixture.repository, "task-running-synthetic", String(run.name), String(run.transcriptPath), Number(selected.number), 1);
   assert.equal(reads, 1); assert.equal(initial.items.length, 1); assert.equal(initial.hasMore, true); assert(initial.nextCursor);
+  const complete = await original("task-running-synthetic", String(run.name), String(run.transcriptPath), null, 100);
+  assert.equal(complete.data.hasMore, false); assert(complete.data.nextCursor, "an end cursor must remain available for active append");
+  await appendFile(join(fixture.tasksRoot, "task-running", ...String(run.transcriptPath).split("/")), `${JSON.stringify({ record_type: "assistant.message", text: "after-end" })}\n`);
+  await fixture.importer.reconcile();
+  const appended = await original("task-running-synthetic", String(run.name), String(run.transcriptPath), complete.data.nextCursor);
+  assert.equal(appended.data.records.length, 1); assert.equal((appended.data.records[0].value as Record<string, unknown>).text, "after-end");
 });
 
 test("F005 canonical pipelines retain every run, review kind, patch, and integration event", async (t) => {
@@ -93,10 +102,15 @@ test("F005 canonical pipelines retain every run, review kind, patch, and integra
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
   const view = await loadArchiveTaskView(fixture.repository, "task-complete-synthetic");
   assert(view);
-  assert.equal(view.attempts.length, 6); assert.equal(view.planRuns?.length, 1); assert.equal(view.patches.length, 2);
+  assert.equal(view.attempts.length, 2, "pipelines are the outer processing passes"); assert.equal(view.planRuns?.length, 1); assert.equal(view.patches.length, 2);
+  assert.equal(view.attempts.reduce((total, pipeline) => total + (pipeline.runs as Array<unknown>).length, 0), 7);
+  assert(view.attempts.some((pipeline) => (pipeline.runs as Array<Record<string, unknown>>).some((run) => run.runId === "run-repair-implementation")));
+  assert(view.attempts.every((pipeline) => (pipeline.runs as Array<Record<string, unknown>>).every((run) => "resumeOfRunId" in run && "sessionId" in run)));
+  assert(view.attempts.some((pipeline) => (pipeline.runs as Array<Record<string, unknown>>).some((run) => (run.usage as Record<string, unknown>).totalTokens !== undefined)));
   assert.deepEqual(new Set(view.reviews.map((review) => review.kind)), new Set(["raw", "effective"]));
   assert(view.timeline.some((event) => event.kind === "integration"));
-  assert(view.attempts.some((attempt) => (attempt.workerRun as Record<string, unknown>).resumeOfRunId !== undefined));
+  assert(view.validations.every((validation) => typeof validation.outputUrl === "string"));
+  assert(view.attempts.some((pipeline) => (pipeline.integration as Record<string, unknown>).state === "succeeded"));
 });
 
 test("F006 complete append advances global revision without staling prior cursors", async (t) => {
@@ -111,6 +125,28 @@ test("F006 complete append advances global revision without staling prior cursor
   assert(fixture.importer.revision().revision > revision);
   const continued = await fixture.repository.readTranscriptChunk("task-running-synthetic", "run-implementation-recovery", path, first.data.nextCursor);
   assert.equal(continued.data.file.fileRevision, generation); assert(continued.data.records.some((record) => (record.value as Record<string, unknown>).text === "appended"));
+});
+
+test("F006 content-bound cursors survive cache rebuild and stale after replacement", async () => {
+  const fixture = await fixtureImporter();
+  const importers: StewardArchiveImporter[] = [fixture.importer];
+  try {
+    const path = "pipelines/pipeline-initial/runs/run-implementation-recovery/codex.jsonl";
+    const first = await fixture.repository.readTranscriptChunk("task-running-synthetic", "run-implementation-recovery", path, null, 1);
+    fixture.importer.db.close();
+    await rm(fixture.cachePath, { force: true }); await rm(`${fixture.cachePath}-wal`, { force: true }); await rm(`${fixture.cachePath}-shm`, { force: true });
+    const rebuilt = new StewardArchiveImporter(fixture.config); importers.push(rebuilt); await rebuilt.reconcile();
+    const rebuiltRepository = new StewardArchiveRepository(rebuilt);
+    assert.equal((await rebuiltRepository.readTranscriptChunk("task-running-synthetic", "run-implementation-recovery", path, first.data.nextCursor)).data.file.fileRevision, first.data.file.fileRevision);
+    rebuilt.db.close();
+    await writeFile(join(fixture.tasksRoot, "task-running", ...path.split("/")), `${JSON.stringify({ record_type: "assistant.message", text: "replacement" })}\n`);
+    await rm(fixture.cachePath, { force: true }); await rm(`${fixture.cachePath}-wal`, { force: true }); await rm(`${fixture.cachePath}-shm`, { force: true });
+    const replaced = new StewardArchiveImporter(fixture.config); importers.push(replaced); await replaced.reconcile();
+    await assert.rejects(() => new StewardArchiveRepository(replaced).readTranscriptChunk("task-running-synthetic", "run-implementation-recovery", path, first.data.nextCursor), (error: Error & { code?: string }) => error.code === "STALE_CURSOR");
+  } finally {
+    for (const importer of importers) try { importer.db.close(); } catch { /* already closed */ }
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("F007 malformed replacement metadata retains the last-valid indexed run", async (t) => {
@@ -132,6 +168,18 @@ test("F008 terminal verification requires a complete schema-valid manifest ident
   await writeJson(path, manifest); await fixture.importer.reconcile();
   const task = fixture.importer.db.prepare("SELECT archive_state, archive_reason FROM tasks WHERE task_id=?").get("task-complete-synthetic");
   assert.equal(task?.archive_state, "incomplete"); assert.equal(task?.archive_reason, "manifest-invalid"); assert.equal(fixture.importer.status().verifiedTaskCount, 0);
+});
+
+test("F008 mutation of verified terminal metadata preserves the task and revokes verification", async (t) => {
+  const fixture = await fixtureImporter();
+  t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
+  assert.equal(fixture.importer.db.prepare("SELECT archive_state FROM tasks WHERE task_id=?").get("task-complete-synthetic")?.archive_state, "verified");
+  const path = join(fixture.tasksRoot, "task-complete", "pipelines", "pipeline-initial", "runs", "run-implementation", "run.json");
+  const run = await json(path); run.startedAt = "0"; await writeJson(path, run);
+  await fixture.importer.reconcile();
+  const row = fixture.importer.db.prepare("SELECT archive_state, archive_reason FROM tasks WHERE task_id=?").get("task-complete-synthetic");
+  assert.equal(row?.archive_state, "corrupt"); assert.equal(row?.archive_reason, "manifest-mismatch");
+  assert.equal(fixture.importer.status().verifiedTaskCount, 0); assert.equal(fixture.importer.status().state, "archive-corrupt");
 });
 
 test("F009 and F015 dashboard returns every state and distinguishes missing totals from zero", async (t) => {
@@ -166,14 +214,58 @@ test("F011 external metadata validator rejects invented or incomplete pipelines"
   assert.throws(() => validatePipeline({ pipelineId: "pipeline-x", taskId: "task-x", ordinal: 0, trigger: "invented", phase: "invented" }), /missing|contract/);
 });
 
-test("F014 large JSONL indexing yields while acquisition remains outside the transaction", async (t) => {
+test("F011 canonical schema rejects null available descriptors and non-RFC3339 timestamps", async () => {
+  const run = await json(fileURLToPath(new URL("../../examples/steward-dataset/task-running/pipelines/pipeline-initial/runs/run-implementation-recovery/run.json", import.meta.url)));
+  const artifacts = run.artifacts as Record<string, Record<string, unknown>>;
+  artifacts.codex.availability = "available"; artifacts.codex.reason = null; artifacts.codex.mediaType = null; artifacts.codex.byteSize = null;
+  assert.throws(() => validateRun(run), /archive contract/);
+  const task = await json(fileURLToPath(new URL("../../examples/steward-dataset/task-running/task.json", import.meta.url)));
+  task.updatedAt = "0";
+  assert.throws(() => validateTask(task), /archive contract/);
+});
+
+test("F014 200k-record JSONL indexing yields with bounded event-loop stalls", async (t) => {
   const fixture = await fixtureImporter();
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
   const path = join(fixture.tasksRoot, "task-running", "pipelines", "pipeline-initial", "runs", "run-implementation-recovery", "codex.jsonl");
-  let payload = ""; for (let index = 0; index < 2500; index += 1) payload += `${JSON.stringify({ record_type: "assistant.message", text: `record-${index}` })}\n`; await appendFile(path, payload);
-  let yielded = false; setImmediate(() => { yielded = true; }); await fixture.importer.reconcile();
-  assert.equal(yielded, true); assert.equal(fixture.importer.status().state, "ready");
-  const file = fixture.importer.db.prepare("SELECT complete_records FROM files WHERE task_id=? AND relative_path LIKE '%run-implementation-recovery/codex.jsonl'").get("task-running-synthetic"); assert.equal(Number(file?.complete_records), 2502);
+  let payload = ""; for (let index = 0; index < 200_000; index += 1) payload += `${JSON.stringify({ record_type: "assistant.message", text: `record-${index}` })}\n`; await appendFile(path, payload);
+  let ticks = 0; let maximumGap = 0; let previous = performance.now();
+  const timer = setInterval(() => { const current = performance.now(); maximumGap = Math.max(maximumGap, current - previous); previous = current; ticks += 1; }, 10);
+  await fixture.importer.reconcile(); clearInterval(timer);
+  assert(ticks > 10); assert(maximumGap < 750, `event-loop stall was ${maximumGap}ms`); assert.equal(fixture.importer.status().state, "ready");
+  const file = fixture.importer.db.prepare("SELECT complete_records FROM files WHERE task_id=? AND relative_path LIKE '%run-implementation-recovery/codex.jsonl'").get("task-running-synthetic"); assert.equal(Number(file?.complete_records), 200_002);
+});
+
+test("F018 every active task is separate from terminal history", async (t) => {
+  const fixture = await fixtureImporter();
+  t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
+  const destination = join(fixture.tasksRoot, "task-running-second"); await cp(join(fixture.tasksRoot, "task-running"), destination, { recursive: true });
+  await rewriteTaskIdentity(destination, "task-running-synthetic", "task-running-second");
+  const taskPath = join(destination, "task.json"); const task = await json(taskPath); task.summary = { title: "Second active task", text: "Must remain reachable" }; await writeJson(taskPath, task);
+  await fixture.importer.reconcile();
+  const dashboard = fixture.repository.getTaskDashboard(); const history = fixture.repository.listTasksPage();
+  assert.deepEqual(new Set(dashboard.active.map((item) => item.taskId)), new Set(["task-running-synthetic", "task-running-second"]));
+  assert.equal(history.tasks.some((item) => item.status === "running"), false);
+});
+
+test("F019 unknown transcript records are bounded opaque evidence without provider payload", async (t) => {
+  const fixture = await fixtureImporter();
+  t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
+  const relative = "pipelines/pipeline-initial/runs/run-implementation-recovery/codex.jsonl";
+  await appendFile(join(fixture.tasksRoot, "task-running", ...relative.split("/")), `${JSON.stringify({ record_type: "provider.private", provider_thread_id: "secret-provider-id", body: { private: "never disclose" }, text: "private body" })}\n`);
+  await fixture.importer.reconcile();
+  const chunk = await fixture.repository.readTranscriptChunk("task-running-synthetic", "run-implementation-recovery", relative, null, 100);
+  const serialized = JSON.stringify(chunk.data.records.at(-1));
+  assert.match(serialized, /unrecognized-record/); assert.doesNotMatch(serialized, /secret-provider-id|never disclose|private body|provider\.private/);
+});
+
+test("F020 raw artifact access exposes a stream after accepted identity validation", async (t) => {
+  const fixture = await fixtureImporter();
+  t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
+  const artifact = await fixture.repository.readArtifact("task-running-synthetic", "prompt.md");
+  assert.equal("bytes" in artifact, false); assert.equal(typeof artifact.stream.pipe, "function");
+  const chunks: Buffer[] = []; for await (const chunk of artifact.stream) chunks.push(Buffer.from(chunk));
+  assert.equal(Buffer.concat(chunks).length, artifact.size); assert.match(Buffer.concat(chunks).toString("utf8"), /synthetic/i);
 });
 
 test("schema stores offsets and relationships but no raw body columns", async (t) => {

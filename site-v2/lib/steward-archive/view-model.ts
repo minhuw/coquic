@@ -51,25 +51,42 @@ export async function loadArchiveTaskView(repository: StewardArchiveRepository, 
     const pipelineId = String(pipeline.pipelineId);
     const runs = (group.runs as Array<Record<string, unknown>>) ?? [];
     const nonPlanning = runs.filter((run) => run.role !== "planning");
-    const ownedAttempts: number[] = [];
+    const number = attempts.length;
+    pipelineAttempt.set(pipelineId, number);
+    const runEvidence: Array<Record<string, unknown>> = [];
     for (const run of runs) {
       const path = transcriptPath(run);
-      if (run.role === "planning") {
-        const number = planRuns.length;
-        planRuns.push({ number, name: String(run.runId), status: run.state, startedAt: run.startedAt, completedAt: run.completedAt ?? null, durationSeconds: durationSeconds(String(run.startedAt), typeof run.completedAt === "string" ? run.completedAt : null), model: run.model ?? null, reasoningEffort: run.reasoning ?? null, eventCount: Number(isRecord(run.indexedFiles) ? 0 : (Array.isArray(run.indexedFiles) ? (run.indexedFiles.find((file) => file.relative_path === path) as Record<string, unknown> | undefined)?.complete_records ?? 0 : 0)), exitCode: isRecord(run.exit) && typeof run.exit.code === "number" ? run.exit.code : null, summary: isRecord(run.result) && typeof run.result.summary === "string" ? run.result.summary : "Planning run evidence.", transcriptPath: path, transcript: { availability: path ? "available" : "missing", mode: "archive", sizeBytes: 0, originalSizeBytes: 0, truncated: false, text: "" } });
-        continue;
-      }
-      const number = attempts.length;
-      ownedAttempts.push(number);
-      pipelineAttempt.set(pipelineId, number);
       const indexedFiles = Array.isArray(run.indexedFiles) ? run.indexedFiles as Array<Record<string, unknown>> : [];
       const transcriptFile = indexedFiles.find((file) => file.relative_path === path);
-      attempts.push({ number, pipelineId, pipelineOrdinal: pipeline.ordinal, pipelineTrigger: pipeline.trigger, parentPipelineId: pipeline.parentPipelineId ?? null, label: `${titleCase(String(run.role ?? "run"))} · ${pipelineId}`, status: run.state, startedAt: run.startedAt, completedAt: run.completedAt ?? null, summary: isRecord(run.result) && typeof run.result.summary === "string" ? run.result.summary : "Archive run evidence.", workerRun: { name: run.runId, sessionId: run.sessionId, resumeOfRunId: run.resumeOfRunId ?? null, parentRunId: run.parentRunId ?? null, retryOfRunId: run.retryOfRunId ?? null, transcriptPath: path, model: run.model ?? null, reasoningEffort: run.reasoning ?? null, events: Number(transcriptFile?.complete_records ?? 0), exitCode: isRecord(run.exit) && typeof run.exit.code === "number" ? run.exit.code : null, status: run.state, initialCursor: null, hasMore: false }, reviewerRun: null, artifacts: { transcriptBytes: Number(transcriptFile?.actual_size ?? 0), patchBytes: 0, lastMessageBytes: 0, transcriptTruncated: false } });
+      runEvidence.push({
+        runId: String(run.runId), role: String(run.role), roleOrdinal: Number(run.roleOrdinal), state: String(run.state),
+        sessionId: String(run.sessionId), resumeOfRunId: run.resumeOfRunId ?? null, parentRunId: run.parentRunId ?? null,
+        retryOfRunId: run.retryOfRunId ?? null, startedAt: String(run.startedAt), completedAt: run.completedAt ?? null,
+        model: run.model ?? null, reasoning: run.reasoning ?? null, result: run.result, usage: run.usage, cost: run.cost,
+        transcriptPath: path, completeRecords: Number(transcriptFile?.complete_records ?? 0),
+      });
+      if (run.role === "planning") {
+        const planNumber = planRuns.length;
+        planRuns.push({ number: planNumber, name: String(run.runId), status: run.state, startedAt: run.startedAt, completedAt: run.completedAt ?? null, durationSeconds: durationSeconds(String(run.startedAt), typeof run.completedAt === "string" ? run.completedAt : null), model: run.model ?? null, reasoningEffort: run.reasoning ?? null, eventCount: Number(transcriptFile?.complete_records ?? 0), exitCode: isRecord(run.exit) && typeof run.exit.code === "number" ? run.exit.code : null, summary: isRecord(run.result) && typeof run.result.summary === "string" ? run.result.summary : "Planning run evidence.", transcriptPath: path, transcript: { availability: path ? "available" : "missing", mode: "archive", sizeBytes: Number(transcriptFile?.actual_size ?? 0), originalSizeBytes: Number(transcriptFile?.actual_size ?? 0), truncated: false, text: "" } });
+      }
     }
-    const owner = ownedAttempts[0] ?? Math.max(0, attempts.length - 1);
-    for (const validation of (group.validations as Array<Record<string, unknown>>) ?? []) validations.push({ id: validation.validationId, pipelineId, attempt: owner, command: validation.command, status: validation.result, exitCode: null, durationSeconds: durationSeconds(String(validation.startedAt), typeof validation.completedAt === "string" ? validation.completedAt : null) ?? 0, summary: validation.state === "running" ? "Validation is still running." : "Validation result recorded in the archive.", summaryTruncated: false, outputPath: validation.outputPath });
-    for (const review of (group.reviews as Array<Record<string, unknown>>) ?? []) reviews.push({ id: review.reviewId, pipelineId, attempt: owner, kind: review.kind, role: review.role, verdict: review.verdict, summary: `${titleCase(String(review.kind))} review by ${String(review.role)}.`, findings: Array.isArray(review.findings) ? review.findings.map((finding) => ({ severity: review.kind === "effective" ? "warning" : "info", title: String(finding), file: String(isRecord(review.artifact) ? review.artifact.path : "Archive review"), line: null, detail: String(finding), recommendation: "See the owning review artifact and its formality decision." })) : [], validationGaps: [], remainingRisk: review.kind === "effective" ? "Effective findings retain formality exclusions from the raw review." : "Raw findings remain distinct from effective findings.", artifactPath: isRecord(review.artifact) ? review.artifact.path : null });
-    if (Array.isArray(pipeline.patches)) for (const descriptor of pipeline.patches as Array<Record<string, unknown>>) patches.push({ attempt: owner, pipelineId, filesChanged: 0, additions: 0, deletions: 0, rawUrl: `/api/steward/tasks/${encodeURIComponent(taskId)}/artifact?path=${encodeURIComponent(String(descriptor.path))}`, descriptor, files: [] });
+    const primary = [...nonPlanning].reverse().find((run) => transcriptPath(run)) ?? nonPlanning.at(-1) ?? runs.at(-1);
+    const primaryPath = primary ? transcriptPath(primary) : null;
+    const primaryFiles = primary && Array.isArray(primary.indexedFiles) ? primary.indexedFiles as Array<Record<string, unknown>> : [];
+    const primaryTranscript = primaryFiles.find((file) => file.relative_path === primaryPath);
+    attempts.push({
+      number, pipelineId, pipelineOrdinal: pipeline.ordinal, pipelineTrigger: pipeline.trigger, parentPipelineId: pipeline.parentPipelineId ?? null,
+      label: `Pipeline ${String(pipeline.ordinal).padStart(2, "0")} · ${titleCase(String(pipeline.trigger))}`, status: pipeline.state,
+      startedAt: pipeline.startedAt, completedAt: pipeline.completedAt ?? null,
+      summary: `${runs.length} owned run${runs.length === 1 ? "" : "s"}; ${String(pipeline.phase)} phase.`, runs: runEvidence,
+      integration: pipeline.integration,
+      workerRun: { name: primary?.runId, sessionId: primary?.sessionId, resumeOfRunId: primary?.resumeOfRunId ?? null, parentRunId: primary?.parentRunId ?? null, retryOfRunId: primary?.retryOfRunId ?? null, transcriptPath: primaryPath, model: primary?.model ?? null, reasoningEffort: primary?.reasoning ?? null, events: Number(primaryTranscript?.complete_records ?? 0), exitCode: primary && isRecord(primary.exit) && typeof primary.exit.code === "number" ? primary.exit.code : null, status: String(primary?.state ?? pipeline.state), initialCursor: null, hasMore: false },
+      reviewerRun: null,
+      artifacts: { transcriptBytes: Number(primaryTranscript?.actual_size ?? 0), patchBytes: 0, lastMessageBytes: 0, transcriptTruncated: false },
+    });
+    for (const validation of (group.validations as Array<Record<string, unknown>>) ?? []) validations.push({ id: validation.validationId, pipelineId, attempt: number, command: validation.command, status: validation.result, exitCode: null, durationSeconds: durationSeconds(String(validation.startedAt), typeof validation.completedAt === "string" ? validation.completedAt : null) ?? 0, summary: validation.state === "running" ? "Validation is still running." : "Validation result recorded in the archive.", summaryTruncated: false, outputPath: validation.outputPath, outputUrl: `/api/steward/tasks/${encodeURIComponent(taskId)}/artifact?path=${encodeURIComponent(String(validation.outputPath))}` });
+    for (const review of (group.reviews as Array<Record<string, unknown>>) ?? []) reviews.push({ id: review.reviewId, pipelineId, attempt: number, kind: review.kind, role: review.role, verdict: review.verdict, summary: `${titleCase(String(review.kind))} review by ${String(review.role)}.`, findings: Array.isArray(review.findings) ? review.findings.map((finding) => ({ severity: review.kind === "effective" ? "warning" : "info", title: String(finding), file: String(isRecord(review.artifact) ? review.artifact.path : "Archive review"), line: null, detail: String(finding), recommendation: "See the owning review artifact and its formality decision." })) : [], validationGaps: [], remainingRisk: review.kind === "effective" ? "Effective findings retain formality exclusions from the raw review." : "Raw findings remain distinct from effective findings.", artifactPath: isRecord(review.artifact) ? review.artifact.path : null });
+    if (Array.isArray(pipeline.patches)) for (const descriptor of pipeline.patches as Array<Record<string, unknown>>) patches.push({ attempt: number, pipelineId, filesChanged: 0, additions: 0, deletions: 0, rawUrl: `/api/steward/tasks/${encodeURIComponent(taskId)}/artifact?path=${encodeURIComponent(String(descriptor.path))}`, descriptor, files: [] });
     timeline.push({ id: `pipeline-${pipelineId}`, stage: String(pipeline.phase), kind: String(pipeline.trigger), timestamp: String(pipeline.updatedAt), title: `${titleCase(String(pipeline.trigger))} pipeline`, detail: `${nonPlanning.length} non-planning runs · ${String(pipeline.state)}` });
     if (isRecord(pipeline.integration) && pipeline.integration.state !== "pending") timeline.push({ id: `integration-${pipelineId}`, stage: "integration", kind: "integration", timestamp: String(pipeline.integration.completedAt ?? pipeline.updatedAt), title: `Integration ${titleCase(String(pipeline.integration.state))}`, detail: pipeline.integration.commit ? `Commit ${String(pipeline.integration.commit)}` : "No commit identity recorded" });
   }

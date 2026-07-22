@@ -1,37 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${COQUIC_DEPLOY_TEST_MODE:-}" == "1" ]]; then
-  test_root="${COQUIC_DEPLOY_TEST_ROOT:-}"
-  if [[ -z "${test_root}" || ! -f "${test_root}/.coquic-deploy-test-root" ]]; then
-    echo "offline deploy test root is missing its ownership marker" >&2
-    exit 1
-  fi
-  test_root="$(cd "${test_root}" && pwd -P)"
-  state_root="${test_root}/opt/coquic-demo/steward"
-  releases_root="${test_root}/opt/coquic-demo/releases"
-  current_link="${test_root}/opt/coquic-demo/current"
-  install -d -m 775 "${state_root}/tasks" "${state_root}/cache"
-  printf '%s\n' raw-preserved >"${state_root}/tasks/publisher.marker"
-  printf '%s\n' cache-preserved >"${state_root}/cache/index.marker"
-  install -d -m 755 "${releases_root}/release-a/app"
-  printf '%s\n' first >"${releases_root}/release-a/app/version"
-  ln -sfnT "${releases_root}/release-a" "${current_link}"
-  printf '%s\n' repaired >"${releases_root}/release-a/app/version"
-  install -d -m 755 "${releases_root}/release-b/app"
-  printf '%s\n' second >"${releases_root}/release-b/app/version"
-  ln -sfnT "${releases_root}/release-b" "${current_link}"
-  ln -sfnT "${releases_root}/release-a" "${current_link}"
-  [[ "$(cat "${state_root}/tasks/publisher.marker")" == "raw-preserved" ]]
-  [[ "$(cat "${state_root}/cache/index.marker")" == "cache-preserved" ]]
-  probe="${COQUIC_DEPLOY_TEST_PROBE:-}"
-  [[ -x "${probe}" ]] || { echo "offline deploy status probe is missing" >&2; exit 1; }
-  probe_result="$("${probe}" /api/steward/status)"
-  grep -Eq '"state":"(indexing|ready|degraded|unavailable|incompatible|archive-corrupt)"' <<<"${probe_result}"
-  printf '%s\n' "offline deploy first/repeat/repair/rollback completed"
-  exit 0
-fi
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
@@ -115,9 +84,21 @@ app_env_vars=(
 COQUIC_STEWARD_TASKS_ROOT="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
 COQUIC_STEWARD_CACHE_PATH="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
-remote_releases_root="/opt/coquic-demo/releases"
+remote_prefix="${COQUIC_DEPLOY_OFFLINE_ROOT:-}"
+if [[ -n "${remote_prefix}" ]]; then
+  if [[ "${remote_prefix}" != /* || ! -f "${remote_prefix}/.coquic-deploy-test-root" ]]; then
+    echo "offline deploy root is missing its ownership marker" >&2
+    exit 1
+  fi
+  remote_prefix="$(cd "${remote_prefix}" && pwd -P)"
+fi
+remote_releases_root="${remote_prefix}/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
-remote_current_link="/opt/coquic-demo/current"
+remote_current_link="${remote_prefix}/opt/coquic-demo/current"
+remote_steward_root="${remote_prefix}/opt/coquic-demo/steward"
+remote_config_root="${remote_prefix}/etc/coquic-demo"
+remote_systemd_service="${remote_prefix}/etc/systemd/system/coquic-demo.service"
+remote_tmp_root="${remote_prefix}/tmp"
 remote_target="${remote_user}@${remote_host}"
 remote_release_retention="${COQUIC_DEMO_RELEASE_RETENTION:-3}"
 
@@ -176,12 +157,17 @@ deploy_succeeded=0
 deployment_interrupted=0
 deployment_interrupt_status=1
 deploy_phase="initialization"
-verification_attempts=30
-verification_sleep_seconds=2
+verification_attempts="${COQUIC_DEMO_VERIFICATION_ATTEMPTS:-30}"
+verification_sleep_seconds="${COQUIC_DEMO_VERIFICATION_SLEEP_SECONDS:-2}"
 verification_path="${COQUIC_DEMO_VERIFICATION_PATH:-/}"
 verification_page_marker="${COQUIC_DEMO_PAGE_MARKER:-coquic-wasm-demo-v1}"
 verification_wasm="${COQUIC_DEMO_VERIFY_WASM:-true}"
 same_release_repair_mode=0
+
+if [[ ! "${verification_attempts}" =~ ^[1-9][0-9]*$ || ! "${verification_sleep_seconds}" =~ ^[0-9]+$ ]]; then
+  echo "deployment verification retry settings must be non-negative integers" >&2
+  exit 1
+fi
 
 if [[ "${verification_path}" != /* ]]; then
   echo "COQUIC_DEMO_VERIFICATION_PATH must start with '/': ${verification_path}" >&2
@@ -225,13 +211,15 @@ rollback_remote() {
 
   previous_release_target_arg="${previous_release_target:-__COQUIC_EMPTY_PREVIOUS_RELEASE_TARGET__}"
 
-  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target_arg}" "${remote_release_dir}" "${same_release_repair_mode}" <<'EOF'
+  ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_upload_dir}" "${remote_current_link}" "${previous_release_target_arg}" "${remote_release_dir}" "${same_release_repair_mode}" "${remote_config_root}" "${remote_systemd_service}" <<'EOF'
 set -euo pipefail
 remote_upload_dir="$1"
 remote_current_link="$2"
 previous_release_target="$3"
 remote_release_dir="$4"
 same_release_repair_mode="$5"
+remote_config_root="$6"
+remote_systemd_service="$7"
 
 if [[ "${previous_release_target}" == "__COQUIC_EMPTY_PREVIOUS_RELEASE_TARGET__" ]]; then
   previous_release_target=""
@@ -274,18 +262,18 @@ fi
 # rollback: restore same-release /opt/coquic-demo/current/h3-server
 if [[ "${same_release_repair_mode}" == "1" ]]; then
   restore_or_remove \
-    "/opt/coquic-demo/current/h3-server" \
+    "${remote_current_link}/h3-server" \
     "${remote_upload_dir}/current.h3-server.bak" \
     "${remote_upload_dir}/current.h3-server.absent" \
     "755"
   # rollback: restore same-release /opt/coquic-demo/current/app
   restore_dir_or_remove \
-    "/opt/coquic-demo/current/app" \
+    "${remote_current_link}/app" \
     "${remote_upload_dir}/current.app.bak" \
     "${remote_upload_dir}/current.app.absent"
   # rollback: restore same-release /opt/coquic-demo/current/run-demo.sh
   restore_or_remove \
-    "/opt/coquic-demo/current/run-demo.sh" \
+    "${remote_current_link}/run-demo.sh" \
     "${remote_upload_dir}/current.run-demo.sh.bak" \
     "${remote_upload_dir}/current.run-demo.sh.absent" \
     "755"
@@ -300,28 +288,28 @@ fi
 
 # rollback: restore /etc/systemd/system/coquic-demo.service
 restore_or_remove \
-  "/etc/systemd/system/coquic-demo.service" \
+  "${remote_systemd_service}" \
   "${remote_upload_dir}/coquic-demo.service.bak" \
   "${remote_upload_dir}/coquic-demo.service.absent" \
   "644"
 restore_or_remove \
-  "/etc/coquic-demo/tls/fullchain.pem" \
+  "${remote_config_root}/tls/fullchain.pem" \
   "${remote_upload_dir}/fullchain.pem.bak" \
   "${remote_upload_dir}/fullchain.pem.absent" \
   "644"
 # rollback: restore /etc/coquic-demo/tls/privkey.pem
 restore_or_remove \
-  "/etc/coquic-demo/tls/privkey.pem" \
+  "${remote_config_root}/tls/privkey.pem" \
   "${remote_upload_dir}/privkey.pem.bak" \
   "${remote_upload_dir}/privkey.pem.absent" \
   "600"
 restore_or_remove \
-  "/etc/coquic-demo/rag.env" \
+  "${remote_config_root}/rag.env" \
   "${remote_upload_dir}/rag.env.bak" \
   "${remote_upload_dir}/rag.env.absent" \
   "600"
 restore_or_remove \
-  "/etc/coquic-demo/app.env" \
+  "${remote_config_root}/app.env" \
   "${remote_upload_dir}/app.env.bak" \
   "${remote_upload_dir}/app.env.absent" \
   "600"
@@ -524,9 +512,10 @@ done
 EOF
 
 deploy_phase="remote runtime preflight"
-ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${rag_env_configured}" <<'EOF'
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${rag_env_configured}" "${remote_config_root}/rag.env" <<'EOF'
 set -euo pipefail
 rag_env_configured="$1"
+rag_env_path="$2"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "remote preflight failed: node is required to run the Next.js demo server" >&2
@@ -541,7 +530,7 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "remote preflight failed: curl is required for local Next.js startup checks" >&2
   exit 1
 fi
-if [[ "${rag_env_configured}" == "1" ]] || sudo test -f /etc/coquic-demo/rag.env; then
+if [[ "${rag_env_configured}" == "1" ]] || sudo test -f "${rag_env_path}"; then
   if ! command -v uv >/dev/null 2>&1; then
     echo "remote preflight failed: uv is required to run the RAG QA API" >&2
     exit 1
@@ -558,7 +547,7 @@ deploy_phase="remote upload directory creation"
 remote_upload_dir="$(
   # shellcheck disable=SC2029
   ssh "${ssh_opts[@]}" "${remote_target}" \
-    "umask 077 && mktemp -d /tmp/coquic-demo-release-${release_id}-XXXXXX"
+    "umask 077 && mkdir -p '${remote_tmp_root}' && mktemp -d '${remote_tmp_root}/coquic-demo-release-${release_id}-XXXXXX'"
 )"
 
 deploy_phase="artifact upload"
@@ -577,13 +566,17 @@ rollback_armed=1
 
 deploy_phase="remote install"
 remote_install_status=0
-ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" <<'EOF' || remote_install_status=$?
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" "${remote_releases_root}" "${remote_steward_root}" "${remote_config_root}" "${remote_systemd_service}" <<'EOF' || remote_install_status=$?
 set -euo pipefail
 
 remote_release_dir="$1"
 remote_upload_dir="$2"
 remote_current_link="$3"
 same_release_repair_mode="$4"
+remote_releases_root="$5"
+remote_steward_root="$6"
+remote_config_root="$7"
+remote_systemd_service="$8"
 
 backup_or_mark_absent() {
   local source_path="$1"
@@ -608,7 +601,7 @@ if sudo systemctl is-enabled --quiet coquic-demo.service; then
   service_was_enabled=1
 fi
 
-sudo install -d -m 755 /opt/coquic-demo/releases
+sudo install -d -m 755 "${remote_releases_root}"
 ensure_steward_state_dir() {
   local path="$1"
   if sudo test -e "${path}"; then
@@ -620,11 +613,11 @@ ensure_steward_state_dir() {
   # operator ownership is preserved on repeat deployments and rollbacks.
   sudo chown "$(id -un):$(id -gn)" "${path}"
 }
-ensure_steward_state_dir /opt/coquic-demo/steward
-ensure_steward_state_dir /opt/coquic-demo/steward/tasks
-ensure_steward_state_dir /opt/coquic-demo/steward/cache
-sudo install -d -m 755 /etc/coquic-demo
-sudo install -d -m 755 /etc/coquic-demo/tls
+ensure_steward_state_dir "${remote_steward_root}"
+ensure_steward_state_dir "${remote_steward_root}/tasks"
+ensure_steward_state_dir "${remote_steward_root}/cache"
+sudo install -d -m 755 "${remote_config_root}"
+sudo install -d -m 755 "${remote_config_root}/tls"
 
 if [[ "${service_was_active}" == "1" ]]; then
   sudo touch "${remote_upload_dir}/service.was_active"
@@ -638,23 +631,23 @@ else
 fi
 
 backup_or_mark_absent \
-  "/etc/systemd/system/coquic-demo.service" \
+  "${remote_systemd_service}" \
   "${remote_upload_dir}/coquic-demo.service.bak" \
   "${remote_upload_dir}/coquic-demo.service.absent"
 backup_or_mark_absent \
-  "/etc/coquic-demo/tls/fullchain.pem" \
+  "${remote_config_root}/tls/fullchain.pem" \
   "${remote_upload_dir}/fullchain.pem.bak" \
   "${remote_upload_dir}/fullchain.pem.absent"
 backup_or_mark_absent \
-  "/etc/coquic-demo/tls/privkey.pem" \
+  "${remote_config_root}/tls/privkey.pem" \
   "${remote_upload_dir}/privkey.pem.bak" \
   "${remote_upload_dir}/privkey.pem.absent"
 backup_or_mark_absent \
-  "/etc/coquic-demo/rag.env" \
+  "${remote_config_root}/rag.env" \
   "${remote_upload_dir}/rag.env.bak" \
   "${remote_upload_dir}/rag.env.absent"
 backup_or_mark_absent \
-  "/etc/coquic-demo/app.env" \
+  "${remote_config_root}/app.env" \
   "${remote_upload_dir}/app.env.bak" \
   "${remote_upload_dir}/app.env.absent"
 
@@ -664,17 +657,17 @@ if [[ "${same_release_repair_mode}" != "1" ]]; then
 else
   # same-release backup /opt/coquic-demo/current/h3-server
   backup_or_mark_absent \
-    "/opt/coquic-demo/current/h3-server" \
+    "${remote_current_link}/h3-server" \
     "${remote_upload_dir}/current.h3-server.bak" \
     "${remote_upload_dir}/current.h3-server.absent"
   # same-release backup /opt/coquic-demo/current/app
   backup_or_mark_absent \
-    "/opt/coquic-demo/current/app" \
+    "${remote_current_link}/app" \
     "${remote_upload_dir}/current.app.bak" \
     "${remote_upload_dir}/current.app.absent"
   # same-release backup /opt/coquic-demo/current/run-demo.sh
   backup_or_mark_absent \
-    "/opt/coquic-demo/current/run-demo.sh" \
+    "${remote_current_link}/run-demo.sh" \
     "${remote_upload_dir}/current.run-demo.sh.bak" \
     "${remote_upload_dir}/current.run-demo.sh.absent"
   # same-release gate: stop active service before in-place mutation
@@ -695,7 +688,7 @@ sudo rm -rf "${remote_release_dir}/app"
 sudo install -d -m 755 "${remote_release_dir}/app"
 sudo tar -xf "${remote_upload_dir}/app.tar" -C "${remote_release_dir}/app"
 sudo install -d -m 755 "${remote_release_dir}/app/public"
-previous_app_public_dir="/opt/coquic-demo/current/app/public"
+previous_app_public_dir="${remote_current_link}/app/public"
 if [[ "${same_release_repair_mode}" == "1" ]]; then
   previous_app_public_dir="${remote_upload_dir}/current.app.bak/public"
 fi
@@ -739,13 +732,13 @@ if sudo test -d "${previous_app_public_dir}/coverage" &&
   sudo cp -a "${previous_app_public_dir}/coverage" "${remote_release_dir}/app/public/coverage"
 fi
 
-sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" /etc/systemd/system/coquic-demo.service
-sudo install -m 644 "${remote_upload_dir}/fullchain.pem" /etc/coquic-demo/tls/fullchain.pem
-sudo install -m 600 "${remote_upload_dir}/privkey.pem" /etc/coquic-demo/tls/privkey.pem
+sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" "${remote_systemd_service}"
+sudo install -m 644 "${remote_upload_dir}/fullchain.pem" "${remote_config_root}/tls/fullchain.pem"
+sudo install -m 600 "${remote_upload_dir}/privkey.pem" "${remote_config_root}/tls/privkey.pem"
 if sudo test -f "${remote_upload_dir}/rag.env"; then
-  sudo install -m 600 "${remote_upload_dir}/rag.env" /etc/coquic-demo/rag.env
+  sudo install -m 600 "${remote_upload_dir}/rag.env" "${remote_config_root}/rag.env"
 fi
-sudo install -m 600 "${remote_upload_dir}/app.env" /etc/coquic-demo/app.env
+sudo install -m 600 "${remote_upload_dir}/app.env" "${remote_config_root}/app.env"
 
 sudo ln -sfnT "${remote_release_dir}" "${remote_current_link}"
 sudo systemctl daemon-reload

@@ -196,20 +196,20 @@ export function PipelineGraph({ stages, transitions }: { stages: PipelineStage[]
             <div className="grid gap-2 sm:grid-cols-[13rem_minmax(0,1fr)] sm:gap-6">
               <div>
                 <p className="text-sm font-semibold text-ink">{selected.label}</p>
-                <p className="mt-1 text-xs text-muted data-text">Attempts {formatAttempts(selected.attempts)}</p>
+                <p className="mt-1 text-xs text-muted data-text">Pipelines {formatAttempts(selected.attempts)}</p>
               </div>
               <ul className="space-y-1 text-xs leading-5 text-muted">
-                {selected.causes.map((cause, index) => <li key={`${cause.attempt}-${index}`}><span className="mr-2 text-faint data-text">{cause.attempt === null ? "Plan" : `A${String(cause.attempt + 1).padStart(2, "0")}`}</span><span>{cause.detail}</span></li>)}
+                {selected.causes.map((cause, index) => <li key={`${cause.attempt}-${index}`}><span className="mr-2 text-faint data-text">{cause.attempt === null ? "Plan" : `P${String(cause.attempt + 1).padStart(2, "0")}`}</span><span>{cause.detail}</span></li>)}
               </ul>
             </div>
-          ) : <p className="text-xs leading-5 text-muted">{returnTransitions ? `${returnTransitions} returns extended execution across ${returnedAttempts} attempts.` : "No return transitions recorded."}</p>}
+          ) : <p className="text-xs leading-5 text-muted">{returnTransitions ? `${returnTransitions} returns extended execution across ${returnedAttempts} pipelines.` : "No return transitions recorded."}</p>}
         </div>
       </div>
 
       <ol className="mt-5 border-t border-line md:hidden" aria-label="Task state transitions">
         {transitions.map((transition) => (
           <li key={`${transition.from}-${transition.to}`} className="grid grid-cols-[minmax(0,1fr)_2.5rem] gap-3 border-b border-line py-3">
-            <div><p className="text-sm font-medium text-ink">{transition.label}</p>{transition.attempts.length ? <p className="mt-1 text-xs text-muted data-text">Attempts {formatAttempts(transition.attempts)}</p> : null}</div>
+            <div><p className="text-sm font-medium text-ink">{transition.label}</p>{transition.attempts.length ? <p className="mt-1 text-xs text-muted data-text">Pipelines {formatAttempts(transition.attempts)}</p> : null}</div>
             <span className="text-right text-sm font-semibold text-ink data-text">{transition.count}</span>
           </li>
         ))}

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import { basename } from "node:path";
+import { Readable } from "node:stream";
 import type { DatabaseSync } from "node:sqlite";
 import { getArchiveConfig, type ArchiveConfig } from "./config";
 import { getArchiveImporter, type ImportStatus, type StewardArchiveImporter } from "./importer";
@@ -44,7 +46,48 @@ function invalidCursor(message = "invalid cursor") { const error = new Error(mes
 function staleCursor(message = "cursor is stale") { const error = new Error(message) as CursorError; error.code = "STALE_CURSOR"; return error; }
 function decodeCursor(value: string) { try { const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")); if (!isRecord(decoded)) throw new Error(); return decoded; } catch { throw invalidCursor(); } }
 function nullableNumber(value: unknown) { return value === null || value === undefined ? null : Number(value); }
-function sha256(bytes: Buffer) { return createHash("sha256").update(bytes).digest("hex"); }
+function yieldToEventLoop() { return new Promise<void>((resolve) => setImmediate(resolve)); }
+
+async function hashHandlePrefix(handle: FileHandle, end: number) {
+  const digest = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  for (let position = 0; position < end;) {
+    const length = Math.min(buffer.length, end - position);
+    const { bytesRead } = await handle.read(buffer, 0, length, position);
+    if (bytesRead !== length) throw staleCursor("accepted archive evidence changed");
+    digest.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+    await yieldToEventLoop();
+  }
+  return digest.digest("hex");
+}
+
+async function readHandleRange(handle: FileHandle, start: number, end: number) {
+  const length = end - start;
+  const buffer = Buffer.allocUnsafe(length);
+  let offset = 0;
+  while (offset < length) {
+    const result = await handle.read(buffer, offset, length - offset, start + offset);
+    if (!result.bytesRead) throw staleCursor("accepted archive evidence changed");
+    offset += result.bytesRead;
+  }
+  return buffer;
+}
+
+const KNOWN_TRANSCRIPT_TYPES = new Set(["assistant.message", "user.message", "tool.call", "tool.result", "file.change", "synthetic.assistant", "synthetic.tool"]);
+function boundedString(value: unknown, limit: number) { return typeof value === "string" ? value.slice(0, limit) : undefined; }
+function renderTranscriptValue(source: string, indexedType: unknown) {
+  let value: JsonRecord;
+  try { value = JSON.parse(source) as JsonRecord; } catch { return { opaque: true, category: "unrecognized-record" }; }
+  if (!isRecord(value)) return { opaque: true, category: "unrecognized-record" };
+  const type = typeof indexedType === "string" ? indexedType : typeof value.record_type === "string" ? value.record_type : typeof value.type === "string" ? value.type : null;
+  if (!type || !KNOWN_TRANSCRIPT_TYPES.has(type)) return { opaque: true, category: "unrecognized-record" };
+  const text = boundedString(value.text, 8_192) ?? boundedString(value.message, 8_192);
+  const command = boundedString(value.command, 2_048);
+  const output = boundedString(value.output, 8_192);
+  const exitCode = Number.isSafeInteger(value.exit_code) ? Number(value.exit_code) : undefined;
+  return Object.fromEntries(Object.entries({ record_type: type, text, command, output, exit_code: exitCode }).filter(([, item]) => item !== undefined));
+}
 
 export class StewardArchiveRepository {
   readonly importer: StewardArchiveImporter;
@@ -96,15 +139,22 @@ export class StewardArchiveRepository {
     if (!task) throw new Error("task is unavailable");
     const taskRoot = await resolveDirectoryContainedPath(this.config.tasksRoot, String(task.root_relative_path));
     const resolved = await resolveRegularContainedPath(taskRoot, relativePath);
-    const bytes = await readFile(resolved.path);
     const acceptedEnd = Number(file.accepted_end);
-    if (!Number.isSafeInteger(acceptedEnd) || acceptedEnd < 0 || bytes.length < acceptedEnd || sha256(bytes.subarray(0, acceptedEnd)) !== file.prefix_hash) throw staleCursor("accepted archive evidence changed");
-    return { file, bytes: bytes.subarray(0, acceptedEnd), stat: resolved.stat };
+    if (!Number.isSafeInteger(acceptedEnd) || acceptedEnd < 0) throw staleCursor("accepted archive evidence changed");
+    const handle = await open(resolved.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.dev !== resolved.stat.dev || stat.ino !== resolved.stat.ino || stat.size < acceptedEnd || await hashHandlePrefix(handle, acceptedEnd) !== file.prefix_hash) throw staleCursor("accepted archive evidence changed");
+      return { file, handle, acceptedEnd, stat };
+    } catch (error) { await handle.close(); throw error; }
   }
 
   private async acceptedJson(taskId: string, relativePath: string, validator: (value: JsonRecord) => JsonRecord) {
     const accepted = await this.acceptedFile(taskId, relativePath);
-    return validator(parseCompleteJson(accepted.bytes.toString("utf8"), relativePath));
+    try {
+      if (accepted.acceptedEnd > 8 * 1024 * 1024) throw new Error("archive metadata exceeds the supported boundary");
+      return validator(parseCompleteJson((await readHandleRange(accepted.handle, 0, accepted.acceptedEnd)).toString("utf8"), relativePath));
+    } finally { await accepted.handle.close(); }
   }
 
   async loadTaskDetail(taskId: string, selection: { pipelineId?: string; runId?: string } = {}) {
@@ -139,31 +189,47 @@ export class StewardArchiveRepository {
     const run = this.db.prepare("SELECT pipeline_id FROM runs WHERE task_id=? AND run_id=?").get(taskId, runId);
     if (!run || !relativePath.startsWith(`pipelines/${String(run.pipeline_id)}/runs/${runId}/`)) throw new Error("transcript is not owned by the selected run");
     const accepted = await this.acceptedFile(taskId, relativePath, "jsonl");
-    const fileRevision = String(accepted.file.file_revision ?? "");
-    const cursorData = cursor ? decodeCursor(cursor) : null;
-    if (cursorData && (cursorData.taskId !== taskId || cursorData.runId !== runId || cursorData.relativePath !== relativePath || cursorData.fileRevision !== fileRevision)) throw staleCursor();
-    const startOrdinal = cursorData ? Number(cursorData.ordinal) : 0;
-    if (!Number.isSafeInteger(startOrdinal) || startOrdinal < 0) throw invalidCursor();
-    const bounded = Math.min(100, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 50));
-    const rows = this.db.prepare("SELECT ordinal, byte_start, byte_end, timestamp, record_type FROM records WHERE task_id=? AND relative_path=? AND ordinal>=? ORDER BY ordinal LIMIT ?").all(taskId, relativePath, startOrdinal, bounded + 1);
-    const pageRows = rows.slice(0, bounded);
-    const records = pageRows.map((row) => {
-      const start = Number(row.byte_start); const end = Number(row.byte_end);
-      if (start < 0 || end <= start || end > accepted.bytes.length || accepted.bytes[end - 1] !== 10) throw staleCursor("indexed transcript boundary changed");
-      const line = accepted.bytes.subarray(start, end - 1).toString("utf8");
-      try { return { ordinal: Number(row.ordinal), timestamp: row.timestamp ?? null, type: row.record_type ?? null, value: JSON.parse(line) }; }
-      catch { return { ordinal: Number(row.ordinal), timestamp: row.timestamp ?? null, type: row.record_type ?? "opaque", value: { opaque: true } }; }
-    });
-    const hasMore = rows.length > bounded;
-    const nextOrdinal = hasMore ? Number(pageRows.at(-1)?.ordinal ?? startOrdinal) + 1 : null;
-    return { schemaVersion: "2.0", generatedAt: new Date().toISOString(), data: { taskId, pipelineId: run.pipeline_id, runId, file: { path: relativePath, fileRevision, acceptedEnd: Number(accepted.file.accepted_end), completeRecords: Number(accepted.file.complete_records) }, records, nextCursor: nextOrdinal === null ? null : encodeCursor({ taskId, runId, relativePath, fileRevision, ordinal: nextOrdinal }), previousCursor: startOrdinal > 0 ? encodeCursor({ taskId, runId, relativePath, fileRevision, ordinal: Math.max(0, startOrdinal - bounded) }) : null, hasMore } };
+    try {
+      const fileRevision = String(accepted.file.file_revision ?? "");
+      const cursorData = cursor ? decodeCursor(cursor) : null;
+      if (cursorData && (cursorData.taskId !== taskId || cursorData.runId !== runId || cursorData.relativePath !== relativePath || cursorData.fileRevision !== fileRevision)) throw staleCursor();
+      const startOrdinal = cursorData ? Number(cursorData.ordinal) : 0;
+      if (!Number.isSafeInteger(startOrdinal) || startOrdinal < 0) throw invalidCursor();
+      if (cursorData) {
+        const prefixEnd = Number(cursorData.prefixEnd);
+        if (!Number.isSafeInteger(prefixEnd) || prefixEnd < 0 || typeof cursorData.prefixHash !== "string") throw invalidCursor();
+        const preceding = startOrdinal === 0 ? null : this.db.prepare("SELECT byte_end FROM records WHERE task_id=? AND relative_path=? AND ordinal=?").get(taskId, relativePath, startOrdinal - 1);
+        if ((startOrdinal === 0 && prefixEnd !== 0) || (startOrdinal > 0 && Number(preceding?.byte_end) !== prefixEnd) || await hashHandlePrefix(accepted.handle, prefixEnd) !== cursorData.prefixHash) throw staleCursor();
+      }
+      const bounded = Math.min(100, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 50));
+      const rows = this.db.prepare("SELECT ordinal, byte_start, byte_end, timestamp, record_type FROM records WHERE task_id=? AND relative_path=? AND ordinal>=? ORDER BY ordinal LIMIT ?").all(taskId, relativePath, startOrdinal, bounded + 1);
+      const pageRows = rows.slice(0, bounded);
+      const rangeStart = Number(pageRows[0]?.byte_start ?? 0);
+      const rangeEnd = Number(pageRows.at(-1)?.byte_end ?? rangeStart);
+      const bytes = rangeEnd > rangeStart ? await readHandleRange(accepted.handle, rangeStart, rangeEnd) : Buffer.alloc(0);
+      const records = pageRows.map((row) => {
+        const start = Number(row.byte_start); const end = Number(row.byte_end);
+        if (start < rangeStart || end <= start || end > rangeEnd || bytes[end - rangeStart - 1] !== 10) throw staleCursor("indexed transcript boundary changed");
+        const line = bytes.subarray(start - rangeStart, end - rangeStart - 1).toString("utf8");
+        const value = renderTranscriptValue(line, row.record_type);
+        return { ordinal: Number(row.ordinal), timestamp: row.timestamp ?? null, type: value.opaque === true ? "opaque" : row.record_type ?? "opaque", value };
+      });
+      const hasMore = rows.length > bounded;
+      const nextOrdinal = pageRows.length ? Number(pageRows.at(-1)?.ordinal) + 1 : startOrdinal;
+      const prefixEnd = pageRows.length ? Number(pageRows.at(-1)?.byte_end) : cursorData ? Number(cursorData.prefixEnd) : 0;
+      const prefixHash = await hashHandlePrefix(accepted.handle, prefixEnd);
+      const nextCursor = encodeCursor({ taskId, runId, relativePath, fileRevision, ordinal: nextOrdinal, prefixEnd, prefixHash });
+      return { schemaVersion: "2.0", generatedAt: new Date().toISOString(), data: { taskId, pipelineId: run.pipeline_id, runId, file: { path: relativePath, fileRevision, acceptedEnd: Number(accepted.file.accepted_end), completeRecords: Number(accepted.file.complete_records) }, records, nextCursor, previousCursor: startOrdinal > 0 ? encodeCursor({ taskId, runId, relativePath, fileRevision, ordinal: 0, prefixEnd: 0, prefixHash: await hashHandlePrefix(accepted.handle, 0) }) : null, hasMore } };
+    } finally { await accepted.handle.close(); }
   }
 
   async readArtifact(taskId: string, relativePath: string) {
     const accepted = await this.acceptedFile(taskId, relativePath);
     const declaredType = String(accepted.file.media_type ?? "application/octet-stream");
     const contentType = ["application/json", "application/x-ndjson", "text/plain", "text/markdown", "text/x-diff", "application/octet-stream"].includes(declaredType) ? declaredType : "application/octet-stream";
-    return { bytes: accepted.bytes, contentType, filename: basename(relativePath), size: accepted.bytes.length, active: accepted.file.lifecycle !== "terminal" || accepted.file.status !== "ready" };
+    const stream = accepted.acceptedEnd === 0 ? Readable.from([]) : accepted.handle.createReadStream({ start: 0, end: accepted.acceptedEnd - 1, autoClose: true });
+    if (accepted.acceptedEnd === 0) await accepted.handle.close();
+    return { stream, contentType, filename: basename(relativePath), size: accepted.acceptedEnd, active: accepted.file.lifecycle !== "terminal" || accepted.file.status !== "ready" };
   }
 }
 

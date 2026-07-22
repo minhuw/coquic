@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 
 export interface DatabaseMeta {
   state: string;
@@ -136,6 +136,18 @@ export function openArchiveDatabase(cachePath: string) {
       PRIMARY KEY(task_id, relative_path, ordinal),
       FOREIGN KEY(task_id, relative_path) REFERENCES files(task_id, relative_path) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS record_staging (
+      import_token TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      byte_start INTEGER NOT NULL,
+      byte_end INTEGER NOT NULL,
+      timestamp TEXT,
+      record_type TEXT,
+      PRIMARY KEY(import_token, relative_path, ordinal)
+    );
+    CREATE INDEX IF NOT EXISTS record_staging_import ON record_staging(import_token, relative_path, ordinal);
     CREATE TABLE IF NOT EXISTS importer_errors (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       task_id TEXT,

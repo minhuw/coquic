@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { appendFile, cp, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,18 +18,28 @@ async function availablePort() {
 }
 
 async function waitForStatus(baseUrl: string, child: ChildProcess) {
+  let lastStatus = "no response";
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) throw new Error(`Next server exited before archive readiness (${child.exitCode})`);
     try {
       const response = await fetch(`${baseUrl}/api/steward/status`, { cache: "no-store" });
       if (response.ok) {
         const payload = await response.json() as { data?: { state?: string; taskCount?: number } };
-        if (payload.data?.state === "ready" && payload.data.taskCount === 2) return;
+        lastStatus = JSON.stringify(payload.data);
+        if (payload.data?.state === "ready" && payload.data.taskCount === 53) return;
       }
     } catch { /* server is still starting */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
-  throw new Error("temporary Steward archive did not become ready");
+  throw new Error(`temporary Steward archive did not become ready: ${lastStatus}`);
+}
+
+async function rewriteTaskIdentity(root: string, oldId: string, newId: string) {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) await rewriteTaskIdentity(path, oldId, newId);
+    else if (entry.isFile() && entry.name.endsWith(".json")) await writeFile(path, (await readFile(path, "utf8")).replaceAll(oldId, newId));
+  }
 }
 
 async function stop(child: ChildProcess) {
@@ -50,6 +60,17 @@ void (async () => {
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   await cp(new URL("../examples/steward-dataset", import.meta.url), tasksRoot, { recursive: true });
+  const runningTemplate = join(tasksRoot, "task-running");
+  const secondActive = join(tasksRoot, "task-running-second");
+  await cp(runningTemplate, secondActive, { recursive: true }); await rewriteTaskIdentity(secondActive, "task-running-synthetic", "task-running-second");
+  const secondTaskPath = join(secondActive, "task.json"); const secondTask = JSON.parse(await readFile(secondTaskPath, "utf8")) as Record<string, unknown>;
+  secondTask.summary = { title: "Second active task", text: "Parallel active work remains reachable." }; secondTask.updatedAt = "2026-07-22T10:31:00Z"; await writeFile(secondTaskPath, `${JSON.stringify(secondTask, null, 2)}\n`);
+  for (let index = 0; index < 50; index += 1) {
+    const taskId = `task-browser-history-${String(index).padStart(3, "0")}`;
+    const destination = join(tasksRoot, taskId); await cp(runningTemplate, destination, { recursive: true }); await rewriteTaskIdentity(destination, "task-running-synthetic", taskId);
+    const taskPath = join(destination, "task.json"); const task = JSON.parse(await readFile(taskPath, "utf8")) as Record<string, unknown>;
+    task.status = "succeeded"; task.summary = { title: `Browser history ${String(index).padStart(2, "0")}`, text: "Paginated terminal archive fixture." }; task.updatedAt = `2026-07-21T08:00:${String(index).padStart(2, "0")}Z`; await writeFile(taskPath, `${JSON.stringify(task, null, 2)}\n`);
+  }
   await cp(join(siteRoot, ".next", "standalone"), serverRoot, { recursive: true });
   await cp(join(siteRoot, ".next", "static"), join(serverRoot, ".next", "static"), { recursive: true });
   if (existsSync(join(siteRoot, "public"))) await cp(join(siteRoot, "public"), join(serverRoot, "public"), { recursive: true });
@@ -58,7 +79,7 @@ void (async () => {
 
   const server = spawn(process.execPath, [join(serverRoot, "server.js")], {
     cwd: serverRoot,
-    env: { ...process.env, HOSTNAME: "127.0.0.1", PORT: String(port), NODE_ENV: "production", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_RECONCILE_MS: "250", COQUIC_STEWARD_BATCH_SIZE: "1" },
+    env: { ...process.env, HOSTNAME: "127.0.0.1", PORT: String(port), NODE_ENV: "production", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_RECONCILE_MS: "60000", COQUIC_STEWARD_BATCH_SIZE: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverOutput = "";

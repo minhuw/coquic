@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
-import { existsSync, renameSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, existsSync, renameSync } from "node:fs";
+import { open, readFile, readdir } from "node:fs/promises";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
 import { openArchiveDatabase, readDatabaseMeta, updateDatabaseMeta, withTransaction, type DatabaseMeta } from "./database";
 import { getArchiveConfig, type ArchiveConfig } from "./config";
@@ -30,14 +30,13 @@ type FileDescriptor = {
 };
 
 type IndexedRecord = { ordinal: number; byteStart: number; byteEnd: number; timestamp: string | null; recordType: string | null };
-type FileSnapshot = FileDescriptor & { kind: string; status: "ready" | "missing"; size: number | null; acceptedEnd: number; prefixHash: string | null; prefixRevision: number; fileRevision: string; records: IndexedRecord[]; recordsJson: string };
+type FileSnapshot = FileDescriptor & { kind: string; status: "ready" | "missing"; size: number | null; acceptedEnd: number; prefixHash: string | null; prefixRevision: number; fileRevision: string; completeRecords: number };
 type ArchiveVerification = { state: string; manifestObservedAt: string | null; verifiedAt: string | null; reason: string | null };
 
 const JSONL_NAMES = new Set(["events.jsonl", "codex.jsonl", "activities.jsonl", "manifest.jsonl"]);
 const TERMINAL_STATES = new Set(["succeeded", "pushed", "no_changes", "blocked", "failed", "cancelled"]);
 
 function now() { return new Date().toISOString(); }
-function hash(bytes: Buffer | string) { return createHash("sha256").update(bytes).digest("hex"); }
 function fileMediaType(path: string) {
   if (path.endsWith(".jsonl")) return "application/x-ndjson";
   if (path.endsWith(".json")) return "application/json";
@@ -49,6 +48,88 @@ function fileMediaType(path: string) {
 function fileKind(path: string) { return JSONL_NAMES.has(path.split("/").at(-1) ?? "") ? "jsonl" : "artifact"; }
 function nullable(value: unknown) { return value == null ? null : value; }
 function yieldToEventLoop() { return new Promise<void>((resolve) => setImmediate(resolve)); }
+
+async function findAcceptedEnd(path: string, size: number, kind: string) {
+  if (kind !== "jsonl" || size === 0) return kind === "jsonl" ? 0 : size;
+  const handle = await open(path, "r");
+  try {
+    const chunkSize = 64 * 1024;
+    for (let end = size; end > 0;) {
+      const start = Math.max(0, end - chunkSize);
+      const buffer = Buffer.allocUnsafe(end - start);
+      await handle.read(buffer, 0, buffer.length, start);
+      const newline = buffer.lastIndexOf(10);
+      if (newline !== -1) return start + newline + 1;
+      end = start;
+      await yieldToEventLoop();
+    }
+    return 0;
+  } finally { await handle.close(); }
+}
+
+async function hashFilePrefix(path: string, end: number) {
+  const digest = createHash("sha256");
+  if (end > 0) for await (const chunk of createReadStream(path, { start: 0, end: end - 1, highWaterMark: 64 * 1024 })) { digest.update(chunk as Buffer); await yieldToEventLoop(); }
+  return digest.digest("hex");
+}
+
+async function scanJsonl(path: string, acceptedEnd: number, onRecords: (records: IndexedRecord[]) => void) {
+  const digest = createHash("sha256");
+  let firstRecordDigest: string | null = null;
+  let lineDigest = createHash("sha256");
+  let lineFragments: Buffer[] = [];
+  let capturedBytes = 0;
+  let offset = 0;
+  let lineStart = 0;
+  let ordinal = 0;
+  let batch: IndexedRecord[] = [];
+  const captureLimit = 64 * 1024;
+  if (acceptedEnd > 0) {
+    for await (const value of createReadStream(path, { start: 0, end: acceptedEnd - 1, highWaterMark: 64 * 1024 })) {
+      const chunk = value as Buffer;
+      digest.update(chunk);
+      let position = 0;
+      while (position < chunk.length) {
+        const newline = chunk.indexOf(10, position);
+        const segmentEnd = newline === -1 ? chunk.length : newline;
+        const segment = chunk.subarray(position, segmentEnd);
+        lineDigest.update(segment);
+        if (capturedBytes < captureLimit) {
+          const captured = segment.subarray(0, captureLimit - capturedBytes);
+          if (captured.length) lineFragments.push(captured);
+          capturedBytes += captured.length;
+        }
+        if (newline === -1) break;
+        lineDigest.update(Buffer.from("\n"));
+        const byteEnd = offset + newline + 1;
+        const line = capturedBytes < captureLimit ? Buffer.concat(lineFragments).toString("utf8") : "";
+        let timestamp: string | null = null;
+        let recordType: string | null = null;
+        if (line) {
+          try {
+            const parsed = JSON.parse(line) as JsonRecord;
+            timestamp = typeof parsed.at === "string" ? parsed.at : typeof parsed.timestamp === "string" ? parsed.timestamp : null;
+            recordType = typeof parsed.kind === "string" ? parsed.kind : typeof parsed.record_type === "string" ? parsed.record_type : typeof parsed.type === "string" ? parsed.type : null;
+          } catch { /* complete unknown records remain opaque */ }
+        }
+        const recordDigest = lineDigest.digest("hex");
+        if (firstRecordDigest === null) firstRecordDigest = recordDigest;
+        batch.push({ ordinal, byteStart: lineStart, byteEnd, timestamp, recordType });
+        ordinal += 1;
+        lineStart = byteEnd;
+        lineDigest = createHash("sha256");
+        lineFragments = [];
+        capturedBytes = 0;
+        position = newline + 1;
+        if (batch.length === 512) { onRecords(batch); batch = []; await yieldToEventLoop(); }
+      }
+      offset += chunk.length;
+      await yieldToEventLoop();
+    }
+  }
+  if (batch.length) onRecords(batch);
+  return { prefixHash: digest.digest("hex"), firstRecordDigest, completeRecords: ordinal };
+}
 
 function descriptorFrom(value: unknown): FileDescriptor | null {
   if (!isRecord(value) || typeof value.path !== "string" || !isSafeRelativePath(value.path)) return null;
@@ -80,44 +161,21 @@ async function readValidated(root: string, path: string, validator: (value: Json
   return validator(parseCompleteJson(await readFile(resolved.path, "utf8"), path));
 }
 
-async function indexSnapshot(taskRoot: string, descriptor: FileDescriptor, previous?: Record<string, unknown>): Promise<FileSnapshot> {
+async function indexSnapshot(taskRoot: string, descriptor: FileDescriptor, onRecords: (records: IndexedRecord[]) => void, previous?: Record<string, unknown>): Promise<FileSnapshot> {
   const kind = fileKind(descriptor.path);
   try {
     const resolved = await resolveRegularContainedPath(taskRoot, descriptor.path);
-    const bytes = await readFile(resolved.path);
-    const acceptedEnd = kind === "jsonl" ? Math.max(0, bytes.lastIndexOf(10) + 1) : bytes.length;
-    const accepted = bytes.subarray(0, acceptedEnd);
-    const prefixHash = hash(accepted);
+    const size = resolved.stat.size;
+    const acceptedEnd = await findAcceptedEnd(resolved.path, size, kind);
     const previousEnd = Number(previous?.accepted_end ?? 0);
     const previousHash = typeof previous?.prefix_hash === "string" ? previous.prefix_hash : null;
-    const appendCompatible = Boolean(previous) && acceptedEnd >= previousEnd && previousHash === hash(bytes.subarray(0, previousEnd));
+    const appendCompatible = Boolean(previous) && acceptedEnd >= previousEnd && previousHash === await hashFilePrefix(resolved.path, previousEnd);
     const prefixRevision = previous ? Number(previous.prefix_revision ?? 0) + (appendCompatible ? 0 : 1) : 0;
-    const records: IndexedRecord[] = [];
-    if (kind === "jsonl") {
-      let start = 0;
-      let ordinal = 0;
-      for (let cursor = 0; cursor < acceptedEnd; cursor += 1) {
-        if (accepted[cursor] !== 10) continue;
-        const end = cursor + 1;
-        const line = accepted.subarray(start, cursor).toString("utf8");
-        if (line) {
-          let timestamp: string | null = null;
-          let recordType: string | null = null;
-          try {
-            const value = JSON.parse(line) as JsonRecord;
-            timestamp = typeof value.at === "string" ? value.at : typeof value.timestamp === "string" ? value.timestamp : null;
-            recordType = typeof value.kind === "string" ? value.kind : typeof value.record_type === "string" ? value.record_type : typeof value.type === "string" ? value.type : null;
-          } catch { /* complete unknown records stay indexed as opaque evidence */ }
-          records.push({ ordinal, byteStart: start, byteEnd: end, timestamp, recordType });
-          ordinal += 1;
-        }
-        start = end;
-        if (records.length > 0 && records.length % 256 === 0) await yieldToEventLoop();
-      }
-    }
-    return { ...descriptor, kind, status: "ready", size: bytes.length, acceptedEnd, prefixHash, prefixRevision, fileRevision: `generation-${prefixRevision}`, records, recordsJson: JSON.stringify(records) };
+    const scanned = kind === "jsonl" ? await scanJsonl(resolved.path, acceptedEnd, onRecords) : { prefixHash: await hashFilePrefix(resolved.path, acceptedEnd), firstRecordDigest: null, completeRecords: 0 };
+    const fileRevision = `sha256:${scanned.firstRecordDigest ?? scanned.prefixHash}`;
+    return { ...descriptor, kind, status: "ready", size, acceptedEnd, prefixHash: scanned.prefixHash, prefixRevision, fileRevision, completeRecords: scanned.completeRecords };
   } catch {
-    return { ...descriptor, kind, status: "missing", size: null, acceptedEnd: 0, prefixHash: null, prefixRevision: Number(previous?.prefix_revision ?? 0), fileRevision: String(previous?.file_revision ?? "generation-0"), records: [], recordsJson: "[]" };
+    return { ...descriptor, kind, status: "missing", size: null, acceptedEnd: 0, prefixHash: null, prefixRevision: Number(previous?.prefix_revision ?? 0), fileRevision: String(previous?.file_revision ?? "sha256:missing"), completeRecords: 0 };
   }
 }
 
@@ -151,8 +209,7 @@ async function verifyManifest(taskId: string, epochId: string, taskRoot: string,
   for (const item of manifest.files as JsonRecord[]) {
     try {
       const resolved = await resolveRegularContainedPath(taskRoot, String(item.path));
-      const bytes = await readFile(resolved.path);
-      if (bytes.length !== item.byteSize || hash(bytes) !== item.sha256) return { state: "corrupt", manifestObservedAt: observed, verifiedAt: null, reason: "manifest-mismatch" };
+      if (resolved.stat.size !== item.byteSize || await hashFilePrefix(resolved.path, resolved.stat.size) !== item.sha256) return { state: "corrupt", manifestObservedAt: observed, verifiedAt: null, reason: "manifest-mismatch" };
     } catch { return { state: "incomplete", manifestObservedAt: observed, verifiedAt: null, reason: "manifest-content-missing" }; }
     await yieldToEventLoop();
   }
@@ -231,7 +288,13 @@ export class StewardArchiveImporter {
         changed ||= result.changed;
         archiveCorrupt ||= result.archiveState === "corrupt";
         this.db.prepare("DELETE FROM importer_errors WHERE task_id=?").run(entry.name);
-      } catch { failures += 1; this.recordError(entry.name, "task-import"); }
+      } catch {
+        failures += 1;
+        const retained = await this.reverifyRetainedTerminalTask(entry.name, epoch.epochId);
+        changed ||= retained.changed;
+        archiveCorrupt ||= retained.archiveState === "corrupt";
+        this.recordError(entry.name, "task-import");
+      }
       processed += 1;
       if (processed % this.config.batchSize === 0) await yieldToEventLoop();
     }
@@ -243,6 +306,21 @@ export class StewardArchiveImporter {
   private recordError(taskId: string | null, category: string) {
     const timestamp = now();
     this.db.prepare(`INSERT INTO importer_errors(task_id, category, count, first_seen_at, last_seen_at) VALUES(?, ?, 1, ?, ?) ON CONFLICT(task_id, category) DO UPDATE SET count=min(count+1, 1000), last_seen_at=excluded.last_seen_at`).run(taskId, category, timestamp, timestamp);
+  }
+
+  private async reverifyRetainedTerminalTask(directoryName: string, epochId: string) {
+    const row = this.db.prepare("SELECT task_id, status, archive_state FROM tasks WHERE root_relative_path=?").get(directoryName);
+    if (!row || !TERMINAL_STATES.has(String(row.status))) return { changed: false, archiveState: String(row?.archive_state ?? "live") };
+    let verification: ArchiveVerification;
+    try {
+      const root = await resolveDirectoryContainedPath(this.config.tasksRoot, directoryName);
+      verification = await verifyManifest(String(row.task_id), epochId, root, row.status);
+    } catch {
+      verification = { state: "corrupt", manifestObservedAt: now(), verifiedAt: null, reason: "terminal-tree-invalid" };
+    }
+    const previous = String(row.archive_state);
+    this.db.prepare("UPDATE tasks SET archive_state=?, manifest_observed_at=?, verified_at=?, archive_reason=? WHERE task_id=?").run(verification.state, verification.manifestObservedAt, verification.verifiedAt, verification.reason, row.task_id);
+    return { changed: previous !== verification.state, archiveState: verification.state };
   }
 
   private async importTask(directoryName: string, epochId: string) {
@@ -283,10 +361,19 @@ export class StewardArchiveImporter {
     try { await resolveRegularContainedPath(root, "manifest.json"); descriptors.push({ path: "manifest.json", lifecycle: "terminal", availability: "available", mediaType: "application/json" }); } catch { /* live tasks need no manifest */ }
     const previousFiles = new Map(this.db.prepare("SELECT * FROM files WHERE task_id=?").all(taskId).map((row) => [String(row.relative_path), row]));
     const snapshots: FileSnapshot[] = [];
-    for (const descriptor of descriptors) { snapshots.push(await indexSnapshot(root, descriptor, previousFiles.get(descriptor.path))); if (snapshots.length % 32 === 0) await yieldToEventLoop(); }
-    const archiveState = await verifyManifest(taskId, epochId, root, task.status);
-    const importedAt = now();
-    return withTransaction(this.db, () => {
+    const importToken = randomUUID();
+    const insertStage = this.db.prepare("INSERT INTO record_staging(import_token, task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type) VALUES(?, ?, ?, ?, ?, ?, ?, ?)");
+    try {
+      for (const descriptor of descriptors) {
+        const stageRecords = (records: IndexedRecord[]) => withTransaction(this.db, () => {
+          for (const record of records) insertStage.run(importToken, taskId, descriptor.path, record.ordinal, record.byteStart, record.byteEnd, record.timestamp, record.recordType);
+        });
+        snapshots.push(await indexSnapshot(root, descriptor, stageRecords, previousFiles.get(descriptor.path)));
+        if (snapshots.length % 32 === 0) await yieldToEventLoop();
+      }
+      const archiveState = await verifyManifest(taskId, epochId, root, task.status);
+      const importedAt = now();
+      return withTransaction(this.db, () => {
       const previous = this.db.prepare("SELECT status, title, summary, updated_at, archive_state FROM tasks WHERE task_id=?").get(taskId);
       const previousRunCount = Number(this.db.prepare("SELECT count(*) AS count FROM runs WHERE task_id=?").get(taskId)?.count ?? 0);
       const previousPipelineCount = Number(this.db.prepare("SELECT count(*) AS count FROM pipelines WHERE task_id=?").get(taskId)?.count ?? 0);
@@ -307,13 +394,17 @@ export class StewardArchiveImporter {
       }
       this.db.prepare("DELETE FROM files WHERE task_id=?").run(taskId);
       for (const file of snapshots) {
-        this.db.prepare(`INSERT INTO files(task_id, relative_path, kind, media_type, lifecycle, declared_size, declared_sha256, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(taskId, file.path, file.kind, file.mediaType ?? fileMediaType(file.path), file.lifecycle ?? "live", file.byteSize ?? null, file.sha256 ?? null, file.size, file.acceptedEnd, file.prefixHash, file.prefixRevision, file.records.length, file.fileRevision, file.status);
-        if (file.records.length) this.db.prepare(`INSERT INTO records(task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type) SELECT ?, ?, json_extract(value, '$.ordinal'), json_extract(value, '$.byteStart'), json_extract(value, '$.byteEnd'), json_extract(value, '$.timestamp'), json_extract(value, '$.recordType') FROM json_each(?)`).run(taskId, file.path, file.recordsJson);
+        this.db.prepare(`INSERT INTO files(task_id, relative_path, kind, media_type, lifecycle, declared_size, declared_sha256, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(taskId, file.path, file.kind, file.mediaType ?? fileMediaType(file.path), file.lifecycle ?? "live", file.byteSize ?? null, file.sha256 ?? null, file.size, file.acceptedEnd, file.prefixHash, file.prefixRevision, file.completeRecords, file.fileRevision, file.status);
+        if (file.completeRecords) this.db.prepare("INSERT INTO records(task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type) SELECT task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type FROM record_staging WHERE import_token=? AND relative_path=? ORDER BY ordinal").run(importToken, file.path);
       }
+      this.db.prepare("DELETE FROM record_staging WHERE import_token=?").run(importToken);
       this.db.prepare("UPDATE tasks SET archive_state=?, manifest_observed_at=?, verified_at=?, archive_reason=? WHERE task_id=?").run(archiveState.state, archiveState.manifestObservedAt, archiveState.verifiedAt, archiveState.reason, taskId);
       const changed = !previous || String(previous.status) !== String(task.status) || String(previous.title) !== String((task.summary as JsonRecord).title) || String(previous.summary) !== String((task.summary as JsonRecord).text) || String(previous.updated_at) !== String(task.updatedAt) || String(previous.archive_state) !== archiveState.state || previousRunCount !== runs.length || previousPipelineCount !== pipelines.length || fileChanged;
-      return { changed, archiveState: archiveState.state };
-    });
+        return { changed, archiveState: archiveState.state };
+      });
+    } finally {
+      this.db.prepare("DELETE FROM record_staging WHERE import_token=?").run(importToken);
+    }
   }
 }
 

@@ -21,6 +21,7 @@ import { TranscriptLayout, type RunOutlinePhase, type RunPhaseKind } from "./tra
 import { LazyTranscript, type TranscriptRecord } from "./lazy-transcript";
 import { getArchiveRepository } from "@/lib/steward-archive/repository";
 import { loadArchiveTaskView, loadInitialTranscript } from "@/lib/steward-archive/view-model";
+import { RevisionMonitor } from "../../revision-monitor";
 
 export const metadata: Metadata = { title: "Steward task" };
 
@@ -59,6 +60,8 @@ interface TaskData {
     completedAt: string | null; summary: string;
     workerRun: { name?: string; sessionId?: string; resumeOfRunId?: string | null; parentRunId?: string | null; retryOfRunId?: string | null; transcriptPath?: string | null; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string; initialCursor?: string | null; hasMore?: boolean; fileRevision?: string | null };
     reviewerRun: { name?: string; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string } | null;
+    runs: Array<{ runId: string; role: string; roleOrdinal: number; state: string; sessionId: string; resumeOfRunId: string | null; parentRunId: string | null; retryOfRunId: string | null; startedAt: string; completedAt: string | null; model: string | null; reasoning: string | null; result: { status?: string; summary?: string | null }; usage: { availability?: string; promptTokens?: number | null; completionTokens?: number | null; totalTokens?: number | null }; cost: { availability?: string; estimatedMicroUsd?: number | null; currency?: string | null }; completeRecords: number }>;
+    integration: { state?: string; commit?: string | null; resultPath?: string | null; startedAt?: string; completedAt?: string | null };
     artifacts: { transcriptBytes: number; patchBytes: number; lastMessageBytes: number; transcriptTruncated: boolean };
   }>;
   transcript: TranscriptItem[];
@@ -72,7 +75,7 @@ interface TaskData {
       }>;
     }>;
   }>;
-  validations: Array<{ id: string; pipelineId?: string; attempt: number; command: string; status: string; exitCode: number | null; durationSeconds: number; summary: string; summaryTruncated: boolean }>;
+  validations: Array<{ id: string; pipelineId?: string; attempt: number; command: string; status: string; exitCode: number | null; durationSeconds: number; summary: string; summaryTruncated: boolean; outputUrl?: string }>;
   reviews: Array<{
     id?: string; pipelineId?: string; attempt: number; kind?: string; role?: string; verdict: string; summary: string;
     findings: Array<{ severity: string; title: string; file: string; line: number | null; detail: string; recommendation: string }>;
@@ -220,20 +223,29 @@ function PlanningRuns({ runs, taskId, privateTranscripts }: { runs: NonNullable<
 function AttemptsEvidence({ data, selectedAttempt, taskId, artifact, selectedFile, privateTranscript }: { data: TaskData; selectedAttempt: number; taskId: string; artifact: ArtifactView; selectedFile?: string; privateTranscript: ArchiveTranscript | null }) {
   return (
     <section id="attempts" aria-labelledby="attempt-title" className="scroll-mt-20 border-b border-line py-8 sm:py-10">
-      <div className="flex items-baseline justify-between gap-4"><h2 id="attempt-title" className="text-lg font-semibold text-ink">Attempts</h2><span className="text-xs text-muted data-text">{data.attempts.length}</span></div>
+      <div className="flex items-baseline justify-between gap-4"><h2 id="attempt-title" className="text-lg font-semibold text-ink">Processing pipelines</h2><span className="text-xs text-muted data-text">{data.attempts.length}</span></div>
       <div className="mt-5 border-t border-line">
         {data.attempts.map((item) => {
           const current = item.number === selectedAttempt;
-          const eventCount = item.workerRun.events + (item.reviewerRun?.events ?? 0);
+          const eventCount = item.runs.reduce((total, run) => total + run.completeRecords, 0);
           const hasPublishedTranscript = data.transcript.some((event) => event.attempt === item.number);
           const privateActive = current && artifact === "transcript" && privateTranscript !== null;
           const showPublicationWarnings = !privateActive && (data.task.status === "running" || artifact === "transcript" && hasPublishedTranscript);
           const evidenceHref = (view: ArtifactView) => `/steward/tasks/${taskId}?attempt=${item.number}&artifact=${view}#attempt-${item.number + 1}-evidence`;
           return (
             <AttemptDisclosure key={item.number} id={`attempt-${item.number + 1}-evidence`} current={current} number={item.number} label={item.label} summary={item.summary} status={<Status value={item.status} />} eventCount={eventCount} model={item.workerRun.model} reasoningEffort={item.workerRun.reasoningEffort}>
+                <section aria-label={`${item.label} owned runs`} className="mb-7 border-y border-line">
+                  <div className="flex items-baseline justify-between gap-4 py-3"><h3 className="text-sm font-semibold text-ink">Owned runs</h3><span className="text-xs text-muted data-text">{item.runs.length}</span></div>
+                  <ol className="border-t border-line">{item.runs.map((run) => <li key={run.runId} className="grid gap-3 border-b border-line py-4 last:border-b-0 lg:grid-cols-[minmax(12rem,1fr)_minmax(14rem,1fr)_minmax(12rem,0.8fr)]">
+                    <div className="min-w-0"><p className="break-all text-sm font-semibold text-ink data-text">{run.runId}</p><p className="mt-1 text-xs text-muted">{titleCase(run.role)} run {run.roleOrdinal} · <Status value={run.state} /></p><p className="mt-2 text-xs leading-5 text-muted">{run.result?.summary ?? "No run result summary available."}</p></div>
+                    <dl className="text-xs text-muted"><div className="flex justify-between gap-3 py-1"><dt>Session</dt><dd className="break-all text-right text-ink data-text">{run.sessionId}</dd></div>{run.resumeOfRunId ? <div className="flex justify-between gap-3 py-1"><dt>Resumes</dt><dd className="break-all text-right text-ink data-text">{run.resumeOfRunId}</dd></div> : null}{run.parentRunId ? <div className="flex justify-between gap-3 py-1"><dt>Parent</dt><dd className="break-all text-right text-ink data-text">{run.parentRunId}</dd></div> : null}{run.retryOfRunId ? <div className="flex justify-between gap-3 py-1"><dt>Retries</dt><dd className="break-all text-right text-ink data-text">{run.retryOfRunId}</dd></div> : null}<div className="flex justify-between gap-3 py-1"><dt>Records</dt><dd className="text-ink data-text">{run.completeRecords}</dd></div></dl>
+                    <dl className="text-xs text-muted"><div className="flex justify-between gap-3 py-1"><dt>Model</dt><dd className="text-right text-ink data-text">{run.model ?? "Unavailable"}</dd></div><div className="flex justify-between gap-3 py-1"><dt>Reasoning</dt><dd className="text-right text-ink">{run.reasoning ?? "Unavailable"}</dd></div><div className="flex justify-between gap-3 py-1"><dt>Tokens</dt><dd className="text-right text-ink data-text">{run.usage.totalTokens == null ? titleCase(run.usage.availability ?? "unavailable") : run.usage.totalTokens.toLocaleString("en-US")}</dd></div><div className="flex justify-between gap-3 py-1"><dt>Cost</dt><dd className="text-right text-ink data-text">{run.cost.estimatedMicroUsd == null ? titleCase(run.cost.availability ?? "unavailable") : `$${(run.cost.estimatedMicroUsd / 1_000_000).toFixed(6)}`}</dd></div></dl>
+                  </li>)}</ol>
+                  <dl className="grid border-t border-line py-3 text-xs text-muted sm:grid-cols-3"><div><dt>Integration</dt><dd className="mt-1 text-ink"><Status value={item.integration?.state ?? "unavailable"} /></dd></div><div><dt>Commit</dt><dd className="mt-1 break-all text-ink data-text">{item.integration?.commit ?? "Unavailable"}</dd></div><div><dt>Result evidence</dt><dd className="mt-1 break-all text-ink data-text">{item.integration?.resultPath ?? "Unavailable"}</dd></div></dl>
+                </section>
                 {showPublicationWarnings && data.completeness.warnings.length ? <div className="mb-5 border-y border-line py-3 text-xs leading-5"><p className="font-medium text-warning">{titleCase(data.completeness.state)} publication</p><ul className="mt-1 text-muted">{data.completeness.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : null}
                 {!privateActive && artifact === "transcript" && hasPublishedTranscript ? <p className="mb-4 max-w-3xl text-xs leading-5 text-warning">{data.completeness.transcript}</p> : null}
-                <nav aria-label={`Attempt ${item.number + 1} evidence`} className="flex max-w-full overflow-x-auto border-b border-line">{artifactViews.map((view) => <Link key={view} href={evidenceHref(view)} aria-current={artifact === view ? "page" : undefined} className={`shrink-0 border-b-2 px-4 py-3 text-sm font-medium no-underline first:pl-0 ${artifact === view ? "border-accent text-accent" : "border-transparent text-muted"}`}>{titleCase(view)}</Link>)}</nav>
+                <nav aria-label={`Pipeline ${item.number + 1} evidence`} className="flex max-w-full overflow-x-auto border-b border-line">{artifactViews.map((view) => <Link key={view} href={evidenceHref(view)} aria-current={artifact === view ? "page" : undefined} className={`shrink-0 border-b-2 px-4 py-3 text-sm font-medium no-underline first:pl-0 ${artifact === view ? "border-accent text-accent" : "border-transparent text-muted"}`}>{titleCase(view)}</Link>)}</nav>
                 <div className="pt-6"><ArtifactPanel view={artifact} data={data} attempt={item.number} taskId={taskId} transcriptTruncated={item.artifacts.transcriptTruncated} selectedFile={current ? selectedFile : undefined} privateTranscript={privateActive ? privateTranscript : null} /></div>
             </AttemptDisclosure>
           );
@@ -415,7 +427,7 @@ function ArtifactPanel({ view, data, attempt, taskId, transcriptTruncated, selec
   if (view === "validation") {
     const records = data.validations.filter((record) => record.attempt === attempt || record.pipelineId === attemptData.pipelineId);
     if (!records.length) return <EmptyEvidence title="Validation not started" detail="No validation records exist for the selected attempt at this snapshot." />;
-    return <ul className="border-t border-line">{records.map((record) => <li key={record.id} className="grid gap-4 border-b border-line py-5 sm:grid-cols-[8rem_minmax(0,1fr)_7rem]"><div><Status value={record.status} /><p className="mt-1 text-xs text-muted data-text">exit {record.exitCode}</p></div><div><p className="break-words text-sm font-medium text-ink data-text">{record.command}</p>{record.summaryTruncated ? <p className="mt-2 text-xs text-warning">Earlier output omitted · published tail</p> : null}<pre aria-label={record.summaryTruncated ? "Published validation tail" : undefined} className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs leading-5 text-muted data-text">{record.summary}</pre></div><p className="text-xs text-muted data-text sm:text-right">{record.durationSeconds}s</p></li>)}</ul>;
+    return <ul className="border-t border-line">{records.map((record) => <li key={record.id} className="grid gap-4 border-b border-line py-5 sm:grid-cols-[8rem_minmax(0,1fr)_7rem]"><div><Status value={record.status} /><p className="mt-1 text-xs text-muted data-text">exit {record.exitCode ?? "unavailable"}</p></div><div><p className="break-words text-sm font-medium text-ink data-text">{record.command}</p>{record.summaryTruncated ? <p className="mt-2 text-xs text-warning">Earlier output omitted · published tail</p> : null}<pre aria-label={record.summaryTruncated ? "Published validation tail" : undefined} className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs leading-5 text-muted data-text">{record.summary}</pre>{record.outputUrl ? <a href={record.outputUrl} className="mt-3 inline-block text-xs font-medium text-accent">Download validation log</a> : null}</div><p className="text-xs text-muted data-text sm:text-right">{record.durationSeconds}s</p></li>)}</ul>;
   }
   const reviewRecords = data.reviews.filter((record) => record.attempt === attempt || record.pipelineId === attemptData.pipelineId);
   if (!reviewRecords.length) return <EmptyEvidence title="Review not started" detail="No reviewer record exists for the selected run's pipeline at this snapshot." />;
@@ -434,6 +446,7 @@ interface PageProps {
 export default async function StewardTaskPage({ params, searchParams }: PageProps) {
   const [{ taskId }, query] = await Promise.all([params, searchParams]);
   const repository = getArchiveRepository();
+  const initialRevision = repository.getRevision().revision;
   const archiveData = await loadArchiveTaskView(repository, taskId);
   const data = archiveData as TaskData | null;
   if (!data) notFound();
@@ -458,6 +471,7 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
 
   return <>
     <SiteHeader githubStars={githubStars} />
+    <RevisionMonitor initialRevision={initialRevision} />
     <main id="content"><div className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12">
       <header className="py-10 sm:py-12">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

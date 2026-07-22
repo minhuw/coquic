@@ -516,13 +516,13 @@ diagnostic categories and the synchronous hook exits successfully. Private
 files are mode `0600` under mode `0700` directories. No trajectory artifact is
 copied to the public mirror.
 
-Project hooks live in `.codex/hooks.json`. Codex normally asks the operator to
-review and trust project hooks; complete that `/hooks` trust review before a
-code run when trajectory evidence is required. Steward does not edit the
-operator's `~/.codex` configuration and does not pass
-`--dangerously-bypass-hook-trust`. If the trust review is skipped, the run
-still proceeds and its diagnostics expose `unavailable`/`not_produced`
-trajectory evidence only.
+Steward supplies these hooks as invocation-local Codex configuration only for
+code-stage workers. It does not install project hooks under `.codex/` or edit
+the operator's `~/.codex` configuration, so ordinary Codex sessions and
+non-code Steward stages do not discover the recorder. Steward passes
+`--dangerously-bypass-hook-trust` for its vetted hook command; if hooks are
+disabled by operator or managed policy, the run still proceeds and its
+diagnostics expose `unavailable`/`not_produced` trajectory evidence only.
 
 Each transient Codex retry archives its complete trajectory as
 `tool-changes.retry-<n>/` alongside the matching transcript and last-message

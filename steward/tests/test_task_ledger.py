@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -199,6 +200,118 @@ def test_checkpoint_round_trip(config: StewardConfig) -> None:
     )
 
 
+def test_execution_and_checkpoint_pointers_are_task_scoped(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+
+    def allocate(title: str):
+        task, _ = store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=title,
+                prompt="prompt",
+            )
+        )
+        execution = store.get_execution(task.id)
+        pipeline = store.list_pipelines(task.id)[0]
+        session = store.create_session(task.id, pipeline.id)
+        run = store.create_run(
+            task.id, pipeline.id, session.id, role="implementation"
+        )
+        return task, execution, pipeline, session, run
+
+    first = allocate("first")
+    second = allocate("second")
+    first_task, first_execution, first_pipeline, _, _ = first
+    _, _, second_pipeline, second_session, second_run = second
+
+    with pytest.raises(ValueError, match="pipeline does not belong"):
+        store.transition_execution(
+            first_execution.id,
+            "active",
+            pipeline_id=second_pipeline.id,
+            session_id=second_session.id,
+            run_id=second_run.id,
+        )
+    with pytest.raises(ValueError, match="session does not belong"):
+        store.save_checkpoint(
+            WorktreeCheckpoint(
+                task_id=first_task.id,
+                execution_id=first_execution.id,
+                base_commit="a" * 40,
+                expected_tree="b" * 40,
+                phase="implementation",
+                owning_pipeline_id=first_pipeline.id,
+                active_session_id=second_session.id,
+                active_run_id=second_run.id,
+            )
+        )
+    checkpoint = store.save_checkpoint(
+        WorktreeCheckpoint(
+            task_id=first_task.id,
+            execution_id=first_execution.id,
+            base_commit="a" * 40,
+            expected_tree="b" * 40,
+            phase="implementation",
+            owning_pipeline_id=first_pipeline.id,
+        )
+    )
+
+    with sqlite3.connect(config.db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError, match="ownership"):
+            connection.execute(
+                "UPDATE task_executions SET owning_pipeline_id = ? WHERE id = ?",
+                (second_pipeline.id, first_execution.id),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="ownership"):
+            connection.execute(
+                "UPDATE task_worktree_checkpoints SET owning_pipeline_id = ? WHERE id = ?",
+                (second_pipeline.id, checkpoint.id),
+            )
+
+
+def test_task_allocation_rolls_back_execution_pipeline_failure(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    from coquic_steward.storage.sqlite import Session
+
+    real_flush = Session.flush
+    flushes = 0
+
+    def crash_after_task_flush(session: Session, *args: object, **kwargs: object) -> None:
+        nonlocal flushes
+        real_flush(session, *args, **kwargs)
+        flushes += 1
+        if flushes == 1:
+            raise RuntimeError("injected pipeline allocation failure")
+
+    with patch(
+        "coquic_steward.storage.sqlite.Session.flush",
+        new=crash_after_task_flush,
+    ), pytest.raises(RuntimeError, match="pipeline allocation"):
+        store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title="atomic allocation",
+                prompt="prompt",
+            )
+        )
+
+    with sqlite3.connect(config.db_path) as connection:
+        assert connection.execute("SELECT count(*) FROM tasks").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM task_executions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM task_pipelines"
+        ).fetchone() == (0,)
+
+
 def test_invalid_recovery_lineage_is_rejected(config: StewardConfig) -> None:
     store = TaskStore(config.db_path)
     task, _ = store.add_task(
@@ -316,11 +429,10 @@ def test_database_rejects_cross_task_run_parent(config: StewardConfig) -> None:
             )
 
 
-def test_checkpoint_rejects_dirty_worktree(
-    repo: Path, config: StewardConfig
-) -> None:
+def test_checkpoint_rejects_dirty_worktree(config: StewardConfig) -> None:
     worktrees = Worktrees(config)
-    task, _ = TaskStore(config.db_path).add_task(
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
             worker=WorkerKind.custom,
@@ -328,16 +440,81 @@ def test_checkpoint_rejects_dirty_worktree(
             prompt="prompt",
         )
     )
+    pipeline = store.list_pipelines(task.id)[0]
+    path, _ = worktrees.create(task)
     identity = worktrees.identity(
         task,
-        repo,
-        owning_pipeline_id="pipeline-safe",
+        path,
+        owning_pipeline_id=pipeline.id,
         phase="implementation",
     )
-    (repo / "README.md").write_text("changed\n", encoding="utf-8")
+    store.save_checkpoint(
+        WorktreeCheckpoint(
+            task_id=identity.task_id,
+            execution_id=identity.execution_id,
+            base_commit=identity.base_commit,
+            expected_tree=identity.expected_tree,
+            phase=identity.phase,
+            owning_pipeline_id=identity.owning_pipeline_id,
+            worktree_path=identity.path,
+        )
+    )
+    (path / "README.md").write_text("changed\n", encoding="utf-8")
 
-    assert not worktrees.validate_checkpoint(repo, identity)
+    assert not worktrees.validate_checkpoint(path, identity)
 
-    (repo / "README.md").write_text("hello\n", encoding="utf-8")
-    (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
-    assert not worktrees.validate_checkpoint(repo, identity)
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    (path / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    assert not worktrees.validate_checkpoint(path, identity)
+
+
+def test_checkpoint_recovery_binds_durable_runtime_identity(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="checkpoint identity",
+            prompt="prompt",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    worktrees = Worktrees(config)
+    path, _ = worktrees.create(task)
+    identity = worktrees.identity(
+        task,
+        path,
+        owning_pipeline_id=pipeline.id,
+        phase="implementation",
+        image_version="image-v1",
+        runtime_version="runtime-v1",
+    )
+    store.save_checkpoint(
+        WorktreeCheckpoint(
+            task_id=identity.task_id,
+            execution_id=identity.execution_id,
+            base_commit=identity.base_commit,
+            expected_tree=identity.expected_tree,
+            phase=identity.phase,
+            owning_pipeline_id=identity.owning_pipeline_id,
+            active_session_id=identity.active_session_id,
+            active_run_id=identity.active_run_id,
+            worktree_path=identity.path,
+            image_version=identity.image_version,
+            runtime_version=identity.runtime_version,
+        )
+    )
+
+    assert worktrees.validate_checkpoint(path, identity)
+    assert not worktrees.validate_checkpoint(
+        path, replace(identity, task_id="task-wrong")
+    )
+    assert not worktrees.validate_checkpoint(
+        path, replace(identity, owning_pipeline_id="pipeline-wrong")
+    )
+    assert not worktrees.validate_checkpoint(
+        path, replace(identity, runtime_version="runtime-wrong")
+    )
+    assert not worktrees.validate_checkpoint(config.worktrees_dir, identity)

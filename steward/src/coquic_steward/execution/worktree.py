@@ -23,6 +23,7 @@ FORBIDDEN_PATH_PARTS = {
 @dataclass(frozen=True)
 class WorktreeIdentity:
     task_id: str
+    execution_id: str
     path: Path
     base_commit: str
     expected_tree: str
@@ -73,6 +74,55 @@ class Worktrees:
         """Verify an existing worktree before recovery can adopt it."""
         if not path.is_dir() or (path / ".git").exists() is False:
             return False
+        task_id = getattr(checkpoint, "task_id", None)
+        execution_id = getattr(checkpoint, "execution_id", None)
+        owning_pipeline_id = getattr(checkpoint, "owning_pipeline_id", None)
+        declared_path = getattr(checkpoint, "worktree_path", None) or getattr(
+            checkpoint, "path", None
+        )
+        if not all((task_id, execution_id, owning_pipeline_id, declared_path)):
+            return False
+        actual_path = path.resolve()
+        if actual_path != Path(declared_path).resolve():
+            return False
+        if actual_path != (self.config.worktrees_dir / str(task_id)).resolve():
+            return False
+        if not self.config.db_path.is_file():
+            return False
+        from ..storage import TaskStore
+
+        store = TaskStore(self.config.db_path)
+        try:
+            durable = store.get_checkpoint(str(execution_id))
+            execution = store.get_execution(str(execution_id))
+            pipeline = store.get_pipeline(str(owning_pipeline_id))
+        except KeyError:
+            return False
+        if (
+            execution.task_id != task_id
+            or pipeline.task_id != task_id
+            or pipeline.execution_id != execution_id
+        ):
+            return False
+        fields = (
+            "task_id",
+            "execution_id",
+            "base_commit",
+            "expected_tree",
+            "phase",
+            "owning_pipeline_id",
+            "active_session_id",
+            "active_run_id",
+            "image_version",
+            "runtime_version",
+        )
+        if any(
+            getattr(durable, field) != getattr(checkpoint, field, None)
+            for field in fields
+        ):
+            return False
+        if durable.worktree_path is None or durable.worktree_path.resolve() != actual_path:
+            return False
         expected_base = getattr(checkpoint, "base_commit", None)
         expected_tree = getattr(checkpoint, "expected_tree", None)
         if expected_base is not None:
@@ -99,12 +149,16 @@ class Worktrees:
         image_version: str | None = None,
         runtime_version: str | None = None,
     ) -> WorktreeIdentity:
+        from ..storage import TaskStore
+
+        execution = TaskStore(self.config.db_path).get_execution(task.id)
         base_commit = run_command(["git", "rev-parse", "HEAD"], cwd=path, check=True).stdout.strip()
         expected_tree = _worktree_tree(path)
         if expected_tree is None:
             raise RuntimeError(f"could not determine worktree identity: {path}")
         return WorktreeIdentity(
             task_id=task.id,
+            execution_id=execution.id,
             path=path,
             base_commit=base_commit,
             expected_tree=expected_tree,

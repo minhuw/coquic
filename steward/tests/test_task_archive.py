@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -13,11 +14,19 @@ from coquic_steward.execution.task_archive import (
     ArchiveValidationError,
     TaskArchive,
 )
+from coquic_steward.core.config import StewardConfig
+from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
+from coquic_steward.storage import TaskStore
+
+
+COMPLETED_AT = "2026-07-22T00:00:04Z"
 
 
 def _live_archive(tmp_path: Path) -> TaskArchive:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "raw prompt\n")
+    archive.create_task(
+        "task-safe", "raw prompt\n", pipeline_id="pipeline-initial"
+    )
     archive.materialize_pipeline(
         "task-safe",
         {
@@ -70,7 +79,7 @@ def test_paths_reject_traversal_and_hidden_components(tmp_path: Path) -> None:
 
 def test_atomic_materialization_and_exact_reconciliation(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     assert archive.reconcile("task-safe", "result.json", b"{}\n") == "materialized"
     assert archive.reconcile("task-safe", "result.json", b"{}\n") == "adopted"
     with pytest.raises(ArchiveConflictError):
@@ -79,7 +88,7 @@ def test_atomic_materialization_and_exact_reconciliation(tmp_path: Path) -> None
 
 def test_jsonl_appends_complete_lines_only(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     archive.append_event("task-safe", {"kind": "task.created"})
     events = archive.task_path("task-safe", "events.jsonl").read_bytes()
     assert events.endswith(b"\n")
@@ -92,7 +101,7 @@ def test_jsonl_event_id_retry_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     timestamps = iter(
         [
             "2026-07-22T00:00:00Z",
@@ -119,7 +128,7 @@ def test_jsonl_event_id_retry_is_idempotent(
 
 def test_private_fields_do_not_enter_run_metadata(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     archive.materialize_run(
         "task-safe",
         "pipeline-initial",
@@ -149,6 +158,7 @@ def test_seal_manifest_is_exact_and_terminal(tmp_path: Path) -> None:
         "task-safe",
         "succeeded",
         completion_identity="completion-safe",
+        completed_at=COMPLETED_AT,
         external_actions_complete=True,
         writer_final=True,
     )
@@ -175,7 +185,9 @@ def test_task_directory_symlink_is_rejected(tmp_path: Path) -> None:
 
     archive = TaskArchive(tasks)
     with pytest.raises(ArchiveValidationError, match="symlink"):
-        archive.create_task("task-safe", "prompt")
+        archive.create_task(
+            "task-safe", "prompt", pipeline_id="pipeline-initial"
+        )
     assert not (outside / "task.json").exists()
 
 
@@ -196,6 +208,7 @@ def test_seal_rejects_symlinked_directory(tmp_path: Path) -> None:
             "task-safe",
             "succeeded",
             completion_identity="completion-safe",
+            completed_at=COMPLETED_AT,
             external_actions_complete=True,
             writer_final=True,
         )
@@ -203,7 +216,7 @@ def test_seal_rejects_symlinked_directory(tmp_path: Path) -> None:
 
 def test_writes_and_seal_reject_special_files(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     fifo = archive.task_path("task-safe", "result.json")
     os.mkfifo(fifo)
 
@@ -214,6 +227,7 @@ def test_writes_and_seal_reject_special_files(tmp_path: Path) -> None:
             "task-safe",
             "succeeded",
             completion_identity="completion-safe",
+            completed_at=COMPLETED_AT,
             external_actions_complete=True,
             writer_final=True,
         )
@@ -223,7 +237,7 @@ def test_materializers_emit_canonical_pipeline_and_run_shapes(
     tmp_path: Path,
 ) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     pipeline_path = archive.materialize_pipeline(
         "task-safe",
         {
@@ -269,7 +283,7 @@ def test_materializers_emit_canonical_pipeline_and_run_shapes(
 
 def test_seal_schema_validates_pipeline_documents(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
-    archive.create_task("task-safe", "prompt")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
     archive.materialize_pipeline(
         "task-safe",
         {
@@ -320,6 +334,7 @@ def test_seal_schema_validates_pipeline_documents(tmp_path: Path) -> None:
             "task-safe",
             "succeeded",
             completion_identity="completion-safe",
+            completed_at=COMPLETED_AT,
             external_actions_complete=True,
             writer_final=True,
         )
@@ -346,6 +361,7 @@ def test_manifest_verification_rejects_invalid_identity_and_epoch(
         "task-safe",
         "succeeded",
         completion_identity="completion-safe",
+        completed_at=COMPLETED_AT,
         external_actions_complete=True,
         writer_final=True,
     )
@@ -357,3 +373,168 @@ def test_manifest_verification_rejects_invalid_identity_and_epoch(
     )
 
     assert not archive.verify("task-safe")
+
+
+def test_materializes_typed_ledger_with_real_ids_and_exact_terminal_retries(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="typed ledger",
+            prompt="prompt",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id)
+    run = store.create_run(
+        task.id, pipeline.id, session.id, role="implementation"
+    )
+    archive = TaskArchive(config.tasks_dir)
+
+    archive.materialize_ledger(task, pipeline, [run])
+    archive.materialize_ledger(task, pipeline, [run])
+
+    task_document = json.loads(archive.task_path(task.id, "task.json").read_text())
+    assert task_document["currentPipelineId"] == pipeline.id
+    assert task_document["pipelines"][0]["pipelineId"] == pipeline.id
+    pipeline_path = archive.task_path(
+        task.id, f"pipelines/{pipeline.id}/pipeline.json"
+    )
+    assert json.loads(pipeline_path.read_text())["state"] == "active"
+
+    completed_run = store.transition_run(run.id, "succeeded", exit_code=0)
+    archive.materialize_run(task.id, pipeline.id, completed_run)
+    completed_pipeline = store.transition_pipeline(
+        pipeline.id, "succeeded", phase="complete"
+    )
+    archive.materialize_pipeline(
+        task.id, completed_pipeline, runs=[completed_run]
+    )
+
+    archive.materialize_run(task.id, pipeline.id, completed_run)
+    archive.materialize_pipeline(
+        task.id, completed_pipeline, runs=[completed_run]
+    )
+    with pytest.raises(ArchiveImmutableError):
+        archive.materialize_pipeline(
+            task.id,
+            completed_pipeline.model_copy(update={"output_identity": "changed"}),
+            runs=[completed_run],
+        )
+
+
+def test_task_materialization_requires_a_ledger_pipeline_id(tmp_path: Path) -> None:
+    archive = TaskArchive(tmp_path / "tasks")
+
+    with pytest.raises(ArchiveValidationError, match="ledger pipeline"):
+        archive.create_task("task-safe", "prompt")
+
+
+def test_seal_is_single_winner_and_binds_completion_envelope(tmp_path: Path) -> None:
+    archive = _live_archive(tmp_path)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+    requests = [
+        ("completion-one", "2026-07-22T00:01:00Z"),
+        ("completion-two", "2026-07-22T00:02:00Z"),
+    ]
+
+    def seal(request: tuple[str, str]) -> tuple[str, object]:
+        try:
+            return (
+                "sealed",
+                TaskArchive(archive.root).seal(
+                    "task-safe",
+                    "succeeded",
+                    completion_identity=request[0],
+                    completed_at=request[1],
+                    external_actions_complete=True,
+                    writer_final=True,
+                ),
+            )
+        except ArchiveConflictError as exc:
+            return "conflict", exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(seal, requests))
+
+    assert sorted(result[0] for result in results) == ["conflict", "sealed"]
+    manifest_path = archive.task_path("task-safe", "manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    winning_request = (
+        manifest["completionIdentity"],
+        manifest["completedAt"],
+    )
+    assert winning_request in requests
+    assert archive.verify("task-safe")
+    assert (
+        archive.seal(
+            "task-safe",
+            "succeeded",
+            completion_identity=winning_request[0],
+            completed_at=winning_request[1],
+            external_actions_complete=True,
+            writer_final=True,
+        )
+        == manifest_path
+    )
+
+    manifest["completionIdentity"] = "completion-recanonicalized"
+    manifest["completedAt"] = "2026-07-22T00:03:00Z"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    assert not archive.verify("task-safe")
+
+
+def test_seal_crash_retries_only_the_exact_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _live_archive(tmp_path)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+    real_create = archive._atomic_create_bytes
+
+    def crash(path: Path, data: bytes) -> bool:
+        if path.name == "manifest.json":
+            raise RuntimeError("injected seal crash")
+        return real_create(path, data)
+
+    monkeypatch.setattr(archive, "_atomic_create_bytes", crash)
+    with pytest.raises(RuntimeError, match="seal crash"):
+        archive.seal(
+            "task-safe",
+            "succeeded",
+            completion_identity="completion-stable",
+            completed_at=COMPLETED_AT,
+            external_actions_complete=True,
+            writer_final=True,
+        )
+    monkeypatch.setattr(archive, "_atomic_create_bytes", real_create)
+
+    with pytest.raises(ArchiveConflictError, match="completion"):
+        archive.seal(
+            "task-safe",
+            "succeeded",
+            completion_identity="completion-different",
+            completed_at=COMPLETED_AT,
+            external_actions_complete=True,
+            writer_final=True,
+        )
+    archive.seal(
+        "task-safe",
+        "succeeded",
+        completion_identity="completion-stable",
+        completed_at=COMPLETED_AT,
+        external_actions_complete=True,
+        writer_final=True,
+    )
+    assert archive.verify("task-safe")

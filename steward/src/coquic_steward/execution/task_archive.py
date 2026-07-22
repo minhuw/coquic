@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import stat
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -194,6 +195,30 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     raise TypeError(f"expected mapping or pydantic model, got {type(value).__name__}")
+
+
+def _ledger_run_reference(
+    run: Mapping[str, Any] | TaskRun,
+    *,
+    task_id: str,
+    pipeline_id: str,
+) -> dict[str, Any]:
+    value = _camelize(_as_dict(run))
+    run_id = value.get("runId") or value.get("id")
+    if not run_id:
+        raise ArchiveValidationError("ledger run id is required")
+    run_id = validate_opaque_id(str(run_id))
+    if value.get("taskId") != task_id or value.get("pipelineId") != pipeline_id:
+        raise ArchiveConflictError("ledger run does not belong to task pipeline")
+    reference = {
+        "runId": run_id,
+        "role": value.get("role"),
+        "roleOrdinal": value.get("roleOrdinal"),
+        "state": value.get("state"),
+        "path": f"pipelines/{pipeline_id}/runs/{run_id}/run.json",
+    }
+    _validate_run_reference(reference)
+    return reference
 
 
 def _validate_shape(
@@ -906,8 +931,29 @@ class TaskArchive:
 
     write_task = create_task
 
-    def create_task_from_record(self, record: TaskRecord) -> Path:
-        return self.create_task(record.id, record.spec.prompt, task=record)
+    def create_task_from_record(
+        self,
+        record: TaskRecord,
+        *,
+        pipeline: TaskPipeline | None = None,
+        pipeline_id: str | None = None,
+    ) -> Path:
+        if pipeline is not None:
+            if pipeline.task_id != record.id:
+                raise ArchiveConflictError("ledger pipeline does not belong to task")
+            if pipeline_id is not None and pipeline_id != pipeline.id:
+                raise ArchiveConflictError("ledger pipeline identities conflict")
+            pipeline_id = pipeline.id
+        if pipeline_id is None:
+            raise ArchiveValidationError(
+                "task materialization requires a ledger pipeline id"
+            )
+        return self.create_task(
+            record.id,
+            record.spec.prompt,
+            task=record,
+            pipeline_id=pipeline_id,
+        )
 
     def update_task(self, task_id: str, metadata: Mapping[str, Any]) -> Path:
         value = _private_filtered(dict(metadata))
@@ -954,19 +1000,25 @@ class TaskArchive:
         value.setdefault("createdAt", _now())
         value.setdefault("updatedAt", value["createdAt"])
         selected_pipeline = pipeline_id
-        if selected_pipeline is None and not value.get("pipelines"):
-            selected_pipeline = "pipeline-initial"
+        if selected_pipeline is None:
+            selected_pipeline = value.get("currentPipelineId")
         if selected_pipeline is not None:
             validate_opaque_id(str(selected_pipeline))
         if value.get("currentPipelineId") is None:
             value["currentPipelineId"] = selected_pipeline
         value.setdefault("summary", {"title": task_id, "text": "Task created."})
         if not value.get("pipelines"):
-            value["pipelines"] = (
-                [{"pipelineId": selected_pipeline, "ordinal": 1, "path": f"pipelines/{selected_pipeline}/pipeline.json"}]
-                if selected_pipeline is not None
-                else []
-            )
+            if selected_pipeline is None:
+                raise ArchiveValidationError(
+                    "task materialization requires a ledger pipeline id"
+                )
+            value["pipelines"] = [
+                {
+                    "pipelineId": selected_pipeline,
+                    "ordinal": 1,
+                    "path": f"pipelines/{selected_pipeline}/pipeline.json",
+                }
+            ]
         value.setdefault("terminalStatusObservedAt", None)
         value.setdefault("manifestPath", None)
         if value["taskId"] != task_id or value["epochId"] != self.epoch_id:
@@ -979,10 +1031,16 @@ class TaskArchive:
 
     def write_json(self, task_id: str, relative: str, value: Mapping[str, Any] | list[Any]) -> Path:
         path = self.task_path(task_id, relative)
-        self._assert_mutable(task_id, path)
         data = _json_bytes(_private_filtered(value))
-        if path.exists() and path.is_file() and path.read_bytes() == data:
-            return path
+        self._assert_safe_archive_path(path, target="file")
+        if path.exists():
+            if not path.is_file():
+                raise ArchiveValidationError(
+                    f"archive path is not a regular file: {path}"
+                )
+            if path.read_bytes() == data:
+                return path
+        self._assert_mutable(task_id, path)
         if path.exists() and path.name.endswith(".jsonl"):
             raise ArchiveConflictError("JSONL files are append-only")
         # JSON/Markdown metadata is live and may be atomically replaced. Raw
@@ -1016,6 +1074,26 @@ class TaskArchive:
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
             _fsync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _atomic_create_bytes(self, path: Path, data: bytes) -> bool:
+        """Publish complete bytes only when the visible path is still absent."""
+        self._assert_safe_archive_path(path, target="file")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._assert_safe_archive_path(path, target="file")
+        temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, path, follow_symlinks=False)
+            except FileExistsError:
+                return False
+            _fsync_directory(path.parent)
+            return True
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -1133,6 +1211,7 @@ class TaskArchive:
         pipeline: Mapping[str, Any] | TaskPipeline,
         *,
         pipeline_id: str | None = None,
+        runs: Sequence[Mapping[str, Any] | TaskRun] | None = None,
     ) -> Path:
         value = _as_dict(pipeline)
         identifier = pipeline_id or value.get("pipelineId") or value.get("id")
@@ -1163,6 +1242,18 @@ class TaskArchive:
             value.setdefault("completedAt", None)
         for key in ("inputs", "patches", "validations", "reviews", "runs"):
             value.setdefault(key, [])
+        if runs is not None:
+            value["runs"] = [
+                _ledger_run_reference(
+                    run,
+                    task_id=task_id,
+                    pipeline_id=identifier,
+                )
+                for run in runs
+            ]
+            value["runs"].sort(
+                key=lambda item: (item["roleOrdinal"], item["runId"])
+            )
         value.setdefault(
             "integration",
             {
@@ -1184,6 +1275,26 @@ class TaskArchive:
 
     write_pipeline = materialize_pipeline
     materialize_pipeline_descriptor = materialize_pipeline
+
+    def materialize_ledger(
+        self,
+        task: TaskRecord,
+        pipeline: TaskPipeline,
+        runs: Sequence[TaskRun],
+    ) -> Path:
+        if pipeline.task_id != task.id:
+            raise ArchiveConflictError("ledger pipeline does not belong to task")
+        if not runs:
+            raise ArchiveValidationError(
+                "canonical pipeline materialization requires ledger runs"
+            )
+        task_path = self.create_task_from_record(task, pipeline=pipeline)
+        for run in runs:
+            if run.task_id != task.id or run.pipeline_id != pipeline.id:
+                raise ArchiveConflictError("ledger run does not belong to task pipeline")
+            self.materialize_run(task.id, pipeline.id, run)
+        self.materialize_pipeline(task.id, pipeline, runs=runs)
+        return task_path
 
     def materialize_run(
         self,
@@ -1480,6 +1591,12 @@ class TaskArchive:
             raise ArchiveSealError(f"task status is not terminal: {status}")
         if not external_actions_complete or not writer_final:
             raise ArchiveSealError("sealing requires external actions and writer finality")
+        if completion_identity is None or completed_at is None:
+            raise ArchiveSealError(
+                "sealing requires stable completion identity and timestamp"
+            )
+        validate_opaque_id(completion_identity)
+        _validate_timestamp(completed_at, "manifest.completedAt")
         task_dir = self.task_dir(task_id)
         try:
             self._assert_safe_archive_path(task_dir, target="directory")
@@ -1487,6 +1604,32 @@ class TaskArchive:
             raise ArchiveSealError(str(exc)) from exc
         if not task_dir.is_dir():
             raise ArchiveSealError(f"task archive does not exist: {task_id}")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(task_dir, flags)
+        except OSError as exc:
+            raise ArchiveSealError(f"could not lock task archive: {task_id}") from exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            return self._seal_locked(
+                task_id,
+                status,
+                completion_identity,
+                completed_at,
+            )
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def _seal_locked(
+        self,
+        task_id: str,
+        status: str,
+        completion_identity: str,
+        completed_at: str,
+    ) -> Path:
+        task_dir = self.task_dir(task_id)
         manifest_path = task_dir / "manifest.json"
         if manifest_path.exists():
             self._verify_manifest_path(task_id, manifest_path)
@@ -1496,13 +1639,20 @@ class TaskArchive:
                 raise ArchiveSealError("invalid terminal manifest") from exc
             if existing_manifest.get("terminalStatus") != status:
                 raise ArchiveConflictError("terminal status conflicts with manifest")
-            if completion_identity is not None and existing_manifest.get("completionIdentity") != completion_identity:
+            if existing_manifest.get("completionIdentity") != completion_identity:
                 raise ArchiveConflictError("completion identity conflicts with manifest")
-            if completed_at is not None and existing_manifest.get("completedAt") != completed_at:
+            if existing_manifest.get("completedAt") != completed_at:
                 raise ArchiveConflictError("completion timestamp conflicts with manifest")
             return manifest_path
         self._reconcile_hidden(task_dir)
         self._validate_tree_paths(task_dir)
+        self._validate_task_graph(task_id, status)
+        self._record_completion(
+            task_id,
+            status=status,
+            completion_identity=completion_identity,
+            completed_at=completed_at,
+        )
         self._validate_task_graph(task_id, status)
         files: list[dict[str, Any]] = []
         for path in sorted(task_dir.rglob("*")):
@@ -1528,13 +1678,86 @@ class TaskArchive:
             "manifestVersion": FORMAT_VERSION,
             "epochId": self.ensure_epoch()["epochId"],
             "taskId": validate_opaque_id(task_id),
-            "completionIdentity": validate_opaque_id(completion_identity or f"completion-{secrets.token_hex(12)}"),
+            "completionIdentity": completion_identity,
             "terminalStatus": status,
-            "completedAt": completed_at or _now(),
+            "completedAt": completed_at,
             "files": files,
         }
-        self._atomic_bytes(manifest_path, _json_bytes(manifest))
+        manifest_bytes = _json_bytes(manifest)
+        if not self._atomic_create_bytes(manifest_path, manifest_bytes):
+            self._verify_manifest_path(task_id, manifest_path)
+            if manifest_path.read_bytes() != manifest_bytes:
+                raise ArchiveConflictError(
+                    "another completion already sealed the task archive"
+                )
         return manifest_path
+
+    def _record_completion(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        completion_identity: str,
+        completed_at: str,
+    ) -> None:
+        task_path = self.task_path(task_id, "task.json")
+        try:
+            task = json.loads(task_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveSealError("task.json is not valid JSON") from exc
+        if not isinstance(task, dict):
+            raise ArchiveSealError("task.json must contain an object")
+        if task.get("status") != status:
+            raise ArchiveSealError("task metadata status is not terminal status")
+        manifest_reference = task.get("manifestPath")
+        if manifest_reference not in {None, "manifest.json"}:
+            raise ArchiveConflictError("task manifest path conflicts with completion")
+        task["manifestPath"] = "manifest.json"
+        if task.get("terminalStatusObservedAt") is None:
+            task["terminalStatusObservedAt"] = completed_at
+        self.write_json(task_id, "task.json", task)
+
+        event = self._completion_event(
+            task_id,
+            status=status,
+            completion_identity=completion_identity,
+            completed_at=completed_at,
+        )
+        events_path = self.task_path(task_id, "events.jsonl")
+        existing_completion: list[Mapping[str, Any]] = []
+        try:
+            lines = events_path.read_bytes().splitlines()
+            for line in lines:
+                value = json.loads(line)
+                if isinstance(value, Mapping) and value.get("kind") == "archive.frozen":
+                    existing_completion.append(value)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveConflictError("task completion events are invalid") from exc
+        if existing_completion:
+            if len(existing_completion) != 1 or existing_completion[0] != event:
+                raise ArchiveConflictError("completion identity conflicts with task events")
+            return
+        self.append_event(task_id, event)
+
+    def _completion_event(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        completion_identity: str,
+        completed_at: str,
+    ) -> dict[str, Any]:
+        suffix = hashlib.sha256(completion_identity.encode("utf-8")).hexdigest()[:24]
+        return {
+            "eventId": f"event-archive-{suffix}",
+            "kind": "archive.frozen",
+            "at": completed_at,
+            "epochId": self.ensure_epoch()["epochId"],
+            "taskId": task_id,
+            "completionIdentity": completion_identity,
+            "terminalStatus": status,
+            "completedAt": completed_at,
+        }
 
     seal_task = seal
     freeze = seal
@@ -1720,6 +1943,7 @@ class TaskArchive:
             raise ArchiveSealError("manifest epoch identity mismatch")
         self._validate_tree_paths(task_dir)
         self._validate_task_graph(task_id, manifest["terminalStatus"])
+        self._validate_completion_binding(task_id, manifest)
         expected: dict[str, Mapping[str, Any]] = {}
         for descriptor in manifest["files"]:
             relative = descriptor["path"]
@@ -1748,6 +1972,48 @@ class TaskArchive:
             data = actual[relative].read_bytes()
             if descriptor.get("byteSize") != len(data) or descriptor.get("sha256") != hashlib.sha256(data).hexdigest():
                 raise ArchiveSealError(f"terminal file hash mismatch: {relative}")
+
+    def _validate_completion_binding(
+        self,
+        task_id: str,
+        manifest: Mapping[str, Any],
+    ) -> None:
+        events_path = self.task_path(task_id, "events.jsonl")
+        try:
+            data = events_path.read_bytes()
+            if data and not data.endswith(b"\n"):
+                raise ArchiveSealError("task completion events have an incomplete line")
+            completion_events = []
+            for line in data.splitlines():
+                value = json.loads(line)
+                if isinstance(value, Mapping) and value.get("kind") == "archive.frozen":
+                    completion_events.append(value)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveSealError("task completion events are invalid") from exc
+        expected = self._completion_event(
+            task_id,
+            status=str(manifest["terminalStatus"]),
+            completion_identity=str(manifest["completionIdentity"]),
+            completed_at=str(manifest["completedAt"]),
+        )
+        if completion_events != [expected]:
+            raise ArchiveSealError(
+                "terminal manifest completion does not match the task graph"
+            )
+        try:
+            task = json.loads(
+                self.task_path(task_id, "task.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveSealError("task.json is not valid JSON") from exc
+        if (
+            not isinstance(task, Mapping)
+            or task.get("terminalStatusObservedAt") is None
+            or task.get("manifestPath") != "manifest.json"
+        ):
+            raise ArchiveSealError(
+                "task metadata does not bind the terminal manifest"
+            )
 
     def _validate_task_graph(self, task_id: str, status: str) -> None:
         task_dir = self.task_dir(task_id)

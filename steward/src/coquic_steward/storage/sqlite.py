@@ -7,7 +7,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import Select, create_engine, event, func, select
+from sqlalchemy import Connection, Select, create_engine, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -155,22 +155,41 @@ class SQLiteTaskStore:
             Event(task_id=record.id, kind="task.created", message=record.spec.title),
             path_codec=self.path_codec,
         )
-        with Session(self.engine) as session, session.begin():
-            try:
+        now = utc_now()
+        execution = TaskExecution(
+            id=new_execution_id(),
+            task_id=record.id,
+            created_at=now,
+            updated_at=now,
+        )
+        pipeline = TaskPipeline(
+            id=new_pipeline_id(),
+            task_id=record.id,
+            execution_id=execution.id,
+            ordinal=1,
+            trigger="initial",
+            started_at=now,
+            updated_at=now,
+        )
+        execution_row = execution_to_row(execution, path_codec=self.path_codec)
+        pipeline_row = pipeline_to_row(pipeline)
+        try:
+            with Session(self.engine) as session, session.begin():
                 session.add(row)
                 session.add(event_row)
                 session.flush()
-            except IntegrityError:
-                session.rollback()
-                if dedupe_key is None:
-                    raise
-                existing = self._find_active_dedupe(dedupe_key)
-                if existing is None:
-                    raise
-                return existing, False
-        # New-format tasks always start with a durable execution and initial
-        # pipeline. Existing rows loaded from a pre-2.0 database are untouched.
-        self.ensure_execution(record.id)
+                session.add(execution_row)
+                session.flush()
+                session.add(pipeline_row)
+                session.flush()
+                execution_row.owning_pipeline_id = pipeline.id
+        except IntegrityError:
+            if dedupe_key is None:
+                raise
+            existing = self._find_active_dedupe(dedupe_key)
+            if existing is None:
+                raise
+            return existing, False
         self.request_wakeup(
             "task.created",
             {"task_id": record.id, "kind": str(record.spec.kind)},
@@ -292,6 +311,13 @@ class SQLiteTaskStore:
                 raise ValueError("completed execution is immutable")
             if row.state == state and row.state == ExecutionState.complete.value:
                 return row_to_execution(row, path_codec=self.path_codec)
+            self._validate_execution_ownership(
+                session,
+                row,
+                pipeline_id=pipeline_id,
+                session_id=session_id,
+                run_id=run_id,
+            )
             row.state = state
             row.updated_at = now
             if phase is not None:
@@ -303,6 +329,43 @@ class SQLiteTaskStore:
             if run_id is not None:
                 row.active_run_id = run_id
         return self.get_execution(execution_id)
+
+    @staticmethod
+    def _validate_execution_ownership(
+        session: Session,
+        execution: TaskExecutionRow,
+        *,
+        pipeline_id: str | None,
+        session_id: str | None,
+        run_id: str | None,
+    ) -> None:
+        selected_pipeline_id = pipeline_id or execution.owning_pipeline_id
+        if pipeline_id is not None:
+            pipeline = session.get(TaskPipelineRow, pipeline_id)
+            if (
+                pipeline is None
+                or pipeline.task_id != execution.task_id
+                or pipeline.execution_id != execution.id
+            ):
+                raise ValueError("execution pipeline does not belong to task")
+        selected_session_id = session_id or execution.active_session_id
+        if session_id is not None:
+            session_row = session.get(CodexSessionRow, session_id)
+            if (
+                session_row is None
+                or session_row.task_id != execution.task_id
+                or session_row.pipeline_id != selected_pipeline_id
+            ):
+                raise ValueError("execution session does not belong to task pipeline")
+        if run_id is not None:
+            run = session.get(TaskRunRow, run_id)
+            if (
+                run is None
+                or run.task_id != execution.task_id
+                or run.pipeline_id != selected_pipeline_id
+                or run.session_id != selected_session_id
+            ):
+                raise ValueError("execution run does not belong to task session")
 
     update_execution_state = transition_execution
 
@@ -804,13 +867,38 @@ class SQLiteTaskStore:
         )
 
     def upsert_checkpoint(self, checkpoint: WorktreeCheckpoint) -> WorktreeCheckpoint:
-        execution = self.get_execution(checkpoint.execution_id)
-        if execution.task_id != checkpoint.task_id:
-            raise ValueError("checkpoint execution does not belong to task")
-        pipeline = self.get_pipeline(checkpoint.owning_pipeline_id)
-        if pipeline.task_id != checkpoint.task_id or pipeline.execution_id != checkpoint.execution_id:
-            raise ValueError("checkpoint pipeline does not belong to execution")
         with Session(self.engine) as session, session.begin():
+            execution = session.get(TaskExecutionRow, checkpoint.execution_id)
+            if execution is None or execution.task_id != checkpoint.task_id:
+                raise ValueError("checkpoint execution does not belong to task")
+            pipeline = session.get(TaskPipelineRow, checkpoint.owning_pipeline_id)
+            if (
+                pipeline is None
+                or pipeline.task_id != checkpoint.task_id
+                or pipeline.execution_id != checkpoint.execution_id
+            ):
+                raise ValueError("checkpoint pipeline does not belong to execution")
+            if checkpoint.active_session_id is not None:
+                active_session = session.get(
+                    CodexSessionRow, checkpoint.active_session_id
+                )
+                if (
+                    active_session is None
+                    or active_session.task_id != checkpoint.task_id
+                    or active_session.pipeline_id != checkpoint.owning_pipeline_id
+                ):
+                    raise ValueError(
+                        "checkpoint session does not belong to task pipeline"
+                    )
+            if checkpoint.active_run_id is not None:
+                active_run = session.get(TaskRunRow, checkpoint.active_run_id)
+                if (
+                    active_run is None
+                    or active_run.task_id != checkpoint.task_id
+                    or active_run.pipeline_id != checkpoint.owning_pipeline_id
+                    or active_run.session_id != checkpoint.active_session_id
+                ):
+                    raise ValueError("checkpoint run does not belong to task session")
             row = session.get(TaskWorktreeCheckpointRow, checkpoint.id)
             if row is None:
                 existing = session.scalar(
@@ -1853,6 +1941,7 @@ class SQLiteTaskStore:
             }
             if not wakeup_columns:
                 Base.metadata.create_all(connection)
+            _install_ledger_ownership_triggers(connection)
 
     def _migrate_portable_paths(self) -> None:
         task_columns = (
@@ -1913,6 +2002,82 @@ class SQLiteTaskStore:
         if not isinstance(loaded, dict):
             return value
         return json.dumps(self.path_codec.dump_json(loaded), sort_keys=True)
+
+
+def _install_ledger_ownership_triggers(connection: Connection) -> None:
+    execution_checks = """
+        SELECT RAISE(ABORT, 'execution pipeline ownership mismatch')
+        WHERE NEW.owning_pipeline_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM task_pipelines AS pipeline
+            WHERE pipeline.id = NEW.owning_pipeline_id
+              AND pipeline.task_id = NEW.task_id
+              AND pipeline.execution_id = NEW.id
+        );
+        SELECT RAISE(ABORT, 'execution session ownership mismatch')
+        WHERE NEW.active_session_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM codex_sessions AS codex_session
+            WHERE codex_session.id = NEW.active_session_id
+              AND codex_session.task_id = NEW.task_id
+              AND codex_session.pipeline_id = NEW.owning_pipeline_id
+        );
+        SELECT RAISE(ABORT, 'execution run ownership mismatch')
+        WHERE NEW.active_run_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM task_runs AS run
+            WHERE run.id = NEW.active_run_id
+              AND run.task_id = NEW.task_id
+              AND run.pipeline_id = NEW.owning_pipeline_id
+              AND run.session_id = NEW.active_session_id
+        );
+    """
+    checkpoint_checks = """
+        SELECT RAISE(ABORT, 'checkpoint execution ownership mismatch')
+        WHERE NOT EXISTS (
+            SELECT 1 FROM task_executions AS execution
+            WHERE execution.id = NEW.execution_id
+              AND execution.task_id = NEW.task_id
+        );
+        SELECT RAISE(ABORT, 'checkpoint pipeline ownership mismatch')
+        WHERE NOT EXISTS (
+            SELECT 1 FROM task_pipelines AS pipeline
+            WHERE pipeline.id = NEW.owning_pipeline_id
+              AND pipeline.task_id = NEW.task_id
+              AND pipeline.execution_id = NEW.execution_id
+        );
+        SELECT RAISE(ABORT, 'checkpoint session ownership mismatch')
+        WHERE NEW.active_session_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM codex_sessions AS codex_session
+            WHERE codex_session.id = NEW.active_session_id
+              AND codex_session.task_id = NEW.task_id
+              AND codex_session.pipeline_id = NEW.owning_pipeline_id
+        );
+        SELECT RAISE(ABORT, 'checkpoint run ownership mismatch')
+        WHERE NEW.active_run_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM task_runs AS run
+            WHERE run.id = NEW.active_run_id
+              AND run.task_id = NEW.task_id
+              AND run.pipeline_id = NEW.owning_pipeline_id
+              AND run.session_id = NEW.active_session_id
+        );
+    """
+    for action in ("INSERT", "UPDATE"):
+        connection.exec_driver_sql(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS validate_task_execution_ownership_{action.lower()}
+            BEFORE {action} ON task_executions
+            BEGIN
+                {execution_checks}
+            END
+            """
+        )
+        connection.exec_driver_sql(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS validate_worktree_checkpoint_ownership_{action.lower()}
+            BEFORE {action} ON task_worktree_checkpoints
+            BEGIN
+                {checkpoint_checks}
+            END
+            """
+        )
 
 
 def _row_values(row: object) -> dict[str, object]:

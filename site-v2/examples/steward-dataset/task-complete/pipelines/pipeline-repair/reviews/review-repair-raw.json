@@ -1,0 +1,21 @@
+{
+  "reviewId": "review-repair-raw",
+  "taskId": "task-complete-synthetic",
+  "pipelineId": "pipeline-repair",
+  "ordinal": 1,
+  "kind": "raw",
+  "role": "reviewer",
+  "state": "available",
+  "verdict": "approve",
+  "findings": ["Synthetic repair is complete.", "No remaining risk."],
+  "artifact": {
+    "path": "pipelines/pipeline-repair/reviews/review-repair-raw.json",
+    "lifecycle": "terminal",
+    "availability": "available",
+    "mediaType": "application/json",
+    "byteSize": 0,
+    "sha256": null,
+    "requiredAtTerminal": true,
+    "reason": null
+  }
+}

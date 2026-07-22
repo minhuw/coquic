@@ -85,6 +85,10 @@ include `warnings` identifying omissions.
 | Steward daily summary  | `/api/v2/steward/daily/{date}`                | `steward.schema.json#/$defs/dailySummary`         |
 | Steward growth summary | `/api/v2/steward/growth/current`              | `steward.schema.json#/$defs/growthSummary`        |
 | Steward task           | `/api/v2/steward/tasks/{id}`                  | `steward-observability.schema.json#/$defs/taskDetail` |
+| Raw archive task list   | `/api/v2/steward/archive/tasks`              | `steward-dataset.schema.json#/$defs/task`         |
+| Raw archive task tree   | `/api/v2/steward/archive/tasks/{id}`         | `steward-dataset.schema.json#/$defs/task`         |
+| Raw archive run         | `/api/v2/steward/archive/tasks/{id}/pipelines/{pipelineId}/runs/{runId}` | `steward-dataset.schema.json#/$defs/run` |
+| Raw archive freshness   | `/api/v2/steward/archive/tasks/{id}/freshness` | importer status object                           |
 
 The browser-local Workbench command/event protocol is defined by
 `workbench.schema.json` and [WORKBENCH.md](WORKBENCH.md); it is not an HTTP API.
@@ -92,6 +96,31 @@ The browser-local Workbench command/event protocol is defined by
 Stable legacy artifact and download paths MUST remain available during migration.
 The V2 application SHOULD consume canonical endpoints so legacy transformation is
 isolated in server adapters.
+
+## Raw Steward task archive
+
+The raw archive is an independent resource family, not another representation of
+the sanitized Steward task. Its canonical source is the direct task tree defined
+in [STEWARD_DATASET.md](STEWARD_DATASET.md), with epoch, task, pipeline, run,
+validation, review, integration, and terminal-manifest metadata validated by
+`schemas/steward-dataset.schema.json`. The archive is public by placement and
+preserves raw bytes. It does not reuse the sanitized task schema or cache table.
+
+The importer publishes execution state and archive state separately. A task may
+be `succeeded` while `archiveState` is `live`, `incomplete`, or `corrupt`; only a
+verified terminal manifest yields `archiveState: "verified"`. `lastSyncAt`,
+`lastSuccessfulImportAt`, accepted byte offsets/prefix identities, and a stable
+retry category describe freshness. Missing or partial usage and estimated cost
+remain explicit objects with nullable values and reasons; zero is never a
+placeholder for unavailable evidence.
+
+Raw JSONL records are retained in source order and remain opaque. A progressive
+consumer exposes only complete newline-terminated records. An incomplete live
+tail is available as raw bytes but is not returned as a parsed record. Metadata
+before an artifact, an artifact before metadata, a replacement, truncation, or a
+missed watcher event is a recoverable import condition; the cache retries and
+retains its last valid JSON view. Terminal hash or path mismatch after manifest
+verification is corruption, not a partial success.
 
 ## Normalization from legacy data
 

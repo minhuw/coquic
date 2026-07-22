@@ -1,0 +1,22 @@
+{
+  "taskId": "task-running-synthetic",
+  "epochId": "epoch-synthetic-20260722",
+  "status": "running",
+  "promptPath": "prompt.md",
+  "eventsPath": "events.jsonl",
+  "createdAt": "2026-07-22T08:00:00Z",
+  "updatedAt": "2026-07-22T08:05:00Z",
+  "currentPipelineId": "pipeline-initial",
+  "summary": {
+    "title": "Synthetic live task",
+    "text": "Implementation is still changing and the recovery run is active."
+  },
+  "pipelines": [
+    {
+      "pipelineId": "pipeline-initial",
+      "ordinal": 1,
+      "path": "pipelines/pipeline-initial/pipeline.json"
+    }
+  ],
+  "terminalStatusObservedAt": null
+}

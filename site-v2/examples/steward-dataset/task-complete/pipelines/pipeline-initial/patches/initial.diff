@@ -1,0 +1,6 @@
+diff --git a/synthetic.txt b/synthetic.txt
+new file mode 100644
+--- /dev/null
++++ b/synthetic.txt
+@@ -0,0 +1 @@
++initial

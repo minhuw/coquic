@@ -1,0 +1,7 @@
+diff --git a/synthetic.txt b/synthetic.txt
+index 1111111..2222222 100644
+--- a/synthetic.txt
++++ b/synthetic.txt
+@@ -1 +1 @@
+-initial
++repaired

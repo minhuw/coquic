@@ -247,3 +247,32 @@ announced without replacing retained valid evidence with an error message.
   locally; closing expanded diff restores focus.
 - Artifact states distinguish available, not produced, unavailable, redacted,
   and truncated.
+
+## Raw Steward archive (future, independent from `/steward`)
+
+- Preserve the sanitized `/steward` channel and its disclosure boundary. The raw
+  archive is an explicitly separate research surface and is never silently
+  substituted for sanitized task detail.
+- Task lists and detail show exact running or terminal execution status beside a
+  distinct archive verification state. A terminal task status is not presented
+  as a verified archive until every terminal manifest descriptor exists and its
+  byte size and SHA-256 match.
+- Detail groups evidence by ordered pipeline, then shows each run's role,
+  session, interrupted/resumed relationship, retry/parent relationship, raw and
+  effective review, validation output, patches, integration evidence, and
+  artifact availability. Open role strings remain visible rather than being
+  collapsed into a fixed role list.
+- Usage and cost cards distinguish available, partial, and unavailable values;
+  they show reasons and pricing/model provenance and never render unavailable
+  evidence as zero.
+- Freshness shows last successful sync/import time, watcher versus periodic
+  reconciliation state, accepted JSONL prefix, retry category, and recoverable
+  import lag. It distinguishes a manifest observed from an archive verified.
+- Newly imported real Codex and observation records MAY appear progressively in
+  source order. A minute-sized watcher batch MAY be paced visually, but the UI
+  MUST NOT fabricate records, role output, completion, token usage, cost, or
+  realtime transport claims. Incomplete live tails are not rendered as parsed
+  records.
+- Raw artifact download returns synchronized bytes without normalization. Safe
+  task, pipeline, run, and artifact paths are validated before lookup; web
+  requests use cache state and do not parse the raw tree.

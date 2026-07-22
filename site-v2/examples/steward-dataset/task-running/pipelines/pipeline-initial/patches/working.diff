@@ -1,0 +1,6 @@
+diff --git a/synthetic.txt b/synthetic.txt
+index 0000000..1111111 100644
+--- /dev/null
++++ b/synthetic.txt
+@@ -0,0 +1 @@
++live fixture

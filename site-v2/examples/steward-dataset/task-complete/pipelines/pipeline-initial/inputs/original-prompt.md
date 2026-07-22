@@ -1,0 +1,1 @@
+Synthetic initial input.

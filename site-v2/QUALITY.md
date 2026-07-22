@@ -48,6 +48,22 @@
 - Do not expose filesystem paths, credentials, private prompts, or raw internal
   Steward state beyond fields declared in the public schema.
 
+The future raw Steward archive is a separate, deliberate disclosure channel. Its
+metadata and every durable non-hidden artifact below the task root are public by
+placement, while daemon credentials, auth homes, SQLite/WAL files, worktrees,
+runtime caches, sockets, and other private global state are excluded by
+placement. Raw prompts and transcripts are preserved byte-for-byte; the importer
+does not sanitize, redact, scan, quarantine, or infer credential safety from
+content. Safe relative paths reject absolute paths, `.`, `..`, backslashes, NUL,
+hidden temporary components, symlinks, and non-regular files.
+
+Archive consumers retain a last-valid JSON cache, import only complete JSONL
+lines, detect replacement/truncation/prefix changes, and retry recoverable
+eventual-consistency gaps. A watcher is paired with periodic reconciliation after
+missed events or restart. Terminal manifest verification checks exact bytes and
+marks later mutation as corruption. Raw downloads serve bytes without
+normalization; incomplete live tails are never returned as parsed records.
+
 ## Performance budgets
 
 - Server-render meaningful route identity and loading state without JavaScript.
@@ -70,3 +86,11 @@
   the producer supplies it.
 - Contract tests MUST cover happy, empty, partial, missing, malformed, delayed,
   keyboard, compact, dark, reduced-motion, and 200%-zoom states.
+
+Raw archive contract tests MUST additionally cover live metadata-before-artifact
+and artifact-before-metadata convergence, last-valid JSON retention, complete-
+line JSONL parsing, append and duplicate replay, replacement and truncation,
+missed-event periodic reconciliation, manifest-before-content delivery, exact
+terminal sizes/hashes, unsafe path rejection, and post-verification mutation.
+Freshness, import lag, terminal status, and archive verification remain separate
+observable states.

@@ -105,6 +105,49 @@ validations, reviews, and event timelines.
 Home report. The date uses `YYYY-MM-DD`. Usage and repository groups declare
 availability independently so a missing model-usage source never becomes zero.
 
+## Raw Steward archive (future)
+
+The raw archive endpoints are read-only and independent of the sanitized Steward
+surface. They read the rebuildable importer cache; web requests never parse the
+task tree directly.
+
+`GET /api/v2/steward/archive/tasks` returns a V2 envelope whose `data` contains
+the epoch identity, ordered task summaries, and importer freshness. Each summary
+includes `taskId`, exact execution `status`, `archiveState` (`live`, `incomplete`,
+`verified`, or `corrupt`), current pipeline ID, `updatedAt`,
+`lastSuccessfulImportAt`, and a recoverable `importLag` object when bytes or
+references are still converging. A task list does not imply terminal archive
+verification.
+
+`GET /api/v2/steward/archive/tasks/{taskId}` returns task detail grouped by
+ordered pipeline. Each pipeline includes trigger, parent, phase/state, base/input
+and resulting identities, validation and review descriptors, integration outcome,
+and ordered runs. Run detail exposes role, role ordinal, stable archive session
+ID, `resumeOfRunId`, parent/retry relations, model/reasoning, lifecycle/exit,
+usage/cost availability, and artifact descriptors. A terminal task status and
+the separate terminal-manifest verification result are both shown.
+
+`GET /api/v2/steward/archive/tasks/{taskId}/pipelines/{pipelineId}/runs/{runId}`
+returns the run metadata and artifact descriptors. Planning, implementation,
+review, formality, commit-message, recovery, and other Steward-launched
+`codex exec` processes are runs; deterministic validation and daemon Git/SSH
+actions remain pipeline evidence. A resumed session is a new run and carries
+`resumeOfRunId`.
+
+`GET /api/v2/steward/archive/tasks/{taskId}/artifacts/{path}` returns the
+synchronized raw bytes with the declared media type and safe content
+disposition. It performs no normalization, redaction, or transcript
+reconstruction. A live JSONL download may contain an incomplete tail, but parsed
+record APIs exclude that tail and expose only the accepted complete-line prefix.
+
+`GET /api/v2/steward/archive/tasks/{taskId}/freshness` returns `lastSyncAt`,
+`lastSuccessfulImportAt`, watcher/reconciliation timestamps, accepted file
+identity/prefix/size, retry category, and whether the terminal manifest is
+observed, converged, verified, or corrupt. `GET /api/v2/steward/archive/tasks/{taskId}/import-status`
+returns the same import state grouped by pending metadata, missing artifacts,
+parse retries, and terminal verification. These are eventual-consistency
+diagnostics, not a claim that transport is realtime.
+
 ## Legacy compatibility
 
 During migration, these paths remain stable: `/perf-results.json`,

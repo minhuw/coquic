@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -14,6 +18,7 @@ from referencing import Registry, Resource
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "schemas"
 EXAMPLE_DIR = ROOT / "examples"
+DATASET_DIR = EXAMPLE_DIR / "steward-dataset"
 
 EXAMPLE_TARGETS = {
     "coverage-snapshot.json": ("evidence.schema.json", "coverageSnapshot"),
@@ -305,6 +310,422 @@ def validate_steward_observability() -> int:
     return failures
 
 
+def _dataset_validator(definition: str) -> Draft202012Validator:
+    schema = read_json(SCHEMA_DIR / "steward-dataset.schema.json")
+    common = read_json(SCHEMA_DIR / "common.schema.json")
+    registry = Registry().with_resources(
+        (item["$id"], Resource.from_contents(item)) for item in (schema, common)
+    )
+    return Draft202012Validator(
+        {"$ref": f"{schema['$id']}#/$defs/{definition}"},
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+
+
+def _dataset_validate_json(path: Path, definition: str, root: Path) -> int:
+    try:
+        value = read_json(path)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"dataset {path.relative_to(root)} [json-invalid]: {error}")
+        return 1
+    failures = 0
+    validator = _dataset_validator(definition)
+    for error in sorted(validator.iter_errors(value), key=lambda item: list(item.path)):
+        failures += 1
+        location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+        print(f"dataset {path.relative_to(root)} at {location} [schema-invalid]: {error.message}")
+    return failures
+
+
+def _dataset_jsonl(path: Path, root: Path) -> tuple[list[object], int, bytes, int]:
+    """Return parsed complete records, accepted bytes, prefix digest, tail size."""
+    data = path.read_bytes()
+    last_newline = data.rfind(b"\n")
+    accepted_size = last_newline + 1
+    accepted = data[:accepted_size]
+    tail = data[accepted_size:]
+    records: list[object] = []
+    failures = 0
+    for line_number, line in enumerate(accepted.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            failures += 1
+            print(
+                f"dataset {path.relative_to(root)} line {line_number} "
+                f"[jsonl-invalid]: {error}"
+            )
+    if failures:
+        raise ValueError("invalid complete JSONL prefix")
+    prefix_identity = hashlib.sha256(accepted).digest()
+    return records, accepted_size, prefix_identity, len(tail)
+
+
+def _dataset_artifact_paths(value: object) -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        if "path" in value and isinstance(value["path"], str):
+            paths.append(value["path"])
+        for child in value.values():
+            paths.extend(_dataset_artifact_paths(child))
+    elif isinstance(value, list):
+        for child in value:
+            paths.extend(_dataset_artifact_paths(child))
+    return paths
+
+
+def _dataset_path_is_safe(path: str) -> bool:
+    if not path or path.startswith("/") or "\\" in path or "\x00" in path:
+        return False
+    parts = path.split("/")
+    return all(part and part not in {".", ".."} and not part.startswith(".") for part in parts)
+
+
+def _dataset_relation_checks(task_root: Path, task: dict[str, object], running: bool) -> int:
+    failures = 0
+    task_id = task["taskId"]
+    task_rel = task_root
+    pipelines = task["pipelines"]
+    pipeline_ids = [item["pipelineId"] for item in pipelines]
+    ordinals = [item["ordinal"] for item in pipelines]
+    if len(pipeline_ids) != len(set(pipeline_ids)):
+        print(f"dataset {task_id} [duplicate-pipeline-id]")
+        failures += 1
+    if ordinals != sorted(ordinals):
+        print(f"dataset {task_id} [pipeline-order]")
+        failures += 1
+    if task["currentPipelineId"] is not None and task["currentPipelineId"] not in pipeline_ids:
+        print(f"dataset {task_id} [current-pipeline-missing]")
+        failures += 1
+
+    all_runs: dict[str, tuple[dict[str, object], str]] = {}
+    for pipeline_ref in pipelines:
+        pipeline_path = task_rel / pipeline_ref["path"]
+        if not pipeline_path.exists():
+            if running:
+                continue
+            print(f"dataset {task_id}/{pipeline_ref['pipelineId']} [pipeline-missing]")
+            failures += 1
+            continue
+        pipeline = read_json(pipeline_path)
+        if pipeline["taskId"] != task_id or pipeline["pipelineId"] != pipeline_ref["pipelineId"]:
+            print(f"dataset {pipeline_path.relative_to(task_root)} [pipeline-relation]")
+            failures += 1
+        if pipeline["ordinal"] != pipeline_ref["ordinal"]:
+            print(f"dataset {pipeline_path.relative_to(task_root)} [pipeline-ordinal]")
+            failures += 1
+        parent = pipeline["parentPipelineId"]
+        if pipeline["ordinal"] == 1 and parent is not None:
+            print(f"dataset {pipeline_path.relative_to(task_root)} [root-parent]")
+            failures += 1
+        if parent is not None and parent not in pipeline_ids:
+            print(f"dataset {pipeline_path.relative_to(task_root)} [parent-pipeline-missing]")
+            failures += 1
+
+        def check_artifact_reference(reference: str, category: str) -> None:
+            nonlocal failures
+            if not (task_root / reference).exists() and not running:
+                print(f"dataset {pipeline_path.relative_to(task_root)} [{category}-missing]")
+                failures += 1
+
+        for group_name in ("inputs", "patches"):
+            for artifact in pipeline[group_name]:
+                if not _dataset_path_is_safe(artifact["path"]):
+                    print(f"dataset {pipeline_path.relative_to(task_root)} [unsafe-artifact-path]")
+                    failures += 1
+                check_artifact_reference(artifact["path"], "pipeline-artifact")
+        validations = pipeline["validations"]
+        if [item["ordinal"] for item in validations] != sorted(item["ordinal"] for item in validations):
+            print(f"dataset {pipeline_path.relative_to(task_root)} [validation-order]")
+            failures += 1
+        reviews = pipeline["reviews"]
+        if [item["ordinal"] for item in reviews] != sorted(item["ordinal"] for item in reviews):
+            print(f"dataset {pipeline_path.relative_to(task_root)} [review-order]")
+            failures += 1
+        runs = pipeline["runs"]
+        if [item["roleOrdinal"] for item in runs] != sorted(item["roleOrdinal"] for item in runs):
+            print(f"dataset {pipeline_path.relative_to(task_root)} [run-order]")
+            failures += 1
+        for run_ref in runs:
+            run_path = task_root / run_ref["path"]
+            if not run_path.exists():
+                if running:
+                    continue
+                print(f"dataset {run_ref['path']} [run-missing]")
+                failures += 1
+                continue
+            run = read_json(run_path)
+            run_id = run["runId"]
+            if run_id in all_runs:
+                print(f"dataset {run_ref['path']} [duplicate-run-id]")
+                failures += 1
+            all_runs[run_id] = (run, pipeline["pipelineId"])
+            if run["taskId"] != task_id or run["pipelineId"] != pipeline["pipelineId"]:
+                print(f"dataset {run_ref['path']} [run-relation]")
+                failures += 1
+            if run["runId"] != run_ref["runId"] or run["role"] != run_ref["role"] or run["roleOrdinal"] != run_ref["roleOrdinal"]:
+                print(f"dataset {run_ref['path']} [run-descriptor]")
+                failures += 1
+            if run["state"] != run_ref["state"]:
+                print(f"dataset {run_ref['path']} [run-state]")
+                failures += 1
+
+    for run_id, (run, pipeline_id) in all_runs.items():
+        for relation_name in ("parentRunId", "retryOfRunId"):
+            relation_id = run[relation_name]
+            if relation_id is not None:
+                relation_entry = all_runs.get(relation_id)
+                if relation_entry is None:
+                    print(f"dataset {task_id}/{run_id} [{relation_name}-missing]")
+                    failures += 1
+                elif relation_entry[1] != pipeline_id:
+                    print(f"dataset {task_id}/{run_id} [{relation_name}-cross-pipeline]")
+                    failures += 1
+        resume_id = run["resumeOfRunId"]
+        if resume_id is None:
+            continue
+        prior_entry = all_runs.get(resume_id)
+        legal_roles = {"planning", "implementation", "reviewer", "review"}
+        if prior_entry is None:
+            print(f"dataset {task_id}/{run_id} [resume-target-missing]")
+            failures += 1
+            continue
+        prior, prior_pipeline_id = prior_entry
+        if prior_pipeline_id != pipeline_id or prior["taskId"] != run["taskId"]:
+            print(f"dataset {task_id}/{run_id} [resume-cross-pipeline]")
+            failures += 1
+        if prior["state"] != "interrupted" or run["role"] not in legal_roles or prior["role"] != run["role"]:
+            print(f"dataset {task_id}/{run_id} [illegal-resume-lineage]")
+            failures += 1
+        if prior["sessionId"] != run["sessionId"]:
+            print(f"dataset {task_id}/{run_id} [resume-session-mismatch]")
+            failures += 1
+
+    sessions: dict[str, list[dict[str, object]]] = {}
+    for run, _pipeline_id in all_runs.values():
+        sessions.setdefault(run["sessionId"], []).append(run)
+    for session_id, session_runs in sessions.items():
+        if len(session_runs) > 1 and not any(run["resumeOfRunId"] for run in session_runs):
+            print(f"dataset {task_id}/{session_id} [session-reuse-without-recovery]")
+            failures += 1
+    return failures
+
+
+def _dataset_manifest_state(task_root: Path) -> str:
+    manifest_path = task_root / "manifest.json"
+    if not manifest_path.exists():
+        return "live"
+    try:
+        manifest = read_json(manifest_path)
+    except (OSError, json.JSONDecodeError):
+        return "corrupt"
+    descriptors = manifest.get("files")
+    if not isinstance(descriptors, list):
+        return "corrupt"
+    descriptor_map: dict[str, dict[str, object]] = {}
+    for item in descriptors:
+        path = item.get("path") if isinstance(item, dict) else None
+        if not isinstance(path, str) or not _dataset_path_is_safe(path) or path in descriptor_map:
+            return "corrupt"
+        descriptor_map[path] = item
+    if list(descriptor_map) != sorted(descriptor_map):
+        return "corrupt"
+    actual: dict[str, Path] = {}
+    for path in task_root.rglob("*"):
+        if path == manifest_path:
+            continue
+        if path.is_symlink():
+            return "corrupt"
+        if path.is_file():
+            relative = path.relative_to(task_root).as_posix()
+            if not _dataset_path_is_safe(relative):
+                return "corrupt"
+            actual[relative] = path
+        elif not path.is_dir():
+            return "corrupt"
+    if set(actual) != set(descriptor_map):
+        return "incomplete" if set(actual) < set(descriptor_map) else "corrupt"
+    for relative, path in actual.items():
+        descriptor = descriptor_map[relative]
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if descriptor.get("byteSize") != path.stat().st_size or descriptor.get("sha256") != digest:
+            return "corrupt"
+    return "verified"
+
+
+def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
+    failures = 0
+
+    def expect(label: str, actual: object, expected: object) -> None:
+        nonlocal failures
+        if actual != expected:
+            failures += 1
+            print(f"dataset mutation [{label}]: expected {expected!r}, got {actual!r}")
+
+    with tempfile.TemporaryDirectory(prefix="steward-dataset-") as temporary:
+        temporary_root = Path(temporary)
+        live = temporary_root / "running"
+        complete = temporary_root / "complete"
+        shutil.copytree(running_root, live)
+        shutil.copytree(complete_root, complete)
+
+        live_codex = live / "pipelines/pipeline-initial/runs/run-implementation-interrupted/codex.jsonl"
+        records, _codex_accepted_size, _codex_prefix_identity, tail_size = _dataset_jsonl(live_codex, running_root)
+        expect("incomplete-final-record", tail_size > 0, True)
+        expect("complete-line-count", len(records), 3)
+
+        # Metadata-before-artifact and artifact-before-metadata are recoverable.
+        (live / "pipelines/pipeline-initial/inputs/original-prompt.md").unlink()
+        expect("metadata-before-artifact", _dataset_manifest_state(live), "live")
+        (live / "orphan-artifact.bin").write_bytes(b"synthetic out of order")
+        expect("artifact-before-metadata", _dataset_manifest_state(live), "live")
+
+        malformed = live / "task.json"
+        malformed.write_text("{\"status\":", encoding="utf-8")
+        try:
+            json.loads(malformed.read_text(encoding="utf-8"))
+            expect("incomplete-json", "parsed", "retained-last-valid")
+        except json.JSONDecodeError:
+            expect("incomplete-json", "retained-last-valid", "retained-last-valid")
+
+        # Restore the live tree for cursor cases.
+        shutil.rmtree(live)
+        shutil.copytree(running_root, live)
+        append = live / "events.jsonl"
+        original_events = running_root / "events.jsonl"
+        original_bytes = original_events.read_bytes()
+        _event_records, accepted_size, prefix_identity, _event_tail = _dataset_jsonl(original_events, running_root)
+        append.write_bytes(original_bytes + b'{"eventId":"event-running-4","kind":"rescan"}\n')
+        appended_records, appended_size, _identity, _tail = _dataset_jsonl(append, running_root)
+        expect("appended-jsonl", len(appended_records), 4)
+        expect("append-offset", appended_size > accepted_size, True)
+        duplicate = live / "events.jsonl"
+        duplicate.write_bytes(append.read_bytes() + b'{"eventId":"event-running-4","kind":"rescan"}\n')
+        duplicate_records, _size, _identity, _tail = _dataset_jsonl(duplicate, running_root)
+        unique_records = {json.dumps(item, sort_keys=True) for item in duplicate_records}
+        expect("duplicate-replay", len(unique_records), 4)
+        replacement = live / "events.jsonl"
+        replacement.write_bytes(b'{"eventId":"replacement","kind":"rescan"}\n')
+        _records, _size, replacement_identity, _tail = _dataset_jsonl(replacement, running_root)
+        expect("replacement-prefix", replacement_identity == prefix_identity, False)
+        truncated = live / "events.jsonl"
+        truncated.write_bytes(original_bytes[: accepted_size // 2])
+        _records, truncated_size, _identity, _tail = _dataset_jsonl(truncated, running_root)
+        expect("truncation-offset", truncated_size < accepted_size, True)
+        expect("missed-event-rescan", (live / "task.json").exists(), True)
+
+        # A manifest can arrive before content, but a changed or extra terminal
+        # file is corruption once the terminal tree is otherwise present.
+        missing = temporary_root / "manifest-before-content"
+        shutil.copytree(complete_root, missing)
+        missing_file = next(path for path in missing.rglob("*") if path.is_file() and path.name != "manifest.json")
+        missing_file.unlink()
+        expect("manifest-before-content", _dataset_manifest_state(missing), "incomplete")
+        changed = temporary_root / "changed-after-verification"
+        shutil.copytree(complete_root, changed)
+        changed_file = next(path for path in changed.rglob("*") if path.is_file() and path.name != "manifest.json")
+        changed_file.write_bytes(changed_file.read_bytes() + b"changed")
+        expect("post-verification-mutation", _dataset_manifest_state(changed), "corrupt")
+        extra = temporary_root / "extra-terminal-file"
+        shutil.copytree(complete_root, extra)
+        (extra / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+        expect("unexpected-terminal-file", _dataset_manifest_state(extra), "corrupt")
+        linked = temporary_root / "symlink-terminal-file"
+        shutil.copytree(complete_root, linked)
+        link_target = next(path for path in linked.rglob("*") if path.is_file() and path.name != "manifest.json")
+        (linked / "unsafe-link").symlink_to(link_target)
+        expect("symlink-terminal-file", _dataset_manifest_state(linked), "corrupt")
+        nonregular = temporary_root / "nonregular-terminal-file"
+        shutil.copytree(complete_root, nonregular)
+        fifo = nonregular / "unsafe-fifo"
+        try:
+            os.mkfifo(fifo)
+            expect("nonregular-terminal-file", _dataset_manifest_state(nonregular), "corrupt")
+        except (OSError, ValueError):
+            # The platform may not permit creating a FIFO in the test sandbox.
+            pass
+
+    return failures
+
+
+def validate_steward_dataset() -> int:
+    failures = 0
+    epoch_path = DATASET_DIR / "epoch.json"
+    failures += _dataset_validate_json(epoch_path, "epoch", DATASET_DIR)
+    task_roots = [DATASET_DIR / "task-running", DATASET_DIR / "task-complete"]
+    tasks: dict[str, dict[str, object]] = {}
+    for task_root in task_roots:
+        task_path = task_root / "task.json"
+        failures += _dataset_validate_json(task_path, "task", DATASET_DIR)
+        task = read_json(task_path)
+        tasks[task["taskId"]] = task
+        failures += _dataset_relation_checks(task_root, task, task_root.name == "task-running")
+
+        def check_artifact_reference(reference: str, category: str) -> None:
+            nonlocal failures
+            if not (task_root / reference).exists() and task_root.name != "task-running":
+                print(f"dataset {task_path.relative_to(DATASET_DIR)} [{category}-missing]")
+                failures += 1
+
+        metadata_targets = [(task_root / "pipelines" / item["pipelineId"] / "pipeline.json", "pipeline") for item in task["pipelines"]]
+        for pipeline_path, _definition in metadata_targets:
+            if pipeline_path.exists():
+                failures += _dataset_validate_json(pipeline_path, "pipeline", DATASET_DIR)
+                pipeline = read_json(pipeline_path)
+                for validation_ref in pipeline["validations"]:
+                    validation_path = task_root / validation_ref["path"]
+                    if validation_path.exists():
+                        failures += _dataset_validate_json(validation_path, "validation", DATASET_DIR)
+                        validation = read_json(validation_path)
+                        check_artifact_reference(validation["outputPath"], "validation-output")
+                        check_artifact_reference(validation["output"]["path"], "validation-artifact")
+                for review_ref in pipeline["reviews"]:
+                    review_path = task_root / review_ref["path"]
+                    if review_path.exists():
+                        failures += _dataset_validate_json(review_path, "review", DATASET_DIR)
+                        review = read_json(review_path)
+                        check_artifact_reference(review["artifact"]["path"], "review-artifact")
+                for run_ref in pipeline["runs"]:
+                    run_path = task_root / run_ref["path"]
+                    if run_path.exists():
+                        failures += _dataset_validate_json(run_path, "run", DATASET_DIR)
+                        run = read_json(run_path)
+                        for artifact in run["artifacts"].values():
+                            check_artifact_reference(artifact["path"], "run-artifact")
+                        if run["result"]["path"] is not None:
+                            check_artifact_reference(run["result"]["path"], "run-result")
+                        if run["usage"] is not None and run["usage"]["sourcePath"] is not None:
+                            check_artifact_reference(run["usage"]["sourcePath"], "usage-source")
+        for jsonl_path in sorted(task_root.rglob("*.jsonl")):
+            try:
+                _dataset_jsonl(jsonl_path, DATASET_DIR)
+            except ValueError:
+                failures += 1
+        manifest_path = task_root / "manifest.json"
+        if task_root.name == "task-running":
+            if manifest_path.exists():
+                failures += 1
+                print(f"dataset {manifest_path.relative_to(DATASET_DIR)} [running-manifest-present]")
+        else:
+            failures += _dataset_validate_json(manifest_path, "manifest", DATASET_DIR)
+            state = _dataset_manifest_state(task_root)
+            if state != "verified":
+                failures += 1
+                print(f"dataset {manifest_path.relative_to(DATASET_DIR)} [manifest-{state}]")
+
+    if tasks["task-running-synthetic"]["epochId"] != read_json(epoch_path)["epochId"]:
+        failures += 1
+        print("dataset task-running/task.json [epoch-relation]")
+    if tasks["task-complete-synthetic"]["epochId"] != read_json(epoch_path)["epochId"]:
+        failures += 1
+        print("dataset task-complete/task.json [epoch-relation]")
+    failures += _dataset_mutation_checks(DATASET_DIR / "task-running", DATASET_DIR / "task-complete")
+    return failures
+
+
 def main() -> int:
     failures = (
         validate_json_contracts()
@@ -312,6 +733,7 @@ def main() -> int:
         + validate_steward_dashboard()
         + validate_steward_observability()
         + validate_steward_growth()
+        + validate_steward_dataset()
     )
     if failures:
         print(f"contract validation failed with {failures} finding(s)")

@@ -1,0 +1,22 @@
+{
+  "validationId": "validation-initial",
+  "taskId": "task-running-synthetic",
+  "pipelineId": "pipeline-initial",
+  "ordinal": 1,
+  "command": "synthetic-check --pending",
+  "state": "running",
+  "startedAt": "2026-07-22T08:05:00Z",
+  "completedAt": null,
+  "result": "unavailable",
+  "outputPath": "pipelines/pipeline-initial/validations/validation-initial/output.log",
+  "output": {
+    "path": "pipelines/pipeline-initial/validations/validation-initial/output.log",
+    "lifecycle": "live",
+    "availability": "partial",
+    "mediaType": "text/plain",
+    "byteSize": 32,
+    "sha256": null,
+    "requiredAtTerminal": false,
+    "reason": "Validation is still running."
+  }
+}

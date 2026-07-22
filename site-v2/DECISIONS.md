@@ -198,3 +198,31 @@ preview visual language.
 The gate is deliberately described as a convenience notice, not authentication
 or a security boundary. It is enabled only by deployment configuration, stores
 no account data, and remains disabled in ordinary local development.
+
+## D-020: Raw Steward archive is a placement-public, eventually consistent tree
+
+The post-Steward-2.0 raw research archive is a distinct channel from the
+sanitized Steward mirror. `$COQUIC_HOME/tasks/` is the canonical task directory;
+the producer and Site V2 receiver share its relative hierarchy. One process is
+one run nested under exactly one pipeline, and only explicit interrupted
+planning/implementation/review recovery may resume a stable archive session.
+The archive is published by placement: durable non-hidden task evidence is
+public, while daemon credentials, private Codex homes, SQLite, worktrees, and
+global runtime state stay outside the root. Raw bytes are accepted without
+sanitization or content filtering.
+
+Live publication is eventually consistent. Stable paths, atomic small metadata
+replacement, append-only JSONL, complete-line parsing, last-valid JSON caching,
+idempotent prefix cursors, and replacement/truncation rebuilds let a watcher and
+periodic reconciliation converge after missed events or restart. Transport
+ordering has no semantic meaning. A task status is observed independently from
+archive verification. After terminal outcome and external-result finalization,
+one immutable task-local manifest covers every other durable regular file with
+exact size and lower-case SHA-256; a manifest arriving before bytes remains
+incomplete until verified, and any later mutation is corruption.
+
+Rejected alternatives are a generated local dataset projection, a manifest-last
+live snapshot, one revision tree per sync, blind parsing on web requests,
+transport-order assumptions, raw sanitization, and legacy backfill. The Site V2
+cache is rebuildable and never shares a table or disclosure policy with the
+sanitized Steward cache.

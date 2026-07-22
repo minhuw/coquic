@@ -1,0 +1,1 @@
+Synthetic formality examination completed.

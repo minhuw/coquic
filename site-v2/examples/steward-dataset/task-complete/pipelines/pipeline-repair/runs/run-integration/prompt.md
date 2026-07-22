@@ -1,0 +1,1 @@
+Synthetic integration prompt.

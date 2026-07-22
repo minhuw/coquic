@@ -1,0 +1,415 @@
+{
+  "manifestVersion": "1.0",
+  "epochId": "epoch-synthetic-20260722",
+  "taskId": "task-complete-synthetic",
+  "completionIdentity": "completion-synthetic-20260722",
+  "terminalStatus": "succeeded",
+  "completedAt": "2026-07-22T08:20:00Z",
+  "files": [
+  {
+    "path": "events.jsonl",
+    "byteSize": 462,
+    "sha256": "b8c5db732dfeb970ef74845b49e91518a7198269a99fe8baecde323ef5b69ca0"
+  },
+  {
+    "path": "pipelines/pipeline-initial/inputs/original-prompt.md",
+    "byteSize": 25,
+    "sha256": "f33306034a42ed63b4507665b876d736c5bc0c3805ace3910a1da705c10591d5"
+  },
+  {
+    "path": "pipelines/pipeline-initial/patches/initial.diff",
+    "byteSize": 121,
+    "sha256": "1a4d1d1ff4e63712e20205ce76b823fb805f399d9b438be922660fb46edeaccb"
+  },
+  {
+    "path": "pipelines/pipeline-initial/pipeline.json",
+    "byteSize": 2612,
+    "sha256": "197b0815a8332c9047e7ebac1482aa1aeffc6d439309b5a375ad2759dc08fd54"
+  },
+  {
+    "path": "pipelines/pipeline-initial/reviews/review-initial-effective.json",
+    "byteSize": 594,
+    "sha256": "6208ccb3d1e58269e6ca0224bfe289d819a48f116cc5085e7c5ac8f484bf448a"
+  },
+  {
+    "path": "pipelines/pipeline-initial/reviews/review-initial-raw.json",
+    "byteSize": 575,
+    "sha256": "eb98d881fb080372f23b8f9499e6873bdd13fcc35713d12acb5720d104ebf95e"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/activities.jsonl",
+    "byteSize": 83,
+    "sha256": "b193e48f19eece0108fc7fd05312e1548e02fdab42faadc158cffcb88e97d238"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/codex.jsonl",
+    "byteSize": 127,
+    "sha256": "57957a097a8332147cbea70d87b71fb946bc4c899c43587227e88cfd34e8af9b"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/last-message.md",
+    "byteSize": 43,
+    "sha256": "712b866c3abc019c8047323849598582ebdae1d2f36a4b0674006a9fa201379c"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/prompt.md",
+    "byteSize": 28,
+    "sha256": "41034cdfca1287d3c45754e64fa6ebd2f1e3cf6695c73ace572a6143520cbcfb"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/result.json",
+    "byteSize": 68,
+    "sha256": "3e60910324c2289f2ddc5379fd7e6f0b1202258a1de66825223b0d93a2a66d29"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/run.json",
+    "byteSize": 2919,
+    "sha256": "c981a14a1a133906780dde3a0bc9ab3ea030ba8f67525509bfaf6ef8d28f426f"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/tool-changes/manifest.jsonl",
+    "byteSize": 58,
+    "sha256": "b8243a41401b692604d12a6ecb65d09cd06f824d5c22f7dd074de3ace6ab5ba2"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-formality/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/activities.jsonl",
+    "byteSize": 88,
+    "sha256": "6fe338d6195a37c8308ef522da5b42837687b9b1da3cee962404edbec7b714df"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/codex.jsonl",
+    "byteSize": 142,
+    "sha256": "fe0bbae1a4084c46af8b8e82daf51e284344011c019ed09b96448d284d64a171"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/last-message.md",
+    "byteSize": 36,
+    "sha256": "7707da1940ab429c0cdff76d89804d9ce4b216707ca7560752881e51754cc2d4"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/prompt.md",
+    "byteSize": 33,
+    "sha256": "24dc2f8dbf90c485c3b58e22e5c756a4dcba41fc3aa253af536a236e84aa4a43"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/result.json",
+    "byteSize": 69,
+    "sha256": "e0a406ec45dc8cc4fa523602e06def7b8582ff73be8547b7f27b7b967a86e886"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/run.json",
+    "byteSize": 2979,
+    "sha256": "e14f7701ab9cfdcca2194ba43ed0ae97d3cc63d5e3c251a0bea8add524378a20"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/tool-changes/manifest.jsonl",
+    "byteSize": 58,
+    "sha256": "10eb192bf55c977d4fd710b0e1c934117e5c2e1f4996b30a9da3112e6d0074b7"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-implementation/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/activities.jsonl",
+    "byteSize": 78,
+    "sha256": "23ffd5f3e6c4b1f3d5ad73324f868d42f540bf4d452a361e57fe3f98f7170362"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/codex.jsonl",
+    "byteSize": 112,
+    "sha256": "42bb9e969761bff80ee5bc533160c67d556ff625debc12a6653c8b228ed9cd9f"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/last-message.md",
+    "byteSize": 25,
+    "sha256": "393ef6acfe91745fd24a7ba04ff3a04b450af177c86132410b043a73b20ca1fb"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/prompt.md",
+    "byteSize": 27,
+    "sha256": "d0e32fce99fe846f03ab2829bfe10d5755a548b81561faaed73deb8d471e10f1"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/result.json",
+    "byteSize": 60,
+    "sha256": "9b1228f6ea2c18f61a7f6fd98612ffb48b9a4b5b744e401edea095c912216c97"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/run.json",
+    "byteSize": 2850,
+    "sha256": "6cd74bd76612979b875393137708f124251a239805a5faa19a84e9c1f5ff5903"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/tool-changes/manifest.jsonl",
+    "byteSize": 52,
+    "sha256": "8810332a7442bccc137bd91989ab8656e0c8da2f5cc208d9905a35b3028539e1"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-plan/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/activities.jsonl",
+    "byteSize": 80,
+    "sha256": "376f9d0d00ffdbf92dc3a298689b4d299003ee67b60c49cc9876f4c3eb98dc5d"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/codex.jsonl",
+    "byteSize": 120,
+    "sha256": "17f10e30d2bffab66695ed654c124506d2a5d9caa07676498e0399cc2d5cdb71"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/last-message.md",
+    "byteSize": 35,
+    "sha256": "12ca715310b391b9d01ca02a87abf9bd80c3574fd9fafbffb772d2c5501e2784"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/prompt.md",
+    "byteSize": 27,
+    "sha256": "230a88ab2502eaede77da866fe63971f2419d392b83ed317fd7405cd1347c298"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/result.json",
+    "byteSize": 60,
+    "sha256": "6a168ca033b2101239bd1102896341eb8a76aaff0745c078ca0e01754e26f3b8"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/run.json",
+    "byteSize": 2890,
+    "sha256": "27feec4b8016d6c54d0a0407c8e24d29a66137d9292a6bbeb30410707c31104f"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/tool-changes/manifest.jsonl",
+    "byteSize": 56,
+    "sha256": "8854c89828e028bab1c74fa8eb13f0ac0f61bfc02d62a86b00a2a8bf228fc730"
+  },
+  {
+    "path": "pipelines/pipeline-initial/runs/run-review/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-initial/validations/validation-initial/output.log",
+    "byteSize": 36,
+    "sha256": "f6b6282ac52d9d2e11adecefe6b5ad727a48cac64256ec551a78992571407b47"
+  },
+  {
+    "path": "pipelines/pipeline-initial/validations/validation-initial/validation.json",
+    "byteSize": 674,
+    "sha256": "aebf85763f07ab5e96b4d87ebf2b55d81fb6f53ff60b1ec0d61de80cac986db4"
+  },
+  {
+    "path": "pipelines/pipeline-repair/inputs/review-feedback.md",
+    "byteSize": 56,
+    "sha256": "5c523d421de534642b67c6e8153fd29ae26ed48fadf68f9f4a38a1f40229f9db"
+  },
+  {
+    "path": "pipelines/pipeline-repair/integration.json",
+    "byteSize": 134,
+    "sha256": "72d8b2426529cdae618e4cc8c16b18f117bb479d2e8575cc20348eb939ae99f7"
+  },
+  {
+    "path": "pipelines/pipeline-repair/patches/repair.diff",
+    "byteSize": 144,
+    "sha256": "ff362658258a5991aea6fa2f5e3e8b5fe119621bb80d8d3bb68a4ed4eaf8579c"
+  },
+  {
+    "path": "pipelines/pipeline-repair/pipeline.json",
+    "byteSize": 2557,
+    "sha256": "7ed7640193e41d79925e9d80ed50b6b56bef70b79a496d776775bb35d13a25e7"
+  },
+  {
+    "path": "pipelines/pipeline-repair/reviews/review-repair-effective.json",
+    "byteSize": 591,
+    "sha256": "376f71ebb453305cb789e8574ab987e89cd585c5ed2cd6a9d18db53c06086bc1"
+  },
+  {
+    "path": "pipelines/pipeline-repair/reviews/review-repair-raw.json",
+    "byteSize": 568,
+    "sha256": "af0f54927c7683b7acc0c29664469945c43133548d3a62c48f8399420a9546f6"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/activities.jsonl",
+    "byteSize": 85,
+    "sha256": "1be0e56aafdfcd36b6f51259ddf41ec7df98e82fcc60e0d2be51a58483b19597"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/codex.jsonl",
+    "byteSize": 133,
+    "sha256": "1845fe560e2725afc85f04997fce7d289a167b1ae108bfab03b83e5e048bebe0"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/last-message.md",
+    "byteSize": 33,
+    "sha256": "1a257e249723e0e241eea296cb42b13c622cc44479ed5ef4dd1969f4dcbd798b"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/prompt.md",
+    "byteSize": 30,
+    "sha256": "5226d77b28bc994bc67b6c77b60509be8c7a4071d516c3ea63df15618514afba"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/result.json",
+    "byteSize": 68,
+    "sha256": "c2ee32f430157cc245c93f1f12c3ddf2e8bf616ec28ef9eccc8678211dd6cc82"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/run.json",
+    "byteSize": 2940,
+    "sha256": "aab49cb63e6c717be159192a48f5f82d230f9fb5d2033de93c430474fe143f06"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/tool-changes/manifest.jsonl",
+    "byteSize": 61,
+    "sha256": "5904257db8b351ee95aceb4eaa505e4177fdbd05d8f5654a899cb4558665ead6"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-integration/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/activities.jsonl",
+    "byteSize": 80,
+    "sha256": "026e1eec4d34103db52e79e5ef60722c711934455cdde1a73acc6c8bba3c6d55"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/codex.jsonl",
+    "byteSize": 118,
+    "sha256": "270e1426af8475cc9368c14950eefbe55fbc4f2d668c55909c58ffdbd55bd7c5"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/last-message.md",
+    "byteSize": 43,
+    "sha256": "a7b1eed278311305d08d2c58bb4ecd1705aebee46d00bf9392b9fdde8562b549"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/prompt.md",
+    "byteSize": 40,
+    "sha256": "85669e8efe39967f056df0d98e9c65521e936bc8818cb66d879b399a70ad15ad"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/result.json",
+    "byteSize": 68,
+    "sha256": "e03f42d1381e1cfd1eda5b415063f7206b117acb90283ed4d0be3c113c99c2dc"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/run.json",
+    "byteSize": 3029,
+    "sha256": "3b98f490fc9d6915666655457c5285f47f126dccc3690d1cabff14a289aa3995"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/tool-changes/manifest.jsonl",
+    "byteSize": 58,
+    "sha256": "965020bab54cb3d190dba2f2f125294f2cd60fff6fbace6bbc532ef5d026b650"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-implementation/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/activities.jsonl",
+    "byteSize": 87,
+    "sha256": "d7c6cce9b74d14e6c43e081cd0da561aed8146981046300509ce860dc7a8521f"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/codex.jsonl",
+    "byteSize": 131,
+    "sha256": "6279c83a303780eb6c0f3bf2a95d72119bff7197000e180e23bed7aad0002490"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/last-message.md",
+    "byteSize": 34,
+    "sha256": "0dec00a249ccb18215e47aa6fe73ec75194f0ee426cb117be83c728d00005851"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/prompt.md",
+    "byteSize": 34,
+    "sha256": "3218665fb67f25d20615e5896684817f4e0c66fab94c0f742f1ad69f8086c3d2"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/result.json",
+    "byteSize": 59,
+    "sha256": "113cf836c010f9153097d39ad811714b040982b8572cd879f02893940ef848af"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/run.json",
+    "byteSize": 2951,
+    "sha256": "8f4ed30d5d4f4ba4637176a463e7465e782003f174c1fd7575693021466f507a"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/telemetry.json",
+    "byteSize": 61,
+    "sha256": "90127ca53d154f997a35c7509d8f154cabb6ca6fd3c98152229cbf4edf5a3e87"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/tool-changes/manifest.jsonl",
+    "byteSize": 56,
+    "sha256": "99e6da8cfe75c0506b2595d8827a4ff836082efc71a534f829d89ed3fdd31c6c"
+  },
+  {
+    "path": "pipelines/pipeline-repair/runs/run-repair-review/tool-changes/summary.json",
+    "byteSize": 35,
+    "sha256": "bd43b7a43a1602a9e81155e68535cada84c25d33e5a53e191f1a559e2b9f478b"
+  },
+  {
+    "path": "pipelines/pipeline-repair/validations/validation-repair/output.log",
+    "byteSize": 35,
+    "sha256": "af2f15e5c7c63f0d43cafca04e663f5cde45b6a2be44e4628d63b67cda7edb03"
+  },
+  {
+    "path": "pipelines/pipeline-repair/validations/validation-repair/validation.json",
+    "byteSize": 667,
+    "sha256": "38725fafa6eba8210687ce8bd36b8d28c26bf02c97835bd66be59777e56def33"
+  },
+  {
+    "path": "prompt.md",
+    "byteSize": 253,
+    "sha256": "788825875aae52d8adbde2e68ee873b09a19b7cf6ce3cfdd2326dcecde895229"
+  },
+  {
+    "path": "task.json",
+    "byteSize": 785,
+    "sha256": "9ba8a453ac251356d47ec629230a0d91686db7c0d45710833fe56542578c7029"
+  }
+]
+}

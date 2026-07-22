@@ -34,6 +34,8 @@ open.
 - [DATA.md](DATA.md): canonical V2 data model, naming rules, resources, and legacy
   normalization policy.
 - [API.md](API.md): HTTP and event-stream contracts.
+- [STEWARD_DATASET.md](STEWARD_DATASET.md): raw post-Steward-2.0 task archive
+  hierarchy, live import, and terminal verification contract.
 - [WORKBENCH.md](WORKBENCH.md): clean UI-to-WASM command/event boundary.
 - [MIGRATION.md](MIGRATION.md): parity gates and replacement strategy.
 - `schemas/`: normative JSON Schema 2020-12 documents.

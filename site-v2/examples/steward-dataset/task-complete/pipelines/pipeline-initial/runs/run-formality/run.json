@@ -1,0 +1,30 @@
+{
+  "runId": "run-formality",
+  "taskId": "task-complete-synthetic",
+  "pipelineId": "pipeline-initial",
+  "role": "formality",
+  "roleOrdinal": 4,
+  "sessionId": "session-formality-synthetic",
+  "resumeOfRunId": null,
+  "parentRunId": "run-review",
+  "retryOfRunId": null,
+  "state": "succeeded",
+  "startedAt": "2026-07-22T07:50:00Z",
+  "updatedAt": "2026-07-22T07:52:00Z",
+  "completedAt": "2026-07-22T07:52:00Z",
+  "model": "synthetic-codex-2.0",
+  "reasoning": "low",
+  "exit": { "code": 0, "signal": null, "reason": null },
+  "result": { "status": "available", "summary": "Formality examination completed.", "path": "pipelines/pipeline-initial/runs/run-formality/result.json" },
+  "usage": { "availability": "available", "promptTokens": 100, "completionTokens": 50, "totalTokens": 150, "sourcePath": "pipelines/pipeline-initial/runs/run-formality/telemetry.json", "reason": null },
+  "cost": { "availability": "available", "estimatedMicroUsd": 150, "currency": "USD", "model": "synthetic-codex-2.0", "pricingSource": "synthetic-test-pricing", "reason": null },
+  "artifacts": {
+    "codex": { "path": "pipelines/pipeline-initial/runs/run-formality/codex.jsonl", "lifecycle": "terminal", "availability": "available", "mediaType": "application/x-ndjson", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null },
+    "activities": { "path": "pipelines/pipeline-initial/runs/run-formality/activities.jsonl", "lifecycle": "terminal", "availability": "available", "mediaType": "application/x-ndjson", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null },
+    "telemetry": { "path": "pipelines/pipeline-initial/runs/run-formality/telemetry.json", "lifecycle": "terminal", "availability": "available", "mediaType": "application/json", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null },
+    "lastMessage": { "path": "pipelines/pipeline-initial/runs/run-formality/last-message.md", "lifecycle": "terminal", "availability": "available", "mediaType": "text/markdown", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null },
+    "result": { "path": "pipelines/pipeline-initial/runs/run-formality/result.json", "lifecycle": "terminal", "availability": "available", "mediaType": "application/json", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null },
+    "toolChangesManifest": { "path": "pipelines/pipeline-initial/runs/run-formality/tool-changes/manifest.jsonl", "lifecycle": "terminal", "availability": "available", "mediaType": "application/x-ndjson", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null },
+    "toolChangesSummary": { "path": "pipelines/pipeline-initial/runs/run-formality/tool-changes/summary.json", "lifecycle": "terminal", "availability": "available", "mediaType": "application/json", "byteSize": 0, "sha256": null, "requiredAtTerminal": true, "reason": null }
+  }
+}

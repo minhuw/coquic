@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import json
+import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -367,10 +368,6 @@ class StewardConfig:
         the destination passes SQLite integrity checks, then it is moved to a
         read-only, provenance-marked backup.
         """
-        if daemon_running:
-            raise RuntimeError("cannot migrate Steward state while daemon is running")
-        if (self.state_dir / "daemon.lock").exists():
-            raise RuntimeError("cannot migrate Steward state while daemon lock exists")
         _reject_symlink_roots(self.coquic_home, self.legacy_steward_home)
         self.coquic_home.mkdir(parents=True, exist_ok=True)
         source = self.legacy_db_path
@@ -382,19 +379,32 @@ class StewardConfig:
         if source.is_symlink() or destination.is_symlink():
             raise RuntimeError("Steward database paths must not be symlinks")
         _validate_private_mode(self.legacy_steward_home)
+        backup = self.legacy_backup_path
+        migration_marked = marker.exists() or legacy_marker.exists()
+        if (
+            not source.exists()
+            and destination.exists()
+            and backup.exists()
+            and migration_marked
+            and _legacy_backup_is_complete(self, destination, backup)
+        ):
+            return destination
+        if daemon_running:
+            raise RuntimeError("cannot migrate Steward state while daemon is running")
+        if (self.state_dir / "daemon.lock").exists():
+            raise RuntimeError("cannot migrate Steward state while daemon lock exists")
         if destination.exists() and source.exists():
             if not _same_sqlite_content(source, destination):
                 raise RuntimeError("ambiguous differing active Steward databases")
             # Identical copies are safe to make authoritative; still preserve
             # the source below as a marked backup when migration is incomplete.
-        if (marker.exists() or legacy_marker.exists()) and destination.exists() and not source.exists():
-            return destination
         if not source.exists():
             if destination.exists():
                 _validate_sqlite(destination)
-                backup = self.legacy_backup_path
-                if backup.exists() and not (marker.exists() or legacy_marker.exists()):
-                    _write_migration_provenance(self, destination, backup)
+                if backup.exists():
+                    _finish_legacy_backup(self, destination, backup)
+                elif marker.exists() or legacy_marker.exists():
+                    raise RuntimeError("Steward migration provenance has no legacy backup")
                 return destination
             return destination
         _validate_private_mode(self.coquic_home)
@@ -408,7 +418,9 @@ class StewardConfig:
             _fsync_directory(destination.parent)
         finally:
             temporary.unlink(missing_ok=True)
-        backup = self.legacy_backup_path
+        _checkpoint_sqlite(source)
+        if not _same_sqlite_content(source, destination):
+            raise RuntimeError("verified Steward destination differs from legacy source")
         if source.exists() and source != backup:
             if backup.exists():
                 if not _same_sqlite_content(source, backup):
@@ -416,14 +428,7 @@ class StewardConfig:
                 source.unlink()
             else:
                 os.replace(source, backup)
-            os.chmod(backup, stat.S_IRUSR | stat.S_IRGRP)
-            for suffix in ("-wal", "-shm"):
-                sidecar = source.with_name(source.name + suffix)
-                if sidecar.exists():
-                    sidecar_backup = backup.with_name(backup.name + suffix)
-                    os.replace(sidecar, sidecar_backup)
-                    os.chmod(sidecar_backup, stat.S_IRUSR | stat.S_IRGRP)
-        _write_migration_provenance(self, destination, backup)
+        _finish_legacy_backup(self, destination, backup)
         return destination
 
     # Compatibility spellings used by migration callers and tests.
@@ -493,6 +498,11 @@ def load_config(
         telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
     )
+    # Configuration loading is the ordinary process-start boundary. The
+    # migrator performs a read-only completeness check before requiring the
+    # offline boundary for any pending legacy handoff.
+    if config.legacy_db_path.exists() or config.legacy_backup_path.exists():
+        config.migrate_legacy_database()
     config.ensure_dirs()
     return config
 
@@ -699,15 +709,32 @@ def _utc_timestamp() -> str:
 
 
 def _valid_epoch(value: object) -> bool:
+    required = {"epochId", "formatVersion", "policy", "startedAt"}
+    allowed = required | {"endedAt"}
     return (
         isinstance(value, dict)
+        and required.issubset(value)
+        and set(value).issubset(allowed)
         and value.get("formatVersion") == ARCHIVE_FORMAT_VERSION
         and value.get("policy") == ARCHIVE_POLICY
         and isinstance(value.get("epochId"), str)
-        and bool(value["epochId"])
-        and isinstance(value.get("startedAt"), str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value["epochId"])
+        is not None
+        and _valid_utc_timestamp(value.get("startedAt"))
         and value.get("endedAt") is None
     )
+
+
+def _valid_utc_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return False
+    return parsed.utcoffset() is not None
 
 
 def _reject_symlink_roots(*paths: Path) -> None:
@@ -774,6 +801,97 @@ def _sqlite_backup(source: Path, destination: Path) -> None:
     finally:
         destination_connection.close()
         source_connection.close()
+
+
+def _checkpoint_sqlite(path: Path) -> None:
+    """Fold committed WAL bytes into the legacy database after copy validation."""
+    try:
+        with sqlite3.connect(path) as connection:
+            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"could not checkpoint legacy SQLite database: {path}") from exc
+    if result is not None and result[0] != 0:
+        raise RuntimeError(f"legacy SQLite database is busy: {path}")
+
+
+def _finish_legacy_backup(
+    config: StewardConfig, destination: Path, backup: Path
+) -> None:
+    """Finish the restartable database/sidecar rename before marking migration."""
+    source = config.legacy_db_path
+    interrupted = backup.with_name(f"{backup.name}.interrupted")
+    if not backup.exists():
+        if not interrupted.exists():
+            raise RuntimeError("legacy Steward database backup is missing")
+        if not stat.S_ISREG(interrupted.lstat().st_mode):
+            raise RuntimeError("interrupted legacy backup is not a regular file")
+        _rebuild_legacy_backup(destination, backup)
+    if backup.is_symlink() or interrupted.is_symlink():
+        raise RuntimeError("legacy Steward database backup is unsafe")
+    for suffix in ("-wal", "-shm"):
+        sidecar = source.with_name(source.name + suffix)
+        sidecar_backup = backup.with_name(backup.name + suffix)
+        if sidecar.is_symlink() or sidecar_backup.is_symlink():
+            raise RuntimeError("legacy SQLite sidecars must not be symlinks")
+        if sidecar.exists():
+            if sidecar_backup.exists():
+                if sidecar.read_bytes() != sidecar_backup.read_bytes():
+                    raise RuntimeError("legacy SQLite sidecar backup conflicts")
+                sidecar.unlink()
+            else:
+                os.replace(sidecar, sidecar_backup)
+        if sidecar_backup.exists():
+            os.chmod(sidecar_backup, stat.S_IRUSR | stat.S_IRGRP)
+    if not _same_sqlite_content(backup, destination):
+        if interrupted.exists():
+            raise RuntimeError("multiple interrupted legacy backups conflict")
+        for suffix in ("-wal", "-shm"):
+            sidecar_backup = backup.with_name(backup.name + suffix)
+            if sidecar_backup.exists():
+                interrupted_sidecar = interrupted.with_name(interrupted.name + suffix)
+                if interrupted_sidecar.is_symlink():
+                    raise RuntimeError("interrupted legacy sidecar is unsafe")
+                if interrupted_sidecar.exists():
+                    if sidecar_backup.read_bytes() != interrupted_sidecar.read_bytes():
+                        raise RuntimeError("interrupted legacy sidecar conflicts")
+                    sidecar_backup.unlink()
+                else:
+                    os.replace(sidecar_backup, interrupted_sidecar)
+                os.chmod(interrupted_sidecar, stat.S_IRUSR | stat.S_IRGRP)
+        os.replace(backup, interrupted)
+        os.chmod(interrupted, stat.S_IRUSR | stat.S_IRGRP)
+        _rebuild_legacy_backup(destination, backup)
+    if not _same_sqlite_content(backup, destination):
+        raise RuntimeError("legacy Steward backup differs from verified destination")
+    os.chmod(backup, stat.S_IRUSR | stat.S_IRGRP)
+    _fsync_directory(backup.parent)
+    _write_migration_provenance(config, destination, backup)
+
+
+def _legacy_backup_is_complete(
+    config: StewardConfig, destination: Path, backup: Path
+) -> bool:
+    if backup.is_symlink():
+        return False
+    for suffix in ("-wal", "-shm"):
+        source_sidecar = config.legacy_db_path.with_name(
+            config.legacy_db_path.name + suffix
+        )
+        backup_sidecar = backup.with_name(backup.name + suffix)
+        if source_sidecar.exists() or source_sidecar.is_symlink() or backup_sidecar.is_symlink():
+            return False
+    return _same_sqlite_content(backup, destination)
+
+
+def _rebuild_legacy_backup(destination: Path, backup: Path) -> None:
+    temporary = backup.with_name(f".{backup.name}.copy-{secrets.token_hex(8)}")
+    try:
+        _sqlite_backup(destination, temporary)
+        _validate_sqlite(temporary)
+        os.replace(temporary, backup)
+        _fsync_directory(backup.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _same_sqlite_content(left: Path, right: Path) -> bool:

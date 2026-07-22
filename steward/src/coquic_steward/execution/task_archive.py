@@ -7,6 +7,7 @@ refuses to guess when a visible byte disagrees with that expectation.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -50,6 +51,64 @@ PRIVATE_KEYS = {
     "archive_generation",
     "auth",
     "credentials",
+}
+TASK_KEYS = {
+    "taskId",
+    "epochId",
+    "status",
+    "promptPath",
+    "eventsPath",
+    "createdAt",
+    "updatedAt",
+    "currentPipelineId",
+    "summary",
+    "pipelines",
+    "terminalStatusObservedAt",
+    "manifestPath",
+}
+PIPELINE_KEYS = {
+    "pipelineId",
+    "taskId",
+    "ordinal",
+    "trigger",
+    "parentPipelineId",
+    "phase",
+    "state",
+    "baseIdentity",
+    "inputIdentity",
+    "outputIdentity",
+    "patchIdentity",
+    "startedAt",
+    "updatedAt",
+    "completedAt",
+    "inputs",
+    "patches",
+    "validations",
+    "reviews",
+    "integration",
+    "runs",
+}
+RUN_KEYS = {
+    "runId",
+    "taskId",
+    "pipelineId",
+    "role",
+    "roleOrdinal",
+    "sessionId",
+    "resumeOfRunId",
+    "parentRunId",
+    "retryOfRunId",
+    "state",
+    "startedAt",
+    "updatedAt",
+    "completedAt",
+    "model",
+    "reasoning",
+    "exit",
+    "result",
+    "usage",
+    "cost",
+    "artifacts",
 }
 
 
@@ -135,6 +194,553 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     raise TypeError(f"expected mapping or pydantic model, got {type(value).__name__}")
+
+
+def _validate_shape(
+    value: Any,
+    *,
+    required: set[str],
+    allowed: set[str],
+    label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ArchiveValidationError(f"{label} schema requires an object")
+    keys = set(value)
+    missing = required - keys
+    extra = keys - allowed
+    if missing:
+        raise ArchiveValidationError(
+            f"{label} schema is missing {', '.join(sorted(missing))}"
+        )
+    if extra:
+        raise ArchiveValidationError(
+            f"{label} schema has unknown fields: {', '.join(sorted(extra))}"
+        )
+    return value
+
+
+def _validate_timestamp(value: Any, label: str) -> None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ArchiveValidationError(f"{label} must be a UTC date-time")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ArchiveValidationError(f"{label} must be a UTC date-time") from exc
+    if parsed.utcoffset() is None:
+        raise ArchiveValidationError(f"{label} must be a UTC date-time")
+
+
+def _validate_safe_id_or_none(value: Any, label: str) -> None:
+    if value is not None:
+        try:
+            validate_opaque_id(value)
+        except ArchiveValidationError as exc:
+            raise ArchiveValidationError(f"{label} must be a safe id") from exc
+
+
+def _validate_optional_text(value: Any, label: str) -> None:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise ArchiveValidationError(f"{label} must be null or non-empty text")
+
+
+def _validate_nonnegative_integer(value: Any, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ArchiveValidationError(f"{label} must be a non-negative integer")
+
+
+def _validate_artifact(value: Any, label: str) -> None:
+    keys = {
+        "path",
+        "lifecycle",
+        "availability",
+        "mediaType",
+        "byteSize",
+        "sha256",
+        "requiredAtTerminal",
+        "reason",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label=label)
+    validate_relative_path(value["path"])
+    if value["lifecycle"] not in {"live", "terminal", "optional"}:
+        raise ArchiveValidationError(f"{label} has invalid lifecycle")
+    availability = value["availability"]
+    if availability not in {
+        "available",
+        "partial",
+        "missing",
+        "unavailable",
+        "notProduced",
+    }:
+        raise ArchiveValidationError(f"{label} has invalid availability")
+    _validate_optional_text(value["mediaType"], f"{label}.mediaType")
+    if value["byteSize"] is not None:
+        _validate_nonnegative_integer(value["byteSize"], f"{label}.byteSize")
+    digest = value["sha256"]
+    if digest is not None and (
+        not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise ArchiveValidationError(f"{label}.sha256 is invalid")
+    if not isinstance(value["requiredAtTerminal"], bool):
+        raise ArchiveValidationError(f"{label}.requiredAtTerminal must be boolean")
+    _validate_optional_text(value["reason"], f"{label}.reason")
+    if availability == "available":
+        if not isinstance(value["mediaType"], str) or not value["mediaType"]:
+            raise ArchiveValidationError(f"{label} available mediaType is required")
+        _validate_nonnegative_integer(value["byteSize"], f"{label}.byteSize")
+        if value["reason"] is not None:
+            raise ArchiveValidationError(f"{label} available reason must be null")
+    elif availability == "partial":
+        if not isinstance(value["reason"], str) or not value["reason"]:
+            raise ArchiveValidationError(f"{label} partial reason is required")
+    elif value["byteSize"] is not None or digest is not None:
+        raise ArchiveValidationError(f"{label} unavailable size/hash must be null")
+    elif not isinstance(value["reason"], str) or not value["reason"]:
+        raise ArchiveValidationError(f"{label} unavailable reason is required")
+
+
+def _validate_integration(value: Any) -> None:
+    keys = {"state", "resultPath", "commit", "startedAt", "completedAt"}
+    value = _validate_shape(
+        value, required=keys, allowed=keys, label="integration"
+    )
+    if value["state"] not in {
+        "pending",
+        "succeeded",
+        "failed",
+        "conflict",
+        "unavailable",
+    }:
+        raise ArchiveValidationError("integration schema has invalid state")
+    if value["resultPath"] is not None:
+        validate_relative_path(value["resultPath"])
+    commit = value["commit"]
+    if commit is not None and (
+        not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+    ):
+        raise ArchiveValidationError("integration schema has invalid commit")
+    _validate_timestamp(value["startedAt"], "integration.startedAt")
+    if value["completedAt"] is not None:
+        _validate_timestamp(value["completedAt"], "integration.completedAt")
+
+
+def _validate_pipeline_reference(value: Any) -> None:
+    keys = {"pipelineId", "ordinal", "path"}
+    value = _validate_shape(
+        value, required=keys, allowed=keys, label="pipeline reference"
+    )
+    validate_opaque_id(value["pipelineId"])
+    _validate_nonnegative_integer(value["ordinal"], "pipeline reference ordinal")
+    if value["ordinal"] < 1:
+        raise ArchiveValidationError("pipeline reference ordinal must be positive")
+    validate_relative_path(value["path"])
+
+
+def _validate_run_reference(value: Any) -> None:
+    keys = {"runId", "role", "roleOrdinal", "state", "path"}
+    value = _validate_shape(
+        value, required=keys, allowed=keys, label="run reference"
+    )
+    validate_opaque_id(value["runId"])
+    if not isinstance(value["role"], str) or not (1 <= len(value["role"]) <= 128):
+        raise ArchiveValidationError("run reference role is invalid")
+    _validate_nonnegative_integer(value["roleOrdinal"], "run reference ordinal")
+    if value["roleOrdinal"] < 1:
+        raise ArchiveValidationError("run reference ordinal must be positive")
+    if value["state"] not in {
+        "running",
+        "succeeded",
+        "failed",
+        "interrupted",
+        "cancelled",
+    }:
+        raise ArchiveValidationError("run reference state is invalid")
+    validate_relative_path(value["path"])
+
+
+def _validate_task_document(value: Any) -> None:
+    required = TASK_KEYS - {"terminalStatusObservedAt", "manifestPath"}
+    value = _validate_shape(
+        value, required=required, allowed=TASK_KEYS, label="task"
+    )
+    validate_opaque_id(value["taskId"])
+    validate_opaque_id(value["epochId"])
+    if value["status"] not in {
+        "queued",
+        "running",
+        "reviewing",
+        "integrating",
+        *TERMINAL_TASK_STATUSES,
+    }:
+        raise ArchiveValidationError("task schema has invalid status")
+    validate_relative_path(value["promptPath"])
+    validate_relative_path(value["eventsPath"])
+    _validate_timestamp(value["createdAt"], "task.createdAt")
+    _validate_timestamp(value["updatedAt"], "task.updatedAt")
+    _validate_safe_id_or_none(value["currentPipelineId"], "currentPipelineId")
+    summary = _validate_shape(
+        value["summary"],
+        required={"title", "text"},
+        allowed={"title", "text"},
+        label="task summary",
+    )
+    for key in ("title", "text"):
+        if not isinstance(summary[key], str) or not summary[key]:
+            raise ArchiveValidationError(f"task summary {key} is required")
+    pipelines = value["pipelines"]
+    if not isinstance(pipelines, list) or not pipelines:
+        raise ArchiveValidationError("task schema requires pipelines")
+    for reference in pipelines:
+        _validate_pipeline_reference(reference)
+    if value.get("terminalStatusObservedAt") is not None:
+        _validate_timestamp(
+            value["terminalStatusObservedAt"], "task.terminalStatusObservedAt"
+        )
+    if value.get("manifestPath") is not None:
+        validate_relative_path(value["manifestPath"])
+
+
+def _validate_pipeline_document(value: Any) -> None:
+    value = _validate_shape(
+        value, required=PIPELINE_KEYS, allowed=PIPELINE_KEYS, label="pipeline"
+    )
+    validate_opaque_id(value["pipelineId"])
+    validate_opaque_id(value["taskId"])
+    _validate_nonnegative_integer(value["ordinal"], "pipeline.ordinal")
+    if value["ordinal"] < 1:
+        raise ArchiveValidationError("pipeline ordinal must be positive")
+    if value["trigger"] not in {
+        "initial",
+        "validation-repair",
+        "review-repair",
+        "integration-rebase",
+        "integration-conflict",
+        "push-race",
+    }:
+        raise ArchiveValidationError("pipeline schema has invalid trigger")
+    _validate_safe_id_or_none(value["parentPipelineId"], "parentPipelineId")
+    if value["phase"] not in {
+        "planning",
+        "implementation",
+        "validation",
+        "review",
+        "integration",
+        "complete",
+    }:
+        raise ArchiveValidationError("pipeline schema has invalid phase")
+    if value["state"] not in {
+        "active",
+        "succeeded",
+        "failed",
+        "blocked",
+        "cancelled",
+        "interrupted",
+        "superseded",
+    }:
+        raise ArchiveValidationError("pipeline schema has invalid state")
+    for key in ("baseIdentity", "inputIdentity", "outputIdentity", "patchIdentity"):
+        _validate_optional_text(value[key], f"pipeline.{key}")
+    _validate_timestamp(value["startedAt"], "pipeline.startedAt")
+    _validate_timestamp(value["updatedAt"], "pipeline.updatedAt")
+    if value["completedAt"] is not None:
+        _validate_timestamp(value["completedAt"], "pipeline.completedAt")
+    for key in ("inputs", "patches"):
+        if not isinstance(value[key], list):
+            raise ArchiveValidationError(f"pipeline {key} must be an array")
+        for index, descriptor in enumerate(value[key]):
+            _validate_artifact(descriptor, f"pipeline.{key}[{index}]")
+    if not isinstance(value["validations"], list):
+        raise ArchiveValidationError("pipeline validations must be an array")
+    for reference in value["validations"]:
+        keys = {"validationId", "ordinal", "path"}
+        reference = _validate_shape(
+            reference,
+            required=keys,
+            allowed=keys,
+            label="validation reference",
+        )
+        validate_opaque_id(reference["validationId"])
+        _validate_nonnegative_integer(reference["ordinal"], "validation ordinal")
+        if reference["ordinal"] < 1:
+            raise ArchiveValidationError("validation ordinal must be positive")
+        validate_relative_path(reference["path"])
+    if not isinstance(value["reviews"], list):
+        raise ArchiveValidationError("pipeline reviews must be an array")
+    for reference in value["reviews"]:
+        keys = {"reviewId", "kind", "ordinal", "path"}
+        reference = _validate_shape(
+            reference, required=keys, allowed=keys, label="review reference"
+        )
+        validate_opaque_id(reference["reviewId"])
+        if reference["kind"] not in {"raw", "effective"}:
+            raise ArchiveValidationError("review reference kind is invalid")
+        _validate_nonnegative_integer(reference["ordinal"], "review ordinal")
+        if reference["ordinal"] < 1:
+            raise ArchiveValidationError("review ordinal must be positive")
+        validate_relative_path(reference["path"])
+    _validate_integration(value["integration"])
+    if not isinstance(value["runs"], list) or not value["runs"]:
+        raise ArchiveValidationError("pipeline schema requires runs")
+    for reference in value["runs"]:
+        _validate_run_reference(reference)
+
+
+def _validate_usage(value: Any) -> None:
+    keys = {
+        "availability",
+        "promptTokens",
+        "completionTokens",
+        "totalTokens",
+        "sourcePath",
+        "reason",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label="run usage")
+    if value["availability"] not in {"available", "partial", "unavailable"}:
+        raise ArchiveValidationError("run usage availability is invalid")
+    for key in ("promptTokens", "completionTokens", "totalTokens"):
+        if value[key] is not None:
+            _validate_nonnegative_integer(value[key], f"run usage {key}")
+    if value["sourcePath"] is not None:
+        validate_relative_path(value["sourcePath"])
+    _validate_optional_text(value["reason"], "run usage reason")
+    if value["availability"] == "available":
+        for key in ("promptTokens", "completionTokens", "totalTokens"):
+            _validate_nonnegative_integer(value[key], f"run usage {key}")
+        if value["sourcePath"] is None or value["reason"] is not None:
+            raise ArchiveValidationError("available run usage is incomplete")
+    elif value["availability"] == "partial":
+        if all(value[key] is None for key in ("promptTokens", "completionTokens", "totalTokens")):
+            raise ArchiveValidationError("partial run usage has no counters")
+        if not isinstance(value["reason"], str) or not value["reason"]:
+            raise ArchiveValidationError("partial run usage reason is required")
+    elif any(
+        value[key] is not None
+        for key in ("promptTokens", "completionTokens", "totalTokens", "sourcePath")
+    ) or not isinstance(value["reason"], str):
+        raise ArchiveValidationError("unavailable run usage is invalid")
+
+
+def _validate_cost(value: Any) -> None:
+    keys = {
+        "availability",
+        "estimatedMicroUsd",
+        "currency",
+        "model",
+        "pricingSource",
+        "reason",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label="run cost")
+    if value["availability"] not in {"available", "partial", "unavailable"}:
+        raise ArchiveValidationError("run cost availability is invalid")
+    if value["estimatedMicroUsd"] is not None:
+        _validate_nonnegative_integer(
+            value["estimatedMicroUsd"], "run cost estimatedMicroUsd"
+        )
+    for key in ("model", "pricingSource", "reason"):
+        _validate_optional_text(value[key], f"run cost {key}")
+    currency = value["currency"]
+    if currency is not None and (
+        not isinstance(currency, str) or re.fullmatch(r"[A-Z]{3}", currency) is None
+    ):
+        raise ArchiveValidationError("run cost currency is invalid")
+    if value["availability"] == "available":
+        _validate_nonnegative_integer(
+            value["estimatedMicroUsd"], "run cost estimatedMicroUsd"
+        )
+        if (
+            currency != "USD"
+            or not value["model"]
+            or not value["pricingSource"]
+            or value["reason"] is not None
+        ):
+            raise ArchiveValidationError("available run cost is incomplete")
+    elif value["availability"] == "unavailable":
+        if any(
+            value[key] is not None
+            for key in ("estimatedMicroUsd", "currency", "pricingSource")
+        ) or not isinstance(value["reason"], str):
+            raise ArchiveValidationError("unavailable run cost is invalid")
+    elif not isinstance(value["reason"], str) or not value["reason"]:
+        raise ArchiveValidationError("partial run cost reason is required")
+
+
+def _validate_run_document(value: Any) -> None:
+    value = _validate_shape(value, required=RUN_KEYS, allowed=RUN_KEYS, label="run")
+    for key in ("runId", "taskId", "pipelineId", "sessionId"):
+        validate_opaque_id(value[key])
+    if not isinstance(value["role"], str) or not (1 <= len(value["role"]) <= 128):
+        raise ArchiveValidationError("run schema has invalid role")
+    _validate_nonnegative_integer(value["roleOrdinal"], "run.roleOrdinal")
+    if value["roleOrdinal"] < 1:
+        raise ArchiveValidationError("run role ordinal must be positive")
+    for key in ("resumeOfRunId", "parentRunId", "retryOfRunId"):
+        _validate_safe_id_or_none(value[key], f"run.{key}")
+    if value["state"] not in {
+        "running",
+        "succeeded",
+        "failed",
+        "interrupted",
+        "cancelled",
+    }:
+        raise ArchiveValidationError("run schema has invalid state")
+    _validate_timestamp(value["startedAt"], "run.startedAt")
+    _validate_timestamp(value["updatedAt"], "run.updatedAt")
+    if value["state"] == "running":
+        if value["completedAt"] is not None:
+            raise ArchiveValidationError("running run completedAt must be null")
+    else:
+        _validate_timestamp(value["completedAt"], "run.completedAt")
+    for key in ("model", "reasoning"):
+        _validate_optional_text(value[key], f"run.{key}")
+    if value["exit"] is not None:
+        exit_keys = {"code", "signal", "reason"}
+        exit_value = _validate_shape(
+            value["exit"], required=exit_keys, allowed=exit_keys, label="run exit"
+        )
+        if exit_value["code"] is not None and (
+            isinstance(exit_value["code"], bool)
+            or not isinstance(exit_value["code"], int)
+        ):
+            raise ArchiveValidationError("run exit code is invalid")
+        _validate_optional_text(exit_value["signal"], "run exit signal")
+        _validate_optional_text(exit_value["reason"], "run exit reason")
+    result_keys = {"status", "summary", "path"}
+    result = _validate_shape(
+        value["result"],
+        required=result_keys,
+        allowed=result_keys,
+        label="run result",
+    )
+    if result["status"] not in {"available", "partial", "unavailable"}:
+        raise ArchiveValidationError("run result status is invalid")
+    if result["summary"] is not None and not isinstance(result["summary"], str):
+        raise ArchiveValidationError("run result summary is invalid")
+    if result["path"] is not None:
+        validate_relative_path(result["path"])
+    _validate_usage(value["usage"])
+    _validate_cost(value["cost"])
+    artifact_keys = {
+        "codex",
+        "activities",
+        "telemetry",
+        "lastMessage",
+        "result",
+        "toolChangesManifest",
+        "toolChangesSummary",
+    }
+    artifacts = _validate_shape(
+        value["artifacts"],
+        required=artifact_keys,
+        allowed=artifact_keys,
+        label="run artifacts",
+    )
+    for key, descriptor in artifacts.items():
+        _validate_artifact(descriptor, f"run artifact {key}")
+
+
+def _validate_validation_document(value: Any) -> None:
+    keys = {
+        "validationId",
+        "taskId",
+        "pipelineId",
+        "ordinal",
+        "command",
+        "state",
+        "startedAt",
+        "completedAt",
+        "result",
+        "outputPath",
+        "output",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label="validation")
+    for key in ("validationId", "taskId", "pipelineId"):
+        validate_opaque_id(value[key])
+    _validate_nonnegative_integer(value["ordinal"], "validation ordinal")
+    if value["ordinal"] < 1 or not isinstance(value["command"], str) or not value["command"]:
+        raise ArchiveValidationError("validation schema has invalid ordinal/command")
+    if value["state"] not in {"running", "completed", "unavailable"}:
+        raise ArchiveValidationError("validation schema has invalid state")
+    _validate_timestamp(value["startedAt"], "validation.startedAt")
+    if value["completedAt"] is not None:
+        _validate_timestamp(value["completedAt"], "validation.completedAt")
+    if value["result"] not in {"pass", "fail", "skipped", "unavailable"}:
+        raise ArchiveValidationError("validation schema has invalid result")
+    validate_relative_path(value["outputPath"])
+    _validate_artifact(value["output"], "validation output")
+
+
+def _validate_review_document(value: Any) -> None:
+    keys = {
+        "reviewId",
+        "taskId",
+        "pipelineId",
+        "ordinal",
+        "kind",
+        "role",
+        "state",
+        "verdict",
+        "findings",
+        "artifact",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label="review")
+    for key in ("reviewId", "taskId", "pipelineId"):
+        validate_opaque_id(value[key])
+    _validate_nonnegative_integer(value["ordinal"], "review ordinal")
+    if value["ordinal"] < 1 or value["kind"] not in {"raw", "effective"}:
+        raise ArchiveValidationError("review schema has invalid ordinal/kind")
+    if not isinstance(value["role"], str) or not value["role"]:
+        raise ArchiveValidationError("review schema has invalid role")
+    if value["state"] not in {"available", "partial", "unavailable"}:
+        raise ArchiveValidationError("review schema has invalid state")
+    if value["verdict"] not in {
+        "approve",
+        "request-changes",
+        "unknown",
+        "unavailable",
+    }:
+        raise ArchiveValidationError("review schema has invalid verdict")
+    if not isinstance(value["findings"], list) or not all(
+        isinstance(item, str) for item in value["findings"]
+    ):
+        raise ArchiveValidationError("review findings must be strings")
+    _validate_artifact(value["artifact"], "review artifact")
+
+
+def _validate_manifest_document(value: Any) -> None:
+    keys = {
+        "manifestVersion",
+        "epochId",
+        "taskId",
+        "completionIdentity",
+        "terminalStatus",
+        "completedAt",
+        "files",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label="manifest")
+    if value["manifestVersion"] != FORMAT_VERSION:
+        raise ArchiveValidationError("manifest schema has invalid version")
+    for key in ("epochId", "taskId", "completionIdentity"):
+        validate_opaque_id(value[key])
+    if value["terminalStatus"] not in TERMINAL_TASK_STATUSES:
+        raise ArchiveValidationError("manifest schema has invalid terminal status")
+    _validate_timestamp(value["completedAt"], "manifest.completedAt")
+    if not isinstance(value["files"], list) or not value["files"]:
+        raise ArchiveValidationError("manifest schema requires files")
+    for descriptor in value["files"]:
+        file_keys = {"path", "byteSize", "sha256"}
+        descriptor = _validate_shape(
+            descriptor,
+            required=file_keys,
+            allowed=file_keys,
+            label="manifest file",
+        )
+        validate_relative_path(descriptor["path"])
+        _validate_nonnegative_integer(descriptor["byteSize"], "manifest file size")
+        if (
+            not isinstance(descriptor["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", descriptor["sha256"]) is None
+        ):
+            raise ArchiveValidationError("manifest file hash is invalid")
 
 
 class TaskArchive:
@@ -249,15 +855,27 @@ class TaskArchive:
 
     @staticmethod
     def _valid_epoch(value: Any) -> bool:
-        return (
-            isinstance(value, Mapping)
-            and value.get("formatVersion") == FORMAT_VERSION
-            and value.get("policy") == POLICY
-            and isinstance(value.get("epochId"), str)
-            and SAFE_ID_RE.fullmatch(value["epochId"]) is not None
-            and isinstance(value.get("startedAt"), str)
-            and value.get("endedAt") is None
-        )
+        required = {"epochId", "formatVersion", "policy", "startedAt"}
+        allowed = required | {"endedAt"}
+        if (
+            not isinstance(value, Mapping)
+            or not required.issubset(value)
+            or not set(value).issubset(allowed)
+        ):
+            return False
+        if (
+            value.get("formatVersion") != FORMAT_VERSION
+            or value.get("policy") != POLICY
+            or not isinstance(value.get("epochId"), str)
+            or SAFE_ID_RE.fullmatch(value["epochId"]) is None
+            or value.get("endedAt") is not None
+        ):
+            return False
+        try:
+            _validate_timestamp(value.get("startedAt"), "epoch.startedAt")
+        except ArchiveValidationError:
+            return False
+        return True
 
     def create_task(
         self,
@@ -272,9 +890,11 @@ class TaskArchive:
         self.ensure_epoch()
         task_id = validate_opaque_id(task_id)
         directory = self.task_dir(task_id)
+        self._assert_safe_archive_path(directory, target="directory")
         if directory.exists() and not directory.is_dir():
             raise ArchiveConflictError(f"task path is not a directory: {directory}")
         directory.mkdir(parents=True, exist_ok=True)
+        self._assert_safe_archive_path(directory, target="directory")
         metadata = self._task_metadata(task_id, task, task_metadata, pipeline_id)
         self.write_json(task_id, "task.json", metadata)
         self.write_bytes(task_id, "prompt.md", prompt.encode("utf-8") if isinstance(prompt, str) else prompt)
@@ -293,6 +913,7 @@ class TaskArchive:
         value = _private_filtered(dict(metadata))
         if value.get("taskId") != task_id:
             raise ArchiveConflictError("task metadata identity does not match archive path")
+        _validate_task_document(value)
         return self.write_json(task_id, "task.json", value)
 
     materialize_task = update_task
@@ -352,7 +973,9 @@ class TaskArchive:
             raise ArchiveConflictError("task metadata identity does not match archive path")
         if not isinstance(value.get("pipelines"), list):
             raise ArchiveValidationError("task pipelines must be an array")
-        return _private_filtered(value)
+        value = _private_filtered(value)
+        _validate_task_document(value)
+        return value
 
     def write_json(self, task_id: str, relative: str, value: Mapping[str, Any] | list[Any]) -> Path:
         path = self.task_path(task_id, relative)
@@ -382,7 +1005,9 @@ class TaskArchive:
         return path
 
     def _atomic_bytes(self, path: Path, data: bytes) -> None:
+        self._assert_safe_archive_path(path, target="file")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._assert_safe_archive_path(path, target="file")
         temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
         try:
             with temporary.open("xb") as handle:
@@ -397,6 +1022,7 @@ class TaskArchive:
     def reconcile(self, task_id: str, relative: str, expected: bytes | Mapping[str, Any] | list[Any]) -> str:
         data = _json_bytes(expected) if isinstance(expected, (Mapping, list)) else expected
         path = self.task_path(task_id, relative)
+        self._assert_safe_archive_path(path, target="file")
         if not path.exists():
             self.write_bytes(task_id, relative, data)
             return "materialized"
@@ -411,23 +1037,74 @@ class TaskArchive:
     def reconcile_expected(self, task_id: str, expected: Mapping[str, bytes | Mapping[str, Any] | list[Any]]) -> dict[str, str]:
         return {relative: self.reconcile(task_id, relative, value) for relative, value in expected.items()}
 
-    def append_jsonl(self, task_id: str, relative: str, record: Mapping[str, Any] | bytes) -> int:
+    def append_jsonl(
+        self,
+        task_id: str,
+        relative: str,
+        record: Mapping[str, Any] | bytes,
+        *,
+        generated_at: bool = False,
+    ) -> int:
         path = self.task_path(task_id, relative)
         self._assert_mutable(task_id, path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._assert_safe_archive_path(path, target="file")
         line = (_json_bytes(record) if isinstance(record, Mapping) else record)
         if not line.endswith(b"\n"):
             line += b"\n"
-        if path.exists():
-            if path.is_symlink() or not path.is_file():
+        stable_event_id = record.get("eventId") if isinstance(record, Mapping) else None
+        flags = os.O_CREAT | os.O_APPEND | os.O_RDWR
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as exc:
+            raise ArchiveConflictError(f"could not open JSONL path safely: {path}") from exc
+        with os.fdopen(descriptor, "r+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ArchiveConflictError(f"JSONL path is not regular: {path}")
-            with path.open("rb") as handle:
-                existing = handle.read()
+            handle.seek(0)
+            existing = handle.read()
             if existing and not existing.endswith(b"\n"):
                 raise ArchiveConflictError("cannot append after incomplete JSONL line")
-        else:
-            existing = b""
-        with path.open("ab") as handle:
+            if stable_event_id is not None:
+                matching_offsets: list[tuple[int, bytes]] = []
+                offset = 0
+                for existing_line in existing.splitlines(keepends=True):
+                    offset += len(existing_line)
+                    try:
+                        existing_record = json.loads(existing_line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        isinstance(existing_record, Mapping)
+                        and existing_record.get("eventId") == stable_event_id
+                    ):
+                        matching_offsets.append((offset, existing_line))
+                if len(matching_offsets) > 1:
+                    raise ArchiveConflictError(
+                        f"duplicate JSONL eventId already exists: {stable_event_id}"
+                    )
+                if matching_offsets:
+                    offset, existing_line = matching_offsets[0]
+                    equivalent = existing_line == line
+                    if not equivalent and generated_at:
+                        try:
+                            existing_value = json.loads(existing_line)
+                        except json.JSONDecodeError:
+                            existing_value = None
+                        if isinstance(existing_value, Mapping):
+                            existing_without_at = dict(existing_value)
+                            requested_without_at = dict(record)
+                            existing_without_at.pop("at", None)
+                            requested_without_at.pop("at", None)
+                            equivalent = existing_without_at == requested_without_at
+                    if not equivalent:
+                        raise ArchiveConflictError(
+                            f"conflicting JSONL eventId reuse: {stable_event_id}"
+                        )
+                    return offset
+            handle.seek(0, os.SEEK_END)
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
@@ -440,10 +1117,13 @@ class TaskArchive:
     def append_event(self, task_id: str, event: Mapping[str, Any]) -> int:
         value = dict(event)
         value.setdefault("eventId", f"event-{secrets.token_hex(10)}")
+        generated_at = "at" not in value
         value.setdefault("at", _now())
         if not SAFE_ID_RE.fullmatch(str(value["eventId"])):
             raise ArchiveValidationError("eventId must be an opaque safe id")
-        return self.append_jsonl(task_id, "events.jsonl", value)
+        return self.append_jsonl(
+            task_id, "events.jsonl", value, generated_at=generated_at
+        )
 
     append_task_event = append_event
 
@@ -483,8 +1163,20 @@ class TaskArchive:
             value.setdefault("completedAt", None)
         for key in ("inputs", "patches", "validations", "reviews", "runs"):
             value.setdefault(key, [])
+        value.setdefault(
+            "integration",
+            {
+                "state": "pending",
+                "resultPath": None,
+                "commit": None,
+                "startedAt": value["startedAt"],
+                "completedAt": None,
+            },
+        )
         if value["taskId"] != task_id:
             raise ArchiveConflictError("pipeline task id does not match directory")
+        value = {key: item for key, item in value.items() if key in PIPELINE_KEYS}
+        _validate_pipeline_document(value)
         relative = f"pipelines/{identifier}/pipeline.json"
         path = self.write_json(task_id, relative, value)
         self._add_task_pipeline_reference(task_id, identifier, int(value["ordinal"]))
@@ -518,6 +1210,22 @@ class TaskArchive:
         value.pop("imageVersion", None)
         value.pop("runtimeVersion", None)
         value.pop("checkpointId", None)
+        exit_value = value.get("exit")
+        if exit_value is None and any(
+            key in value for key in ("exit_code", "exit_signal", "exit_reason")
+        ):
+            value["exit"] = {
+                "code": value.get("exit_code"),
+                "signal": value.get("exit_signal"),
+                "reason": value.get("exit_reason"),
+            }
+        if "result_summary" in value and "result" not in value:
+            summary = value.get("result_summary")
+            value["result"] = {
+                "status": "available" if summary is not None else "unavailable",
+                "summary": summary,
+                "path": None,
+            }
         value.setdefault("taskId", task_id)
         value.setdefault("pipelineId", pipeline_id)
         value.setdefault("role", "unknown")
@@ -542,6 +1250,8 @@ class TaskArchive:
         value.setdefault("artifacts", _empty_artifacts(task_id, pipeline_id, identifier))
         if value["taskId"] != task_id or value["pipelineId"] != pipeline_id:
             raise ArchiveConflictError("run identity does not match directory")
+        value = {key: item for key, item in value.items() if key in RUN_KEYS}
+        _validate_run_document(value)
         path = self.write_json(task_id, f"pipelines/{validate_opaque_id(pipeline_id)}/runs/{identifier}/run.json", value)
         self._add_pipeline_run_reference(task_id, pipeline_id, identifier, int(value["roleOrdinal"]), str(value["role"]), str(value["state"]))
         return path
@@ -590,11 +1300,6 @@ class TaskArchive:
             f"pipelines/{pipeline_id}/validations/{identifier}/output.log",
         )
         value.setdefault("output", _artifact_descriptor(output_path, "text/plain", output is not None))
-        path = self.write_json(
-            task_id,
-            f"pipelines/{validate_opaque_id(pipeline_id)}/validations/{identifier}/validation.json",
-            value,
-        )
         if output is not None:
             output_bytes = output.encode("utf-8") if isinstance(output, str) else output
             self.write_bytes(
@@ -612,11 +1317,15 @@ class TaskArchive:
                 }
             )
             value["output"] = descriptor
-            self.write_json(
-                task_id,
-                f"pipelines/{validate_opaque_id(pipeline_id)}/validations/{identifier}/validation.json",
-                value,
-            )
+        _validate_validation_document(value)
+        path = self.write_json(
+            task_id,
+            f"pipelines/{validate_opaque_id(pipeline_id)}/validations/{identifier}/validation.json",
+            value,
+        )
+        self._add_pipeline_validation_reference(
+            task_id, pipeline_id, identifier, int(value["ordinal"])
+        )
         return path
 
     write_validation = materialize_validation
@@ -644,17 +1353,40 @@ class TaskArchive:
         value.setdefault("findings", [])
         value.setdefault(
             "artifact",
-            _artifact_descriptor(
-                f"pipelines/{pipeline_id}/reviews/{identifier}.json",
-                "application/json",
-                True,
-            ),
+            {
+                "path": f"pipelines/{pipeline_id}/reviews/{identifier}.json",
+                "lifecycle": "terminal",
+                "availability": "available",
+                "mediaType": "application/json",
+                "byteSize": 0,
+                "sha256": None,
+                "requiredAtTerminal": True,
+                "reason": None,
+            },
         )
-        return self.write_json(
+        artifact = value.get("artifact")
+        if isinstance(artifact, dict) and artifact.get("path") == (
+            f"pipelines/{pipeline_id}/reviews/{identifier}.json"
+        ):
+            for _ in range(4):
+                size = len(_json_bytes(value))
+                if artifact.get("byteSize") == size:
+                    break
+                artifact["byteSize"] = size
+        _validate_review_document(value)
+        path = self.write_json(
             task_id,
             f"pipelines/{validate_opaque_id(pipeline_id)}/reviews/{identifier}.json",
             value,
         )
+        self._add_pipeline_review_reference(
+            task_id,
+            pipeline_id,
+            identifier,
+            int(value["ordinal"]),
+            str(value["kind"]),
+        )
+        return path
 
     write_review = materialize_review
 
@@ -670,6 +1402,7 @@ class TaskArchive:
         value.setdefault("commit", None)
         value.setdefault("startedAt", _now())
         value.setdefault("completedAt", None)
+        _validate_integration(value)
         return self.write_json(
             task_id,
             f"pipelines/{validate_opaque_id(pipeline_id)}/integration.json",
@@ -748,6 +1481,10 @@ class TaskArchive:
         if not external_actions_complete or not writer_final:
             raise ArchiveSealError("sealing requires external actions and writer finality")
         task_dir = self.task_dir(task_id)
+        try:
+            self._assert_safe_archive_path(task_dir, target="directory")
+        except ArchiveValidationError as exc:
+            raise ArchiveSealError(str(exc)) from exc
         if not task_dir.is_dir():
             raise ArchiveSealError(f"task archive does not exist: {task_id}")
         manifest_path = task_dir / "manifest.json"
@@ -765,6 +1502,7 @@ class TaskArchive:
                 raise ArchiveConflictError("completion timestamp conflicts with manifest")
             return manifest_path
         self._reconcile_hidden(task_dir)
+        self._validate_tree_paths(task_dir)
         self._validate_task_graph(task_id, status)
         files: list[dict[str, Any]] = []
         for path in sorted(task_dir.rglob("*")):
@@ -776,9 +1514,11 @@ class TaskArchive:
                 raise ArchiveSealError(f"unknown hidden archive path: {relative}")
             if relative == "manifest.json":
                 continue
-            if path.is_symlink() or not path.is_file():
-                if path.is_dir():
-                    continue
+            if path.is_symlink():
+                raise ArchiveSealError(f"symlinked archive path: {relative}")
+            if path.is_dir():
+                continue
+            if not stat.S_ISREG(path.lstat().st_mode):
                 raise ArchiveSealError(f"non-regular visible archive path: {relative}")
             data = path.read_bytes()
             files.append({"path": validate_relative_path(relative), "byteSize": len(data), "sha256": hashlib.sha256(data).hexdigest()})
@@ -876,20 +1616,116 @@ class TaskArchive:
         references.sort(key=lambda item: (int(item.get("roleOrdinal", 0)), str(item.get("runId", ""))))
         self.write_json(task_id, f"pipelines/{pipeline_id}/pipeline.json", metadata)
 
+    def _add_pipeline_validation_reference(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        validation_id: str,
+        ordinal: int,
+    ) -> None:
+        path = self.task_path(task_id, f"pipelines/{pipeline_id}/pipeline.json")
+        if not path.is_file():
+            return
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveValidationError("pipeline.json is not valid JSON") from exc
+        references = metadata.setdefault("validations", [])
+        reference = {
+            "validationId": validation_id,
+            "ordinal": ordinal,
+            "path": (
+                f"pipelines/{pipeline_id}/validations/{validation_id}/validation.json"
+            ),
+        }
+        for index, item in enumerate(references):
+            if isinstance(item, Mapping) and item.get("validationId") == validation_id:
+                references[index] = reference
+                break
+        else:
+            references.append(reference)
+        references.sort(
+            key=lambda item: (
+                int(item.get("ordinal", 0)),
+                str(item.get("validationId", "")),
+            )
+        )
+        self.write_json(task_id, f"pipelines/{pipeline_id}/pipeline.json", metadata)
+
+    def _add_pipeline_review_reference(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        review_id: str,
+        ordinal: int,
+        kind: str,
+    ) -> None:
+        path = self.task_path(task_id, f"pipelines/{pipeline_id}/pipeline.json")
+        if not path.is_file():
+            return
+        try:
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveValidationError("pipeline.json is not valid JSON") from exc
+        references = metadata.setdefault("reviews", [])
+        reference = {
+            "reviewId": review_id,
+            "kind": kind,
+            "ordinal": ordinal,
+            "path": f"pipelines/{pipeline_id}/reviews/{review_id}.json",
+        }
+        for index, item in enumerate(references):
+            if isinstance(item, Mapping) and item.get("reviewId") == review_id:
+                references[index] = reference
+                break
+        else:
+            references.append(reference)
+        references.sort(
+            key=lambda item: (
+                int(item.get("ordinal", 0)),
+                str(item.get("reviewId", "")),
+            )
+        )
+        self.write_json(task_id, f"pipelines/{pipeline_id}/pipeline.json", metadata)
+
     def _verify_manifest_path(self, task_id: str, manifest_path: Path) -> None:
+        task_id = validate_opaque_id(task_id)
+        task_dir = self.task_dir(task_id)
+        try:
+            self._assert_safe_archive_path(task_dir, target="directory")
+            self._assert_safe_archive_path(manifest_path, target="file")
+            self._assert_safe_archive_path(self.epoch_path, target="file")
+        except ArchiveValidationError as exc:
+            raise ArchiveSealError(str(exc)) from exc
+        if not manifest_path.exists() or not self.epoch_path.exists():
+            raise ArchiveSealError("terminal manifest or archive epoch is missing")
         try:
             raw_manifest = manifest_path.read_bytes()
             manifest = json.loads(raw_manifest.decode("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ArchiveSealError("invalid terminal manifest") from exc
-        if not isinstance(manifest, Mapping) or manifest.get("taskId") != task_id:
+        try:
+            _validate_manifest_document(manifest)
+        except ArchiveValidationError as exc:
+            raise ArchiveSealError(f"invalid terminal manifest schema: {exc}") from exc
+        if manifest["taskId"] != task_id:
             raise ArchiveSealError("manifest task identity mismatch")
-        if manifest.get("manifestVersion") != FORMAT_VERSION or not isinstance(manifest.get("files"), list):
-            raise ArchiveSealError("invalid terminal manifest schema")
         if raw_manifest != _json_bytes(manifest):
             raise ArchiveSealError("terminal manifest bytes are not canonical")
-        expected = {item.get("path"): item for item in manifest["files"] if isinstance(item, Mapping)}
-        task_dir = self.task_dir(task_id)
+        try:
+            epoch = json.loads(self.epoch_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArchiveSealError("archive epoch is invalid") from exc
+        if not self._valid_epoch(epoch) or manifest["epochId"] != epoch["epochId"]:
+            raise ArchiveSealError("manifest epoch identity mismatch")
+        self._validate_tree_paths(task_dir)
+        self._validate_task_graph(task_id, manifest["terminalStatus"])
+        expected: dict[str, Mapping[str, Any]] = {}
+        for descriptor in manifest["files"]:
+            relative = descriptor["path"]
+            if relative in expected:
+                raise ArchiveSealError("manifest contains duplicate file paths")
+            expected[relative] = descriptor
         actual: dict[str, Path] = {}
         for path in task_dir.rglob("*"):
             relative = path.relative_to(task_dir).as_posix()
@@ -900,10 +1736,8 @@ class TaskArchive:
                 raise ArchiveSealError(f"unknown hidden archive path: {relative}")
             if relative == "manifest.json":
                 continue
-            if path.is_symlink() or not path.is_file():
-                if path.is_dir():
-                    continue
-                raise ArchiveSealError(f"non-regular visible path: {relative}")
+            if path.is_dir():
+                continue
             actual[relative] = path
         if set(expected) != set(actual):
             raise ArchiveSealError("terminal manifest coverage does not match visible files")
@@ -911,20 +1745,30 @@ class TaskArchive:
         if ordered != sorted(ordered):
             raise ArchiveSealError("manifest file list is not canonical")
         for relative, descriptor in expected.items():
-            if not isinstance(relative, str) or not validate_relative_path(relative):
-                raise ArchiveSealError("manifest contains an unsafe path")
             data = actual[relative].read_bytes()
             if descriptor.get("byteSize") != len(data) or descriptor.get("sha256") != hashlib.sha256(data).hexdigest():
                 raise ArchiveSealError(f"terminal file hash mismatch: {relative}")
 
     def _validate_task_graph(self, task_id: str, status: str) -> None:
+        task_dir = self.task_dir(task_id)
+
+        def load_document(path: Path, label: str) -> Mapping[str, Any]:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ArchiveSealError(f"{label} is not valid JSON") from exc
+            if not isinstance(value, Mapping):
+                raise ArchiveSealError(f"{label} must be an object")
+            return value
+
         task_path = self.task_dir(task_id) / "task.json"
         if not task_path.is_file():
             raise ArchiveSealError("task.json is required before sealing")
+        task = load_document(task_path, "task.json")
         try:
-            task = json.loads(task_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ArchiveSealError("task.json is not valid JSON") from exc
+            _validate_task_document(task)
+        except ArchiveValidationError as exc:
+            raise ArchiveSealError(f"task schema is invalid: {exc}") from exc
         if task.get("taskId") != task_id or task.get("epochId") != self.ensure_epoch()["epochId"]:
             raise ArchiveSealError("task metadata identity mismatch")
         if task.get("status") != status:
@@ -937,89 +1781,175 @@ class TaskArchive:
         if not isinstance(pipelines, list) or not pipelines:
             raise ArchiveSealError("task metadata must reference at least one pipeline")
         pipeline_ids: set[str] = set()
+        pipeline_ordinals: set[int] = set()
         parent_ids: dict[str, str | None] = {}
         for reference in pipelines:
-            if not isinstance(reference, Mapping):
-                raise ArchiveSealError("pipeline reference is not an object")
-            try:
-                pipeline_id = validate_opaque_id(str(reference["pipelineId"]))
-                relative = validate_relative_path(str(reference["path"]))
-            except (KeyError, ArchiveError) as exc:
-                raise ArchiveSealError("invalid pipeline reference") from exc
-            if not isinstance(reference.get("ordinal"), int) or reference["ordinal"] < 1:
-                raise ArchiveSealError("pipeline reference ordinal is invalid")
+            pipeline_id = reference["pipelineId"]
+            relative = reference["path"]
             if pipeline_id in pipeline_ids or relative != f"pipelines/{pipeline_id}/pipeline.json":
                 raise ArchiveSealError("pipeline references are not canonical")
+            if reference["ordinal"] in pipeline_ordinals:
+                raise ArchiveSealError("pipeline ordinals are not unique")
             pipeline_ids.add(pipeline_id)
+            pipeline_ordinals.add(reference["ordinal"])
             pipeline_path = self.task_path(task_id, relative)
             if not pipeline_path.is_file():
                 raise ArchiveSealError(f"missing pipeline metadata: {relative}")
+            pipeline = load_document(pipeline_path, relative)
             try:
-                pipeline = json.loads(pipeline_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ArchiveSealError(f"invalid pipeline metadata: {relative}") from exc
+                _validate_pipeline_document(pipeline)
+            except ArchiveValidationError as exc:
+                raise ArchiveSealError(f"pipeline schema is invalid: {exc}") from exc
             if pipeline.get("pipelineId") != pipeline_id or pipeline.get("taskId") != task_id:
                 raise ArchiveSealError("pipeline identity does not match task graph")
+            if pipeline["ordinal"] != reference["ordinal"]:
+                raise ArchiveSealError("pipeline ordinal disagrees with task graph")
             parent_ids[pipeline_id] = pipeline.get("parentPipelineId")
-            if pipeline.get("state") not in {"active", "succeeded", "failed", "blocked", "cancelled", "interrupted", "superseded"}:
-                raise ArchiveSealError("invalid pipeline state")
             if pipeline.get("state") in {"active", "interrupted"}:
                 raise ArchiveSealError("cannot seal while a pipeline is active or interrupted")
-            runs = pipeline.get("runs")
-            if not isinstance(runs, list) or not runs:
-                raise ArchiveSealError("pipeline must reference at least one run")
-            for run_reference in runs:
-                if not isinstance(run_reference, Mapping):
-                    raise ArchiveSealError("run reference is not an object")
+            for descriptor in (*pipeline["inputs"], *pipeline["patches"]):
+                self._validate_artifact_evidence(task_id, descriptor)
+            validation_paths: set[str] = set()
+            for validation_reference in pipeline["validations"]:
+                validation_id = validation_reference["validationId"]
+                validation_relative = validation_reference["path"]
+                expected_validation = (
+                    f"pipelines/{pipeline_id}/validations/{validation_id}/validation.json"
+                )
+                if validation_relative != expected_validation or validation_relative in validation_paths:
+                    raise ArchiveSealError("validation references are not canonical")
+                validation_paths.add(validation_relative)
+                validation = load_document(
+                    self.task_path(task_id, validation_relative), validation_relative
+                )
                 try:
-                    run_id = validate_opaque_id(str(run_reference["runId"]))
-                    run_relative = validate_relative_path(str(run_reference["path"]))
-                except (KeyError, ArchiveError) as exc:
-                    raise ArchiveSealError("invalid run reference") from exc
+                    _validate_validation_document(validation)
+                except ArchiveValidationError as exc:
+                    raise ArchiveSealError(f"validation schema is invalid: {exc}") from exc
+                if (
+                    validation["validationId"] != validation_id
+                    or validation["taskId"] != task_id
+                    or validation["pipelineId"] != pipeline_id
+                    or validation["ordinal"] != validation_reference["ordinal"]
+                ):
+                    raise ArchiveSealError("validation identity disagrees with graph")
+                self._validate_artifact_evidence(task_id, validation["output"])
+            actual_validation_paths = {
+                path.relative_to(task_dir).as_posix()
+                for path in self.pipeline_dir(task_id, pipeline_id).glob(
+                    "validations/*/validation.json"
+                )
+            }
+            if actual_validation_paths != validation_paths:
+                raise ArchiveSealError("validation graph coverage is not exact")
+            review_paths: set[str] = set()
+            for review_reference in pipeline["reviews"]:
+                review_id = review_reference["reviewId"]
+                review_relative = review_reference["path"]
+                expected_review = f"pipelines/{pipeline_id}/reviews/{review_id}.json"
+                if review_relative != expected_review or review_relative in review_paths:
+                    raise ArchiveSealError("review references are not canonical")
+                review_paths.add(review_relative)
+                review = load_document(
+                    self.task_path(task_id, review_relative), review_relative
+                )
+                try:
+                    _validate_review_document(review)
+                except ArchiveValidationError as exc:
+                    raise ArchiveSealError(f"review schema is invalid: {exc}") from exc
+                if (
+                    review["reviewId"] != review_id
+                    or review["taskId"] != task_id
+                    or review["pipelineId"] != pipeline_id
+                    or review["ordinal"] != review_reference["ordinal"]
+                    or review["kind"] != review_reference["kind"]
+                ):
+                    raise ArchiveSealError("review identity disagrees with graph")
+                self._validate_artifact_evidence(task_id, review["artifact"])
+            actual_review_paths = {
+                path.relative_to(task_dir).as_posix()
+                for path in self.pipeline_dir(task_id, pipeline_id).glob("reviews/*.json")
+            }
+            if actual_review_paths != review_paths:
+                raise ArchiveSealError("review graph coverage is not exact")
+            run_paths: set[str] = set()
+            run_documents: dict[str, Mapping[str, Any]] = {}
+            runs = pipeline["runs"]
+            for run_reference in runs:
+                run_id = run_reference["runId"]
+                run_relative = run_reference["path"]
                 expected_run_path = f"pipelines/{pipeline_id}/runs/{run_id}/run.json"
-                if run_relative != expected_run_path:
+                if run_relative != expected_run_path or run_relative in run_paths:
                     raise ArchiveSealError("run reference is not canonical")
+                run_paths.add(run_relative)
                 run_path = self.task_path(task_id, run_relative)
                 if not run_path.is_file():
                     raise ArchiveSealError(f"missing run metadata: {run_relative}")
+                run = load_document(run_path, run_relative)
                 try:
-                    run = json.loads(run_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise ArchiveSealError(f"invalid run metadata: {run_relative}") from exc
+                    _validate_run_document(run)
+                except ArchiveValidationError as exc:
+                    raise ArchiveSealError(f"run schema is invalid: {exc}") from exc
                 if run.get("runId") != run_id or run.get("taskId") != task_id or run.get("pipelineId") != pipeline_id:
                     raise ArchiveSealError("run identity does not match task graph")
-                if run.get("state") not in {"running", "succeeded", "failed", "interrupted", "cancelled"}:
-                    raise ArchiveSealError("invalid run state")
+                if any(
+                    run[key] != run_reference[key]
+                    for key in ("role", "roleOrdinal", "state")
+                ):
+                    raise ArchiveSealError("run reference disagrees with run metadata")
                 if run.get("state") == "running":
                     raise ArchiveSealError("cannot seal while a run is running")
-                if not run.get("completedAt"):
-                    raise ArchiveSealError("terminal run is missing completedAt")
-                artifacts = run.get("artifacts")
-                if not isinstance(artifacts, Mapping):
-                    raise ArchiveSealError("run artifacts are missing")
+                run_documents[run_id] = run
+                artifacts = run["artifacts"]
                 for descriptor in artifacts.values():
-                    if not isinstance(descriptor, Mapping):
-                        raise ArchiveSealError("invalid run artifact descriptor")
-                    try:
-                        artifact_relative = validate_relative_path(str(descriptor["path"]))
-                    except (KeyError, ArchiveError) as exc:
-                        raise ArchiveSealError("invalid run artifact path") from exc
-                    artifact_path = self.task_path(task_id, artifact_relative)
-                    if descriptor.get("requiredAtTerminal"):
-                        if descriptor.get("availability") not in {"available", "partial"}:
-                            raise ArchiveSealError("required terminal artifact is unavailable")
-                        if not artifact_path.is_file():
-                            raise ArchiveSealError(f"missing required run artifact: {artifact_relative}")
-                        artifact_bytes = artifact_path.read_bytes()
-                        if descriptor.get("byteSize") is not None and descriptor.get("byteSize") != len(artifact_bytes):
-                            raise ArchiveSealError(f"run artifact size disagrees: {artifact_relative}")
-                        if descriptor.get("sha256") is not None and descriptor.get("sha256") != hashlib.sha256(artifact_bytes).hexdigest():
-                            raise ArchiveSealError(f"run artifact hash disagrees: {artifact_relative}")
+                    self._validate_artifact_evidence(task_id, descriptor)
+            actual_run_paths = {
+                path.relative_to(task_dir).as_posix()
+                for path in self.pipeline_dir(task_id, pipeline_id).glob(
+                    "runs/*/run.json"
+                )
+            }
+            if actual_run_paths != run_paths:
+                raise ArchiveSealError("run graph coverage is not exact")
+            for run_id, run in run_documents.items():
+                for relation in ("parentRunId", "retryOfRunId"):
+                    related = run[relation]
+                    if related is not None and related not in run_documents:
+                        raise ArchiveSealError(
+                            f"run {relation} leaves its owning pipeline: {run_id}"
+                        )
+                resumed = run["resumeOfRunId"]
+                if resumed is not None:
+                    predecessor = run_documents.get(resumed)
+                    if predecessor is None:
+                        raise ArchiveSealError("recovery predecessor is missing")
+                    if (
+                        predecessor["state"] != "interrupted"
+                        or predecessor["role"] != run["role"]
+                        or predecessor["sessionId"] != run["sessionId"]
+                    ):
+                        raise ArchiveSealError("recovery lineage is invalid")
             if pipeline.get("state") != "active" and not pipeline.get("completedAt"):
                 raise ArchiveSealError("terminal pipeline is missing completedAt")
+        actual_pipeline_paths = {
+            path.relative_to(task_dir).as_posix()
+            for path in (task_dir / "pipelines").glob("*/pipeline.json")
+        }
+        expected_pipeline_paths = {
+            reference["path"] for reference in pipelines
+        }
+        if actual_pipeline_paths != expected_pipeline_paths:
+            raise ArchiveSealError("pipeline graph coverage is not exact")
         for pipeline_id, parent_id in parent_ids.items():
             if parent_id is not None and parent_id not in pipeline_ids:
                 raise ArchiveSealError(f"pipeline parent is missing: {pipeline_id}")
+            seen: set[str] = set()
+            current: str | None = pipeline_id
+            while current is not None:
+                if current in seen:
+                    raise ArchiveSealError("pipeline parent graph contains a cycle")
+                seen.add(current)
+                current = parent_ids.get(current)
         current_pipeline = task.get("currentPipelineId")
         if current_pipeline is not None and current_pipeline not in pipeline_ids:
             raise ArchiveSealError("current pipeline is missing from task graph")
@@ -1035,6 +1965,46 @@ class TaskArchive:
                 except json.JSONDecodeError as exc:
                     raise ArchiveSealError(f"JSONL contains an invalid record: {jsonl_path.relative_to(self.task_dir(task_id))}") from exc
 
+    def _validate_artifact_evidence(
+        self, task_id: str, descriptor: Mapping[str, Any]
+    ) -> None:
+        relative = descriptor["path"]
+        availability = descriptor["availability"]
+        if descriptor["requiredAtTerminal"] and availability not in {
+            "available",
+            "partial",
+        }:
+            raise ArchiveSealError(f"required terminal artifact is unavailable: {relative}")
+        if availability not in {"available", "partial"}:
+            return
+        path = self.task_path(task_id, relative)
+        if not path.is_file():
+            raise ArchiveSealError(f"available artifact is missing: {relative}")
+        data = path.read_bytes()
+        if descriptor["byteSize"] is not None and descriptor["byteSize"] != len(data):
+            raise ArchiveSealError(f"artifact size disagrees: {relative}")
+        if (
+            descriptor["sha256"] is not None
+            and descriptor["sha256"] != hashlib.sha256(data).hexdigest()
+        ):
+            raise ArchiveSealError(f"artifact hash disagrees: {relative}")
+
+    @staticmethod
+    def _validate_tree_paths(task_dir: Path) -> None:
+        for path in task_dir.rglob("*"):
+            relative = path.relative_to(task_dir).as_posix()
+            if path.is_symlink():
+                raise ArchiveSealError(f"symlinked archive path: {relative}")
+            mode = path.lstat().st_mode
+            if not stat.S_ISDIR(mode) and not stat.S_ISREG(mode):
+                raise ArchiveSealError(f"non-regular archive path: {relative}")
+            hidden_parts = [part for part in Path(relative).parts if part.startswith(".")]
+            if hidden_parts and not (
+                stat.S_ISREG(mode)
+                and all(TEMPORARY_RE.fullmatch(part) for part in hidden_parts)
+            ):
+                raise ArchiveSealError(f"unknown hidden archive path: {relative}")
+
     @staticmethod
     def _reconcile_hidden(task_dir: Path) -> None:
         # Hidden temporary files are incomplete generations and are not public.
@@ -1042,7 +2012,11 @@ class TaskArchive:
         for path in task_dir.rglob("*"):
             if not path.name.startswith("."):
                 continue
-            if path.is_file() and TEMPORARY_RE.fullmatch(path.name):
+            if (
+                not path.is_symlink()
+                and stat.S_ISREG(path.lstat().st_mode)
+                and TEMPORARY_RE.fullmatch(path.name)
+            ):
                 continue
             raise ArchiveSealError(f"unknown hidden archive path: {path.relative_to(task_dir)}")
 
@@ -1050,9 +2024,9 @@ class TaskArchive:
         manifest = self.task_dir(task_id) / "manifest.json"
         if manifest.exists():
             raise ArchiveImmutableError(f"task archive is terminally sealed: {task_id}")
-        if path.is_symlink():
-            raise ArchiveValidationError(f"archive path must not be a symlink: {path}")
         task_dir = self.task_dir(task_id)
+        self._assert_safe_archive_path(task_dir, target="directory")
+        self._assert_safe_archive_path(path, target="file")
         try:
             relative_parent = path.parent.relative_to(task_dir)
         except ValueError as exc:
@@ -1087,6 +2061,33 @@ class TaskArchive:
                 run_state = None
             if run_state in {"succeeded", "failed", "interrupted", "cancelled"}:
                 raise ArchiveImmutableError(f"completed run evidence is immutable: {path}")
+
+    def _assert_safe_archive_path(self, path: Path, *, target: str) -> None:
+        try:
+            relative = path.relative_to(self.root)
+        except ValueError as exc:
+            raise ArchiveValidationError("archive path escapes configured root") from exc
+        current = self.root
+        components = (Path("."), *relative.parts)
+        for index, component in enumerate(components):
+            if component != Path("."):
+                current = current / component
+            try:
+                mode = current.lstat().st_mode
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(mode):
+                raise ArchiveValidationError(f"archive path component is a symlink: {current}")
+            is_target = index == len(components) - 1
+            expected = target if is_target else "directory"
+            if expected == "directory" and not stat.S_ISDIR(mode):
+                raise ArchiveValidationError(
+                    f"archive path component is not a directory: {current}"
+                )
+            if expected == "file" and not stat.S_ISREG(mode):
+                raise ArchiveValidationError(
+                    f"archive path is not a regular file: {current}"
+                )
 
 
 class TaskArchiveWriter(TaskArchive):

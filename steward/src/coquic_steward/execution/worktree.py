@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 from dataclasses import dataclass
 import shutil
+import tempfile
 from pathlib import Path
 
 from ..core.config import StewardConfig
@@ -81,8 +82,8 @@ class Worktrees:
             if not actual_base.ok or actual_base.stdout.strip() != str(expected_base):
                 return False
         if expected_tree is not None:
-            actual_tree = run_command(["git", "write-tree"], cwd=path)
-            if not actual_tree.ok or actual_tree.stdout.strip() != str(expected_tree):
+            actual_tree = _worktree_tree(path)
+            if actual_tree is None or actual_tree != str(expected_tree):
                 return False
         return True
 
@@ -99,7 +100,9 @@ class Worktrees:
         runtime_version: str | None = None,
     ) -> WorktreeIdentity:
         base_commit = run_command(["git", "rev-parse", "HEAD"], cwd=path, check=True).stdout.strip()
-        expected_tree = run_command(["git", "write-tree"], cwd=path, check=True).stdout.strip()
+        expected_tree = _worktree_tree(path)
+        if expected_tree is None:
+            raise RuntimeError(f"could not determine worktree identity: {path}")
         return WorktreeIdentity(
             task_id=task.id,
             path=path,
@@ -307,6 +310,25 @@ class Worktrees:
         run_command(["git", "worktree", "prune"], cwd=self.config.repo_root)
         if branch and branch.startswith("steward/"):
             run_command(["git", "branch", "-D", branch], cwd=self.config.repo_root)
+
+
+def _worktree_tree(path: Path) -> str | None:
+    """Hash tracked and non-ignored worktree content without changing its index."""
+    with tempfile.TemporaryDirectory(prefix="coquic-steward-index-") as temporary:
+        index_path = Path(temporary) / "index"
+        environment = {"GIT_INDEX_FILE": str(index_path)}
+        read_tree = run_command(
+            ["git", "read-tree", "HEAD"], cwd=path, env=environment
+        )
+        if not read_tree.ok:
+            return None
+        add = run_command(
+            ["git", "add", "--all", "--", "."], cwd=path, env=environment
+        )
+        if not add.ok:
+            return None
+        tree = run_command(["git", "write-tree"], cwd=path, env=environment)
+        return tree.stdout.strip() if tree.ok else None
 
 
 def _slug(value: object) -> str:

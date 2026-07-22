@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from coquic_steward.core.config import StewardConfig
+from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.models import (
     TaskKind,
     TaskSpec,
@@ -14,6 +16,7 @@ from coquic_steward.core.models import (
     WorktreeCheckpoint,
 )
 from coquic_steward.storage import TaskStore
+from coquic_steward.execution.worktree import Worktrees
 
 
 def test_new_layout_and_epoch_are_explicit(repo: Path, coquic_home: Path) -> None:
@@ -42,6 +45,97 @@ def test_legacy_database_migration_preserves_source_and_marks_backup(
     assert config.migration_marker_path.exists()
     with sqlite3.connect(config.db_path) as connection:
         assert connection.execute("SELECT value FROM fixture").fetchone() == ("kept",)
+
+
+def test_normal_startup_migrates_legacy_database(
+    repo: Path, coquic_home: Path
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    legacy_store = TaskStore(config.legacy_db_path)
+    task, _ = legacy_store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="legacy",
+            prompt="prompt",
+        )
+    )
+    legacy_store.engine.dispose()
+
+    startup_config = load_config(repo_root=repo)
+    current_store = TaskStore(startup_config.db_path)
+
+    assert current_store.get(task.id).id == task.id
+    assert not startup_config.legacy_db_path.exists()
+    assert startup_config.legacy_backup_path.exists()
+
+
+def test_migration_restart_reconciles_stranded_wal(
+    repo: Path, coquic_home: Path
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    connection = sqlite3.connect(config.legacy_db_path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA wal_autocheckpoint=0")
+    connection.execute("CREATE TABLE fixture (value TEXT)")
+    connection.commit()
+    connection.execute("INSERT INTO fixture VALUES ('wal-only')")
+    connection.commit()
+    real_replace = os.replace
+
+    def crash_after_database_rename(source: Path, destination: Path) -> None:
+        real_replace(source, destination)
+        if Path(source) == config.legacy_db_path:
+            raise RuntimeError("simulated migration interruption")
+
+    with patch(
+        "coquic_steward.core.config.os.replace",
+        side_effect=crash_after_database_rename,
+    ), pytest.raises(RuntimeError, match="interruption"):
+        config.migrate_legacy_database()
+    connection.close()
+
+    config.migrate_legacy_database()
+
+    with sqlite3.connect(config.legacy_backup_path) as backup:
+        assert backup.execute("SELECT value FROM fixture").fetchall() == [
+            ("wal-only",)
+        ]
+    assert config.migration_marker_path.exists()
+
+
+def test_migration_restart_rebuilds_incomplete_read_only_backup(
+    repo: Path, coquic_home: Path
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    with sqlite3.connect(config.legacy_db_path) as source:
+        source.execute("CREATE TABLE fixture (value TEXT)")
+        source.execute("INSERT INTO fixture VALUES ('committed')")
+        source.commit()
+        with sqlite3.connect(config.db_path) as destination:
+            source.backup(destination)
+    config.legacy_db_path.unlink()
+    for suffix in ("-wal", "-shm"):
+        config.legacy_db_path.with_name(
+            config.legacy_db_path.name + suffix
+        ).unlink(missing_ok=True)
+    with sqlite3.connect(config.legacy_backup_path):
+        pass
+    os.chmod(config.legacy_backup_path, 0o440)
+    config.migration_marker_path.write_text("{}\n", encoding="utf-8")
+
+    config = load_config(repo_root=repo)
+
+    with sqlite3.connect(config.legacy_backup_path) as backup:
+        assert backup.execute("SELECT value FROM fixture").fetchall() == [
+            ("committed",)
+        ]
+    assert config.legacy_backup_path.with_name(
+        config.legacy_backup_path.name + ".interrupted"
+    ).exists()
 
 
 def test_ledger_allocates_ordered_lineage_and_private_fields(config: StewardConfig) -> None:
@@ -115,3 +209,135 @@ def test_invalid_recovery_lineage_is_rejected(config: StewardConfig) -> None:
     run = store.create_run(task.id, pipeline.id, session.id, role="implementation")
     with pytest.raises(ValueError, match="interrupted"):
         store.link_recovery_run(run.id)
+
+
+def test_run_lineage_and_idempotency_are_task_scoped(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+
+    def create_task(title: str):
+        return store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=title,
+                prompt="prompt",
+            )
+        )[0]
+
+    first = create_task("first")
+    second = create_task("second")
+    first_pipeline = store.list_pipelines(first.id)[0]
+    second_pipeline = store.list_pipelines(second.id)[0]
+    first_session = store.create_session(
+        first.id, first_pipeline.id, idempotency_key="shared-key"
+    )
+    second_session = store.create_session(
+        second.id, second_pipeline.id, idempotency_key="shared-key"
+    )
+    second_run = store.create_run(
+        second.id,
+        second_pipeline.id,
+        second_session.id,
+        role="implementation",
+    )
+
+    assert first_session.task_id == first.id
+    assert second_session.task_id == second.id
+    with pytest.raises(ValueError, match="parent run"):
+        store.create_run(
+            first.id,
+            first_pipeline.id,
+            first_session.id,
+            role="implementation",
+            parent_run_id=second_run.id,
+        )
+
+
+def test_interrupted_run_has_only_one_recovery(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="recover",
+            prompt="prompt",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id)
+    run = store.create_run(
+        task.id, pipeline.id, session.id, role="implementation"
+    )
+    store.mark_run_interrupted(run.id)
+
+    def recover(_: int):
+        try:
+            return store.link_recovery_run(run.id)
+        except ValueError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(recover, range(2)))
+
+    assert sum(not isinstance(result, ValueError) for result in results) == 1
+    errors = [result for result in results if isinstance(result, ValueError)]
+    assert len(errors) == 1
+    assert "already has a recovery" in str(errors[0])
+
+
+def test_database_rejects_cross_task_run_parent(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+
+    def create_run(title: str):
+        task, _ = store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=title,
+                prompt="prompt",
+            )
+        )
+        pipeline = store.list_pipelines(task.id)[0]
+        session = store.create_session(task.id, pipeline.id)
+        return store.create_run(
+            task.id, pipeline.id, session.id, role="implementation"
+        )
+
+    first = create_run("first")
+    second = create_run("second")
+    with sqlite3.connect(config.db_path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE task_runs SET parent_run_id = ? WHERE id = ?",
+                (second.id, first.id),
+            )
+
+
+def test_checkpoint_rejects_dirty_worktree(
+    repo: Path, config: StewardConfig
+) -> None:
+    worktrees = Worktrees(config)
+    task, _ = TaskStore(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="checkpoint",
+            prompt="prompt",
+        )
+    )
+    identity = worktrees.identity(
+        task,
+        repo,
+        owning_pipeline_id="pipeline-safe",
+        phase="implementation",
+    )
+    (repo / "README.md").write_text("changed\n", encoding="utf-8")
+
+    assert not worktrees.validate_checkpoint(repo, identity)
+
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    assert not worktrees.validate_checkpoint(repo, identity)

@@ -468,13 +468,29 @@ class SQLiteTaskStore:
         pipeline = self.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
             raise ValueError("session pipeline does not belong to task")
-        if idempotency_key:
-            with Session(self.engine) as session:
-                existing = session.scalar(
-                    select(CodexSessionRow).where(CodexSessionRow.idempotency_key == idempotency_key)
+
+        def existing_idempotent_session() -> CodexSession | None:
+            if not idempotency_key:
+                return None
+            with Session(self.engine) as query_session:
+                existing = query_session.scalar(
+                    select(CodexSessionRow).where(
+                        CodexSessionRow.task_id == task_id,
+                        CodexSessionRow.idempotency_key == idempotency_key,
+                    )
                 )
-                if existing is not None:
-                    return row_to_session(existing, path_codec=self.path_codec)
+                if existing is None:
+                    return None
+                if existing.pipeline_id != pipeline_id:
+                    raise ValueError(
+                        "session idempotency key belongs to another pipeline"
+                    )
+                return row_to_session(existing, path_codec=self.path_codec)
+
+        if idempotency_key:
+            existing = existing_idempotent_session()
+            if existing is not None:
+                return existing
         now = utc_now()
         item = CodexSession(
             id=session_id or new_session_id(),
@@ -487,9 +503,15 @@ class SQLiteTaskStore:
             started_at=now,
             updated_at=now,
         )
-        with Session(self.engine) as session, session.begin():
-            session.add(session_to_row(item, path_codec=self.path_codec))
-            session.flush()
+        try:
+            with Session(self.engine) as session, session.begin():
+                session.add(session_to_row(item, path_codec=self.path_codec))
+                session.flush()
+        except IntegrityError:
+            existing = existing_idempotent_session()
+            if existing is not None:
+                return existing
+            raise
         return item
 
     def get_session(self, session_id: str) -> CodexSession:
@@ -553,6 +575,17 @@ class SQLiteTaskStore:
         session = self.get_session(session_id)
         if session.task_id != task_id or session.pipeline_id != pipeline_id:
             raise ValueError("run session does not belong to task pipeline")
+        for relation, related_run_id in (
+            ("parent", parent_run_id),
+            ("retry", retry_of_run_id),
+        ):
+            if related_run_id is None:
+                continue
+            related = self.get_run(related_run_id)
+            if related.task_id != task_id or related.pipeline_id != pipeline_id:
+                raise ValueError(
+                    f"{relation} run must belong to the same task and pipeline"
+                )
         if resume_of_run_id is not None:
             predecessor = self.get_run(resume_of_run_id)
             if predecessor.task_id != task_id or predecessor.pipeline_id != pipeline_id:
@@ -577,14 +610,38 @@ class SQLiteTaskStore:
         if idempotency_key:
             with Session(self.engine) as session:
                 existing = session.scalar(
-                    select(TaskRunRow).where(TaskRunRow.idempotency_key == idempotency_key)
+                    select(TaskRunRow).where(
+                        TaskRunRow.task_id == task_id,
+                        TaskRunRow.idempotency_key == idempotency_key,
+                    )
                 )
                 if existing is not None:
-                    return row_to_run(existing)
+                    item = row_to_run(existing)
+                    if (
+                        item.pipeline_id != pipeline_id
+                        or item.session_id != session_id
+                        or item.role != role
+                        or item.resume_of_run_id != resume_of_run_id
+                        or item.parent_run_id != parent_run_id
+                        or item.retry_of_run_id != retry_of_run_id
+                    ):
+                        raise ValueError("run idempotency key conflicts with request")
+                    return item
         for attempt in range(8):
             try:
                 with self.engine.connect() as connection:
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    if resume_of_run_id is not None:
+                        existing_recovery = connection.execute(
+                            select(TaskRunRow.id).where(
+                                TaskRunRow.resume_of_run_id == resume_of_run_id
+                            )
+                        ).scalar_one_or_none()
+                        if existing_recovery is not None:
+                            connection.exec_driver_sql("ROLLBACK")
+                            raise ValueError(
+                                "interrupted run already has a recovery"
+                            )
                     selected = role_ordinal
                     if selected is None:
                         selected = connection.execute(
@@ -613,7 +670,28 @@ class SQLiteTaskStore:
                     connection.exec_driver_sql("COMMIT")
                     self._activate_run_ownership(item)
                     return item
-            except IntegrityError:
+            except IntegrityError as exc:
+                if idempotency_key:
+                    with Session(self.engine) as session:
+                        existing = session.scalar(
+                            select(TaskRunRow).where(
+                                TaskRunRow.task_id == task_id,
+                                TaskRunRow.idempotency_key == idempotency_key,
+                            )
+                        )
+                        if existing is not None:
+                            return row_to_run(existing)
+                if resume_of_run_id is not None:
+                    with Session(self.engine) as session:
+                        existing_recovery = session.scalar(
+                            select(TaskRunRow.id).where(
+                                TaskRunRow.resume_of_run_id == resume_of_run_id
+                            )
+                        )
+                    if existing_recovery is not None:
+                        raise ValueError(
+                            "interrupted run already has a recovery"
+                        ) from exc
                 if attempt == 7:
                     raise
                 time.sleep(0.005 * (attempt + 1))

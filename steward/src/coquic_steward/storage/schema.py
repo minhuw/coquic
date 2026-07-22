@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -218,7 +228,12 @@ class TaskExecutionRow(Base):
 
     __table_args__ = (
         UniqueConstraint("task_id", name="uq_task_executions_task"),
-        UniqueConstraint("idempotency_key", name="uq_task_executions_idempotency"),
+        UniqueConstraint("id", "task_id", name="uq_task_executions_id_task"),
+        UniqueConstraint(
+            "task_id",
+            "idempotency_key",
+            name="uq_task_executions_task_idempotency",
+        ),
         CheckConstraint(
             "state IN ('active', 'interrupted', 'complete')",
             name="ck_task_executions_state",
@@ -233,14 +248,10 @@ class TaskPipelineRow(Base):
     task_id: Mapped[str] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    execution_id: Mapped[str] = mapped_column(
-        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    execution_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     trigger: Mapped[str] = mapped_column(String, nullable=False)
-    parent_pipeline_id: Mapped[str | None] = mapped_column(
-        ForeignKey("task_pipelines.id", ondelete="RESTRICT"), nullable=True
-    )
+    parent_pipeline_id: Mapped[str | None] = mapped_column(String, nullable=True)
     phase: Mapped[str] = mapped_column(String, nullable=False)
     state: Mapped[str] = mapped_column(String, nullable=False, default="active")
     base_identity: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -255,6 +266,29 @@ class TaskPipelineRow(Base):
 
     __table_args__ = (
         UniqueConstraint("task_id", "ordinal", name="uq_task_pipelines_task_ordinal"),
+        UniqueConstraint("id", "task_id", name="uq_task_pipelines_id_task"),
+        UniqueConstraint(
+            "id",
+            "task_id",
+            "execution_id",
+            name="uq_task_pipelines_id_task_execution",
+        ),
+        ForeignKeyConstraint(
+            ("execution_id", "task_id"),
+            ("task_executions.id", "task_executions.task_id"),
+            ondelete="CASCADE",
+            name="fk_task_pipelines_execution_task",
+        ),
+        ForeignKeyConstraint(
+            ("parent_pipeline_id", "task_id", "execution_id"),
+            (
+                "task_pipelines.id",
+                "task_pipelines.task_id",
+                "task_pipelines.execution_id",
+            ),
+            ondelete="RESTRICT",
+            name="fk_task_pipelines_parent_task_execution",
+        ),
         CheckConstraint("ordinal > 0", name="ck_task_pipelines_ordinal"),
         CheckConstraint(
             "trigger IN ('initial', 'validation-repair', 'review-repair', 'integration-rebase', 'integration-conflict', 'push-race')",
@@ -278,9 +312,7 @@ class CodexSessionRow(Base):
     task_id: Mapped[str] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    pipeline_id: Mapped[str] = mapped_column(
-        ForeignKey("task_pipelines.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    pipeline_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     state: Mapped[str] = mapped_column(String, nullable=False, default="active")
     provider_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     private_home_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -291,7 +323,20 @@ class CodexSessionRow(Base):
     closed_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("idempotency_key", name="uq_codex_sessions_idempotency"),
+        UniqueConstraint(
+            "id", "task_id", "pipeline_id", name="uq_codex_sessions_id_task_pipeline"
+        ),
+        UniqueConstraint(
+            "task_id",
+            "idempotency_key",
+            name="uq_codex_sessions_task_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ("pipeline_id", "task_id"),
+            ("task_pipelines.id", "task_pipelines.task_id"),
+            ondelete="CASCADE",
+            name="fk_codex_sessions_pipeline_task",
+        ),
         CheckConstraint(
             "state IN ('active', 'closed', 'interrupted')",
             name="ck_codex_sessions_state",
@@ -306,24 +351,14 @@ class TaskRunRow(Base):
     task_id: Mapped[str] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    pipeline_id: Mapped[str] = mapped_column(
-        ForeignKey("task_pipelines.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("codex_sessions.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
+    pipeline_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     role: Mapped[str] = mapped_column(String, nullable=False)
     role_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     state: Mapped[str] = mapped_column(String, nullable=False, default="running")
-    resume_of_run_id: Mapped[str | None] = mapped_column(
-        ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=True
-    )
-    parent_run_id: Mapped[str | None] = mapped_column(
-        ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=True
-    )
-    retry_of_run_id: Mapped[str | None] = mapped_column(
-        ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=True
-    )
+    resume_of_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    retry_of_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     reasoning: Mapped[str | None] = mapped_column(String, nullable=True)
     image_version: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -342,7 +377,45 @@ class TaskRunRow(Base):
 
     __table_args__ = (
         UniqueConstraint("pipeline_id", "role", "role_ordinal", name="uq_task_runs_role_ordinal"),
-        UniqueConstraint("idempotency_key", name="uq_task_runs_idempotency"),
+        UniqueConstraint("id", "task_id", "pipeline_id", name="uq_task_runs_id_task_pipeline"),
+        UniqueConstraint("resume_of_run_id", name="uq_task_runs_single_recovery"),
+        UniqueConstraint(
+            "task_id", "idempotency_key", name="uq_task_runs_task_idempotency"
+        ),
+        ForeignKeyConstraint(
+            ("pipeline_id", "task_id"),
+            ("task_pipelines.id", "task_pipelines.task_id"),
+            ondelete="CASCADE",
+            name="fk_task_runs_pipeline_task",
+        ),
+        ForeignKeyConstraint(
+            ("session_id", "task_id", "pipeline_id"),
+            (
+                "codex_sessions.id",
+                "codex_sessions.task_id",
+                "codex_sessions.pipeline_id",
+            ),
+            ondelete="RESTRICT",
+            name="fk_task_runs_session_task_pipeline",
+        ),
+        ForeignKeyConstraint(
+            ("resume_of_run_id", "task_id", "pipeline_id"),
+            ("task_runs.id", "task_runs.task_id", "task_runs.pipeline_id"),
+            ondelete="RESTRICT",
+            name="fk_task_runs_resume_task_pipeline",
+        ),
+        ForeignKeyConstraint(
+            ("parent_run_id", "task_id", "pipeline_id"),
+            ("task_runs.id", "task_runs.task_id", "task_runs.pipeline_id"),
+            ondelete="RESTRICT",
+            name="fk_task_runs_parent_task_pipeline",
+        ),
+        ForeignKeyConstraint(
+            ("retry_of_run_id", "task_id", "pipeline_id"),
+            ("task_runs.id", "task_runs.task_id", "task_runs.pipeline_id"),
+            ondelete="RESTRICT",
+            name="fk_task_runs_retry_task_pipeline",
+        ),
         CheckConstraint("role_ordinal > 0", name="ck_task_runs_role_ordinal"),
         CheckConstraint(
             "state IN ('running', 'succeeded', 'failed', 'interrupted', 'cancelled')",

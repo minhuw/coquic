@@ -9,21 +9,14 @@ on:
     branches:
       - main
     paths:
-      - site/**
-      - rag/**
-      - references/rfc/**
-      - references/demo-deployment.md
-      - docs/**
+      - site-v2/**
+      - site/deploy/**
       - src/**
       - build.zig
       - build.zig.zon
       - flake.nix
       - flake.lock
-      - site/h3-server/Dockerfile
-      - scripts/build-boringssl-wasm.sh
-      - scripts/wasm-quic-smoke.mjs
       - .github/workflows/deploy-demo.yml
-      - scripts/check-steward-deployment.py
   workflow_dispatch:
 
 permissions:
@@ -62,13 +55,23 @@ jobs:
       - name: Build h3-server
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 
-      - name: Build Next.js demo
+      - name: Build Next.js V2 demo
         run: |
-          nix develop -c npm --prefix site/next ci
-          nix develop -c npm --prefix site/next run build:demo
+          nix develop -c npm --prefix site-v2 ci
+          nix develop -c npm --prefix site-v2 run typecheck
+          nix develop -c npm --prefix site-v2 run build
 
-      - name: Package demo app
-        run: nix develop -c npm --prefix site/next run package:demo -- "${RUNNER_TEMP}/demo-app"
+      - name: Package V2 demo app
+        run: |
+          app_dir="${RUNNER_TEMP}/demo-app"
+          rm -rf -- "${app_dir}"
+          install -d -m 755 "${app_dir}/.next"
+          cp -R -- site-v2/.next/standalone/. "${app_dir}/"
+          cp -R -- site-v2/.next/static "${app_dir}/.next/static"
+          if [[ -d site-v2/public ]]; then
+            cp -R -- site-v2/public "${app_dir}/public"
+          fi
+          test -f "${app_dir}/server.js"
 
       - name: Configure SSH
         env:
@@ -113,25 +116,26 @@ jobs:
         env:
           COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}
           COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          COQUIC_QDRANT_URL: ${{ secrets.COQUIC_QDRANT_URL }}
-          COQUIC_QDRANT_API_KEY: ${{ secrets.COQUIC_QDRANT_API_KEY }}
+          COQUIC_DEMO_QA_ENABLED: "false"
+          COQUIC_DEMO_VERIFICATION_PATH: /preview
+          COQUIC_DEMO_PAGE_MARKER: CoQUIC V2 is under construction
+          COQUIC_DEMO_VERIFY_WASM: "false"
+          COQUIC_V2_PREVIEW_PASSWORD: happyquic
         run: site/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"
 
-      - name: Check deployed Steward monitor
+      - name: Check deployed V2 preview
         run: |
-          mkdir -p "${RUNNER_TEMP}/steward-monitor"
-          nix develop -c uv run --project steward python scripts/check-steward-deployment.py \
-            --base-url https://coquic.minhuw.dev \
-            --max-age-seconds 120 \
-            --max-latency-ms 2000 \
-            --output "${RUNNER_TEMP}/steward-monitor/result.json"
-
-      - name: Upload Steward monitor evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: steward-deployment-monitor-${{ github.run_id }}
-          path: ${{ runner.temp }}/steward-monitor/result.json
-          if-no-files-found: warn
+          headers="$(curl --fail --silent --show-error --head https://coquic.minhuw.dev/)"
+          grep -Eiq '^location:.*\/preview' <<<"${headers}"
+          page="$(curl --fail --silent --show-error https://coquic.minhuw.dev/preview)"
+          grep -Fq 'CoQUIC V2 is under construction' <<<"${page}"
+          curl --fail --silent --show-error \
+            --cookie-jar "${RUNNER_TEMP}/v2-preview.cookies" \
+            --output /dev/null \
+            --data-urlencode 'password=happyquic' \
+            --data-urlencode 'next=/' \
+            https://coquic.minhuw.dev/api/preview-access
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --cookie "${RUNNER_TEMP}/v2-preview.cookies" \
+            https://coquic.minhuw.dev/)"
+          test "${status}" = "200"

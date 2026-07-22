@@ -3,9 +3,17 @@ set -euo pipefail
 
 release_dir="${COQUIC_DEMO_RELEASE_DIR:-/opt/coquic-demo/current}"
 rag_env_file="${COQUIC_DEMO_RAG_ENV_FILE:-/etc/coquic-demo/rag.env}"
+app_env_file="${COQUIC_DEMO_APP_ENV_FILE:-/etc/coquic-demo/app.env}"
 if [[ -f "${rag_env_file}" ]]; then
   set -a
+  # shellcheck source=/dev/null
   source "${rag_env_file}"
+  set +a
+fi
+if [[ -f "${app_env_file}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "${app_env_file}"
   set +a
 fi
 

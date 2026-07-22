@@ -75,6 +75,11 @@ elif [[ ${rag_env_present} -eq ${#rag_env_vars[@]} ]]; then
   rag_env_configured=1
 fi
 
+app_env_vars=(
+  COQUIC_DEMO_QA_ENABLED
+  COQUIC_V2_PREVIEW_PASSWORD
+)
+
 remote_releases_root="/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
 remote_current_link="/opt/coquic-demo/current"
@@ -138,7 +143,27 @@ deployment_interrupt_status=1
 deploy_phase="initialization"
 verification_attempts=30
 verification_sleep_seconds=2
+verification_path="${COQUIC_DEMO_VERIFICATION_PATH:-/}"
+verification_page_marker="${COQUIC_DEMO_PAGE_MARKER:-coquic-wasm-demo-v1}"
+verification_wasm="${COQUIC_DEMO_VERIFY_WASM:-true}"
 same_release_repair_mode=0
+
+if [[ "${verification_path}" != /* ]]; then
+  echo "COQUIC_DEMO_VERIFICATION_PATH must start with '/': ${verification_path}" >&2
+  exit 1
+fi
+case "${verification_wasm}" in
+  1|true|yes|on)
+    verification_wasm=1
+    ;;
+  0|false|no|off)
+    verification_wasm=0
+    ;;
+  *)
+    echo "invalid COQUIC_DEMO_VERIFY_WASM value: ${verification_wasm}" >&2
+    exit 1
+    ;;
+esac
 
 cleanup_local() {
   rm -rf "${staging_dir}"
@@ -260,6 +285,11 @@ restore_or_remove \
   "${remote_upload_dir}/rag.env.bak" \
   "${remote_upload_dir}/rag.env.absent" \
   "600"
+restore_or_remove \
+  "/etc/coquic-demo/app.env" \
+  "${remote_upload_dir}/app.env.bak" \
+  "${remote_upload_dir}/app.env.absent" \
+  "600"
 
 sudo systemctl daemon-reload
 
@@ -370,6 +400,13 @@ if [[ ${rag_env_configured} -eq 1 ]]; then
     done
   } > "${staging_dir}/rag.env"
 fi
+{
+  for env_var in "${app_env_vars[@]}"; do
+    if [[ -n "${!env_var:-}" ]]; then
+      printf 'export %s=%q\n' "${env_var}" "${!env_var}"
+    fi
+  done
+} > "${staging_dir}/app.env"
 
 deploy_phase="remote current preflight"
 previous_release_target="$(
@@ -499,6 +536,7 @@ scp "${scp_opts[@]}" "${staging_dir}/privkey.pem" "${remote_target}:${remote_upl
 if [[ ${rag_env_configured} -eq 1 ]]; then
   scp "${scp_opts[@]}" "${staging_dir}/rag.env" "${remote_target}:${remote_upload_dir}/rag.env"
 fi
+scp "${scp_opts[@]}" "${staging_dir}/app.env" "${remote_target}:${remote_upload_dir}/app.env"
 
 rollback_armed=1
 
@@ -566,6 +604,10 @@ backup_or_mark_absent \
   "/etc/coquic-demo/rag.env" \
   "${remote_upload_dir}/rag.env.bak" \
   "${remote_upload_dir}/rag.env.absent"
+backup_or_mark_absent \
+  "/etc/coquic-demo/app.env" \
+  "${remote_upload_dir}/app.env.bak" \
+  "${remote_upload_dir}/app.env.absent"
 
 if [[ "${same_release_repair_mode}" != "1" ]]; then
   sudo rm -rf "${remote_release_dir}"
@@ -653,6 +695,7 @@ sudo install -m 600 "${remote_upload_dir}/privkey.pem" /etc/coquic-demo/tls/priv
 if sudo test -f "${remote_upload_dir}/rag.env"; then
   sudo install -m 600 "${remote_upload_dir}/rag.env" /etc/coquic-demo/rag.env
 fi
+sudo install -m 600 "${remote_upload_dir}/app.env" /etc/coquic-demo/app.env
 
 sudo ln -sfnT "${remote_release_dir}" "${remote_current_link}"
 sudo systemctl daemon-reload
@@ -671,7 +714,8 @@ if [[ ${remote_install_status} -ne 0 ]]; then
   fail_or_interrupt_with_rollback "${remote_install_status}" "deployment failed during remote install"
 fi
 
-url="https://${public_host}/"
+base_url="https://${public_host}"
+url="${base_url}${verification_path}"
 curl_http3_out_paths_file="${staging_dir}/curl-http3-out-paths"
 deploy_phase="curl-http3 build"
 nix_build_status=0
@@ -764,8 +808,7 @@ for attempt in $(seq 1 "${verification_attempts}"); do
   page=""
   page_error_path="${staging_dir}/verify-page-${attempt}.err"
   if page="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}" 2>"${page_error_path}")"; then
-    # verification marker: coquic-wasm-demo-v1
-    if grep -Fq "coquic-wasm-demo-v1" <<<"${page}"; then
+    if grep -Fq "${verification_page_marker}" <<<"${page}"; then
       page_verified=1
       break
     fi
@@ -784,40 +827,42 @@ if [[ ${page_verified} -ne 1 ]]; then
   fail_with_rollback "deployment verification failed: page markers did not converge after retries"
 fi
 
-wasm_mime_verified=0
-last_wasm_headers=""
-last_wasm_error=""
-deploy_phase="WASM MIME verification"
-for attempt in $(seq 1 "${verification_attempts}"); do
-  # verification retry loop: wasm MIME
-  wasm_headers=""
-  wasm_error_path="${staging_dir}/verify-wasm-${attempt}.err"
-  if wasm_headers="$(timeout 20s "${curl_http3_bin}" --http3-only -I "${url}coquic-wasm-quic.wasm" 2>"${wasm_error_path}")"; then
-    normalized_wasm_headers="$(printf '%s' "${wasm_headers}" | tr -d '\r')"
-    last_wasm_headers="${normalized_wasm_headers}"
-    last_wasm_error=""
-    if grep -Eq '^HTTP/[0-9](\.[0-9])?[[:space:]]+200([[:space:]]|$)' <<<"${normalized_wasm_headers}" &&
-       grep -Eiq '^content-type:[[:space:]]*application/wasm[[:space:]]*$' <<<"${normalized_wasm_headers}"; then
-      wasm_mime_verified=1
-      break
+if [[ ${verification_wasm} -eq 1 ]]; then
+  wasm_mime_verified=0
+  last_wasm_headers=""
+  last_wasm_error=""
+  deploy_phase="WASM MIME verification"
+  for attempt in $(seq 1 "${verification_attempts}"); do
+    # verification retry loop: wasm MIME
+    wasm_headers=""
+    wasm_error_path="${staging_dir}/verify-wasm-${attempt}.err"
+    if wasm_headers="$(timeout 20s "${curl_http3_bin}" --http3-only -I "${base_url}/coquic-wasm-quic.wasm" 2>"${wasm_error_path}")"; then
+      normalized_wasm_headers="$(printf '%s' "${wasm_headers}" | tr -d '\r')"
+      last_wasm_headers="${normalized_wasm_headers}"
+      last_wasm_error=""
+      if grep -Eq '^HTTP/[0-9](\.[0-9])?[[:space:]]+200([[:space:]]|$)' <<<"${normalized_wasm_headers}" &&
+         grep -Eiq '^content-type:[[:space:]]*application/wasm[[:space:]]*$' <<<"${normalized_wasm_headers}"; then
+        wasm_mime_verified=1
+        break
+      fi
+    else
+      last_wasm_error="$(cat "${wasm_error_path}" 2>/dev/null || true)"
     fi
-  else
-    last_wasm_error="$(cat "${wasm_error_path}" 2>/dev/null || true)"
+    if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
+      sleep "${verification_sleep_seconds}"
+    fi
+  done
+  if [[ ${wasm_mime_verified} -ne 1 ]]; then
+    if [[ -n "${last_wasm_headers}" ]]; then
+      echo "last wasm header verification response:" >&2
+      printf '%s\n' "${last_wasm_headers}" >&2
+    fi
+    if [[ -n "${last_wasm_error}" ]]; then
+      echo "last wasm header verification error:" >&2
+      printf '%s\n' "${last_wasm_error}" >&2
+    fi
+    fail_with_rollback "deployment verification failed: wasm MIME type did not converge after retries"
   fi
-  if [[ "${attempt}" -lt "${verification_attempts}" ]]; then
-    sleep "${verification_sleep_seconds}"
-  fi
-done
-if [[ ${wasm_mime_verified} -ne 1 ]]; then
-  if [[ -n "${last_wasm_headers}" ]]; then
-    echo "last wasm header verification response:" >&2
-    printf '%s\n' "${last_wasm_headers}" >&2
-  fi
-  if [[ -n "${last_wasm_error}" ]]; then
-    echo "last wasm header verification error:" >&2
-    printf '%s\n' "${last_wasm_error}" >&2
-  fi
-  fail_with_rollback "deployment verification failed: wasm MIME type did not converge after retries"
 fi
 
 if [[ ${rag_env_configured} -eq 1 ]]; then
@@ -829,7 +874,7 @@ if [[ ${rag_env_configured} -eq 1 ]]; then
     # verification retry loop: RAG QA health through Next rewrite
     qa_health=""
     qa_error_path="${staging_dir}/verify-qa-${attempt}.err"
-    if qa_health="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${url}rag-api/api/health" 2>"${qa_error_path}")"; then
+    if qa_health="$(timeout 20s "${curl_http3_bin}" --http3-only -sS "${base_url}/rag-api/api/health" 2>"${qa_error_path}")"; then
       last_qa_health="${qa_health}"
       last_qa_error=""
       if grep -Fq '"ready":true' <<<"${qa_health}"; then

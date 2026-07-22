@@ -20,7 +20,7 @@ import { RunConfiguration } from "./run-configuration";
 import { TranscriptLayout, type RunOutlinePhase, type RunPhaseKind } from "./transcript-layout";
 import { LazyTranscript, type TranscriptRecord } from "./lazy-transcript";
 import { getArchiveRepository } from "@/lib/steward-archive/repository";
-import { loadArchiveTaskView } from "@/lib/steward-archive/view-model";
+import { loadArchiveTaskView, loadInitialTranscript } from "@/lib/steward-archive/view-model";
 
 export const metadata: Metadata = { title: "Steward task" };
 
@@ -52,17 +52,18 @@ interface TaskData {
       availability: string; mode: string; sizeBytes: number;
       originalSizeBytes: number; truncated: boolean; text: string;
     };
+    transcriptPath?: string | null;
   }>;
   attempts: Array<{
-    number: number; label: string; status: string; startedAt: string;
+    number: number; pipelineId?: string; label: string; status: string; startedAt: string;
     completedAt: string | null; summary: string;
-    workerRun: { name?: string; transcriptPath?: string | null; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string };
+    workerRun: { name?: string; sessionId?: string; resumeOfRunId?: string | null; parentRunId?: string | null; retryOfRunId?: string | null; transcriptPath?: string | null; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string; initialCursor?: string | null; hasMore?: boolean; fileRevision?: string | null };
     reviewerRun: { name?: string; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string } | null;
     artifacts: { transcriptBytes: number; patchBytes: number; lastMessageBytes: number; transcriptTruncated: boolean };
   }>;
   transcript: TranscriptItem[];
   patches: Array<{
-    attempt: number; filesChanged: number; additions: number; deletions: number; rawUrl: string | null;
+    attempt: number; pipelineId?: string; filesChanged: number; additions: number; deletions: number; rawUrl: string | null;
     files: Array<{
       path: string; status: string; additions: number; deletions: number;
       hunks: Array<{
@@ -71,9 +72,9 @@ interface TaskData {
       }>;
     }>;
   }>;
-  validations: Array<{ id: string; attempt: number; command: string; status: string; exitCode: number; durationSeconds: number; summary: string; summaryTruncated: boolean }>;
+  validations: Array<{ id: string; pipelineId?: string; attempt: number; command: string; status: string; exitCode: number | null; durationSeconds: number; summary: string; summaryTruncated: boolean }>;
   reviews: Array<{
-    attempt: number; verdict: string; summary: string;
+    id?: string; pipelineId?: string; attempt: number; kind?: string; role?: string; verdict: string; summary: string;
     findings: Array<{ severity: string; title: string; file: string; line: number | null; detail: string; recommendation: string }>;
     validationGaps: string[]; remainingRisk: string;
   }>;
@@ -82,7 +83,7 @@ interface TaskData {
 }
 
 interface TranscriptItem {
-  id: string; attempt: number; kind: string; label: string; timestamp?: string; text?: string;
+  id: string; ordinal?: number; attempt: number; kind: string; label: string; timestamp?: string; text?: string;
   durationSeconds?: number; durationMs?: number; command?: string; output?: string; outputTruncated?: boolean; exitCode?: number | null;
   outputBytes?: number; changes?: Array<{ path: string; kind: string }>;
   todos?: Array<{ text: string; completed: boolean }>;
@@ -205,7 +206,7 @@ function PlanningRuns({ runs, taskId, privateTranscripts }: { runs: NonNullable<
               <div className="pb-8 pt-4">
                 {!privateTranscript && run.transcript.truncated ? <p className="mt-5 text-xs text-warning">Published planner transcript tail · {formatArtifactBytes(run.transcript.sizeBytes)} of {formatArtifactBytes(run.transcript.originalSizeBytes)}</p> : null}
                 <div className="mt-5">
-                  {transcriptItems.length ? <TranscriptPanel items={transcriptItems} anchorPrefix={anchorPrefix} taskId={taskId} truncated={!privateTranscript && run.transcript.truncated} privateTranscript={privateTranscript} privateScope="plan" privateIndex={run.number} unavailableTarget="run" showCadence={false} /> : <EmptyEvidence title="Planner transcript not published" detail="This planning run has metadata, but no transcript content is available in this publication." />}
+                  {transcriptItems.length || run.transcriptPath ? <TranscriptPanel items={transcriptItems} anchorPrefix={anchorPrefix} taskId={taskId} truncated={!privateTranscript && run.transcript.truncated} privateTranscript={privateTranscript} transcriptRunId={run.name} transcriptPath={run.transcriptPath} initialHasMore={Boolean(run.transcriptPath)} privateScope="plan" privateIndex={run.number} unavailableTarget="run" showCadence={false} /> : <EmptyEvidence title="Planner transcript not published" detail="This planning run has metadata, but no transcript content is available in this publication." />}
                 </div>
               </div>
             </details>
@@ -383,14 +384,14 @@ function ModelUsage({ id, usage, eventCount, commandCount, privateTranscript, tr
   );
 }
 
-function TranscriptPanel({ items, anchorPrefix, taskId, truncated, privateTranscript, transcriptRunId, transcriptPath, privateScope = "attempt", privateIndex = 0, privateTranscriptName, unavailableTarget = "attempt", showCadence = true }: { items: TranscriptItem[]; anchorPrefix: string; taskId: string; truncated: boolean; privateTranscript: ArchiveTranscript | null; transcriptRunId?: string; transcriptPath?: string | null; privateScope?: "attempt" | "plan"; privateIndex?: number; privateTranscriptName?: string; unavailableTarget?: "attempt" | "run"; showCadence?: boolean }) {
+function TranscriptPanel({ items, anchorPrefix, taskId, truncated, privateTranscript, transcriptRunId, transcriptPath, initialCursor, initialHasMore, fileRevision, privateScope = "attempt", privateIndex = 0, privateTranscriptName, unavailableTarget = "attempt", showCadence = true }: { items: TranscriptItem[]; anchorPrefix: string; taskId: string; truncated: boolean; privateTranscript: ArchiveTranscript | null; transcriptRunId?: string; transcriptPath?: string | null; initialCursor?: string | null; initialHasMore?: boolean; fileRevision?: string | null; privateScope?: "attempt" | "plan"; privateIndex?: number; privateTranscriptName?: string; unavailableTarget?: "attempt" | "run"; showCadence?: boolean }) {
   const toolCalls = items.filter((item) => item.kind === "tool").length;
   return (
     <div aria-label="Agent transcript">
       {privateTranscript && showCadence ? <DurationStrip anchorPrefix={anchorPrefix} transcript={privateTranscript} /> : null}
       <ModelUsage id={`${anchorPrefix}-model-usage-title`} usage={privateTranscript?.usage ?? null} eventCount={items.length} commandCount={toolCalls} privateTranscript={privateTranscript !== null} truncated={truncated} unavailableTarget={unavailableTarget} />
       <TranscriptLayout anchorPrefix={anchorPrefix} phases={buildRunOutline(items)}>
-        <LazyTranscript taskId={taskId} runId={privateTranscript ? undefined : transcriptRunId} path={privateTranscript ? undefined : transcriptPath} initialCount={items.length} initial={items.map((item): TranscriptRecord => ({ ordinal: Number(item.id.split("-").at(-1) ?? 0), timestamp: item.timestamp ?? null, value: item.text ?? item.command ?? item.label, id: item.id, kind: titleCase(item.kind), label: item.label, text: item.text, command: item.command, output: item.output, exitCode: item.exitCode }))} />
+        <LazyTranscript taskId={taskId} runId={privateTranscript ? undefined : transcriptRunId} path={privateTranscript ? undefined : transcriptPath} initialCursor={initialCursor} initialHasMore={initialHasMore} fileRevision={fileRevision} initial={items.map((item): TranscriptRecord => ({ ordinal: item.ordinal ?? Number(item.id.split("-").at(-1) ?? 0), timestamp: item.timestamp ?? null, value: item.text ?? item.command ?? item.label, id: item.id, kind: titleCase(item.kind), label: item.label, text: item.text, command: item.command, output: item.output, exitCode: item.exitCode }))} />
       </TranscriptLayout>
     </div>
   );
@@ -402,22 +403,23 @@ function ArtifactPanel({ view, data, attempt, taskId, transcriptTruncated, selec
     const items: TranscriptItem[] = privateTranscript
       ? privateTranscript.items.map((item) => ({ ...item, attempt }))
       : data.transcript.filter((item) => item.attempt === attempt);
-    if (!items.length) return <EmptyEvidence title="Transcript excerpt not published" detail="Transcript metadata exists for this attempt, but no sanitized event excerpt was included in this publication." />;
-    return <TranscriptPanel items={items} anchorPrefix={`attempt-${attempt + 1}`} taskId={taskId} truncated={privateTranscript ? false : transcriptTruncated} privateTranscript={privateTranscript} transcriptRunId={attemptData.workerRun.name} transcriptPath={attemptData.workerRun.transcriptPath} privateIndex={attempt} privateTranscriptName={attemptData.workerRun.name} />;
+    if (!items.length && !attemptData.workerRun.transcriptPath) return <EmptyEvidence title="Transcript not available" detail="This run has no declared transcript artifact." />;
+    return <TranscriptPanel items={items} anchorPrefix={`attempt-${attempt + 1}`} taskId={taskId} truncated={privateTranscript ? false : transcriptTruncated} privateTranscript={privateTranscript} transcriptRunId={attemptData.workerRun.name} transcriptPath={attemptData.workerRun.transcriptPath} initialCursor={attemptData.workerRun.initialCursor} initialHasMore={attemptData.workerRun.hasMore} fileRevision={attemptData.workerRun.fileRevision} privateIndex={attempt} privateTranscriptName={attemptData.workerRun.name} />;
   }
   if (view === "patch") {
-    const patch = data.patches.find((item) => item.attempt === attempt);
+    const patch = data.patches.find((item) => item.attempt === attempt) ?? data.patches.find((item) => item.pipelineId === attemptData.pipelineId);
     if (!patch) return <EmptyEvidence title="Structured patch not published" detail={attemptData.artifacts.patchBytes ? "Patch metadata exists for this attempt, but no file-level diff was included in this publication." : "No patch artifact exists for this attempt at this snapshot."} />;
+    if (!patch.files.length) return <div className="border-y border-line py-8"><p className="font-medium text-ink">Raw patch evidence</p><p className="mt-2 text-sm text-muted">The canonical patch remains attached to this pipeline and loads only on request.</p>{patch.rawUrl ? <a className="mt-4 inline-block text-sm text-accent" href={patch.rawUrl}>Download raw patch</a> : null}</div>;
     return <PatchViewer patch={patch} initialPath={selectedFile} />;
   }
   if (view === "validation") {
-    const records = data.validations.filter((record) => record.attempt === attempt);
+    const records = data.validations.filter((record) => record.attempt === attempt || record.pipelineId === attemptData.pipelineId);
     if (!records.length) return <EmptyEvidence title="Validation not started" detail="No validation records exist for the selected attempt at this snapshot." />;
     return <ul className="border-t border-line">{records.map((record) => <li key={record.id} className="grid gap-4 border-b border-line py-5 sm:grid-cols-[8rem_minmax(0,1fr)_7rem]"><div><Status value={record.status} /><p className="mt-1 text-xs text-muted data-text">exit {record.exitCode}</p></div><div><p className="break-words text-sm font-medium text-ink data-text">{record.command}</p>{record.summaryTruncated ? <p className="mt-2 text-xs text-warning">Earlier output omitted · published tail</p> : null}<pre aria-label={record.summaryTruncated ? "Published validation tail" : undefined} className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs leading-5 text-muted data-text">{record.summary}</pre></div><p className="text-xs text-muted data-text sm:text-right">{record.durationSeconds}s</p></li>)}</ul>;
   }
-  const review = data.reviews.find((record) => record.attempt === attempt);
-  if (!review) return <EmptyEvidence title="Review not started" detail="No reviewer record exists for the selected attempt at this snapshot." />;
-  return <div><div className="flex items-baseline justify-between gap-4 border-y border-line py-4"><h3 className="text-base font-semibold text-ink">Reviewer verdict</h3><Status value={review.verdict} /></div><p className="mt-5 text-sm leading-7 text-muted">{review.summary}</p>{review.findings.map((finding) => <article key={finding.title} className="mt-7 border-l-2 border-negative pl-5"><p className="text-xs font-medium text-negative">{titleCase(finding.severity)} finding</p><h4 className="mt-2 font-semibold text-ink">{finding.title}</h4><p className="mt-2 break-all text-xs text-muted data-text">{finding.file}{finding.line ? `:${finding.line}` : ""}</p><p className="mt-3 text-sm leading-7 text-muted">{finding.detail}</p><p className="mt-3 text-sm leading-7 text-ink"><strong className="font-medium">Required change:</strong> {finding.recommendation}</p></article>)}{review.validationGaps.length ? <div className="mt-8"><h4 className="text-sm font-semibold text-ink">Validation gaps</h4><ul className="mt-3 space-y-2 text-sm leading-6 text-muted">{review.validationGaps.map((gap) => <li key={gap}>— {gap}</li>)}</ul></div> : <p className="mt-7 text-sm text-positive">No validation gaps recorded.</p>}<p className="mt-7 text-sm leading-6 text-muted"><strong className="font-medium text-ink">Remaining risk:</strong> {review.remainingRisk}</p></div>;
+  const reviewRecords = data.reviews.filter((record) => record.attempt === attempt || record.pipelineId === attemptData.pipelineId);
+  if (!reviewRecords.length) return <EmptyEvidence title="Review not started" detail="No reviewer record exists for the selected run's pipeline at this snapshot." />;
+  return <div>{reviewRecords.map((review) => <section key={review.id ?? `${review.kind}-${review.role}`} className="border-b border-line pb-8 last:border-b-0"><div className="flex items-baseline justify-between gap-4 border-y border-line py-4"><h3 className="text-base font-semibold text-ink">{review.kind ? titleCase(review.kind) : "Reviewer"} evidence · {review.role ?? "reviewer"}</h3><Status value={review.verdict} /></div><p className="mt-5 text-sm leading-7 text-muted">{review.summary}</p>{review.findings.map((finding) => <article key={finding.title} className="mt-7 border-l-2 border-negative pl-5"><p className="text-xs font-medium text-negative">{titleCase(finding.severity)} finding</p><h4 className="mt-2 font-semibold text-ink">{finding.title}</h4><p className="mt-2 break-all text-xs text-muted data-text">{finding.file}{finding.line ? `:${finding.line}` : ""}</p><p className="mt-3 text-sm leading-7 text-muted">{finding.detail}</p><p className="mt-3 text-sm leading-7 text-ink"><strong className="font-medium">Required change:</strong> {finding.recommendation}</p></article>)}<p className="mt-7 text-sm leading-6 text-muted"><strong className="font-medium text-ink">Remaining risk:</strong> {review.remainingRisk}</p></section>)}</div>;
 }
 
 function EmptyEvidence({ title, detail }: { title: string; detail: string }) {
@@ -431,7 +433,8 @@ interface PageProps {
 
 export default async function StewardTaskPage({ params, searchParams }: PageProps) {
   const [{ taskId }, query] = await Promise.all([params, searchParams]);
-  const archiveData = await loadArchiveTaskView(getArchiveRepository(), taskId);
+  const repository = getArchiveRepository();
+  const archiveData = await loadArchiveTaskView(repository, taskId);
   const data = archiveData as TaskData | null;
   if (!data) notFound();
   const requestedView = typeof query.artifact === "string" ? query.artifact : "transcript";
@@ -440,6 +443,15 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
   const attempt = data.attempts.some((item) => item.number === requestedAttempt) ? requestedAttempt : data.attempts.at(-1)?.number ?? 0;
   const selectedFile = typeof query.file === "string" ? query.file : undefined;
   const selectedAttempt = data.attempts.find((item) => item.number === attempt)!;
+  if (artifact === "transcript" && selectedAttempt?.workerRun.name && selectedAttempt.workerRun.transcriptPath) {
+    try {
+      const initial = await loadInitialTranscript(repository, taskId, selectedAttempt.workerRun.name, selectedAttempt.workerRun.transcriptPath, attempt);
+      data.transcript.push(...initial.items);
+      selectedAttempt.workerRun.initialCursor = initial.nextCursor;
+      selectedAttempt.workerRun.hasMore = initial.hasMore;
+      selectedAttempt.workerRun.fileRevision = initial.fileRevision;
+    } catch { /* an active replacement is reported by the evidence panel without exposing bytes */ }
+  }
   const privateTranscript: ArchiveTranscript | null = null;
   const privatePlanTranscripts = new Map<number, ArchiveTranscript>();
   const githubStars = await getGitHubStars();

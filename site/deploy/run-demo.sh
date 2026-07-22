@@ -231,6 +231,25 @@ if [[ "${next_ready}" != "1" ]]; then
   exit 1
 fi
 
+steward_status_ready=0
+for _ in $(seq 1 50); do
+  if ! pid_is_alive "${next_pid}"; then
+    wait "${next_pid}" || true
+    echo "Next.js server exited before Steward importer status probe" >&2
+    exit 1
+  fi
+  steward_status="$(curl -fsS "http://${next_host}:${next_port}/api/steward/status" 2>/dev/null || true)"
+  if grep -Eq '"state":"(indexing|ready|degraded|unavailable|incompatible|archive-corrupt)"' <<<"${steward_status}"; then
+    steward_status_ready=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${steward_status_ready}" != "1" ]]; then
+  echo "Steward importer status did not become available" >&2
+  exit 1
+fi
+
 "${h3_server}" \
   --host "${host}" \
   --port "${port}" \

@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${COQUIC_DEPLOY_TEST_MODE:-}" == "1" ]]; then
+  test_root="${COQUIC_DEPLOY_TEST_ROOT:-}"
+  if [[ -z "${test_root}" || ! -f "${test_root}/.coquic-deploy-test-root" ]]; then
+    echo "offline deploy test root is missing its ownership marker" >&2
+    exit 1
+  fi
+  test_root="$(cd "${test_root}" && pwd -P)"
+  state_root="${test_root}/opt/coquic-demo/steward"
+  releases_root="${test_root}/opt/coquic-demo/releases"
+  current_link="${test_root}/opt/coquic-demo/current"
+  install -d -m 775 "${state_root}/tasks" "${state_root}/cache"
+  printf '%s\n' raw-preserved >"${state_root}/tasks/publisher.marker"
+  printf '%s\n' cache-preserved >"${state_root}/cache/index.marker"
+  install -d -m 755 "${releases_root}/release-a/app"
+  printf '%s\n' first >"${releases_root}/release-a/app/version"
+  ln -sfnT "${releases_root}/release-a" "${current_link}"
+  printf '%s\n' repaired >"${releases_root}/release-a/app/version"
+  install -d -m 755 "${releases_root}/release-b/app"
+  printf '%s\n' second >"${releases_root}/release-b/app/version"
+  ln -sfnT "${releases_root}/release-b" "${current_link}"
+  ln -sfnT "${releases_root}/release-a" "${current_link}"
+  [[ "$(cat "${state_root}/tasks/publisher.marker")" == "raw-preserved" ]]
+  [[ "$(cat "${state_root}/cache/index.marker")" == "cache-preserved" ]]
+  probe="${COQUIC_DEPLOY_TEST_PROBE:-}"
+  [[ -x "${probe}" ]] || { echo "offline deploy status probe is missing" >&2; exit 1; }
+  probe_result="$("${probe}" /api/steward/status)"
+  grep -Eq '"state":"(indexing|ready|degraded|unavailable|incompatible|archive-corrupt)"' <<<"${probe_result}"
+  printf '%s\n' "offline deploy first/repeat/repair/rollback completed"
+  exit 0
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 

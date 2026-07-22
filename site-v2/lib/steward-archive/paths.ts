@@ -33,8 +33,18 @@ export function resolveSafePath(root: string, relativePath: string) {
   return target;
 }
 
+async function assertNoSymlinkSegments(root: string, relativePath: string) {
+  let current = resolve(root);
+  for (const segment of relativePath.split("/")) {
+    current = join(current, segment);
+    const stat = await lstat(current);
+    if (stat.isSymbolicLink()) throw new Error("archive paths must not contain symlinks");
+  }
+}
+
 export async function resolveRegularContainedPath(root: string, relativePath: string) {
   const target = resolveSafePath(root, relativePath);
+  await assertNoSymlinkSegments(root, relativePath);
   const lexicalStat = await lstat(target);
   if (lexicalStat.isSymbolicLink() || !lexicalStat.isFile()) throw new Error("archive artifact must be a regular non-symlink file");
   const rootReal = await realpath(root);
@@ -43,6 +53,17 @@ export async function resolveRegularContainedPath(root: string, relativePath: st
   const stat = await lstat(targetReal);
   if (!stat.isFile()) throw new Error("archive artifact is not a regular file");
   return { path: targetReal, stat };
+}
+
+export async function resolveDirectoryContainedPath(root: string, relativePath: string) {
+  const target = resolveSafePath(root, relativePath);
+  await assertNoSymlinkSegments(root, relativePath);
+  const lexicalStat = await lstat(target);
+  if (lexicalStat.isSymbolicLink() || !lexicalStat.isDirectory()) throw new Error("archive path must be a real directory");
+  const rootReal = await realpath(root);
+  const targetReal = await realpath(target);
+  if (!contained(rootReal, targetReal) || targetReal === rootReal) throw new Error("directory is outside archive root");
+  return targetReal;
 }
 
 export async function assertDirectoryRoot(root: string) {

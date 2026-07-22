@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { existsSync, lstatSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 
 export type ArchiveRuntime = "production" | "development" | "test";
 
@@ -42,6 +42,21 @@ function hasPathPrefix(parent: string, child: string) {
   return relation === "" || (!relation.startsWith(`..${sep}`) && relation !== ".." && !isAbsolute(relation));
 }
 
+function effectivePathWithoutSymlinks(path: string) {
+  const absolute = resolve(path);
+  const segments = absolute.split(sep).filter(Boolean);
+  let existing: string = sep;
+  let index = 0;
+  for (; index < segments.length; index += 1) {
+    const candidate = resolve(existing, segments[index]);
+    if (!existsSync(candidate)) break;
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink()) throw new ArchiveConfigError("symlink-path", "archive paths must not contain symlink ancestors");
+    existing = candidate;
+  }
+  return resolve(realpathSync(existing), ...segments.slice(index));
+}
+
 export function validateArchivePaths(tasksRoot: string, cachePath: string, runtime: ArchiveRuntime = runtimeFromEnv()) {
   if (!isAbsolute(tasksRoot) || !isAbsolute(cachePath)) {
     throw new ArchiveConfigError("relative-path", "archive paths must be absolute");
@@ -65,6 +80,11 @@ export function validateArchivePaths(tasksRoot: string, cachePath: string, runti
   if (existsSync(raw)) {
     const stat = lstatSync(raw);
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw new ArchiveConfigError("raw-root", "archive root must be a real directory");
+  }
+  const effectiveRaw = effectivePathWithoutSymlinks(raw);
+  const effectiveCache = effectivePathWithoutSymlinks(cache);
+  if (effectiveRaw === effectiveCache || hasPathPrefix(effectiveRaw, effectiveCache) || hasPathPrefix(effectiveCache, effectiveRaw)) {
+    throw new ArchiveConfigError("nested-real-path", "archive and cache real paths must not contain one another");
   }
   if (existsSync(cache)) {
     const stat = lstatSync(cache);

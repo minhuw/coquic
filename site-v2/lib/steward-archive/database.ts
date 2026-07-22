@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const DATABASE_SCHEMA_VERSION = 1;
+export const DATABASE_SCHEMA_VERSION = 2;
 
 export interface DatabaseMeta {
   state: string;
@@ -90,7 +90,7 @@ export function openArchiveDatabase(cachePath: string) {
     );
     CREATE INDEX IF NOT EXISTS runs_lookup ON runs(task_id, pipeline_id, role_ordinal);
     CREATE TABLE IF NOT EXISTS usage_facts (
-      task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       availability TEXT NOT NULL,
       prompt_tokens INTEGER,
@@ -103,7 +103,8 @@ export function openArchiveDatabase(cachePath: string) {
       cost_model TEXT,
       pricing_source TEXT,
       cost_reason TEXT,
-      PRIMARY KEY(task_id, run_id)
+      PRIMARY KEY(task_id, run_id),
+      FOREIGN KEY(task_id, run_id) REFERENCES runs(task_id, run_id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS usage_available ON usage_facts(availability, cost_availability);
     CREATE TABLE IF NOT EXISTS files (

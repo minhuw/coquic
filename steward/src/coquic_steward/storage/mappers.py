@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from ..core.models import (
+    CodexSession,
     Event,
+    TaskExecution,
+    TaskPipeline,
+    TaskRun,
+    WorktreeCheckpoint,
     SchedulerWakeup,
     SignalFetchRun,
     SignalItem,
@@ -17,13 +22,18 @@ from ..core.models import (
     ValidationResult,
 )
 from .schema import (
+    CodexSessionRow,
     EventRow,
     SchedulerWakeupRow,
     SignalFetchRunRow,
     SignalItemRow,
     TaskIterationRow,
+    TaskExecutionRow,
     TaskPlanRunRow,
+    TaskPipelineRow,
     TaskRow,
+    TaskRunRow,
+    TaskWorktreeCheckpointRow,
     ValidationRow,
 )
 
@@ -40,10 +50,21 @@ class PathCodec:
             "worktrees",
         }
     )
+    _LEGACY_ROOTS = frozenset(
+        {
+            "implementation-plans",
+            "logs",
+            "patches",
+            "prompts",
+            "schemas",
+            "transcripts",
+        }
+    )
     _PATH_KEYS = frozenset({"cwd", "log", "logs", "path", "paths"})
 
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, legacy_dir: Path | None = None):
         self.base_dir = base_dir.resolve()
+        self.legacy_dir = legacy_dir.resolve() if legacy_dir is not None else None
 
     def dump(self, value: Path | None) -> str | None:
         if value is None:
@@ -51,6 +72,13 @@ class PathCodec:
         path = value.expanduser()
         if not path.is_absolute():
             return path.as_posix()
+        if self.legacy_dir is not None:
+            try:
+                relative = path.resolve().relative_to(self.legacy_dir)
+            except ValueError:
+                pass
+            else:
+                return relative.as_posix()
         try:
             return path.resolve().relative_to(self.base_dir).as_posix()
         except ValueError:
@@ -60,7 +88,11 @@ class PathCodec:
         if not value:
             return None
         path = Path(value)
-        return path if path.is_absolute() else self.base_dir / path
+        if path.is_absolute():
+            return path
+        if self.legacy_dir is not None and self._looks_like_legacy_path(path):
+            return self.legacy_dir / path
+        return self.base_dir / path
 
     def is_portable(self, value: str | None) -> bool:
         if not value:
@@ -108,11 +140,17 @@ class PathCodec:
         path = Path(value)
         if path.is_absolute() or not self._looks_like_state_path(path):
             return value
+        if self.legacy_dir is not None and self._looks_like_legacy_path(path):
+            return str(self.legacy_dir / path)
         return str(self.base_dir / path)
 
     def _looks_like_state_path(self, path: Path) -> bool:
         parts = path.parts
         return bool(parts) and parts[0] in self._RELATIVE_ROOTS
+
+    def _looks_like_legacy_path(self, path: Path) -> bool:
+        parts = path.parts
+        return bool(parts) and parts[0] in self._LEGACY_ROOTS
 
     def _is_path_key(self, key: str | None) -> bool:
         if key is None:
@@ -474,6 +512,222 @@ def row_to_signal_fetch_run(row: SignalFetchRunRow) -> SignalFetchRun:
         has_more=row.has_more,
         error=row.error,
         summary=row.summary,
+    )
+
+
+def execution_to_row(item: TaskExecution, *, path_codec: PathCodec) -> TaskExecutionRow:
+    return TaskExecutionRow(
+        id=item.id,
+        task_id=item.task_id,
+        state=str(item.state),
+        current_phase=str(item.current_phase),
+        owning_pipeline_id=item.owning_pipeline_id,
+        active_session_id=item.active_session_id,
+        active_run_id=item.active_run_id,
+        base_commit=item.base_commit,
+        expected_tree=item.expected_tree,
+        worktree_path=path_codec.dump(item.worktree_path),
+        image_version=item.image_version,
+        runtime_version=item.runtime_version,
+        idempotency_key=item.idempotency_key,
+        archive_generation=item.archive_generation,
+        created_at=_dump_datetime(item.created_at),
+        updated_at=_dump_datetime(item.updated_at),
+    )
+
+
+def row_to_execution(row: TaskExecutionRow, *, path_codec: PathCodec) -> TaskExecution:
+    return TaskExecution(
+        id=row.id,
+        task_id=row.task_id,
+        state=row.state,
+        current_phase=row.current_phase,
+        owning_pipeline_id=row.owning_pipeline_id,
+        active_session_id=row.active_session_id,
+        active_run_id=row.active_run_id,
+        base_commit=row.base_commit,
+        expected_tree=row.expected_tree,
+        worktree_path=path_codec.load(row.worktree_path),
+        image_version=row.image_version,
+        runtime_version=row.runtime_version,
+        idempotency_key=row.idempotency_key,
+        archive_generation=row.archive_generation,
+        created_at=_load_datetime(row.created_at),
+        updated_at=_load_datetime(row.updated_at),
+    )
+
+
+def pipeline_to_row(item: TaskPipeline) -> TaskPipelineRow:
+    return TaskPipelineRow(
+        id=item.id,
+        task_id=item.task_id,
+        execution_id=item.execution_id,
+        ordinal=item.ordinal,
+        trigger=str(item.trigger),
+        parent_pipeline_id=item.parent_pipeline_id,
+        phase=str(item.phase),
+        state=str(item.state),
+        base_identity=item.base_identity,
+        input_identity=item.input_identity,
+        output_identity=item.output_identity,
+        patch_identity=item.patch_identity,
+        metadata_json=_dump_json(item.metadata),
+        started_at=_dump_datetime(item.started_at),
+        updated_at=_dump_datetime(item.updated_at),
+        completed_at=_dump_datetime(item.completed_at) if item.completed_at else None,
+        archive_generation=item.archive_generation,
+    )
+
+
+def row_to_pipeline(row: TaskPipelineRow) -> TaskPipeline:
+    return TaskPipeline(
+        id=row.id,
+        task_id=row.task_id,
+        execution_id=row.execution_id,
+        ordinal=row.ordinal,
+        trigger=row.trigger,
+        parent_pipeline_id=row.parent_pipeline_id,
+        phase=row.phase,
+        state=row.state,
+        base_identity=row.base_identity,
+        input_identity=row.input_identity,
+        output_identity=row.output_identity,
+        patch_identity=row.patch_identity,
+        metadata=_loads_dict(row.metadata_json),
+        started_at=_load_datetime(row.started_at),
+        updated_at=_load_datetime(row.updated_at),
+        completed_at=_load_datetime(row.completed_at) if row.completed_at else None,
+        archive_generation=row.archive_generation,
+    )
+
+
+def session_to_row(item: CodexSession, *, path_codec: PathCodec) -> CodexSessionRow:
+    return CodexSessionRow(
+        id=item.id,
+        task_id=item.task_id,
+        pipeline_id=item.pipeline_id,
+        state=str(item.state),
+        provider_session_id=item.provider_session_id,
+        private_home_path=path_codec.dump(item.private_home_path),
+        idempotency_key=item.idempotency_key,
+        archive_generation=item.archive_generation,
+        started_at=_dump_datetime(item.started_at),
+        updated_at=_dump_datetime(item.updated_at),
+        closed_at=_dump_datetime(item.closed_at) if item.closed_at else None,
+    )
+
+
+def row_to_session(row: CodexSessionRow, *, path_codec: PathCodec) -> CodexSession:
+    return CodexSession(
+        id=row.id,
+        task_id=row.task_id,
+        pipeline_id=row.pipeline_id,
+        state=row.state,
+        provider_session_id=row.provider_session_id,
+        private_home_path=path_codec.load(row.private_home_path),
+        idempotency_key=row.idempotency_key,
+        archive_generation=row.archive_generation,
+        started_at=_load_datetime(row.started_at),
+        updated_at=_load_datetime(row.updated_at),
+        closed_at=_load_datetime(row.closed_at) if row.closed_at else None,
+    )
+
+
+def run_to_row(item: TaskRun) -> TaskRunRow:
+    return TaskRunRow(
+        id=item.id,
+        task_id=item.task_id,
+        pipeline_id=item.pipeline_id,
+        session_id=item.session_id,
+        role=item.role,
+        role_ordinal=item.role_ordinal,
+        state=str(item.state),
+        resume_of_run_id=item.resume_of_run_id,
+        parent_run_id=item.parent_run_id,
+        retry_of_run_id=item.retry_of_run_id,
+        model=item.model,
+        reasoning=item.reasoning,
+        image_version=item.image_version,
+        runtime_version=item.runtime_version,
+        checkpoint_id=item.checkpoint_id,
+        provider_run_id=item.provider_run_id,
+        exit_code=item.exit_code,
+        exit_signal=item.exit_signal,
+        exit_reason=item.exit_reason,
+        result_summary=item.result_summary,
+        idempotency_key=item.idempotency_key,
+        started_at=_dump_datetime(item.started_at),
+        updated_at=_dump_datetime(item.updated_at),
+        completed_at=_dump_datetime(item.completed_at) if item.completed_at else None,
+        archive_generation=item.archive_generation,
+    )
+
+
+def row_to_run(row: TaskRunRow) -> TaskRun:
+    return TaskRun(
+        id=row.id,
+        task_id=row.task_id,
+        pipeline_id=row.pipeline_id,
+        session_id=row.session_id,
+        role=row.role,
+        role_ordinal=row.role_ordinal,
+        state=row.state,
+        resume_of_run_id=row.resume_of_run_id,
+        parent_run_id=row.parent_run_id,
+        retry_of_run_id=row.retry_of_run_id,
+        model=row.model,
+        reasoning=row.reasoning,
+        image_version=row.image_version,
+        runtime_version=row.runtime_version,
+        checkpoint_id=row.checkpoint_id,
+        provider_run_id=row.provider_run_id,
+        exit_code=row.exit_code,
+        exit_signal=row.exit_signal,
+        exit_reason=row.exit_reason,
+        result_summary=row.result_summary,
+        idempotency_key=row.idempotency_key,
+        started_at=_load_datetime(row.started_at),
+        updated_at=_load_datetime(row.updated_at),
+        completed_at=_load_datetime(row.completed_at) if row.completed_at else None,
+        archive_generation=row.archive_generation,
+    )
+
+
+def checkpoint_to_row(item: WorktreeCheckpoint, *, path_codec: PathCodec) -> TaskWorktreeCheckpointRow:
+    return TaskWorktreeCheckpointRow(
+        id=item.id,
+        task_id=item.task_id,
+        execution_id=item.execution_id,
+        base_commit=item.base_commit,
+        expected_tree=item.expected_tree,
+        phase=str(item.phase),
+        owning_pipeline_id=item.owning_pipeline_id,
+        active_session_id=item.active_session_id,
+        active_run_id=item.active_run_id,
+        worktree_path=path_codec.dump(item.worktree_path),
+        image_version=item.image_version,
+        runtime_version=item.runtime_version,
+        created_at=_dump_datetime(item.created_at),
+        updated_at=_dump_datetime(item.updated_at),
+    )
+
+
+def row_to_checkpoint(row: TaskWorktreeCheckpointRow, *, path_codec: PathCodec) -> WorktreeCheckpoint:
+    return WorktreeCheckpoint(
+        id=row.id,
+        task_id=row.task_id,
+        execution_id=row.execution_id,
+        base_commit=row.base_commit,
+        expected_tree=row.expected_tree,
+        phase=row.phase,
+        owning_pipeline_id=row.owning_pipeline_id,
+        active_session_id=row.active_session_id,
+        active_run_id=row.active_run_id,
+        worktree_path=path_codec.load(row.worktree_path),
+        image_version=row.image_version,
+        runtime_version=row.runtime_version,
+        created_at=_load_datetime(row.created_at),
+        updated_at=_load_datetime(row.updated_at),
     )
 
 

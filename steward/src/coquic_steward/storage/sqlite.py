@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,18 +25,31 @@ from ..core.lifecycle import (
 )
 from ..core.models import (
     ACTIVE_STATUSES,
+    CodexRunState,
+    CodexSession,
     Event,
+    ExecutionState,
     SchedulerWakeup,
     SchedulerWakeupStatus,
     SignalFetchRun,
     SignalItem,
     SignalItemStatus,
     TaskIteration,
+    TaskExecution,
+    TaskPipeline,
+    PipelineState,
+    PipelinePhase,
     TaskPlanRun,
     TaskRecord,
+    TaskRun,
     TaskSpec,
     TaskStatus,
     ValidationResult,
+    WorktreeCheckpoint,
+    new_execution_id,
+    new_pipeline_id,
+    new_run_id,
+    new_session_id,
     WorkerKind,
     WorkerResult,
     new_signal_item_id,
@@ -43,9 +58,16 @@ from ..core.models import (
 from .mappers import (
     PathCodec,
     event_to_row,
+    checkpoint_to_row,
+    execution_to_row,
     iteration_to_row,
     plan_run_to_row,
     row_to_event,
+    row_to_checkpoint,
+    row_to_execution,
+    row_to_pipeline,
+    row_to_run,
+    row_to_session,
     row_to_scheduler_wakeup,
     row_to_signal_fetch_run,
     row_to_signal_item,
@@ -53,6 +75,9 @@ from .mappers import (
     row_to_plan_run,
     row_to_task,
     scheduler_wakeup_to_row,
+    pipeline_to_row,
+    run_to_row,
+    session_to_row,
     signal_fetch_run_to_row,
     signal_item_to_row,
     task_to_row,
@@ -63,13 +88,18 @@ from .mappers import (
 )
 from .schema import (
     Base,
+    CodexSessionRow,
     EventRow,
     SchedulerWakeupRow,
     SignalFetchRunRow,
     SignalItemRow,
     TaskIterationRow,
+    TaskExecutionRow,
     TaskPlanRunRow,
+    TaskPipelineRow,
     TaskRow,
+    TaskRunRow,
+    TaskWorktreeCheckpointRow,
     ValidationRow,
 )
 
@@ -95,11 +125,15 @@ class SQLiteTaskStore:
     def __init__(self, path: Path, on_change: Callable[[], None] | None = None):
         self.path = path
         self.on_change = on_change
-        self.path_codec = PathCodec(path.parent)
+        self.path_codec = PathCodec(path.parent, legacy_dir=path.parent / "steward")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", future=True)
         event.listen(self.engine, "connect", _configure_sqlite)
         Base.metadata.create_all(self.engine)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         self._migrate_schema()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
@@ -107,6 +141,7 @@ class SQLiteTaskStore:
     def add_task(
         self, spec: TaskSpec, *, dedupe_key: str | None = None
     ) -> tuple[TaskRecord, bool]:
+        self._ensure_archive_epoch()
         metadata = dict(spec.metadata)
         if dedupe_key is not None:
             existing = self._find_active_dedupe(dedupe_key)
@@ -133,11 +168,611 @@ class SQLiteTaskStore:
                 if existing is None:
                     raise
                 return existing, False
+        # New-format tasks always start with a durable execution and initial
+        # pipeline. Existing rows loaded from a pre-2.0 database are untouched.
+        self.ensure_execution(record.id)
         self.request_wakeup(
             "task.created",
             {"task_id": record.id, "kind": str(record.spec.kind)},
         )
         return record, True
+
+    def _ensure_archive_epoch(self) -> None:
+        # The first post-2.0 allocation starts the immutable archive epoch.
+        # Legacy rows are never enumerated or copied by this hook.
+        from ..execution.task_archive import TaskArchive
+
+        TaskArchive(self.path.parent / "tasks").ensure_epoch()
+
+    @property
+    def archive_epoch_path(self) -> Path:
+        return self.path.parent / "tasks" / "epoch.json"
+
+    # ------------------------------------------------------------------
+    # Steward 2.0 normalized execution ledger
+
+    def ensure_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str | None = None,
+        idempotency_key: str | None = None,
+        initialize_pipeline: bool = True,
+        **fields: object,
+    ) -> TaskExecution:
+        """Create (or return) the single execution owner for a task."""
+        with Session(self.engine) as session, session.begin():
+            existing = session.scalar(
+                select(TaskExecutionRow).where(TaskExecutionRow.task_id == task_id)
+            )
+            if existing is not None:
+                item = row_to_execution(existing, path_codec=self.path_codec)
+                if initialize_pipeline:
+                    pipeline_exists = session.scalar(
+                        select(TaskPipelineRow.id).where(
+                            TaskPipelineRow.execution_id == existing.id
+                        )
+                    )
+                    if pipeline_exists is None:
+                        # The surrounding transaction is read-only for this
+                        # path; create the initial pipeline after it closes.
+                        pass
+                    else:
+                        return item
+                else:
+                    return item
+            else:
+                item = None
+            if item is None:
+                now = utc_now()
+                item = TaskExecution(
+                    id=execution_id or new_execution_id(),
+                    task_id=task_id,
+                    idempotency_key=idempotency_key,
+                    **_execution_fields(fields),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(execution_to_row(item, path_codec=self.path_codec))
+                session.flush()
+        if initialize_pipeline:
+            self._insert_pipeline(
+                task_id,
+                item.id,
+                pipeline_id=None,
+                trigger="initial",
+                parent_pipeline_id=None,
+                ordinal=1,
+            )
+            item = self.get_execution(task_id)
+        return item
+
+    create_execution = ensure_execution
+    create_task_execution = ensure_execution
+    allocate_execution = ensure_execution
+
+    def get_execution(self, task_id_or_execution_id: str) -> TaskExecution:
+        with Session(self.engine) as session:
+            row = session.get(TaskExecutionRow, task_id_or_execution_id)
+            if row is None:
+                row = session.scalar(
+                    select(TaskExecutionRow).where(
+                        TaskExecutionRow.task_id == task_id_or_execution_id
+                    )
+                )
+            if row is None:
+                raise KeyError(task_id_or_execution_id)
+            return row_to_execution(row, path_codec=self.path_codec)
+
+    def transition_execution(
+        self,
+        execution_id: str,
+        state: str,
+        *,
+        expected_state: str | None = None,
+        phase: str | None = None,
+        pipeline_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+    ) -> TaskExecution:
+        if state not in {item.value for item in ExecutionState}:
+            raise ValueError(f"invalid execution state {state!r}")
+        if phase is not None and phase not in {item.value for item in PipelinePhase}:
+            raise ValueError(f"invalid execution phase {phase!r}")
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskExecutionRow, execution_id)
+            if row is None:
+                raise KeyError(execution_id)
+            if expected_state is not None and row.state != expected_state:
+                raise ValueError(
+                    f"execution compare-and-set failed: expected {expected_state}, found {row.state}"
+                )
+            if row.state == ExecutionState.complete.value and state != row.state:
+                raise ValueError("completed execution is immutable")
+            if row.state == state and row.state == ExecutionState.complete.value:
+                return row_to_execution(row, path_codec=self.path_codec)
+            row.state = state
+            row.updated_at = now
+            if phase is not None:
+                row.current_phase = phase
+            if pipeline_id is not None:
+                row.owning_pipeline_id = pipeline_id
+            if session_id is not None:
+                row.active_session_id = session_id
+            if run_id is not None:
+                row.active_run_id = run_id
+        return self.get_execution(execution_id)
+
+    update_execution_state = transition_execution
+
+    def list_executions(self, task_id: str) -> list[TaskExecution]:
+        try:
+            return [self.get_execution(task_id)]
+        except KeyError:
+            return []
+
+    execution_history = list_executions
+
+    def create_pipeline(
+        self,
+        task_id: str,
+        *,
+        execution_id: str | None = None,
+        pipeline_id: str | None = None,
+        trigger: str = "initial",
+        parent_pipeline_id: str | None = None,
+        ordinal: int | None = None,
+        **fields: object,
+    ) -> TaskPipeline:
+        execution = self.ensure_execution(
+            task_id, execution_id=execution_id, initialize_pipeline=False
+        )
+        if parent_pipeline_id is not None:
+            parent = self.get_pipeline(parent_pipeline_id)
+            if parent.task_id != task_id or parent.execution_id != execution.id:
+                raise ValueError("parent pipeline must belong to the same task execution")
+        return self._insert_pipeline(
+            task_id,
+            execution.id,
+            pipeline_id=pipeline_id,
+            trigger=trigger,
+            parent_pipeline_id=parent_pipeline_id,
+            ordinal=ordinal,
+            **fields,
+        )
+
+    def _insert_pipeline(
+        self,
+        task_id: str,
+        execution_id: str,
+        *,
+        pipeline_id: str | None,
+        trigger: str,
+        parent_pipeline_id: str | None,
+        ordinal: int | None,
+        **fields: object,
+    ) -> TaskPipeline:
+        for attempt in range(8):
+            try:
+                with self.engine.connect() as connection:
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    if ordinal is None:
+                        value = connection.execute(
+                            select(func.coalesce(func.max(TaskPipelineRow.ordinal), 0) + 1).where(
+                                TaskPipelineRow.task_id == task_id
+                            )
+                        ).scalar_one()
+                        selected_ordinal = int(value)
+                    else:
+                        selected_ordinal = int(ordinal)
+                    now = utc_now()
+                    item = TaskPipeline(
+                        id=pipeline_id or new_pipeline_id(),
+                        task_id=task_id,
+                        execution_id=execution_id,
+                        ordinal=selected_ordinal,
+                        trigger=trigger,
+                        parent_pipeline_id=parent_pipeline_id,
+                        **_pipeline_fields(fields),
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    connection.execute(TaskPipelineRow.__table__.insert().values(**_row_values(pipeline_to_row(item))))
+                    connection.exec_driver_sql("COMMIT")
+                    self._set_pipeline_owner(item)
+                    return item
+            except IntegrityError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+        raise RuntimeError("pipeline allocation failed")
+
+    def _set_pipeline_owner(self, item: TaskPipeline) -> None:
+        now = item.updated_at.isoformat()
+        with Session(self.engine) as session, session.begin():
+            execution = session.get(TaskExecutionRow, item.execution_id)
+            if execution is not None:
+                execution.owning_pipeline_id = item.id
+                execution.updated_at = now
+
+    def list_pipelines(self, task_id: str) -> list[TaskPipeline]:
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(TaskPipelineRow)
+                .where(TaskPipelineRow.task_id == task_id)
+                .order_by(TaskPipelineRow.ordinal, TaskPipelineRow.id)
+            ).all()
+            return [row_to_pipeline(row) for row in rows]
+
+    pipeline_history = list_pipelines
+
+    def get_pipeline(self, pipeline_id: str) -> TaskPipeline:
+        with Session(self.engine) as session:
+            row = session.get(TaskPipelineRow, pipeline_id)
+            if row is None:
+                raise KeyError(pipeline_id)
+            return row_to_pipeline(row)
+
+    def transition_pipeline(
+        self,
+        pipeline_id: str,
+        state: str,
+        *,
+        expected_state: str | None = None,
+        phase: str | None = None,
+        summary: str | None = None,
+    ) -> TaskPipeline:
+        if state not in {item.value for item in PipelineState}:
+            raise ValueError(f"invalid pipeline state {state!r}")
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskPipelineRow, pipeline_id)
+            if row is None:
+                raise KeyError(pipeline_id)
+            if expected_state is not None and row.state != expected_state:
+                raise ValueError(f"pipeline compare-and-set failed: expected {expected_state}, found {row.state}")
+            if row.state != "active" and state != row.state:
+                raise ValueError("completed pipeline is immutable")
+            if row.state == state and row.state != "active":
+                return row_to_pipeline(row)
+            row.state = state
+            if phase is not None:
+                row.phase = phase
+            row.updated_at = now
+            if state != "active":
+                row.completed_at = now
+            execution = session.get(TaskExecutionRow, row.execution_id)
+            if execution is not None:
+                execution.owning_pipeline_id = row.id
+                if phase is not None:
+                    execution.current_phase = phase
+                execution.updated_at = now
+        return self.get_pipeline(pipeline_id)
+
+    update_pipeline_state = transition_pipeline
+    create_task_pipeline = create_pipeline
+    allocate_pipeline = create_pipeline
+
+    def create_session(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        *,
+        session_id: str | None = None,
+        provider_session_id: str | None = None,
+        private_home_path: Path | None = None,
+        idempotency_key: str | None = None,
+        archive_generation: int = 0,
+    ) -> CodexSession:
+        pipeline = self.get_pipeline(pipeline_id)
+        if pipeline.task_id != task_id:
+            raise ValueError("session pipeline does not belong to task")
+        if idempotency_key:
+            with Session(self.engine) as session:
+                existing = session.scalar(
+                    select(CodexSessionRow).where(CodexSessionRow.idempotency_key == idempotency_key)
+                )
+                if existing is not None:
+                    return row_to_session(existing, path_codec=self.path_codec)
+        now = utc_now()
+        item = CodexSession(
+            id=session_id or new_session_id(),
+            task_id=task_id,
+            pipeline_id=pipeline_id,
+            provider_session_id=provider_session_id,
+            private_home_path=private_home_path,
+            idempotency_key=idempotency_key,
+            archive_generation=archive_generation,
+            started_at=now,
+            updated_at=now,
+        )
+        with Session(self.engine) as session, session.begin():
+            session.add(session_to_row(item, path_codec=self.path_codec))
+            session.flush()
+        return item
+
+    def get_session(self, session_id: str) -> CodexSession:
+        with Session(self.engine) as session:
+            row = session.get(CodexSessionRow, session_id)
+            if row is None:
+                raise KeyError(session_id)
+            return row_to_session(row, path_codec=self.path_codec)
+
+    def list_sessions(self, task_id: str, *, pipeline_id: str | None = None) -> list[CodexSession]:
+        with Session(self.engine) as session:
+            statement = select(CodexSessionRow).where(CodexSessionRow.task_id == task_id)
+            if pipeline_id is not None:
+                statement = statement.where(CodexSessionRow.pipeline_id == pipeline_id)
+            rows = session.scalars(statement.order_by(CodexSessionRow.started_at, CodexSessionRow.id)).all()
+            return [row_to_session(row, path_codec=self.path_codec) for row in rows]
+
+    session_history = list_sessions
+
+    def close_session(
+        self, session_id: str, *, state: str = "closed", expected_state: str | None = None
+    ) -> CodexSession:
+        if state not in {"closed", "interrupted"}:
+            raise ValueError(f"invalid session state {state!r}")
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            row = session.get(CodexSessionRow, session_id)
+            if row is None:
+                raise KeyError(session_id)
+            if expected_state is not None and row.state != expected_state:
+                raise ValueError(f"session compare-and-set failed: expected {expected_state}, found {row.state}")
+            if row.state == "closed" and state != "closed":
+                raise ValueError("closed session is immutable")
+            row.state = state
+            row.updated_at = now
+            row.closed_at = now
+        return self.get_session(session_id)
+
+    end_session = close_session
+    create_codex_session = create_session
+    allocate_session = create_session
+
+    def create_run(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        session_id: str,
+        *,
+        role: str,
+        run_id: str | None = None,
+        role_ordinal: int | None = None,
+        resume_of_run_id: str | None = None,
+        parent_run_id: str | None = None,
+        retry_of_run_id: str | None = None,
+        idempotency_key: str | None = None,
+        **fields: object,
+    ) -> TaskRun:
+        pipeline = self.get_pipeline(pipeline_id)
+        if pipeline.task_id != task_id:
+            raise ValueError("run pipeline does not belong to task")
+        session = self.get_session(session_id)
+        if session.task_id != task_id or session.pipeline_id != pipeline_id:
+            raise ValueError("run session does not belong to task pipeline")
+        if resume_of_run_id is not None:
+            predecessor = self.get_run(resume_of_run_id)
+            if predecessor.task_id != task_id or predecessor.pipeline_id != pipeline_id:
+                raise ValueError("recovery run must remain in the same task and pipeline")
+            if predecessor.state != CodexRunState.interrupted.value:
+                raise ValueError("only an interrupted run can be resumed")
+            if predecessor.role not in {"planning", "implementation", "review"}:
+                raise ValueError("only planning, implementation, or review runs can resume")
+            if role != predecessor.role:
+                raise ValueError("recovery run role does not match predecessor")
+            if predecessor.session_id != session_id:
+                raise ValueError("a recovery run must reuse the interrupted session")
+            expected_image = fields.get("image_version")
+            expected_runtime = fields.get("runtime_version")
+            if predecessor.image_version != expected_image:
+                raise ValueError("recovery run image version does not match predecessor")
+            if predecessor.runtime_version != expected_runtime:
+                raise ValueError("recovery run runtime version does not match predecessor")
+            expected_checkpoint = fields.get("checkpoint_id")
+            if predecessor.checkpoint_id != expected_checkpoint:
+                raise ValueError("recovery run worktree checkpoint does not match predecessor")
+        if idempotency_key:
+            with Session(self.engine) as session:
+                existing = session.scalar(
+                    select(TaskRunRow).where(TaskRunRow.idempotency_key == idempotency_key)
+                )
+                if existing is not None:
+                    return row_to_run(existing)
+        for attempt in range(8):
+            try:
+                with self.engine.connect() as connection:
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    selected = role_ordinal
+                    if selected is None:
+                        selected = connection.execute(
+                            select(func.coalesce(func.max(TaskRunRow.role_ordinal), 0) + 1).where(
+                                TaskRunRow.pipeline_id == pipeline_id,
+                                TaskRunRow.role == role,
+                            )
+                        ).scalar_one()
+                    now = utc_now()
+                    item = TaskRun(
+                        id=run_id or new_run_id(),
+                        task_id=task_id,
+                        pipeline_id=pipeline_id,
+                        session_id=session_id,
+                        role=role,
+                        role_ordinal=int(selected),
+                        resume_of_run_id=resume_of_run_id,
+                        parent_run_id=parent_run_id,
+                        retry_of_run_id=retry_of_run_id,
+                        idempotency_key=idempotency_key,
+                        **_run_fields(fields),
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    connection.execute(TaskRunRow.__table__.insert().values(**_row_values(run_to_row(item))))
+                    connection.exec_driver_sql("COMMIT")
+                    self._activate_run_ownership(item)
+                    return item
+            except IntegrityError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+        raise RuntimeError("run allocation failed")
+
+    def _activate_run_ownership(self, item: TaskRun) -> None:
+        now = item.updated_at.isoformat()
+        with Session(self.engine) as session, session.begin():
+            session_row = session.get(CodexSessionRow, item.session_id)
+            if session_row is not None:
+                session_row.state = "active"
+                session_row.updated_at = now
+            execution = session.scalar(
+                select(TaskExecutionRow).where(TaskExecutionRow.task_id == item.task_id)
+            )
+            if execution is not None:
+                execution.owning_pipeline_id = item.pipeline_id
+                execution.active_session_id = item.session_id
+                execution.active_run_id = item.id
+                execution.updated_at = now
+
+    def get_run(self, run_id: str) -> TaskRun:
+        with Session(self.engine) as session:
+            row = session.get(TaskRunRow, run_id)
+            if row is None:
+                raise KeyError(run_id)
+            return row_to_run(row)
+
+    def list_runs(self, task_id: str, *, pipeline_id: str | None = None) -> list[TaskRun]:
+        with Session(self.engine) as session:
+            statement = select(TaskRunRow).where(TaskRunRow.task_id == task_id)
+            if pipeline_id is not None:
+                statement = statement.where(TaskRunRow.pipeline_id == pipeline_id)
+            rows = session.scalars(statement.order_by(TaskRunRow.started_at, TaskRunRow.id)).all()
+            return [row_to_run(row) for row in rows]
+
+    run_history = list_runs
+
+    def transition_run(
+        self,
+        run_id: str,
+        state: str,
+        *,
+        expected_state: str | None = None,
+        exit_code: int | None = None,
+        exit_signal: str | None = None,
+        exit_reason: str | None = None,
+        result_summary: str | None = None,
+    ) -> TaskRun:
+        valid_states = {item.value for item in CodexRunState}
+        if state not in valid_states:
+            raise ValueError(f"invalid run state {state!r}")
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskRunRow, run_id)
+            if row is None:
+                raise KeyError(run_id)
+            if expected_state is not None and row.state != expected_state:
+                raise ValueError(f"run compare-and-set failed: expected {expected_state}, found {row.state}")
+            if row.state != CodexRunState.running.value and state != row.state:
+                raise ValueError("terminal run is immutable")
+            if row.state == state and row.state != CodexRunState.running.value:
+                return row_to_run(row)
+            row.state = state
+            row.updated_at = now
+            if exit_code is not None:
+                row.exit_code = exit_code
+            row.exit_signal = exit_signal
+            row.exit_reason = exit_reason
+            row.result_summary = result_summary
+            row.completed_at = None if state == CodexRunState.running.value else now
+            if state == CodexRunState.interrupted.value:
+                session_row = session.get(CodexSessionRow, row.session_id)
+                if session_row is not None:
+                    session_row.state = "interrupted"
+                    session_row.updated_at = now
+            if state != CodexRunState.running.value:
+                execution = session.scalar(
+                    select(TaskExecutionRow).where(TaskExecutionRow.task_id == row.task_id)
+                )
+                if execution is not None and execution.active_run_id == row.id:
+                    execution.active_run_id = None
+                    execution.updated_at = now
+        return self.get_run(run_id)
+
+    update_run_state = transition_run
+    create_task_run = create_run
+    allocate_run = create_run
+
+    def mark_run_interrupted(self, run_id: str, *, reason: str | None = None) -> TaskRun:
+        return self.transition_run(
+            run_id,
+            CodexRunState.interrupted.value,
+            expected_state=CodexRunState.running.value,
+            exit_reason=reason,
+        )
+
+    interrupt_run = mark_run_interrupted
+    record_run_interruption = mark_run_interrupted
+
+    def link_recovery_run(self, predecessor_run_id: str, **kwargs: object) -> TaskRun:
+        predecessor = self.get_run(predecessor_run_id)
+        return self.create_run(
+            predecessor.task_id,
+            predecessor.pipeline_id,
+            predecessor.session_id,
+            role=predecessor.role,
+            resume_of_run_id=predecessor_run_id,
+            **kwargs,
+        )
+
+    def upsert_checkpoint(self, checkpoint: WorktreeCheckpoint) -> WorktreeCheckpoint:
+        execution = self.get_execution(checkpoint.execution_id)
+        if execution.task_id != checkpoint.task_id:
+            raise ValueError("checkpoint execution does not belong to task")
+        pipeline = self.get_pipeline(checkpoint.owning_pipeline_id)
+        if pipeline.task_id != checkpoint.task_id or pipeline.execution_id != checkpoint.execution_id:
+            raise ValueError("checkpoint pipeline does not belong to execution")
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskWorktreeCheckpointRow, checkpoint.id)
+            if row is None:
+                existing = session.scalar(
+                    select(TaskWorktreeCheckpointRow).where(
+                        TaskWorktreeCheckpointRow.execution_id == checkpoint.execution_id
+                    )
+                )
+                if existing is not None:
+                    row = existing
+                    checkpoint = checkpoint.model_copy(update={"id": existing.id})
+                else:
+                    row = checkpoint_to_row(checkpoint, path_codec=self.path_codec)
+                    session.add(row)
+            if row is not None and row.id == checkpoint.id:
+                values = _row_values(checkpoint_to_row(checkpoint, path_codec=self.path_codec))
+                for key, value in values.items():
+                    if key != "id":
+                        setattr(row, key, value)
+            session.flush()
+        return checkpoint
+
+    save_checkpoint = upsert_checkpoint
+
+    def get_checkpoint(self, execution_id: str) -> WorktreeCheckpoint:
+        with Session(self.engine) as session:
+            row = session.scalar(
+                select(TaskWorktreeCheckpointRow).where(
+                    TaskWorktreeCheckpointRow.execution_id == execution_id
+                )
+            )
+            if row is None:
+                raise KeyError(execution_id)
+            return row_to_checkpoint(row, path_codec=self.path_codec)
+
+    def checkpoint_matches(self, execution_id: str, **expected: object) -> bool:
+        try:
+            checkpoint = self.get_checkpoint(execution_id)
+        except KeyError:
+            return False
+        return all(getattr(checkpoint, key, None) == value for key, value in expected.items())
 
     def get(self, task_id: str) -> TaskRecord:
         with Session(self.engine) as session:
@@ -1200,6 +1835,104 @@ class SQLiteTaskStore:
         if not isinstance(loaded, dict):
             return value
         return json.dumps(self.path_codec.dump_json(loaded), sort_keys=True)
+
+
+def _row_values(row: object) -> dict[str, object]:
+    table = getattr(row, "__table__")
+    return {column.name: getattr(row, column.name) for column in table.columns}
+
+
+def _execution_fields(fields: dict[str, object]) -> dict[str, object]:
+    accepted = {
+        key: fields[key]
+        for key in (
+            "state",
+            "current_phase",
+            "owning_pipeline_id",
+            "active_session_id",
+            "active_run_id",
+            "base_commit",
+            "expected_tree",
+            "worktree_path",
+            "image_version",
+            "runtime_version",
+            "archive_generation",
+        )
+        if key in fields
+    }
+    aliases = {
+        "phase": "current_phase",
+        "owning_pipeline": "owning_pipeline_id",
+        "pipeline_id": "owning_pipeline_id",
+        "session_id": "active_session_id",
+        "run_id": "active_run_id",
+        "base": "base_commit",
+        "tree": "expected_tree",
+    }
+    for source, target in aliases.items():
+        if source in fields and target not in accepted:
+            accepted[target] = fields[source]
+    return accepted
+
+
+def _pipeline_fields(fields: dict[str, object]) -> dict[str, object]:
+    accepted = {
+        key: fields[key]
+        for key in (
+            "phase",
+            "state",
+            "base_identity",
+            "input_identity",
+            "output_identity",
+            "patch_identity",
+            "metadata",
+            "completed_at",
+            "archive_generation",
+        )
+        if key in fields
+    }
+    aliases = {
+        "base": "base_identity",
+        "input": "input_identity",
+        "output": "output_identity",
+        "patch": "patch_identity",
+    }
+    for source, target in aliases.items():
+        if source in fields and target not in accepted:
+            accepted[target] = fields[source]
+    return accepted
+
+
+def _run_fields(fields: dict[str, object]) -> dict[str, object]:
+    accepted = {
+        key: fields[key]
+        for key in (
+            "state",
+            "model",
+            "reasoning",
+            "image_version",
+            "runtime_version",
+            "checkpoint_id",
+            "provider_run_id",
+            "exit_code",
+            "exit_signal",
+            "exit_reason",
+            "result_summary",
+            "completed_at",
+            "archive_generation",
+        )
+        if key in fields
+    }
+    aliases = {
+        "provider_id": "provider_run_id",
+        "provider_run": "provider_run_id",
+        "reasoning_effort": "reasoning",
+        "summary": "result_summary",
+    }
+    for source, target in aliases.items():
+        if source in fields and target not in accepted:
+            accepted[target] = fields[source]
+    return accepted
 
 
 def _task_query() -> Select[tuple[TaskRow]]:

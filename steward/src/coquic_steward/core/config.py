@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import json
+import secrets
 import shutil
+import sqlite3
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +28,8 @@ DEFAULT_ENABLED_SIGNALS = (
     "codacy",
 )
 DEFAULT_COQUIC_HOME = "~/.coquic"
+ARCHIVE_FORMAT_VERSION = "1.0"
+ARCHIVE_POLICY = "post-steward-2.0"
 DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES = {
     "github-actions:ci": 30,
     "github-actions:test": 30,
@@ -185,21 +191,44 @@ class StewardConfig:
 
     @property
     def coquic_home(self) -> Path:
-        return (
-            Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser().resolve()
-        )
+        # Keep the lexical path so migration can detect a symlinked root before
+        # resolving it into an apparently safe directory.
+        return Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser()
 
     @property
     def steward_home(self) -> Path:
         return self.coquic_home / "steward"
 
     @property
+    def legacy_steward_home(self) -> Path:
+        """The pre-2.0 private root, retained for compatibility reads."""
+        return self.steward_home
+
+    @property
     def state_dir(self) -> Path:
+        # Existing workers still use this root for private compatibility files.
+        # New operational state is exposed through the explicit properties below.
         return self.steward_home
 
     @property
     def worktrees_dir(self) -> Path:
-        return self.state_dir / "worktrees"
+        return self.coquic_home / "worktrees"
+
+    @property
+    def tasks_dir(self) -> Path:
+        return self.coquic_home / "tasks"
+
+    @property
+    def private_dir(self) -> Path:
+        return self.coquic_home / "private"
+
+    @property
+    def private_root(self) -> Path:
+        return self.private_dir
+
+    @property
+    def private_sessions_dir(self) -> Path:
+        return self.private_dir / "codex-sessions"
 
     @property
     def transcripts_dir(self) -> Path:
@@ -207,7 +236,35 @@ class StewardConfig:
 
     @property
     def db_path(self) -> Path:
-        return self.state_dir / "steward.sqlite"
+        return self.coquic_home / "steward.sqlite"
+
+    @property
+    def legacy_db_path(self) -> Path:
+        return self.legacy_steward_home / "steward.sqlite"
+
+    @property
+    def legacy_worktrees_dir(self) -> Path:
+        return self.legacy_steward_home / "worktrees"
+
+    @property
+    def legacy_transcripts_dir(self) -> Path:
+        return self.legacy_steward_home / "transcripts"
+
+    @property
+    def migration_marker_path(self) -> Path:
+        return self.coquic_home / ".steward-2.0-migration.json"
+
+    @property
+    def legacy_migration_marker_path(self) -> Path:
+        return self.legacy_steward_home / "steward.sqlite.pre-2.0.json"
+
+    @property
+    def legacy_backup_path(self) -> Path:
+        return self.legacy_db_path.with_name("steward.sqlite.pre-2.0.bak")
+
+    @property
+    def epoch_path(self) -> Path:
+        return self.tasks_dir / "epoch.json"
 
     @property
     def legacy_json_path(self) -> Path:
@@ -241,16 +298,137 @@ class StewardConfig:
         )
 
     def ensure_dirs(self) -> None:
-        for path in (
-            self.state_dir,
+        # Keep old private directories available to existing readers while all
+        # 2.0 roots are created directly below COQUIC_HOME.  This method is
+        # intentionally migration-free; callers must request migration
+        # explicitly after stopping the daemon.
+        roots = (
+            self.coquic_home,
             self.worktrees_dir,
+            self.tasks_dir,
+            self.private_dir,
+            self.private_sessions_dir,
+            self.state_dir,
             self.transcripts_dir,
             self.logs_dir,
             self.prompts_dir,
             self.patches_dir,
             self.implementation_plans_dir,
-        ):
-            path.mkdir(parents=True, exist_ok=True)
+        )
+        _ensure_controlled_roots(roots)
+
+    def ensure_epoch(self) -> dict[str, Any]:
+        """Create or verify the single immutable post-2.0 archive epoch."""
+        self.tasks_dir.mkdir(parents=True, exist_ok=True)
+        path = self.epoch_path
+        if path.is_symlink():
+            raise RuntimeError(f"archive epoch is a symlink: {path}")
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"invalid archive epoch: {path}") from exc
+            if not _valid_epoch(data):
+                raise RuntimeError("archive epoch does not match post-steward-2.0")
+            return data
+        data = {
+            "epochId": f"epoch-{secrets.token_hex(12)}",
+            "formatVersion": ARCHIVE_FORMAT_VERSION,
+            "policy": ARCHIVE_POLICY,
+            "startedAt": _utc_timestamp(),
+            "endedAt": None,
+        }
+        temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+        temporary.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        _fsync_file(temporary)
+        try:
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                # Another allocator won the epoch race.  Its exact immutable
+                # bytes are authoritative and are verified on the next read.
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
+        _fsync_directory(path.parent)
+        if path.is_symlink():
+            raise RuntimeError(f"archive epoch is a symlink: {path}")
+        result = json.loads(path.read_text(encoding="utf-8"))
+        if not _valid_epoch(result):
+            raise RuntimeError("archive epoch does not match post-steward-2.0")
+        return result
+
+    def migrate_legacy_database(
+        self, *, daemon_running: bool = False, require_epoch: bool = False
+    ) -> Path:
+        """Copy the legacy SQLite database to the 2.0 root without data loss.
+
+        Migration is deliberately explicit.  The source remains intact until
+        the destination passes SQLite integrity checks, then it is moved to a
+        read-only, provenance-marked backup.
+        """
+        if daemon_running:
+            raise RuntimeError("cannot migrate Steward state while daemon is running")
+        if (self.state_dir / "daemon.lock").exists():
+            raise RuntimeError("cannot migrate Steward state while daemon lock exists")
+        _reject_symlink_roots(self.coquic_home, self.legacy_steward_home)
+        self.coquic_home.mkdir(parents=True, exist_ok=True)
+        source = self.legacy_db_path
+        destination = self.db_path
+        marker = self.migration_marker_path
+        legacy_marker = self.legacy_migration_marker_path
+        if require_epoch:
+            self.ensure_epoch()
+        if source.is_symlink() or destination.is_symlink():
+            raise RuntimeError("Steward database paths must not be symlinks")
+        _validate_private_mode(self.legacy_steward_home)
+        if destination.exists() and source.exists():
+            if not _same_sqlite_content(source, destination):
+                raise RuntimeError("ambiguous differing active Steward databases")
+            # Identical copies are safe to make authoritative; still preserve
+            # the source below as a marked backup when migration is incomplete.
+        if (marker.exists() or legacy_marker.exists()) and destination.exists() and not source.exists():
+            return destination
+        if not source.exists():
+            if destination.exists():
+                _validate_sqlite(destination)
+                backup = self.legacy_backup_path
+                if backup.exists() and not (marker.exists() or legacy_marker.exists()):
+                    _write_migration_provenance(self, destination, backup)
+                return destination
+            return destination
+        _validate_private_mode(self.coquic_home)
+        temporary = destination.with_name(f".{destination.name}.copy-{secrets.token_hex(8)}")
+        temporary.unlink(missing_ok=True)
+        try:
+            _sqlite_backup(source, temporary)
+            _validate_sqlite(temporary)
+            os.replace(temporary, destination)
+            os.chmod(destination, 0o600)
+            _fsync_directory(destination.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+        backup = self.legacy_backup_path
+        if source.exists() and source != backup:
+            if backup.exists():
+                if not _same_sqlite_content(source, backup):
+                    raise RuntimeError("legacy database backup conflicts with source")
+                source.unlink()
+            else:
+                os.replace(source, backup)
+            os.chmod(backup, stat.S_IRUSR | stat.S_IRGRP)
+            for suffix in ("-wal", "-shm"):
+                sidecar = source.with_name(source.name + suffix)
+                if sidecar.exists():
+                    sidecar_backup = backup.with_name(backup.name + suffix)
+                    os.replace(sidecar, sidecar_backup)
+                    os.chmod(sidecar_backup, stat.S_IRUSR | stat.S_IRGRP)
+        _write_migration_provenance(self, destination, backup)
+        return destination
+
+    # Compatibility spellings used by migration callers and tests.
+    migrate_legacy_state = migrate_legacy_database
+    migrate_database = migrate_legacy_database
 
 
 def load_config(
@@ -512,6 +690,157 @@ def _optional_path(value: object) -> Path | None:
     if value in (None, ""):
         return None
     return Path(str(value)).expanduser()
+
+
+def _utc_timestamp() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _valid_epoch(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("formatVersion") == ARCHIVE_FORMAT_VERSION
+        and value.get("policy") == ARCHIVE_POLICY
+        and isinstance(value.get("epochId"), str)
+        and bool(value["epochId"])
+        and isinstance(value.get("startedAt"), str)
+        and value.get("endedAt") is None
+    )
+
+
+def _reject_symlink_roots(*paths: Path) -> None:
+    for path in paths:
+        if path.is_symlink():
+            raise RuntimeError(f"Steward root must not be a symlink: {path}")
+
+
+def _validate_private_mode(path: Path) -> None:
+    if not path.exists():
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_IRWXO):
+        raise PermissionError(f"unsafe permissions on Steward root: {path}")
+
+
+def _ensure_controlled_roots(paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        if path.is_symlink():
+            raise RuntimeError(f"Steward path must not be a symlink: {path}")
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            # A read-only fixture can still be inspected; mkdir/stat errors are
+            # surfaced by the operation that needs the path.
+            pass
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_sqlite(path: Path) -> None:
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if not result or result[0] != "ok":
+                raise RuntimeError(f"SQLite integrity check failed for {path}")
+            connection.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"invalid SQLite database: {path}") from exc
+
+
+def _sqlite_backup(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source_connection = sqlite3.connect(source)
+    destination_connection = sqlite3.connect(destination)
+    try:
+        source_connection.backup(destination_connection)
+        destination_connection.commit()
+    finally:
+        destination_connection.close()
+        source_connection.close()
+
+
+def _same_sqlite_content(left: Path, right: Path) -> bool:
+    try:
+        _validate_sqlite(left)
+        _validate_sqlite(right)
+    except RuntimeError:
+        return False
+    left_connection = sqlite3.connect(f"file:{left}?mode=ro", uri=True)
+    right_connection = sqlite3.connect(f"file:{right}?mode=ro", uri=True)
+    try:
+        left_tables = left_connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        right_tables = right_connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        if left_tables != right_tables:
+            return False
+        for table, _ in left_tables:
+            if table.startswith("sqlite_"):
+                continue
+            left_rows = left_connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+            right_rows = right_connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+            if left_rows != right_rows:
+                return False
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        left_connection.close()
+        right_connection.close()
+
+
+def _write_migration_provenance(
+    config: StewardConfig, destination: Path, backup: Path
+) -> None:
+    provenance = {
+        "formatVersion": ARCHIVE_FORMAT_VERSION,
+        "source": str(backup.relative_to(config.coquic_home)),
+        "destination": str(destination.relative_to(config.coquic_home)),
+        "migratedAt": _utc_timestamp(),
+    }
+    markers = (config.migration_marker_path, config.legacy_migration_marker_path)
+    for marker in markers:
+        temporary_marker = marker.with_name(
+            f".{marker.name}.tmp-{secrets.token_hex(8)}"
+        )
+        try:
+            temporary_marker.write_text(
+                json.dumps(provenance, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _fsync_file(temporary_marker)
+            os.replace(temporary_marker, marker)
+            _fsync_directory(marker.parent)
+        finally:
+            temporary_marker.unlink(missing_ok=True)
+
+
+def migrate_legacy_database(
+    config: StewardConfig, *, daemon_running: bool = False, require_epoch: bool = False
+) -> Path:
+    """Module-level compatibility wrapper for explicit state migration."""
+    return config.migrate_legacy_database(
+        daemon_running=daemon_running, require_epoch=require_epoch
+    )
 
 
 def default_signal_provider_config(name: str) -> SignalProviderConfig:

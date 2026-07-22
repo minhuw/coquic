@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+from dataclasses import dataclass
 import shutil
 from pathlib import Path
 
@@ -18,14 +19,37 @@ FORBIDDEN_PATH_PARTS = {
 }
 
 
+@dataclass(frozen=True)
+class WorktreeIdentity:
+    task_id: str
+    path: Path
+    base_commit: str
+    expected_tree: str
+    phase: str
+    owning_pipeline_id: str
+    active_session_id: str | None = None
+    active_run_id: str | None = None
+    image_version: str | None = None
+    runtime_version: str | None = None
+
+
 class Worktrees:
     def __init__(self, config: StewardConfig):
         self.config = config
 
-    def create(self, task: TaskRecord) -> tuple[Path, str]:
+    def create(
+        self,
+        task: TaskRecord,
+        *,
+        checkpoint: WorktreeIdentity | object | None = None,
+    ) -> tuple[Path, str]:
         branch = task.branch_name or f"steward/{_slug(task.spec.kind)}/{_slug(task.id)}"
         path = task.worktree_path or self.config.worktrees_dir / task.id
         if path.exists():
+            if checkpoint is not None and not self.validate_checkpoint(path, checkpoint):
+                raise RuntimeError(
+                    f"existing worktree does not match its durable checkpoint: {path}"
+                )
             return path, branch
         base = self._new_worktree_base()
         self.config.worktrees_dir.mkdir(parents=True, exist_ok=True)
@@ -43,6 +67,51 @@ class Worktrees:
             check=True,
         )
         return path, branch
+
+    def validate_checkpoint(self, path: Path, checkpoint: WorktreeIdentity | object) -> bool:
+        """Verify an existing worktree before recovery can adopt it."""
+        if not path.is_dir() or (path / ".git").exists() is False:
+            return False
+        expected_base = getattr(checkpoint, "base_commit", None)
+        expected_tree = getattr(checkpoint, "expected_tree", None)
+        if expected_base is not None:
+            actual_base = run_command(
+                ["git", "rev-parse", "HEAD"], cwd=path
+            )
+            if not actual_base.ok or actual_base.stdout.strip() != str(expected_base):
+                return False
+        if expected_tree is not None:
+            actual_tree = run_command(["git", "write-tree"], cwd=path)
+            if not actual_tree.ok or actual_tree.stdout.strip() != str(expected_tree):
+                return False
+        return True
+
+    def identity(
+        self,
+        task: TaskRecord,
+        path: Path,
+        *,
+        owning_pipeline_id: str,
+        phase: str,
+        active_session_id: str | None = None,
+        active_run_id: str | None = None,
+        image_version: str | None = None,
+        runtime_version: str | None = None,
+    ) -> WorktreeIdentity:
+        base_commit = run_command(["git", "rev-parse", "HEAD"], cwd=path, check=True).stdout.strip()
+        expected_tree = run_command(["git", "write-tree"], cwd=path, check=True).stdout.strip()
+        return WorktreeIdentity(
+            task_id=task.id,
+            path=path,
+            base_commit=base_commit,
+            expected_tree=expected_tree,
+            phase=phase,
+            owning_pipeline_id=owning_pipeline_id,
+            active_session_id=active_session_id,
+            active_run_id=active_run_id,
+            image_version=image_version,
+            runtime_version=runtime_version,
+        )
 
     def _new_worktree_base(self) -> str:
         if (

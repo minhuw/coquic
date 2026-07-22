@@ -10,6 +10,18 @@ from ..core.models import (
     SignalFetchStatus,
 )
 from .sqlite import SQLiteTaskStore
+from .schema import (
+    CodexSessionRow,
+    TaskExecutionRow,
+    TaskPipelineRow,
+    TaskRunRow,
+    TaskWorktreeCheckpointRow,
+    TaskExecution,
+    TaskPipeline,
+    CodexSession,
+    TaskRun,
+    WorktreeCheckpoint,
+)
 
 TaskStore = SQLiteTaskStore
 
@@ -141,6 +153,16 @@ def _now() -> datetime:
 __all__ = [
     "SQLiteTaskStore",
     "TaskStore",
+    "CodexSessionRow",
+    "TaskExecutionRow",
+    "TaskPipelineRow",
+    "TaskRunRow",
+    "TaskWorktreeCheckpointRow",
+    "TaskExecution",
+    "TaskPipeline",
+    "CodexSession",
+    "TaskRun",
+    "WorktreeCheckpoint",
     "due_provider_names",
     "idle_fetch_provider_names",
     "scheduler_state",

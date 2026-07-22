@@ -122,6 +122,85 @@ class CodexStage(StrEnum):
     commit_message = "commit_message"
 
 
+class ExecutionState(StrEnum):
+    active = "active"
+    interrupted = "interrupted"
+    complete = "complete"
+
+
+class PipelineTrigger(StrEnum):
+    initial = "initial"
+    validation_repair = "validation-repair"
+    review_repair = "review-repair"
+    integration_rebase = "integration-rebase"
+    integration_conflict = "integration-conflict"
+    push_race = "push-race"
+
+
+class PipelinePhase(StrEnum):
+    planning = "planning"
+    implementation = "implementation"
+    validation = "validation"
+    review = "review"
+    integration = "integration"
+    complete = "complete"
+
+
+class PipelineState(StrEnum):
+    active = "active"
+    succeeded = "succeeded"
+    failed = "failed"
+    blocked = "blocked"
+    cancelled = "cancelled"
+    interrupted = "interrupted"
+    superseded = "superseded"
+
+
+class CodexRunState(StrEnum):
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    interrupted = "interrupted"
+    cancelled = "cancelled"
+
+
+class SessionState(StrEnum):
+    active = "active"
+    closed = "closed"
+    interrupted = "interrupted"
+
+
+def _new_opaque_id(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex[:20]}"
+
+
+def new_execution_id() -> str:
+    return _new_opaque_id("execution")
+
+
+def new_pipeline_id() -> str:
+    return _new_opaque_id("pipeline")
+
+
+def new_session_id() -> str:
+    return _new_opaque_id("session")
+
+
+def new_run_id() -> str:
+    return _new_opaque_id("run")
+
+
+def new_checkpoint_id() -> str:
+    return _new_opaque_id("checkpoint")
+
+
+new_task_execution_id = new_execution_id
+new_task_pipeline_id = new_pipeline_id
+new_codex_session_id = new_session_id
+new_task_run_id = new_run_id
+new_archive_session_id = new_session_id
+
+
 class SignalItemStatus(StrEnum):
     pending = "pending"
     planned = "planned"
@@ -275,6 +354,195 @@ class TaskRecord(BaseModel):
     @property
     def id(self) -> str:
         return self.spec.id
+
+
+class WorktreeCheckpoint(BaseModel):
+    """Private proof used before a recovery may adopt a disposable worktree."""
+
+    model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
+
+    id: str = Field(default_factory=new_checkpoint_id)
+    task_id: str
+    execution_id: str
+    base_commit: str
+    expected_tree: str
+    phase: PipelinePhase | str
+    owning_pipeline_id: str
+    active_session_id: str | None = None
+    active_run_id: str | None = None
+    worktree_path: Path | None = None
+    image_version: str | None = None
+    runtime_version: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            if "checkpoint_id" in value and "id" not in value:
+                value["id"] = value["checkpoint_id"]
+        return value
+
+    @property
+    def checkpoint_id(self) -> str:
+        return self.id
+
+
+class TaskExecution(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
+
+    id: str = Field(default_factory=new_execution_id)
+    task_id: str
+    state: ExecutionState | str = ExecutionState.active
+    current_phase: PipelinePhase | str = PipelinePhase.planning
+    owning_pipeline_id: str | None = None
+    active_session_id: str | None = None
+    active_run_id: str | None = None
+    base_commit: str | None = None
+    expected_tree: str | None = None
+    worktree_path: Path | None = None
+    image_version: str | None = None
+    runtime_version: str | None = None
+    idempotency_key: str | None = None
+    archive_generation: int = Field(default=0, ge=0)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            if "execution_id" in value and "id" not in value:
+                value["id"] = value["execution_id"]
+            if "phase" in value and "current_phase" not in value:
+                value["current_phase"] = value["phase"]
+        return value
+
+    @property
+    def execution_id(self) -> str:
+        return self.id
+
+    @property
+    def phase(self) -> PipelinePhase | str:
+        return self.current_phase
+
+
+class TaskPipeline(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
+
+    id: str = Field(default_factory=new_pipeline_id)
+    task_id: str
+    execution_id: str
+    ordinal: int = Field(ge=1)
+    trigger: PipelineTrigger | str = PipelineTrigger.initial
+    parent_pipeline_id: str | None = None
+    phase: PipelinePhase | str = PipelinePhase.planning
+    state: PipelineState | str = PipelineState.active
+    base_identity: str | None = None
+    input_identity: str | None = None
+    output_identity: str | None = None
+    patch_identity: str | None = None
+    started_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    archive_generation: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            if "pipeline_id" in value and "id" not in value:
+                value["id"] = value["pipeline_id"]
+        return value
+
+    @property
+    def pipeline_id(self) -> str:
+        return self.id
+
+
+class CodexSession(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
+
+    id: str = Field(default_factory=new_session_id)
+    task_id: str
+    pipeline_id: str
+    state: SessionState | str = SessionState.active
+    provider_session_id: str | None = None
+    private_home_path: Path | None = None
+    idempotency_key: str | None = None
+    archive_generation: int = Field(default=0, ge=0)
+    started_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    closed_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            if "session_id" in value and "id" not in value:
+                value["id"] = value["session_id"]
+        return value
+
+    @property
+    def session_id(self) -> str:
+        return self.id
+
+    @property
+    def archive_session_id(self) -> str:
+        return self.id
+
+
+class TaskRun(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
+
+    id: str = Field(default_factory=new_run_id)
+    task_id: str
+    pipeline_id: str
+    session_id: str
+    role: str
+    role_ordinal: int = Field(ge=1)
+    state: CodexRunState | str = CodexRunState.running
+    resume_of_run_id: str | None = None
+    parent_run_id: str | None = None
+    retry_of_run_id: str | None = None
+    model: str | None = None
+    reasoning: str | None = None
+    image_version: str | None = None
+    runtime_version: str | None = None
+    checkpoint_id: str | None = None
+    provider_run_id: str | None = None
+    exit_code: int | None = None
+    exit_signal: str | None = None
+    exit_reason: str | None = None
+    result_summary: str | None = None
+    idempotency_key: str | None = None
+    started_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    archive_generation: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            if "run_id" in value and "id" not in value:
+                value["id"] = value["run_id"]
+        return value
+
+    @property
+    def run_id(self) -> str:
+        return self.id
+
+    @property
+    def archive_session_id(self) -> str:
+        return self.session_id
 
 
 class Event(BaseModel):

@@ -144,10 +144,12 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.repo_root == repo
     assert config.steward_home == coquic_home / "steward"
     assert config.state_dir == coquic_home / "steward"
-    assert config.db_path == coquic_home / "steward" / "steward.sqlite"
+    assert config.db_path == coquic_home / "steward.sqlite"
     assert config.db_path.name == "steward.sqlite"
     assert config.legacy_json_path == config.state_dir / "steward.json"
-    assert config.worktrees_dir == config.state_dir / "worktrees"
+    assert config.worktrees_dir == coquic_home / "worktrees"
+    assert config.tasks_dir == coquic_home / "tasks"
+    assert config.private_root == coquic_home / "private"
     assert config.transcripts_dir == config.state_dir / "transcripts"
     assert config.integration_mode == "local-only"
     assert config.local_only is False

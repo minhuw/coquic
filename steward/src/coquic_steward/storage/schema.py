@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -192,6 +192,200 @@ class SchedulerWakeupRow(Base):
     data_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
+class TaskExecutionRow(Base):
+    """Normalized private execution ownership and phase cursor."""
+
+    __tablename__ = "task_executions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    state: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    current_phase: Mapped[str] = mapped_column(String, nullable=False, default="planning")
+    owning_pipeline_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    active_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    active_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    base_commit: Mapped[str | None] = mapped_column(String, nullable=True)
+    expected_tree: Mapped[str | None] = mapped_column(String, nullable=True)
+    worktree_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    runtime_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    archive_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_task_executions_task"),
+        UniqueConstraint("idempotency_key", name="uq_task_executions_idempotency"),
+        CheckConstraint(
+            "state IN ('active', 'interrupted', 'complete')",
+            name="ck_task_executions_state",
+        ),
+    )
+
+
+class TaskPipelineRow(Base):
+    __tablename__ = "task_pipelines"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    trigger: Mapped[str] = mapped_column(String, nullable=False)
+    parent_pipeline_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_pipelines.id", ondelete="RESTRICT"), nullable=True
+    )
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    base_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    input_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    output_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    patch_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    archive_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "ordinal", name="uq_task_pipelines_task_ordinal"),
+        CheckConstraint("ordinal > 0", name="ck_task_pipelines_ordinal"),
+        CheckConstraint(
+            "trigger IN ('initial', 'validation-repair', 'review-repair', 'integration-rebase', 'integration-conflict', 'push-race')",
+            name="ck_task_pipelines_trigger",
+        ),
+        CheckConstraint(
+            "phase IN ('planning', 'implementation', 'validation', 'review', 'integration', 'complete')",
+            name="ck_task_pipelines_phase",
+        ),
+        CheckConstraint(
+            "state IN ('active', 'succeeded', 'failed', 'blocked', 'cancelled', 'interrupted', 'superseded')",
+            name="ck_task_pipelines_state",
+        ),
+    )
+
+
+class CodexSessionRow(Base):
+    __tablename__ = "codex_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    pipeline_id: Mapped[str] = mapped_column(
+        ForeignKey("task_pipelines.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    state: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    provider_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    private_home_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    archive_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    closed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_codex_sessions_idempotency"),
+        CheckConstraint(
+            "state IN ('active', 'closed', 'interrupted')",
+            name="ck_codex_sessions_state",
+        ),
+    )
+
+
+class TaskRunRow(Base):
+    __tablename__ = "task_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    pipeline_id: Mapped[str] = mapped_column(
+        ForeignKey("task_pipelines.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("codex_sessions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    role_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="running")
+    resume_of_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=True
+    )
+    parent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=True
+    )
+    retry_of_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("task_runs.id", ondelete="RESTRICT"), nullable=True
+    )
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    reasoning: Mapped[str | None] = mapped_column(String, nullable=True)
+    image_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    runtime_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_signal: Mapped[str | None] = mapped_column(String, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    archive_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("pipeline_id", "role", "role_ordinal", name="uq_task_runs_role_ordinal"),
+        UniqueConstraint("idempotency_key", name="uq_task_runs_idempotency"),
+        CheckConstraint("role_ordinal > 0", name="ck_task_runs_role_ordinal"),
+        CheckConstraint(
+            "state IN ('running', 'succeeded', 'failed', 'interrupted', 'cancelled')",
+            name="ck_task_runs_state",
+        ),
+        CheckConstraint(
+            "(state = 'running' AND completed_at IS NULL) OR (state != 'running' AND completed_at IS NOT NULL)",
+            name="ck_task_runs_completed",
+        ),
+    )
+
+
+class TaskWorktreeCheckpointRow(Base):
+    __tablename__ = "task_worktree_checkpoints"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    base_commit: Mapped[str] = mapped_column(String, nullable=False)
+    expected_tree: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    owning_pipeline_id: Mapped[str] = mapped_column(String, nullable=False)
+    active_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    active_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    worktree_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    runtime_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("execution_id", name="uq_task_worktree_checkpoints_execution"),
+        CheckConstraint(
+            "phase IN ('planning', 'implementation', 'validation', 'review', 'integration', 'complete')",
+            name="ck_task_worktree_checkpoints_phase",
+        ),
+    )
+
+
 Index(
     "ix_tasks_active_dedupe_key",
     TaskRow.dedupe_key,
@@ -227,3 +421,13 @@ Index(
     unique=True,
     sqlite_where=SignalItemRow.status == "pending",
 )
+
+Index("ix_task_pipelines_task_ordinal", TaskPipelineRow.task_id, TaskPipelineRow.ordinal)
+Index("ix_task_runs_task_started", TaskRunRow.task_id, TaskRunRow.started_at)
+
+# Readable aliases for callers that inspect the normalized SQL schema directly.
+TaskExecution = TaskExecutionRow
+TaskPipeline = TaskPipelineRow
+CodexSession = CodexSessionRow
+TaskRun = TaskRunRow
+WorktreeCheckpoint = TaskWorktreeCheckpointRow

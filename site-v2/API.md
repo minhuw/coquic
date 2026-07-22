@@ -120,12 +120,14 @@ references are still converging. A task list does not imply terminal archive
 verification.
 
 `GET /api/v2/steward/archive/tasks/{taskId}` returns task detail grouped by
-ordered pipeline. Each pipeline includes trigger, parent, phase/state, base/input
-and resulting identities, validation and review descriptors, integration outcome,
-and ordered runs. Run detail exposes role, role ordinal, stable archive session
-ID, `resumeOfRunId`, parent/retry relations, model/reasoning, lifecycle/exit,
-usage/cost availability, and artifact descriptors. A terminal task status and
-the separate terminal-manifest verification result are both shown.
+ordered pipeline in a V2 `taskDetailResponse` envelope. Its `data` contains the
+on-disk task metadata, expanded `pipelineDetail` groups, `archiveState`, the
+separate terminal-manifest `archiveVerification`, importer `freshness`, and any
+recoverable `importLag`. Each pipeline group includes full pipeline metadata,
+validation and review records, and ordered runs. Run detail exposes role, role
+ordinal, stable archive session ID, `resumeOfRunId`, parent/retry relations,
+model/reasoning, lifecycle/exit, usage/cost availability, and artifact
+descriptors. A terminal task status does not imply a verified archive.
 
 `GET /api/v2/steward/archive/tasks/{taskId}/pipelines/{pipelineId}/runs/{runId}`
 returns the run metadata and artifact descriptors. Planning, implementation,

@@ -86,7 +86,7 @@ include `warnings` identifying omissions.
 | Steward growth summary | `/api/v2/steward/growth/current`              | `steward.schema.json#/$defs/growthSummary`        |
 | Steward task           | `/api/v2/steward/tasks/{id}`                  | `steward-observability.schema.json#/$defs/taskDetail` |
 | Raw archive task list   | `/api/v2/steward/archive/tasks`              | `steward-dataset.schema.json#/$defs/taskListResponse` |
-| Raw archive task tree   | `/api/v2/steward/archive/tasks/{id}`         | `steward-dataset.schema.json#/$defs/task`         |
+| Raw archive task detail | `/api/v2/steward/archive/tasks/{id}`         | `steward-dataset.schema.json#/$defs/taskDetailResponse` |
 | Raw archive run         | `/api/v2/steward/archive/tasks/{id}/pipelines/{pipelineId}/runs/{runId}` | `steward-dataset.schema.json#/$defs/run` |
 | Raw archive freshness   | `/api/v2/steward/archive/tasks/{id}/freshness` | importer status object                           |
 

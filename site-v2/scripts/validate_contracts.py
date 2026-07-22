@@ -385,7 +385,18 @@ def _dataset_path_is_safe(path: str) -> bool:
     return all(part and part not in {".", ".."} and not part.startswith(".") for part in parts)
 
 
+def _dataset_path_has_symlink(task_root: Path, relative: str) -> bool:
+    candidate = task_root
+    for part in relative.split("/"):
+        candidate /= part
+        if candidate.is_symlink():
+            return True
+    return False
+
+
 def _dataset_session_lineage_error(session_runs: list[dict[str, object]]) -> str | None:
+    if any(run["resumeOfRunId"] == run["runId"] for run in session_runs):
+        return "session-recovery-cycle"
     if len(session_runs) == 1:
         return None
     roots = [run for run in session_runs if run["resumeOfRunId"] is None]
@@ -409,6 +420,27 @@ def _dataset_session_lineage_error(session_runs: list[dict[str, object]]) -> str
     return None
 
 
+def _dataset_pipeline_parent_error(
+    pipeline_id: str,
+    ordinal: int,
+    parent_id: str | None,
+    pipeline_ordinals: dict[str, int],
+) -> str | None:
+    if parent_id is None:
+        return None
+    if parent_id not in pipeline_ordinals:
+        return "parent-pipeline-missing"
+    if parent_id == pipeline_id or pipeline_ordinals[parent_id] >= ordinal:
+        return "parent-pipeline-cycle"
+    return None
+
+
+def _dataset_run_has_live_artifact(run: dict[str, object]) -> bool:
+    return run["state"] != "running" and any(
+        artifact["lifecycle"] == "live" for artifact in run["artifacts"].values()
+    )
+
+
 def _dataset_artifact_checks(
     task_root: Path, metadata_path: Path, value: object, running: bool
 ) -> int:
@@ -420,17 +452,19 @@ def _dataset_artifact_checks(
             failures += 1
             continue
         target = task_root / relative
-        if target.is_symlink() or (target.exists() and not target.is_file()):
+        if _dataset_path_has_symlink(task_root, relative) or (
+            target.exists() and not target.is_file()
+        ):
             print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [artifact-not-regular]")
             failures += 1
             continue
-        available = artifact["availability"] in {"available", "partial"}
         frozen = artifact["lifecycle"] == "terminal"
         if not target.exists():
-            if (frozen and available) or not running:
+            if not running:
                 print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [artifact-missing]")
                 failures += 1
             continue
+        available = artifact["availability"] in {"available", "partial"}
         if frozen and available and artifact["byteSize"] != target.stat().st_size:
             print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [artifact-byte-size]")
             failures += 1
@@ -444,6 +478,9 @@ def _dataset_relation_checks(task_root: Path, task: dict[str, object], running: 
     pipelines = task["pipelines"]
     pipeline_ids = [item["pipelineId"] for item in pipelines]
     ordinals = [item["ordinal"] for item in pipelines]
+    pipeline_ordinals = {
+        item["pipelineId"]: item["ordinal"] for item in pipelines
+    }
     if len(pipeline_ids) != len(set(pipeline_ids)):
         print(f"dataset {task_id} [duplicate-pipeline-id]")
         failures += 1
@@ -474,8 +511,11 @@ def _dataset_relation_checks(task_root: Path, task: dict[str, object], running: 
         if pipeline["ordinal"] == 1 and parent is not None:
             print(f"dataset {pipeline_path.relative_to(task_root)} [root-parent]")
             failures += 1
-        if parent is not None and parent not in pipeline_ids:
-            print(f"dataset {pipeline_path.relative_to(task_root)} [parent-pipeline-missing]")
+        parent_error = _dataset_pipeline_parent_error(
+            pipeline["pipelineId"], pipeline["ordinal"], parent, pipeline_ordinals
+        )
+        if parent_error is not None:
+            print(f"dataset {pipeline_path.relative_to(task_root)} [{parent_error}]")
             failures += 1
 
         def check_artifact_reference(reference: str, category: str) -> None:
@@ -580,7 +620,7 @@ def _dataset_manifest_state(
     if manifest_path.is_symlink():
         return "corrupt"
     if not manifest_path.exists():
-        return "live"
+        return "corrupt" if previously_verified else "live"
     if not manifest_path.is_file():
         return "corrupt"
     try:
@@ -696,6 +736,54 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
         [],
     )
 
+    complete_task = read_json(complete_root / "task.json")
+    pipeline_groups = []
+    for pipeline_ref in complete_task["pipelines"]:
+        pipeline = read_json(complete_root / pipeline_ref["path"])
+        pipeline_groups.append(
+            {
+                "pipeline": pipeline,
+                "validations": [
+                    read_json(complete_root / item["path"])
+                    for item in pipeline["validations"]
+                ],
+                "reviews": [
+                    read_json(complete_root / item["path"])
+                    for item in pipeline["reviews"]
+                ],
+                "runs": [
+                    read_json(complete_root / item["path"])
+                    for item in pipeline["runs"]
+                ],
+            }
+        )
+    complete_manifest = read_json(complete_root / "manifest.json")
+    task_detail_response = {
+        "schemaVersion": "2.0",
+        "generatedAt": complete_manifest["completedAt"],
+        "data": {
+            "task": complete_task,
+            "pipelines": pipeline_groups,
+            "archiveState": "verified",
+            "archiveVerification": {
+                "state": "verified",
+                "manifestObservedAt": complete_manifest["completedAt"],
+                "verifiedAt": complete_manifest["completedAt"],
+                "reason": None,
+            },
+            "freshness": {
+                "lastSyncAt": complete_manifest["completedAt"],
+                "lastSuccessfulImportAt": complete_manifest["completedAt"],
+            },
+            "importLag": None,
+        },
+    }
+    expect(
+        "task-detail-response-schema",
+        list(_dataset_validator("taskDetailResponse").iter_errors(task_detail_response)),
+        [],
+    )
+
     interrupted = read_json(
         running_root
         / "pipelines/pipeline-initial/runs/run-implementation-interrupted/run.json"
@@ -703,6 +791,46 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
     recovery = read_json(
         running_root
         / "pipelines/pipeline-initial/runs/run-implementation-recovery/run.json"
+    )
+    self_resume = dict(interrupted)
+    self_resume["resumeOfRunId"] = self_resume["runId"]
+    expect(
+        "self-resume-cycle",
+        _dataset_session_lineage_error([self_resume]),
+        "session-recovery-cycle",
+    )
+    null_evidence = dict(recovery)
+    null_evidence.update({"usage": None, "cost": None})
+    expect(
+        "run-needs-explicit-usage-and-cost",
+        bool(list(_dataset_validator("run").iter_errors(null_evidence))),
+        True,
+    )
+    mutable_terminal = dict(interrupted)
+    mutable_terminal["completedAt"] = None
+    mutable_terminal["artifacts"] = {
+        name: {**artifact, "lifecycle": "live"}
+        for name, artifact in interrupted["artifacts"].items()
+    }
+    expect(
+        "terminal-run-needs-completion-time",
+        bool(list(_dataset_validator("run").iter_errors(mutable_terminal))),
+        True,
+    )
+    expect(
+        "terminal-run-artifacts-freeze",
+        _dataset_run_has_live_artifact(mutable_terminal),
+        True,
+    )
+    expect(
+        "pipeline-self-parent",
+        _dataset_pipeline_parent_error(
+            "pipeline-repair",
+            2,
+            "pipeline-repair",
+            {"pipeline-initial": 1, "pipeline-repair": 2},
+        ),
+        "parent-pipeline-cycle",
     )
     unrelated = dict(interrupted)
     unrelated.update({"runId": "run-unrelated", "roleOrdinal": 3})
@@ -764,7 +892,6 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
         expect("truncation-offset", truncated_size < accepted_size, True)
         expect("missed-event-rescan", (live / "task.json").exists(), True)
 
-        complete_task = read_json(complete_root / "task.json")
         manifest_expectations = {
             "expected_epoch_id": complete_task["epochId"],
             "expected_task_id": complete_task["taskId"],
@@ -812,6 +939,57 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
                 missing, previously_verified=True, **manifest_expectations
             ),
             "corrupt",
+        )
+        missing_manifest = temporary_root / "manifest-missing-after-verification"
+        shutil.copytree(complete_root, missing_manifest)
+        expect(
+            "verified-before-manifest-deletion",
+            _dataset_manifest_state(missing_manifest, **manifest_expectations),
+            "verified",
+        )
+        (missing_manifest / "manifest.json").unlink()
+        expect(
+            "post-verification-manifest-deletion",
+            _dataset_manifest_state(
+                missing_manifest,
+                previously_verified=True,
+                **manifest_expectations,
+            ),
+            "corrupt",
+        )
+        delayed_artifact = temporary_root / "active-metadata-before-artifact"
+        shutil.copytree(running_root, delayed_artifact)
+        delayed_run_path = (
+            delayed_artifact
+            / "pipelines/pipeline-initial/runs/run-implementation-interrupted/run.json"
+        )
+        delayed_run = read_json(delayed_run_path)
+        (delayed_artifact / delayed_run["artifacts"]["activities"]["path"]).unlink(
+            missing_ok=True
+        )
+        expect(
+            "active-metadata-before-terminal-artifact",
+            _dataset_artifact_checks(
+                delayed_artifact, delayed_run_path, delayed_run, running=True
+            ),
+            0,
+        )
+        symlink_parent = temporary_root / "symlink-parent-artifact"
+        shutil.copytree(running_root, symlink_parent)
+        changes_relative = (
+            "pipelines/pipeline-initial/runs/run-implementation-interrupted/"
+            "tool-changes"
+        )
+        changes = symlink_parent / changes_relative
+        external_changes = temporary_root / "external-tool-changes"
+        shutil.move(changes, external_changes)
+        changes.symlink_to(external_changes, target_is_directory=True)
+        expect(
+            "symlink-parent-artifact",
+            _dataset_path_has_symlink(
+                symlink_parent, f"{changes_relative}/manifest.jsonl"
+            ),
+            True,
         )
         changed = temporary_root / "changed-after-verification"
         shutil.copytree(complete_root, changed)
@@ -907,10 +1085,7 @@ def validate_steward_dataset() -> int:
                         failures += _dataset_artifact_checks(
                             task_root, run_path, run, running
                         )
-                        if run["completedAt"] is not None and any(
-                            artifact["lifecycle"] == "live"
-                            for artifact in run["artifacts"].values()
-                        ):
+                        if _dataset_run_has_live_artifact(run):
                             failures += 1
                             print(
                                 f"dataset {run_path.relative_to(DATASET_DIR)} "

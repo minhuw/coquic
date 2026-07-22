@@ -345,6 +345,88 @@
       },
       "description": "The future V2 API envelope for ordered raw-archive task summaries. It is distinct from task.json on disk."
     },
+    "archiveVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "manifestObservedAt", "verifiedAt", "reason"],
+      "properties": {
+        "state": { "enum": ["live", "incomplete", "verified", "corrupt"] },
+        "manifestObservedAt": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "verifiedAt": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "reason": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "verified" } } },
+          "then": {
+            "properties": {
+              "manifestObservedAt": { "$ref": "#/$defs/timestamp" },
+              "verifiedAt": { "$ref": "#/$defs/timestamp" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "state": { "enum": ["incomplete", "corrupt"] } } },
+          "then": {
+            "properties": { "reason": { "type": "string", "minLength": 1 } }
+          }
+        }
+      ]
+    },
+    "pipelineDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pipeline", "validations", "reviews", "runs"],
+      "properties": {
+        "pipeline": { "$ref": "#/$defs/pipeline" },
+        "validations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/validation" }
+        },
+        "reviews": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/review" }
+        },
+        "runs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/run" }
+        }
+      },
+      "description": "Expanded cached task detail grouped by one ordered pipeline; on-disk path references remain in pipeline metadata."
+    },
+    "taskDetailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task", "pipelines", "archiveState", "archiveVerification", "freshness", "importLag"],
+          "properties": {
+            "task": { "$ref": "#/$defs/task" },
+            "pipelines": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/pipelineDetail" }
+            },
+            "archiveState": { "enum": ["live", "incomplete", "verified", "corrupt"] },
+            "archiveVerification": { "$ref": "#/$defs/archiveVerification" },
+            "freshness": { "$ref": "#/$defs/archiveFreshness" },
+            "importLag": {
+              "anyOf": [{ "$ref": "#/$defs/archiveImportLag" }, { "type": "null" }]
+            }
+          }
+        }
+      },
+      "description": "The future V2 API envelope for task metadata, expanded pipeline groups, freshness, and terminal archive verification."
+    },
     "identity": {
       "type": ["string", "null"],
       "minLength": 1
@@ -521,13 +603,20 @@
         },
         "result": { "$ref": "#/$defs/runResult" },
         "usage": {
-          "anyOf": [{ "$ref": "#/$defs/usage" }, { "type": "null" }]
+          "$ref": "#/$defs/usage"
         },
         "cost": {
-          "anyOf": [{ "$ref": "#/$defs/cost" }, { "type": "null" }]
+          "$ref": "#/$defs/cost"
         },
         "artifacts": { "$ref": "#/$defs/runArtifacts" }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "running" } } },
+          "then": { "properties": { "completedAt": { "type": "null" } } },
+          "else": { "properties": { "completedAt": { "$ref": "#/$defs/timestamp" } } }
+        }
+      ],
       "description": "One Steward-launched codex exec process. Every process has one run directory; recovery is a new run."
     },
     "manifestFile": {

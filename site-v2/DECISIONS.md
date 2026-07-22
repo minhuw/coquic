@@ -227,5 +227,6 @@ transport-order assumptions, raw sanitization, and legacy backfill. The Site V2
 cache is rebuildable and never shares a table or disclosure policy with the
 sanitized Steward cache. Availability-specific schema constraints preserve the
 difference between genuine zero values and absent evidence, including pricing
-provenance, while the task-list API has its own V2 envelope because cached list
-summaries are not on-disk `task.json` documents.
+provenance, while the task-list and grouped task-detail APIs have their own V2
+envelopes because cached summaries and expanded pipeline/verification state are
+not on-disk `task.json` documents.

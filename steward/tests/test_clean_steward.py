@@ -4449,7 +4449,7 @@ def test_codex_runner_places_resume_options_before_session(
     assert args[-2:] == ["planner-thread-1", "-"]
     assert args.index("--output-schema") < args.index("planner-thread-1")
     assert args[args.index("--model") + 1] == "gpt-5.6-terra"
-    assert args[args.index("--config") + 1] == 'model_reasoning_effort="medium"'
+    assert 'model_reasoning_effort="medium"' in args
     assert args.index("--config") < args.index("planner-thread-1")
     assert "--cd" not in args
     assert "--sandbox" not in args

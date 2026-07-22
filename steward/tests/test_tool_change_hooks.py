@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -348,6 +349,49 @@ def test_runner_only_exports_context_for_code_stage(config, tmp_path: Path) -> N
     assert result.diagnostics["tool_change_capture"]["captured"] == 1
     assert result.diagnostics["tool_change_capture"]["state"] == "complete"
     assert (result.transcript_path.parent / "tool-changes" / "manifest.jsonl").exists()
+
+
+def test_runner_scopes_hook_configuration_to_code_stage(config) -> None:
+    runner = CodexRunner(config)
+    last_message = config.state_dir / "last.md"
+
+    code_args = runner._args(
+        config.repo_root,
+        last_message,
+        output_schema=None,
+        resume_session=None,
+        stage=CodexStage.code,
+    )
+    overrides = [
+        code_args[index + 1]
+        for index, value in enumerate(code_args[:-1])
+        if value == "--config"
+    ]
+    hook_overrides = [value for value in overrides if value.startswith("hooks.")]
+
+    assert "--dangerously-bypass-hook-trust" in code_args
+    assert {value.split("=", 1)[0] for value in hook_overrides} == {
+        "hooks.PreToolUse",
+        "hooks.PostToolUse",
+    }
+    for override in hook_overrides:
+        value = tomllib.loads(f"value={override.split('=', 1)[1]}")["value"]
+        assert value[0]["matcher"] == "^(Bash|apply_patch)$"
+        assert value[0]["hooks"][0]["type"] == "command"
+        assert value[0]["hooks"][0]["command"].endswith(
+            " -m coquic_steward.agents.tool_changes"
+        )
+
+    for stage in (CodexStage.implementation_plan, CodexStage.review):
+        args = runner._args(
+            config.repo_root,
+            last_message,
+            output_schema=None,
+            resume_session=None,
+            stage=stage,
+        )
+        assert "--dangerously-bypass-hook-trust" not in args
+        assert not any(value.startswith("hooks.") for value in args)
 
 
 @pytest.mark.parametrize("archive_failure", ["collision", "rename"])

@@ -5,9 +5,11 @@ import os
 import queue
 import re
 import selectors
+import shlex
 import signal
 # subprocess is required to stream Codex stdio; launches use explicit argv and shell=False.
 import subprocess  # nosec B404
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +40,11 @@ CODEX_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 _RETRY_PRESERVATION_LIMIT = 16
 _METADATA_QUEUE_LIMIT = 256
 _METADATA_DRAIN_GRACE_SECONDS = 0.05
+_TOOL_CHANGE_HOOK_EVENTS = ("PreToolUse", "PostToolUse")
+_TOOL_CHANGE_HOOK_MATCHER = "^(Bash|apply_patch)$"
+_TOOL_CHANGE_HOOK_COMMAND = shlex.join(
+    [sys.executable, "-m", "coquic_steward.agents.tool_changes"]
+)
 _CODEX_RETRY_PROMPT = (
     "Continue the interrupted turn. Complete the original task and return the "
     "required final response."
@@ -374,6 +381,10 @@ class CodexRunner:
         if resume_session:
             args.append("resume")
         args.extend(["--json"])
+        if stage == CodexStage.code:
+            args.append("--dangerously-bypass-hook-trust")
+            for event in _TOOL_CHANGE_HOOK_EVENTS:
+                args.extend(["--config", _tool_change_hook_override(event)])
         if settings.model:
             args.extend(["--model", settings.model])
         if settings.reasoning_effort:
@@ -601,6 +612,14 @@ class CodexRunner:
             reasoning_effort=reasoning_effort,
             diagnostics=diagnostics_json,
         )
+
+
+def _tool_change_hook_override(event: str) -> str:
+    return (
+        f"hooks.{event}=[{{matcher={json.dumps(_TOOL_CHANGE_HOOK_MATCHER)},"
+        "hooks=[{type=\"command\","
+        f"command={json.dumps(_TOOL_CHANGE_HOOK_COMMAND)}}}]}}]"
+    )
 
 
 def _bounded_capture_diagnostics(value: dict[str, object]) -> dict[str, object]:

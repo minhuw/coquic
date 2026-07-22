@@ -6,25 +6,21 @@ import {
   Flag,
   GitCommitHorizontal,
   ShieldAlert,
-  Terminal,
 } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { SiteHeader } from "@/components/site-header";
-import activeTask from "@/examples/steward-active-task-detail.json";
-import completedTask from "@/examples/steward-task-detail.json";
-import realTask from "@/examples/steward-real-task-detail.json";
 import { getGitHubStars } from "@/lib/github";
 import { PatchViewer } from "./patch-viewer";
 import { TimelineDrawer } from "./timeline-drawer";
 import { AttemptDisclosure } from "./attempt-disclosure";
 import { DurationStrip } from "./duration-strip";
 import { PipelineGraph, type PipelineStage, type PipelineTransition } from "./pipeline-graph";
-import { PrivateCommand } from "./private-command";
-import { getPrivatePlanTranscript, getPrivateTranscript, type PrivateTranscript } from "./private-transcript";
 import { RunConfiguration } from "./run-configuration";
-import { TranscriptMessage } from "./transcript-message";
 import { TranscriptLayout, type RunOutlinePhase, type RunPhaseKind } from "./transcript-layout";
+import { LazyTranscript, type TranscriptRecord } from "./lazy-transcript";
+import { getArchiveRepository } from "@/lib/steward-archive/repository";
+import { loadArchiveTaskView } from "@/lib/steward-archive/view-model";
 
 export const metadata: Metadata = { title: "Steward task" };
 
@@ -60,7 +56,7 @@ interface TaskData {
   attempts: Array<{
     number: number; label: string; status: string; startedAt: string;
     completedAt: string | null; summary: string;
-    workerRun: { name?: string; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string };
+    workerRun: { name?: string; transcriptPath?: string | null; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string };
     reviewerRun: { name?: string; model?: string | null; reasoningEffort?: string | null; events: number; exitCode: number | null; status: string } | null;
     artifacts: { transcriptBytes: number; patchBytes: number; lastMessageBytes: number; transcriptTruncated: boolean };
   }>;
@@ -92,11 +88,19 @@ interface TranscriptItem {
   todos?: Array<{ text: string; completed: boolean }>;
 }
 
-const details: Record<string, TaskData> = {
-  [activeTask.data.task.id]: activeTask.data as TaskData,
-  [completedTask.data.task.id]: completedTask.data as TaskData,
-  [realTask.data.task.id]: realTask.data as TaskData,
-};
+interface ArchiveTranscript {
+  items: TranscriptItem[];
+  usage: {
+    turns: Array<{ ordinal: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningOutputTokens: number }>;
+    inputTokens: number;
+    cachedInputTokens: number;
+    uncachedInputTokens: number;
+    outputTokens: number;
+    reasoningOutputTokens: number;
+    totalTokens: number;
+  } | null;
+  timing: null;
+}
 
 function titleCase(value: string) {
   return value.replace(/([A-Z])/g, " $1").replace(/[._-]/g, " ").replace(/^./, (letter) => letter.toUpperCase());
@@ -168,7 +172,7 @@ function ImplementationPlan({ plan }: { plan: TaskData["plan"] }) {
   );
 }
 
-function PlanningRuns({ runs, taskId, privateTranscripts }: { runs: NonNullable<TaskData["planRuns"]>; taskId: string; privateTranscripts: Map<number, PrivateTranscript> }) {
+function PlanningRuns({ runs, taskId, privateTranscripts }: { runs: NonNullable<TaskData["planRuns"]>; taskId: string; privateTranscripts: Map<number, ArchiveTranscript> }) {
   return (
     <section id="planning-runs" aria-labelledby="planning-runs-title" className="border-b border-line pt-8 sm:pt-10">
       <div className="flex items-baseline justify-between gap-4">
@@ -212,7 +216,7 @@ function PlanningRuns({ runs, taskId, privateTranscripts }: { runs: NonNullable<
   );
 }
 
-function AttemptsEvidence({ data, selectedAttempt, taskId, artifact, selectedFile, privateTranscript }: { data: TaskData; selectedAttempt: number; taskId: string; artifact: ArtifactView; selectedFile?: string; privateTranscript: PrivateTranscript | null }) {
+function AttemptsEvidence({ data, selectedAttempt, taskId, artifact, selectedFile, privateTranscript }: { data: TaskData; selectedAttempt: number; taskId: string; artifact: ArtifactView; selectedFile?: string; privateTranscript: ArchiveTranscript | null }) {
   return (
     <section id="attempts" aria-labelledby="attempt-title" className="scroll-mt-20 border-b border-line py-8 sm:py-10">
       <div className="flex items-baseline justify-between gap-4"><h2 id="attempt-title" className="text-lg font-semibold text-ink">Attempts</h2><span className="text-xs text-muted data-text">{data.attempts.length}</span></div>
@@ -323,7 +327,7 @@ function compactTokenCount(value: number) {
   return value.toLocaleString("en-US");
 }
 
-function ModelUsage({ id, usage, eventCount, commandCount, privateTranscript, truncated, unavailableTarget }: { id: string; usage: PrivateTranscript["usage"]; eventCount: number; commandCount: number; privateTranscript: boolean; truncated: boolean; unavailableTarget: "attempt" | "run" }) {
+function ModelUsage({ id, usage, eventCount, commandCount, privateTranscript, truncated, unavailableTarget }: { id: string; usage: ArchiveTranscript["usage"]; eventCount: number; commandCount: number; privateTranscript: boolean; truncated: boolean; unavailableTarget: "attempt" | "run" }) {
   const activity = <p className={`text-muted data-text sm:ml-auto ${truncated ? "text-warning" : ""}`}>{usage ? <>{usage.turns.length} {usage.turns.length === 1 ? "turn" : "turns"} · </> : null}{eventCount} events · {commandCount} {privateTranscript ? "commands" : "tool calls"}{truncated ? " · Published excerpt" : null}</p>;
   if (!usage) {
     return (
@@ -379,53 +383,27 @@ function ModelUsage({ id, usage, eventCount, commandCount, privateTranscript, tr
   );
 }
 
-function TranscriptPanel({ items, anchorPrefix, taskId, truncated, privateTranscript, privateScope = "attempt", privateIndex = 0, privateTranscriptName, unavailableTarget = "attempt", showCadence = true }: { items: TranscriptItem[]; anchorPrefix: string; taskId: string; truncated: boolean; privateTranscript: PrivateTranscript | null; privateScope?: "attempt" | "plan"; privateIndex?: number; privateTranscriptName?: string; unavailableTarget?: "attempt" | "run"; showCadence?: boolean }) {
+function TranscriptPanel({ items, anchorPrefix, taskId, truncated, privateTranscript, transcriptRunId, transcriptPath, privateScope = "attempt", privateIndex = 0, privateTranscriptName, unavailableTarget = "attempt", showCadence = true }: { items: TranscriptItem[]; anchorPrefix: string; taskId: string; truncated: boolean; privateTranscript: ArchiveTranscript | null; transcriptRunId?: string; transcriptPath?: string | null; privateScope?: "attempt" | "plan"; privateIndex?: number; privateTranscriptName?: string; unavailableTarget?: "attempt" | "run"; showCadence?: boolean }) {
   const toolCalls = items.filter((item) => item.kind === "tool").length;
   return (
     <div aria-label="Agent transcript">
       {privateTranscript && showCadence ? <DurationStrip anchorPrefix={anchorPrefix} transcript={privateTranscript} /> : null}
       <ModelUsage id={`${anchorPrefix}-model-usage-title`} usage={privateTranscript?.usage ?? null} eventCount={items.length} commandCount={toolCalls} privateTranscript={privateTranscript !== null} truncated={truncated} unavailableTarget={unavailableTarget} />
       <TranscriptLayout anchorPrefix={anchorPrefix} phases={buildRunOutline(items)}>
-        <ol className="min-w-0 border-t border-line">
-          {items.map((item, index) => (
-            <li id={`${anchorPrefix}-event-${item.id}`} key={item.id} className="scroll-mt-24 border-b border-line py-6">
-              <article className="min-w-0">
-                <header className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6">
-                  <div className="flex min-w-0 items-baseline gap-3">
-                    <p className="shrink-0 text-xs font-medium text-muted data-text">{String(index + 1).padStart(2, "0")} / {titleCase(item.kind)}</p>
-                    <h3 className="min-w-0 text-sm font-semibold text-ink [overflow-wrap:anywhere]">{item.label}</h3>
-                  </div>
-                  {item.timestamp ? <time className="shrink-0 text-xs text-faint data-text" dateTime={item.timestamp}>{formatDateTime(item.timestamp)}</time> : null}
-                </header>
-                {privateTranscript && item.kind === "tool" && item.command && item.outputBytes !== undefined ? <div className="mt-3"><PrivateCommand taskId={taskId} itemId={item.id} command={item.command} exitCode={item.exitCode ?? null} outputBytes={item.outputBytes} scope={privateScope} index={privateIndex} transcriptName={privateTranscriptName} /></div> : item.kind === "tool" ? (
-                  <details open className="group mt-3 border-y border-line">
-                    <summary className="grid cursor-pointer list-none gap-2 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-                      <span className="flex min-w-0 items-start gap-2 text-xs leading-5 text-ink data-text"><Terminal aria-hidden="true" size={14} className="mt-0.5 shrink-0 text-accent" /><span className="break-all">{item.command}</span></span>
-                      <span className="text-xs text-muted data-text">{item.durationSeconds === undefined ? null : `${item.durationSeconds}s · `}<span className={item.exitCode === 0 ? "text-positive" : "text-negative"}>exit {item.exitCode}</span></span>
-                    </summary>
-                    <div className="border-t border-line">
-                      {item.outputTruncated ? <p className="px-4 pt-3 text-xs text-warning">Earlier output omitted · published tail</p> : null}
-                      <pre aria-label={item.outputTruncated ? "Published tool output tail" : undefined} className="max-h-72 overflow-auto bg-diff-gutter px-4 py-3 text-xs leading-5 text-ink data-text">{item.output}</pre>
-                    </div>
-                  </details>
-                ) : item.kind === "file" ? <ul className="mt-4 border-t border-line">{item.changes?.map((change) => <li key={`${change.kind}-${change.path}`} className="grid gap-2 border-b border-line py-3 text-xs sm:grid-cols-[5rem_minmax(0,1fr)]"><span className="font-medium text-accent">{titleCase(change.kind)}</span><code className="break-all text-ink data-text">{change.path}</code></li>)}</ul> : item.kind === "todo" ? <section aria-label="Work plan" className="mt-4 border-y border-line py-4"><p className="text-xs text-muted data-text">{item.todos?.filter((todo) => todo.completed).length ?? 0} / {item.todos?.length ?? 0} complete</p><ul className="mt-3 space-y-2">{item.todos?.map((todo, todoIndex) => <li key={`${todo.text}-${todoIndex}`} className="flex items-start gap-3 text-sm leading-6"><input type="checkbox" checked={todo.completed} readOnly disabled className="mt-1 size-4 shrink-0 accent-positive disabled:opacity-100" /><span className={todo.completed ? "text-faint line-through" : "text-ink"}>{todo.text}</span></li>)}</ul></section> : <TranscriptMessage text={item.text ?? ""} />}
-              </article>
-            </li>
-          ))}
-        </ol>
+        <LazyTranscript taskId={taskId} runId={privateTranscript ? undefined : transcriptRunId} path={privateTranscript ? undefined : transcriptPath} initialCount={items.length} initial={items.map((item): TranscriptRecord => ({ ordinal: Number(item.id.split("-").at(-1) ?? 0), timestamp: item.timestamp ?? null, value: item.text ?? item.command ?? item.label, id: item.id, kind: titleCase(item.kind), label: item.label, text: item.text, command: item.command, output: item.output, exitCode: item.exitCode }))} />
       </TranscriptLayout>
     </div>
   );
 }
 
-function ArtifactPanel({ view, data, attempt, taskId, transcriptTruncated, selectedFile, privateTranscript }: { view: ArtifactView; data: TaskData; attempt: number; taskId: string; transcriptTruncated: boolean; selectedFile?: string; privateTranscript: PrivateTranscript | null }) {
+function ArtifactPanel({ view, data, attempt, taskId, transcriptTruncated, selectedFile, privateTranscript }: { view: ArtifactView; data: TaskData; attempt: number; taskId: string; transcriptTruncated: boolean; selectedFile?: string; privateTranscript: ArchiveTranscript | null }) {
   const attemptData = data.attempts.find((item) => item.number === attempt)!;
   if (view === "transcript") {
     const items: TranscriptItem[] = privateTranscript
       ? privateTranscript.items.map((item) => ({ ...item, attempt }))
       : data.transcript.filter((item) => item.attempt === attempt);
     if (!items.length) return <EmptyEvidence title="Transcript excerpt not published" detail="Transcript metadata exists for this attempt, but no sanitized event excerpt was included in this publication." />;
-    return <TranscriptPanel items={items} anchorPrefix={`attempt-${attempt + 1}`} taskId={taskId} truncated={privateTranscript ? false : transcriptTruncated} privateTranscript={privateTranscript} privateIndex={attempt} privateTranscriptName={attemptData.workerRun.name} />;
+    return <TranscriptPanel items={items} anchorPrefix={`attempt-${attempt + 1}`} taskId={taskId} truncated={privateTranscript ? false : transcriptTruncated} privateTranscript={privateTranscript} transcriptRunId={attemptData.workerRun.name} transcriptPath={attemptData.workerRun.transcriptPath} privateIndex={attempt} privateTranscriptName={attemptData.workerRun.name} />;
   }
   if (view === "patch") {
     const patch = data.patches.find((item) => item.attempt === attempt);
@@ -453,7 +431,8 @@ interface PageProps {
 
 export default async function StewardTaskPage({ params, searchParams }: PageProps) {
   const [{ taskId }, query] = await Promise.all([params, searchParams]);
-  const data = details[taskId];
+  const archiveData = await loadArchiveTaskView(getArchiveRepository(), taskId);
+  const data = archiveData as TaskData | null;
   if (!data) notFound();
   const requestedView = typeof query.artifact === "string" ? query.artifact : "transcript";
   const artifact: ArtifactView = artifactViews.includes(requestedView as ArtifactView) ? requestedView as ArtifactView : "transcript";
@@ -461,14 +440,8 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
   const attempt = data.attempts.some((item) => item.number === requestedAttempt) ? requestedAttempt : data.attempts.at(-1)?.number ?? 0;
   const selectedFile = typeof query.file === "string" ? query.file : undefined;
   const selectedAttempt = data.attempts.find((item) => item.number === attempt)!;
-  const privateTranscript = query.transcript === "published" ? null : getPrivateTranscript(taskId, attempt, selectedAttempt.workerRun.name);
-  const privatePlanTranscripts = new Map<number, PrivateTranscript>();
-  if (query.transcript !== "published") {
-    for (const run of data.planRuns ?? []) {
-      const transcript = getPrivatePlanTranscript(taskId, run.number);
-      if (transcript) privatePlanTranscripts.set(run.number, transcript);
-    }
-  }
+  const privateTranscript: ArchiveTranscript | null = null;
+  const privatePlanTranscripts = new Map<number, ArchiveTranscript>();
   const githubStars = await getGitHubStars();
 
   return <>

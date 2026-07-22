@@ -122,6 +122,16 @@ missed watcher event is a recoverable import condition; the cache retries and
 retains its last valid JSON view. Terminal hash or path mismatch after manifest
 verification is corruption, not a partial success.
 
+Site V2 keeps acquisition, normalization, domain state, and rendering separate.
+The importer is a single asynchronous in-process Next.js owner. SQLite stores
+only rebuildable cross-task metadata, aggregate facts, safe file descriptors,
+accepted JSONL offsets, prefix identities, and bounded retry state; it never
+stores transcript, prompt, patch, review, validation, or tool-output bodies.
+Dashboard, history, aggregate usage/cost, freshness, and revision requests are
+SQLite-only. A detail request may resolve one indexed task root and read one
+selected file on demand. Missing and partial token/cost values remain distinct
+from zero and every aggregate reports available-run coverage.
+
 ## Normalization from legacy data
 
 ### Performance

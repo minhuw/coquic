@@ -94,3 +94,11 @@ missed-event periodic reconciliation, manifest-before-content delivery, exact
 terminal sizes/hashes, unsafe path rejection, and post-verification mutation.
 Freshness, import lag, terminal status, and archive verification remain separate
 observable states.
+
+Cross-task quality gates MUST prove that dashboard, history, aggregate usage and
+revision requests perform SQLite-only reads. Detail and artifact gates MUST
+prove containment to exactly one indexed task root, accepted-prefix cursor
+binding, safe download headers, and no absolute path disclosure. Unit and
+browser gates MUST cover the 50-row opaque cursor, missing-versus-zero coverage,
+`Load more` transcript pagination, one refresh per revision, hidden-tab pause,
+bounded retry backoff, and timer/listener cleanup.

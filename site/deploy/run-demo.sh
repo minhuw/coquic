@@ -33,12 +33,53 @@ transcript_archive_name="codex-history-coquic-transcripts-only-20260630.zip"
 transcript_archive_path="${COQUIC_TRANSCRIPT_ARCHIVE_PATH:-${transcript_dataset_dir}/${transcript_archive_name}}"
 transcript_sqlite_path="${COQUIC_TRANSCRIPT_SQLITE_PATH:-${transcript_dataset_dir}/transcripts.sqlite}"
 transcript_archive_url="${COQUIC_TRANSCRIPT_ARCHIVE_URL:-/dataset/${transcript_archive_name}}"
+steward_tasks_root="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
+steward_cache_path="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
 next_root="${release_dir}/app"
 rag_root="${COQUIC_DEMO_RAG_ROOT:-${next_root}/rag}"
 rag_repo_root="${COQUIC_DEMO_RAG_REPO_ROOT:-${next_root}}"
 rag_state_dir="${COQUIC_RAG_STATE_DIR:-${rag_repo_root}/.rag}"
 h3_server="${release_dir}/h3-server"
+
+release_dir_abs="$(cd "${release_dir}" && pwd -P)"
+case "${steward_tasks_root}" in
+  /*) ;;
+  *) echo "COQUIC_STEWARD_TASKS_ROOT must be absolute" >&2; exit 1 ;;
+esac
+case "${steward_cache_path}" in
+  /*) ;;
+  *) echo "COQUIC_STEWARD_CACHE_PATH must be absolute" >&2; exit 1 ;;
+esac
+case "${steward_tasks_root}" in
+  "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward archive must be outside the release" >&2; exit 1 ;;
+esac
+case "${steward_cache_path}" in
+  "${steward_tasks_root}"|"${steward_tasks_root}"/*) echo "Steward cache must be outside the raw archive" >&2; exit 1 ;;
+esac
+case "${steward_cache_path}" in
+  "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward cache must be outside the release" >&2; exit 1 ;;
+esac
+case "${steward_tasks_root}" in
+  "${steward_cache_path}"|"${steward_cache_path}"/*) echo "Steward raw archive must not contain the cache" >&2; exit 1 ;;
+esac
+if [[ -e "${steward_tasks_root}" && ! -d "${steward_tasks_root}" ]]; then
+  echo "Steward raw root is not a directory: ${steward_tasks_root}" >&2
+  exit 1
+fi
+if [[ -e "${steward_tasks_root}" && ! -r "${steward_tasks_root}" ]]; then
+  echo "Steward raw root is not readable" >&2
+  exit 1
+fi
+steward_cache_parent="$(dirname "${steward_cache_path}")"
+if [[ ! -d "${steward_cache_parent}" || ! -w "${steward_cache_parent}" ]]; then
+  echo "Steward cache parent is not writable" >&2
+  exit 1
+fi
+if ! (cd "${next_root}" && node -e "const sqlite=require('node:sqlite'); if (typeof sqlite.DatabaseSync !== 'function') process.exit(1)"); then
+  echo "host Node runtime does not provide node:sqlite DatabaseSync" >&2
+  exit 1
+fi
 
 if [[ ! -x "${h3_server}" ]]; then
   echo "missing h3-server: ${h3_server}" >&2
@@ -164,6 +205,8 @@ fi
   COQUIC_TRANSCRIPT_ARCHIVE_PATH="${transcript_archive_path}" \
   COQUIC_TRANSCRIPT_ARCHIVE_URL="${transcript_archive_url}" \
   COQUIC_TRANSCRIPT_SQLITE_PATH="${transcript_sqlite_path}" \
+  COQUIC_STEWARD_TASKS_ROOT="${steward_tasks_root}" \
+  COQUIC_STEWARD_CACHE_PATH="${steward_cache_path}" \
   HOSTNAME="${next_host}" \
   PORT="${next_port}" \
   NODE_ENV=production \

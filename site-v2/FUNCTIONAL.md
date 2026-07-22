@@ -248,7 +248,7 @@ announced without replacing retained valid evidence with an error message.
 - Artifact states distinguish available, not produced, unavailable, redacted,
   and truncated.
 
-## Raw Steward archive (future, independent from `/steward`)
+## Raw Steward archive (independent from `/steward`)
 
 - Preserve the sanitized `/steward` channel and its disclosure boundary. The raw
   archive is an explicitly separate research surface and is never silently
@@ -274,5 +274,16 @@ announced without replacing retained valid evidence with an error message.
   realtime transport claims. Incomplete live tails are not rendered as parsed
   records.
 - Raw artifact download returns synchronized bytes without normalization. Safe
-  task, pipeline, run, and artifact paths are validated before lookup; web
-  requests use cache state and do not parse the raw tree.
+  task, pipeline, run, and artifact paths are validated before lookup. Aggregate
+  requests use SQLite only and never scan multiple raw task directories; one
+  detail request may read the selected indexed task root.
+- The in-process importer starts once from `instrumentation.ts`, returns without
+  awaiting a scan, watches as a latency hint, and reconciles every 60 seconds.
+  It exposes `indexing`, `ready`, `degraded`, `unavailable`, `incompatible`, and
+  `archive-corrupt` states with no path or exception leakage.
+- Task history is newest-first with an opaque stable cursor and 50 rows per
+  page. Transcript chunks start at a complete-line cursor and explicit `Load
+  more` controls continue until every accepted record is visible; a changed
+  prefix returns a stale-cursor response.
+- Signals and Planning remain visible route choices but production renders an
+  explicit not-connected state; no checked-in fixture records are used there.

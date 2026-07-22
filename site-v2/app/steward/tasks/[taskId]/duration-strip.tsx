@@ -1,4 +1,7 @@
-import type { PrivateTranscript } from "./private-transcript";
+type TranscriptTiming = {
+  items: Array<{ kind: string; durationMs?: number; id: string; label: string }>;
+  timing: { startedAt: string; endedAt: string; totalDurationMs: number; messageIntervals: number } | null;
+};
 
 const segmentTones = ["bg-muted", "bg-ink", "bg-faint", "bg-line-strong"];
 
@@ -19,7 +22,7 @@ function formatTime(timestamp: string) {
   }).format(new Date(timestamp));
 }
 
-export function DurationStrip({ anchorPrefix, transcript }: { anchorPrefix: string; transcript: PrivateTranscript }) {
+export function DurationStrip({ anchorPrefix, transcript }: { anchorPrefix: string; transcript: TranscriptTiming }) {
   if (!transcript.timing) return null;
   const intervals = transcript.items.filter((item) => item.kind === "assistant" && item.durationMs !== undefined);
   if (!intervals.length) return null;

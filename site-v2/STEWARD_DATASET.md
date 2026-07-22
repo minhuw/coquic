@@ -164,9 +164,13 @@ verifies; otherwise it remains live/incomplete and retries. After verification,
 any source mutation is archive corruption. No transport ordering is required.
 
 The Site V2 cache stores file identity, accepted prefix/size, parse status, and
-retry state. Web requests read the rebuildable cache and never parse the raw
-tree directly. Raw artifact downloads return synchronized bytes without
-normalization; incomplete live tails are not returned as parsed records.
+retry state. Aggregate/list requests read SQLite only and never scan multiple
+raw task directories. A task-detail request first resolves one indexed task ID
+and may read metadata or selected accepted evidence from that one task
+directory. Raw artifact downloads return synchronized bytes without
+normalization; parsed transcript chunks stop at the accepted newline boundary
+and incomplete live tails are not returned as parsed records. The cache is
+disposable and is never a second raw payload projection.
 
 ## Paths, records, and disclosure
 

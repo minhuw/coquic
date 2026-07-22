@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - 'site/next/**'
+      - 'site-v2/**'
       - 'flake.nix'
       - 'DESIGN.md'
       - '.github/workflows/frontend.yml'
   push:
     paths:
       - 'site/next/**'
+      - 'site-v2/**'
       - 'flake.nix'
       - 'DESIGN.md'
       - '.github/workflows/frontend.yml'
@@ -68,3 +70,28 @@ jobs:
           path: |
             site/next/test-results/**
             site/next/playwright-report/**
+
+  site-v2-quality:
+    name: Site V2 archive quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+      - name: Install Site V2 dependencies
+        run: nix develop -c npm --prefix site-v2 ci
+      - name: Contract validation
+        run: nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
+      - name: Archive unit tests
+        run: nix develop -c npm --prefix site-v2 run test:unit
+      - name: Typecheck and build
+        run: |
+          nix develop -c npm --prefix site-v2 run typecheck
+          nix develop -c npm --prefix site-v2 run build
+      - name: Steward archive smoke
+        run: nix develop -c npm --prefix site-v2 run test:steward
+      - name: Deployment path smoke
+        run: nix develop -c npm --prefix site-v2 run test:deploy

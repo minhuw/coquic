@@ -78,7 +78,11 @@ fi
 app_env_vars=(
   COQUIC_DEMO_QA_ENABLED
   COQUIC_V2_PREVIEW_PASSWORD
+  COQUIC_STEWARD_TASKS_ROOT
+  COQUIC_STEWARD_CACHE_PATH
 )
+COQUIC_STEWARD_TASKS_ROOT="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
+COQUIC_STEWARD_CACHE_PATH="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
 remote_releases_root="/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
@@ -574,6 +578,20 @@ if sudo systemctl is-enabled --quiet coquic-demo.service; then
 fi
 
 sudo install -d -m 755 /opt/coquic-demo/releases
+ensure_steward_state_dir() {
+  local path="$1"
+  if sudo test -e "${path}"; then
+    sudo test -d "${path}" || { echo "Steward state path is not a directory: ${path}" >&2; exit 1; }
+    return
+  fi
+  sudo install -d -m 775 "${path}"
+  # First creation follows the current deployment/receiver account. Existing
+  # operator ownership is preserved on repeat deployments and rollbacks.
+  sudo chown "$(id -un):$(id -gn)" "${path}"
+}
+ensure_steward_state_dir /opt/coquic-demo/steward
+ensure_steward_state_dir /opt/coquic-demo/steward/tasks
+ensure_steward_state_dir /opt/coquic-demo/steward/cache
 sudo install -d -m 755 /etc/coquic-demo
 sudo install -d -m 755 /etc/coquic-demo/tls
 

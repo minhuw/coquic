@@ -7,4 +7,8 @@ next-env.d.ts
 *.tsbuildinfo
 playwright-report/
 test-results/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+archive-test-*
 data/perf-results.json

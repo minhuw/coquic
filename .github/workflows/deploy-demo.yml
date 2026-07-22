@@ -58,6 +58,8 @@ jobs:
       - name: Build Next.js V2 demo
         run: |
           nix develop -c npm --prefix site-v2 ci
+          nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
+          nix develop -c npm --prefix site-v2 run test:unit
           nix develop -c npm --prefix site-v2 run typecheck
           nix develop -c npm --prefix site-v2 run build
 
@@ -139,3 +141,7 @@ jobs:
             --cookie "${RUNNER_TEMP}/v2-preview.cookies" \
             https://coquic.minhuw.dev/)"
           test "${status}" = "200"
+          archive_status="$(curl --fail --silent --show-error \
+            --cookie "${RUNNER_TEMP}/v2-preview.cookies" \
+            https://coquic.minhuw.dev/api/steward/status)"
+          grep -Eq '"state":"(indexing|ready|degraded|unavailable|incompatible|archive-corrupt)"' <<<"${archive_status}"

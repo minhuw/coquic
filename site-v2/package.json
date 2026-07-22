@@ -8,6 +8,9 @@
     "start": "next start",
     "shadcn": "shadcn",
     "import:steward-trajectory": "node scripts/import_steward_trajectory.mjs ../.orca/steward/task-20260712124934-e08ef7c8.public.json examples/steward-real-task-detail.json ../.coquic/steward/public/steward/status.json",
+    "test:unit": "tsx --test tests/steward-archive/*.test.ts",
+    "test:steward": "tsx scripts/test_steward.ts",
+    "test:deploy": "tsx scripts/test_deploy.ts",
     "typecheck": "tsc --noEmit",
     "test:visual": "playwright test"
   },
@@ -35,6 +38,7 @@
     "parse-diff": "^0.11.1",
     "shadcn": "^4.13.1",
     "tailwindcss": "^4.1.18",
+    "tsx": "^4.23.1",
     "typescript": "^5.9.3"
   }
 }

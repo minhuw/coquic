@@ -230,3 +230,29 @@ difference between genuine zero values and absent evidence, including pricing
 provenance, while the task-list and grouped task-detail APIs have their own V2
 envelopes because cached summaries and expanded pipeline/verification state are
 not on-disk `task.json` documents.
+
+## D-021: Site V2 consumes the archive in-process through a rebuildable index
+
+The raw task archive consumer is an asynchronous in-process Next.js service.
+`instrumentation.ts` starts one idempotent background importer for the Node
+runtime and never waits for the initial tree scan. SQLite is a disposable,
+rebuildable cross-task metadata/index cache: it stores task/pipeline/run
+relationships, aggregate availability, safe file descriptors, complete-record
+offsets, accepted-prefix identities, manifest state, and bounded importer
+health, but never raw prompt/transcript/patch/review/tool-output bodies.
+
+Aggregate dashboard, history, usage/cost, freshness, and revision requests use
+SQLite only. A detail request first resolves an indexed task ID, then reads only
+the selected metadata or accepted evidence below that one task root. Cursors
+are opaque and bound to the current file identity; changed prefixes invalidate
+continuations. Signals and Planning remain a separate raw control-loop archive
+channel and production renders them not connected.
+
+Rejected alternatives are an importer/API sidecar, a second service or custom
+Next server, a full-payload SQLite copy, request-time cross-task scans,
+fixture-backed production, SSE/WebSocket refresh, and a task-page redesign.
+
+Deployment creates `/opt/coquic-demo/steward/tasks` and its sibling cache but
+does not provision receiver credentials. An operator must point Plan 004's
+forced receiver at exactly `/opt/coquic-demo/steward/tasks` using the existing
+ownership and SSH policy before live publication begins.

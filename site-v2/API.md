@@ -105,11 +105,20 @@ validations, reviews, and event timelines.
 Home report. The date uses `YYYY-MM-DD`. Usage and repository groups declare
 availability independently so a missing model-usage source never becomes zero.
 
-## Raw Steward archive (future)
+## Raw Steward archive
 
 The raw archive endpoints are read-only and independent of the sanitized Steward
-surface. They read the rebuildable importer cache; web requests never parse the
-task tree directly.
+surface. An asynchronous in-process Next.js importer maintains a rebuildable
+SQLite metadata index. Aggregate/list requests use SQLite only and never scan
+multiple task directories; one detail request may read only its resolved task.
+The importer reports `indexing`, `ready`, `degraded`, `unavailable`,
+`incompatible`, and `archive-corrupt` without absolute paths or exception text.
+
+`GET /api/steward/status` returns `{schemaVersion, generatedAt, data}` with
+`state`, `schemaVersion`, `epochId`, monotonic `revision`, bounded task and
+verification counts, timestamps, lag, watcher state, and error count. `GET
+/api/steward/revision` returns the same envelope with only the opaque revision
+and state. Both are `Cache-Control: no-store`.
 
 `GET /api/v2/steward/archive/tasks` returns a V2 envelope whose `data` contains
 the epoch identity, ordered task summaries, and importer freshness. Each summary
@@ -141,6 +150,19 @@ synchronized raw bytes with the declared media type and safe content
 disposition. It performs no normalization, redaction, or transcript
 reconstruction. A live JSONL download may contain an incomplete tail, but parsed
 record APIs exclude that tail and expose only the accepted complete-line prefix.
+
+`GET /api/steward/tasks/{taskId}/transcript?run={runId}&path={relativePath}`
+returns a bounded `{taskId, pipelineId, runId, file, records, nextCursor,
+previousCursor, hasMore}` envelope. Cursors are opaque and bound to the accepted
+file identity/revision; a replacement or truncation returns `409` and no stale
+records. Each record has its ordinal and parsed value only after a complete
+newline. The default page is 50 records and an explicit Load more action can
+continue until `hasMore` is false.
+
+`GET /api/steward/tasks/{taskId}/artifact?path={relativePath}` streams one
+SQLite-declared regular file below that task root with `Content-Disposition`,
+`nosniff`, and `Cache-Control: no-store`. Arbitrary paths, symlinks, non-regular
+files, and absolute path disclosure are rejected.
 
 `GET /api/v2/steward/archive/tasks/{taskId}/freshness` returns `lastSyncAt`,
 `lastSuccessfulImportAt`, watcher/reconciliation timestamps, accepted file

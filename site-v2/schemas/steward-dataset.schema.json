@@ -32,7 +32,7 @@
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "lifecycle", "availability", "mediaType", "byteSize", "sha256", "requiredAtTerminal"],
+      "required": ["path", "lifecycle", "availability", "mediaType", "byteSize", "sha256", "requiredAtTerminal", "reason"],
       "properties": {
         "path": { "$ref": "#/$defs/safePath" },
         "lifecycle": {
@@ -48,6 +48,38 @@
         "requiredAtTerminal": { "type": "boolean" },
         "reason": { "type": ["string", "null"], "minLength": 1 }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "availability": { "const": "available" } } },
+          "then": {
+            "properties": {
+              "mediaType": { "type": "string", "minLength": 1 },
+              "byteSize": { "type": "integer", "minimum": 0 },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "availability": { "const": "partial" } } },
+          "then": {
+            "properties": { "reason": { "type": "string", "minLength": 1 } }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "availability": { "enum": ["missing", "unavailable", "notProduced"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "byteSize": { "type": "null" },
+              "sha256": { "type": "null" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ],
       "description": "An explicit reference to an owning raw artifact. Missing and partial values are not fabricated as empty bytes."
     },
     "usage": {
@@ -64,6 +96,43 @@
         },
         "reason": { "type": ["string", "null"], "minLength": 1 }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "availability": { "const": "available" } } },
+          "then": {
+            "properties": {
+              "promptTokens": { "type": "integer", "minimum": 0 },
+              "completionTokens": { "type": "integer", "minimum": 0 },
+              "totalTokens": { "type": "integer", "minimum": 0 },
+              "sourcePath": { "$ref": "#/$defs/safePath" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "availability": { "const": "partial" } } },
+          "then": {
+            "properties": { "reason": { "type": "string", "minLength": 1 } },
+            "anyOf": [
+              { "properties": { "promptTokens": { "type": "integer" } } },
+              { "properties": { "completionTokens": { "type": "integer" } } },
+              { "properties": { "totalTokens": { "type": "integer" } } }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "availability": { "const": "unavailable" } } },
+          "then": {
+            "properties": {
+              "promptTokens": { "type": "null" },
+              "completionTokens": { "type": "null" },
+              "totalTokens": { "type": "null" },
+              "sourcePath": { "type": "null" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ],
       "description": "Usage evidence keeps partial and unavailable values explicit; a missing value is never converted to zero."
     },
     "cost": {
@@ -78,6 +147,37 @@
         "pricingSource": { "type": ["string", "null"], "minLength": 1 },
         "reason": { "type": ["string", "null"], "minLength": 1 }
       },
+      "allOf": [
+        {
+          "if": { "properties": { "availability": { "const": "available" } } },
+          "then": {
+            "properties": {
+              "estimatedMicroUsd": { "type": "integer", "minimum": 0 },
+              "currency": { "type": "string", "const": "USD" },
+              "model": { "type": "string", "minLength": 1 },
+              "pricingSource": { "type": "string", "minLength": 1 },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "availability": { "const": "partial" } } },
+          "then": {
+            "properties": { "reason": { "type": "string", "minLength": 1 } }
+          }
+        },
+        {
+          "if": { "properties": { "availability": { "const": "unavailable" } } },
+          "then": {
+            "properties": {
+              "estimatedMicroUsd": { "type": "null" },
+              "currency": { "type": "null" },
+              "pricingSource": { "type": "null" },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ],
       "description": "Estimated cost uses integer micro-USD and names model/pricing provenance when available."
     },
     "epoch": {
@@ -177,6 +277,73 @@
         }
       },
       "description": "Task metadata is live and may be atomically replaced. A terminal Steward status is not terminal archive verification."
+    },
+    "archiveImportLag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "reason"],
+      "properties": {
+        "category": { "$ref": "#/$defs/safeId" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "archiveTaskSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "status", "archiveState", "currentPipelineId", "updatedAt", "lastSuccessfulImportAt", "importLag"],
+      "properties": {
+        "taskId": { "$ref": "#/$defs/safeId" },
+        "status": {
+          "enum": ["queued", "running", "reviewing", "integrating", "succeeded", "pushed", "no_changes", "blocked", "failed", "cancelled"]
+        },
+        "archiveState": { "enum": ["live", "incomplete", "verified", "corrupt"] },
+        "currentPipelineId": {
+          "anyOf": [{ "$ref": "#/$defs/safeId" }, { "type": "null" }]
+        },
+        "updatedAt": { "$ref": "#/$defs/timestamp" },
+        "lastSuccessfulImportAt": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "importLag": {
+          "anyOf": [{ "$ref": "#/$defs/archiveImportLag" }, { "type": "null" }]
+        }
+      }
+    },
+    "archiveFreshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lastSyncAt", "lastSuccessfulImportAt"],
+      "properties": {
+        "lastSyncAt": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "lastSuccessfulImportAt": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        }
+      }
+    },
+    "taskListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": {
+        "schemaVersion": { "const": "2.0" },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["epochId", "tasks", "freshness"],
+          "properties": {
+            "epochId": { "$ref": "#/$defs/safeId" },
+            "tasks": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/archiveTaskSummary" }
+            },
+            "freshness": { "$ref": "#/$defs/archiveFreshness" }
+          }
+        }
+      },
+      "description": "The future V2 API envelope for ordered raw-archive task summaries. It is distinct from task.json on disk."
     },
     "identity": {
       "type": ["string", "null"],

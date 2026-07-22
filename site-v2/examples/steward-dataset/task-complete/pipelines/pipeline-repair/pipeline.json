@@ -19,7 +19,7 @@
       "lifecycle": "terminal",
       "availability": "available",
       "mediaType": "text/markdown",
-      "byteSize": 0,
+      "byteSize": 56,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": null
@@ -31,7 +31,7 @@
       "lifecycle": "terminal",
       "availability": "available",
       "mediaType": "text/x-diff",
-      "byteSize": 0,
+      "byteSize": 144,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": null

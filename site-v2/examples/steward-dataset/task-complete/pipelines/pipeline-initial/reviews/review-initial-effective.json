@@ -13,7 +13,7 @@
     "lifecycle": "terminal",
     "availability": "available",
     "mediaType": "application/json",
-    "byteSize": 0,
+    "byteSize": 596,
     "sha256": null,
     "requiredAtTerminal": true,
     "reason": null

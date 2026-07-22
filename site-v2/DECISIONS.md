@@ -225,4 +225,7 @@ Rejected alternatives are a generated local dataset projection, a manifest-last
 live snapshot, one revision tree per sync, blind parsing on web requests,
 transport-order assumptions, raw sanitization, and legacy backfill. The Site V2
 cache is rebuildable and never shares a table or disclosure policy with the
-sanitized Steward cache.
+sanitized Steward cache. Availability-specific schema constraints preserve the
+difference between genuine zero values and absent evidence, including pricing
+provenance, while the task-list API has its own V2 envelope because cached list
+summaries are not on-disk `task.json` documents.

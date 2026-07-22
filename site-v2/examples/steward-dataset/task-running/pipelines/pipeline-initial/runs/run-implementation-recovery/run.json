@@ -85,7 +85,7 @@
       "byteSize": 59,
       "sha256": null,
       "requiredAtTerminal": true,
-      "reason": null
+      "reason": "The recovery result is still changing."
     },
     "toolChangesManifest": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-recovery/tool-changes/manifest.jsonl",

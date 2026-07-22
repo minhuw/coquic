@@ -364,17 +364,18 @@ def _dataset_jsonl(path: Path, root: Path) -> tuple[list[object], int, bytes, in
     return records, accepted_size, prefix_identity, len(tail)
 
 
-def _dataset_artifact_paths(value: object) -> list[str]:
-    paths: list[str] = []
+def _dataset_artifact_descriptors(value: object) -> list[dict[str, object]]:
+    descriptors: list[dict[str, object]] = []
     if isinstance(value, dict):
-        if "path" in value and isinstance(value["path"], str):
-            paths.append(value["path"])
+        required = {"path", "lifecycle", "availability", "byteSize", "sha256"}
+        if required <= value.keys():
+            descriptors.append(value)
         for child in value.values():
-            paths.extend(_dataset_artifact_paths(child))
+            descriptors.extend(_dataset_artifact_descriptors(child))
     elif isinstance(value, list):
         for child in value:
-            paths.extend(_dataset_artifact_paths(child))
-    return paths
+            descriptors.extend(_dataset_artifact_descriptors(child))
+    return descriptors
 
 
 def _dataset_path_is_safe(path: str) -> bool:
@@ -382,6 +383,58 @@ def _dataset_path_is_safe(path: str) -> bool:
         return False
     parts = path.split("/")
     return all(part and part not in {".", ".."} and not part.startswith(".") for part in parts)
+
+
+def _dataset_session_lineage_error(session_runs: list[dict[str, object]]) -> str | None:
+    if len(session_runs) == 1:
+        return None
+    roots = [run for run in session_runs if run["resumeOfRunId"] is None]
+    if len(roots) != 1:
+        return "session-reuse-without-recovery"
+    resume_targets = [run["resumeOfRunId"] for run in session_runs if run["resumeOfRunId"]]
+    if len(resume_targets) != len(set(resume_targets)):
+        return "session-recovery-branch"
+    reachable = {roots[0]["runId"]}
+    while True:
+        added = {
+            run["runId"]
+            for run in session_runs
+            if run["resumeOfRunId"] in reachable and run["runId"] not in reachable
+        }
+        if not added:
+            break
+        reachable.update(added)
+    if len(reachable) != len(session_runs):
+        return "session-recovery-chain"
+    return None
+
+
+def _dataset_artifact_checks(
+    task_root: Path, metadata_path: Path, value: object, running: bool
+) -> int:
+    failures = 0
+    for artifact in _dataset_artifact_descriptors(value):
+        relative = artifact["path"]
+        if not isinstance(relative, str) or not _dataset_path_is_safe(relative):
+            print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [unsafe-artifact-path]")
+            failures += 1
+            continue
+        target = task_root / relative
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [artifact-not-regular]")
+            failures += 1
+            continue
+        available = artifact["availability"] in {"available", "partial"}
+        frozen = artifact["lifecycle"] == "terminal"
+        if not target.exists():
+            if (frozen and available) or not running:
+                print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [artifact-missing]")
+                failures += 1
+            continue
+        if frozen and available and artifact["byteSize"] != target.stat().st_size:
+            print(f"dataset {metadata_path.relative_to(DATASET_DIR)} [artifact-byte-size]")
+            failures += 1
+    return failures
 
 
 def _dataset_relation_checks(task_root: Path, task: dict[str, object], running: bool) -> int:
@@ -508,19 +561,41 @@ def _dataset_relation_checks(task_root: Path, task: dict[str, object], running: 
     for run, _pipeline_id in all_runs.values():
         sessions.setdefault(run["sessionId"], []).append(run)
     for session_id, session_runs in sessions.items():
-        if len(session_runs) > 1 and not any(run["resumeOfRunId"] for run in session_runs):
-            print(f"dataset {task_id}/{session_id} [session-reuse-without-recovery]")
+        category = _dataset_session_lineage_error(session_runs)
+        if category is not None:
+            print(f"dataset {task_id}/{session_id} [{category}]")
             failures += 1
     return failures
 
 
-def _dataset_manifest_state(task_root: Path) -> str:
+def _dataset_manifest_state(
+    task_root: Path,
+    *,
+    expected_epoch_id: str | None = None,
+    expected_task_id: str | None = None,
+    expected_terminal_status: str | None = None,
+    previously_verified: bool = False,
+) -> str:
     manifest_path = task_root / "manifest.json"
+    if manifest_path.is_symlink():
+        return "corrupt"
     if not manifest_path.exists():
         return "live"
+    if not manifest_path.is_file():
+        return "corrupt"
     try:
         manifest = read_json(manifest_path)
     except (OSError, json.JSONDecodeError):
+        return "corrupt"
+    expected_identity = {
+        "epochId": expected_epoch_id,
+        "taskId": expected_task_id,
+        "terminalStatus": expected_terminal_status,
+    }
+    if any(
+        expected is not None and manifest.get(field) != expected
+        for field, expected in expected_identity.items()
+    ):
         return "corrupt"
     descriptors = manifest.get("files")
     if not isinstance(descriptors, list):
@@ -547,7 +622,9 @@ def _dataset_manifest_state(task_root: Path) -> str:
         elif not path.is_dir():
             return "corrupt"
     if set(actual) != set(descriptor_map):
-        return "incomplete" if set(actual) < set(descriptor_map) else "corrupt"
+        if set(actual) < set(descriptor_map) and not previously_verified:
+            return "incomplete"
+        return "corrupt"
     for relative, path in actual.items():
         descriptor = descriptor_map[relative]
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -564,6 +641,76 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
         if actual != expected:
             failures += 1
             print(f"dataset mutation [{label}]: expected {expected!r}, got {actual!r}")
+
+    invalid_usage = {
+        "availability": "unavailable",
+        "promptTokens": 0,
+        "completionTokens": 0,
+        "totalTokens": 0,
+        "sourcePath": None,
+        "reason": None,
+    }
+    expect(
+        "unavailable-usage-is-not-zero",
+        bool(list(_dataset_validator("usage").iter_errors(invalid_usage))),
+        True,
+    )
+    invalid_cost = {
+        "availability": "available",
+        "estimatedMicroUsd": 100,
+        "currency": "USD",
+        "model": "synthetic-codex-2.0",
+        "pricingSource": None,
+        "reason": None,
+    }
+    expect(
+        "available-cost-needs-provenance",
+        bool(list(_dataset_validator("cost").iter_errors(invalid_cost))),
+        True,
+    )
+    task_list_response = {
+        "schemaVersion": "2.0",
+        "generatedAt": "2026-07-22T08:05:00Z",
+        "data": {
+            "epochId": "epoch-synthetic-20260722",
+            "tasks": [
+                {
+                    "taskId": "task-running-synthetic",
+                    "status": "running",
+                    "archiveState": "live",
+                    "currentPipelineId": "pipeline-initial",
+                    "updatedAt": "2026-07-22T08:05:00Z",
+                    "lastSuccessfulImportAt": "2026-07-22T08:05:00Z",
+                    "importLag": None,
+                }
+            ],
+            "freshness": {
+                "lastSyncAt": "2026-07-22T08:05:00Z",
+                "lastSuccessfulImportAt": "2026-07-22T08:05:00Z",
+            },
+        },
+    }
+    expect(
+        "task-list-response-schema",
+        list(_dataset_validator("taskListResponse").iter_errors(task_list_response)),
+        [],
+    )
+
+    interrupted = read_json(
+        running_root
+        / "pipelines/pipeline-initial/runs/run-implementation-interrupted/run.json"
+    )
+    recovery = read_json(
+        running_root
+        / "pipelines/pipeline-initial/runs/run-implementation-recovery/run.json"
+    )
+    unrelated = dict(interrupted)
+    unrelated.update({"runId": "run-unrelated", "roleOrdinal": 3})
+    expect(
+        "unrelated-run-session-reuse",
+        _dataset_session_lineage_error([interrupted, recovery, unrelated]),
+        "session-reuse-without-recovery",
+    )
 
     with tempfile.TemporaryDirectory(prefix="steward-dataset-") as temporary:
         temporary_root = Path(temporary)
@@ -617,13 +764,55 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
         expect("truncation-offset", truncated_size < accepted_size, True)
         expect("missed-event-rescan", (live / "task.json").exists(), True)
 
+        complete_task = read_json(complete_root / "task.json")
+        manifest_expectations = {
+            "expected_epoch_id": complete_task["epochId"],
+            "expected_task_id": complete_task["taskId"],
+            "expected_terminal_status": complete_task["status"],
+        }
+        identity = temporary_root / "manifest-identity"
+        shutil.copytree(complete_root, identity)
+        original_manifest = read_json(identity / "manifest.json")
+        invalid_identities = {
+            "epochId": "epoch-other-synthetic",
+            "taskId": "task-other-synthetic",
+            "terminalStatus": "failed",
+        }
+        for field, invalid_value in invalid_identities.items():
+            changed_manifest = dict(original_manifest)
+            changed_manifest[field] = invalid_value
+            (identity / "manifest.json").write_text(
+                json.dumps(changed_manifest), encoding="utf-8"
+            )
+            expect(
+                f"manifest-{field}-relation",
+                _dataset_manifest_state(identity, **manifest_expectations),
+                "corrupt",
+            )
+
         # A manifest can arrive before content, but a changed or extra terminal
         # file is corruption once the terminal tree is otherwise present.
         missing = temporary_root / "manifest-before-content"
         shutil.copytree(complete_root, missing)
-        missing_file = next(path for path in missing.rglob("*") if path.is_file() and path.name != "manifest.json")
+        expect(
+            "verified-before-deletion",
+            _dataset_manifest_state(missing, **manifest_expectations),
+            "verified",
+        )
+        missing_file = missing / "events.jsonl"
         missing_file.unlink()
-        expect("manifest-before-content", _dataset_manifest_state(missing), "incomplete")
+        expect(
+            "manifest-before-content",
+            _dataset_manifest_state(missing, **manifest_expectations),
+            "incomplete",
+        )
+        expect(
+            "post-verification-deletion",
+            _dataset_manifest_state(
+                missing, previously_verified=True, **manifest_expectations
+            ),
+            "corrupt",
+        )
         changed = temporary_root / "changed-after-verification"
         shutil.copytree(complete_root, changed)
         changed_file = next(path for path in changed.rglob("*") if path.is_file() and path.name != "manifest.json")
@@ -638,6 +827,17 @@ def _dataset_mutation_checks(running_root: Path, complete_root: Path) -> int:
         link_target = next(path for path in linked.rglob("*") if path.is_file() and path.name != "manifest.json")
         (linked / "unsafe-link").symlink_to(link_target)
         expect("symlink-terminal-file", _dataset_manifest_state(linked), "corrupt")
+        linked_manifest = temporary_root / "symlink-terminal-manifest"
+        shutil.copytree(complete_root, linked_manifest)
+        external_manifest = temporary_root / "external-manifest.json"
+        external_manifest.write_bytes((linked_manifest / "manifest.json").read_bytes())
+        (linked_manifest / "manifest.json").unlink()
+        (linked_manifest / "manifest.json").symlink_to(external_manifest)
+        expect(
+            "symlink-terminal-manifest",
+            _dataset_manifest_state(linked_manifest, **manifest_expectations),
+            "corrupt",
+        )
         nonregular = temporary_root / "nonregular-terminal-file"
         shutil.copytree(complete_root, nonregular)
         fifo = nonregular / "unsafe-fifo"
@@ -655,14 +855,16 @@ def validate_steward_dataset() -> int:
     failures = 0
     epoch_path = DATASET_DIR / "epoch.json"
     failures += _dataset_validate_json(epoch_path, "epoch", DATASET_DIR)
+    epoch = read_json(epoch_path)
     task_roots = [DATASET_DIR / "task-running", DATASET_DIR / "task-complete"]
     tasks: dict[str, dict[str, object]] = {}
     for task_root in task_roots:
+        running = task_root.name == "task-running"
         task_path = task_root / "task.json"
         failures += _dataset_validate_json(task_path, "task", DATASET_DIR)
         task = read_json(task_path)
         tasks[task["taskId"]] = task
-        failures += _dataset_relation_checks(task_root, task, task_root.name == "task-running")
+        failures += _dataset_relation_checks(task_root, task, running)
 
         def check_artifact_reference(reference: str, category: str) -> None:
             nonlocal failures
@@ -675,11 +877,17 @@ def validate_steward_dataset() -> int:
             if pipeline_path.exists():
                 failures += _dataset_validate_json(pipeline_path, "pipeline", DATASET_DIR)
                 pipeline = read_json(pipeline_path)
+                failures += _dataset_artifact_checks(
+                    task_root, pipeline_path, pipeline, running
+                )
                 for validation_ref in pipeline["validations"]:
                     validation_path = task_root / validation_ref["path"]
                     if validation_path.exists():
                         failures += _dataset_validate_json(validation_path, "validation", DATASET_DIR)
                         validation = read_json(validation_path)
+                        failures += _dataset_artifact_checks(
+                            task_root, validation_path, validation, running
+                        )
                         check_artifact_reference(validation["outputPath"], "validation-output")
                         check_artifact_reference(validation["output"]["path"], "validation-artifact")
                 for review_ref in pipeline["reviews"]:
@@ -687,12 +895,27 @@ def validate_steward_dataset() -> int:
                     if review_path.exists():
                         failures += _dataset_validate_json(review_path, "review", DATASET_DIR)
                         review = read_json(review_path)
+                        failures += _dataset_artifact_checks(
+                            task_root, review_path, review, running
+                        )
                         check_artifact_reference(review["artifact"]["path"], "review-artifact")
                 for run_ref in pipeline["runs"]:
                     run_path = task_root / run_ref["path"]
                     if run_path.exists():
                         failures += _dataset_validate_json(run_path, "run", DATASET_DIR)
                         run = read_json(run_path)
+                        failures += _dataset_artifact_checks(
+                            task_root, run_path, run, running
+                        )
+                        if run["completedAt"] is not None and any(
+                            artifact["lifecycle"] == "live"
+                            for artifact in run["artifacts"].values()
+                        ):
+                            failures += 1
+                            print(
+                                f"dataset {run_path.relative_to(DATASET_DIR)} "
+                                "[completed-run-live-artifact]"
+                            )
                         for artifact in run["artifacts"].values():
                             check_artifact_reference(artifact["path"], "run-artifact")
                         if run["result"]["path"] is not None:
@@ -711,15 +934,20 @@ def validate_steward_dataset() -> int:
                 print(f"dataset {manifest_path.relative_to(DATASET_DIR)} [running-manifest-present]")
         else:
             failures += _dataset_validate_json(manifest_path, "manifest", DATASET_DIR)
-            state = _dataset_manifest_state(task_root)
+            state = _dataset_manifest_state(
+                task_root,
+                expected_epoch_id=epoch["epochId"],
+                expected_task_id=task["taskId"],
+                expected_terminal_status=task["status"],
+            )
             if state != "verified":
                 failures += 1
                 print(f"dataset {manifest_path.relative_to(DATASET_DIR)} [manifest-{state}]")
 
-    if tasks["task-running-synthetic"]["epochId"] != read_json(epoch_path)["epochId"]:
+    if tasks["task-running-synthetic"]["epochId"] != epoch["epochId"]:
         failures += 1
         print("dataset task-running/task.json [epoch-relation]")
-    if tasks["task-complete-synthetic"]["epochId"] != read_json(epoch_path)["epochId"]:
+    if tasks["task-complete-synthetic"]["epochId"] != epoch["epochId"]:
         failures += 1
         print("dataset task-complete/task.json [epoch-relation]")
     failures += _dataset_mutation_checks(DATASET_DIR / "task-running", DATASET_DIR / "task-complete")

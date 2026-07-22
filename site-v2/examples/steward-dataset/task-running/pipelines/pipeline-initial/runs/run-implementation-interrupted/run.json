@@ -43,40 +43,40 @@
   "artifacts": {
     "codex": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-interrupted/codex.jsonl",
-      "lifecycle": "live",
+      "lifecycle": "terminal",
       "availability": "partial",
       "mediaType": "application/x-ndjson",
-      "byteSize": 144,
+      "byteSize": 373,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": "The accepted prefix is readable; the final record is incomplete."
     },
     "activities": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-interrupted/activities.jsonl",
-      "lifecycle": "live",
+      "lifecycle": "terminal",
       "availability": "available",
       "mediaType": "application/x-ndjson",
-      "byteSize": 74,
+      "byteSize": 163,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": null
     },
     "telemetry": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-interrupted/telemetry.json",
-      "lifecycle": "live",
+      "lifecycle": "terminal",
       "availability": "partial",
       "mediaType": "application/json",
-      "byteSize": 93,
+      "byteSize": 110,
       "sha256": null,
       "requiredAtTerminal": false,
       "reason": "Telemetry is incomplete."
     },
     "lastMessage": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-interrupted/last-message.md",
-      "lifecycle": "live",
+      "lifecycle": "terminal",
       "availability": "available",
       "mediaType": "text/markdown",
-      "byteSize": 45,
+      "byteSize": 51,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": null
@@ -86,27 +86,27 @@
       "lifecycle": "terminal",
       "availability": "partial",
       "mediaType": "application/json",
-      "byteSize": 67,
+      "byteSize": 72,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": "Interrupted result is final for this run."
     },
     "toolChangesManifest": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-interrupted/tool-changes/manifest.jsonl",
-      "lifecycle": "live",
+      "lifecycle": "terminal",
       "availability": "available",
       "mediaType": "application/x-ndjson",
-      "byteSize": 68,
+      "byteSize": 58,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": null
     },
     "toolChangesSummary": {
       "path": "pipelines/pipeline-initial/runs/run-implementation-interrupted/tool-changes/summary.json",
-      "lifecycle": "live",
+      "lifecycle": "terminal",
       "availability": "available",
       "mediaType": "application/json",
-      "byteSize": 44,
+      "byteSize": 45,
       "sha256": null,
       "requiredAtTerminal": true,
       "reason": null

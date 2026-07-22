@@ -5,6 +5,16 @@ prototype for a future CoQUIC website. An implementation MUST be buildable from
 this directory without reading `site/next`, its styles, components, screenshots,
 or generated DOM.
 
+## Preview access
+
+Set `COQUIC_V2_PREVIEW_PASSWORD` on a preview deployment to place every V2 route
+behind the shared under-construction notice. Successful entry sets an HTTP-only
+cookie for seven days. Leaving the variable unset disables the gate for local
+development and normal test runs.
+
+This is a convenience gate for reviewers, not an authentication or security
+boundary. Do not use it to protect sensitive data.
+
 The contract preserves the useful behavior of the existing website and defines
 a new visual system while leaving component structure and framework choices
 open.

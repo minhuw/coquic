@@ -185,3 +185,16 @@ This preserves Steward's actual lifecycle: planning can retry until it produces
 one valid plan, then implementation, validation, and review revisions reuse that
 plan. The interface must not imply that each worker attempt received a new plan,
 and unavailable planning telemetry remains unavailable rather than zero.
+
+## D-019: Preview access is an explicit construction notice
+
+On 2026-07-22, V2 gained an optional shared-password gate for compatibility
+deployments. When configured, every application route redirects to one
+under-construction screen and returns reviewers to their requested URL after
+entry. The screen uses the established product identity, status language,
+form controls, and responsive design tokens rather than introducing a separate
+preview visual language.
+
+The gate is deliberately described as a convenience notice, not authentication
+or a security boundary. It is enabled only by deployment configuration, stores
+no account data, and remains disabled in ordinary local development.

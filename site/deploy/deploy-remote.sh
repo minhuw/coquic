@@ -645,6 +645,7 @@ sudo install -m 755 "${remote_upload_dir}/run-demo.sh" "${remote_release_dir}/ru
 sudo rm -rf "${remote_release_dir}/app"
 sudo install -d -m 755 "${remote_release_dir}/app"
 sudo tar -xf "${remote_upload_dir}/app.tar" -C "${remote_release_dir}/app"
+sudo install -d -m 755 "${remote_release_dir}/app/public"
 previous_app_public_dir="/opt/coquic-demo/current/app/public"
 if [[ "${same_release_repair_mode}" == "1" ]]; then
   previous_app_public_dir="${remote_upload_dir}/current.app.bak/public"

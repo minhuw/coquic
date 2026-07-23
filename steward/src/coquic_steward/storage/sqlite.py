@@ -2333,6 +2333,15 @@ class SQLiteTaskStore:
                 _task_query().where(TaskRow.status.in_(active_statuses))
             ).all()
             for row in rows:
+                # Steward 2.0 tasks have durable execution/run identities and
+                # are reconciled by the daemon. Elapsed time alone cannot
+                # distinguish a live, complete, or interrupted external action.
+                if session.scalar(
+                    select(TaskExecutionRow.id).where(
+                        TaskExecutionRow.task_id == row.id
+                    )
+                ) is not None:
+                    continue
                 if row.status == TaskStatus.integrating.value and (
                     _has_active_integration_for_source(session, row.id)
                 ):

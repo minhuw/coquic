@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from pathlib import Path
 
 from ..core.config import StewardConfig
 from ..core.lifecycle import (
@@ -22,6 +24,7 @@ from ..core.models import (
     DaemonCycleSummary,
     DaemonRuntime,
     DaemonRuntimeState,
+    PipelineCursorPhase,
     PublicMirrorFailureCategory,
     PublicMirrorHealth,
     PublicMirrorPublishState,
@@ -33,8 +36,15 @@ from ..core.models import (
     WorkerKind,
 )
 from ..execution.executor import StewardExecutor
-from ..execution.session import SessionSupervisor, runtime_factory_for_config
+from ..execution.session import (
+    InvocationStatus,
+    ResumeCategory,
+    SessionResult,
+    SessionSupervisor,
+    runtime_factory_for_config,
+)
 from ..execution.task_archive import TaskArchiveWriter
+from ..core.subprocesses import run_command
 from ..planning import run_planner
 from ..public_mirror import (
     classify_publish_failure,
@@ -234,32 +244,82 @@ class StewardDaemon:
     reconcile = startup_reconcile
 
     def _reconcile_task(self, task: TaskRecord) -> ReconciliationOutcome:
-        """Classify a task's persisted run without resetting any identity."""
+        """Reconcile archive, ledger, process, Git, and cleanup identities."""
 
-        if TaskStatus(task.status).terminal:
-            events = self.store.events(task.id)
-            if any(event.kind == "cleanup_pending" for event in events) and not any(
-                event.kind == "cleanup_complete" for event in events
-            ):
-                if self.finalize_terminal_task(task.id):
-                    return ReconciliationOutcome(task.id, ReconciliationDisposition.cleaned, "terminal cleanup resumed")
-                return ReconciliationOutcome(task.id, ReconciliationDisposition.blocked, "terminal cleanup remains pending")
+        events = self.store.events(task.id)
+        terminal = TaskStatus(task.status).terminal
+        if terminal and any(event.kind == "cleanup_complete" for event in events):
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.unchanged,
+                "terminal cleanup already complete",
+            )
         try:
+            execution = self.store.get_execution(task.id)
             runs = self.store.list_runs(task.id)
         except (AttributeError, KeyError):
-            runs = []
-        running = [run for run in runs if str(run.state) == "running"]
-        if not running:
-            if TaskStatus(task.status).terminal:
+            # Rows without the normalized execution ledger retain the legacy
+            # stale-task policy and have no 2.0 identities to reconcile here.
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.unchanged,
+                "legacy task has no execution ledger",
+            )
+
+        conflict, evidence = self._reconcile_identity_matrix(task, execution, runs)
+        if conflict is not None:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                conflict,
+                evidence=evidence,
+            )
+
+        if terminal:
+            if self.finalize_terminal_task(task.id):
                 return ReconciliationOutcome(
-                    task.id, ReconciliationDisposition.unchanged, "terminal task preserved"
+                    task.id,
+                    ReconciliationDisposition.cleaned,
+                    "terminal archive verified and cleanup converged",
                 )
-            return ReconciliationOutcome(task.id, ReconciliationDisposition.unchanged)
-        for run in running:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "terminal sealing or cleanup remains pending",
+            )
+
+        if self.session_supervisor is not None and task.worktree_path is not None:
+            reconcile_container = getattr(
+                self.session_supervisor, "reconcile_container", None
+            )
+            if callable(reconcile_container):
+                try:
+                    reconcile_container(task.id, ensure_running=True)
+                except Exception as exc:
+                    return ReconciliationOutcome(
+                        task.id,
+                        ReconciliationDisposition.blocked,
+                        "task container identity could not be reconciled",
+                        evidence={"error": exc.__class__.__name__},
+                    )
+
+        running = [run for run in runs if str(run.state) == "running"]
+        if len(running) > 1:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "multiple running ledger entries claim one task",
+                evidence={"running_count": len(running)},
+            )
+        if running:
+            run = running[0]
+            completed = self._complete_atomic_run_result(task, run)
+            if completed is not None:
+                return completed
             if self.session_supervisor is None:
                 try:
                     self.store.mark_run_interrupted(run.id, reason="daemon restart")
-                except Exception:
+                except ValueError:
                     pass
                 return ReconciliationOutcome(
                     task.id,
@@ -286,25 +346,822 @@ class StewardDaemon:
                     container_id=getattr(inspection.container, "container_id", None),
                 )
             try:
-                self.store.mark_run_interrupted(run.id, reason="wrapper disappeared during daemon restart")
+                self.store.mark_run_interrupted(
+                    run.id,
+                    reason="wrapper disappeared during daemon restart",
+                )
+            except ValueError:
+                pass
+            runs = self.store.list_runs(task.id)
+
+        root = self._interrupted_recovery_root(runs)
+        if root is not None and self.session_supervisor is not None:
+            return self._resume_or_recover(task, root, runs)
+        if root is not None:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.interrupted,
+                "partial run evidence preserved for a configured session boundary",
+                run_id=root.id,
+            )
+        deterministic = self._reconcile_deterministic_phase(task, execution)
+        if deterministic is not None:
+            return deterministic
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.unchanged,
+            "ledger identities reconciled",
+            evidence=evidence,
+        )
+
+    def _reconcile_identity_matrix(
+        self,
+        task: TaskRecord,
+        execution: object,
+        runs: list[object],
+    ) -> tuple[str | None, dict[str, object]]:
+        evidence: dict[str, object] = {
+            "archive": "absent",
+            "ledger": "matched",
+            "worktree": "absent",
+            "commit": "not-applicable",
+            "remote": "not-applicable",
+        }
+        try:
+            pipelines = self.store.list_pipelines(task.id)
+            by_pipeline = {pipeline.id: pipeline for pipeline in pipelines}
+            owner = getattr(execution, "owning_pipeline_id", None)
+            if owner is not None and owner not in by_pipeline:
+                return "execution points at an unknown pipeline", evidence
+            for run in runs:
+                pipeline = by_pipeline.get(run.pipeline_id)
+                if pipeline is None or pipeline.task_id != task.id:
+                    return "run pipeline identity conflicts with its task", evidence
+                session = self.store.get_session(run.session_id)
+                if (
+                    session.task_id != task.id
+                    or session.pipeline_id != run.pipeline_id
+                ):
+                    return "run session identity conflicts with its pipeline", evidence
+
+            archive = TaskArchiveWriter(self.config)
+            task_dir = archive.task_dir(task.id)
+            task_json = task_dir / "task.json"
+            if task_dir.exists():
+                if not task_json.is_file():
+                    return "task archive exists without task metadata", evidence
+                metadata = json.loads(task_json.read_text(encoding="utf-8"))
+                if metadata.get("taskId") != task.id:
+                    return "task archive identity conflicts with the ledger", evidence
+                for pipeline in pipelines:
+                    path = task_dir / "pipelines" / pipeline.id / "pipeline.json"
+                    if path.exists():
+                        value = json.loads(path.read_text(encoding="utf-8"))
+                        if (
+                            value.get("taskId") != task.id
+                            or value.get("pipelineId") != pipeline.id
+                        ):
+                            return "pipeline archive identity conflicts with the ledger", evidence
+                    else:
+                        pipeline_runs = [
+                            run for run in runs if run.pipeline_id == pipeline.id
+                        ]
+                        if pipeline_runs:
+                            archive.materialize_pipeline(
+                                task.id,
+                                pipeline,
+                                runs=pipeline_runs,
+                            )
+                for run in runs:
+                    path = (
+                        task_dir
+                        / "pipelines"
+                        / run.pipeline_id
+                        / "runs"
+                        / run.id
+                        / "run.json"
+                    )
+                    if path.exists():
+                        value = json.loads(path.read_text(encoding="utf-8"))
+                        if (
+                            value.get("taskId") != task.id
+                            or value.get("pipelineId") != run.pipeline_id
+                            or value.get("runId") != run.id
+                        ):
+                            return "run archive identity conflicts with the ledger", evidence
+                    else:
+                        archive.materialize_run(task.id, run.pipeline_id, run)
+                evidence["archive"] = "matched"
+            elif runs:
+                archive.create_task_from_record(
+                    task,
+                    pipeline=by_pipeline.get(owner) if owner else pipelines[-1],
+                )
+                for pipeline in pipelines:
+                    pipeline_runs = [
+                        run for run in runs if run.pipeline_id == pipeline.id
+                    ]
+                    if not pipeline_runs:
+                        continue
+                    for run in pipeline_runs:
+                        archive.materialize_run(task.id, pipeline.id, run)
+                    archive.materialize_pipeline(
+                        task.id,
+                        pipeline,
+                        runs=pipeline_runs,
+                    )
+                evidence["archive"] = "materialized"
+
+            task_worktree = task.worktree_path
+            execution_worktree = getattr(execution, "worktree_path", None)
+            if task_worktree is not None and execution_worktree is not None:
+                if Path(task_worktree).resolve() != Path(execution_worktree).resolve():
+                    return "worktree path conflicts with execution ownership", evidence
+            worktree = Path(task_worktree or execution_worktree) if (
+                task_worktree is not None or execution_worktree is not None
+            ) else None
+            if worktree is not None:
+                if not worktree.is_dir():
+                    return "owned worktree is missing", evidence
+                inside = run_command(
+                    ["git", "rev-parse", "--is-inside-work-tree"],
+                    cwd=worktree,
+                )
+                if not inside.ok or inside.stdout.strip() != "true":
+                    return "owned worktree is not a Git worktree", evidence
+                base = getattr(execution, "base_commit", None)
+                if base:
+                    exists = run_command(
+                        ["git", "cat-file", "-e", f"{base}^{{commit}}"],
+                        cwd=worktree,
+                    )
+                    if not exists.ok:
+                        return "base commit identity is unavailable", evidence
+                evidence["worktree"] = "matched"
+                conflict = self._reconcile_commit_and_remote(task, worktree)
+                if conflict is not None:
+                    return conflict, evidence
+                evidence["commit"] = "matched"
+                if self.config.integration_mode == "push-main" and not self.config.local_only:
+                    evidence["remote"] = "matched"
+            manifest = task_dir / "manifest.json"
+            if manifest.exists() and not archive.verify(task.id):
+                return "terminal manifest verification failed", evidence
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            evidence["error"] = exc.__class__.__name__
+            return "persisted task identity could not be verified", evidence
+        return None, evidence
+
+    def _reconcile_deterministic_phase(
+        self,
+        task: TaskRecord,
+        execution: object,
+    ) -> ReconciliationOutcome | None:
+        pipeline_id = getattr(execution, "owning_pipeline_id", None)
+        if pipeline_id is None:
+            return None
+        active = self._unfinished_phase_event(task.id, pipeline_id)
+        if active is None:
+            return None
+        phase = str(active.data.get("phase") or "")
+        action = str(active.data.get("action_id") or "")
+        pipeline = self.store.get_pipeline(pipeline_id)
+        if phase in {"provisioned", "validation", "integration"}:
+            self._release_phase_action(task.id, pipeline_id, phase, action)
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.interrupted,
+                f"deterministic {phase} phase released for exact rerun",
+                evidence={"phase": phase},
+            )
+        if phase == "commit":
+            return self._reconcile_interrupted_commit(
+                task,
+                execution,
+                pipeline,
+                active,
+            )
+        if phase == "push":
+            return self._reconcile_interrupted_push(task, pipeline, action)
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.blocked,
+            "active phase cannot be reconciled without its run identity",
+            evidence={"phase": phase},
+        )
+
+    def _reconcile_interrupted_commit(
+        self,
+        task: TaskRecord,
+        execution: object,
+        pipeline: object,
+        active: object,
+    ) -> ReconciliationOutcome:
+        phase = "commit"
+        action = str(active.data.get("action_id") or "")
+        expected_tree = active.data.get("input", {}).get("payload", {}).get(
+            "expected_tree"
+        )
+        worktree = Path(task.worktree_path) if task.worktree_path else None
+        if worktree is None or not worktree.is_dir() or not expected_tree:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "commit phase has no exact worktree tree identity",
+                evidence={"phase": phase},
+            )
+        tree = run_command(["git", "rev-parse", "HEAD^{tree}"], cwd=worktree)
+        status = run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=worktree,
+        )
+        if not tree.ok or not status.ok:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "commit worktree state could not be inspected",
+                evidence={"phase": phase},
+            )
+        if status.stdout:
+            self._release_phase_action(task.id, pipeline.id, phase, action)
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.interrupted,
+                "uncommitted accepted tree released for commit retry",
+                evidence={"phase": phase},
+            )
+        if tree.stdout.strip() != str(expected_tree):
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "committed tree conflicts with the accepted tree",
+                evidence={"phase": phase},
+            )
+        head = run_command(["git", "rev-parse", "HEAD"], cwd=worktree)
+        if not head.ok:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "commit identity could not be inspected",
+                evidence={"phase": phase},
+            )
+        commit = head.stdout.strip()
+        base = pipeline.base_identity or getattr(execution, "base_commit", None)
+        if commit == base:
+            self.store.finish_task(
+                task.id,
+                TaskStatus.no_changes,
+                "accepted tree was already committed",
+            )
+            next_phase = PipelineCursorPhase.ready_to_seal
+        else:
+            if not any(
+                event.kind == "pipeline.commit"
+                and event.data.get("commit") == commit
+                for event in self.store.events(task.id)
+            ):
+                self.store.add_event(
+                    task.id,
+                    "pipeline.commit",
+                    commit,
+                    {
+                        "pipeline_id": pipeline.id,
+                        "action_id": action,
+                        "commit": commit,
+                        "tree": expected_tree,
+                        "reconciled": True,
+                    },
+                )
+            next_phase = (
+                PipelineCursorPhase.push
+                if self.config.integration_mode == "push-main"
+                and not self.config.local_only
+                else PipelineCursorPhase.ready_to_seal
+            )
+        self.executor._phase_finish(
+            task,
+            pipeline,
+            PipelineCursorPhase.commit,
+            next_phase,
+            evidence={"commit": commit, "reconciled": True},
+        )
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.ingested,
+            "completed commit adopted from exact Git identity",
+            evidence={"phase": phase, "commit": commit},
+        )
+
+    def _reconcile_interrupted_push(
+        self,
+        task: TaskRecord,
+        pipeline: object,
+        action: str,
+    ) -> ReconciliationOutcome:
+        commit = next(
+            (
+                event.data.get("commit")
+                for event in reversed(self.store.events(task.id))
+                if event.kind == "pipeline.commit"
+                and isinstance(event.data.get("commit"), str)
+            ),
+            None,
+        )
+        worktree = Path(task.worktree_path) if task.worktree_path else None
+        if commit and worktree is not None and worktree.is_dir():
+            remote = f"{self.config.git_remote}/{self.config.main_branch}"
+            ancestry = run_command(
+                ["git", "merge-base", "--is-ancestor", commit, remote],
+                cwd=worktree,
+            )
+            if ancestry.ok:
+                self.store.add_event(
+                    task.id,
+                    "pipeline.push.ambiguous_resolved",
+                    commit,
+                    {
+                        "pipeline_id": pipeline.id,
+                        "commit": commit,
+                        "reconciled": True,
+                    },
+                )
+                self.store.finish_task(
+                    task.id,
+                    TaskStatus.pushed,
+                    f"pushed {commit}",
+                )
+                self.executor._phase_finish(
+                    task,
+                    pipeline,
+                    PipelineCursorPhase.push,
+                    PipelineCursorPhase.ready_to_seal,
+                    evidence={"commit": commit, "reconciled": True},
+                )
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.ingested,
+                    "completed push adopted from fetched remote ancestry",
+                    evidence={"phase": "push", "commit": commit},
+                )
+        self._release_phase_action(task.id, pipeline.id, "push", action)
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.interrupted,
+            "unconfirmed push released for idempotent retry",
+            evidence={"phase": "push"},
+        )
+
+    def _unfinished_phase_event(self, task_id: str, pipeline_id: str):
+        states: dict[str, tuple[str, object]] = {}
+        for event in self.store.events(task_id):
+            if event.data.get("pipeline_id") != pipeline_id:
+                continue
+            if event.kind == "pipeline.phase.started":
+                action = event.data.get("action_id")
+                if action:
+                    states[str(action)] = ("active", event)
+            elif event.kind == "pipeline.phase.finished":
+                action = event.data.get("output", {}).get("action_id")
+                if action:
+                    states[str(action)] = ("finished", event)
+            elif event.kind == "pipeline.phase.interrupted":
+                action = event.data.get("action_id")
+                if action:
+                    states[str(action)] = ("interrupted", event)
+        return next(
+            (
+                event
+                for state, event in reversed(list(states.values()))
+                if state == "active"
+            ),
+            None,
+        )
+
+    def _release_phase_action(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        phase: str,
+        action_id: str,
+    ) -> None:
+        self.store.add_event(
+            task_id,
+            "pipeline.phase.interrupted",
+            f"{phase} interrupted by daemon restart",
+            {
+                "pipeline_id": pipeline_id,
+                "phase": phase,
+                "action_id": action_id,
+                "reason": "daemon-restart",
+            },
+        )
+
+    def _reconcile_commit_and_remote(
+        self,
+        task: TaskRecord,
+        worktree: Path,
+    ) -> str | None:
+        events = self.store.events(task.id)
+        commit = next(
+            (
+                str(event.data["commit"])
+                for event in reversed(events)
+                if event.kind == "pipeline.commit"
+                and isinstance(event.data.get("commit"), str)
+            ),
+            None,
+        )
+        if commit is None:
+            return None
+        exists = run_command(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            cwd=worktree,
+        )
+        if not exists.ok:
+            return "persisted commit identity is unavailable"
+        expected_tree = next(
+            (
+                str(event.data["tree"])
+                for event in reversed(events)
+                if event.kind == "pipeline.commit"
+                and event.data.get("commit") == commit
+                and isinstance(event.data.get("tree"), str)
+            ),
+            None,
+        )
+        if expected_tree is not None:
+            tree = run_command(
+                ["git", "rev-parse", f"{commit}^{{tree}}"],
+                cwd=worktree,
+            )
+            if not tree.ok or tree.stdout.strip() != expected_tree:
+                return "persisted commit tree conflicts with accepted output"
+        pushed = any(
+            event.kind in {"pipeline.push", "pipeline.push.ambiguous_resolved"}
+            and event.data.get("commit") == commit
+            for event in events
+        )
+        if pushed and self.config.integration_mode == "push-main" and not self.config.local_only:
+            remote = f"{self.config.git_remote}/{self.config.main_branch}"
+            ancestry = run_command(
+                ["git", "merge-base", "--is-ancestor", commit, remote],
+                cwd=worktree,
+            )
+            if not ancestry.ok:
+                return "persisted push is not reachable from fetched remote ancestry"
+        return None
+
+    def _complete_atomic_run_result(
+        self,
+        task: TaskRecord,
+        run: object,
+    ) -> ReconciliationOutcome | None:
+        run_dir = (
+            TaskArchiveWriter(self.config).task_dir(task.id)
+            / "pipelines"
+            / run.pipeline_id
+            / "runs"
+            / run.id
+        )
+        result_path = run_dir / "result.json"
+        last_message = run_dir / "last-message.md"
+        if not result_path.is_file() or not last_message.is_file():
+            return None
+        try:
+            result_metadata = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if result_metadata.get("status") != "available":
+            return None
+        try:
+            saved = self.store.transition_run(
+                run.id,
+                "succeeded",
+                expected_state="running",
+                exit_code=run.exit_code or 0,
+                result_summary=str(result_metadata.get("summary") or "completed"),
+            )
+        except ValueError:
+            saved = self.store.get_run(run.id)
+            if str(saved.state) != "succeeded":
+                return None
+        result = self._session_result_from_run(saved)
+        try:
+            self.executor.reconcile_session_result(run.id, result)
+        except Exception as exc:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "complete run result conflicts with its durable phase",
+                run_id=run.id,
+                evidence={"error": exc.__class__.__name__},
+            )
+        self._add_recovery_event_once(
+            task.id,
+            "session.result.ingested",
+            "complete atomic run result ingested",
+            run.id,
+            {"run_id": run.id},
+        )
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.ingested,
+            "complete atomic run result ingested once",
+            run_id=run.id,
+        )
+
+    @staticmethod
+    def _interrupted_recovery_root(runs: list[object]) -> object | None:
+        for run in runs:
+            if (
+                str(run.state) == "interrupted"
+                and getattr(run, "resume_of_run_id", None) is None
+                and getattr(run, "retry_of_run_id", None) is None
+            ):
+                return run
+        return None
+
+    def _resume_or_recover(
+        self,
+        task: TaskRecord,
+        predecessor: object,
+        runs: list[object],
+    ) -> ReconciliationOutcome:
+        recovery_ids = {predecessor.id}
+        successors: list[object] = []
+        for run in runs:
+            if (
+                run.resume_of_run_id in recovery_ids
+                or run.retry_of_run_id in recovery_ids
+            ):
+                successors.append(run)
+                recovery_ids.add(run.id)
+        for successor in successors:
+            if str(successor.state) == "succeeded":
+                return self._ingest_recovered_result(task, predecessor, successor)
+            if str(successor.state) == "running":
+                try:
+                    inspection = self.session_supervisor.inspect(successor.id)
+                except Exception as exc:
+                    return ReconciliationOutcome(
+                        task.id,
+                        ReconciliationDisposition.blocked,
+                        "recovery run ownership could not be verified",
+                        run_id=successor.id,
+                        evidence={"error": exc.__class__.__name__},
+                    )
+                if inspection.live:
+                    return ReconciliationOutcome(
+                        task.id,
+                        ReconciliationDisposition.adopted,
+                        "matching live recovery wrapper adopted",
+                        run_id=successor.id,
+                    )
+                try:
+                    self.store.mark_run_interrupted(
+                        successor.id,
+                        reason="recovery wrapper disappeared during daemon restart",
+                    )
+                except ValueError:
+                    pass
+                if successor.retry_of_run_id is not None:
+                    return ReconciliationOutcome(
+                        task.id,
+                        ReconciliationDisposition.blocked,
+                        "fresh recovery was interrupted; evidence is preserved",
+                        run_id=successor.id,
+                    )
+
+        try:
+            session = self.store.get_session(predecessor.session_id)
+        except KeyError:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "interrupted run has no private session ledger",
+                run_id=predecessor.id,
+            )
+        if (
+            predecessor.checkpoint_id is not None
+            and session.checkpoint_id is not None
+            and predecessor.checkpoint_id != session.checkpoint_id
+        ):
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "run and session checkpoint identities conflict",
+                run_id=predecessor.id,
+            )
+        unfinished = self._unfinished_phase_action(
+            task.id,
+            predecessor.pipeline_id,
+        )
+        if (
+            predecessor.checkpoint_id is not None
+            and unfinished is not None
+            and predecessor.checkpoint_id != unfinished
+        ):
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "run checkpoint does not own the interrupted phase",
+                run_id=predecessor.id,
+            )
+
+        resumable = predecessor.role in {
+            "planner",
+            "planning",
+            "implementation",
+            "reviewer",
+            "review",
+        }
+        prompt = self.session_supervisor.build_recovery_packet(
+            predecessor.id
+        ).prompt()
+        resume_result = None
+        if resumable and predecessor.checkpoint_id is not None:
+            self._add_recovery_event_once(
+                task.id,
+                "session.recovery.decision",
+                "exact session resume selected",
+                predecessor.id,
+                {"predecessor_run_id": predecessor.id, "decision": "resume"},
+            )
+            try:
+                resume_result = self.session_supervisor.resume_with_retries(
+                    predecessor.id,
+                    prompt=prompt,
+                    max_attempts=self.config.resume_attempt_limit,
+                    api_key=os.getenv("CODEX_API_KEY"),
+                    cwd=session.cwd,
+                    checkpoint_id=predecessor.checkpoint_id,
+                )
             except Exception as exc:
                 return ReconciliationOutcome(
                     task.id,
                     ReconciliationDisposition.blocked,
-                    "run interruption could not be persisted",
-                    run_id=run.id,
+                    "exact session resume could not be launched safely",
+                    run_id=predecessor.id,
                     evidence={"error": exc.__class__.__name__},
                 )
+            if resume_result.category is ResumeCategory.success:
+                assert resume_result.result is not None
+                return self._ingest_recovered_result(
+                    task,
+                    predecessor,
+                    self.store.get_run(resume_result.result.run_id),
+                    result=resume_result.result,
+                )
+            if resume_result.category in {
+                ResumeCategory.identity_mismatch,
+                ResumeCategory.checkpoint_drift,
+                ResumeCategory.incompatible_cli,
+            }:
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.blocked,
+                    "resume identity validation failed",
+                    run_id=predecessor.id,
+                    evidence={"category": resume_result.category.value},
+                )
+
+        category = (
+            resume_result.category.value
+            if resume_result is not None
+            else "ineligible-or-missing-checkpoint"
+        )
+        self._add_recovery_event_once(
+            task.id,
+            "session.recovery.decision",
+            "fresh evidence recovery selected",
+            predecessor.id,
+            {
+                "predecessor_run_id": predecessor.id,
+                "decision": "fresh-recovery",
+                "resume_category": category,
+            },
+        )
+        try:
+            recovered = self.session_supervisor.recover(
+                predecessor.id,
+                api_key=os.getenv("CODEX_API_KEY"),
+                cwd=session.cwd,
+            )
+        except Exception as exc:
             return ReconciliationOutcome(
                 task.id,
-                ReconciliationDisposition.interrupted,
-                "partial run evidence preserved for resume or recovery",
-                run_id=run.id,
+                ReconciliationDisposition.blocked,
+                "fresh evidence recovery could not be launched safely",
+                run_id=predecessor.id,
+                evidence={"error": exc.__class__.__name__, "category": category},
             )
-        return ReconciliationOutcome(task.id, ReconciliationDisposition.unchanged)
+        if recovered.category is not ResumeCategory.success or recovered.result is None:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "fresh recovery did not produce a complete result",
+                run_id=predecessor.id,
+                evidence={"category": recovered.category.value},
+            )
+        return self._ingest_recovered_result(
+            task,
+            predecessor,
+            self.store.get_run(recovered.result.run_id),
+            result=recovered.result,
+        )
+
+    def _ingest_recovered_result(
+        self,
+        task: TaskRecord,
+        predecessor: object,
+        recovered_run: object,
+        *,
+        result: SessionResult | None = None,
+    ) -> ReconciliationOutcome:
+        selected = result or self._session_result_from_run(recovered_run)
+        try:
+            self.executor.reconcile_session_result(predecessor.id, selected)
+        except Exception as exc:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "recovered result conflicts with its durable phase",
+                run_id=recovered_run.id,
+                evidence={"error": exc.__class__.__name__},
+            )
+        self._add_recovery_event_once(
+            task.id,
+            "session.recovery.completed",
+            "recovered run ingested",
+            predecessor.id,
+            {
+                "predecessor_run_id": predecessor.id,
+                "recovered_run_id": recovered_run.id,
+                "mode": "resume"
+                if recovered_run.resume_of_run_id is not None
+                else "fresh-recovery",
+            },
+        )
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.resumed,
+            "interrupted run recovered and ingested",
+            run_id=recovered_run.id,
+        )
+
+    def _session_result_from_run(self, run: object) -> SessionResult:
+        run_dir = (
+            TaskArchiveWriter(self.config).task_dir(run.task_id)
+            / "pipelines"
+            / run.pipeline_id
+            / "runs"
+            / run.id
+        )
+        return SessionResult(
+            run.task_id,
+            run.pipeline_id,
+            run.session_id,
+            run.id,
+            InvocationStatus.succeeded,
+            run.exit_code or 0,
+            None,
+            run_dir / "codex.jsonl",
+            run_dir / "last-message.md",
+        )
+
+    def _unfinished_phase_action(
+        self,
+        task_id: str,
+        pipeline_id: str,
+    ) -> str | None:
+        event = self._unfinished_phase_event(task_id, pipeline_id)
+        if event is None:
+            return None
+        action = event.data.get("action_id")
+        return str(action) if action else None
+
+    def _add_recovery_event_once(
+        self,
+        task_id: str,
+        kind: str,
+        message: str,
+        identity: str,
+        data: dict[str, object],
+    ) -> None:
+        if any(
+            event.kind == kind
+            and (
+                event.data.get("predecessor_run_id") == identity
+                or event.data.get("run_id") == identity
+            )
+            and all(event.data.get(key) == value for key, value in data.items())
+            for event in self.store.events(task_id)
+        ):
+            return
+        self.store.add_event(task_id, kind, message, data)
 
     def finalize_terminal_task(self, task_id: str) -> bool:
-        """Seal immutable evidence, then retry each private cleanup action."""
+        """Seal immutable evidence, then converge terminal-only cleanup."""
 
         task = self.store.get(task_id)
         if not TaskStatus(task.status).terminal:
@@ -313,6 +1170,28 @@ class StewardDaemon:
         cleanup_complete = any(event.kind == "cleanup_complete" for event in events)
         if cleanup_complete:
             return True
+        try:
+            if any(str(run.state) == "running" for run in self.store.list_runs(task.id)):
+                self.store.add_event(
+                    task.id,
+                    "cleanup_blocked",
+                    "terminal cleanup requires all runs to stop",
+                )
+                return False
+        except (AttributeError, KeyError):
+            pass
+
+        if self.session_supervisor is not None:
+            try:
+                self.session_supervisor.stop_container(task.id, timeout=1)
+            except Exception as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_retryable",
+                    "terminal container stop incomplete",
+                    {"step": "container-stop", "error": exc.__class__.__name__},
+                )
+                return False
         archive = TaskArchiveWriter(self.config)
         manifest = archive.task_dir(task.id) / "manifest.json"
         try:
@@ -331,7 +1210,7 @@ class StewardDaemon:
                     task.id,
                     str(task.status),
                     completion_identity=completion_identity,
-                    completed_at=task.completed_at.isoformat() if task.completed_at else utc_now().isoformat(),
+                    completed_at=task.updated_at.isoformat(),
                     external_actions_complete=True,
                     writer_final=True,
                 )
@@ -346,31 +1225,80 @@ class StewardDaemon:
             return False
         if not any(event.kind == "cleanup_pending" for event in events):
             self.store.add_event(task.id, "cleanup_pending", "terminal manifest verified")
-        errors: list[str] = []
-        if self.session_supervisor is not None:
-            try:
-                self.session_supervisor.stop_container(task.id, timeout=1)
-            except Exception as exc:
-                errors.append(f"container:{exc.__class__.__name__}")
-        try:
-            if task.worktree_path is not None and task.worktree_path.exists():
-                self.executor.clean_finished_task_worktree(task)
-        except Exception as exc:
-            errors.append(f"worktree:{exc.__class__.__name__}")
-        private_home = self.config.private_sessions_dir / task.id
-        try:
-            if private_home.exists():
-                resolved = private_home.resolve()
-                root = self.config.private_sessions_dir.resolve()
-                if root not in resolved.parents:
-                    raise RuntimeError("private home escaped session root")
-                import shutil
+        events = self.store.events(task.id)
 
-                shutil.rmtree(resolved)
+        if not any(event.kind == "cleanup.container_removed" for event in events):
+            try:
+                if self.session_supervisor is not None:
+                    remove = getattr(self.session_supervisor, "remove_container", None)
+                    if not callable(remove):
+                        raise RuntimeError("session boundary has no remove operation")
+                    remove(task.id)
+                self.store.add_event(
+                    task.id,
+                    "cleanup.container_removed",
+                    "owned terminal container removed",
+                )
+            except Exception as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_retryable",
+                    "terminal container removal incomplete",
+                    {"step": "container-remove", "error": exc.__class__.__name__},
+                )
+                return False
+        events = self.store.events(task.id)
+        if not any(event.kind == "cleanup.worktree_removed" for event in events):
+            try:
+                if task.worktree_path is not None and task.worktree_path.exists():
+                    self.executor.clean_finished_task_worktree(task)
+                self.store.add_event(
+                    task.id,
+                    "cleanup.worktree_removed",
+                    "disposable terminal worktree removed",
+                )
+            except Exception as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_retryable",
+                    "terminal worktree removal incomplete",
+                    {"step": "worktree-remove", "error": exc.__class__.__name__},
+                )
+                return False
+        events = self.store.events(task.id)
+        if not any(event.kind == "cleanup.session_homes_removed" for event in events):
+            private_home = self.config.private_sessions_dir / task.id
+            try:
+                if private_home.exists():
+                    resolved = private_home.resolve()
+                    root = self.config.private_sessions_dir.resolve()
+                    if root not in resolved.parents:
+                        raise RuntimeError("private home escaped session root")
+                    import shutil
+
+                    shutil.rmtree(resolved)
+                self.store.add_event(
+                    task.id,
+                    "cleanup.session_homes_removed",
+                    "eligible private session homes removed",
+                )
+            except Exception as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_retryable",
+                    "terminal session-home removal incomplete",
+                    {"step": "session-home-remove", "error": exc.__class__.__name__},
+                )
+                return False
+        try:
+            archive.verify_or_raise(task.id)
         except Exception as exc:
-            errors.append(f"session-home:{exc.__class__.__name__}")
-        if errors:
-            self.store.add_event(task.id, "cleanup_retryable", "terminal cleanup incomplete", {"errors": errors})
+            self.store.add_event(
+                task.id,
+                "cleanup_blocked",
+                "terminal archive changed during cleanup",
+                {"error": exc.__class__.__name__},
+            )
             return False
         self.store.add_event(task.id, "cleanup_complete", "terminal private state removed")
         return True

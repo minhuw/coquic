@@ -526,6 +526,7 @@ def test_store_recovers_stale_active_tasks(config: StewardConfig) -> None:
         kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P"
     )
     task, _ = store.add_task(spec, dedupe_key="same")
+    make_task_legacy(store, task.id)
     store.update_status(task.id, TaskStatus.running, "started")
     make_task_stale(store, task.id)
 
@@ -572,6 +573,7 @@ def test_daemon_cleans_recovered_stale_task_worktree(config: StewardConfig) -> N
     (worktree / "README.md").write_text("stale\n", encoding="utf-8")
     task.worktree_path = worktree
     store.save(task)
+    make_task_legacy(store, task.id)
     store.start_worker(task.id, "worker started")
     make_task_stale(store, task.id)
 
@@ -628,6 +630,7 @@ def test_daemon_preserves_recovered_stale_integration_commit(
         event.kind == "integration.commit_created"
         for event in store.events(integration.id)
     )
+    make_task_legacy(store, integration.id)
     store.start_integration(integration.id, "pushing to main")
     make_task_stale(store, integration.id)
 
@@ -657,6 +660,7 @@ def test_daemon_does_not_clean_external_recovered_stale_worktree(
     external.mkdir()
     task.worktree_path = external
     store.save(task)
+    make_task_legacy(store, task.id)
     store.start_worker(task.id, "worker started")
     make_task_stale(store, task.id)
 
@@ -1474,6 +1478,7 @@ def test_daemon_tick_recovers_stale_task_before_planning(
         ),
         dedupe_key="code-quality:current",
     )
+    make_task_legacy(store, task.id)
     store.update_status(task.id, TaskStatus.running, "started")
     make_task_stale(store, task.id)
 
@@ -1608,6 +1613,8 @@ def test_daemon_recovers_stale_reviewing_task_with_review_timeout(
     running, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="W", prompt="W")
     )
+    make_task_legacy(store, reviewing.id)
+    make_task_legacy(store, running.id)
     store.start_worker(reviewing.id, "worker started")
     store.start_review(reviewing.id, "review started")
     store.start_worker(running.id, "worker started")
@@ -1660,6 +1667,7 @@ def test_store_treats_unfinished_review_revision_as_worker_active(
         row = session.get(TaskRow, task.id)
         assert row is not None
         row.status = TaskStatus.reviewing.value
+    make_task_legacy(store, task.id)
     make_task_stale(store, task.id, minutes=30)
 
     recovered = store.recover_stale_active_tasks(
@@ -1722,6 +1730,7 @@ def test_store_recovers_unfinished_review_revision_with_worker_timeout(
         row = session.get(TaskRow, task.id)
         assert row is not None
         row.status = TaskStatus.reviewing.value
+    make_task_legacy(store, task.id)
     make_task_stale(store, task.id, minutes=130)
 
     recovered = store.recover_stale_active_tasks(
@@ -1753,6 +1762,7 @@ def test_store_recovers_validation_phase_with_validation_timeout(
     )
     store.start_worker(task.id, "worker started")
     store.start_validation(task.id, "validation running: retry")
+    make_task_legacy(store, task.id)
     validation_started_at = utc_now() - timedelta(minutes=40)
     with Session(store.engine) as session, session.begin():
         task_row = session.get(TaskRow, task.id)
@@ -4860,6 +4870,20 @@ def make_task_stale(store: TaskStore, task_id: str, *, minutes: int = 30) -> Non
         row = session.get(TaskRow, task_id)
         assert row is not None
         row.updated_at = old.isoformat()
+
+
+def make_task_legacy(store: TaskStore, task_id: str) -> None:
+    """Remove the 2.0 ledger so a fixture exercises legacy stale recovery."""
+
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM task_pipelines WHERE task_id = ?",
+            (task_id,),
+        )
+        connection.exec_driver_sql(
+            "DELETE FROM task_executions WHERE task_id = ?",
+            (task_id,),
+        )
 
 
 def test_signal_collector_accepts_providers(config: StewardConfig) -> None:

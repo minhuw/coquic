@@ -491,8 +491,46 @@ class SessionSupervisor:
                 None,
             )
             if existing is not None:
-                restart = getattr(self.store, "restart_run", None)
-                run = restart(existing.id) if restart is not None else existing
+                retries = [
+                    candidate
+                    for candidate in self.store.list_runs(
+                        predecessor.task_id,
+                        pipeline_id=predecessor.pipeline_id,
+                    )
+                    if candidate.retry_of_run_id == existing.id
+                ]
+                latest = retries[-1] if retries else existing
+                if latest.state == CodexRunState.succeeded.value:
+                    return ResumeResult(
+                        ResumeCategory.success,
+                        result=self._persisted_session_result(latest),
+                    )
+                if latest.state == CodexRunState.running.value:
+                    return ResumeResult(
+                        ResumeCategory.rejected,
+                        evidence={"reason": "resume attempt is already running"},
+                    )
+                if retries:
+                    return ResumeResult(
+                        ResumeCategory.transient_provider,
+                        result=self._persisted_session_result(latest),
+                        evidence={"reason": "resume attempts exhausted"},
+                    )
+                run = self.store.create_run(
+                    predecessor.task_id,
+                    predecessor.pipeline_id,
+                    predecessor.session_id,
+                    role=predecessor.role,
+                    parent_run_id=existing.id,
+                    retry_of_run_id=existing.id,
+                    idempotency_key=f"resume-retry:{predecessor.id}",
+                    model=model or predecessor.model,
+                    reasoning=reasoning_effort or predecessor.reasoning,
+                    image_version=session.image_digest,
+                    runtime_version=self.runtime_identity,
+                    checkpoint_id=session.checkpoint_id,
+                    provider_store_identity=session.provider_store_identity,
+                )
             else:
                 run = self.store.create_run(
                     predecessor.task_id,
@@ -628,9 +666,58 @@ class SessionSupervisor:
         predecessor = self.store.get_run(predecessor_run_id)
         session = self.store.get_session(predecessor.session_id)
         task = self.store.get(predecessor.task_id)
+        recovery_key = f"fresh-recovery:{predecessor.id}"
+        existing_session = next(
+            (
+                candidate
+                for candidate in self.store.list_sessions(
+                    predecessor.task_id,
+                    pipeline_id=predecessor.pipeline_id,
+                )
+                if candidate.idempotency_key == recovery_key
+            ),
+            None,
+        )
+        if existing_session is not None:
+            existing_run = next(
+                (
+                    candidate
+                    for candidate in self.store.list_runs(
+                        predecessor.task_id,
+                        pipeline_id=predecessor.pipeline_id,
+                    )
+                    if candidate.session_id == existing_session.id
+                ),
+                None,
+            )
+            if existing_run is not None:
+                if existing_run.state == CodexRunState.succeeded.value:
+                    return ResumeResult(
+                        ResumeCategory.success,
+                        result=self._persisted_session_result(existing_run),
+                        evidence={"recovery": True, "adopted": True},
+                    )
+                if existing_run.state == CodexRunState.running.value:
+                    return ResumeResult(
+                        ResumeCategory.rejected,
+                        evidence={"recovery": True, "reason": "already running"},
+                    )
+                return ResumeResult(
+                    ResumeCategory.transient_provider,
+                    result=self._persisted_session_result(existing_run),
+                    evidence={"recovery": True, "reason": "attempt already completed"},
+                )
         cwd = Path(kwargs.pop("cwd", None) or session.cwd or task.worktree_path or self.config.repo_root)
         role = _runtime_role(predecessor.role)
-        stage = CodexStage.review if predecessor.role in {"review", "reviewer"} else CodexStage.code
+        stage = (
+            CodexStage.review
+            if predecessor.role in {"review", "reviewer", "formality"}
+            else CodexStage.commit_message
+            if predecessor.role == "commit-message"
+            else CodexStage.implementation_plan
+            if predecessor.role in {"planner", "planning"}
+            else CodexStage.code
+        )
         settings = self.config.codex_settings(stage)
         result = self.start(
             task.id,
@@ -647,6 +734,7 @@ class SessionSupervisor:
             codex_identity=kwargs.pop("codex_identity", None) or session.codex_identity,
             output_schema=kwargs.pop("output_schema", None),
             timeout_seconds=kwargs.pop("timeout_seconds", None),
+            idempotency_key=recovery_key,
         )
         try:
             self.store.update_run(result.run_id, retry_of_run_id=predecessor_run_id)
@@ -662,6 +750,27 @@ class SessionSupervisor:
             ResumeCategory.success if result.status is InvocationStatus.succeeded else ResumeCategory.transient_provider,
             result=result,
             evidence={"recovery": True},
+        )
+
+    def _persisted_session_result(self, run: TaskRun) -> SessionResult:
+        run_dir = self.archive.task_dir(run.task_id) / "pipelines" / run.pipeline_id / "runs" / run.id
+        status = (
+            InvocationStatus.succeeded
+            if run.state == CodexRunState.succeeded.value
+            else InvocationStatus.interrupted
+            if run.state == CodexRunState.interrupted.value
+            else InvocationStatus.failed
+        )
+        return SessionResult(
+            run.task_id,
+            run.pipeline_id,
+            run.session_id,
+            run.id,
+            status,
+            run.exit_code or 0,
+            None,
+            run_dir / "codex.jsonl",
+            run_dir / "last-message.md",
         )
 
     def interrupt(
@@ -807,6 +916,45 @@ class SessionSupervisor:
         runtime = self._runtimes.get(task_id)
         if runtime is not None:
             runtime.stop(timeout=timeout)
+
+    def reconcile_container(
+        self,
+        task_id: str,
+        *,
+        ensure_running: bool = True,
+    ) -> Any:
+        """Adopt, restart, or recreate one exactly matching task container."""
+
+        task = self.store.get(task_id)
+        runtime, _ = self._boundary_for(task)
+        if runtime is None:
+            return None
+        try:
+            inspection = runtime.adopt()
+        except ContainerBoundaryError as exc:
+            if exc.category is not ContainerErrorCategory.not_found:
+                raise
+            if not ensure_running:
+                return None
+            runtime.ensure_started()
+            return runtime.adopt()
+        if ensure_running and not inspection.running:
+            runtime.start(inspection.container_id)
+            return runtime.adopt(expected_id=inspection.container_id)
+        return inspection
+
+    def remove_container(self, task_id: str) -> None:
+        """Remove a stopped task container after terminal archive sealing."""
+
+        task = self.store.get(task_id)
+        runtime = self.runtime or self._runtimes.get(task_id)
+        if runtime is None:
+            runtime, _ = self._boundary_for(task)
+        if runtime is None:
+            return
+        runtime.remove()
+        self._runtimes.pop(task_id, None)
+        self._invokers.pop(task_id, None)
 
     def run(
         self,

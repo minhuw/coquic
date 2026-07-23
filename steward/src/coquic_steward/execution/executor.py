@@ -69,7 +69,7 @@ from .implementation_plan import (
 )
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
-from .session import SessionSupervisor
+from .session import InvocationStatus, SessionResult, SessionSupervisor
 from .container_config import TaskRole
 from ..core.lifecycle import (
     AdvanceResult,
@@ -190,6 +190,7 @@ class _SessionRunnerAdapter:
             reasoning_effort=settings.reasoning_effort,
             output_schema=output_schema,
             stage=stage,
+            checkpoint_id=idempotency_key,
             sandbox=sandbox,
             idempotency_key=idempotency_key,
         )
@@ -308,6 +309,281 @@ class StewardExecutor:
             return self._advance_once_locked(task_id)
         finally:
             lock.release()
+
+    def reconcile_session_result(
+        self,
+        predecessor_run_id: str,
+        result: SessionResult,
+    ) -> AdvanceResult | None:
+        """Ingest one completed recovered run into its claimed phase once."""
+
+        predecessor = self.store.get_run(predecessor_run_id)
+        task = self.store.get(predecessor.task_id)
+        pipeline = self.store.get_pipeline(predecessor.pipeline_id)
+        action = predecessor.checkpoint_id
+        if action and any(
+            event.kind == "pipeline.phase.finished"
+            and event.data.get("pipeline_id") == pipeline.id
+            and event.data.get("output", {}).get("action_id") == action
+            for event in self.store.events(task.id)
+        ):
+            return None
+        phase = self._pipeline_cursor(task.id, pipeline.id)
+        in_progress = self._in_progress_action(task.id, pipeline.id, phase)
+        if in_progress is None:
+            return None
+        if action is not None and in_progress.action_id != action:
+            raise RuntimeError("recovered run does not own the active phase action")
+        if result.status is not InvocationStatus.succeeded:
+            raise RuntimeError("only a complete recovered result can be ingested")
+        worker = self._worker_result_from_session(predecessor, result)
+        role = predecessor.role
+        if phase == PipelineCursorPhase.planning and role in {"planner", "planning"}:
+            plan = parse_implementation_plan(worker.final_message, task, self.config)
+            if plan is None or self.worktrees.has_changes(self._require_worktree(task)):
+                return self._block_pipeline(
+                    task, pipeline, "recovered implementation plan is invalid"
+                )
+            self.store.add_event(
+                task.id,
+                "pipeline.plan.result",
+                "accepted",
+                {
+                    "pipeline_id": pipeline.id,
+                    "action_id": in_progress.action_id,
+                    "plan": plan,
+                    "recovered_run_id": result.run_id,
+                },
+            )
+            self._archive_write(task, pipeline, "plans/recovered-plan.json", plan)
+            adopted = self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                PipelineCursorPhase.implementation,
+                evidence={"plan": plan, "recovered_run_id": result.run_id},
+            )
+        elif phase == PipelineCursorPhase.implementation and role == "implementation":
+            iterations = self.store.iterations(task.id)
+            if not iterations:
+                raise RuntimeError("recovered implementation has no iteration ledger")
+            iteration = iterations[-1].iteration
+            self.store.finish_iteration_worker(task.id, iteration, worker)
+            worktree = self._require_worktree(task)
+            base, output_tree, patch = self.worktrees.snapshot(worktree)
+            self._set_identity(
+                pipeline,
+                base_identity=base,
+                input_identity=pipeline.input_identity or base,
+                output_identity=output_tree,
+                patch_identity=patch,
+                expected_tree=output_tree,
+                phase=coarse_phase(PipelineCursorPhase.validation),
+            )
+            if patch == sha256(b"").hexdigest() or not self.worktrees.has_changes(
+                worktree
+            ):
+                self.store.finish_task(
+                    task.id,
+                    TaskStatus.no_changes,
+                    "recovered implementation produced no changes",
+                )
+                next_phase = PipelineCursorPhase.ready_to_seal
+            else:
+                next_phase = PipelineCursorPhase.validation
+            adopted = self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                next_phase,
+                output_identity=output_tree,
+                patch_identity=patch,
+                evidence={"recovered_run_id": result.run_id},
+            )
+        elif phase == PipelineCursorPhase.review and role in {"review", "reviewer"}:
+            review = parse_review(worker.final_message)
+            if review is None:
+                return self._block_pipeline(task, pipeline, "recovered review is invalid")
+            raw = dict(review)
+            self._record_review_artifacts(
+                task,
+                pipeline,
+                raw,
+                kind="raw",
+                action_id=in_progress.action_id or "recovered",
+            )
+            self.store.add_event(
+                task.id,
+                "pipeline.review.raw",
+                "recovered review captured",
+                {
+                    "pipeline_id": pipeline.id,
+                    "action_id": in_progress.action_id,
+                    "review": raw,
+                    "recovered_run_id": result.run_id,
+                },
+            )
+            next_phase = (
+                PipelineCursorPhase.integration
+                if review_approved(review)
+                else PipelineCursorPhase.formality
+            )
+            adopted = self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                next_phase,
+                evidence={"review": raw, "recovered_run_id": result.run_id},
+            )
+        elif phase == PipelineCursorPhase.formality and role == "formality":
+            raw = self._latest_raw_review(task.id, pipeline.id)
+            if raw is None:
+                return self._block_pipeline(
+                    task, pipeline, "recovered formality has no raw review"
+                )
+            try:
+                examined = parse_formality(worker.final_message, raw)
+            except FormalityError as exc:
+                return self._block_pipeline(
+                    task, pipeline, f"recovered formality is invalid: {exc}"
+                )
+            self._record_review_artifacts(
+                task,
+                pipeline,
+                examined.effective_review,
+                kind="effective",
+                action_id=in_progress.action_id or "recovered",
+            )
+            self.store.add_event(
+                task.id,
+                "pipeline.formality.effective",
+                "recovered effective review built",
+                {
+                    "pipeline_id": pipeline.id,
+                    "action_id": in_progress.action_id,
+                    "result": examined.as_dict(),
+                    "recovered_run_id": result.run_id,
+                },
+            )
+            if examined.escalated:
+                return self._block_pipeline(
+                    task, pipeline, "formality escalated a review finding"
+                )
+            if examined.blocking:
+                packet = {
+                    "review": examined.effective_review,
+                    "dispositions": [
+                        item.as_dict() for item in examined.dispositions
+                    ],
+                }
+                fingerprint = _review_no_progress_fingerprint(
+                    pipeline.output_identity or pipeline.patch_identity,
+                    raw,
+                    examined.dispositions,
+                )
+                packet["fingerprint"] = fingerprint
+                child = self._new_child_pipeline(
+                    task,
+                    pipeline,
+                    PipelineTrigger.review_repair,
+                    packet,
+                )
+                adopted = AdvanceResult(
+                    task.id,
+                    child.id,
+                    PipelineCursorPhase.provisioned,
+                    PipelineCursorPhase.implementation,
+                    "child_pipeline",
+                    progressed=True,
+                    evidence=examined.as_dict(),
+                )
+            else:
+                adopted = self._phase_finish(
+                    task,
+                    pipeline,
+                    phase,
+                    PipelineCursorPhase.integration,
+                    evidence={
+                        **examined.as_dict(),
+                        "recovered_run_id": result.run_id,
+                    },
+                )
+        elif phase == PipelineCursorPhase.commit_message and role == "commit-message":
+            message = parse_commit_message(worker.final_message)
+            if message is None:
+                return self._block_pipeline(
+                    task, pipeline, "recovered commit message is invalid"
+                )
+            self.store.add_event(
+                task.id,
+                "pipeline.commit_message",
+                message["subject"],
+                {
+                    "pipeline_id": pipeline.id,
+                    "action_id": in_progress.action_id,
+                    **message,
+                    "recovered_run_id": result.run_id,
+                },
+            )
+            adopted = self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                PipelineCursorPhase.commit,
+                evidence={**message, "recovered_run_id": result.run_id},
+            )
+        else:
+            raise RuntimeError(
+                f"recovered role {role!r} does not match phase {phase.value!r}"
+            )
+        self.store.add_event(
+            task.id,
+            "session.recovery.ingested",
+            "recovered run ingested into durable phase",
+            {
+                "predecessor_run_id": predecessor.id,
+                "recovered_run_id": result.run_id,
+                "pipeline_id": pipeline.id,
+                "phase": phase.value,
+            },
+        )
+        return adopted
+
+    def _worker_result_from_session(
+        self,
+        predecessor: Any,
+        result: SessionResult,
+    ) -> WorkerResult:
+        try:
+            message = result.last_message_path.read_text(encoding="utf-8")
+        except OSError:
+            message = ""
+        stage = (
+            CodexStage.implementation_plan
+            if predecessor.role in {"planner", "planning"}
+            else CodexStage.review
+            if predecessor.role in {"review", "reviewer", "formality"}
+            else CodexStage.commit_message
+            if predecessor.role == "commit-message"
+            else CodexStage.code
+        )
+        return WorkerResult(
+            completed=True,
+            command=[self.config.codex_bin, "exec", "resume"],
+            cwd=self.store.get_session(predecessor.session_id).cwd
+            or self.config.repo_root,
+            exit_code=result.exit_code,
+            transcript_path=result.transcript_path,
+            last_message_path=result.last_message_path,
+            final_message=message,
+            session_id=result.session_id,
+            run_id=result.run_id,
+            pipeline_id=result.pipeline_id,
+            stage=stage,
+            model=predecessor.model,
+            reasoning_effort=predecessor.reasoning,
+            diagnostics={"recovered": True},
+        )
 
     @classmethod
     def _durable_lock(cls, task_id: str) -> threading.RLock:
@@ -944,8 +1220,8 @@ class StewardExecutor:
     def _in_progress_action(
         self, task_id: str, pipeline_id: str, phase: PipelineCursorPhase
     ) -> AdvanceResult | None:
+        states: dict[str, str] = {}
         starts: dict[str, Any] = {}
-        finishes: set[str] = set()
         for event in self.store.events(task_id):
             if event.data.get("pipeline_id") != pipeline_id:
                 continue
@@ -953,12 +1229,17 @@ class StewardExecutor:
                 action = event.data.get("action_id")
                 if action:
                     starts[str(action)] = event
+                    states[str(action)] = "active"
             elif event.kind == "pipeline.phase.finished":
                 action = event.data.get("output", {}).get("action_id")
                 if action:
-                    finishes.add(str(action))
+                    states[str(action)] = "finished"
+            elif event.kind == "pipeline.phase.interrupted":
+                action = event.data.get("action_id")
+                if action:
+                    states[str(action)] = "interrupted"
         for action, event in starts.items():
-            if action not in finishes:
+            if states.get(action) == "active":
                 return AdvanceResult(
                     task_id,
                     pipeline_id,
@@ -1042,12 +1323,15 @@ class StewardExecutor:
                     select(EventRow.kind, EventRow.data_json).where(
                         EventRow.task_id == task_id,
                         EventRow.kind.in_(
-                            ("pipeline.phase.started", "pipeline.phase.finished")
+                            (
+                                "pipeline.phase.started",
+                                "pipeline.phase.finished",
+                                "pipeline.phase.interrupted",
+                            )
                         ),
                     )
                 ).all()
-                starts: set[str] = set()
-                finishes: set[str] = set()
+                states: dict[str, str] = {}
                 for kind, data_json in records:
                     try:
                         payload = json.loads(data_json)
@@ -1058,12 +1342,18 @@ class StewardExecutor:
                     if kind == "pipeline.phase.started" and payload.get("phase") == phase.value:
                         claimed = payload.get("action_id")
                         if claimed:
-                            starts.add(str(claimed))
+                            states[str(claimed)] = "active"
                     elif kind == "pipeline.phase.finished":
                         completed = payload.get("output", {}).get("action_id")
                         if completed:
-                            finishes.add(str(completed))
-                if starts - finishes or action_id in finishes:
+                            states[str(completed)] = "finished"
+                    elif kind == "pipeline.phase.interrupted":
+                        interrupted = payload.get("action_id")
+                        if interrupted:
+                            states[str(interrupted)] = "interrupted"
+                if any(state == "active" for state in states.values()) or states.get(
+                    action_id
+                ) == "finished":
                     connection.rollback()
                     return False
                 connection.execute(

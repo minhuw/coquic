@@ -397,6 +397,33 @@ class TaskContainerRuntime:
                 _decode_error(result.stderr),
             )
 
+    def remove(self, container_id: str | None = None) -> None:
+        """Remove one stopped, identity-validated task container.
+
+        This is deliberately separate from :meth:`stop`: graceful daemon
+        shutdown retains stopped containers, while terminal cleanup removes
+        them only after the public archive has been sealed and verified.
+        """
+
+        identifier = container_id or self.config.container_name
+        try:
+            inspection = self.adopt(expected_id=container_id)
+        except ContainerBoundaryError as exc:
+            if exc.category is ContainerErrorCategory.not_found:
+                return
+            raise
+        if inspection.running:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid,
+                "task container must be stopped before removal",
+            )
+        result = self._run(["rm", identifier], allow_not_found=True)
+        if result.returncode and not _not_found(result.stderr):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.runtime_unavailable,
+                _decode_error(result.stderr),
+            )
+
     def _mount_argv(self, mount: ContainerMount) -> list[str]:
         source = str(mount.source)
         if any(char in source for char in "\x00\n"):

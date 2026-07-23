@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from coquic_steward.core.models import (
     CodexStage,
     TaskKind,
     TaskSpec,
+    TaskRun,
     TaskWorkflow,
     ValidationResult,
     WorkerKind,
@@ -19,7 +21,10 @@ from coquic_steward.core.models import (
     PipelineTrigger,
 )
 from coquic_steward.core.lifecycle import pipeline_transition_allowed
-from coquic_steward.execution.executor import StewardExecutor
+from coquic_steward.execution.executor import (
+    StewardExecutor,
+    _validation_no_progress_fingerprint,
+)
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
 
@@ -398,15 +403,66 @@ def test_validation_uses_container_validation_role(config, monkeypatch) -> None:
     executor.session_supervisor = supervisor
     runner = executor._container_validation_runner(task, store.list_pipelines(task.id)[0])
 
-    result = runner(["true"], config.repo_root, 10)
+    worktree = config.repo_root.resolve()
+    command = [
+        "nix",
+        "develop",
+        f"git+{worktree.as_uri()}#lint",
+        "-c",
+        "bash",
+        str(worktree / "scripts" / "run-validation-with-index.sh"),
+        f"--root={worktree}",
+    ]
+    result = runner(command, config.repo_root, 10)
 
     assert result.ok
     assert calls[0][0].value == "validation"
     assert "GIT_OBJECT_DIRECTORY" in calls[0][1]["env"]
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" in calls[0][1]["env"]
+    assert calls[0][1]["workdir"] == "/mapped/repo"
+    assert calls[0][1]["command"] == [
+        "nix",
+        "develop",
+        "git+file:///mapped/repo#lint",
+        "-c",
+        "bash",
+        "/mapped/repo/scripts/run-validation-with-index.sh",
+        "--root=/mapped/repo",
+    ]
 
 
-def test_archive_write_preserves_parent_and_child_pipeline_refs(config) -> None:
+def test_validation_no_progress_fingerprint_ignores_attempt_metadata(tmp_path) -> None:
+    first_log = tmp_path / "iteration-1" / "gate.txt"
+    second_log = tmp_path / "iteration-2" / "gate.txt"
+    first_log.parent.mkdir()
+    second_log.parent.mkdir()
+    first_log.write_text("same failure\n", encoding="utf-8")
+    second_log.write_text("same failure\n", encoding="utf-8")
+    first = ValidationResult(
+        command=["bash", str(tmp_path / "worktree" / "scripts" / "gate.sh")],
+        cwd=tmp_path / "worktree",
+        passed=False,
+        exit_code=1,
+        output_path=first_log,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+    )
+    second = first.model_copy(
+        update={
+            "output_path": second_log,
+            "started_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+            "completed_at": datetime(2026, 1, 2, 0, 0, 1, tzinfo=timezone.utc),
+        }
+    )
+
+    assert _validation_no_progress_fingerprint("same-tree", [first]) == (
+        _validation_no_progress_fingerprint("same-tree", [second])
+    )
+
+
+def test_archive_write_preserves_parent_and_child_pipeline_refs(
+    config, monkeypatch
+) -> None:
     store = TaskStore(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
@@ -418,19 +474,63 @@ def test_archive_write_preserves_parent_and_child_pipeline_refs(config) -> None:
         )
     )
     executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    archive = TaskArchiveWriter(config)
+    runs = {}
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        store,
+        "list_runs",
+        lambda _task_id, pipeline_id=None: (
+            runs.get(pipeline_id, [])
+            if pipeline_id is not None
+            else [run for values in runs.values() for run in values]
+        ),
+    )
+
+    def add_completed_run(pipeline):
+        run = TaskRun(
+            id=f"run-{pipeline.ordinal}",
+            task_id=task.id,
+            pipeline_id=pipeline.id,
+            session_id=f"session-{pipeline.ordinal}",
+            role="implementation",
+            role_ordinal=1,
+            state="succeeded",
+            exit_code=0,
+            started_at=now,
+            updated_at=now,
+            completed_at=now,
+        )
+        runs[pipeline.id] = [run]
+        archive.materialize_run(task.id, pipeline.id, run)
+
     parent = store.list_pipelines(task.id)[0]
+    add_completed_run(parent)
     executor._archive_write(task, parent, "parent.json", {"attempt": 1})
     child = executor._new_child_pipeline(
         task, parent, PipelineTrigger.validation_repair, {"failure": "gate"}
     )
+    add_completed_run(child)
     executor._archive_write(task, child, "child.json", {"attempt": 2})
 
-    archive = TaskArchiveWriter(config)
     metadata = json.loads(archive.task_path(task.id, "task.json").read_text())
     assert {item["pipelineId"] for item in metadata["pipelines"]} == {
         parent.id,
         child.id,
     }
+    for item in (parent, child):
+        descriptor = archive.task_path(
+            task.id, f"pipelines/{item.id}/pipeline.json"
+        )
+        assert descriptor.is_file()
+
+    executor._archive_write(task, child, "child-repeat.json", {"attempt": 2})
+    store.transition_pipeline(child.id, "blocked", phase="review")
+    terminal_task = store.finish_task(task.id, "blocked", "blocked for archive test")
+    terminal_child = store.get_pipeline(child.id)
+    executor._prepare_archive_task(archive, terminal_task, terminal_child)
+    archive._validate_task_graph(task.id, "blocked")
 
 
 def test_validation_conflict_and_phase_budgets_are_explicit(config) -> None:

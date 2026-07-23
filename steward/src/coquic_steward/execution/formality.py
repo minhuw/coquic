@@ -186,6 +186,8 @@ def build_effective_review(
         elif item.disposition != FormalityDisposition.reject:
             raise FormalityError("unsupported disposition")
     source = dict(raw_review) if isinstance(raw_review, Mapping) else {"findings": list(raw_review)}
+    if not findings and str(source.get("verdict", "")) in {"block", "revise"}:
+        blocking = True
     effective = {
         "verdict": "block" if blocking else "approve",
         "summary": str(source.get("summary", "")),

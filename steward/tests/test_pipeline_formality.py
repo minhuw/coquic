@@ -87,6 +87,21 @@ def test_follow_up_only_is_non_blocking() -> None:
     assert result.effective_review["verdict"] == "approve"
 
 
+@pytest.mark.parametrize("verdict", ["block", "revise"])
+def test_evidence_level_block_without_findings_remains_blocking(verdict: str) -> None:
+    raw = _review(0)
+    raw["verdict"] = verdict
+    raw["validation_gaps"] = ["required validation evidence is unavailable"]
+    raw["remaining_risk"] = "the patch has not passed its required gates"
+
+    result = parse_formality('{"dispositions": []}', raw)
+
+    assert result.blocking is True
+    assert result.effective_review["verdict"] == "block"
+    assert result.effective_review["validation_gaps"] == raw["validation_gaps"]
+    assert result.effective_review["remaining_risk"] == raw["remaining_risk"]
+
+
 @pytest.mark.parametrize(
     "message",
     [

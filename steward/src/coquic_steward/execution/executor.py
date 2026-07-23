@@ -672,10 +672,7 @@ class StewardExecutor:
             {"pipeline_id": pipeline.id, **evidence},
         )
         if failed:
-            fingerprint = bounded_fingerprint(
-                patch,
-                [self._validation_evidence(item) for item in failed],
-            )
+            fingerprint = _validation_no_progress_fingerprint(output_tree, failed)
             self.store.add_event(task.id, "pipeline.validation.failure", "validation failed", {"pipeline_id": pipeline.id, "fingerprint": fingerprint, **evidence})
             if self._fingerprint_seen(task.id, fingerprint):
                 return self._block_pipeline(task, pipeline, "validation made no progress")
@@ -759,10 +756,10 @@ class StewardExecutor:
                 "review": examined.effective_review,
                 "dispositions": [item.as_dict() for item in examined.dispositions],
             }
-            fingerprint = bounded_fingerprint(
-                pipeline.patch_identity,
-                examined.effective_review,
-                packet["dispositions"],
+            fingerprint = _review_no_progress_fingerprint(
+                pipeline.output_identity or pipeline.patch_identity,
+                raw,
+                examined.dispositions,
             )
             self.store.add_event(
                 task.id,
@@ -1549,12 +1546,11 @@ class StewardExecutor:
             "apply_detail": prepared.detail,
             **(extra_evidence or {}),
         }
-        fingerprint = bounded_fingerprint(
-            selected_trigger.value,
+        fingerprint = _integration_no_progress_fingerprint(
+            selected_trigger,
             latest_main,
             digest,
             prepared.applied,
-            _stable_push_failure(prepared.detail),
         )
         evidence["fingerprint"] = fingerprint
         event_kind = (
@@ -1634,16 +1630,21 @@ class StewardExecutor:
                 os.chown(path, session_uid, validation_gid)
 
         def execute(command: list[str], cwd: Path, timeout: float) -> CommandResult:
+            container_workdir = runtime.config.container_path(cwd, role)
+            container_command = [
+                _rewrite_mounted_argument(item, cwd, container_workdir)
+                for item in command
+            ]
             result = runtime.exec(
                 role,
                 session_uid=session_uid,
                 session_id=session_id,
-                command=command,
+                command=container_command,
                 env={
                     "GIT_OBJECT_DIRECTORY": container_objects,
                     "GIT_ALTERNATE_OBJECT_DIRECTORIES": container_alternate,
                 },
-                workdir=runtime.config.container_path(cwd, role),
+                workdir=container_workdir,
                 timeout=timeout,
             )
             return CommandResult(
@@ -1696,14 +1697,39 @@ class StewardExecutor:
     ) -> None:
         archive.ensure_epoch()
         task_path = archive.task_path(task.id, "task.json")
+        pipelines = self.store.list_pipelines(task.id)
+        runs_by_pipeline = {
+            item.id: self.store.list_runs(task.id, pipeline_id=item.id)
+            for item in pipelines
+        }
         if not task_path.is_file():
+            if not runs_by_pipeline.get(pipeline.id):
+                raise RuntimeError("cannot archive a pipeline before its first run")
             archive.create_task_from_record(task, pipeline=pipeline)
-        for item in self.store.list_pipelines(task.id):
-            archive._add_task_pipeline_reference(task.id, item.id, item.ordinal)
+        materialized = set()
+        for item in pipelines:
+            runs = runs_by_pipeline[item.id]
+            if not runs:
+                continue
+            archive.materialize_pipeline(task.id, item, runs=runs)
+            materialized.add(item.id)
+        if not materialized:
+            raise RuntimeError("cannot archive a task before its first pipeline run")
         metadata = json.loads(task_path.read_text(encoding="utf-8"))
+        metadata["pipelines"] = [
+            reference
+            for reference in metadata.get("pipelines", [])
+            if reference.get("pipelineId") in materialized
+        ]
         metadata["status"] = str(task.status)
         metadata["updatedAt"] = task.updated_at.isoformat().replace("+00:00", "Z")
-        metadata["currentPipelineId"] = pipeline.id
+        if pipeline.id in materialized:
+            metadata["currentPipelineId"] = pipeline.id
+        elif metadata.get("currentPipelineId") not in materialized:
+            metadata["currentPipelineId"] = max(
+                (item for item in pipelines if item.id in materialized),
+                key=lambda item: item.ordinal,
+            ).id
         metadata["summary"] = {
             "title": task.spec.title,
             "text": task.summary or task.spec.prompt,
@@ -3823,6 +3849,116 @@ def _stable_validation_diagnostics(validation: ValidationResult) -> str:
         match.group(0).strip() for match in _GTEST_FAILED_TEST_RE.finditer(text)
     )
     return "\n\n".join(sorted(signatures)) if signatures else text
+
+
+def _replace_path_reference(value: str, source: str, target: str) -> str:
+    """Replace mounted path references without matching sibling path prefixes."""
+
+    offset = 0
+    while True:
+        index = value.find(source, offset)
+        if index < 0:
+            return value
+        end = index + len(source)
+        if end == len(value) or value[end] in "/#?":
+            value = value[:index] + target + value[end:]
+            offset = index + len(target)
+        else:
+            offset = end
+
+
+def _rewrite_path_references(
+    value: str,
+    source: Path,
+    *,
+    target_path: str,
+    target_uri: str,
+) -> str:
+    source = source.resolve()
+    value = _replace_path_reference(value, source.as_uri(), target_uri)
+    return _replace_path_reference(value, str(source), target_path)
+
+
+def _rewrite_mounted_argument(value: str, source: Path, target: str) -> str:
+    return _rewrite_path_references(
+        value,
+        source,
+        target_path=target,
+        target_uri=Path(target).as_uri(),
+    )
+
+
+def _validation_no_progress_fingerprint(
+    output_identity: str | None,
+    validations: list[ValidationResult],
+) -> str:
+    failures = []
+    for validation in validations:
+        if validation.passed:
+            continue
+        diagnostics = _rewrite_path_references(
+            _stable_validation_diagnostics(validation),
+            validation.cwd,
+            target_path="<worktree>",
+            target_uri="file://<worktree>",
+        )
+        command = [
+            _rewrite_path_references(
+                item,
+                validation.cwd,
+                target_path="<worktree>",
+                target_uri="file://<worktree>",
+            )
+            for item in validation.command
+        ]
+        failures.append(
+            {
+                "command": command,
+                "exit_code": validation.exit_code,
+                "diagnostics": sha256(
+                    diagnostics.encode("utf-8", errors="replace")
+                ).hexdigest(),
+            }
+        )
+    failures.sort(key=lambda item: json.dumps(item, sort_keys=True))
+    return bounded_fingerprint("validation", output_identity, failures)
+
+
+def _review_no_progress_fingerprint(
+    output_identity: str | None,
+    raw_review: dict[str, Any],
+    dispositions: Any,
+) -> str:
+    findings = raw_review.get("findings", [])
+    blocking_findings = []
+    for item in dispositions:
+        disposition = getattr(item.disposition, "value", str(item.disposition))
+        if disposition not in {"required", "revert"}:
+            continue
+        blocking_findings.append(
+            {
+                "source_index": item.source_index,
+                "disposition": disposition,
+                "finding": findings[item.source_index],
+            }
+        )
+    blocking_findings.sort(key=lambda item: item["source_index"])
+    return bounded_fingerprint("review", output_identity, blocking_findings)
+
+
+def _integration_no_progress_fingerprint(
+    trigger: PipelineTrigger,
+    latest_main: str,
+    patch_identity: str,
+    applied: bool,
+) -> str:
+    return bounded_fingerprint(
+        "integration",
+        trigger.value,
+        latest_main,
+        patch_identity,
+        applied,
+    )
 
 
 def _is_transient_push_failure(message: str) -> bool:

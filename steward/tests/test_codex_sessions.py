@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import signal
 import stat
 from dataclasses import replace
 from pathlib import Path
@@ -251,7 +252,9 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
                 container_name=f"coquic-steward-task-{task.id}"
             )
             self.probed = None
-            self.signaled = None
+            self.live = True
+            self.signals = []
+            self.stopped = False
 
         def inspect(self):
             return ContainerInspection(
@@ -264,10 +267,17 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
 
         def exec_is_live(self, identity):
             self.probed = identity
-            return True
+            if self.signals and self.signals[-1][1] == signal.SIGKILL:
+                assert store.get_run(run.id).state == "running"
+            return self.live
 
         def signal(self, identity, sig):
-            self.signaled = (identity, sig)
+            self.signals.append((identity, sig))
+            if sig == signal.SIGKILL:
+                self.live = False
+
+        def stop(self, *args, **kwargs):
+            self.stopped = True
 
     created = []
 
@@ -293,10 +303,20 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
     assert inspection.identity == expected
     assert created[0].probed == expected
 
-    interrupted = restarted.interrupt(run.id)
-    assert not interrupted.forced
-    assert created[0].signaled is not None
-    assert created[0].signaled[0] == expected
+    interrupted = restarted.interrupt(run.id, grace_seconds=0)
+    assert interrupted.forced
+    assert interrupted.status.value == "forced"
+    assert created[0].signals == [
+        (expected, signal.SIGTERM),
+        (expected, signal.SIGKILL),
+    ]
+    assert created[0].probed == expected
+    assert not created[0].live
+    assert not created[0].stopped
+    assert created[0].inspect().running
+    persisted = store.get_run(run.id)
+    assert persisted.state == "interrupted"
+    assert persisted.exit_reason == "forced termination"
 
 
 class _CompletedProcess:

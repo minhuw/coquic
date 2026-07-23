@@ -24,7 +24,12 @@ from ..core.config import StewardConfig
 from ..core.models import CodexRunState, CodexSession, CodexStage, TaskRecord, TaskRun, WorkerResult
 from ..core.subprocesses import run_command
 from ..storage import TaskStore
-from .container import ContainerBoundaryError, ExecIdentity, TaskContainerRuntime
+from .container import (
+    ContainerBoundaryError,
+    ContainerErrorCategory,
+    ExecIdentity,
+    TaskContainerRuntime,
+)
 from .container_config import TaskContainerConfig, TaskRole
 from .task_archive import ArchiveError, TaskArchiveWriter
 
@@ -492,21 +497,36 @@ class SessionSupervisor:
         runtime = active.get("runtime")
         process = active.get("process") or getattr(invoker, "process", None)
         identity = active.get("identity") or getattr(invoker, "identity", None)
-        try:
-            if runtime is not None and identity is not None:
-                runtime.signal(identity, signal.SIGKILL if force else signal.SIGTERM)
-            elif process is not None:
-                process.kill() if force else process.send_signal(signal.SIGTERM)
-            elif hasattr(invoker, "interrupt"):
-                invoker.interrupt(force=force)
-            if process is not None and not force:
-                try:
-                    process.wait(timeout=grace_seconds)
-                except Exception:
-                    forced = True
-                    process.kill()
-        except (OSError, ContainerBoundaryError):
-            forced = True
+        if runtime is not None and identity is not None:
+            runtime.signal(identity, signal.SIGKILL if force else signal.SIGTERM)
+            exited = self._wait_for_exec_exit(
+                runtime, identity, timeout=grace_seconds
+            )
+            if not exited and not force:
+                forced = True
+                runtime.signal(identity, signal.SIGKILL)
+                exited = self._wait_for_exec_exit(
+                    runtime, identity, timeout=grace_seconds
+                )
+            if not exited:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.timeout,
+                    "invocation remained live after forced interruption",
+                )
+        else:
+            try:
+                if process is not None:
+                    process.kill() if force else process.send_signal(signal.SIGTERM)
+                elif hasattr(invoker, "interrupt"):
+                    invoker.interrupt(force=force)
+                if process is not None and not force:
+                    try:
+                        process.wait(timeout=grace_seconds)
+                    except Exception:
+                        forced = True
+                        process.kill()
+            except (OSError, ContainerBoundaryError):
+                forced = True
         result = self.store.mark_run_interrupted(
             run_id,
             reason="forced termination" if forced else "cooperative interruption",
@@ -517,6 +537,21 @@ class SessionSupervisor:
             forced,
             result.exit_code,
         )
+
+    @staticmethod
+    def _wait_for_exec_exit(
+        runtime: TaskContainerRuntime,
+        identity: ExecIdentity,
+        *,
+        timeout: float,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while runtime.exec_is_live(identity):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+        return True
 
     def inspect(self, run_id: str) -> InspectionResult:
         with self._active_lock:

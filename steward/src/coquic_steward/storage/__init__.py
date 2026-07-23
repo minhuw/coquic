@@ -9,9 +9,11 @@ from ..core.models import (
     SchedulerState,
     SignalFetchStatus,
 )
+from ..task_archive_sync_config import TaskArchiveSyncHealth
 from .sqlite import SQLiteTaskStore
 from .schema import (
     CodexSessionRow,
+    TaskArchiveSyncHealthRow,
     TaskExecutionRow,
     TaskPipelineRow,
     TaskRunRow,
@@ -158,6 +160,8 @@ __all__ = [
     "TaskPipelineRow",
     "TaskRunRow",
     "TaskWorktreeCheckpointRow",
+    "TaskArchiveSyncHealthRow",
+    "TaskArchiveSyncHealth",
     "TaskExecution",
     "TaskPipeline",
     "CodexSession",

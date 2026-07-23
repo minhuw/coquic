@@ -202,6 +202,26 @@ class SchedulerWakeupRow(Base):
     data_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
+class TaskArchiveSyncHealthRow(Base):
+    """Single operational row for the standalone raw archive synchronizer."""
+
+    __tablename__ = "task_archive_sync_health"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active_cycle_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_started_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_success_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_duration_seconds: Mapped[float | None] = mapped_column(nullable=True)
+    last_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_category: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failure_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+
+
 class TaskExecutionRow(Base):
     """Normalized private execution ownership and phase cursor."""
 
@@ -504,3 +524,4 @@ TaskPipeline = TaskPipelineRow
 CodexSession = CodexSessionRow
 TaskRun = TaskRunRow
 WorktreeCheckpoint = TaskWorktreeCheckpointRow
+TaskArchiveSyncHealth = TaskArchiveSyncHealthRow

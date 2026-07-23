@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from collections.abc import Callable
@@ -55,6 +56,12 @@ from ..core.models import (
     new_signal_item_id,
     utc_now,
 )
+from ..task_archive_sync_config import (
+    TASK_ARCHIVE_SYNC_HEALTH_ID,
+    TaskArchiveSyncHealth,
+    bounded_safe_detail,
+    validate_cycle_id,
+)
 from .mappers import (
     PathCodec,
     event_to_row,
@@ -85,6 +92,7 @@ from .mappers import (
     update_plan_run_row,
     update_task_row,
     validation_to_row,
+    row_to_task_archive_sync_health,
 )
 from .schema import (
     Base,
@@ -100,6 +108,7 @@ from .schema import (
     TaskRow,
     TaskRunRow,
     TaskWorktreeCheckpointRow,
+    TaskArchiveSyncHealthRow,
     ValidationRow,
 )
 
@@ -135,6 +144,7 @@ class SQLiteTaskStore:
         except OSError:
             pass
         self._migrate_schema()
+        self._ensure_task_archive_sync_health()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
 
@@ -1175,6 +1185,292 @@ class SQLiteTaskStore:
         self._notify_change()
         return wakeup
 
+    # ------------------------------------------------------------------
+    # Standalone raw task-archive synchronizer health
+
+    def _ensure_task_archive_sync_health(self) -> None:
+        """Create the one health row without touching task or mirror state."""
+
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskArchiveSyncHealthRow, TASK_ARCHIVE_SYNC_HEALTH_ID)
+            if row is None:
+                session.add(
+                    TaskArchiveSyncHealthRow(
+                        id=TASK_ARCHIVE_SYNC_HEALTH_ID,
+                        enabled=False,
+                        consecutive_failure_count=0,
+                    )
+                )
+
+    def get_task_archive_sync_health(self) -> TaskArchiveSyncHealth:
+        with Session(self.engine) as session:
+            row = session.get(TaskArchiveSyncHealthRow, TASK_ARCHIVE_SYNC_HEALTH_ID)
+            if row is None:
+                # This is defensive for databases created by an interrupted
+                # migration; normal construction always creates the row.
+                session.add(
+                    TaskArchiveSyncHealthRow(
+                        id=TASK_ARCHIVE_SYNC_HEALTH_ID,
+                        enabled=False,
+                        consecutive_failure_count=0,
+                    )
+                )
+                session.commit()
+                row = session.get(TaskArchiveSyncHealthRow, TASK_ARCHIVE_SYNC_HEALTH_ID)
+            assert row is not None
+            return row_to_task_archive_sync_health(row)
+
+    task_archive_sync_health = get_task_archive_sync_health
+    archive_sync_health = get_task_archive_sync_health
+
+    def set_task_archive_sync_enabled(self, enabled: bool) -> TaskArchiveSyncHealth:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                UPDATE task_archive_sync_health
+                   SET enabled = :enabled
+                 WHERE id = :id
+                """,
+                {"enabled": int(enabled), "id": TASK_ARCHIVE_SYNC_HEALTH_ID},
+            )
+        self._notify_change()
+        return self.get_task_archive_sync_health()
+
+    enable_task_archive_sync = set_task_archive_sync_enabled
+
+    def claim_task_archive_sync_cycle(
+        self,
+        cycle_id: str,
+        *,
+        started_at: datetime | None = None,
+        require_enabled: bool = False,
+    ) -> bool:
+        """Atomically claim the idle health row for one transfer cycle."""
+
+        validate_cycle_id(cycle_id)
+        if not isinstance(require_enabled, bool):
+            raise ValueError("require_enabled must be a boolean")
+        timestamp = (started_at or utc_now()).isoformat()
+        predicate = "AND enabled = 1" if require_enabled else ""
+        with self.engine.begin() as connection:
+            result = connection.exec_driver_sql(
+                f"""
+                UPDATE task_archive_sync_health
+                   SET active_cycle_id = :cycle_id,
+                       last_started_at = :started_at,
+                       last_finished_at = NULL,
+                       last_exit_code = NULL,
+                       last_category = NULL,
+                       last_detail = NULL,
+                       last_duration_seconds = NULL
+                 WHERE id = :id
+                   AND active_cycle_id IS NULL
+                   {predicate}
+                """,
+                {
+                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "cycle_id": cycle_id,
+                    "started_at": timestamp,
+                },
+            )
+            claimed = result.rowcount == 1
+        if claimed:
+            self._notify_change()
+        return claimed
+
+    claim_archive_sync_cycle = claim_task_archive_sync_cycle
+    claim_task_archive_cycle = claim_task_archive_sync_cycle
+
+    @staticmethod
+    def _bounded_duration(duration_seconds: float | None) -> float | None:
+        if duration_seconds is None:
+            return None
+        if isinstance(duration_seconds, bool):
+            return None
+        try:
+            value = float(duration_seconds)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        if value < 0:
+            return 0.0
+        return min(value, 86400.0)
+
+    @staticmethod
+    def _bounded_exit_code(exit_code: int | None) -> int | None:
+        if exit_code is None:
+            return None
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            raise ValueError("exit_code must be an integer or None")
+        return max(-255, min(255, exit_code))
+
+    def finish_task_archive_sync_success(
+        self,
+        cycle_id: str,
+        *,
+        finished_at: datetime | None = None,
+        duration_seconds: float | None = None,
+        exit_code: int = 0,
+        safe_detail: str | None = None,
+        detail: str | None = None,
+    ) -> bool:
+        """Record rsync exit 0 and release the active-cycle claim."""
+
+        validate_cycle_id(cycle_id)
+        bounded_exit_code = self._bounded_exit_code(exit_code)
+        if bounded_exit_code != 0:
+            raise ValueError("success requires exit_code 0")
+        timestamp = (finished_at or utc_now()).isoformat()
+        with self.engine.begin() as connection:
+            result = connection.exec_driver_sql(
+                """
+                UPDATE task_archive_sync_health
+                   SET active_cycle_id = NULL,
+                       last_finished_at = :finished_at,
+                       last_success_at = :finished_at,
+                       last_duration_seconds = :duration,
+                       last_exit_code = :exit_code,
+                       last_category = 'success',
+                       last_detail = :detail,
+                       consecutive_failure_count = 0
+                 WHERE id = :id AND active_cycle_id = :cycle_id
+                """,
+                {
+                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "cycle_id": cycle_id,
+                    "finished_at": timestamp,
+                    "duration": self._bounded_duration(duration_seconds),
+                    "exit_code": bounded_exit_code,
+                    "detail": bounded_safe_detail(
+                        safe_detail if safe_detail is not None else detail
+                    ),
+                },
+            )
+            finished = result.rowcount == 1
+        if finished:
+            self._notify_change()
+        return finished
+
+    finish_archive_sync_success = finish_task_archive_sync_success
+
+    def finish_task_archive_sync_failure(
+        self,
+        cycle_id: str,
+        *,
+        category: str,
+        exit_code: int | None = None,
+        safe_detail: str | None = None,
+        detail: str | None = None,
+        finished_at: datetime | None = None,
+        duration_seconds: float | None = None,
+    ) -> bool:
+        """Record a bounded failure/incomplete outcome and release the claim."""
+
+        validate_cycle_id(cycle_id)
+        if not isinstance(category, str) or not category or len(category) > 64:
+            raise ValueError("category must be a short non-empty string")
+        if any(not character.isalnum() and character not in "_-" for character in category):
+            raise ValueError("category contains unsupported characters")
+        bounded_exit_code = self._bounded_exit_code(exit_code)
+        timestamp = (finished_at or utc_now()).isoformat()
+        with self.engine.begin() as connection:
+            result = connection.exec_driver_sql(
+                """
+                UPDATE task_archive_sync_health
+                   SET active_cycle_id = NULL,
+                       last_finished_at = :finished_at,
+                       last_duration_seconds = :duration,
+                       last_exit_code = :exit_code,
+                       last_category = :category,
+                       last_detail = :detail,
+                       consecutive_failure_count = MIN(consecutive_failure_count + 1, 1000000)
+                 WHERE id = :id AND active_cycle_id = :cycle_id
+                """,
+                {
+                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "cycle_id": cycle_id,
+                    "finished_at": timestamp,
+                    "duration": self._bounded_duration(duration_seconds),
+                    "exit_code": bounded_exit_code,
+                    "category": category,
+                    "detail": bounded_safe_detail(
+                        safe_detail if safe_detail is not None else detail
+                    ),
+                },
+            )
+            finished = result.rowcount == 1
+        if finished:
+            self._notify_change()
+        return finished
+
+    finish_archive_sync_failure = finish_task_archive_sync_failure
+
+    def finish_task_archive_sync_incomplete(
+        self,
+        cycle_id: str,
+        *,
+        exit_code: int | None = 24,
+        safe_detail: str | None = None,
+        detail: str | None = None,
+        finished_at: datetime | None = None,
+        duration_seconds: float | None = None,
+    ) -> bool:
+        return self.finish_task_archive_sync_failure(
+            cycle_id,
+            category="incomplete",
+            exit_code=exit_code,
+            safe_detail=safe_detail,
+            detail=detail,
+            finished_at=finished_at,
+            duration_seconds=duration_seconds,
+        )
+
+    finish_archive_sync_incomplete = finish_task_archive_sync_incomplete
+
+    def reconcile_interrupted_task_archive_sync(
+        self,
+        *,
+        finished_at: datetime | None = None,
+        safe_detail: str = "cycle interrupted before completion",
+        detail: str | None = None,
+    ) -> bool:
+        """Close an active cycle left by a process restart."""
+
+        timestamp = (finished_at or utc_now()).isoformat()
+        with self.engine.begin() as connection:
+            result = connection.exec_driver_sql(
+                """
+                UPDATE task_archive_sync_health
+                   SET active_cycle_id = NULL,
+                       last_finished_at = :finished_at,
+                       last_duration_seconds = NULL,
+                       last_exit_code = NULL,
+                       last_category = 'interrupted',
+                       last_detail = :detail,
+                       consecutive_failure_count = MIN(consecutive_failure_count + 1, 1000000)
+                 WHERE id = :id AND active_cycle_id IS NOT NULL
+                """,
+                {
+                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "finished_at": timestamp,
+                    "detail": bounded_safe_detail(
+                        safe_detail if detail is None else detail
+                    )
+                    or "cycle interrupted before completion",
+                },
+            )
+            reconciled = result.rowcount == 1
+        if reconciled:
+            self._notify_change()
+        return reconciled
+
+    reconcile_task_archive_sync = reconcile_interrupted_task_archive_sync
+    reconcile_archive_sync_interruption = reconcile_interrupted_task_archive_sync
+    reconcile_interrupted_active_cycle = reconcile_interrupted_task_archive_sync
+
     def pending_wakeups(self, *, limit: int | None = None) -> list[SchedulerWakeup]:
         statement = (
             select(SchedulerWakeupRow)
@@ -1941,6 +2237,9 @@ class SQLiteTaskStore:
             }
             if not wakeup_columns:
                 Base.metadata.create_all(connection)
+            # This table is additive and independent of task, pipeline, run,
+            # and sanitized public-mirror health state.
+            TaskArchiveSyncHealthRow.__table__.create(connection, checkfirst=True)
             _install_ledger_ownership_triggers(connection)
 
     def _migrate_portable_paths(self) -> None:

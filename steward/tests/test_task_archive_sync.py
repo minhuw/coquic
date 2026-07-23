@@ -561,6 +561,43 @@ def test_run_once_timeout_cancel_exception_and_raw_output_secrecy(
 
 
 @pytest.mark.parametrize(
+    ("exception_type", "exception_args"),
+    [(KeyboardInterrupt, ()), (SystemExit, (7,))],
+)
+def test_run_once_interruptions_finalize_health_and_reraise(
+    tmp_path: Path,
+    exception_type: type[BaseException],
+    exception_args: tuple[object, ...],
+) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+    interruption = exception_type(*exception_args)
+    calls = 0
+
+    def interrupt(_argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        raise interruption
+
+    with pytest.raises(exception_type) as raised:
+        TaskArchiveSynchronizer(config, store, runner=interrupt).run_once()
+    assert raised.value is interruption
+    health = store.get_task_archive_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == TaskArchiveSyncCategory.interrupted
+    assert health.last_finished_at is not None
+    assert health.consecutive_failure_count == 1
+
+    followup = TaskArchiveSynchronizer(
+        config,
+        store,
+        runner=lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stderr=b""),
+    ).run_once()
+    assert followup.success
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
     ("returncode", "stderr", "category"),
     [
         (0, b"", TaskArchiveSyncCategory.success),

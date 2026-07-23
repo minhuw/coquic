@@ -39,6 +39,7 @@ class TaskArchiveSyncCategory(StrEnum):
     busy = "busy"
     disabled = "disabled"
     cancelled = "cancelled"
+    interrupted = "interrupted"
     timeout = "timeout"
     ssh_auth = "ssh_auth"
     ssh = "ssh_auth"
@@ -809,6 +810,7 @@ class TaskArchiveSynchronizer:
             )
         started_tick = self._monotonic()
         classification: TaskArchiveSyncClassification
+        interruption: BaseException | None = None
         try:
             if self._cancelled():
                 raise TaskArchiveSyncCancelled
@@ -876,8 +878,15 @@ class TaskArchiveSynchronizer:
                 None,
                 "synchronizer failed before transfer completion",
             )
-        except (KeyboardInterrupt, SystemExit):
-            raise
+        except (KeyboardInterrupt, SystemExit) as exc:
+            interruption = exc
+            classification = TaskArchiveSyncClassification(
+                TaskArchiveSyncCategory.interrupted,
+                False,
+                True,
+                None,
+                "cycle interrupted before completion",
+            )
         except BaseException:
             # asyncio.CancelledError is a BaseException on supported Python
             # versions; contain it as a deterministic cancellation outcome.
@@ -920,6 +929,8 @@ class TaskArchiveSynchronizer:
                 health = getter()
             except Exception:
                 health = None
+        if interruption is not None:
+            raise interruption
         status = "success" if classification.success else (
             "incomplete" if classification.incomplete else "failure"
         )

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync, renameSync } from "node:fs";
-import { open, readFile, readdir } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
 import { openArchiveDatabase, readDatabaseMeta, updateDatabaseMeta, withTransaction, type DatabaseMeta } from "./database";
 import { getArchiveConfig, type ArchiveConfig } from "./config";
@@ -30,8 +30,17 @@ type FileDescriptor = {
 };
 
 type IndexedRecord = { ordinal: number; byteStart: number; byteEnd: number; timestamp: string | null; recordType: string | null };
-type FileSnapshot = FileDescriptor & { kind: string; status: "ready" | "missing"; size: number | null; acceptedEnd: number; prefixHash: string | null; prefixRevision: number; fileRevision: string; completeRecords: number };
+type RecordMode = "reuse" | "append" | "replace";
+type FileSnapshot = FileDescriptor & { kind: string; status: "ready" | "missing"; size: number | null; acceptedEnd: number; prefixHash: string | null; prefixRevision: number; fileRevision: string; completeRecords: number; deviceId: string | null; inodeId: string | null; mtimeNs: string | null; ctimeNs: string | null; recordMode: RecordMode; parsedRecords: number };
 type ArchiveVerification = { state: string; manifestObservedAt: string | null; verifiedAt: string | null; reason: string | null };
+
+export interface ImportDiagnostics {
+  jsonlFilesReused: number;
+  jsonlFilesAppended: number;
+  jsonlFilesRebuilt: number;
+  jsonlRecordsParsed: number;
+  recordRowsStaged: number;
+}
 
 const JSONL_NAMES = new Set(["events.jsonl", "codex.jsonl", "activities.jsonl", "manifest.jsonl"]);
 const TERMINAL_STATES = new Set(["succeeded", "pushed", "no_changes", "blocked", "failed", "cancelled"]);
@@ -73,21 +82,19 @@ async function hashFilePrefix(path: string, end: number) {
   return digest.digest("hex");
 }
 
-async function scanJsonl(path: string, acceptedEnd: number, onRecords: (records: IndexedRecord[]) => void) {
-  const digest = createHash("sha256");
+async function scanJsonl(path: string, start: number, acceptedEnd: number, startOrdinal: number, onRecords: (records: IndexedRecord[]) => void) {
   let firstRecordDigest: string | null = null;
   let lineDigest = createHash("sha256");
   let lineFragments: Buffer[] = [];
   let capturedBytes = 0;
-  let offset = 0;
-  let lineStart = 0;
-  let ordinal = 0;
+  let offset = start;
+  let lineStart = start;
+  let ordinal = startOrdinal;
   let batch: IndexedRecord[] = [];
   const captureLimit = 64 * 1024;
-  if (acceptedEnd > 0) {
-    for await (const value of createReadStream(path, { start: 0, end: acceptedEnd - 1, highWaterMark: 64 * 1024 })) {
+  if (acceptedEnd > start) {
+    for await (const value of createReadStream(path, { start, end: acceptedEnd - 1, highWaterMark: 64 * 1024 })) {
       const chunk = value as Buffer;
-      digest.update(chunk);
       let position = 0;
       while (position < chunk.length) {
         const newline = chunk.indexOf(10, position);
@@ -128,7 +135,7 @@ async function scanJsonl(path: string, acceptedEnd: number, onRecords: (records:
     }
   }
   if (batch.length) onRecords(batch);
-  return { prefixHash: digest.digest("hex"), firstRecordDigest, completeRecords: ordinal };
+  return { firstRecordDigest, completeRecords: ordinal, parsedRecords: ordinal - startOrdinal };
 }
 
 function descriptorFrom(value: unknown): FileDescriptor | null {
@@ -161,22 +168,72 @@ async function readValidated(root: string, path: string, validator: (value: Json
   return validator(parseCompleteJson(await readFile(resolved.path, "utf8"), path));
 }
 
+function previousString(previous: Record<string, unknown> | undefined, key: string) {
+  return previous?.[key] == null ? null : String(previous[key]);
+}
+
 async function indexSnapshot(taskRoot: string, descriptor: FileDescriptor, onRecords: (records: IndexedRecord[]) => void, previous?: Record<string, unknown>): Promise<FileSnapshot> {
   const kind = fileKind(descriptor.path);
   try {
     const resolved = await resolveRegularContainedPath(taskRoot, descriptor.path);
     const size = resolved.stat.size;
+    const identity = await stat(resolved.path, { bigint: true });
+    const deviceId = String(identity.dev);
+    const inodeId = String(identity.ino);
+    const mtimeNs = String(identity.mtimeNs);
+    const ctimeNs = String(identity.ctimeNs);
+    const unchanged = previous?.status === "ready"
+      && Number(previous.actual_size) === size
+      && previousString(previous, "device_id") === deviceId
+      && previousString(previous, "inode_id") === inodeId
+      && previousString(previous, "mtime_ns") === mtimeNs
+      && previousString(previous, "ctime_ns") === ctimeNs;
+    if (unchanged) {
+      return {
+        ...descriptor,
+        kind,
+        status: "ready",
+        size,
+        acceptedEnd: Number(previous.accepted_end),
+        prefixHash: previousString(previous, "prefix_hash"),
+        prefixRevision: Number(previous.prefix_revision),
+        fileRevision: String(previous.file_revision),
+        completeRecords: Number(previous.complete_records),
+        deviceId,
+        inodeId,
+        mtimeNs,
+        ctimeNs,
+        recordMode: "reuse",
+        parsedRecords: 0,
+      };
+    }
     const acceptedEnd = await findAcceptedEnd(resolved.path, size, kind);
     const previousEnd = Number(previous?.accepted_end ?? 0);
     const previousHash = typeof previous?.prefix_hash === "string" ? previous.prefix_hash : null;
-    const appendCompatible = Boolean(previous) && acceptedEnd >= previousEnd && previousHash === await hashFilePrefix(resolved.path, previousEnd);
+    const sameFile = previous?.status === "ready" && previousString(previous, "device_id") === deviceId && previousString(previous, "inode_id") === inodeId;
+    const appendCompatible = kind === "jsonl" && sameFile && acceptedEnd >= previousEnd && previousHash === await hashFilePrefix(resolved.path, previousEnd);
     const prefixRevision = previous ? Number(previous.prefix_revision ?? 0) + (appendCompatible ? 0 : 1) : 0;
-    const scanned = kind === "jsonl" ? await scanJsonl(resolved.path, acceptedEnd, onRecords) : { prefixHash: await hashFilePrefix(resolved.path, acceptedEnd), firstRecordDigest: null, completeRecords: 0 };
-    const fileRevision = `sha256:${scanned.firstRecordDigest ?? scanned.prefixHash}`;
-    return { ...descriptor, kind, status: "ready", size, acceptedEnd, prefixHash: scanned.prefixHash, prefixRevision, fileRevision, completeRecords: scanned.completeRecords };
+    if (kind === "jsonl") {
+      if (appendCompatible && acceptedEnd === previousEnd) {
+        return { ...descriptor, kind, status: "ready", size, acceptedEnd, prefixHash: previousHash, prefixRevision, fileRevision: String(previous?.file_revision), completeRecords: Number(previous?.complete_records ?? 0), deviceId, inodeId, mtimeNs, ctimeNs, recordMode: "reuse", parsedRecords: 0 };
+      }
+      const start = appendCompatible ? previousEnd : 0;
+      const startOrdinal = appendCompatible ? Number(previous?.complete_records ?? 0) : 0;
+      const scanned = await scanJsonl(resolved.path, start, acceptedEnd, startOrdinal, onRecords);
+      const prefixHash = await hashFilePrefix(resolved.path, acceptedEnd);
+      const fileRevision = appendCompatible ? String(previous?.file_revision) : `sha256:${scanned.firstRecordDigest ?? prefixHash}`;
+      return { ...descriptor, kind, status: "ready", size, acceptedEnd, prefixHash, prefixRevision, fileRevision, completeRecords: scanned.completeRecords, deviceId, inodeId, mtimeNs, ctimeNs, recordMode: appendCompatible ? "append" : "replace", parsedRecords: scanned.parsedRecords };
+    }
+    const prefixHash = await hashFilePrefix(resolved.path, acceptedEnd);
+    return { ...descriptor, kind, status: "ready", size, acceptedEnd, prefixHash, prefixRevision, fileRevision: `sha256:${prefixHash}`, completeRecords: 0, deviceId, inodeId, mtimeNs, ctimeNs, recordMode: "replace", parsedRecords: 0 };
   } catch {
-    return { ...descriptor, kind, status: "missing", size: null, acceptedEnd: 0, prefixHash: null, prefixRevision: Number(previous?.prefix_revision ?? 0), fileRevision: String(previous?.file_revision ?? "sha256:missing"), completeRecords: 0 };
+    return { ...descriptor, kind, status: "missing", size: null, acceptedEnd: 0, prefixHash: null, prefixRevision: Number(previous?.prefix_revision ?? 0) + (previous?.status === "ready" ? 1 : 0), fileRevision: String(previous?.file_revision ?? "sha256:missing"), completeRecords: 0, deviceId: null, inodeId: null, mtimeNs: null, ctimeNs: null, recordMode: "replace", parsedRecords: 0 };
   }
+}
+
+function preserveVerifiedTerminalEvidence(previousState: unknown, verification: ArchiveVerification): ArchiveVerification {
+  if (previousState !== "verified" || verification.state === "verified") return verification;
+  return { ...verification, state: "corrupt", reason: verification.reason ?? "terminal-evidence-missing" };
 }
 
 async function listDurableFiles(taskRoot: string, relativeRoot = ""): Promise<string[]> {
@@ -223,6 +280,7 @@ export class StewardArchiveImporter {
   private queued = false;
   private watcher: FSWatcher | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private importDiagnostics: ImportDiagnostics = { jsonlFilesReused: 0, jsonlFilesAppended: 0, jsonlFilesRebuilt: 0, jsonlRecordsParsed: 0, recordRowsStaged: 0 };
 
   constructor(config = getArchiveConfig()) {
     this.config = config;
@@ -248,6 +306,8 @@ export class StewardArchiveImporter {
 
   revision() { const meta = readDatabaseMeta(this.db); return { revision: meta.revision, state: meta.state as ImportState }; }
 
+  diagnostics() { return { ...this.importDiagnostics }; }
+
   start() {
     if (this.watcher || this.timer) return;
     try { this.watcher = fsWatch(this.config.tasksRoot, { recursive: true }, () => { void this.requestReconcile(); }); updateDatabaseMeta(this.db, { watchState: "watching" }); }
@@ -265,6 +325,8 @@ export class StewardArchiveImporter {
   }
 
   async reconcile() {
+    const diagnostics: ImportDiagnostics = { jsonlFilesReused: 0, jsonlFilesAppended: 0, jsonlFilesRebuilt: 0, jsonlRecordsParsed: 0, recordRowsStaged: 0 };
+    this.importDiagnostics = diagnostics;
     updateDatabaseMeta(this.db, { lastAttemptAt: now() });
     const started = Date.now();
     if (!existsSync(this.config.tasksRoot)) { updateDatabaseMeta(this.db, { state: "unavailable", lastErrorCategory: "archive-root-missing", lastErrorCount: 1 }); return; }
@@ -284,7 +346,7 @@ export class StewardArchiveImporter {
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith(".") || !isSafeId(entry.name)) continue;
       try {
-        const result = await this.importTask(entry.name, epoch.epochId);
+        const result = await this.importTask(entry.name, epoch.epochId, diagnostics);
         changed ||= result.changed;
         archiveCorrupt ||= result.archiveState === "corrupt";
         this.db.prepare("DELETE FROM importer_errors WHERE task_id=?").run(entry.name);
@@ -314,7 +376,7 @@ export class StewardArchiveImporter {
     let verification: ArchiveVerification;
     try {
       const root = await resolveDirectoryContainedPath(this.config.tasksRoot, directoryName);
-      verification = await verifyManifest(String(row.task_id), epochId, root, row.status);
+      verification = preserveVerifiedTerminalEvidence(row.archive_state, await verifyManifest(String(row.task_id), epochId, root, row.status));
     } catch {
       verification = { state: "corrupt", manifestObservedAt: now(), verifiedAt: null, reason: "terminal-tree-invalid" };
     }
@@ -323,11 +385,12 @@ export class StewardArchiveImporter {
     return { changed: previous !== verification.state, archiveState: verification.state };
   }
 
-  private async importTask(directoryName: string, epochId: string) {
+  private async importTask(directoryName: string, epochId: string, diagnostics: ImportDiagnostics) {
     const root = await resolveDirectoryContainedPath(this.config.tasksRoot, directoryName);
     const task = await readValidated(root, "task.json", validateTask);
     const taskId = String(task.taskId);
     if (task.epochId !== epochId) throw new Error("task identity mismatch");
+    const previousTask = this.db.prepare("SELECT status, title, summary, updated_at, archive_state FROM tasks WHERE task_id=?").get(taskId);
     const pipelines: Array<{ path: string; value: JsonRecord }> = [];
     const runs: Array<{ path: string; value: JsonRecord }> = [];
     const validations: Array<{ path: string; value: JsonRecord }> = [];
@@ -368,13 +431,20 @@ export class StewardArchiveImporter {
         const stageRecords = (records: IndexedRecord[]) => withTransaction(this.db, () => {
           for (const record of records) insertStage.run(importToken, taskId, descriptor.path, record.ordinal, record.byteStart, record.byteEnd, record.timestamp, record.recordType);
         });
-        snapshots.push(await indexSnapshot(root, descriptor, stageRecords, previousFiles.get(descriptor.path)));
+        const snapshot = await indexSnapshot(root, descriptor, (records) => { diagnostics.recordRowsStaged += records.length; stageRecords(records); }, previousFiles.get(descriptor.path));
+        snapshots.push(snapshot);
+        if (snapshot.kind === "jsonl") {
+          diagnostics.jsonlRecordsParsed += snapshot.parsedRecords;
+          if (snapshot.recordMode === "reuse") diagnostics.jsonlFilesReused += 1;
+          else if (snapshot.recordMode === "append") diagnostics.jsonlFilesAppended += 1;
+          else diagnostics.jsonlFilesRebuilt += 1;
+        }
         if (snapshots.length % 32 === 0) await yieldToEventLoop();
       }
-      const archiveState = await verifyManifest(taskId, epochId, root, task.status);
+      const archiveState = preserveVerifiedTerminalEvidence(previousTask?.archive_state, await verifyManifest(taskId, epochId, root, task.status));
       const importedAt = now();
       return withTransaction(this.db, () => {
-      const previous = this.db.prepare("SELECT status, title, summary, updated_at, archive_state FROM tasks WHERE task_id=?").get(taskId);
+      const previous = previousTask;
       const previousRunCount = Number(this.db.prepare("SELECT count(*) AS count FROM runs WHERE task_id=?").get(taskId)?.count ?? 0);
       const previousPipelineCount = Number(this.db.prepare("SELECT count(*) AS count FROM pipelines WHERE task_id=?").get(taskId)?.count ?? 0);
       const fileChanged = snapshots.length !== previousFiles.size || snapshots.some((item) => { const old = previousFiles.get(item.path); return !old || String(old.status) !== item.status || Number(old.actual_size ?? -1) !== (item.size ?? -1) || Number(old.accepted_end) !== item.acceptedEnd || String(old.prefix_hash ?? "") !== String(item.prefixHash ?? "") || String(old.declared_sha256 ?? "") !== String(item.sha256 ?? ""); });
@@ -392,10 +462,12 @@ export class StewardArchiveImporter {
           this.db.prepare(`INSERT INTO usage_facts(task_id, run_id, availability, prompt_tokens, completion_tokens, total_tokens, source_path, reason, cost_availability, estimated_micro_usd, cost_model, pricing_source, cost_reason) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(taskId, run.runId, usage.availability ?? "unavailable", safeInteger(usage.promptTokens), safeInteger(usage.completionTokens), safeInteger(usage.totalTokens), nullable(usage.sourcePath), nullable(usage.reason), cost.availability ?? "unavailable", safeInteger(cost.estimatedMicroUsd), nullable(cost.model), nullable(cost.pricingSource), nullable(cost.reason));
         }
       }
-      this.db.prepare("DELETE FROM files WHERE task_id=?").run(taskId);
+      const currentPaths = new Set(snapshots.map((file) => file.path));
+      for (const oldPath of previousFiles.keys()) if (!currentPaths.has(oldPath)) this.db.prepare("DELETE FROM files WHERE task_id=? AND relative_path=?").run(taskId, oldPath);
       for (const file of snapshots) {
-        this.db.prepare(`INSERT INTO files(task_id, relative_path, kind, media_type, lifecycle, declared_size, declared_sha256, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(taskId, file.path, file.kind, file.mediaType ?? fileMediaType(file.path), file.lifecycle ?? "live", file.byteSize ?? null, file.sha256 ?? null, file.size, file.acceptedEnd, file.prefixHash, file.prefixRevision, file.completeRecords, file.fileRevision, file.status);
-        if (file.completeRecords) this.db.prepare("INSERT INTO records(task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type) SELECT task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type FROM record_staging WHERE import_token=? AND relative_path=? ORDER BY ordinal").run(importToken, file.path);
+        this.db.prepare(`INSERT INTO files(task_id, relative_path, kind, media_type, lifecycle, declared_size, declared_sha256, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, device_id, inode_id, mtime_ns, ctime_ns, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, relative_path) DO UPDATE SET kind=excluded.kind, media_type=excluded.media_type, lifecycle=excluded.lifecycle, declared_size=excluded.declared_size, declared_sha256=excluded.declared_sha256, actual_size=excluded.actual_size, accepted_end=excluded.accepted_end, prefix_hash=excluded.prefix_hash, prefix_revision=excluded.prefix_revision, complete_records=excluded.complete_records, file_revision=excluded.file_revision, device_id=excluded.device_id, inode_id=excluded.inode_id, mtime_ns=excluded.mtime_ns, ctime_ns=excluded.ctime_ns, status=excluded.status`).run(taskId, file.path, file.kind, file.mediaType ?? fileMediaType(file.path), file.lifecycle ?? "live", file.byteSize ?? null, file.sha256 ?? null, file.size, file.acceptedEnd, file.prefixHash, file.prefixRevision, file.completeRecords, file.fileRevision, file.deviceId, file.inodeId, file.mtimeNs, file.ctimeNs, file.status);
+        if (file.recordMode === "replace") this.db.prepare("DELETE FROM records WHERE task_id=? AND relative_path=?").run(taskId, file.path);
+        if (file.recordMode !== "reuse" && file.completeRecords) this.db.prepare("INSERT OR REPLACE INTO records(task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type) SELECT task_id, relative_path, ordinal, byte_start, byte_end, timestamp, record_type FROM record_staging WHERE import_token=? AND relative_path=? ORDER BY ordinal").run(importToken, file.path);
       }
       this.db.prepare("DELETE FROM record_staging WHERE import_token=?").run(importToken);
       this.db.prepare("UPDATE tasks SET archive_state=?, manifest_observed_at=?, verified_at=?, archive_reason=? WHERE task_id=?").run(archiveState.state, archiveState.manifestObservedAt, archiveState.verifiedAt, archiveState.reason, taskId);

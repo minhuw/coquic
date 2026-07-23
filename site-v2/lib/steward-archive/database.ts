@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const DATABASE_SCHEMA_VERSION = 3;
+export const DATABASE_SCHEMA_VERSION = 4;
 
 export interface DatabaseMeta {
   state: string;
@@ -121,6 +121,10 @@ export function openArchiveDatabase(cachePath: string) {
       prefix_revision INTEGER NOT NULL DEFAULT 0,
       complete_records INTEGER NOT NULL DEFAULT 0,
       file_revision TEXT,
+      device_id TEXT,
+      inode_id TEXT,
+      mtime_ns TEXT,
+      ctime_ns TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       PRIMARY KEY(task_id, relative_path)
     );

@@ -35,6 +35,8 @@ export interface TaskPage { tasks: TaskRow[]; nextCursor: string | null; previou
 
 const ACTIVE_STATES = ["queued", "running", "reviewing", "integrating"] as const;
 const ALL_STATES = ["queued", "running", "reviewing", "integrating", "succeeded", "pushed", "no_changes", "blocked", "failed", "cancelled"] as const;
+const ACTIVE_FILTER = "status IN ('queued','running','reviewing','integrating')";
+const ACTIVE_RANK = "CASE status WHEN 'running' THEN 0 WHEN 'reviewing' THEN 1 WHEN 'integrating' THEN 2 ELSE 3 END";
 const HISTORY_FILTER = "status NOT IN ('queued','running','reviewing','integrating')";
 
 function rowToTask(row: Record<string, unknown>): TaskRow {
@@ -46,6 +48,7 @@ function invalidCursor(message = "invalid cursor") { const error = new Error(mes
 function staleCursor(message = "cursor is stale") { const error = new Error(message) as CursorError; error.code = "STALE_CURSOR"; return error; }
 function decodeCursor(value: string) { try { const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")); if (!isRecord(decoded)) throw new Error(); return decoded; } catch { throw invalidCursor(); } }
 function nullableNumber(value: unknown) { return value === null || value === undefined ? null : Number(value); }
+function activeRank(status: string) { return status === "running" ? 0 : status === "reviewing" ? 1 : status === "integrating" ? 2 : 3; }
 function yieldToEventLoop() { return new Promise<void>((resolve) => setImmediate(resolve)); }
 
 async function hashHandlePrefix(handle: FileHandle, end: number) {
@@ -104,7 +107,7 @@ export class StewardArchiveRepository {
     const counts = Object.fromEntries(ALL_STATES.map((state) => [state, 0])) as Record<string, number> & { total: number; indexed: number; verified: number };
     counts.total = status.taskCount; counts.indexed = status.taskCount; counts.verified = status.verifiedTaskCount;
     for (const row of this.db.prepare("SELECT status, count(*) AS count FROM tasks GROUP BY status").all()) counts[String(row.status)] = Number(row.count);
-    const active = this.db.prepare("SELECT * FROM tasks WHERE status IN ('queued','running','reviewing','integrating') ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'reviewing' THEN 1 WHEN 'integrating' THEN 2 ELSE 3 END, updated_at DESC, task_id DESC LIMIT 50").all().map(rowToTask);
+    const active = this.db.prepare(`SELECT * FROM tasks WHERE ${ACTIVE_FILTER} ORDER BY ${ACTIVE_RANK}, updated_at DESC, task_id DESC LIMIT 50`).all().map(rowToTask);
     const recent = this.db.prepare(`SELECT * FROM tasks WHERE ${HISTORY_FILTER} ORDER BY updated_at DESC, task_id DESC LIMIT 50`).all().map(rowToTask);
     const usage = this.db.prepare("SELECT count(*) AS total_runs, sum(CASE WHEN availability IN ('available','partial') AND total_tokens IS NOT NULL THEN 1 ELSE 0 END) AS token_runs, sum(CASE WHEN prompt_tokens IS NOT NULL THEN 1 ELSE 0 END) AS prompt_runs, sum(CASE WHEN completion_tokens IS NOT NULL THEN 1 ELSE 0 END) AS completion_runs, sum(CASE WHEN total_tokens IS NOT NULL THEN 1 ELSE 0 END) AS total_token_runs, sum(prompt_tokens) AS prompt, sum(completion_tokens) AS completion, sum(total_tokens) AS total, sum(CASE WHEN cost_availability IN ('available','partial') AND estimated_micro_usd IS NOT NULL THEN 1 ELSE 0 END) AS cost_runs, sum(estimated_micro_usd) AS cost FROM usage_facts").get() ?? {};
     return {
@@ -129,6 +132,31 @@ export class StewardArchiveRepository {
     const hasNewer = first ? Boolean(this.db.prepare(`SELECT 1 FROM tasks WHERE ${HISTORY_FILTER} AND (updated_at > ? OR (updated_at = ? AND task_id > ?)) LIMIT 1`).get(first.updatedAt, first.updatedAt, first.taskId)) : false;
     const hasOlder = last ? Boolean(this.db.prepare(`SELECT 1 FROM tasks WHERE ${HISTORY_FILTER} AND (updated_at < ? OR (updated_at = ? AND task_id < ?)) LIMIT 1`).get(last.updatedAt, last.updatedAt, last.taskId)) : false;
     return { tasks, nextCursor: hasOlder && last ? encodeCursor({ direction: "next", updatedAt: last.updatedAt, taskId: last.taskId }) : null, previousCursor: hasNewer && first ? encodeCursor({ direction: "previous", updatedAt: first.updatedAt, taskId: first.taskId }) : null, total: Number(this.db.prepare(`SELECT count(*) AS count FROM tasks WHERE ${HISTORY_FILTER}`).get()?.count ?? 0), revision: this.getRevision().revision };
+  }
+
+  listActiveTasksPage(cursor?: string | null, limit = 50): TaskPage {
+    const bounded = Math.min(50, Math.max(1, limit));
+    const decoded = cursor ? decodeCursor(cursor) : null;
+    let rows: Array<Record<string, unknown>>;
+    if (!decoded) rows = this.db.prepare(`SELECT * FROM tasks WHERE ${ACTIVE_FILTER} ORDER BY ${ACTIVE_RANK}, updated_at DESC, task_id DESC LIMIT ?`).all(bounded);
+    else {
+      if (decoded.scope !== "active" || !Number.isSafeInteger(decoded.rank) || Number(decoded.rank) < 0 || Number(decoded.rank) > 3 || typeof decoded.updatedAt !== "string" || typeof decoded.taskId !== "string" || !isSafeId(decoded.taskId) || !["next", "previous"].includes(String(decoded.direction))) throw invalidCursor();
+      if (decoded.direction === "next") rows = this.db.prepare(`SELECT * FROM tasks WHERE ${ACTIVE_FILTER} AND (${ACTIVE_RANK} > ? OR (${ACTIVE_RANK} = ? AND (updated_at < ? OR (updated_at = ? AND task_id < ?)))) ORDER BY ${ACTIVE_RANK}, updated_at DESC, task_id DESC LIMIT ?`).all(decoded.rank, decoded.rank, decoded.updatedAt, decoded.updatedAt, decoded.taskId, bounded);
+      else rows = this.db.prepare(`SELECT * FROM tasks WHERE ${ACTIVE_FILTER} AND (${ACTIVE_RANK} < ? OR (${ACTIVE_RANK} = ? AND (updated_at > ? OR (updated_at = ? AND task_id > ?)))) ORDER BY ${ACTIVE_RANK} DESC, updated_at ASC, task_id ASC LIMIT ?`).all(decoded.rank, decoded.rank, decoded.updatedAt, decoded.updatedAt, decoded.taskId, bounded).reverse();
+    }
+    const tasks = rows.map(rowToTask);
+    const first = tasks[0]; const last = tasks.at(-1);
+    const firstRank = first ? activeRank(first.status) : 0;
+    const lastRank = last ? activeRank(last.status) : 0;
+    const hasNewer = first ? Boolean(this.db.prepare(`SELECT 1 FROM tasks WHERE ${ACTIVE_FILTER} AND (${ACTIVE_RANK} < ? OR (${ACTIVE_RANK} = ? AND (updated_at > ? OR (updated_at = ? AND task_id > ?)))) LIMIT 1`).get(firstRank, firstRank, first.updatedAt, first.updatedAt, first.taskId)) : false;
+    const hasOlder = last ? Boolean(this.db.prepare(`SELECT 1 FROM tasks WHERE ${ACTIVE_FILTER} AND (${ACTIVE_RANK} > ? OR (${ACTIVE_RANK} = ? AND (updated_at < ? OR (updated_at = ? AND task_id < ?)))) LIMIT 1`).get(lastRank, lastRank, last.updatedAt, last.updatedAt, last.taskId)) : false;
+    return {
+      tasks,
+      nextCursor: hasOlder && last ? encodeCursor({ scope: "active", direction: "next", rank: lastRank, updatedAt: last.updatedAt, taskId: last.taskId }) : null,
+      previousCursor: hasNewer && first ? encodeCursor({ scope: "active", direction: "previous", rank: firstRank, updatedAt: first.updatedAt, taskId: first.taskId }) : null,
+      total: Number(this.db.prepare(`SELECT count(*) AS count FROM tasks WHERE ${ACTIVE_FILTER}`).get()?.count ?? 0),
+      revision: this.getRevision().revision,
+    };
   }
 
   private async acceptedFile(taskId: string, relativePath: string, kind?: string) {

@@ -245,8 +245,11 @@ Aggregate dashboard, history, usage/cost, freshness, and revision requests use
 SQLite only. A detail request first resolves an indexed task ID, then reads only
 the selected metadata or accepted evidence below that one task root. Cursors
 are opaque and bound to the current file identity; changed prefixes invalidate
-continuations. Signals and Planning remain a separate raw control-loop archive
-channel and production renders them not connected.
+continuations. Active tasks and terminal history use independent bounded cursor
+pages so active work stays prominent without making any indexed task
+unreachable. Pipeline-owned run selection is validated and retained in URL
+state. Signals and Planning remain a separate raw control-loop archive channel
+and production renders them not connected.
 
 Rejected alternatives are an importer/API sidecar, a second service or custom
 Next server, a full-payload SQLite copy, request-time cross-task scans,

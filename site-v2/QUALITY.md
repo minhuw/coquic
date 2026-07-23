@@ -100,5 +100,6 @@ revision requests perform SQLite-only reads. Detail and artifact gates MUST
 prove containment to exactly one indexed task root, accepted-prefix cursor
 binding, safe download headers, and no absolute path disclosure. Unit and
 browser gates MUST cover the 50-row opaque cursor, missing-versus-zero coverage,
-`Load more` transcript pagination, one refresh per revision, hidden-tab pause,
-bounded retry backoff, and timer/listener cleanup.
+the 51st active task, every owned run selector, `Load more` transcript
+pagination, one refresh per revision, hidden-tab pause, bounded retry backoff,
+200% zoom, and timer/listener cleanup.

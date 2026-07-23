@@ -282,8 +282,12 @@ announced without replacing retained valid evidence with an error message.
   It exposes `indexing`, `ready`, `degraded`, `unavailable`, `incompatible`, and
   `archive-corrupt` states with no path or exception leakage.
 - Task history is newest-first with an opaque stable cursor and 50 rows per
-  page. Transcript chunks start at a complete-line cursor and explicit `Load
+  page. Active work has an independent bounded opaque cursor so every indexed
+  active task remains reachable without displacing terminal history. Transcript
+  chunks start at a complete-line cursor and explicit `Load
   more` controls continue until every accepted record is visible; a changed
   prefix returns a stale-cursor response.
+- Every transcript-bearing run owned by a pipeline has an accessible selector;
+  the validated pipeline/run selection is shareable through URL state.
 - Signals and Planning remain visible route choices but production renders an
   explicit not-connected state; no checked-in fixture records are used there.

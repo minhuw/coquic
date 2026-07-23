@@ -120,6 +120,12 @@ verification counts, timestamps, lag, watcher state, and error count. `GET
 /api/steward/revision` returns the same envelope with only the opaque revision
 and state. Both are `Cache-Control: no-store`.
 
+`GET /api/steward/tasks?cursor={opaque}` returns terminal history newest-first in
+stable pages of 50. `scope=active` selects the independently paginated active
+set, ordered by active-state prominence and stable update/task identity. Active
+and history cursors are opaque, scope-bound, SQLite-only, and never hide rows
+beyond the first page.
+
 `GET /api/v2/steward/archive/tasks` returns a V2 envelope whose `data` contains
 the epoch identity, ordered task summaries, and importer freshness. Each summary
 includes `taskId`, exact execution `status`, `archiveState` (`live`, `incomplete`,
@@ -158,6 +164,10 @@ file identity/revision; a replacement or truncation returns `409` and no stale
 records. Each record has its ordinal and parsed value only after a complete
 newline. The default page is 50 records and an explicit Load more action can
 continue until `hasMore` is false.
+
+The task-detail `run` query selects one transcript-bearing run owned by the
+selected pipeline. Run controls preserve that selection in the URL; an unknown
+or cross-pipeline run ID cannot select evidence.
 
 `GET /api/steward/tasks/{taskId}/artifact?path={relativePath}` streams one
 SQLite-declared regular file below that task root with `Content-Disposition`,

@@ -26,7 +26,7 @@ async function waitForStatus(baseUrl: string, child: ChildProcess) {
       if (response.ok) {
         const payload = await response.json() as { data?: { state?: string; taskCount?: number } };
         lastStatus = JSON.stringify(payload.data);
-        if (payload.data?.state === "ready" && payload.data.taskCount === 53) return;
+        if (payload.data?.state === "ready" && payload.data.taskCount === 102) return;
       }
     } catch { /* server is still starting */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
@@ -61,10 +61,12 @@ void (async () => {
   const baseUrl = `http://127.0.0.1:${port}`;
   await cp(new URL("../examples/steward-dataset", import.meta.url), tasksRoot, { recursive: true });
   const runningTemplate = join(tasksRoot, "task-running");
-  const secondActive = join(tasksRoot, "task-running-second");
-  await cp(runningTemplate, secondActive, { recursive: true }); await rewriteTaskIdentity(secondActive, "task-running-synthetic", "task-running-second");
-  const secondTaskPath = join(secondActive, "task.json"); const secondTask = JSON.parse(await readFile(secondTaskPath, "utf8")) as Record<string, unknown>;
-  secondTask.summary = { title: "Second active task", text: "Parallel active work remains reachable." }; secondTask.updatedAt = "2026-07-22T10:31:00Z"; await writeFile(secondTaskPath, `${JSON.stringify(secondTask, null, 2)}\n`);
+  for (let index = 0; index < 50; index += 1) {
+    const taskId = `task-browser-active-${String(index).padStart(3, "0")}`;
+    const destination = join(tasksRoot, taskId); await cp(runningTemplate, destination, { recursive: true }); await rewriteTaskIdentity(destination, "task-running-synthetic", taskId);
+    const taskPath = join(destination, "task.json"); const task = JSON.parse(await readFile(taskPath, "utf8")) as Record<string, unknown>;
+    task.summary = { title: index === 0 ? "Active task 51" : `Active task ${String(50 - index).padStart(2, "0")}`, text: "Paginated active archive fixture." }; task.updatedAt = "2026-07-22T08:00:00Z"; await writeFile(taskPath, `${JSON.stringify(task, null, 2)}\n`);
+  }
   for (let index = 0; index < 50; index += 1) {
     const taskId = `task-browser-history-${String(index).padStart(3, "0")}`;
     const destination = join(tasksRoot, taskId); await cp(runningTemplate, destination, { recursive: true }); await rewriteTaskIdentity(destination, "task-running-synthetic", taskId);

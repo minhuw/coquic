@@ -64,6 +64,7 @@ export async function loadArchiveTaskView(repository: StewardArchiveRepository, 
         retryOfRunId: run.retryOfRunId ?? null, startedAt: String(run.startedAt), completedAt: run.completedAt ?? null,
         model: run.model ?? null, reasoning: run.reasoning ?? null, result: run.result, usage: run.usage, cost: run.cost,
         transcriptPath: path, completeRecords: Number(transcriptFile?.complete_records ?? 0),
+        exitCode: isRecord(run.exit) && typeof run.exit.code === "number" ? run.exit.code : null,
       });
       if (run.role === "planning") {
         const planNumber = planRuns.length;

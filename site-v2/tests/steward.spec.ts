@@ -10,21 +10,25 @@ test("dashboard renders canonical counts, totals, coverage, and freshness", asyn
   await page.goto("/steward?view=tasks");
   await expect(page.getByRole("heading", { level: 1, name: "Steward" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "All canonical states" })).toBeVisible();
-  await expect(page.getByText("Synthetic live task", { exact: true })).toBeVisible();
-  await expect(page.getByText("Synthetic completed task", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Synthetic live task" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Synthetic completed task" })).toBeVisible();
   await expect(page.getByText("1,050", { exact: true })).toBeVisible();
-  await expect(page.getByText("7/111 runs", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("7/209 runs", { exact: true }).first()).toBeVisible();
   expect(errors).toEqual([]);
 });
 
-test("all active tasks remain prominent while terminal history stays paginated at 50", async ({ page, request }) => {
+test("the 51st active task remains reachable while terminal history stays paginated at 50", async ({ page, request }) => {
   await page.goto("/steward?view=tasks");
   await expect(page.getByRole("link", { name: "Synthetic live task" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Second active task" })).toBeVisible();
-  const first = await request.get("/api/steward/tasks");
-  const payload = await first.json() as { data: { tasks: Array<{ status: string }>; nextCursor: string | null } };
-  expect(payload.data.tasks).toHaveLength(50); expect(payload.data.nextCursor).toBeTruthy();
-  expect(payload.data.tasks.every((task) => !["queued", "running", "reviewing", "integrating"].includes(task.status))).toBeTruthy();
+  const active = await request.get("/api/steward/tasks?scope=active");
+  const activePayload = await active.json() as { data: { tasks: Array<{ status: string }>; nextCursor: string | null; total: number } };
+  expect(activePayload.data.tasks).toHaveLength(50); expect(activePayload.data.nextCursor).toBeTruthy(); expect(activePayload.data.total).toBe(51);
+  await page.getByRole("link", { name: "Next active tasks" }).click();
+  await expect(page).toHaveURL(/activeCursor=/); await expect(page.getByRole("link", { name: "Active task 51" })).toBeVisible();
+  const history = await request.get("/api/steward/tasks");
+  const historyPayload = await history.json() as { data: { tasks: Array<{ status: string }>; nextCursor: string | null } };
+  expect(historyPayload.data.tasks).toHaveLength(50); expect(historyPayload.data.nextCursor).toBeTruthy();
+  expect(historyPayload.data.tasks.every((task) => !["queued", "running", "reviewing", "integrating"].includes(task.status))).toBeTruthy();
 });
 
 test("global signals and planning remain explicitly disconnected", async ({ page }) => {
@@ -65,7 +69,19 @@ test("task detail preserves every pipeline run and owned review and patch eviden
   await expect(page.getByRole("region", { name: "Planning runs" })).toContainText("run-plan");
   await expect(page.locator("#attempts > div:last-child > div")).toHaveCount(2);
   await page.getByRole("button", { name: /Pipeline 01:/ }).click();
+  const initialPipeline = page.locator("#attempt-1-evidence");
   for (const runId of ["run-plan", "run-implementation", "run-formality", "run-review", "run-repair-implementation", "run-repair-review", "run-integration"]) await expect(page.getByText(runId, { exact: true }).first()).toBeVisible();
+  await expect(initialPipeline.getByRole("link", { name: /View transcript for run-/ })).toHaveCount(4);
+  await initialPipeline.getByRole("link", { name: "View transcript for run-formality" }).click();
+  await expect(page).toHaveURL(/attempt=0&run=run-formality&artifact=transcript/);
+  await expect(page.getByRole("link", { name: "View transcript for run-formality" })).toHaveAttribute("aria-current", "page");
+  await expect(page.locator("#attempt-1-evidence").getByLabel("Agent transcript")).toBeVisible();
+  const repairDisclosure = page.getByRole("button", { name: /Pipeline 02:/ });
+  if (await repairDisclosure.getAttribute("aria-expanded") === "false") await repairDisclosure.click();
+  const repairPipeline = page.locator("#attempt-2-evidence");
+  await expect(repairPipeline.getByRole("link", { name: /View transcript for run-/ })).toHaveCount(3);
+  await repairPipeline.getByRole("link", { name: "View transcript for run-integration" }).click();
+  await expect(page).toHaveURL(/attempt=1&run=run-integration&artifact=transcript/);
   await expect(page.getByText("Owned runs").first()).toBeVisible();
   await expect(page.getByText("Integration").first()).toBeVisible();
   await page.goto("/steward/tasks/task-complete-synthetic?attempt=0&artifact=review#attempt-1-evidence");
@@ -157,6 +173,22 @@ test("desktop and compact archive surfaces do not overflow", async ({ page }, te
     expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
     if (viewport.width !== 320) await page.screenshot({ path: testInfo.outputPath(`task-${viewport.width}.png`), fullPage: true });
   }
+});
+
+test("task hierarchy remains usable at 200% browser zoom without overflow or overlap", async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 900 });
+  await page.goto("/steward/tasks/task-complete-synthetic");
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  const zoom = await page.evaluate(() => ({ scale: window.visualViewport?.scale, width: window.visualViewport?.width, client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+  expect(zoom.scale).toBe(2); expect(zoom.width).toBe(320); expect(zoom.scroll).toBeLessThanOrEqual(zoom.client);
+  const sections = await page.locator("main > div > section").evaluateAll((nodes) => nodes.map((node) => { const box = node.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, clipped: node.scrollWidth > node.clientWidth }; }));
+  expect(sections.every((section) => !section.clipped)).toBeTruthy();
+  for (let index = 1; index < sections.length; index += 1) expect(sections[index].top).toBeGreaterThanOrEqual(sections[index - 1].bottom - 1);
+  await expect(page.getByRole("heading", { level: 1, name: "Synthetic completed task" })).toBeVisible();
+  const pipeline = page.getByRole("button", { name: /Pipeline 01:/ }); await pipeline.focus(); await page.keyboard.press("Enter"); await expect(pipeline).toHaveAttribute("aria-expanded", "true");
+  const transcript = page.locator("#attempt-1-evidence").getByRole("link", { name: "View transcript for run-review" }); await transcript.focus(); await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/run=run-review/); await expect(page.locator("#attempt-1-evidence").getByLabel("Agent transcript")).toBeVisible();
 });
 
 test("changed accepted transcript prefix returns a stale cursor without replacement bytes", async ({ request }) => {

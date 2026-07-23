@@ -97,13 +97,21 @@ test("F004 transcript view loading is bounded, lazy, and cursor-bearing", async 
   assert.equal(appended.data.records.length, 1); assert.equal((appended.data.records[0].value as Record<string, unknown>).text, "after-end");
 });
 
-test("F005 canonical pipelines retain every run, review kind, patch, and integration event", async (t) => {
+test("F005 every owned run exposes independently loadable transcript evidence", async (t) => {
   const fixture = await fixtureImporter();
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
   const view = await loadArchiveTaskView(fixture.repository, "task-complete-synthetic");
   assert(view);
   assert.equal(view.attempts.length, 2, "pipelines are the outer processing passes"); assert.equal(view.planRuns?.length, 1); assert.equal(view.patches.length, 2);
   assert.equal(view.attempts.reduce((total, pipeline) => total + (pipeline.runs as Array<unknown>).length, 0), 7);
+  assert.deepEqual(view.attempts.map((pipeline) => (pipeline.runs as Array<unknown>).length), [4, 3]);
+  for (const pipeline of view.attempts) {
+    for (const run of pipeline.runs as Array<Record<string, unknown>>) {
+      assert.equal(typeof run.transcriptPath, "string", `${String(run.runId)} needs a selectable transcript locator`);
+      const chunk = await loadInitialTranscript(fixture.repository, "task-complete-synthetic", String(run.runId), String(run.transcriptPath), Number(pipeline.number), 1);
+      assert.equal(chunk.items.length, 1, `${String(run.runId)} transcript must be independently reachable`);
+    }
+  }
   assert(view.attempts.some((pipeline) => (pipeline.runs as Array<Record<string, unknown>>).some((run) => run.runId === "run-repair-implementation")));
   assert(view.attempts.every((pipeline) => (pipeline.runs as Array<Record<string, unknown>>).every((run) => "resumeOfRunId" in run && "sessionId" in run)));
   assert(view.attempts.some((pipeline) => (pipeline.runs as Array<Record<string, unknown>>).some((run) => (run.usage as Record<string, unknown>).totalTokens !== undefined)));
@@ -160,14 +168,15 @@ test("F007 malformed replacement metadata retains the last-valid indexed run", a
   assert.deepEqual(fixture.importer.db.prepare("SELECT state, updated_at FROM runs WHERE task_id=? AND run_id=?").get("task-running-synthetic", "run-implementation-recovery"), before);
 });
 
-test("F008 terminal verification requires a complete schema-valid manifest identity", async (t) => {
+test("F008 invalid mutation of a previously verified manifest is terminal corruption", async (t) => {
   const fixture = await fixtureImporter();
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
   const path = join(fixture.tasksRoot, "task-complete", "manifest.json");
   const manifest = await json(path); delete manifest.completionIdentity;
   await writeJson(path, manifest); await fixture.importer.reconcile();
   const task = fixture.importer.db.prepare("SELECT archive_state, archive_reason FROM tasks WHERE task_id=?").get("task-complete-synthetic");
-  assert.equal(task?.archive_state, "incomplete"); assert.equal(task?.archive_reason, "manifest-invalid"); assert.equal(fixture.importer.status().verifiedTaskCount, 0);
+  assert.equal(task?.archive_state, "corrupt"); assert.equal(task?.archive_reason, "manifest-invalid");
+  assert.equal(fixture.importer.status().verifiedTaskCount, 0); assert.equal(fixture.importer.status().state, "archive-corrupt");
 });
 
 test("F008 mutation of verified terminal metadata preserves the task and revokes verification", async (t) => {
@@ -224,7 +233,7 @@ test("F011 canonical schema rejects null available descriptors and non-RFC3339 t
   assert.throws(() => validateTask(task), /archive contract/);
 });
 
-test("F014 200k-record JSONL indexing yields with bounded event-loop stalls", async (t) => {
+test("F014 unchanged JSONL reuses durable cursors and append parses only new records", async (t) => {
   const fixture = await fixtureImporter();
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
   const path = join(fixture.tasksRoot, "task-running", "pipelines", "pipeline-initial", "runs", "run-implementation-recovery", "codex.jsonl");
@@ -233,18 +242,38 @@ test("F014 200k-record JSONL indexing yields with bounded event-loop stalls", as
   const timer = setInterval(() => { const current = performance.now(); maximumGap = Math.max(maximumGap, current - previous); previous = current; ticks += 1; }, 10);
   await fixture.importer.reconcile(); clearInterval(timer);
   assert(ticks > 10); assert(maximumGap < 750, `event-loop stall was ${maximumGap}ms`); assert.equal(fixture.importer.status().state, "ready");
-  const file = fixture.importer.db.prepare("SELECT complete_records FROM files WHERE task_id=? AND relative_path LIKE '%run-implementation-recovery/codex.jsonl'").get("task-running-synthetic"); assert.equal(Number(file?.complete_records), 200_002);
+  const fileQuery = fixture.importer.db.prepare("SELECT complete_records FROM files WHERE task_id=? AND relative_path LIKE '%run-implementation-recovery/codex.jsonl'");
+  assert.equal(Number(fileQuery.get("task-running-synthetic")?.complete_records), 200_002);
+  assert.equal(fixture.importer.diagnostics().jsonlRecordsParsed, 200_000);
+  const indexedRows = Number(fixture.importer.db.prepare("SELECT count(*) AS count FROM records WHERE task_id=? AND relative_path LIKE '%run-implementation-recovery/codex.jsonl'").get("task-running-synthetic")?.count);
+  await fixture.importer.reconcile();
+  const unchanged = fixture.importer.diagnostics();
+  assert.equal(unchanged.jsonlRecordsParsed, 0, "unchanged accepted files must not be reparsed");
+  assert.equal(unchanged.recordRowsStaged, 0, "unchanged accepted records must not be restaged");
+  assert(unchanged.jsonlFilesReused > 0); assert.equal(Number(fileQuery.get("task-running-synthetic")?.complete_records), indexedRows);
+  await appendFile(path, `${JSON.stringify({ record_type: "assistant.message", text: "append-a" })}\n${JSON.stringify({ record_type: "assistant.message", text: "append-b" })}\n`);
+  await fixture.importer.reconcile();
+  const appended = fixture.importer.diagnostics();
+  assert.equal(appended.jsonlRecordsParsed, 2); assert.equal(appended.recordRowsStaged, 2); assert(appended.jsonlFilesAppended > 0);
+  assert.equal(Number(fileQuery.get("task-running-synthetic")?.complete_records), 200_004);
 });
 
-test("F018 every active task is separate from terminal history", async (t) => {
+test("F018 the 51st active task is reachable through stable bounded pagination", async (t) => {
   const fixture = await fixtureImporter();
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
-  const destination = join(fixture.tasksRoot, "task-running-second"); await cp(join(fixture.tasksRoot, "task-running"), destination, { recursive: true });
-  await rewriteTaskIdentity(destination, "task-running-synthetic", "task-running-second");
-  const taskPath = join(destination, "task.json"); const task = await json(taskPath); task.summary = { title: "Second active task", text: "Must remain reachable" }; await writeJson(taskPath, task);
+  for (let index = 0; index < 50; index += 1) {
+    const taskId = `task-active-${String(index).padStart(3, "0")}`;
+    const destination = join(fixture.tasksRoot, taskId); await cp(join(fixture.tasksRoot, "task-running"), destination, { recursive: true });
+    await rewriteTaskIdentity(destination, "task-running-synthetic", taskId);
+    const taskPath = join(destination, "task.json"); const task = await json(taskPath); task.summary = { title: `Active ${index}`, text: "Must remain reachable" }; await writeJson(taskPath, task);
+  }
   await fixture.importer.reconcile();
-  const dashboard = fixture.repository.getTaskDashboard(); const history = fixture.repository.listTasksPage();
-  assert.deepEqual(new Set(dashboard.active.map((item) => item.taskId)), new Set(["task-running-synthetic", "task-running-second"]));
+  const dashboard = fixture.repository.getTaskDashboard(); const history = fixture.repository.listTasksPage(); const first = fixture.repository.listActiveTasksPage();
+  assert.equal(dashboard.counts.running, 51); assert.equal(dashboard.active.length, 50);
+  assert.equal(first.tasks.length, 50); assert(first.nextCursor); assert.equal(first.previousCursor, null); assert.equal(first.total, 51);
+  const second = fixture.repository.listActiveTasksPage(first.nextCursor); assert.equal(second.tasks.length, 1); assert(second.previousCursor); assert.equal(second.nextCursor, null);
+  assert.equal(new Set([...first.tasks, ...second.tasks].map((item) => item.taskId)).size, 51);
+  const previous = fixture.repository.listActiveTasksPage(second.previousCursor); assert.deepEqual(previous.tasks.map((item) => item.taskId), first.tasks.map((item) => item.taskId));
   assert.equal(history.tasks.some((item) => item.status === "running"), false);
 });
 

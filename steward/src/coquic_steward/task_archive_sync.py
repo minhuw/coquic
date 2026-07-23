@@ -66,11 +66,13 @@ class TaskArchiveSyncReceiverError(ValueError):
 
 def _receiver_root(task_root: Path) -> Path:
     root = Path(task_root).expanduser()
+    if not root.is_absolute() or any(part in {".", ".."} for part in root.parts):
+        raise TaskArchiveSyncReceiverError("receiver root must be an absolute clean path")
     try:
         metadata = root.lstat()
     except OSError as exc:
         raise TaskArchiveSyncReceiverError("receiver root is unavailable") from exc
-    if not root.is_absolute() or not stat.S_ISDIR(metadata.st_mode):
+    if not stat.S_ISDIR(metadata.st_mode):
         raise TaskArchiveSyncReceiverError("receiver root must be an absolute directory")
     if stat.S_ISLNK(metadata.st_mode):
         raise TaskArchiveSyncReceiverError("receiver root must not be a symlink")
@@ -287,7 +289,11 @@ class ForcedReceiverPolicy:
 
     def __post_init__(self) -> None:
         root = Path(self.task_root).expanduser()
-        if not root.is_absolute() or not root.name:
+        if (
+            not root.is_absolute()
+            or not root.name
+            or any(part in {".", ".."} for part in root.parts)
+        ):
             raise ValueError("task_root must be an absolute path")
         if not self.rsync_path.startswith("/") or any(
             character in self.rsync_path for character in ('"', "'", "\n", "\x00")

@@ -10,11 +10,12 @@ import { StewardArchiveRepository } from "@/lib/steward-archive/repository";
 import { validatePipeline, validateRun, validateTask } from "@/lib/steward-archive/schema";
 import { loadArchiveTaskView, loadInitialTranscript } from "@/lib/steward-archive/view-model";
 
-async function fixtureImporter() {
+async function fixtureImporter(prepare?: (tasksRoot: string) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "coquic-steward-"));
   const tasksRoot = join(root, "tasks");
   const cachePath = join(root, "cache", "index.sqlite");
   await cp(new URL("../../examples/steward-dataset", import.meta.url), tasksRoot, { recursive: true });
+  await prepare?.(tasksRoot);
   const config = getArchiveConfig({ NODE_ENV: "test", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_BATCH_SIZE: "1" });
   const importer = new StewardArchiveImporter(config);
   await importer.reconcile();
@@ -172,11 +173,36 @@ test("F008 invalid mutation of a previously verified manifest is terminal corrup
   const fixture = await fixtureImporter();
   t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
   const path = join(fixture.tasksRoot, "task-complete", "manifest.json");
+  const runCount = Number(fixture.importer.db.prepare("SELECT count(*) AS count FROM runs WHERE task_id=?").get("task-complete-synthetic")?.count);
   const manifest = await json(path); delete manifest.completionIdentity;
-  await writeJson(path, manifest); await fixture.importer.reconcile();
-  const task = fixture.importer.db.prepare("SELECT archive_state, archive_reason FROM tasks WHERE task_id=?").get("task-complete-synthetic");
-  assert.equal(task?.archive_state, "corrupt"); assert.equal(task?.archive_reason, "manifest-invalid");
-  assert.equal(fixture.importer.status().verifiedTaskCount, 0); assert.equal(fixture.importer.status().state, "archive-corrupt");
+  await writeJson(path, manifest);
+  for (let reconciliation = 1; reconciliation <= 2; reconciliation += 1) {
+    await fixture.importer.reconcile();
+    const task = fixture.importer.db.prepare("SELECT archive_state, archive_reason FROM tasks WHERE task_id=?").get("task-complete-synthetic");
+    assert.equal(task?.archive_state, "corrupt", `reconciliation ${reconciliation} must retain known corruption`);
+    assert.equal(task?.archive_reason, "manifest-invalid");
+    assert.equal(Number(fixture.importer.db.prepare("SELECT count(*) AS count FROM runs WHERE task_id=?").get("task-complete-synthetic")?.count), runCount);
+    assert.equal(fixture.importer.status().verifiedTaskCount, 0);
+    assert.equal(fixture.importer.status().state, "archive-corrupt");
+  }
+});
+
+test("F008 never-verified incomplete terminal evidence remains recoverable", async (t) => {
+  let completeManifest: Record<string, unknown> | undefined;
+  const fixture = await fixtureImporter(async (tasksRoot) => {
+    const path = join(tasksRoot, "task-complete", "manifest.json");
+    completeManifest = await json(path);
+    const incompleteManifest = { ...completeManifest };
+    delete incompleteManifest.completionIdentity;
+    await writeJson(path, incompleteManifest);
+  });
+  t.after(async () => { fixture.importer.db.close(); await rm(fixture.root, { recursive: true, force: true }); });
+  const query = fixture.importer.db.prepare("SELECT archive_state FROM tasks WHERE task_id=?");
+  assert.equal(query.get("task-complete-synthetic")?.archive_state, "incomplete");
+  assert(completeManifest);
+  await writeJson(join(fixture.tasksRoot, "task-complete", "manifest.json"), completeManifest);
+  await fixture.importer.reconcile();
+  assert.equal(query.get("task-complete-synthetic")?.archive_state, "verified");
 });
 
 test("F008 mutation of verified terminal metadata preserves the task and revokes verification", async (t) => {

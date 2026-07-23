@@ -232,7 +232,7 @@ async function indexSnapshot(taskRoot: string, descriptor: FileDescriptor, onRec
 }
 
 function preserveVerifiedTerminalEvidence(previousState: unknown, verification: ArchiveVerification): ArchiveVerification {
-  if (previousState !== "verified" || verification.state === "verified") return verification;
+  if ((previousState !== "verified" && previousState !== "corrupt") || verification.state === "verified") return verification;
   return { ...verification, state: "corrupt", reason: verification.reason ?? "terminal-evidence-missing" };
 }
 

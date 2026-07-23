@@ -20,6 +20,8 @@ files are skipped by rsync because preservation flags are absent.  Rsync's ordin
 per-file temporary-write-and-rename behavior is retained; in-place, append,
 partial, delayed-update, deletion, source-removal, symlink, device, socket,
 FIFO, ownership, ACL, and xattr modes are forbidden.
+The trusted client also rejects sender-side `-L`/`--copy-links`; this is a
+property of its fixed internally constructed argv, not receiver enforcement.
 
 The SSH command uses batch mode, strict host-key checking, identities-only
 authentication, the dedicated identity and known-hosts files, no agent/port/X11
@@ -44,6 +46,16 @@ The fake receiver harness starts the installed rsync daemon for protocol tests
 and checks the exact forced command/module root; it does not emulate `--server`
 arguments.  Real key generation, installation, rotation, receiver
 configuration, and network provisioning are operator work.
+
+The receiver cannot observe sender-only `--copy-links` (`-L`). Rsync
+dereferences a source symlink before it emits the file-list record, so the
+daemon receives an ordinary regular file and cannot refuse or identify the
+original link. The trusted synchronizer therefore constructs its complete
+argv without that option, and Plan 002's task-placement boundary keeps the
+dedicated identity away from task containers. A malicious holder of the key
+who enables `--copy-links` is outside this direct-rsync threat boundary; a
+typed manifest or receiver-side staging/validation protocol would be required
+to defend against that actor.
 
 ## Consistency and health
 

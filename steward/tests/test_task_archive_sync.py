@@ -341,6 +341,24 @@ def test_fake_receiver_uses_real_rsync_daemon_over_ssh(tmp_path: Path) -> None:
         assert not (protocol.receiver / "pipe").exists()
 
 
+def test_sender_copy_links_is_invisible_to_receiver_policy(tmp_path: Path) -> None:
+    """A sender-only dereference arrives as an ordinary regular file."""
+
+    with _actual_receiver(tmp_path) as protocol:
+        target = protocol.source / "target.txt"
+        target.write_text("target\n", encoding="utf-8")
+        link = protocol.source / "dereferenced.txt"
+        link.symlink_to(target)
+
+        result = protocol.run("--copy-links")
+
+        assert result.returncode == 0, result.stderr
+        copied = protocol.receiver / link.name
+        assert copied.is_file()
+        assert not copied.is_symlink()
+        assert copied.read_text(encoding="utf-8") == "target\n"
+
+
 def test_receiver_protocol_refuses_dangerous_options(tmp_path: Path) -> None:
     with _actual_receiver(tmp_path) as protocol:
         (protocol.source / "visible").write_text("source", encoding="utf-8")
@@ -384,7 +402,7 @@ def test_receiver_protocol_refuses_dangerous_options(tmp_path: Path) -> None:
 
 def test_client_rejects_sender_only_link_and_device_modes(tmp_path: Path) -> None:
     argv = build_rsync_argv(_config(tmp_path))
-    for option in ("--copy-links", "--devices"):
+    for option in ("--copy-links", "-L", "--devices", "-D"):
         unsafe = [*argv[:-2], option, *argv[-2:]]
         with pytest.raises(TaskArchiveSyncReceiverError, match="forbidden option"):
             validate_rsync_argv(unsafe)

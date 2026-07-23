@@ -68,7 +68,7 @@ class TaskArchiveSyncReceiverError(ValueError):
 _RECEIVER_REFUSED_OPTIONS = (
     "delete delete-excluded delete-delay delete-before delete-during delete-after "
     "remove-source-files inplace append append-verify partial partial-dir "
-    "delay-updates links copy-links hard-links devices specials D owner group perms "
+    "delay-updates links hard-links devices specials D owner group perms "
     "acls xattrs"
 )
 
@@ -156,7 +156,6 @@ def validate_receiver_upload(
         "partial-dir",
         "delay-updates",
         "links",
-        "copy-links",
         "hard-links",
         "devices",
         "specials",
@@ -391,7 +390,6 @@ _FORBIDDEN_RECEIVER_TOKENS = (
     "delay-updates",
     "relative",
     "links",
-    "copy-links",
     "hard-links",
     "devices",
     "specials",
@@ -522,6 +520,9 @@ def build_rsync_argv(config: TaskArchiveSyncConfig) -> list[str]:
     return argv
 
 
+_FORBIDDEN_SHORT_RSYNC_FLAGS = frozenset("aAlLDogpHKRX")
+
+
 def _assert_safe_rsync_argv(argv: Sequence[str]) -> None:
     forbidden = (
         "--archive",
@@ -547,11 +548,12 @@ def _assert_safe_rsync_argv(argv: Sequence[str]) -> None:
         "--xattrs",
     )
     for token in argv:
-        lowered = str(token).lower()
+        raw = str(token)
+        lowered = raw.lower()
         if lowered in {
             "-a",
             "-rlptgo",
-            "-rlptgoD",
+            "-rlptgod",
             "-D",
             "-g",
             "-o",
@@ -562,6 +564,11 @@ def _assert_safe_rsync_argv(argv: Sequence[str]) -> None:
             lowered == item or lowered.startswith(item + "=") for item in forbidden
         ):
             raise TaskArchiveSyncReceiverError("rsync argv contains a forbidden option")
+        if raw.startswith("-") and not raw.startswith("--"):
+            if any(flag in raw[1:] for flag in _FORBIDDEN_SHORT_RSYNC_FLAGS):
+                raise TaskArchiveSyncReceiverError(
+                    "rsync argv contains a forbidden option"
+                )
         if lowered.startswith("--remove") or lowered.startswith("--delete"):
             raise TaskArchiveSyncReceiverError("rsync argv contains a deletion option")
     if not argv or argv[0] != "rsync":

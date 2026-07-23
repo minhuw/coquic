@@ -3401,7 +3401,7 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
     assert store.get(queued_integration.id).status == TaskStatus.queued
 
 
-def test_daemon_forever_dispatches_one_task_per_cycle(
+def test_daemon_forever_dispatches_up_to_source_capacity_per_cycle(
     config: StewardConfig, monkeypatch
 ) -> None:
     store = TaskStore(config.db_path)
@@ -3422,7 +3422,13 @@ def test_daemon_forever_dispatches_one_task_per_cycle(
     with pytest.raises(StopIteration):
         daemon.run_forever()
 
-    assert calls == [{"fetch_providers": [], "max_dispatch": 1, "reason": "wakeup"}]
+    assert calls == [
+        {
+            "fetch_providers": [],
+            "max_dispatch": config.limits.max_active_tasks,
+            "reason": "wakeup",
+        }
+    ]
 
 
 def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
@@ -4419,10 +4425,9 @@ def test_codex_planner_prompt_includes_active_tasks(
 
     assert planned == []
     args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
-    resume_index = args.index("resume")
-    session_index = args.index("planner-thread-1")
-    assert resume_index < session_index
-    assert args[session_index + 1] == "-"
+    assert "resume" not in args
+    assert "planner-thread-1" not in args
+    assert args.count("--output-schema") == 2
 
 
 def test_codex_runner_places_resume_options_before_session(
@@ -8389,11 +8394,13 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
         f'printf "%s\\n" "$*" >> "{calls}"\n'
         "mode=worker\n"
         'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
         "  shift || true\n"
         "done\n"
+        'case "$last" in\n'
+        '  */reviewer-*) mode=review;;\n'
+        '  */worker-integration-revision-*) mode=revision;;\n'
+        "esac\n"
         "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
         'if [ "$mode" = "review" ]; then\n'
@@ -8489,7 +8496,9 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
     assert any(event.kind == "integration.conflict" for event in events)
     assert any(event.kind == "worker.integration_revision_requested" for event in events)
     assert any(event.kind == "integration.retry_requested" for event in events)
-    assert "exec resume --json" in calls.read_text(encoding="utf-8")
+    call_log = calls.read_text(encoding="utf-8")
+    assert "resume" not in call_log
+    assert "worker-integration-revision-1" in call_log
 
 
 def test_integration_reset_failure_blocks_without_conflict_repair(
@@ -8664,7 +8673,9 @@ def test_integration_conflict_no_changes_marks_source_no_changes(
     assert any(event.kind == "integration.conflict" for event in events)
     assert any(event.kind == "worker.integration_revision_requested" for event in events)
     assert not any(event.kind == "integration.retry_requested" for event in events)
-    assert "exec resume --json" in calls.read_text(encoding="utf-8")
+    call_log = calls.read_text(encoding="utf-8")
+    assert "resume" not in call_log
+    assert "worker-integration-revision-1" in call_log
 
 
 def test_integration_validation_failure_returns_to_worker_then_queues_retry(
@@ -8696,11 +8707,13 @@ def test_integration_validation_failure_returns_to_worker_then_queues_retry(
         f'printf "%s\\n" "$*" >> "{calls}"\n'
         "mode=worker\n"
         'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
         "  shift || true\n"
         "done\n"
+        'case "$last" in\n'
+        '  */reviewer-*) mode=review;;\n'
+        '  */worker-validation-revision-*) mode=revision;;\n'
+        "esac\n"
         "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
         'if [ "$mode" = "review" ]; then\n'
@@ -8796,7 +8809,9 @@ def test_integration_validation_failure_returns_to_worker_then_queues_retry(
     assert any(event.kind == "integration.validation_failed" for event in events)
     assert any(event.kind == "worker.validation_revision_requested" for event in events)
     assert any(event.kind == "integration.retry_requested" for event in events)
-    assert "exec resume --json" in calls.read_text(encoding="utf-8")
+    call_log = calls.read_text(encoding="utf-8")
+    assert "resume" not in call_log
+    assert "worker-validation-revision-1" in call_log
     assert gate_runs == 2
 
 
@@ -8915,11 +8930,13 @@ def test_executor_routes_blocking_review_back_to_worker_session(
         f'printf "%s\\n" "$*" >> "{calls}"\n'
         "mode=worker\n"
         'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
         "  shift || true\n"
         "done\n"
+        'case "$last" in\n'
+        '  */reviewer-*) mode=review;;\n'
+        '  */worker-revision-*) mode=revision;;\n'
+        "esac\n"
         "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
         'if [ "$mode" = "review" ]; then\n'
@@ -8968,8 +8985,8 @@ def test_executor_routes_blocking_review_back_to_worker_session(
     assert "changed after review" in saved.patch_path.read_text(encoding="utf-8")
     assert saved.spec.metadata["worker_thread_id"] == "worker-thread-1"
     call_log = calls.read_text(encoding="utf-8")
-    assert "exec resume --json" in call_log
-    assert "worker-thread-1" in call_log
+    assert "resume" not in call_log
+    assert "worker-thread-1" not in call_log
     events = store.events(task.id)
     assert [event.kind for event in events].count("review.finished") == 2
     assert any(event.kind == "worker.revision_requested" for event in events)
@@ -9091,11 +9108,13 @@ def test_executor_routes_validation_failure_back_to_worker_session(
         f'printf "%s\\n" "$*" >> "{calls}"\n'
         "mode=worker\n"
         'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=validation; fi\n'
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
         "  shift || true\n"
         "done\n"
+        'case "$last" in\n'
+        '  */reviewer-*) mode=review;;\n'
+        '  */worker-validation-revision-*) mode=validation;;\n'
+        "esac\n"
         "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
         'if [ "$mode" = "review" ]; then\n'
@@ -9144,8 +9163,8 @@ def test_executor_routes_validation_failure_back_to_worker_session(
     assert saved.patch_path is not None
     assert "fixed" in saved.patch_path.read_text(encoding="utf-8")
     call_log = calls.read_text(encoding="utf-8")
-    assert "exec resume --json" in call_log
-    assert "worker-thread-1" in call_log
+    assert "resume" not in call_log
+    assert "worker-thread-1" not in call_log
     assert "worker-validation-revision-1" in (
         tmp_path / "validation-last-path.txt"
     ).read_text(encoding="utf-8")
@@ -9511,11 +9530,13 @@ def test_executor_uses_shared_revision_counter_for_validation_and_review(
         f'printf "%s\\n" "$*" >> "{calls}"\n'
         "mode=worker\n"
         'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
         "  shift || true\n"
         "done\n"
+        'case "$last" in\n'
+        '  */reviewer-*) mode=review;;\n'
+        '  */worker-validation-revision-*|*/worker-revision-*) mode=revision;;\n'
+        "esac\n"
         "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
         'if [ "$mode" = "review" ]; then\n'

@@ -138,12 +138,54 @@ class PipelineTrigger(StrEnum):
 
 
 class PipelinePhase(StrEnum):
+    """Coarse phase values accepted by the Plan 002 ledger schema.
+
+    The durable executor also records a finer cursor in its pipeline events.
+    Keeping these values stable preserves compatibility with existing ledger
+    rows and archive validators.
+    """
+
     planning = "planning"
     implementation = "implementation"
     validation = "validation"
     review = "review"
+    provisioned = "provisioned"
+    formality = "formality"
+    repair = "repair"
     integration = "integration"
+    commit_message = "commit_message"
+    commit = "commit"
+    push = "push"
+    ready_to_seal = "ready_to_seal"
     complete = "complete"
+
+
+class PipelineCursorPhase(StrEnum):
+    """Idempotent action cursor used by the durable task pipeline."""
+
+    provisioned = "provisioned"
+    planning = "planning"
+    implementation = "implementation"
+    validation = "validation"
+    review = "review"
+    formality = "formality"
+    repair = "repair"
+    integration = "integration"
+    commit_message = "commit_message"
+    commit = "commit"
+    push = "push"
+    ready_to_seal = "ready_to_seal"
+
+
+class FormalityDisposition(StrEnum):
+    """Disposition assigned to exactly one raw review finding."""
+
+    required = "required"
+    revert = "revert"
+    follow_up = "followUp"
+    followUp = "followUp"
+    reject = "reject"
+    escalate = "escalate"
 
 
 class PipelineState(StrEnum):

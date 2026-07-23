@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -36,6 +38,7 @@ _CLEAN_VALIDATION_SHELL_PREFIX = (
     "--keep-env-var",
     "HOME",
 )
+MAX_VALIDATION_OUTPUT_BYTES = 2 * 1024 * 1024
 
 
 def default_gates(worktree: Path) -> tuple[tuple[str, list[str]], ...]:
@@ -110,13 +113,31 @@ def run_validation(
     output_path = config.logs_dir / task_id / label / filename if label else config.logs_dir / task_id / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
-    result = run_command(
-        command,
-        cwd=cwd,
-        timeout=config.limits.validation_timeout_minutes * 60,
-    )
+    git_dir = run_command(
+        ["git", "rev-parse", "--absolute-git-dir"], cwd=cwd
+    ).stdout.strip()
+    object_store = str(Path(git_dir) / "objects") if git_dir else ""
+    environment = os.environ.copy()
+    if object_store:
+        with tempfile.TemporaryDirectory(prefix="coquic-steward-validation-") as temporary:
+            environment["GIT_OBJECT_DIRECTORY"] = temporary
+            environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(Path(object_store).resolve())
+            result = run_command(
+                command,
+                cwd=cwd,
+                timeout=config.limits.validation_timeout_minutes * 60,
+                env=environment,
+            )
+    else:
+        result = run_command(
+            command,
+            cwd=cwd,
+            timeout=config.limits.validation_timeout_minutes * 60,
+        )
+    stdout = _bounded_output(result.stdout)
+    stderr = _bounded_output(result.stderr)
     output_path.write_text(
-        f"$ {' '.join(command)}\n\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n",
+        f"$ {' '.join(command)}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n",
         encoding="utf-8",
     )
     return ValidationResult(
@@ -125,9 +146,19 @@ def run_validation(
         passed=result.ok,
         exit_code=result.returncode,
         output_path=output_path,
-        summary=(result.stdout or result.stderr).strip()[-1000:],
+        summary=(stdout or stderr).strip()[-1000:],
         started_at=started,
         completed_at=utc_now(),
+    )
+
+
+def _bounded_output(value: str) -> str:
+    if len(value.encode("utf-8", errors="replace")) <= MAX_VALIDATION_OUTPUT_BYTES:
+        return value
+    encoded = value.encode("utf-8", errors="replace")
+    suffix = b"\n[output truncated by Steward validation boundary]\n"
+    return (encoded[: MAX_VALIDATION_OUTPUT_BYTES - len(suffix)] + suffix).decode(
+        "utf-8", errors="replace"
     )
 
 

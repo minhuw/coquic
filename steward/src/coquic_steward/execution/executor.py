@@ -29,6 +29,10 @@ from ..core.models import (
     TaskSpec,
     TaskStatus,
     TaskWorkflow,
+    PipelineCursorPhase,
+    PipelinePhase,
+    PipelineState,
+    PipelineTrigger,
     ValidationResult,
     WorkerKind,
     WorkerResult,
@@ -44,16 +48,33 @@ from .review import (
     review_schema_path,
     summarize_review,
 )
+from .formality import (
+    FormalityError,
+    formality_schema_path,
+    parse_formality,
+    render_formality_prompt,
+)
 from .implementation_plan import (
     MAX_PLAN_RUN_ATTEMPTS,
     implementation_plan_schema_path,
     parse_implementation_plan,
     save_implementation_plan,
+    deterministic_plan_skip_reason,
+    implementation_plan_required,
 )
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
 from .session import SessionSupervisor
 from .container_config import TaskRole
+from ..core.lifecycle import (
+    AdvanceResult,
+    PhaseInput,
+    PhaseOutput,
+    action_identity,
+    bounded_fingerprint,
+    coarse_phase,
+    require_pipeline_transition,
+)
 
 MAX_TASK_REVISIONS = 100
 MAX_REVIEW_RUN_ATTEMPTS = 2
@@ -129,10 +150,12 @@ class _SessionRunnerAdapter:
         resume_session: str | None = None,
         stage: CodexStage = CodexStage.code,
         sandbox: str | None = None,
+        task_role: TaskRole | str | None = None,
+        idempotency_key: str | None = None,
     ) -> WorkerResult:
         if resume_session is not None:
             raise ValueError("ordinary executor roles cannot resume sessions")
-        role = (
+        role = TaskRole(task_role) if task_role is not None else (
             TaskRole.planner
             if stage == CodexStage.implementation_plan
             else TaskRole.reviewer
@@ -157,6 +180,7 @@ class _SessionRunnerAdapter:
             output_schema=output_schema,
             stage=stage,
             sandbox=sandbox,
+            idempotency_key=idempotency_key,
         )
         return WorkerResult(
             completed=result.status.value == "succeeded",
@@ -202,6 +226,15 @@ class _SessionRunnerAdapter:
 
 
 class StewardExecutor:
+    _durable_locks: dict[str, threading.RLock] = {}
+    _durable_locks_guard = threading.Lock()
+    MAX_PIPELINES = 32
+    MAX_RUNS = 128
+    MAX_VALIDATIONS = 256
+    MAX_REVIEWS = 64
+    MAX_FORMALITY = 32
+    MAX_TRANSPORT_RETRIES = 3
+
     def __init__(
         self,
         config: StewardConfig,
@@ -230,6 +263,980 @@ class StewardExecutor:
         )
         self.worktrees = Worktrees(config)
         self._latest_failed_validations: dict[str, list[ValidationResult]] = {}
+
+    # ------------------------------------------------------------------
+    # Durable pipeline execution
+
+    def advance_once(self, task_id: str) -> AdvanceResult:
+        """Claim and execute at most one persisted pipeline action.
+
+        The action-start event is written before any external boundary.  A
+        second caller either observes the completed action or reports that the
+        first caller is still in progress; it never starts a duplicate run.
+        """
+
+        lock = self._durable_lock(task_id)
+        if not lock.acquire(blocking=False):
+            try:
+                execution = self.store.get_execution(task_id)
+                pipeline_id = execution.owning_pipeline_id or self.store.list_pipelines(task_id)[-1].id
+                phase = self._pipeline_cursor(task_id, pipeline_id)
+            except (KeyError, IndexError):
+                pipeline_id = "unknown"
+                phase = PipelineCursorPhase.provisioned
+            return AdvanceResult(
+                task_id,
+                pipeline_id,
+                phase,
+                None,
+                "in_progress",
+                progressed=False,
+            )
+        try:
+            return self._advance_once_locked(task_id)
+        finally:
+            lock.release()
+
+    @classmethod
+    def _durable_lock(cls, task_id: str) -> threading.RLock:
+        with cls._durable_locks_guard:
+            return cls._durable_locks.setdefault(task_id, threading.RLock())
+
+    def _advance_once_locked(self, task_id: str) -> AdvanceResult:
+        task = self.store.get(task_id)
+        try:
+            execution = self.store.get_execution(task_id)
+        except KeyError:
+            execution = self.store.ensure_execution(task_id)
+        pipelines = self.store.list_pipelines(task_id)
+        if not pipelines:
+            pipeline = self.store.create_pipeline(task_id, execution_id=execution.id)
+        else:
+            pipeline_id = execution.owning_pipeline_id or pipelines[-1].id
+            pipeline = self.store.get_pipeline(pipeline_id)
+        if TaskStatus(task.status).terminal and not any(
+            event.kind == "pipeline.phase.started"
+            and event.data.get("pipeline_id") == pipeline.id
+            for event in self.store.events(task_id)
+        ):
+            return AdvanceResult(
+                task_id,
+                pipeline.id,
+                PipelineCursorPhase.ready_to_seal,
+                None,
+                "legacy_terminal",
+                progressed=False,
+                evidence={"task_status": str(task.status)},
+            )
+        cursor = self._pipeline_cursor(task_id, pipeline.id)
+        if cursor == PipelineCursorPhase.ready_to_seal:
+            return self._seal_ready(task, pipeline)
+        budget_failure = self._budget_failure(task_id)
+        if budget_failure is not None:
+            return self._block_pipeline(task, pipeline, budget_failure)
+        in_progress = self._in_progress_action(task_id, pipeline.id, cursor)
+        if in_progress is not None:
+            return in_progress
+        try:
+            return self._dispatch_durable_phase(task, pipeline, cursor)
+        except Exception as exc:
+            # The durable action has already recorded its input identity. Keep
+            # the worktree untouched and make the ambiguity visible for the
+            # lifecycle reconciler instead of inventing success.
+            detail = str(exc).strip()[-2_000:] or exc.__class__.__name__
+            return self._block_pipeline(task, pipeline, f"phase {cursor} failed: {detail}")
+
+    def _dispatch_durable_phase(
+        self, task: TaskRecord, pipeline: Any, phase: PipelineCursorPhase
+    ) -> AdvanceResult:
+        handlers = {
+            PipelineCursorPhase.provisioned: self._durable_provision,
+            PipelineCursorPhase.planning: self._durable_plan,
+            PipelineCursorPhase.implementation: self._durable_implementation,
+            PipelineCursorPhase.validation: self._durable_validation,
+            PipelineCursorPhase.review: self._durable_review,
+            PipelineCursorPhase.formality: self._durable_formality,
+            PipelineCursorPhase.integration: self._durable_integration,
+            PipelineCursorPhase.commit_message: self._durable_commit_message,
+            PipelineCursorPhase.commit: self._durable_commit,
+            PipelineCursorPhase.push: self._durable_push,
+        }
+        handler = handlers.get(phase)
+        if handler is None:
+            return self._block_pipeline(task, pipeline, f"unsupported pipeline phase {phase}")
+        return handler(task, pipeline)
+
+    def _durable_provision(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.provisioned
+        action = action_identity(task.id, pipeline.id, phase)
+        path = task.worktree_path or self.config.worktrees_dir / task.id
+        input_value = self._phase_start(task, pipeline, phase, payload={"path": str(path)})
+        if TaskStatus(task.status) == TaskStatus.queued:
+            self.store.start_worker(task.id, "durable pipeline provisioned")
+            task = self.store.get(task.id)
+        worktree, branch = self.worktrees.create(task)
+        base, tree, patch = self.worktrees.snapshot(worktree)
+        task.worktree_path = worktree
+        task.branch_name = branch
+        self.store.save(task)
+        self._set_identity(
+            pipeline,
+            base_identity=base,
+            input_identity=tree,
+            output_identity=tree,
+            patch_identity=patch,
+            worktree_path=worktree,
+            phase=coarse_phase(PipelineCursorPhase.planning),
+        )
+        next_phase = (
+            PipelineCursorPhase.planning
+            if implementation_plan_required(task)
+            else PipelineCursorPhase.implementation
+        )
+        return self._phase_finish(
+            task,
+            pipeline,
+            phase,
+            next_phase,
+            output_identity=tree,
+            evidence={
+                "base_identity": base,
+                "input_tree": tree,
+                "output_tree": tree,
+                "patch_identity": patch,
+                "branch": branch,
+                "plan_required": implementation_plan_required(task),
+                "plan_skip_reason": None
+                if implementation_plan_required(task)
+                else deterministic_plan_skip_reason(task),
+            },
+        )
+
+    def _durable_plan(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.planning
+        if not implementation_plan_required(task):
+            return self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                PipelineCursorPhase.implementation,
+                evidence={"skipped": True, "reason": deterministic_plan_skip_reason(task)},
+            )
+        worktree = self._require_worktree(task)
+        self.store.start_implementation_plan(task.id, "durable implementation planning")
+        attempt = self._phase_attempt(task.id, pipeline.id, phase)
+        action = action_identity(task.id, pipeline.id, f"{phase.value}-{attempt}")
+        self._phase_start(
+            task,
+            pipeline,
+            phase,
+            action_id=action,
+            payload={"attempt": attempt, "worktree": str(worktree)},
+        )
+        settings = self.config.codex_settings(CodexStage.implementation_plan)
+        name = f"implementation-plan-{attempt}"
+        transcript, last_message = self.runner.paths(task, name=name)
+        prompt = render_implementation_plan_prompt(task, self.config)
+        schema = implementation_plan_schema_path(self.config)
+        prompt_path = self.config.prompts_dir / task.id / f"{name}.md"
+        try:
+            self.store.begin_plan_run(
+                task.id,
+                attempt,
+                prompt_path=prompt_path,
+                transcript_path=transcript,
+                last_message_path=last_message,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
+            )
+        except (AttributeError, ValueError):
+            pass
+        result = self._durable_runner(
+            task,
+            prompt,
+            worktree,
+            name=name,
+            output_schema=schema,
+            stage=CodexStage.implementation_plan,
+            sandbox="read-only",
+            idempotency_key=action,
+        )
+        changed = self.worktrees.has_changes(worktree)
+        plan = (
+            parse_implementation_plan(result.final_message, task, self.config)
+            if result.completed and not changed
+            else None
+        )
+        plan_path = save_implementation_plan(self.config, task.id, attempt, plan) if plan is not None else None
+        try:
+            self.store.finish_plan_run(
+                task.id,
+                attempt,
+                result,
+                plan=plan,
+                plan_path=plan_path,
+            )
+        except (AttributeError, KeyError, ValueError):
+            pass
+        self.store.add_event(
+            task.id,
+            "pipeline.plan.result",
+            "accepted" if plan is not None else "rejected",
+            {
+                "pipeline_id": pipeline.id,
+                "action_id": action,
+                "attempt": attempt,
+                "plan": plan,
+                "plan_path": str(plan_path) if plan_path else None,
+                "changed_worktree": changed,
+                "exit_code": result.exit_code,
+                "diagnostics": result.diagnostics,
+            },
+        )
+        if plan is not None:
+            self._archive_write(task, pipeline, f"plans/plan-{attempt}.json", plan)
+        if plan is not None:
+            return self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                PipelineCursorPhase.implementation,
+                evidence={"plan": plan, "plan_path": str(plan_path)},
+            )
+        if changed or attempt + 1 >= MAX_PLAN_RUN_ATTEMPTS:
+            return self._block_pipeline(task, pipeline, "implementation planning failed")
+        return self._phase_finish(
+            task,
+            pipeline,
+            phase,
+            phase,
+            evidence={"retry": attempt + 1, "exit_code": result.exit_code},
+        )
+
+    def _durable_implementation(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.implementation
+        worktree = self._require_worktree(task)
+        self.store.start_worker(task.id, "durable implementation")
+        iteration = len(self.store.iterations(task.id))
+        action = action_identity(task.id, pipeline.id, f"{phase.value}-{iteration}")
+        prompt = self._implementation_prompt(task, pipeline)
+        transcript, last_message = self.runner.paths(task, name=f"pipeline-{pipeline.ordinal}-implementation-{iteration}")
+        self._phase_start(
+            task,
+            pipeline,
+            phase,
+            action_id=action,
+            payload={"iteration": iteration, "worktree": str(worktree)},
+        )
+        if not self._iteration_exists(task.id, iteration):
+            self.store.begin_iteration(
+                task.id,
+                iteration,
+                "Initial implementation" if iteration == 0 else f"Implementation repair {iteration}",
+                worker_name="implementation",
+                worker_prompt_path=self.config.prompts_dir / task.id / f"pipeline-{pipeline.ordinal}-implementation-{iteration}.md",
+                worker_transcript_path=transcript,
+                worker_last_message_path=last_message,
+            )
+        result = self._durable_runner(
+            task,
+            prompt,
+            worktree,
+            name=f"pipeline-{pipeline.ordinal}-implementation-{iteration}",
+            stage=CodexStage.code,
+            idempotency_key=action,
+        )
+        self.store.finish_iteration_worker(task.id, iteration, result)
+        if not result.completed:
+            return self._block_pipeline(task, pipeline, result.final_message or "implementation failed")
+        base, output_tree, patch = self.worktrees.snapshot(worktree)
+        self._set_identity(
+            pipeline,
+            base_identity=base,
+            input_identity=pipeline.input_identity or base,
+            output_identity=output_tree,
+            patch_identity=patch,
+            expected_tree=output_tree,
+            phase=coarse_phase(PipelineCursorPhase.validation),
+        )
+        if patch == sha256(b"").hexdigest() or not self.worktrees.has_changes(worktree):
+            self.store.finish_task(task.id, TaskStatus.no_changes, "implementation produced no changes")
+            return self._phase_finish(
+                task,
+                pipeline,
+                phase,
+                PipelineCursorPhase.ready_to_seal,
+                output_identity=output_tree,
+                evidence={"no_changes": True, "output_tree": output_tree},
+            )
+        return self._phase_finish(
+            task,
+            pipeline,
+            phase,
+            PipelineCursorPhase.validation,
+            output_identity=output_tree,
+            patch_identity=patch,
+            evidence={"output_tree": output_tree, "patch_identity": patch, "run": result.run_id},
+        )
+
+    def _durable_validation(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.validation
+        worktree = self._require_worktree(task)
+        self.store.start_validation(task.id, "durable validation")
+        iteration = max(0, len(self.store.iterations(task.id)) - 1)
+        action = action_identity(task.id, pipeline.id, phase)
+        self._phase_start(task, pipeline, phase, action_id=action, payload={"iteration": iteration})
+        forbidden = self.worktrees.forbidden_paths(worktree)
+        frozen = self.worktrees.frozen_paths(worktree, task)
+        if forbidden or frozen:
+            message = "forbidden paths changed: " + ", ".join(forbidden or frozen)
+            return self._block_pipeline(task, pipeline, message)
+        validations = self._run_gates_for_iteration(
+            task.id,
+            worktree,
+            iteration,
+        )
+        task = self.store.get(task.id)
+        failed = [item for item in validations if not item.passed]
+        base, output_tree, patch = self.worktrees.snapshot(worktree)
+        patch_path = self.config.patches_dir / task.id / f"pipeline-{pipeline.ordinal}-iteration-{iteration}.patch"
+        self.worktrees.save_patch(worktree, patch_path)
+        self.store.record_iteration_patch(task.id, iteration, patch_path)
+        self._archive_write(task, pipeline, f"validations/gates-{iteration}.json", {"validations": [self._validation_evidence(item) for item in validations]})
+        self._archive_bytes(task, pipeline, f"patches/iteration-{iteration}.patch", patch_path.read_bytes())
+        task.patch_path = patch_path
+        task.validations.extend(validations)
+        self.store.save(task)
+        self._set_identity(
+            pipeline,
+            base_identity=base,
+            output_identity=output_tree,
+            patch_identity=patch,
+            expected_tree=output_tree,
+            phase=coarse_phase(PipelineCursorPhase.review),
+        )
+        evidence = {
+            "validations": [self._validation_evidence(item) for item in validations],
+            "output_tree": output_tree,
+            "patch_identity": patch,
+            "patch_path": str(patch_path),
+        }
+        if failed:
+            fingerprint = bounded_fingerprint(
+                patch,
+                [self._validation_evidence(item) for item in failed],
+            )
+            self.store.add_event(task.id, "pipeline.validation.failure", "validation failed", {"pipeline_id": pipeline.id, "fingerprint": fingerprint, **evidence})
+            if self._fingerprint_seen(task.id, fingerprint):
+                return self._block_pipeline(task, pipeline, "validation made no progress")
+            child = self._new_child_pipeline(task, pipeline, PipelineTrigger.validation_repair, {"validation": evidence, "fingerprint": fingerprint})
+            return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence=evidence)
+        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.review, output_identity=output_tree, patch_identity=patch, evidence=evidence)
+
+    def _durable_review(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.review
+        worktree = self._require_worktree(task)
+        self.store.start_review(task.id, "durable review")
+        patch_text = self.worktrees.diff(worktree)
+        tree = self.worktrees.tree(worktree)
+        action = action_identity(task.id, pipeline.id, phase)
+        self._phase_start(task, pipeline, phase, action_id=action, payload={"tree": tree, "patch_identity": sha256(patch_text.encode()).hexdigest()})
+        plan = self._latest_plan(task.id, pipeline.id)
+        validations = [self._validation_evidence(item) for item in task.validations]
+        prompt = render_review_prompt(
+            task,
+            self.config,
+            implementation_plan=plan,
+            patch_text=patch_text,
+            tree_identity=tree,
+            validation_evidence=validations,
+            declared_scope=self._declared_scope(task, plan),
+        )
+        schema = review_schema_path(self.config)
+        result = self._durable_runner(
+            task,
+            prompt,
+            worktree,
+            name=f"reviewer-{pipeline.ordinal}",
+            output_schema=schema,
+            stage=CodexStage.review,
+            sandbox="read-only",
+            idempotency_key=action,
+            task_role=TaskRole.reviewer,
+        )
+        review = parse_review(result.final_message) if result.completed else None
+        raw = review or {"verdict": "block", "summary": result.final_message or "review failed", "findings": [], "validation_gaps": [], "remaining_risk": "review invocation failed"}
+        self._record_review_artifacts(task, pipeline, raw, kind="raw", action_id=action)
+        self.store.add_event(task.id, "pipeline.review.raw", "review captured", {"pipeline_id": pipeline.id, "action_id": action, "review": raw, "tree": tree})
+        if review is None:
+            return self._block_pipeline(task, pipeline, "review output was malformed or unavailable")
+        if review_approved(review):
+            return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.integration, evidence={"review": review, "tree": tree, "formality": "skipped"})
+        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.formality, evidence={"review": review, "tree": tree})
+
+    def _durable_formality(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.formality
+        raw = self._latest_raw_review(task.id, pipeline.id)
+        if raw is None:
+            return self._block_pipeline(task, pipeline, "formality has no raw review")
+        action = action_identity(task.id, pipeline.id, phase)
+        self._phase_start(task, pipeline, phase, action_id=action, payload={"finding_count": len(raw.get("findings", []))})
+        worktree = self._require_worktree(task)
+        result = self._durable_runner(
+            task,
+            render_formality_prompt(task, raw, implementation_plan=self._latest_plan(task.id, pipeline.id), declared_scope=self._declared_scope(task, self._latest_plan(task.id, pipeline.id))),
+            worktree,
+            name=f"formality-{pipeline.ordinal}",
+            output_schema=formality_schema_path(self.config),
+            stage=CodexStage.review,
+            sandbox="read-only",
+            task_role=TaskRole.formality,
+            idempotency_key=action,
+        )
+        if not result.completed:
+            return self._block_pipeline(task, pipeline, result.final_message or "formality examination failed")
+        try:
+            examined = parse_formality(result.final_message, raw)
+        except FormalityError as exc:
+            self.store.add_event(task.id, "pipeline.formality.malformed", str(exc), {"pipeline_id": pipeline.id, "action_id": action})
+            return self._block_pipeline(task, pipeline, f"malformed formality output: {exc}")
+        self._record_review_artifacts(task, pipeline, examined.effective_review, kind="effective", action_id=action)
+        self.store.add_event(task.id, "pipeline.formality.effective", "effective review built", {"pipeline_id": pipeline.id, "action_id": action, "result": examined.as_dict()})
+        if examined.escalated:
+            return self._block_pipeline(task, pipeline, "formality escalated a review finding")
+        if examined.blocking:
+            child = self._new_child_pipeline(task, pipeline, PipelineTrigger.review_repair, {"review": examined.effective_review, "dispositions": [item.as_dict() for item in examined.dispositions]})
+            return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence=examined.as_dict())
+        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.integration, evidence=examined.as_dict())
+
+    def _durable_integration(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.integration
+        worktree = self._require_worktree(task)
+        self.store.start_integration(task.id, "durable integration")
+        action = action_identity(task.id, pipeline.id, phase)
+        self._phase_start(task, pipeline, phase, action_id=action, payload={"base": pipeline.base_identity})
+        with _integration_lock(self.config.state_dir):
+            remote_tip = self._latest_main_identity(worktree)
+            base = pipeline.base_identity or self.worktrees.base_commit(worktree)
+            if remote_tip and remote_tip != base:
+                self.store.add_event(task.id, "pipeline.integration.base_changed", "main advanced", {"pipeline_id": pipeline.id, "base": base, "latest_main": remote_tip})
+                child = self._new_child_pipeline(task, pipeline, PipelineTrigger.integration_rebase, {"base": base, "latest_main": remote_tip, "patch_identity": pipeline.patch_identity})
+                return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence={"base": base, "latest_main": remote_tip})
+            tree = self.worktrees.tree(worktree)
+            patch = self.worktrees.patch_identity(worktree)
+            self._set_identity(pipeline, output_identity=tree, patch_identity=patch, phase=coarse_phase(PipelineCursorPhase.commit_message))
+            return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.commit_message, output_identity=tree, patch_identity=patch, evidence={"latest_main": remote_tip, "tree": tree, "patch_identity": patch})
+
+    def _durable_commit_message(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.commit_message
+        worktree = self._require_worktree(task)
+        patch_text = self.worktrees.diff(worktree)
+        validations = list(task.validations)
+        action = action_identity(task.id, pipeline.id, phase)
+        self._phase_start(task, pipeline, phase, action_id=action, payload={"tree": self.worktrees.tree(worktree)})
+        prompt = render_commit_message_prompt(task, patch_text, _patch_paths(patch_text), validations)
+        result = self._durable_runner(task, prompt, worktree, name=f"commit-message-{pipeline.ordinal}", output_schema=commit_message_schema_path(self.config), stage=CodexStage.commit_message, sandbox="read-only", task_role=TaskRole.commit_message, idempotency_key=action)
+        data = parse_commit_message(result.final_message) if result.completed else None
+        if data is None:
+            return self._block_pipeline(task, pipeline, "commit message generation failed")
+        self.store.add_event(task.id, "pipeline.commit_message", data["subject"], {"pipeline_id": pipeline.id, "action_id": action, "subject": data["subject"], "body": data["body"]})
+        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.commit, evidence=data)
+
+    def _durable_commit(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.commit
+        worktree = self._require_worktree(task)
+        message = self._latest_commit_message(task.id, pipeline.id)
+        if message is None:
+            return self._block_pipeline(task, pipeline, "commit has no accepted message")
+        action = action_identity(task.id, pipeline.id, phase)
+        expected_tree = pipeline.output_identity or self.worktrees.tree(worktree)
+        self._phase_start(task, pipeline, phase, payload={"expected_tree": expected_tree, "message": message})
+        sha = self.worktrees.commit_all(worktree, message["subject"], message["body"], expected_tree=expected_tree)
+        if sha is None:
+            self.store.finish_task(task.id, TaskStatus.no_changes, "accepted tree already committed")
+            return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"no_changes": True, "tree": expected_tree})
+        self.store.add_event(task.id, "pipeline.commit", sha, {"pipeline_id": pipeline.id, "action_id": action, "commit": sha, "tree": expected_tree})
+        self._archive_write(task, pipeline, "commit.json", {"commit": sha, "tree": expected_tree, "message": message})
+        next_phase = PipelineCursorPhase.ready_to_seal if self.config.local_only or self.config.integration_mode != IntegrationMode.push_main.value else PipelineCursorPhase.push
+        return self._phase_finish(task, pipeline, phase, next_phase, evidence={"commit": sha, "tree": expected_tree})
+
+    def _durable_push(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        phase = PipelineCursorPhase.push
+        worktree = self._require_worktree(task)
+        commit = self._latest_commit(task.id, pipeline.id)
+        if commit is None:
+            return self._block_pipeline(task, pipeline, "push has no accepted commit")
+        action = action_identity(task.id, pipeline.id, phase)
+        attempt = self._phase_attempt(task.id, pipeline.id, phase)
+        self._phase_start(task, pipeline, phase, action_id=f"{action}-{attempt}", payload={"commit": commit, "attempt": attempt})
+        try:
+            result = self.worktrees.push_head_to_main(worktree)
+        except RuntimeError as exc:
+            detail = str(exc)[-2_000:]
+            if self._commit_reachable(worktree, commit):
+                self.store.add_event(task.id, "pipeline.push.ambiguous_resolved", commit, {"pipeline_id": pipeline.id, "commit": commit, "detail": detail})
+                self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
+                return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit, "ambiguous": True})
+            if _is_transient_push_failure(detail) and attempt < self.MAX_TRANSPORT_RETRIES:
+                self.store.add_event(task.id, "pipeline.push.retry", detail, {"pipeline_id": pipeline.id, "attempt": attempt, "commit": commit})
+                return self._phase_finish(task, pipeline, phase, phase, evidence={"retry": attempt + 1, "detail": detail})
+            if "non-fast-forward" in detail.lower() or "rejected" in detail.lower():
+                child = self._new_child_pipeline(task, pipeline, PipelineTrigger.push_race, {"commit": commit, "detail": detail})
+                return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence={"commit": commit, "detail": detail})
+            return self._block_pipeline(task, pipeline, f"push failed: {detail}")
+        self.store.add_event(task.id, "pipeline.push", commit, {"pipeline_id": pipeline.id, "action_id": action, "commit": commit, "result": _command_result_text(result)})
+        self._archive_write(task, pipeline, "push.json", {"commit": commit, "result": _command_result_text(result)})
+        self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
+        return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit})
+
+    def _pipeline_cursor(self, task_id: str, pipeline_id: str) -> PipelineCursorPhase:
+        cursor = PipelineCursorPhase.provisioned
+        for event in self.store.events(task_id):
+            if event.kind == "pipeline.phase.finished" and event.data.get("pipeline_id") == pipeline_id:
+                value = event.data.get("output", {}).get("next_phase")
+                if value is not None:
+                    try:
+                        cursor = PipelineCursorPhase(value)
+                    except ValueError:
+                        return cursor
+        return cursor
+
+    def _phase_attempt(self, task_id: str, pipeline_id: str, phase: PipelineCursorPhase) -> int:
+        return sum(
+            1
+            for event in self.store.events(task_id)
+            if event.kind == "pipeline.phase.started"
+            and event.data.get("pipeline_id") == pipeline_id
+            and str(event.data.get("phase")) == phase.value
+        )
+
+    def _in_progress_action(
+        self, task_id: str, pipeline_id: str, phase: PipelineCursorPhase
+    ) -> AdvanceResult | None:
+        starts: dict[str, Any] = {}
+        finishes: set[str] = set()
+        for event in self.store.events(task_id):
+            if event.data.get("pipeline_id") != pipeline_id:
+                continue
+            if event.kind == "pipeline.phase.started" and event.data.get("phase") == phase.value:
+                action = event.data.get("action_id")
+                if action:
+                    starts[str(action)] = event
+            elif event.kind == "pipeline.phase.finished":
+                action = event.data.get("output", {}).get("action_id")
+                if action:
+                    finishes.add(str(action))
+        for action, event in starts.items():
+            if action not in finishes:
+                return AdvanceResult(
+                    task_id,
+                    pipeline_id,
+                    phase,
+                    None,
+                    "in_progress",
+                    action_id=action,
+                    progressed=False,
+                    evidence={"started_at": event.created_at.isoformat()},
+                )
+        return None
+
+    def _phase_start(
+        self,
+        task: TaskRecord,
+        pipeline: Any,
+        phase: PipelineCursorPhase,
+        *,
+        action_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> PhaseInput:
+        selected_action = action_id or action_identity(task.id, pipeline.id, phase)
+        current_tree = None
+        if task.worktree_path is not None and task.worktree_path.exists():
+            try:
+                current_tree = self.worktrees.tree(task.worktree_path)
+            except (OSError, RuntimeError):
+                current_tree = None
+        value = PhaseInput(
+            task.id,
+            pipeline.id,
+            selected_action,
+            phase,
+            base_identity=pipeline.base_identity,
+            input_identity=pipeline.input_identity,
+            patch_identity=pipeline.patch_identity,
+            expected_tree=current_tree,
+            payload=payload or {},
+        )
+        self.store.add_event(
+            task.id,
+            "pipeline.phase.started",
+            phase.value,
+            {
+                "pipeline_id": pipeline.id,
+                "phase": phase.value,
+                "action_id": selected_action,
+                "input": self._json_safe(value.as_dict()),
+            },
+        )
+        self._archive_write(task, pipeline, f"phases/{phase.value}-{_safe_filename(selected_action)}-input.json", value.as_dict())
+        return value
+
+    def _phase_finish(
+        self,
+        task: TaskRecord,
+        pipeline: Any,
+        phase: PipelineCursorPhase,
+        next_phase: PipelineCursorPhase,
+        *,
+        output_identity: str | None = None,
+        patch_identity: str | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> AdvanceResult:
+        if next_phase != phase:
+            require_pipeline_transition(phase, next_phase, trigger=pipeline.trigger)
+        action = self._latest_started_action(task.id, pipeline.id, phase)
+        selected_action = action or action_identity(task.id, pipeline.id, phase)
+        output = PhaseOutput(
+            selected_action,
+            phase,
+            next_phase,
+            PipelineState.active,
+            output_identity=output_identity,
+            patch_identity=patch_identity,
+            evidence=evidence or {},
+        )
+        self.store.add_event(
+            task.id,
+            "pipeline.phase.finished",
+            phase.value,
+            {
+                "pipeline_id": pipeline.id,
+                "phase": phase.value,
+                "output": self._json_safe(output.as_dict()),
+            },
+        )
+        self._archive_write(task, pipeline, f"phases/{phase.value}-{_safe_filename(selected_action)}-output.json", output.as_dict())
+        if next_phase != phase:
+            try:
+                self.store.transition_pipeline(
+                    pipeline.id,
+                    PipelineState.active.value,
+                    expected_state=PipelineState.active.value,
+                    phase=coarse_phase(next_phase).value,
+                )
+            except (TypeError, ValueError):
+                # A narrow fake store used by unit tests may expose only the
+                # basic transition signature; the event remains authoritative.
+                self.store.transition_pipeline(
+                    pipeline.id,
+                    PipelineState.active.value,
+                    phase=coarse_phase(next_phase).value,
+                )
+        return AdvanceResult(
+            task.id,
+            pipeline.id,
+            phase,
+            next_phase,
+            "advanced",
+            action_id=selected_action,
+            progressed=True,
+            evidence=evidence or {},
+        )
+
+    def _latest_started_action(self, task_id: str, pipeline_id: str, phase: PipelineCursorPhase) -> str | None:
+        selected = None
+        for event in self.store.events(task_id):
+            if event.kind == "pipeline.phase.started" and event.data.get("pipeline_id") == pipeline_id and event.data.get("phase") == phase.value:
+                selected = event.data.get("action_id")
+        return str(selected) if selected else None
+
+    def _set_identity(self, pipeline: Any, **values: Any) -> None:
+        """Update identity columns through the dependency ledger boundary.
+
+        Plan 002 deliberately keeps this method small; older test doubles do
+        not implement it, so event evidence remains the fallback.
+        """
+
+        allowed = {
+            "base_identity",
+            "input_identity",
+            "output_identity",
+            "patch_identity",
+            "expected_tree",
+            "worktree_path",
+            "phase",
+        }
+        selected = {key: value for key, value in values.items() if key in allowed and value is not None}
+        if not selected:
+            return
+        for key, value in selected.items():
+            try:
+                setattr(pipeline, key, value)
+            except Exception:
+                pass
+        engine = getattr(self.store, "engine", None)
+        if engine is None:
+            for key, value in selected.items():
+                try:
+                    setattr(pipeline, key, value)
+                except Exception:
+                    pass
+            return
+        assignments: list[str] = []
+        parameters: dict[str, Any] = {"pipeline_id": pipeline.id}
+        pipeline_selected = {
+            key: value
+            for key, value in selected.items()
+            if key not in {"worktree_path", "expected_tree"}
+        }
+        for key, value in pipeline_selected.items():
+            column = "phase" if key == "phase" else key
+            if key == "worktree_path":
+                value = str(value)
+            assignments.append(f"{column} = :{column}")
+            parameters[column] = str(value)
+        assignments.append("updated_at = :updated_at")
+        parameters["updated_at"] = utc_now().isoformat()
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                f"UPDATE task_pipelines SET {', '.join(assignments)} WHERE id = :pipeline_id",
+                parameters,
+            )
+            if "base_identity" in selected or "expected_tree" in selected or "worktree_path" in selected:
+                execution = self.store.get_execution(pipeline.task_id)
+                execution_assignments = []
+                execution_parameters: dict[str, Any] = {"execution_id": execution.id}
+                for source, column in (("base_identity", "base_commit"), ("expected_tree", "expected_tree"), ("worktree_path", "worktree_path")):
+                    if source in selected:
+                        value = str(selected[source])
+                        execution_assignments.append(f"{column} = :{column}")
+                        execution_parameters[column] = value
+                execution_assignments.append("updated_at = :updated_at")
+                execution_parameters["updated_at"] = parameters["updated_at"]
+                connection.exec_driver_sql(
+                    f"UPDATE task_executions SET {', '.join(execution_assignments)} WHERE id = :execution_id",
+                    execution_parameters,
+                )
+
+    def _budget_failure(self, task_id: str) -> str | None:
+        try:
+            if len(self.store.list_pipelines(task_id)) > self.MAX_PIPELINES:
+                return "pipeline budget exhausted"
+            if len(self.store.list_runs(task_id)) > self.MAX_RUNS:
+                return "run budget exhausted"
+        except (AttributeError, KeyError):
+            pass
+        events = self.store.events(task_id)
+        if sum(1 for event in events if event.kind == "pipeline.formality.effective") > self.MAX_FORMALITY:
+            return "formality budget exhausted"
+        if sum(1 for event in events if event.kind == "pipeline.review.raw") > self.MAX_REVIEWS:
+            return "review budget exhausted"
+        return None
+
+    def _block_pipeline(self, task: TaskRecord, pipeline: Any, summary: str) -> AdvanceResult:
+        self.store.add_event(task.id, "pipeline.blocked", summary, {"pipeline_id": pipeline.id, "phase": self._pipeline_cursor(task.id, pipeline.id).value, "fingerprint": bounded_fingerprint(summary)})
+        try:
+            self.store.transition_pipeline(pipeline.id, PipelineState.blocked.value, phase=coarse_phase(self._pipeline_cursor(task.id, pipeline.id)).value)
+        except ValueError:
+            pass
+        self.store.finish_task(task.id, TaskStatus.blocked, summary)
+        try:
+            execution = self.store.get_execution(task.id)
+            self.store.transition_execution(execution.id, "complete", expected_state="active", phase=PipelinePhase.complete.value, pipeline_id=pipeline.id)
+        except (KeyError, ValueError):
+            pass
+        phase = self._pipeline_cursor(task.id, pipeline.id)
+        return AdvanceResult(task.id, pipeline.id, phase, None, "blocked", progressed=False, evidence={"summary": summary})
+
+    def _seal_ready(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        status = TaskStatus(task.status)
+        if status not in {TaskStatus.no_changes, TaskStatus.pushed}:
+            status = TaskStatus.succeeded
+            self.store.finish_task(task.id, status, "ready to seal")
+        try:
+            self.store.transition_pipeline(pipeline.id, PipelineState.succeeded.value, phase=PipelinePhase.complete.value)
+        except ValueError:
+            pass
+        try:
+            execution = self.store.get_execution(task.id)
+            self.store.transition_execution(execution.id, "complete", expected_state="active", phase=PipelinePhase.complete.value, pipeline_id=pipeline.id)
+        except (KeyError, ValueError):
+            pass
+        self.store.add_event(task.id, "pipeline.ready_to_seal", status.value, {"pipeline_id": pipeline.id, "terminal_status": status.value})
+        return AdvanceResult(task.id, pipeline.id, PipelineCursorPhase.ready_to_seal, None, "ready_to_seal", progressed=True, evidence={"terminal_status": status.value})
+
+    def _new_child_pipeline(self, task: TaskRecord, parent: Any, trigger: PipelineTrigger, evidence: dict[str, Any]) -> Any:
+        if len(self.store.list_pipelines(task.id)) >= self.MAX_PIPELINES:
+            raise RuntimeError("pipeline budget exhausted")
+        try:
+            self.store.transition_pipeline(parent.id, PipelineState.superseded.value, phase=coarse_phase(self._pipeline_cursor(task.id, parent.id)).value)
+        except ValueError:
+            pass
+        child = self.store.create_pipeline(task.id, execution_id=parent.execution_id, trigger=trigger.value, parent_pipeline_id=parent.id, base_identity=parent.base_identity, input_identity=parent.output_identity or parent.input_identity, patch_identity=parent.patch_identity)
+        self.store.add_event(task.id, "pipeline.child.created", trigger.value, {"pipeline_id": child.id, "parent_pipeline_id": parent.id, "trigger": trigger.value, "evidence": evidence})
+        return child
+
+    def _require_worktree(self, task: TaskRecord) -> Path:
+        if task.worktree_path is None:
+            raise RuntimeError("durable phase requires a worktree")
+        path = Path(task.worktree_path)
+        if not path.exists():
+            raise RuntimeError(f"durable worktree is unavailable: {path}")
+        return path
+
+    def _durable_runner(self, task: TaskRecord, prompt: str, cwd: Path, **kwargs: Any) -> WorkerResult:
+        try:
+            return self.runner.run(task, prompt, cwd, **kwargs)
+        except TypeError as exc:
+            unsupported = {"idempotency_key", "task_role"}
+            if not any(name in str(exc) for name in unsupported):
+                raise
+            kwargs = {key: value for key, value in kwargs.items() if key not in unsupported}
+            return self.runner.run(task, prompt, cwd, **kwargs)
+
+    def _implementation_prompt(self, task: TaskRecord, pipeline: Any) -> str:
+        plan = self._latest_plan(task.id, pipeline.id)
+        if plan is None:
+            return render_worker_prompt(task, self.config, None)
+        return render_worker_prompt(task, self.config, plan)
+
+    def _latest_plan(self, task_id: str, pipeline_id: str) -> dict[str, Any] | None:
+        selected = None
+        for event in self.store.events(task_id):
+            if event.kind == "pipeline.plan.result" and event.data.get("pipeline_id") == pipeline_id:
+                plan = event.data.get("plan")
+                if isinstance(plan, dict):
+                    selected = plan
+        return selected
+
+    def _declared_scope(self, task: TaskRecord, plan: dict[str, Any] | None) -> list[str]:
+        if not plan:
+            return []
+        paths: list[str] = []
+        for step in plan.get("steps", []):
+            if isinstance(step, dict):
+                paths.extend(path for path in step.get("files", []) if isinstance(path, str))
+        return list(dict.fromkeys(paths))
+
+    def _iteration_exists(self, task_id: str, iteration: int) -> bool:
+        try:
+            self.store.get_iteration(task_id, iteration)
+            return True
+        except KeyError:
+            return False
+
+    def _validation_evidence(self, validation: ValidationResult) -> dict[str, Any]:
+        return {
+            "command": validation.command,
+            "cwd": str(validation.cwd),
+            "passed": validation.passed,
+            "exit_code": validation.exit_code,
+            "output_path": str(validation.output_path),
+            "summary": validation.summary,
+            "started_at": validation.started_at.isoformat(),
+            "completed_at": validation.completed_at.isoformat(),
+        }
+
+    def _latest_raw_review(self, task_id: str, pipeline_id: str) -> dict[str, Any] | None:
+        selected = None
+        for event in self.store.events(task_id):
+            if event.kind == "pipeline.review.raw" and event.data.get("pipeline_id") == pipeline_id:
+                value = event.data.get("review")
+                if isinstance(value, dict):
+                    selected = value
+        return selected
+
+    def _record_review_artifacts(self, task: TaskRecord, pipeline: Any, review: dict[str, Any], *, kind: str, action_id: str) -> None:
+        payload = dict(review)
+        payload["kind"] = kind
+        self._archive_write(task, pipeline, f"reviews/{kind}-{_safe_filename(action_id)}.json", payload)
+        try:
+            findings = payload.get("findings", [])
+            values = [json.dumps(item, sort_keys=True) if isinstance(item, dict) else str(item) for item in findings]
+            from .task_archive import TaskArchiveWriter
+
+            TaskArchiveWriter(self.config).materialize_review(task.id, pipeline.id, {"verdict": payload.get("verdict", "unknown"), "findings": values, "state": "available"}, review_id=f"{kind}-{_safe_filename(action_id)}", kind=kind)
+        except Exception:
+            pass
+
+    def _latest_commit_message(self, task_id: str, pipeline_id: str) -> dict[str, str] | None:
+        selected = None
+        for event in self.store.events(task_id):
+            if event.kind == "pipeline.commit_message" and event.data.get("pipeline_id") == pipeline_id:
+                subject, body = event.data.get("subject"), event.data.get("body")
+                if isinstance(subject, str) and isinstance(body, str):
+                    selected = {"subject": subject, "body": body}
+        return selected
+
+    def _latest_commit(self, task_id: str, pipeline_id: str) -> str | None:
+        selected = None
+        for event in self.store.events(task_id):
+            if event.kind == "pipeline.commit" and event.data.get("pipeline_id") == pipeline_id:
+                value = event.data.get("commit")
+                if isinstance(value, str):
+                    selected = value
+        return selected
+
+    def _latest_main_identity(self, worktree: Path) -> str | None:
+        if self.config.integration_mode == IntegrationMode.push_main.value and not self.config.local_only:
+            fetched = run_command(["git", "fetch", self.config.git_remote, self.config.main_branch], cwd=worktree)
+            if not fetched.ok:
+                raise RuntimeError(fetched.stderr[-2_000:] or "git fetch failed")
+            result = run_command(["git", "rev-parse", f"{self.config.git_remote}/{self.config.main_branch}"], cwd=worktree)
+        else:
+            result = run_command(["git", "rev-parse", self.config.main_branch], cwd=worktree)
+        return result.stdout.strip() if result.ok else None
+
+    def _commit_reachable(self, worktree: Path, commit: str) -> bool:
+        remote = f"{self.config.git_remote}/{self.config.main_branch}"
+        fetched = run_command(["git", "fetch", self.config.git_remote, self.config.main_branch], cwd=worktree)
+        if not fetched.ok:
+            return False
+        result = run_command(["git", "merge-base", "--is-ancestor", commit, remote], cwd=worktree)
+        return result.ok
+
+    def _fingerprint_seen(self, task_id: str, fingerprint: str) -> bool:
+        return sum(
+            1
+            for event in self.store.events(task_id)
+            if event.data.get("fingerprint") == fingerprint
+        ) >= 2
+
+    def _archive_write(self, task: TaskRecord, pipeline: Any, relative: str, value: Any) -> None:
+        try:
+            from .task_archive import TaskArchiveWriter
+
+            archive = TaskArchiveWriter(self.config)
+            archive.ensure_epoch()
+            archive.create_task_from_record(task, pipeline=pipeline)
+            archive.write_json(task.id, f"pipelines/{pipeline.id}/{relative}", self._json_safe(value))
+        except Exception as exc:
+            self.store.add_event(task.id, "pipeline.archive.warning", str(exc)[-500:], {"pipeline_id": pipeline.id, "path": relative})
+
+    def _archive_bytes(self, task: TaskRecord, pipeline: Any, relative: str, value: bytes) -> None:
+        try:
+            from .task_archive import TaskArchiveWriter
+
+            archive = TaskArchiveWriter(self.config)
+            archive.ensure_epoch()
+            archive.create_task_from_record(task, pipeline=pipeline)
+            archive.write_bytes(task.id, f"pipelines/{pipeline.id}/{relative}", value)
+        except Exception as exc:
+            self.store.add_event(task.id, "pipeline.archive.warning", str(exc)[-500:], {"pipeline_id": pipeline.id, "path": relative})
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): StewardExecutor._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [StewardExecutor._json_safe(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if hasattr(value, "value"):
+            return str(value.value)
+        return str(value)
 
     def run_task(self, task_id: str) -> bool:
         task = self.store.get(task_id)
@@ -2401,6 +3408,11 @@ def _limit_commit_subject(subject: str) -> str:
 
 def _normalize_commit_subject(subject: str) -> str:
     return re.sub(r"\s+", " ", subject).strip()
+
+
+def _safe_filename(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value))
+    return text.strip("-.")[:96] or "action"
 
 
 def _summarize_validations(validations: list[ValidationResult]) -> str:

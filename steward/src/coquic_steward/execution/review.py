@@ -27,7 +27,36 @@ Revision scope control:
 """
 
 
-def render_review_prompt(task: TaskRecord, config: StewardConfig) -> str:
+def render_review_prompt(
+    task: TaskRecord,
+    config: StewardConfig,
+    *,
+    implementation_plan: dict[str, Any] | None = None,
+    patch_text: str | None = None,
+    tree_identity: str | None = None,
+    validation_evidence: list[dict[str, Any]] | None = None,
+    declared_scope: list[str] | None = None,
+    original_intent: str | None = None,
+) -> str:
+    context = {
+        "task": {
+            "id": task.id,
+            "kind": str(task.spec.kind),
+            "workflow": str(task.spec.workflow),
+            "title": task.spec.title,
+            "prompt": original_intent or task.spec.prompt,
+            "non_goals": task.spec.metadata.get("non_goals", []),
+        },
+        "accepted_plan": implementation_plan,
+        "tree_identity": tree_identity,
+        "declared_scope": declared_scope or [],
+        "validation_evidence": validation_evidence or [],
+    }
+    patch_section = (
+        ["", "<complete_patch>", patch_text, "</complete_patch>"]
+        if patch_text is not None
+        else []
+    )
     return "\n".join(
         [
             "Review the current uncommitted changes in this Steward task worktree.",
@@ -36,8 +65,8 @@ def render_review_prompt(task: TaskRecord, config: StewardConfig) -> str:
             f"Kind: {task.spec.kind}",
             f"Worker: {task.spec.worker}",
             "",
-            "Original task prompt:",
-            task.spec.prompt,
+            "Original task intent and accepted evidence:",
+            json.dumps(context, indent=2, sort_keys=True),
             "",
             "Review policy:",
             "- Review only the uncommitted changes in this worktree.",
@@ -46,8 +75,31 @@ def render_review_prompt(task: TaskRecord, config: StewardConfig) -> str:
             "- Return only JSON matching the provided schema.",
             "",
             _render_skills(config),
+            *patch_section,
         ]
     ).strip()
+
+
+def review_context(
+    task: TaskRecord,
+    *,
+    implementation_plan: dict[str, Any] | None,
+    patch_text: str,
+    tree_identity: str,
+    validation_evidence: list[dict[str, Any]],
+    declared_scope: list[str],
+) -> dict[str, Any]:
+    """Return the exact bounded context supplied to every fresh reviewer."""
+
+    return {
+        "intent": task.spec.prompt,
+        "non_goals": task.spec.metadata.get("non_goals", []),
+        "accepted_plan": implementation_plan,
+        "patch": patch_text,
+        "tree_identity": tree_identity,
+        "validation": validation_evidence,
+        "scope": declared_scope,
+    }
 
 
 def review_schema_path(config: StewardConfig) -> Path:

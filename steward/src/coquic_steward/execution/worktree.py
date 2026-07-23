@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+from hashlib import sha256
 from dataclasses import dataclass
 import shutil
 import tempfile
@@ -187,6 +188,19 @@ class Worktrees:
         result = run_command(["git", "status", "--porcelain"], cwd=path, check=True)
         return bool(result.stdout.strip())
 
+    def base_commit(self, path: Path) -> str:
+        """Return the exact commit from which the worktree is being edited."""
+
+        return run_command(["git", "rev-parse", "HEAD"], cwd=path, check=True).stdout.strip()
+
+    def tree(self, path: Path) -> str:
+        """Hash the complete, non-ignored worktree without changing its index."""
+
+        value = _worktree_tree(path)
+        if value is None:
+            raise RuntimeError(f"could not determine worktree tree: {path}")
+        return value
+
     def diff(self, path: Path) -> str:
         tracked = run_command(
             ["git", "diff", "--binary", "HEAD", "--"], cwd=path, check=True
@@ -217,6 +231,26 @@ class Worktrees:
                 )
             patches.append(result.stdout)
         return "".join(patches)
+
+    def patch_bytes(self, path: Path) -> bytes:
+        """Return the authoritative binary patch for the current worktree."""
+
+        return self.diff(path).encode("utf-8", errors="surrogateescape")
+
+    def patch_identity(self, path: Path) -> str:
+        return sha256(self.patch_bytes(path)).hexdigest()
+
+    binary_patch = patch_bytes
+    patch_digest = patch_identity
+    output_tree = tree
+
+    def snapshot(self, path: Path) -> tuple[str, str, str]:
+        """Return ``(base_commit, output_tree, patch_digest)`` atomically enough
+        for a single trusted process; callers persist it before advancing a
+        phase and re-check it before consuming the result.
+        """
+
+        return self.base_commit(path), self.tree(path), self.patch_identity(path)
 
     def save_patch(self, path: Path, patch_path: Path) -> None:
         patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -249,6 +283,9 @@ class Worktrees:
 
     def stage_tree(self, path: Path) -> str:
         run_command(["git", "add", "-A", "--"], cwd=path, check=True)
+        return run_command(["git", "write-tree"], cwd=path, check=True).stdout.strip()
+
+    def staged_tree(self, path: Path) -> str:
         return run_command(["git", "write-tree"], cwd=path, check=True).stdout.strip()
 
     def commit_all(

@@ -1,0 +1,55 @@
+# Steward Task Pipeline
+
+Steward treats one task as a durable source record containing an ordered set of
+bounded pipelines. The initial pipeline is allocated with the task. Repairs,
+integration rebases/conflicts, and push races create child pipelines under the
+same task; they never create synthetic integration-manager tasks.
+
+## Cursor
+
+The normalized ledger keeps the Plan 002 coarse phase for compatibility. The
+executor records the finer cursor and action identity in ordered events and
+phase artifacts:
+
+`provisioned -> planning -> implementation -> validation -> review -> formality
+-> integration -> commit_message -> commit -> push -> ready_to_seal`.
+
+Planning is required for feature work. A narrowly scoped fix records a stable
+skip reason. Validation is deterministic and runs the complete gate set. Every
+planning, implementation, review, formality, and commit-message action starts a
+fresh Plan 003 session. Ordinary repair paths never resume a provider session.
+
+Before an external boundary Steward stores task, pipeline, phase, action, base,
+input tree, and expected identity. After the boundary it stores the result,
+output tree, patch digest, and next cursor. Duplicate `advance_once()` calls
+adopt a finished action or report `in_progress`; they do not repeat effects.
+
+## Review Formality
+
+The raw reviewer JSON is immutable evidence. A fresh read-only formality
+examination maps every finding index exactly once to `required`, `revert`,
+`followUp`, `reject`, or `escalate`. Required/revert findings create a fresh
+review-repair pipeline. Escalation, malformed output, and exhausted budgets
+block. Follow-up proposals are archived as inert structured evidence and do
+not create issues, tasks, comments, or other external work.
+
+## Integration And Push
+
+Integration runs under the global integration lock, fetches the latest `main`,
+and proves the accepted patch/tree identity before commit. Any base movement
+creates an `integration-rebase` child and repeats validation and review.
+Apply conflicts create an `integration-conflict` child with bounded evidence.
+Push uses no force option. A true non-fast-forward result creates a `push-race`
+child; bounded transient transport failures may retry the same commit.
+
+Only the trusted daemon stages, commits, and pushes. Immediately before commit,
+the staged tree must equal the last validated and effectively reviewed tree.
+Successful task-owned work stops at durable `ready_to_seal`; lifecycle cleanup,
+terminal sealing, and final sync belong to Plan 006.
+
+## Budgets
+
+Pipeline, run, validation, review, formality, transport, and no-progress
+fingerprint budgets are explicit. Repeated patch/failure/finding fingerprints
+block rather than loop. Every archive artifact is bounded and excludes private
+provider identifiers, credentials, and session-home paths.

@@ -30,6 +30,25 @@ _STRING_LIST_SCHEMA = {
 }
 
 
+def implementation_plan_required(task: TaskRecord) -> bool:
+    """Feature pipelines require a structured plan; fixes may use task intent."""
+
+    return str(task.spec.workflow) == "feature" or str(task.spec.kind) == "feature"
+
+
+def deterministic_plan_skip_reason(task: TaskRecord) -> str:
+    """Stable evidence for an eligible fix that intentionally skips planning."""
+
+    if implementation_plan_required(task):
+        raise ValueError("feature tasks cannot skip implementation planning")
+    return "task intent is already executable and workflow is narrowly scoped"
+
+
+# Compatibility aliases used by callers that describe the decision as a gate.
+plan_required = implementation_plan_required
+plan_skip_reason = deterministic_plan_skip_reason
+
+
 def implementation_plan_schema_path(config: StewardConfig) -> Path:
     path = config.state_dir / "schemas" / "implementation-plan.schema.json"
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -20,9 +20,24 @@ read_api_key() {
   export CODEX_API_KEY
 }
 
-case "${1:-run}" in
+case "${1:-serve}" in
+  serve)
+    trap 'exit 0' TERM INT
+    while :; do
+      sleep 3600 &
+      wait "$!"
+    done
+    ;;
   run)
     shift
+    run_id="${COQUIC_STEWARD_RUN_ID:?missing run identity}"
+    if [[ ! "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+      echo "invalid run identity" >&2
+      exit 64
+    fi
+    printf '%s\n' "$$" >"${CODEX_HOME:?}/wrapper-${run_id}.pid"
+    chmod 600 "${CODEX_HOME}/wrapper-${run_id}.pid"
+    umask 0002
     read_api_key
     if [[ "$#" -eq 0 ]]; then
       echo "missing Codex argv" >&2

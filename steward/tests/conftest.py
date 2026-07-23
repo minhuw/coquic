@@ -45,6 +45,7 @@ def config(repo: Path) -> StewardConfig:
     cfg = StewardConfig(
         repo_root=repo,
         limits=StewardLimits(worker_timeout_minutes=1),
+        local_codex_test_harness=True,
     )
     cfg.ensure_dirs()
     return cfg

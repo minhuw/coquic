@@ -12,7 +12,6 @@ from ..core.models import (
     ProjectSignals,
     TaskRecord,
     TaskSpec,
-    new_task_id,
 )
 from .verifier import ActiveTaskSummary, PlanVerifier, summarize_active_tasks
 
@@ -101,7 +100,11 @@ class CodexPlanner:
     ):
         self.config = config
         self._injected_invocation = invocation
-        if runner is None and invocation is None and config.task_image_digest:
+        if (
+            runner is None
+            and invocation is None
+            and not config.local_codex_test_harness
+        ):
             raise ValueError(
                 "CodexPlanner requires an injected task-container invocation boundary"
             )
@@ -120,7 +123,7 @@ class CodexPlanner:
 
     def run(self, signals: ProjectSignals, active_tasks: list[TaskRecord]) -> PlannerRun:
         active = summarize_active_tasks(active_tasks)
-        planner_task = _planner_task()
+        planner_task = _planner_task(self.config)
         result = self.runner.run(
             planner_task,
             render_planner_prompt(signals, active, self.config),
@@ -346,18 +349,19 @@ PLANNER_OUTPUT_SCHEMA = {
 }
 
 
-def _planner_task() -> TaskRecord:
+def _planner_task(config: StewardConfig) -> TaskRecord:
     from ..core.models import TaskKind, TaskSpec, WorkerKind
 
     return TaskRecord(
         spec=TaskSpec(
-            id=f"planner-{new_task_id()}",
+            id="steward-planner",
             kind=TaskKind.custom,
             worker=WorkerKind.custom,
             title="Plan Steward tasks",
             prompt="Plan Steward tasks from current signals.",
             source="planner",
-        )
+        ),
+        worktree_path=config.worktrees_dir / "steward-planner",
     )
 
 

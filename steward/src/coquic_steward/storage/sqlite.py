@@ -660,6 +660,141 @@ class SQLiteTaskStore:
     create_codex_session = create_session
     allocate_session = create_session
 
+    def create_session_with_run(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        *,
+        session_id: str,
+        private_home_path: Path,
+        private_home_relative_path: str,
+        image_digest: str,
+        codex_identity: str,
+        cwd: Path,
+        checkpoint_id: str | None,
+        provider_store_identity: str,
+        owner_role: str,
+        session_idempotency_key: str | None,
+        role: str,
+        model: str | None,
+        reasoning: str | None,
+        image_version: str,
+        runtime_version: str,
+        run_checkpoint_id: str | None,
+        run_provider_store_identity: str,
+    ) -> tuple[CodexSession, TaskRun]:
+        """Allocate a session UID and its mandatory first run atomically."""
+
+        pipeline = self.get_pipeline(pipeline_id)
+        if pipeline.task_id != task_id:
+            raise ValueError("session pipeline does not belong to task")
+
+        def existing_allocation() -> tuple[CodexSession, TaskRun] | None:
+            if session_idempotency_key is None:
+                return None
+            with Session(self.engine) as query_session:
+                session_row = query_session.scalar(
+                    select(CodexSessionRow).where(
+                        CodexSessionRow.task_id == task_id,
+                        CodexSessionRow.idempotency_key == session_idempotency_key,
+                    )
+                )
+                if session_row is None:
+                    return None
+                if session_row.pipeline_id != pipeline_id:
+                    raise ValueError(
+                        "session idempotency key belongs to another pipeline"
+                    )
+                run_row = query_session.scalar(
+                    select(TaskRunRow)
+                    .where(TaskRunRow.session_id == session_row.id)
+                    .order_by(TaskRunRow.role_ordinal, TaskRunRow.id)
+                )
+                if run_row is None:
+                    raise RuntimeError("session allocation is missing its first run")
+                if run_row.role != role:
+                    raise ValueError("session idempotency key conflicts with role")
+                return (
+                    row_to_session(session_row, path_codec=self.path_codec),
+                    row_to_run(run_row),
+                )
+
+        existing = existing_allocation()
+        if existing is not None:
+            return existing
+        now = utc_now()
+        for attempt in range(8):
+            try:
+                with self.engine.connect() as connection:
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    selected_uid = connection.execute(
+                        select(func.coalesce(func.max(CodexSessionRow.home_uid), 9999) + 1)
+                    ).scalar_one()
+                    if not isinstance(selected_uid, int) or not 10000 <= selected_uid <= 60000:
+                        connection.exec_driver_sql("ROLLBACK")
+                        raise ValueError("session home UID allocation exhausted")
+                    ordinal = connection.execute(
+                        select(func.coalesce(func.max(TaskRunRow.role_ordinal), 0) + 1).where(
+                            TaskRunRow.pipeline_id == pipeline_id,
+                            TaskRunRow.role == role,
+                        )
+                    ).scalar_one()
+                    session_item = CodexSession(
+                        id=session_id,
+                        task_id=task_id,
+                        pipeline_id=pipeline_id,
+                        private_home_path=private_home_path,
+                        private_home_relative_path=private_home_relative_path,
+                        home_uid=selected_uid,
+                        image_digest=image_digest,
+                        codex_identity=codex_identity,
+                        cwd=cwd,
+                        checkpoint_id=checkpoint_id,
+                        provider_store_identity=provider_store_identity,
+                        owner_role=owner_role,
+                        idempotency_key=session_idempotency_key,
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    run_item = TaskRun(
+                        task_id=task_id,
+                        pipeline_id=pipeline_id,
+                        session_id=session_id,
+                        role=role,
+                        role_ordinal=int(ordinal),
+                        model=model,
+                        reasoning=reasoning,
+                        image_version=image_version,
+                        runtime_version=runtime_version,
+                        checkpoint_id=run_checkpoint_id,
+                        provider_store_identity=run_provider_store_identity,
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    connection.execute(
+                        CodexSessionRow.__table__.insert().values(
+                            **_row_values(
+                                session_to_row(session_item, path_codec=self.path_codec)
+                            )
+                        )
+                    )
+                    connection.execute(
+                        TaskRunRow.__table__.insert().values(
+                            **_row_values(run_to_row(run_item))
+                        )
+                    )
+                    connection.exec_driver_sql("COMMIT")
+                self._activate_run_ownership(run_item)
+                return session_item, run_item
+            except IntegrityError:
+                existing = existing_allocation()
+                if existing is not None:
+                    return existing
+                if attempt == 7:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+        raise RuntimeError("session and first-run allocation failed")
+
     def update_session(self, session_id: str, **fields: object) -> CodexSession:
         allowed = {
             "provider_session_id",
@@ -730,7 +865,13 @@ class SQLiteTaskStore:
                 raise ValueError("recovery run must remain in the same task and pipeline")
             if predecessor.state != CodexRunState.interrupted.value:
                 raise ValueError("only an interrupted run can be resumed")
-            if predecessor.role not in {"planning", "implementation", "review"}:
+            if predecessor.role not in {
+                "planner",
+                "planning",
+                "implementation",
+                "reviewer",
+                "review",
+            }:
                 raise ValueError("only planning, implementation, or review runs can resume")
             if role != predecessor.role:
                 raise ValueError("recovery run role does not match predecessor")

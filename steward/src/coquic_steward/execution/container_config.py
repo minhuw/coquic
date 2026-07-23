@@ -197,10 +197,18 @@ class TaskContainerConfig:
             )
         return tuple(mounts)
 
-    def environment(self, role: TaskRole | str, *, session_uid: int) -> dict[str, str]:
+    def environment(
+        self,
+        role: TaskRole | str,
+        *,
+        session_uid: int,
+        session_id: str,
+    ) -> dict[str, str]:
         selected = TaskRole(role)
         if session_uid < 10000 or session_uid > 60000:
             raise ValueError("session UID is outside the reserved range")
+        if not _SAFE_ID.fullmatch(session_id):
+            raise ValueError("invalid session identity")
         return {
             "GIT_DIR": self.container_git_dir,
             "GIT_COMMON_DIR": self.container_git_common_dir,
@@ -209,8 +217,36 @@ class TaskContainerConfig:
             else self.container_worktree_ro,
             "COQUIC_STEWARD_ROLE": selected.value,
             "COQUIC_STEWARD_TASK_ID": self.task_id,
-            "CODEX_HOME": f"{self.container_session}/session-{session_uid}",
+            "HOME": f"{self.container_session}/{session_id}",
+            "CODEX_HOME": f"{self.container_session}/{session_id}",
         }
+
+    def container_path(self, host_path: Path, role: TaskRole | str) -> str:
+        """Translate one task-owned host path to its stable container path."""
+
+        selected = TaskRole(role)
+        path = Path(host_path).resolve()
+        mappings = [
+            (
+                self.worktree.resolve(),
+                self.container_worktree_rw
+                if selected.can_write_worktree
+                else self.container_worktree_ro,
+            ),
+            (self.archive.resolve(), self.container_archive),
+            (self.private_sessions.resolve(), self.container_session),
+            (self.git_dir.resolve(), self.container_git_dir),
+            (self.git_common_dir.resolve(), self.container_git_common_dir),
+        ]
+        if self.scratch is not None:
+            mappings.append((self.scratch.resolve(), self.container_scratch))
+        for source, target in mappings:
+            try:
+                relative = path.relative_to(source)
+            except ValueError:
+                continue
+            return target if relative == Path(".") else f"{target}/{relative.as_posix()}"
+        raise ValueError(f"path is outside task container mounts: {host_path}")
 
 
 ContainerConfig = TaskContainerConfig

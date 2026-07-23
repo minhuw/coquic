@@ -55,6 +55,7 @@ class ExecIdentity:
     container_id: str
     exec_id: str
     pid: int | None = None
+    uid: int | None = None
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,10 @@ class TaskContainerRuntime:
             "--label",
             "coquic.steward.runtime=task-container-v1",
         ]
-        for mount in config.read_only_mounts:
+        # Both worktree views and the bounded scratch path are fixed at create
+        # time. Kernel DAC plus the per-exec supplemental group selects which
+        # writable view a role can actually use.
+        for mount in config.mounts_for(TaskRole.implementation):
             argv.extend(self._mount_argv(mount))
         # A private tmpfs is the only writable filesystem before a role exec.
         argv.extend(
@@ -160,7 +164,7 @@ class TaskContainerRuntime:
                 + str(config.limits.scratch_bytes),
             ]
         )
-        argv.extend([config.image_digest, "/usr/local/bin/task-entrypoint.sh"])
+        argv.append(config.image_digest)
         return argv
 
     def adopt(self, *, expected_id: str | None = None) -> ContainerInspection:
@@ -240,6 +244,7 @@ class TaskContainerRuntime:
         role: TaskRole | str,
         *,
         session_uid: int,
+        session_id: str,
         command: list[str],
         env: dict[str, str] | None = None,
         workdir: str | None = None,
@@ -250,7 +255,9 @@ class TaskContainerRuntime:
                 ContainerErrorCategory.invalid, "container exec command is empty or invalid"
             )
         selected = TaskRole(role)
-        allowed = self.config.environment(selected, session_uid=session_uid)
+        allowed = self.config.environment(
+            selected, session_uid=session_uid, session_id=session_id
+        )
         supplied = dict(env or {})
         for key, value in supplied.items():
             if key in {"CODEX_API_KEY", "HOME", "CODEX_HOME"}:
@@ -286,6 +293,7 @@ class TaskContainerRuntime:
         role: TaskRole | str,
         *,
         session_uid: int,
+        session_id: str,
         command: list[str],
         env: dict[str, str] | None = None,
         workdir: str | None = None,
@@ -294,6 +302,7 @@ class TaskContainerRuntime:
         argv = self.exec_argv(
             role,
             session_uid=session_uid,
+            session_id=session_id,
             command=command,
             env=env,
             workdir=workdir,
@@ -307,6 +316,7 @@ class TaskContainerRuntime:
         role: TaskRole | str,
         *,
         session_uid: int,
+        session_id: str,
         command: list[str],
         env: dict[str, str] | None = None,
         workdir: str | None = None,
@@ -314,6 +324,7 @@ class TaskContainerRuntime:
         argv = self.exec_argv(
             role,
             session_uid=session_uid,
+            session_id=session_id,
             command=command,
             env=env,
             workdir=workdir,
@@ -333,18 +344,29 @@ class TaskContainerRuntime:
                 ContainerErrorCategory.identity_mismatch,
                 "signal identity belongs to another task container",
             )
-        # Docker has no portable signal-by-exec-id command.  The trusted wrapper
-        # owns the process handle and exposes a control FIFO; this operation is
-        # intentionally an explicit wrapper request, never a PID-1 signal.
+        if (
+            identity.pid is None
+            or identity.pid <= 1
+            or identity.uid is None
+            or not 10000 <= identity.uid <= 60000
+        ):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid,
+                "exec identity does not contain a validated wrapper PID",
+            )
+        # Docker has no portable signal-by-exec-id command. The trusted wrapper
+        # records its in-container PID before replacing itself with Codex.
         self._run(
             [
                 "exec",
+                "--user",
+                str(identity.uid),
                 "--env",
                 f"COQUIC_STEWARD_SIGNAL={int(sig)}",
                 self.config.container_name,
-                "/usr/local/bin/task-entrypoint.sh",
+                "/bin/task-entrypoint.sh",
                 "signal",
-                identity.exec_id,
+                str(identity.pid),
             ]
         )
 

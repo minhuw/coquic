@@ -14,7 +14,7 @@ import selectors
 import signal
 import subprocess  # nosec B404 - explicit argv and shell=False
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
@@ -50,13 +50,21 @@ class InvocationRequest:
     provider_session_id: str | None = None
     role: str = "implementation"
     session_uid: int | None = None
+    session_id: str | None = None
+    run_id: str | None = None
 
     @property
     def resume(self) -> bool:
         return self.provider_session_id is not None
 
-    def argv(self) -> list[str]:
-        args = [self.codex_bin, "exec"]
+    def argv(
+        self,
+        *,
+        codex_bin: str | None = None,
+        path_mapper: Callable[[Path], str] | None = None,
+    ) -> list[str]:
+        render_path = path_mapper or (lambda value: str(value))
+        args = [codex_bin or self.codex_bin, "exec"]
         if self.provider_session_id is not None:
             args.extend(["resume"])
         args.append("--json")
@@ -70,10 +78,12 @@ class InvocationRequest:
         if self.stage == CodexStage.code:
             args.extend(["--dangerously-bypass-hook-trust"])
         if not self.resume:
-            args.extend(["--sandbox", self.sandbox, "--cd", str(self.cwd)])
-        args.extend(["--output-last-message", str(self.output_last_message)])
+            args.extend(["--sandbox", self.sandbox, "--cd", render_path(self.cwd)])
+        args.extend(
+            ["--output-last-message", render_path(self.output_last_message)]
+        )
         if self.output_schema is not None:
-            args.extend(["--output-schema", str(self.output_schema)])
+            args.extend(["--output-schema", render_path(self.output_schema)])
         if self.provider_session_id is not None:
             args.append(self.provider_session_id)
         args.append("-")
@@ -89,7 +99,7 @@ class JsonlStream:
     """
 
     append: Callable[[bytes], None]
-    events: list[dict[str, Any]] = field(default_factory=list)
+    observe: Callable[[dict[str, Any]], None] | None = None
     suffix: bytes = b""
     provider_session_id: str | None = None
     malformed_lines: int = 0
@@ -125,7 +135,8 @@ class JsonlStream:
         if not isinstance(value, dict):
             self.malformed_lines += 1
             return
-        self.events.append(value)
+        if self.observe is not None:
+            self.observe(value)
         for key in ("thread_id", "session_id", "sessionId"):
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate:
@@ -179,6 +190,7 @@ def stream_process(
     request: InvocationRequest,
     *,
     append: Callable[[bytes], None],
+    observe: Callable[[dict[str, Any]], None] | None = None,
     timeout_seconds: float,
     interrupt_grace_seconds: float = 2.0,
     interrupted: bool = False,
@@ -193,32 +205,34 @@ def stream_process(
             process.stdin.close()
         except (BrokenPipeError, OSError):
             pass
-    decoder = JsonlStream(append)
-    stdout_data = bytearray()
-    stderr_data = bytearray()
+    decoder = JsonlStream(append, observe=observe)
+    stderr_data = _BoundedBytes(64 * 1024)
     selector = selectors.DefaultSelector()
-    streams = ((process.stdout, stdout_data, True), (process.stderr, stderr_data, False))
+    streams = ((process.stdout, True), (process.stderr, False))
     selector_supported = True
-    for stream, sink, is_stdout in streams:
+    for stream, is_stdout in streams:
         if stream is not None:
             try:
-                selector.register(stream, selectors.EVENT_READ, (sink, is_stdout))
+                selector.register(stream, selectors.EVENT_READ, is_stdout)
             except (ValueError, OSError, PermissionError):
                 selector_supported = False
                 break
     started = time.monotonic()
     forced = False
     if not selector_supported:
-        for stream, sink, is_stdout in streams:
+        for stream, is_stdout in streams:
             if stream is None:
                 continue
-            data = stream.read()
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-            if data:
-                sink.extend(data)
+            while True:
+                data = stream.read(65536)
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                if not data:
+                    break
                 if is_stdout:
                     decoder.feed(data)
+                else:
+                    stderr_data.extend(data)
         try:
             exit_code = process.wait(timeout=timeout_seconds)
         except (subprocess.TimeoutExpired, TimeoutError):
@@ -227,10 +241,10 @@ def stream_process(
             exit_code = process.wait()
         return InvocationOutcome(
             exit_code=exit_code,
-            stdout=bytes(stdout_data),
+            stdout=b"",
             stderr=bytes(stderr_data),
             incomplete_suffix=decoder.finish(),
-            events=tuple(decoder.events),
+            events=(),
             provider_session_id=decoder.provider_session_id,
             malformed_lines=decoder.malformed_lines,
             forced=forced,
@@ -252,7 +266,7 @@ def stream_process(
             break
         for key, _ in selector.select(min(0.25, remaining)):
             stream = key.fileobj
-            sink, is_stdout = key.data
+            is_stdout = key.data
             try:
                 try:
                     chunk = os.read(stream.fileno(), 65536)
@@ -263,9 +277,10 @@ def stream_process(
             if not chunk:
                 selector.unregister(stream)
                 continue
-            sink.extend(chunk)
             if is_stdout:
                 decoder.feed(chunk)
+            else:
+                stderr_data.extend(chunk)
     try:
         exit_code = process.wait(timeout=interrupt_grace_seconds)
     except (subprocess.TimeoutExpired, TimeoutError):
@@ -277,15 +292,31 @@ def stream_process(
         exit_code = process.wait()
     return InvocationOutcome(
         exit_code=exit_code,
-        stdout=bytes(stdout_data),
+        stdout=b"",
         stderr=bytes(stderr_data),
         incomplete_suffix=decoder.finish(),
-        events=tuple(decoder.events),
+        events=(),
         provider_session_id=decoder.provider_session_id,
         malformed_lines=decoder.malformed_lines,
         forced=forced,
         interrupted=interrupted,
     )
+
+
+class _BoundedBytes:
+    """Retain only the tail needed for private diagnostics."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+
+    def extend(self, chunk: bytes) -> None:
+        self.data.extend(chunk)
+        if len(self.data) > self.limit:
+            del self.data[: len(self.data) - self.limit]
+
+    def __bytes__(self) -> bytes:
+        return bytes(self.data)
 
 
 def shell_environment_policy_config() -> str:

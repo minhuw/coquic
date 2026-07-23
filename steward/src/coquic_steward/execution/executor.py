@@ -211,7 +211,11 @@ class StewardExecutor:
         self.store = store
         if session_supervisor is not None and runner is not None:
             raise ValueError("provide either session_supervisor or runner, not both")
-        if session_supervisor is None and runner is None and config.task_image_digest:
+        if (
+            session_supervisor is None
+            and runner is None
+            and not config.local_codex_test_harness
+        ):
             raise ValueError(
                 "StewardExecutor requires an injected task-container session supervisor"
             )

@@ -168,6 +168,7 @@ class StewardConfig:
     daemon_image: str = "coquic-steward-daemon"
     daemon_image_digest: str | None = None
     runtime_protocol: str = "task-container-v1"
+    local_codex_test_harness: bool = False
     integration_mode: str = IntegrationMode.local_only.value
     local_only: bool = False
     git_remote: str = "origin"

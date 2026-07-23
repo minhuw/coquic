@@ -423,6 +423,51 @@ def test_run_lineage_and_idempotency_are_task_scoped(
         )
 
 
+def test_session_and_first_run_allocation_rolls_back_together(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="atomic allocation",
+            prompt="prompt",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    arguments = {
+        "session_id": "session-atomic",
+        "private_home_path": config.private_sessions_dir / task.id / "session-atomic",
+        "private_home_relative_path": f"{task.id}/session-atomic",
+        "image_digest": "sha256:" + "a" * 64,
+        "codex_identity": "codex-0.144.6",
+        "cwd": config.repo_root,
+        "checkpoint_id": None,
+        "provider_store_identity": "codex-sessions-v1",
+        "owner_role": "implementation",
+        "session_idempotency_key": None,
+        "role": "implementation",
+        "model": None,
+        "reasoning": None,
+        "image_version": "sha256:" + "a" * 64,
+        "runtime_version": "task-runtime-v1",
+        "run_checkpoint_id": None,
+        "run_provider_store_identity": "codex-sessions-v1",
+    }
+    with patch(
+        "coquic_steward.storage.sqlite.run_to_row",
+        side_effect=RuntimeError("simulated first-run failure"),
+    ), pytest.raises(RuntimeError, match="first-run"):
+        store.create_session_with_run(task.id, pipeline.id, **arguments)
+    assert store.list_sessions(task.id) == []
+    assert store.list_runs(task.id) == []
+
+    session, run = store.create_session_with_run(task.id, pipeline.id, **arguments)
+    assert run.session_id == session.id
+    assert session.home_uid is not None
+
+
 def test_interrupted_run_has_only_one_recovery(config: StewardConfig) -> None:
     store = TaskStore(config.db_path)
     task, _ = store.add_task(

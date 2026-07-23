@@ -8,6 +8,7 @@ import os
 import secrets
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -21,6 +22,7 @@ from ..agents.invocation import (
 )
 from ..core.config import StewardConfig
 from ..core.models import CodexRunState, CodexSession, CodexStage, TaskRecord, TaskRun, WorkerResult
+from ..core.subprocesses import run_command
 from ..storage import TaskStore
 from .container import ContainerBoundaryError, ExecIdentity, TaskContainerRuntime
 from .container_config import TaskContainerConfig, TaskRole
@@ -93,6 +95,8 @@ class SessionInvoker(Protocol):
         *,
         api_key: str | None,
         append: Any,
+        observe: Any = None,
+        on_started: Any = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
     ) -> InvocationOutcome: ...
@@ -107,16 +111,28 @@ class LocalSessionInvoker:
         *,
         api_key: str | None,
         append: Any,
+        observe: Any = None,
+        on_started: Any = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
     ) -> InvocationOutcome:
         process = launch_local(request, api_key=api_key)
         self.process = process
+        if on_started is not None:
+            on_started(
+                ExecIdentity(
+                    "local",
+                    request.run_id or "local",
+                    process.pid,
+                    request.session_uid,
+                )
+            )
         try:
             return stream_process(
                 process,
                 request,
                 append=append,
+                observe=observe,
                 timeout_seconds=timeout_seconds,
                 interrupt_grace_seconds=interrupt_grace_seconds,
             )
@@ -146,20 +162,27 @@ class ContainerSessionInvoker:
         *,
         api_key: str | None,
         append: Any,
+        observe: Any = None,
+        on_started: Any = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
     ) -> InvocationOutcome:
-        if request.session_uid is None:
-            raise ValueError("container invocation requires a session UID")
+        if request.session_uid is None or request.session_id is None or request.run_id is None:
+            raise ValueError("container invocation requires session and run identities")
+        role = TaskRole(request.role)
+        self.runtime.ensure_started()
+        path_mapper = lambda path: self.runtime.config.container_path(path, role)
         process = self.runtime.exec_stream(
-            request.role,
+            role,
             session_uid=request.session_uid,
+            session_id=request.session_id,
             command=[
-                "/usr/local/bin/task-entrypoint.sh",
+                "/bin/task-entrypoint.sh",
                 "run",
-                *request.argv(),
+                *request.argv(codex_bin="codex", path_mapper=path_mapper),
             ],
-            workdir=str(request.cwd),
+            env={"COQUIC_STEWARD_RUN_ID": request.run_id},
+            workdir=path_mapper(request.cwd),
         )
         # The wrapper consumes this control prefix before forwarding the prompt
         # to Codex.  It is never part of stdout, argv, environment, or logs.
@@ -167,22 +190,82 @@ class ContainerSessionInvoker:
             key = (api_key or "").encode("utf-8")
             process.stdin.write(len(key).to_bytes(4, "big") + key)
             process.stdin.flush()
-        self.process = process
+        identity = self._identity(request, process)
+        self.identity = identity
+        supervised_process = _ContainerProcess(process, self.runtime, identity)
+        self.process = supervised_process
+        if on_started is not None:
+            on_started(identity)
         try:
             return stream_process(
-                process,
+                supervised_process,
                 request,
                 append=append,
+                observe=observe,
                 timeout_seconds=timeout_seconds,
                 interrupt_grace_seconds=interrupt_grace_seconds,
             )
         finally:
             self.process = None
 
+    def _identity(self, request: InvocationRequest, process: Any) -> ExecIdentity:
+        pid_path = request.output_last_message.parent / f"wrapper-{request.run_id}.pid"
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                pid = int(pid_path.read_text(encoding="ascii").strip())
+            except (FileNotFoundError, ValueError, OSError):
+                if process.poll() is not None:
+                    break
+                time.sleep(0.01)
+                continue
+            if pid > 1:
+                return ExecIdentity(
+                    self.runtime.config.container_name,
+                    request.run_id or "",
+                    pid,
+                    request.session_uid,
+                )
+            break
+        raise RuntimeError("trusted wrapper did not publish a valid process identity")
+
     def interrupt(self, *, force: bool = False) -> None:
         process = self.process
         if process is not None:
             process.kill() if force else process.send_signal(signal.SIGTERM)
+
+
+class _ContainerProcess:
+    """Stream a Docker exec while signaling the validated in-container PID."""
+
+    def __init__(
+        self,
+        process: Any,
+        runtime: TaskContainerRuntime,
+        identity: ExecIdentity,
+    ) -> None:
+        self._process = process
+        self._runtime = runtime
+        self._identity = identity
+        self.stdin = process.stdin
+        self.stdout = process.stdout
+        self.stderr = process.stderr
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.returncode
+
+    def poll(self) -> int | None:
+        return self._process.poll()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._process.wait(timeout=timeout)
+
+    def send_signal(self, sig: int) -> None:
+        self._runtime.signal(self._identity, sig)
+
+    def kill(self) -> None:
+        self._runtime.signal(self._identity, signal.SIGKILL)
 
 
 class SessionSupervisor:
@@ -213,6 +296,8 @@ class SessionSupervisor:
         self.runtime_factory = runtime_factory
         self.archive = archive or TaskArchiveWriter(config)
         self.invoker = invoker or (ContainerSessionInvoker(runtime) if runtime is not None else None)
+        self._runtimes: dict[str, TaskContainerRuntime] = {}
+        self._invokers: dict[str, SessionInvoker] = {}
         self.image_digest = image_digest or getattr(config, "task_image_digest", None)
         self.codex_identity = codex_identity or getattr(config, "codex_identity", None)
         self.provider_store_identity = provider_store_identity or "codex-sessions-v1"
@@ -241,7 +326,7 @@ class SessionSupervisor:
     ) -> SessionResult:
         selected_role = _normalize_role(role)
         task = self.store.get(task_id)
-        self._ensure_runtime(task)
+        runtime, invoker = self._boundary_for(task)
         pipeline = self.store.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
             raise ValueError("session pipeline does not belong to task")
@@ -265,20 +350,24 @@ class SessionSupervisor:
             codex_bin=self.config.codex_bin,
             cwd=cwd,
             prompt=prompt,
-            output_last_message=self._last_message_path(task, pipeline_id, run.id),
+            output_last_message=self._private_last_message_path(session, run.id),
             stage=stage,
             model=model,
             reasoning_effort=reasoning_effort,
-            output_schema=output_schema,
+            output_schema=self._copy_private_schema(session, run.id, output_schema),
             sandbox=self.config.codex_sandbox,
             role=selected_role,
             session_uid=session.home_uid,
+            session_id=session.id,
+            run_id=run.id,
         )
         return self._execute(
             task,
             session,
             run,
             request,
+            runtime=runtime,
+            invoker=invoker,
             api_key=api_key,
             timeout_seconds=timeout_seconds
             or self._timeout_seconds(stage),
@@ -306,7 +395,7 @@ class SessionSupervisor:
             return ResumeResult(ResumeCategory.unavailable_store, evidence={"error": str(exc)})
         if predecessor.state != CodexRunState.interrupted.value:
             return ResumeResult(ResumeCategory.rejected, evidence={"reason": "predecessor is not interrupted"})
-        if predecessor.role not in {"planning", "implementation", "review"}:
+        if predecessor.role not in {"planner", "planning", "implementation", "reviewer", "review"}:
             return ResumeResult(ResumeCategory.rejected, evidence={"reason": "role is not resumable"})
         if not session.provider_session_id:
             return ResumeResult(ResumeCategory.missing_provider_id)
@@ -350,22 +439,26 @@ class SessionSupervisor:
             codex_bin=self.config.codex_bin,
             cwd=Path(expected_cwd),
             prompt=prompt,
-            output_last_message=self._last_message_path(
-                self.store.get(predecessor.task_id), predecessor.pipeline_id, run.id
-            ),
-            stage=CodexStage.review if predecessor.role == "review" else CodexStage.code,
+            output_last_message=self._private_last_message_path(session, run.id),
+            stage=CodexStage.review if predecessor.role in {"review", "reviewer"} else CodexStage.code,
             model=model or predecessor.model,
             reasoning_effort=reasoning_effort or predecessor.reasoning,
-            output_schema=output_schema,
+            output_schema=self._copy_private_schema(session, run.id, output_schema),
             provider_session_id=session.provider_session_id,
-            role=predecessor.role,
+            role=_runtime_role(predecessor.role),
             session_uid=session.home_uid,
+            session_id=session.id,
+            run_id=run.id,
         )
+        task = self.store.get(predecessor.task_id)
+        runtime, invoker = self._boundary_for(task)
         result = self._execute(
-            self.store.get(predecessor.task_id),
+            task,
             session,
             run,
             request,
+            runtime=runtime,
+            invoker=invoker,
             api_key=api_key,
             timeout_seconds=timeout_seconds or self._timeout_seconds(request.stage),
         )
@@ -391,15 +484,17 @@ class SessionSupervisor:
                 return InterruptionResult(run_id, InvocationStatus.interrupted, force, run.exit_code)
             raise KeyError(run_id)
         forced = force
-        process = active.get("process") or getattr(active.get("invoker"), "process", None)
-        identity = active.get("identity")
+        invoker = active.get("invoker")
+        runtime = active.get("runtime")
+        process = active.get("process") or getattr(invoker, "process", None)
+        identity = active.get("identity") or getattr(invoker, "identity", None)
         try:
-            if self.runtime is not None and identity is not None:
-                self.runtime.signal(identity, signal.SIGKILL if force else signal.SIGTERM)
+            if runtime is not None and identity is not None:
+                runtime.signal(identity, signal.SIGKILL if force else signal.SIGTERM)
             elif process is not None:
                 process.kill() if force else process.send_signal(signal.SIGTERM)
-            elif hasattr(self.invoker, "interrupt"):
-                self.invoker.interrupt(force=force)
+            elif hasattr(invoker, "interrupt"):
+                invoker.interrupt(force=force)
             if process is not None and not force:
                 try:
                     process.wait(timeout=grace_seconds)
@@ -423,9 +518,10 @@ class SessionSupervisor:
         with self._active_lock:
             active = self._active.get(run_id)
         container = None
-        if self.runtime is not None:
+        runtime = active.get("runtime") if active is not None else None
+        if runtime is not None:
             try:
-                container = self.runtime.inspect()
+                container = runtime.inspect()
             except ContainerBoundaryError:
                 container = None
         if active is None:
@@ -434,9 +530,15 @@ class SessionSupervisor:
         live = process.poll() is None if process is not None else bool(active.get("live", True))
         return InspectionResult(run_id, live, container, active.get("identity"))
 
-    def stop_container(self, *, timeout: float | None = None) -> None:
+    def stop_container(self, task_id: str | None = None, *, timeout: float | None = None) -> None:
         if self.runtime is not None:
             self.runtime.stop(timeout=timeout)
+            return
+        if task_id is None:
+            raise ValueError("task_id is required for a task-scoped runtime")
+        runtime = self._runtimes.get(task_id)
+        if runtime is not None:
+            runtime.stop(timeout=timeout)
 
     def run(
         self,
@@ -454,26 +556,32 @@ class SessionSupervisor:
 
         if resume_session is not None:
             raise ValueError("planner turns never use ordinary session resume")
-        if self.invoker is None:
-            raise RuntimeError("planner invocation requires a task-container boundary")
-        private_run = self.config.private_dir / "planner-sessions" / task.id / secrets.token_hex(8)
+        runtime, invoker = self._boundary_for(task)
+        effective_cwd = runtime.config.worktree if runtime is not None else cwd
+        private_run = self.config.private_sessions_dir / task.id / secrets.token_hex(8)
         private_run.mkdir(parents=True, exist_ok=True, mode=0o700)
         request = InvocationRequest(
             codex_bin=self.config.codex_bin,
-            cwd=cwd,
+            cwd=effective_cwd,
             prompt=prompt,
             output_last_message=private_run / "last-message.md",
             stage=stage,
-            output_schema=output_schema,
+            output_schema=_copy_optional_file(
+                output_schema, private_run / "output-schema.json"
+            ),
             sandbox=sandbox or self.config.codex_sandbox,
-            role="planning",
+            role=TaskRole.planner.value,
             session_uid=10000,
+            session_id=private_run.name,
+            run_id=private_run.name,
         )
         raw = private_run / "codex.jsonl"
-        outcome = self.invoker.invoke(
+        outcome = invoker.invoke(
             request,
             api_key=os.getenv("CODEX_API_KEY"),
             append=lambda line: _append_private(raw, line),
+            observe=None,
+            on_started=None,
             timeout_seconds=self._timeout_seconds(stage),
             interrupt_grace_seconds=2.0,
         )
@@ -485,7 +593,7 @@ class SessionSupervisor:
         return WorkerResult(
             completed=outcome.completed,
             command=request.argv(),
-            cwd=cwd,
+            cwd=effective_cwd,
             exit_code=outcome.exit_code,
             transcript_path=raw,
             last_message_path=request.output_last_message,
@@ -512,7 +620,7 @@ class SessionSupervisor:
         session_id = f"session-{secrets.token_hex(12)}"
         relative = f"{task.id}/{session_id}"
         private_home = self.config.private_sessions_dir / relative
-        session = self.store.create_session(
+        session, run = self.store.create_session_with_run(
             task.id,
             pipeline_id,
             session_id=session_id,
@@ -524,21 +632,22 @@ class SessionSupervisor:
             checkpoint_id=checkpoint_id,
             provider_store_identity=self.provider_store_identity,
             owner_role=role,
-            idempotency_key=idempotency_key,
-        )
-        self._prepare_home(session)
-        run = self.store.create_run(
-            task.id,
-            pipeline_id,
-            session.id,
+            session_idempotency_key=idempotency_key,
             role=role,
             model=model,
             reasoning=reasoning_effort,
             image_version=image_digest,
             runtime_version=self.runtime_identity,
-            checkpoint_id=checkpoint_id,
-            provider_store_identity=self.provider_store_identity,
+            run_checkpoint_id=checkpoint_id,
+            run_provider_store_identity=self.provider_store_identity,
         )
+        try:
+            self._prepare_home(session)
+        except Exception:
+            self.store.mark_run_interrupted(
+                run.id, reason="private session home preparation failed"
+            )
+            raise
         try:
             self.archive.ensure_epoch()
             pipeline = self.store.get_pipeline(pipeline_id)
@@ -549,12 +658,27 @@ class SessionSupervisor:
             raise
         return session, run
 
-    def _ensure_runtime(self, task: TaskRecord) -> None:
-        if self.runtime is not None or self.runtime_factory is None:
-            return
-        self.runtime = self.runtime_factory(task)
-        if self.invoker is None:
-            self.invoker = ContainerSessionInvoker(self.runtime)
+    def _boundary_for(
+        self, task: TaskRecord
+    ) -> tuple[TaskContainerRuntime | None, SessionInvoker]:
+        if self.invoker is not None and self.runtime_factory is None:
+            return self.runtime, self.invoker
+        if self.runtime is not None:
+            invoker = self._invokers.setdefault(
+                task.id, ContainerSessionInvoker(self.runtime)
+            )
+            return self.runtime, invoker
+        if self.runtime_factory is None:
+            raise RuntimeError("no invocation boundary is configured")
+        runtime = self._runtimes.get(task.id)
+        if runtime is None:
+            runtime = self.runtime_factory(task)
+            self._runtimes[task.id] = runtime
+        invoker = self._invokers.get(task.id)
+        if invoker is None:
+            invoker = ContainerSessionInvoker(runtime)
+            self._invokers[task.id] = invoker
+        return runtime, invoker
 
     def _execute(
         self,
@@ -563,6 +687,8 @@ class SessionSupervisor:
         run: TaskRun,
         request: InvocationRequest,
         *,
+        runtime: TaskContainerRuntime | None,
+        invoker: SessionInvoker,
         api_key: str | None,
         timeout_seconds: float,
     ) -> SessionResult:
@@ -570,7 +696,8 @@ class SessionSupervisor:
             task.id,
             f"pipelines/{run.pipeline_id}/runs/{run.id}/codex.jsonl",
         )
-        last_message = request.output_last_message
+        private_last_message = request.output_last_message
+        last_message = self._last_message_path(task, run.pipeline_id, run.id)
         transcript.parent.mkdir(parents=True, exist_ok=True)
 
         def append(line: bytes) -> None:
@@ -578,15 +705,40 @@ class SessionSupervisor:
                 task.id, run.pipeline_id, run.id, "codex.jsonl", line
             )
 
+        def observe(event: dict[str, Any]) -> None:
+            self.archive.append_run_jsonl(
+                task.id,
+                run.pipeline_id,
+                run.id,
+                "activities.jsonl",
+                _public_event(event),
+            )
+
+        def on_started(identity: ExecIdentity) -> None:
+            self.store.update_run(
+                run.id,
+                wrapper_pid=identity.pid,
+                exec_identity=identity.exec_id,
+            )
+            with self._active_lock:
+                active = self._active.get(run.id)
+                if active is not None:
+                    active["identity"] = identity
+                    active["process"] = getattr(invoker, "process", None)
+
         with self._active_lock:
-            self._active[run.id] = {"live": True, "invoker": self.invoker}
+            self._active[run.id] = {
+                "live": True,
+                "invoker": invoker,
+                "runtime": runtime,
+            }
         try:
-            if self.invoker is None:
-                raise RuntimeError("no invocation boundary is configured")
-            outcome = self.invoker.invoke(
+            outcome = invoker.invoke(
                 request,
                 api_key=api_key,
                 append=append,
+                observe=observe,
+                on_started=on_started,
                 timeout_seconds=timeout_seconds,
                 interrupt_grace_seconds=2.0,
             )
@@ -654,22 +806,16 @@ class SessionSupervisor:
                     encoding="utf-8",
                 )
                 os.chmod(control, 0o600)
-        if last_message.exists():
+        if private_last_message.exists():
             self.archive.write_run_file(
                 task.id,
                 run.pipeline_id,
                 run.id,
                 "last-message.md",
-                last_message.read_bytes(),
+                private_last_message.read_bytes(),
             )
         for event in outcome.events:
-            self.archive.append_run_jsonl(
-                task.id,
-                run.pipeline_id,
-                run.id,
-                "activities.jsonl",
-                _public_event(event),
-            )
+            observe(event)
         self.archive.write_run_file(
             task.id,
             run.pipeline_id,
@@ -743,6 +889,22 @@ class SessionSupervisor:
             f"pipelines/{pipeline_id}/runs/{run_id}/last-message.md",
         )
 
+    def _private_last_message_path(self, session: CodexSession, run_id: str) -> Path:
+        if session.private_home_path is None:
+            raise RuntimeError("session private home is unavailable")
+        return session.private_home_path / f"last-message-{run_id}.md"
+
+    def _copy_private_schema(
+        self, session: CodexSession, run_id: str, source: Path | None
+    ) -> Path | None:
+        if source is None:
+            return None
+        if session.private_home_path is None:
+            raise RuntimeError("session private home is unavailable")
+        return _copy_optional_file(
+            source, session.private_home_path / f"output-schema-{run_id}.json"
+        )
+
     def _timeout_seconds(self, stage: CodexStage) -> float:
         limits = self.config.limits
         minutes = (
@@ -769,6 +931,20 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
     def build(task: TaskRecord) -> TaskContainerRuntime:
         if task.worktree_path is None:
             raise ValueError("task worktree must exist before creating its container")
+        if task.id == "steward-planner" and not task.worktree_path.exists():
+            task.worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            run_command(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(task.worktree_path),
+                    "HEAD",
+                ],
+                cwd=config.repo_root,
+                check=True,
+            )
         worktree = task.worktree_path.resolve()
         linked_git = worktree / ".git"
         if linked_git.is_file():
@@ -777,19 +953,29 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
                 linked_git = Path(text.split(":", 1)[1].strip()).resolve()
         common_git = (config.repo_root / ".git").resolve()
         scratch = config.private_dir / "task-scratch" / task.id
+        archive = config.tasks_dir / task.id
+        private_sessions = config.private_sessions_dir / task.id
+        archive.mkdir(parents=True, exist_ok=True)
+        private_sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
         scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+        task_write_gid = _task_group(task.id, 100000)
+        validation_gid = _task_group(task.id, 200000)
+        _provision_group_tree(worktree, task_write_gid)
+        _provision_group_tree(scratch, validation_gid)
         container_config = TaskContainerConfig(
             task_id=task.id,
             image=config.task_image,
             image_digest=config.task_image_digest,
             worktree=worktree,
-            archive=config.tasks_dir / task.id,
-            private_sessions=config.private_sessions_dir / task.id,
+            archive=archive,
+            private_sessions=private_sessions,
             git_dir=linked_git,
             git_common_dir=common_git,
             repo_root=config.repo_root,
             scratch=scratch,
             labels={"coquic.steward.codex": config.codex_identity or config.codex_bin},
+            task_write_gid=task_write_gid,
+            validation_gid=validation_gid,
         )
         return TaskContainerRuntime(container_config)
 
@@ -802,6 +988,42 @@ def _append_private(path: Path, data: bytes) -> None:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _copy_optional_file(source: Path | None, destination: Path) -> Path | None:
+    if source is None:
+        return None
+    destination.write_bytes(Path(source).read_bytes())
+    os.chmod(destination, 0o600)
+    return destination
+
+
+def _task_group(task_id: str, base: int) -> int:
+    return base + int(hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:4], 16)
+
+
+def _provision_group_tree(root: Path, gid: int) -> None:
+    """Give one daemon-owned tree to a role group without world access."""
+
+    paths = [root, *root.rglob("*")]
+    for path in paths:
+        if path.is_symlink():
+            continue
+        try:
+            os.chown(path, -1, gid)
+            mode = path.stat().st_mode & 0o777
+            owner_bits = (mode & 0o700) >> 3
+            group_bits = owner_bits & 0o070
+            if path == root / ".git":
+                os.chmod(path, mode & ~0o022)
+            elif path.is_dir():
+                os.chmod(path, mode | group_bits | 0o2000)
+            else:
+                os.chmod(path, mode | group_bits)
+        except PermissionError as exc:
+            raise RuntimeError(
+                f"cannot provision task role group {gid} for {root}"
+            ) from exc
 
 
 def _public_event(value: object) -> Any:
@@ -825,12 +1047,11 @@ def _public_event(value: object) -> Any:
 
 
 def _normalize_role(role: TaskRole | str) -> str:
-    selected = TaskRole(role)
+    return TaskRole(role).value
+
+
+def _runtime_role(role: str) -> str:
     return {
-        TaskRole.planner: "planning",
-        TaskRole.implementation: "implementation",
-        TaskRole.validation: "validation",
-        TaskRole.reviewer: "review",
-        TaskRole.formality: "formality",
-        TaskRole.commit_message: "commit-message",
-    }[selected]
+        "planning": TaskRole.planner.value,
+        "review": TaskRole.reviewer.value,
+    }.get(role, role)

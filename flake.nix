@@ -55,6 +55,36 @@
         ps.sqlalchemy
         ps.typer
       ]);
+      stewardSource = pkgs.stdenvNoCC.mkDerivation {
+        pname = "coquic-steward-source";
+        version = "0.1.0";
+        src = projectSrc;
+        dontBuild = true;
+        installPhase = ''
+          mkdir -p $out/opt/coquic
+          cp -R steward $out/opt/coquic/steward
+        '';
+      };
+      stewardLauncher = pkgs.writeShellScriptBin "coquic-steward" ''
+        export PYTHONPATH="${stewardSource}/opt/coquic/steward/src''${PYTHONPATH:+:$PYTHONPATH}"
+        exec ${stewardPython}/bin/python -m coquic_steward.cli "$@"
+      '';
+      codexCli = pkgs.stdenvNoCC.mkDerivation {
+        pname = "codex-cli";
+        version = "0.144.6";
+        src = pkgs.fetchurl {
+          url = "https://registry.npmjs.org/@openai/codex/-/codex-0.144.6-linux-x64.tgz";
+          hash = "sha256-tnUusujBDm/MlqxcHIrYNCzbmnRQT7hGhq3fCBp9KGg=";
+        };
+        dontConfigure = true;
+        dontBuild = true;
+        installPhase = ''
+          mkdir -p $out/libexec/codex $out/bin
+          cp -R vendor $out/libexec/codex/
+          cp package.json $out/libexec/codex/package.json
+          ln -s $out/libexec/codex/vendor/x86_64-unknown-linux-musl/bin/codex $out/bin/codex
+        '';
+      };
       stewardTaskEntrypoint = pkgs.writeShellScriptBin "task-entrypoint.sh" (
         builtins.readFile ./steward/containers/task-entrypoint.sh
       );
@@ -78,6 +108,7 @@
           pkgs.pre-commit
           pkgs.uv
           zig
+          codexCli
           stewardPython
           stewardTaskEntrypoint
         ];
@@ -92,6 +123,8 @@
           pkgs.git
           pkgs.openssh
           stewardPython
+          stewardSource
+          stewardLauncher
           stewardDaemonEntrypoint
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];

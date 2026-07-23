@@ -138,6 +138,10 @@ class CodexPlanner:
             planner_thread_path(self.config).write_text(
                 result.thread_id, encoding="utf-8"
             )
+        public_thread_id = (
+            result.thread_id if self._injected_invocation is None else None
+        )
+        public_run_id = result.run_id or planner_task.id
         if not result.completed:
             return PlannerRun(
                 planned=[],
@@ -147,8 +151,8 @@ class CodexPlanner:
                 exit_code=result.exit_code,
                 prompt_path=result.prompt_path,
                 transcript_path=result.transcript_path,
-                thread_id=result.thread_id,
-                run_id=planner_task.id,
+                thread_id=public_thread_id,
+                run_id=public_run_id,
                 diagnostics=result.diagnostics,
             )
         raw_json = _extract_json(result.final_message)
@@ -165,9 +169,9 @@ class CodexPlanner:
             exit_code=result.exit_code,
             prompt_path=result.prompt_path,
             transcript_path=result.transcript_path,
-            thread_id=result.thread_id,
+            thread_id=public_thread_id,
             consumed_item_ids=verified.consumed_item_ids,
-            run_id=planner_task.id,
+            run_id=public_run_id,
             diagnostics=result.diagnostics,
         )
 

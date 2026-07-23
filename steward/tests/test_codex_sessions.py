@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import signal
 import stat
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,9 +17,20 @@ from coquic_steward.agents.invocation import (
     stream_process,
 )
 from coquic_steward.core.config import StewardConfig
-from coquic_steward.core.models import CodexStage, TaskKind, TaskSpec, WorkerKind
+from coquic_steward.core.models import (
+    CodexStage,
+    ProjectSignals,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+)
 from coquic_steward.execution import ResumeCategory, SessionSupervisor
-from coquic_steward.execution.container import ContainerInspection, ExecIdentity
+from coquic_steward.execution.container import (
+    ContainerInspection,
+    ExecIdentity,
+    TaskContainerRuntime,
+)
+from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import runtime_factory_for_config
 from coquic_steward.planning.planner import CodexPlanner
@@ -90,6 +102,35 @@ class InterruptedInvoker(FakeInvoker):
         )
 
 
+def _interrupted_session(config: StewardConfig, checkpoint_id: str | None):
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        invoker=InterruptedInvoker(),
+        image_digest="sha256:" + "a" * 64,
+    )
+    first = supervisor.start(
+        task.id,
+        pipeline.id,
+        role="implementation",
+        prompt="do work",
+        cwd=config.repo_root,
+        api_key="fake-key",
+        checkpoint_id=checkpoint_id,
+    )
+    predecessor = store.get_run(first.run_id)
+    session = store.get_session(first.session_id)
+    assert session.private_home_path is not None
+    (session.private_home_path / "sessions" / "provider.json").write_text("{}")
+    supervisor.invoker = FakeInvoker()
+    return store, supervisor, predecessor, session
+
+
 def test_fresh_session_has_private_home_uid_and_no_auth(config: StewardConfig) -> None:
     store = TaskStore(config.db_path)
     task, _ = store.add_task(
@@ -124,35 +165,46 @@ def test_fresh_session_has_private_home_uid_and_no_auth(config: StewardConfig) -
 
 
 def test_resume_requires_exact_provider_id_and_links_new_run(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    store, supervisor, predecessor, _ = _interrupted_session(
+        config, "checkpoint-one"
     )
-    pipeline = store.list_pipelines(task.id)[0]
-    supervisor = SessionSupervisor(
-        config,
-        store,
-        invoker=InterruptedInvoker(),
-        image_digest="sha256:" + "a" * 64,
-    )
-    first = supervisor.start(
-        task.id,
-        pipeline.id,
-        role="implementation",
-        prompt="do work",
-        cwd=config.repo_root,
+    resumed = supervisor.resume(
+        predecessor.id,
+        prompt="continue",
         api_key="fake-key",
+        checkpoint_id="checkpoint-one",
     )
-    predecessor = store.get_run(first.run_id)
-    session = store.get_session(first.session_id)
-    assert session.private_home_path is not None
-    (session.private_home_path / "sessions" / "provider.json").write_text("{}")
-    supervisor.invoker = FakeInvoker()
-    resumed = supervisor.resume(predecessor.id, prompt="continue", api_key="fake-key")
     assert resumed.category is ResumeCategory.success
     assert resumed.result is not None
     assert resumed.result.run_id != predecessor.id
     assert store.get_run(resumed.result.run_id).resume_of_run_id == predecessor.id
+
+
+@pytest.mark.parametrize(
+    ("persisted_checkpoint", "current_checkpoint"),
+    [
+        ("checkpoint-one", None),
+        ("checkpoint-one", ""),
+        (None, "checkpoint-one"),
+        ("checkpoint-one", "checkpoint-two"),
+    ],
+)
+def test_resume_rejects_missing_ambiguous_or_mismatched_checkpoint(
+    config: StewardConfig,
+    persisted_checkpoint: str | None,
+    current_checkpoint: str | None,
+) -> None:
+    store, supervisor, predecessor, _ = _interrupted_session(
+        config, persisted_checkpoint
+    )
+    resumed = supervisor.resume(
+        predecessor.id,
+        prompt="continue",
+        api_key="fake-key",
+        checkpoint_id=current_checkpoint,
+    )
+    assert resumed.category is ResumeCategory.checkpoint_drift
+    assert len(store.list_runs(predecessor.task_id)) == 1
 
 
 def test_jsonl_stream_preserves_invalid_bytes_and_incomplete_suffix() -> None:
@@ -319,6 +371,106 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
     assert persisted.exit_reason == "forced termination"
 
 
+def test_interrupt_does_not_treat_runtime_probe_failure_as_process_exit(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    private_sessions = config.private_sessions_dir / task.id
+    archive = config.tasks_dir / task.id
+    scratch = config.private_dir / "task-scratch" / task.id
+    for path in (private_sessions, archive, scratch):
+        path.mkdir(parents=True, exist_ok=True)
+    runtime_config = TaskContainerConfig(
+        task_id=task.id,
+        image="coquic-steward-task",
+        image_digest="sha256:" + "a" * 64,
+        worktree=config.repo_root,
+        archive=archive,
+        private_sessions=private_sessions,
+        git_dir=config.repo_root / ".git",
+        git_common_dir=config.repo_root / ".git",
+        scratch=scratch,
+    )
+    session, run = store.create_session_with_run(
+        task.id,
+        pipeline.id,
+        session_id="persisted-session",
+        private_home_path=private_sessions / "persisted-session",
+        private_home_relative_path=f"{task.id}/persisted-session",
+        image_digest=runtime_config.image_digest,
+        codex_identity="codex-0.144.6",
+        cwd=config.repo_root,
+        checkpoint_id="checkpoint-one",
+        provider_store_identity="codex-sessions-v1",
+        owner_role="implementation",
+        session_idempotency_key=None,
+        role="implementation",
+        model=None,
+        reasoning=None,
+        image_version=runtime_config.image_digest,
+        runtime_version="task-runtime-v1",
+        run_checkpoint_id="checkpoint-one",
+        run_provider_store_identity="codex-sessions-v1",
+    )
+    store.update_run(run.id, wrapper_pid=4321, exec_identity="docker-exec-one")
+
+    class TransientDockerFailure:
+        def __init__(self) -> None:
+            self.live = True
+            self.signals: list[int] = []
+            self.live_when_probe_failed = False
+
+        def run(self, argv, **_kwargs):
+            signal_value = int(
+                next(
+                    argv[index + 1].split("=", 1)[1]
+                    for index, value in enumerate(argv)
+                    if value == "--env"
+                    and argv[index + 1].startswith("COQUIC_STEWARD_SIGNAL=")
+                )
+            )
+            self.signals.append(signal_value)
+            if signal_value == signal.SIGTERM:
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if signal_value == 0 and len(self.signals) == 2:
+                self.live_when_probe_failed = self.live
+                return subprocess.CompletedProcess(
+                    argv,
+                    1,
+                    b"",
+                    b"Cannot connect to the Docker daemon",
+                )
+            if signal_value == signal.SIGKILL:
+                self.live = False
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if signal_value == 0 and not self.live:
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"/bin/kill: (4321): No such process"
+                )
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    client = TransientDockerFailure()
+    runtime = TaskContainerRuntime(runtime_config, client=client)
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        runtime_factory=lambda _task: runtime,
+        image_digest=runtime_config.image_digest,
+    )
+    interrupted = supervisor.interrupt(run.id, grace_seconds=0)
+    assert client.live_when_probe_failed
+    assert client.signals == [signal.SIGTERM, 0, signal.SIGKILL, 0]
+    assert interrupted.forced
+    persisted = store.get_run(run.id)
+    assert persisted.state == "interrupted"
+    assert persisted.exit_reason == "forced termination"
+    assert session.home_uid is not None
+
+
 class _CompletedProcess:
     def __init__(self, stdout: bytes, stderr: bytes = b"") -> None:
         self.stdout = io.BytesIO(stdout)
@@ -363,6 +515,95 @@ def test_streaming_result_does_not_retain_complete_stdout(tmp_path: Path) -> Non
     assert outcome.events == ()
     assert outcome.incomplete_suffix == b"partial"
     assert len(outcome.stderr) == 64 * 1024
+
+
+def test_signal_planner_uses_canonical_session_run_and_archive_lineage(
+    config: StewardConfig,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CODEX_API_KEY", "fake-key")
+    store = TaskStore(config.db_path)
+    allocations = []
+    create_session_with_run = store.create_session_with_run
+
+    def record_allocation(*args, **kwargs):
+        allocated = create_session_with_run(*args, **kwargs)
+        allocations.append((kwargs, allocated))
+        return allocated
+
+    monkeypatch.setattr(store, "create_session_with_run", record_allocation)
+
+    class PlannerInvoker(FakeInvoker):
+        def invoke(self, request, **kwargs):
+            outcome = super().invoke(request, **kwargs)
+            request.output_last_message.write_text(
+                '{"consumed_item_ids":[],"tasks":[]}\n', encoding="utf-8"
+            )
+            return outcome
+
+    class CapturingSupervisor(SessionSupervisor):
+        def run(self, *args, **kwargs):
+            result = super().run(*args, **kwargs)
+            self.worker_results = [
+                *getattr(self, "worker_results", []),
+                result,
+            ]
+            return result
+
+    invoker = PlannerInvoker()
+    supervisor = CapturingSupervisor(
+        config,
+        store,
+        invoker=invoker,
+        image_digest="sha256:" + "a" * 64,
+        codex_identity="codex-0.144.6",
+    )
+    planner = CodexPlanner(config, invocation=supervisor)
+    first = planner.run(ProjectSignals(repository="minhuw/coquic"), [])
+    second = planner.run(ProjectSignals(repository="minhuw/coquic"), [])
+
+    assert len(allocations) == 2
+    assert first.thread_id is None
+    assert second.thread_id is None
+    assert first.run_id not in {None, "steward-planner", "provider-session"}
+    assert second.run_id not in {None, first.run_id, "provider-session"}
+    assert all(result.thread_id is None for result in supervisor.worker_results)
+    assert [result.run_id for result in supervisor.worker_results] == [
+        first.run_id,
+        second.run_id,
+    ]
+
+    sessions = store.list_sessions("steward-planner")
+    assert len(sessions) == 2
+    assert [session.home_uid for session in sessions] == [10000, 10001]
+    assert all(session.checkpoint_id for session in sessions)
+    assert all(session.provider_session_id == "provider-session" for session in sessions)
+    assert all(
+        kwargs["checkpoint_id"] == session.checkpoint_id
+        and allocated_session.id == session.id
+        and allocated_run.id in {first.run_id, second.run_id}
+        for (kwargs, (allocated_session, allocated_run)), session in zip(
+            allocations, sessions, strict=True
+        )
+    )
+    assert [request.session_uid for request in invoker.requests] == [10000, 10001]
+    assert [request.session_id for request in invoker.requests] == [
+        session.id for session in sessions
+    ]
+    for planner_run in (first, second):
+        run = store.get_run(planner_run.run_id)
+        run_json = (
+            config.tasks_dir
+            / "steward-planner"
+            / "pipelines"
+            / run.pipeline_id
+            / "runs"
+            / run.id
+            / "run.json"
+        )
+        assert run_json.exists()
+        assert "provider-session" not in run_json.read_text(encoding="utf-8")
+        assert planner_run.transcript_path.parent == run_json.parent
 
 
 def test_production_construction_rejects_local_codex_fallback(

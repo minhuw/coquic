@@ -21,7 +21,15 @@ from ..agents.invocation import (
     stream_process,
 )
 from ..core.config import StewardConfig
-from ..core.models import CodexRunState, CodexSession, CodexStage, TaskRecord, TaskRun, WorkerResult
+from ..core.models import (
+    CodexRunState,
+    CodexSession,
+    CodexStage,
+    TaskRecord,
+    TaskRun,
+    TaskStatus,
+    WorkerResult,
+)
 from ..core.subprocesses import run_command
 from ..storage import TaskStore
 from .container import (
@@ -423,8 +431,27 @@ class SessionSupervisor:
             return ResumeResult(ResumeCategory.identity_mismatch, evidence={"field": "cwd"})
         if session.cwd is not None and Path(expected_cwd).resolve() != session.cwd.resolve():
             return ResumeResult(ResumeCategory.checkpoint_drift, evidence={"field": "cwd"})
-        if checkpoint_id is not None and session.checkpoint_id != checkpoint_id:
-            return ResumeResult(ResumeCategory.checkpoint_drift, evidence={"field": "checkpoint_id"})
+        if not _is_unambiguous_checkpoint(checkpoint_id):
+            return ResumeResult(
+                ResumeCategory.checkpoint_drift,
+                evidence={
+                    "field": "checkpoint_id",
+                    "reason": "an exact current checkpoint is required",
+                },
+            )
+        if not _is_unambiguous_checkpoint(session.checkpoint_id):
+            return ResumeResult(
+                ResumeCategory.checkpoint_drift,
+                evidence={
+                    "field": "checkpoint_id",
+                    "reason": "the persisted checkpoint is unavailable",
+                },
+            )
+        if session.checkpoint_id != checkpoint_id:
+            return ResumeResult(
+                ResumeCategory.checkpoint_drift,
+                evidence={"field": "checkpoint_id", "reason": "checkpoint mismatch"},
+            )
         try:
             run = self.store.create_run(
                 predecessor.task_id,
@@ -546,12 +573,19 @@ class SessionSupervisor:
         timeout: float,
     ) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)
-        while runtime.exec_is_live(identity):
+        while True:
+            try:
+                live = runtime.exec_is_live(identity)
+            except ContainerBoundaryError:
+                # A failed runtime probe leaves liveness unknown. Keep the run
+                # active through the grace window so the caller still escalates.
+                live = True
+            if not live:
+                return True
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
             time.sleep(min(0.05, remaining))
-        return True
 
     def inspect(self, run_id: str) -> InspectionResult:
         with self._active_lock:
@@ -628,52 +662,74 @@ class SessionSupervisor:
 
         if resume_session is not None:
             raise ValueError("planner turns never use ordinary session resume")
-        runtime, invoker = self._boundary_for(task)
+        task = self._ensure_planner_task(task)
+        runtime, _ = self._boundary_for(task)
         effective_cwd = runtime.config.worktree if runtime is not None else cwd
-        private_run = self.config.private_sessions_dir / task.id / secrets.token_hex(8)
-        private_run.mkdir(parents=True, exist_ok=True, mode=0o700)
-        request = InvocationRequest(
-            codex_bin=self.config.codex_bin,
-            cwd=effective_cwd,
+        checkpoint_id = _clean_worktree_checkpoint(effective_cwd)
+        execution = self.store.get_execution(task.id)
+        pipeline_id = execution.owning_pipeline_id
+        if pipeline_id is None:
+            pipelines = self.store.list_pipelines(task.id)
+            if not pipelines:
+                raise RuntimeError("planner task does not have a canonical pipeline")
+            pipeline_id = pipelines[-1].id
+        settings = self.config.codex_settings(stage)
+        result = self.start(
+            task.id,
+            pipeline_id,
+            role=TaskRole.planner,
             prompt=prompt,
-            output_last_message=private_run / "last-message.md",
-            stage=stage,
-            output_schema=_copy_optional_file(
-                output_schema, private_run / "output-schema.json"
-            ),
-            sandbox=sandbox or self.config.codex_sandbox,
-            role=TaskRole.planner.value,
-            session_uid=10000,
-            session_id=private_run.name,
-            run_id=private_run.name,
-        )
-        raw = private_run / "codex.jsonl"
-        outcome = invoker.invoke(
-            request,
+            cwd=effective_cwd,
             api_key=os.getenv("CODEX_API_KEY"),
-            append=lambda line: _append_private(raw, line),
-            observe=None,
-            on_started=None,
-            timeout_seconds=self._timeout_seconds(stage),
-            interrupt_grace_seconds=2.0,
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+            output_schema=output_schema,
+            stage=stage,
+            sandbox=sandbox or self.config.codex_sandbox,
+            checkpoint_id=checkpoint_id,
         )
         message = (
-            request.output_last_message.read_text(encoding="utf-8")
-            if request.output_last_message.exists()
+            result.last_message_path.read_text(encoding="utf-8")
+            if result.last_message_path.exists()
             else ""
         )
         return WorkerResult(
-            completed=outcome.completed,
-            command=request.argv(),
+            completed=result.status is InvocationStatus.succeeded,
+            command=[self.config.codex_bin, "exec", "--json"],
             cwd=effective_cwd,
-            exit_code=outcome.exit_code,
-            transcript_path=raw,
-            last_message_path=request.output_last_message,
+            exit_code=result.exit_code,
+            transcript_path=result.transcript_path,
+            last_message_path=result.last_message_path,
             final_message=message,
-            thread_id=outcome.provider_session_id,
+            thread_id=None,
+            session_id=result.session_id,
+            run_id=result.run_id,
+            pipeline_id=result.pipeline_id,
             stage=stage,
-            diagnostics={"malformed_lines": outcome.malformed_lines},
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+            diagnostics=result.diagnostics or {},
         )
+
+    def _ensure_planner_task(self, requested: TaskRecord) -> TaskRecord:
+        try:
+            task = self.store.get(requested.id)
+        except KeyError:
+            task, created = self.store.add_task(requested.spec)
+            if not created:
+                raise RuntimeError("planner task allocation was ambiguous")
+            task.status = TaskStatus.succeeded
+        if task.spec.source != "planner":
+            raise ValueError("planner task identity belongs to a non-planner task")
+        if task.worktree_path is None:
+            task.worktree_path = requested.worktree_path
+        elif (
+            requested.worktree_path is not None
+            and task.worktree_path.resolve() != requested.worktree_path.resolve()
+        ):
+            raise ValueError("planner task worktree identity changed")
+        self.store.save(task)
+        return self.store.get(task.id)
 
     def _allocate(
         self,
@@ -1055,12 +1111,28 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
     return build
 
 
-def _append_private(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with path.open("ab") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
+def _clean_worktree_checkpoint(path: Path) -> str:
+    status = run_command(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=path,
+        check=True,
+    )
+    if status.stdout:
+        raise RuntimeError("planner worktree checkpoint is ambiguous")
+    tree = run_command(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
+    ).stdout.strip()
+    if not tree or any(character not in "0123456789abcdef" for character in tree):
+        raise RuntimeError("planner worktree checkpoint is invalid")
+    return f"git-tree-{tree}"
+
+
+def _is_unambiguous_checkpoint(value: str | None) -> bool:
+    return bool(
+        value
+        and len(value) <= 256
+        and not any(character.isspace() or character == "\x00" for character in value)
+    )
 
 
 def _copy_optional_file(source: Path | None, destination: Path) -> Path | None:

@@ -697,6 +697,9 @@ class WorkerResult(BaseModel):
     last_message_path: Path
     final_message: str = ""
     thread_id: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
+    pipeline_id: str | None = None
     stage: CodexStage = CodexStage.code
     model: str | None = None
     reasoning_effort: str | None = None

@@ -373,7 +373,16 @@ class TaskContainerRuntime:
             ],
             allow_not_found=True,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        if _process_not_found(result.stderr):
+            return False
+        category = (
+            ContainerErrorCategory.not_found
+            if _not_found(result.stderr)
+            else ContainerErrorCategory.runtime_unavailable
+        )
+        raise ContainerBoundaryError(category, _decode_error(result.stderr))
 
     def stop(self, container_id: str | None = None, *, timeout: float | None = None) -> None:
         identifier = container_id or self.config.container_name
@@ -476,6 +485,11 @@ def _not_found(value: bytes) -> bool:
         or "no such object" in text
         or "not found" in text
     )
+
+
+def _process_not_found(value: bytes) -> bool:
+    text = value.decode("utf-8", "replace").lower()
+    return "no such process" in text
 
 
 def _decode_error(value: bytes) -> str:

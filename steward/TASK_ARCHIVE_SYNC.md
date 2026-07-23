@@ -34,7 +34,11 @@ restrict,command="/usr/bin/rsync --server --daemon --config=/fixed/rsyncd.conf .
 The fixed daemon config exposes exactly one write-only `steward-tasks` module
 rooted at `/fixed/steward-tasks`, and refuses deletion/source-removal,
 in-place, append, partial, delayed-update, link, device, special-file,
-ownership, ACL, and xattr options.  This daemon-over-SSH command is intentional:
+ownership, ACL, and xattr options. Refused options are space-separated as
+required by rsync 3.2.7, including the short `D` device/special form. A fixed
+`pre-xfer exec` check accepts only the exact `steward-tasks/` request exposed by
+`RSYNC_REQUEST`, so a client cannot select a module subpath. This daemon-over-SSH
+command is intentional:
 stock `rrsync` rejects the protected-argument option required by the client.
 The fake receiver harness starts the installed rsync daemon for protocol tests
 and checks the exact forced command/module root; it does not emulate `--server`

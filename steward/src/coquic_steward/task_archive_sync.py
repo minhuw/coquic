@@ -64,6 +64,14 @@ class TaskArchiveSyncReceiverError(ValueError):
     """A forced receiver command or path violates the write-only boundary."""
 
 
+_RECEIVER_REFUSED_OPTIONS = (
+    "delete delete-excluded delete-delay delete-before delete-during delete-after "
+    "remove-source-files inplace append append-verify partial partial-dir "
+    "delay-updates links copy-links hard-links devices specials D owner group perms "
+    "acls xattrs"
+)
+
+
 def _receiver_root(task_root: Path) -> Path:
     root = Path(task_root).expanduser()
     if not root.is_absolute() or any(part in {".", ".."} for part in root.parts):
@@ -99,10 +107,7 @@ def build_receiver_rsyncd_config(
         "write only = yes\n"
         "list = no\n"
         "reverse lookup = no\n"
-        "refuse options = delete,delete-excluded,delete-delay,delete-before,"
-        "delete-during,delete-after,remove-source-files,inplace,append,"
-        "append-verify,partial,partial-dir,delay-updates,links,copy-links,"
-        "hard-links,devices,specials,owner,group,perms,acls,xattrs\n"
+        f"refuse options = {_RECEIVER_REFUSED_OPTIONS}\n"
         "exclude = .*\n"
         "exclude = .*/\n"
         "exclude = ~*\n"
@@ -111,10 +116,8 @@ def build_receiver_rsyncd_config(
         "read only = no\n"
         "write only = yes\n"
         "list = no\n"
-        "refuse options = delete,delete-excluded,delete-delay,delete-before,"
-        "delete-during,delete-after,remove-source-files,inplace,append,"
-        "append-verify,partial,partial-dir,delay-updates,links,copy-links,"
-        "hard-links,devices,specials,owner,group,perms,acls,xattrs\n"
+        f"refuse options = {_RECEIVER_REFUSED_OPTIONS}\n"
+        f'pre-xfer exec = /usr/bin/test "$RSYNC_REQUEST" = "{TASK_ARCHIVE_SYNC_MODULE}/"\n'
         "exclude = .*\n"
         "exclude = .*/\n"
         "exclude = ~*\n"
@@ -619,7 +622,12 @@ def classify_rsync_result(
     if "timed out" in hint or "timeout" in hint:
         category = TaskArchiveSyncCategory.timeout
         detail = "transfer timed out"
-    elif "host key" in hint or "known_hosts" in hint or "offending" in hint:
+    elif (
+        "host key" in hint
+        or "host identification has changed" in hint
+        or "known_hosts" in hint
+        or "offending" in hint
+    ):
         category = TaskArchiveSyncCategory.host_key
         detail = "SSH host-key verification failed"
     elif returncode == 255 and _contains_ssh_authentication_evidence(hint):

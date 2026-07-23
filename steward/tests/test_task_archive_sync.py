@@ -6,6 +6,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -703,6 +704,81 @@ def test_run_once_interruptions_finalize_health_and_reraise(
     ).run_once()
     assert followup.success
     assert calls == 1
+
+
+def test_run_once_interrupt_stops_live_child_before_releasing_health(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import signal, time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "print('ready', flush=True); time.sleep(30)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert child.stdout is not None
+    assert child.stdout.readline() == b"ready\n"
+
+    class InterruptingProcess:
+        def __init__(self, process: subprocess.Popen[bytes]) -> None:
+            self.process = process
+            self.interrupted = False
+
+        @property
+        def returncode(self) -> int | None:
+            return self.process.returncode
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+            return self.process.communicate(timeout=timeout)
+
+        def poll(self) -> int | None:
+            return self.process.poll()
+
+        def terminate(self) -> None:
+            self.process.terminate()
+
+        def kill(self) -> None:
+            self.process.kill()
+
+    process = InterruptingProcess(child)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            TaskArchiveSynchronizer(
+                config,
+                store,
+                runner=lambda _argv, **_kwargs: process,
+            ).run_once()
+
+        assert child.poll() is not None
+        health = store.get_task_archive_sync_health()
+        assert health.active_cycle_id is None
+        assert health.last_category == TaskArchiveSyncCategory.interrupted
+
+        followup = TaskArchiveSynchronizer(
+            config,
+            store,
+            runner=lambda _argv, **_kwargs: (
+                pytest.fail("follow-up overlapped the interrupted child")
+                if child.poll() is None
+                else SimpleNamespace(returncode=0, stderr=b"")
+            ),
+        ).run_once()
+        assert followup.success
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
 
 
 @pytest.mark.parametrize(

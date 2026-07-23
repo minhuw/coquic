@@ -789,47 +789,58 @@ class TaskArchiveSynchronizer:
         try:
             if process.poll() is not None:
                 return
-        except (OSError, ValueError):
+        except BaseException:
             pass
-        self._signal_process(process, signal.SIGTERM)
+        try:
+            self._signal_process(process, signal.SIGTERM)
+        except BaseException:
+            pass
         try:
             process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
-            return
-        except subprocess.TimeoutExpired:
+        except BaseException:
+            pass
+        try:
+            if process.poll() is not None:
+                return
+        except BaseException:
+            pass
+        try:
             self._signal_process(process, signal.SIGKILL)
-        except (OSError, ValueError):
-            return
+        except BaseException:
+            pass
         try:
             process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+        except BaseException:
             pass
 
     def _wait_for_process(self, process: Any, argv: list[str]) -> Any:
         deadline = self._monotonic() + self.config.transfer_timeout_seconds
-        while True:
-            if self._cancelled():
-                self._stop_process(process)
-                raise TaskArchiveSyncCancelled
-            remaining = deadline - self._monotonic()
-            if remaining <= 0:
-                self._stop_process(process)
-                raise subprocess.TimeoutExpired(
-                    argv, self.config.transfer_timeout_seconds
+        try:
+            while True:
+                if self._cancelled():
+                    raise TaskArchiveSyncCancelled
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(
+                        argv, self.config.transfer_timeout_seconds
+                    )
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=min(_PROCESS_WAIT_SLICE_SECONDS, remaining)
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+                if self._cancelled():
+                    raise TaskArchiveSyncCancelled
+                return subprocess.CompletedProcess(
+                    argv,
+                    getattr(process, "returncode", None),
+                    stdout,
+                    stderr,
                 )
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=min(_PROCESS_WAIT_SLICE_SECONDS, remaining)
-                )
-            except subprocess.TimeoutExpired:
-                continue
-            if self._cancelled():
-                raise TaskArchiveSyncCancelled
-            return subprocess.CompletedProcess(
-                argv,
-                getattr(process, "returncode", None),
-                stdout,
-                stderr,
-            )
+        except BaseException:
+            self._stop_process(process)
+            raise
 
     def _invoke_runner(self, argv: list[str]) -> Any:
         kwargs: dict[str, Any] = {

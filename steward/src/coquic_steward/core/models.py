@@ -474,6 +474,14 @@ class CodexSession(BaseModel):
     state: SessionState | str = SessionState.active
     provider_session_id: str | None = None
     private_home_path: Path | None = None
+    private_home_relative_path: str | None = None
+    home_uid: int | None = Field(default=None, ge=10000, le=60000)
+    image_digest: str | None = None
+    codex_identity: str | None = None
+    cwd: Path | None = None
+    checkpoint_id: str | None = None
+    provider_store_identity: str | None = None
+    owner_role: str | None = None
     idempotency_key: str | None = None
     archive_generation: int = Field(default=0, ge=0)
     started_at: datetime = Field(default_factory=utc_now)
@@ -517,6 +525,9 @@ class TaskRun(BaseModel):
     runtime_version: str | None = None
     checkpoint_id: str | None = None
     provider_run_id: str | None = None
+    provider_store_identity: str | None = None
+    wrapper_pid: int | None = Field(default=None, ge=1)
+    exec_identity: str | None = None
     exit_code: int | None = None
     exit_signal: str | None = None
     exit_reason: str | None = None

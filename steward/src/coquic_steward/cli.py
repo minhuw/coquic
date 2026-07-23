@@ -14,6 +14,7 @@ from .orchestration import (
     acquire_daemon_lock,
 )
 from .execution.executor import StewardExecutor, default_worker_for_kind
+from .execution.session import SessionSupervisor, runtime_factory_for_config
 from .core.models import (
     Priority,
     Risk,
@@ -43,6 +44,20 @@ def _context() -> tuple[TaskStore, object]:
     return TaskStore(config.db_path), config
 
 
+def _configured_supervisor(config, store: TaskStore) -> SessionSupervisor | None:
+    """Build the production session boundary for a locked task image."""
+
+    if not getattr(config, "task_image_digest", None):
+        return None
+    return SessionSupervisor(
+        config,
+        store,
+        runtime_factory=runtime_factory_for_config(config),
+        image_digest=config.task_image_digest,
+        codex_identity=config.codex_identity or config.codex_bin,
+    )
+
+
 @app.command()
 def agents() -> None:
     for agent in AGENTS.values():
@@ -66,7 +81,11 @@ def run(task_id: str) -> None:
     store, config = _context()
     try:
         with acquire_daemon_lock(config):
-            ok = StewardExecutor(config, store).run_task(task_id)
+            ok = StewardExecutor(
+                config,
+                store,
+                session_supervisor=_configured_supervisor(config, store),
+            ).run_task(task_id)
             task = store.get(task_id)
             typer.echo(f"{'ran' if ok else 'failed'} {task.id} status={task.status}")
             if not ok and TaskStatus(task.status) != TaskStatus.blocked:
@@ -146,6 +165,7 @@ def plan(enqueue: bool = False) -> None:
         config,
         project_signals_from_items(config, actionable),
         store.list_tasks(limit=200),
+        invocation=_configured_supervisor(config, store),
     )
     planned_item_ids: set[str] = set()
     for spec, dedupe_key in planner_run.planned:

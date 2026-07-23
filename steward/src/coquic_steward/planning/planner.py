@@ -91,9 +91,26 @@ class PlannerRun:
 
 
 class CodexPlanner:
-    def __init__(self, config: StewardConfig, verifier: PlanVerifier | None = None):
+    def __init__(
+        self,
+        config: StewardConfig,
+        verifier: PlanVerifier | None = None,
+        *,
+        runner: CodexRunner | None = None,
+        invocation: object | None = None,
+    ):
         self.config = config
-        self.runner = CodexRunner(config)
+        self._injected_invocation = invocation
+        if runner is None and invocation is None and config.task_image_digest:
+            raise ValueError(
+                "CodexPlanner requires an injected task-container invocation boundary"
+            )
+        self.runner = (
+            runner
+            or getattr(invocation, "runner", None)
+            or (invocation if invocation is not None and hasattr(invocation, "run") else None)
+            or CodexRunner(config)
+        )
         self.verifier = verifier or PlanVerifier()
 
     def plan(
@@ -110,10 +127,11 @@ class CodexPlanner:
             self.config.repo_root,
             name="planner",
             output_schema=planner_schema_path(self.config),
-            resume_session=planner_thread_id(self.config),
             stage=CodexStage.signal_planner,
         )
-        if result.thread_id:
+        if self._injected_invocation is None and not self.config.task_image_digest and result.thread_id:
+            # Compatibility evidence for the explicit in-process test harness;
+            # production planning never resumes this file.
             planner_thread_path(self.config).write_text(
                 result.thread_id, encoding="utf-8"
             )
@@ -158,9 +176,16 @@ def plan_tasks(
 
 
 def run_planner(
-    config: StewardConfig, signals: ProjectSignals, active_tasks: list[TaskRecord]
+    config: StewardConfig,
+    signals: ProjectSignals,
+    active_tasks: list[TaskRecord],
+    *,
+    runner: CodexRunner | None = None,
+    invocation: object | None = None,
 ) -> PlannerRun:
-    return CodexPlanner(config).run(signals, active_tasks)
+    return CodexPlanner(config, runner=runner, invocation=invocation).run(
+        signals, active_tasks
+    )
 
 
 def render_planner_prompt(

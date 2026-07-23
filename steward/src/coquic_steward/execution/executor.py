@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import fnmatch
 import json
+import os
 import re
 import threading
 import time
@@ -51,6 +52,8 @@ from .implementation_plan import (
 )
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
+from .session import SessionSupervisor
+from .container_config import TaskRole
 
 MAX_TASK_REVISIONS = 100
 MAX_REVIEW_RUN_ATTEMPTS = 2
@@ -99,11 +102,125 @@ class PatchPreparationResult(StrEnum):
     terminal_failure = "terminal_failure"
 
 
-class StewardExecutor:
-    def __init__(self, config: StewardConfig, store: TaskStore):
+class _SessionRunnerAdapter:
+    """Keep executor observability APIs while delegating execution to sessions."""
+
+    def __init__(self, config: StewardConfig, store: TaskStore, supervisor: SessionSupervisor):
         self.config = config
         self.store = store
-        self.runner = CodexRunner(config)
+        self.supervisor = supervisor
+
+    def paths(self, task: TaskRecord, *, name: str = "worker") -> tuple[Path, Path]:
+        execution = self.store.get_execution(task.id)
+        pipeline_id = execution.owning_pipeline_id or self.store.list_pipelines(task.id)[-1].id
+        # The session supervisor allocates the canonical run path.  This stable
+        # placeholder is used only before begin_iteration records the result.
+        base = self.config.tasks_dir / task.id / "pipelines" / pipeline_id / "runs" / name
+        return base / "codex.jsonl", base / "last-message.md"
+
+    def run(
+        self,
+        task: TaskRecord,
+        prompt: str,
+        cwd: Path,
+        *,
+        name: str = "worker",
+        output_schema: Path | None = None,
+        resume_session: str | None = None,
+        stage: CodexStage = CodexStage.code,
+        sandbox: str | None = None,
+    ) -> WorkerResult:
+        if resume_session is not None:
+            raise ValueError("ordinary executor roles cannot resume sessions")
+        role = (
+            TaskRole.planner
+            if stage == CodexStage.implementation_plan
+            else TaskRole.reviewer
+            if stage == CodexStage.review
+            else TaskRole.implementation
+        )
+        settings = self.config.codex_settings(stage)
+        pipeline_id = self.store.get_execution(task.id).owning_pipeline_id
+        if pipeline_id is None:
+            pipeline_id = self.store.list_pipelines(task.id)[-1].id
+        result = self.supervisor.start(
+            task.id,
+            pipeline_id,
+            role=role,
+            prompt=prompt,
+            cwd=cwd,
+            api_key=os.getenv("CODEX_API_KEY"),
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+            output_schema=output_schema,
+            stage=stage,
+        )
+        return WorkerResult(
+            completed=result.status.value == "succeeded",
+            command=[self.config.codex_bin, "exec", "--json"],
+            cwd=cwd,
+            exit_code=result.exit_code,
+            transcript_path=result.transcript_path,
+            last_message_path=result.last_message_path,
+            final_message=(
+                result.last_message_path.read_text(encoding="utf-8")
+                if result.last_message_path.exists()
+                else ""
+            ),
+            thread_id=result.provider_session_id,
+            stage=stage,
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+            diagnostics=result.diagnostics or {},
+        )
+
+    def run_review(
+        self,
+        task: TaskRecord,
+        prompt: str,
+        cwd: Path,
+        *,
+        name: str = "reviewer",
+        output_schema: Path,
+    ) -> WorkerResult:
+        return self.run(
+            task,
+            prompt,
+            cwd,
+            name=name,
+            output_schema=output_schema,
+            stage=CodexStage.review,
+        )
+
+    def reconcile_tool_changes(
+        self, transcript_path: Path, *, final_patch_path: Path | None = None
+    ) -> dict[str, object]:
+        return {"state": "container-boundary", "transcript_path": str(transcript_path)}
+
+
+class StewardExecutor:
+    def __init__(
+        self,
+        config: StewardConfig,
+        store: TaskStore,
+        *,
+        session_supervisor: SessionSupervisor | None = None,
+        runner: CodexRunner | None = None,
+    ):
+        self.config = config
+        self.store = store
+        if session_supervisor is not None and runner is not None:
+            raise ValueError("provide either session_supervisor or runner, not both")
+        if session_supervisor is None and runner is None and config.task_image_digest:
+            raise ValueError(
+                "StewardExecutor requires an injected task-container session supervisor"
+            )
+        self.session_supervisor = session_supervisor
+        self.runner = (
+            _SessionRunnerAdapter(config, store, session_supervisor)
+            if session_supervisor is not None
+            else runner or CodexRunner(config)
+        )
         self.worktrees = Worktrees(config)
         self._latest_failed_validations: dict[str, list[ValidationResult]] = {}
 
@@ -331,7 +448,9 @@ class StewardExecutor:
         task = self.store.get(task_id)
         task.transcript_path = result.transcript_path
         task.last_message_path = result.last_message_path
-        if result.thread_id:
+        if self.session_supervisor is None and result.thread_id:
+            # Legacy in-process harness compatibility only. Production
+            # container sessions keep provider IDs in private ledger state.
             metadata = dict(task.spec.metadata)
             metadata["worker_thread_id"] = result.thread_id
             task.spec.metadata = metadata
@@ -785,7 +904,6 @@ class StewardExecutor:
                 render_review_revision_prompt(task, review, self.config),
                 task.worktree_path,
                 name=f"worker-revision-{revision}",
-                resume_session=_worker_thread_id(task),
             ),
         )
         self.store.add_event(
@@ -852,7 +970,6 @@ class StewardExecutor:
                 render_validation_revision_prompt(task, validations, self.config),
                 task.worktree_path,
                 name=name,
-                resume_session=_worker_thread_id(task),
             ),
         )
         self.store.add_event(
@@ -925,7 +1042,6 @@ class StewardExecutor:
                 render_integration_revision_prompt(task, conflict, failed_patch),
                 task.worktree_path,
                 name=name,
-                resume_session=_worker_thread_id(task),
             ),
         )
         self.store.add_event(
@@ -1940,11 +2056,6 @@ class IntegrationTranscript:
 
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{utc_now().isoformat()}] {stage}: {message}\n")
-
-
-def _worker_thread_id(task) -> str | None:
-    value = task.spec.metadata.get("worker_thread_id")
-    return value if isinstance(value, str) and value else None
 
 
 def _reviewer_name(attempt: int, review_run: int) -> str:

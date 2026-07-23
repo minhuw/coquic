@@ -6,6 +6,13 @@ codex_bin = "codex"
 # codex_model = "gpt-5.6-terra"
 # codex_reasoning_effort = "medium"
 codex_sandbox = "workspace-write"
+# The daemon resolves and locks these digests before constructing a task
+# container. Never put credentials or a mutable tag in runtime state.
+task_image = "coquic-steward-task"
+# task_image_digest = "sha256:<64 lowercase hex characters>"
+daemon_image = "coquic-steward-daemon"
+# daemon_image_digest = "sha256:<64 lowercase hex characters>"
+runtime_protocol = "task-container-v1"
 integration_mode = "local-only"
 local_only = false
 git_remote = "origin"

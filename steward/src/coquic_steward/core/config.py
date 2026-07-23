@@ -66,6 +66,12 @@ VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
 
 
+def _valid_sha256_digest(value: str) -> bool:
+    return len(value) == 71 and value.startswith("sha256:") and all(
+        character in "0123456789abcdef" for character in value[7:]
+    )
+
+
 @dataclass(frozen=True)
 class StewardLimits:
     max_active_tasks: int = 4
@@ -156,6 +162,12 @@ class StewardConfig:
     codex_stages: dict[str, CodexStageConfig] = field(default_factory=dict)
     codex_profile: str | None = None
     codex_sandbox: str = "workspace-write"
+    codex_identity: str | None = None
+    task_image: str = "coquic-steward-task"
+    task_image_digest: str | None = None
+    daemon_image: str = "coquic-steward-daemon"
+    daemon_image_digest: str | None = None
+    runtime_protocol: str = "task-container-v1"
     integration_mode: str = IntegrationMode.local_only.value
     local_only: bool = False
     git_remote: str = "origin"
@@ -176,6 +188,14 @@ class StewardConfig:
                 f"invalid integration_mode {self.integration_mode!r}; expected {choices}"
             )
         _validate_github_repository(self.github_repository)
+        if not self.task_image or "\n" in self.task_image:
+            raise ValueError("task_image must be non-empty and single-line")
+        if self.task_image_digest is not None and not _valid_sha256_digest(self.task_image_digest):
+            raise ValueError("task_image_digest must be a sha256 digest")
+        if self.daemon_image_digest is not None and not _valid_sha256_digest(self.daemon_image_digest):
+            raise ValueError("daemon_image_digest must be a sha256 digest")
+        if self.runtime_protocol != "task-container-v1":
+            raise ValueError("unsupported task runtime protocol")
         _validate_reasoning_effort(
             self.codex_reasoning_effort, "codex_reasoning_effort"
         )
@@ -467,6 +487,24 @@ def load_config(
         or os.getenv("COQUIC_STEWARD_CODEX_PROFILE")
         or None,
         codex_sandbox=str(steward.get("codex_sandbox", "workspace-write")),
+        codex_identity=(
+            str(codex_data.get("identity"))
+            if isinstance(codex_data, dict) and codex_data.get("identity") is not None
+            else None
+        ),
+        task_image=str(steward.get("task_image", "coquic-steward-task")),
+        task_image_digest=(
+            str(steward.get("task_image_digest"))
+            if steward.get("task_image_digest") is not None
+            else None
+        ),
+        daemon_image=str(steward.get("daemon_image", "coquic-steward-daemon")),
+        daemon_image_digest=(
+            str(steward.get("daemon_image_digest"))
+            if steward.get("daemon_image_digest") is not None
+            else None
+        ),
+        runtime_protocol=str(steward.get("runtime_protocol", "task-container-v1")),
         integration_mode=str(
             steward.get("integration_mode", IntegrationMode.local_only.value)
         ),

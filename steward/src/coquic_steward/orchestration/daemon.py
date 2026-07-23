@@ -25,6 +25,7 @@ from ..core.models import (
     WorkerKind,
 )
 from ..execution.executor import StewardExecutor
+from ..execution.session import SessionSupervisor, runtime_factory_for_config
 from ..planning import run_planner
 from ..public_mirror import (
     classify_publish_failure,
@@ -75,6 +76,7 @@ class StewardDaemon:
         store: TaskStore,
         *,
         logger: Callable[[str], None] | None = None,
+        session_supervisor: SessionSupervisor | None = None,
     ):
         self.config = config
         self.store = store
@@ -84,7 +86,20 @@ class StewardDaemon:
                 "remote push preflight ok "
                 f"remote={config.git_remote} branch={config.main_branch}"
             )
-        self.executor = StewardExecutor(config, store)
+        self.session_supervisor = session_supervisor
+        if self.session_supervisor is None and config.task_image_digest:
+            self.session_supervisor = SessionSupervisor(
+                config,
+                store,
+                runtime_factory=runtime_factory_for_config(config),
+                image_digest=config.task_image_digest,
+                codex_identity=config.codex_identity or config.codex_bin,
+            )
+        self.executor = StewardExecutor(
+            config,
+            store,
+            session_supervisor=self.session_supervisor,
+        )
         self.runtime = DaemonRuntime(
             heartbeat_interval_seconds=DAEMON_HEARTBEAT_INTERVAL_SECONDS
         )
@@ -413,7 +428,19 @@ class StewardDaemon:
                 "enabled_signals": list(self.config.enabled_signals),
             },
         )
-        planner_run = run_planner(self.config, signals, task_context)
+        try:
+            planner_run = run_planner(
+                self.config,
+                signals,
+                task_context,
+                invocation=self.session_supervisor,
+            )
+        except TypeError as exc:
+            # Preserve simple test doubles from the pre-boundary API. A real
+            # invocation TypeError must still propagate unchanged.
+            if "invocation" not in str(exc):
+                raise
+            planner_run = run_planner(self.config, signals, task_context)
         planned_item_count = 0
         planned_item_ids: set[str] = set()
         run_id = planner_run.run_id or planner_run.thread_id

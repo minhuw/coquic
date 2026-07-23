@@ -336,6 +336,14 @@ class CodexSessionRow(Base):
     state: Mapped[str] = mapped_column(String, nullable=False, default="active")
     provider_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     private_home_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    private_home_relative_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    home_uid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_digest: Mapped[str | None] = mapped_column(String, nullable=True)
+    codex_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    cwd: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider_store_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    owner_role: Mapped[str | None] = mapped_column(String, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
     archive_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     started_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -361,6 +369,11 @@ class CodexSessionRow(Base):
             "state IN ('active', 'closed', 'interrupted')",
             name="ck_codex_sessions_state",
         ),
+        CheckConstraint(
+            "home_uid IS NULL OR (home_uid >= 10000 AND home_uid <= 60000)",
+            name="ck_codex_sessions_home_uid",
+        ),
+        UniqueConstraint("home_uid", name="uq_codex_sessions_home_uid"),
     )
 
 
@@ -385,6 +398,9 @@ class TaskRunRow(Base):
     runtime_version: Mapped[str | None] = mapped_column(String, nullable=True)
     checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     provider_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_store_identity: Mapped[str | None] = mapped_column(String, nullable=True)
+    wrapper_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exec_identity: Mapped[str | None] = mapped_column(String, nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     exit_signal: Mapped[str | None] = mapped_column(String, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -972,7 +972,16 @@ class TaskArchive:
         pipeline_id: str | None,
     ) -> dict[str, Any]:
         if isinstance(task, TaskRecord):
-            value = {
+            existing_path = self.task_dir(task.id) / "task.json"
+            existing: dict[str, Any] | None = None
+            if existing_path.exists() and existing_path.is_file():
+                try:
+                    loaded = json.loads(existing_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        existing = loaded
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    existing = None
+            value = existing or {
                 "taskId": task.id,
                 "epochId": self.epoch_id,
                 "status": str(task.status),
@@ -986,6 +995,16 @@ class TaskArchive:
                 "terminalStatusObservedAt": None,
                 "manifestPath": None,
             }
+            value.update(
+                {
+                    "taskId": task.id,
+                    "epochId": self.epoch_id,
+                    "status": str(task.status),
+                    "updatedAt": task.updated_at.isoformat().replace("+00:00", "Z"),
+                    "currentPipelineId": pipeline_id,
+                    "summary": {"title": task.spec.title, "text": task.summary or task.spec.prompt},
+                }
+            )
         elif task is not None:
             value = dict(_as_dict(task))
         elif supplied is not None:
@@ -1019,6 +1038,18 @@ class TaskArchive:
                     "path": f"pipelines/{selected_pipeline}/pipeline.json",
                 }
             ]
+        elif selected_pipeline is not None and not any(
+            isinstance(item, Mapping)
+            and item.get("pipelineId") == selected_pipeline
+            for item in value["pipelines"]
+        ):
+            value["pipelines"].append(
+                {
+                    "pipelineId": selected_pipeline,
+                    "ordinal": len(value["pipelines"]) + 1,
+                    "path": f"pipelines/{selected_pipeline}/pipeline.json",
+                }
+            )
         value.setdefault("terminalStatusObservedAt", None)
         value.setdefault("manifestPath", None)
         if value["taskId"] != task_id or value["epochId"] != self.epoch_id:
@@ -1537,6 +1568,22 @@ class TaskArchive:
             f"pipelines/{validate_opaque_id(pipeline_id)}/runs/{validate_opaque_id(run_id)}/{name}",
             record,
         )
+
+    def append_run_bytes(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        run_id: str,
+        name: str,
+        record: bytes,
+    ) -> int:
+        """Append one already-complete raw JSONL record without decoding it."""
+
+        if not isinstance(record, bytes) or not record.endswith(b"\n"):
+            raise ArchiveValidationError("raw run records must be newline terminated bytes")
+        return self.append_run_jsonl(task_id, pipeline_id, run_id, name, record)
+
+    append_raw_run_record = append_run_bytes
 
     append_codex_record = lambda self, task_id, pipeline_id, run_id, record: self.append_run_jsonl(task_id, pipeline_id, run_id, "codex.jsonl", record)
     append_activity = lambda self, task_id, pipeline_id, run_id, record: self.append_run_jsonl(task_id, pipeline_id, run_id, "activities.jsonl", record)

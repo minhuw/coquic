@@ -1,0 +1,32 @@
+services:
+  steward-daemon:
+    image: "${STEWARD_DAEMON_IMAGE:?set a locked daemon image digest}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    volumes:
+      - "${COQUIC_REPOSITORY:?set a repository path}:/var/lib/coquic-steward/repository:rw"
+      - "${COQUIC_HOME:?set a state path}:/var/lib/coquic-steward/home:rw"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "${STEWARD_GITHUB_CONFIG:?set a daemon-only GitHub config}:/root/.config/gh:ro"
+      - "${STEWARD_SSH_DIR:?set a daemon-only SSH directory}:/root/.ssh:ro"
+      - "${STEWARD_SYNC_KEY:?set a daemon-only sync key}:/run/secrets/sync-key:ro"
+    environment:
+      COQUIC_HOME: /var/lib/coquic-steward/home
+      STEWARD_REPOSITORY: /var/lib/coquic-steward/repository
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=1g
+    restart: unless-stopped
+
+  # Task containers are created by the trusted daemon. This service is only a
+  # documentation fixture and deliberately has no Docker, GitHub, SSH, or sync
+  # credential mounts.
+  task-example:
+    image: "${STEWARD_TASK_IMAGE:?set a locked task image digest}"
+    profiles: [example-only]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    network_mode: bridge

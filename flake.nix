@@ -50,6 +50,86 @@
         sha256 = "sha256-i2UnYhKaM4jn0Xnmnd6R7JAyXYc/88npPNBsON4of3w=";
       };
       projectSrc = lib.cleanSource ./.;
+      stewardPython = pkgs.python3.withPackages (ps: [
+        ps.pydantic
+        ps.sqlalchemy
+        ps.typer
+      ]);
+      stewardTaskEntrypoint = pkgs.writeShellScriptBin "task-entrypoint.sh" (
+        builtins.readFile ./steward/containers/task-entrypoint.sh
+      );
+      stewardDaemonEntrypoint = pkgs.writeShellScriptBin "daemon-entrypoint.sh" (
+        builtins.readFile ./steward/containers/daemon-entrypoint.sh
+      );
+      stewardSourceIdentity = builtins.substring 0 32 (
+        builtins.hashString "sha256" (toString projectSrc)
+      );
+      stewardTaskToolClosure = pkgs.buildEnv {
+        name = "coquic-steward-task-tools";
+        paths = [
+          pkgs.bash
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gawk
+          pkgs.git
+          pkgs.gnutar
+          pkgs.gzip
+          pkgs.nix
+          pkgs.pre-commit
+          pkgs.uv
+          zig
+          stewardPython
+          stewardTaskEntrypoint
+        ];
+        pathsToLink = [ "/bin" "/lib" "/share" ];
+      };
+      stewardDaemonToolClosure = pkgs.buildEnv {
+        name = "coquic-steward-daemon-tools";
+        paths = [
+          pkgs.bash
+          pkgs.coreutils
+          pkgs.docker
+          pkgs.git
+          pkgs.openssh
+          stewardPython
+          stewardDaemonEntrypoint
+        ];
+        pathsToLink = [ "/bin" "/lib" "/share" ];
+      };
+      stewardTaskImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-steward-task";
+        tag = stewardSourceIdentity;
+        contents = [ stewardTaskToolClosure ];
+        config = {
+          Entrypoint = [ "${stewardTaskEntrypoint}/bin/task-entrypoint.sh" ];
+          WorkingDir = "/task/worktree-ro";
+          Labels = {
+            "org.opencontainers.image.source-revision" = stewardSourceIdentity;
+            "coquic.steward.runtime-protocol" = "task-container-v1";
+            "coquic.steward.codex-version" = "0.144.6";
+            "coquic.steward.closure" = builtins.substring 0 32 (
+              builtins.hashString "sha256" (toString stewardTaskToolClosure)
+            );
+          };
+        };
+      };
+      stewardDaemonImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-steward-daemon";
+        tag = stewardSourceIdentity;
+        contents = [ stewardDaemonToolClosure ];
+        config = {
+          Entrypoint = [ "${stewardDaemonEntrypoint}/bin/daemon-entrypoint.sh" ];
+          WorkingDir = "/var/lib/coquic-steward";
+          Labels = {
+            "org.opencontainers.image.source-revision" = stewardSourceIdentity;
+            "coquic.steward.runtime-protocol" = "task-container-v1";
+            "coquic.steward.codex-version" = "0.144.6";
+            "coquic.steward.closure" = builtins.substring 0 32 (
+              builtins.hashString "sha256" (toString stewardDaemonToolClosure)
+            );
+          };
+        };
+      };
       quictlsVersion = "3.3.0-quic1";
       quictlsSrc = pkgs.fetchFromGitHub {
         owner = "quictls";
@@ -2150,6 +2230,8 @@ EOF
         ngtcp2-perf-client = ngtcp2PerfClient;
         lsquic-perf-client = lsquicPerfClient;
         neqo-perf-client = neqoPerfClient;
+        steward-daemon-image = stewardDaemonImage;
+        steward-task-image = stewardTaskImage;
       };
 
       apps.${system} = {

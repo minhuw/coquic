@@ -535,6 +535,14 @@ class SQLiteTaskStore:
         session_id: str | None = None,
         provider_session_id: str | None = None,
         private_home_path: Path | None = None,
+        private_home_relative_path: str | None = None,
+        home_uid: int | None = None,
+        image_digest: str | None = None,
+        codex_identity: str | None = None,
+        cwd: Path | None = None,
+        checkpoint_id: str | None = None,
+        provider_store_identity: str | None = None,
+        owner_role: str | None = None,
         idempotency_key: str | None = None,
         archive_generation: int = 0,
     ) -> CodexSession:
@@ -565,27 +573,52 @@ class SQLiteTaskStore:
             if existing is not None:
                 return existing
         now = utc_now()
-        item = CodexSession(
-            id=session_id or new_session_id(),
-            task_id=task_id,
-            pipeline_id=pipeline_id,
-            provider_session_id=provider_session_id,
-            private_home_path=private_home_path,
-            idempotency_key=idempotency_key,
-            archive_generation=archive_generation,
-            started_at=now,
-            updated_at=now,
-        )
-        try:
-            with Session(self.engine) as session, session.begin():
-                session.add(session_to_row(item, path_codec=self.path_codec))
-                session.flush()
-        except IntegrityError:
-            existing = existing_idempotent_session()
-            if existing is not None:
-                return existing
-            raise
-        return item
+        for attempt in range(8):
+            try:
+                with self.engine.connect() as connection:
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    selected_uid = home_uid
+                    if selected_uid is None:
+                        selected_uid = connection.execute(
+                            select(func.coalesce(func.max(CodexSessionRow.home_uid), 9999) + 1)
+                        ).scalar_one()
+                    if not isinstance(selected_uid, int) or not 10000 <= selected_uid <= 60000:
+                        connection.exec_driver_sql("ROLLBACK")
+                        raise ValueError("session home UID allocation exhausted")
+                    item = CodexSession(
+                        id=session_id or new_session_id(),
+                        task_id=task_id,
+                        pipeline_id=pipeline_id,
+                        provider_session_id=provider_session_id,
+                        private_home_path=private_home_path,
+                        private_home_relative_path=private_home_relative_path,
+                        home_uid=selected_uid,
+                        image_digest=image_digest,
+                        codex_identity=codex_identity,
+                        cwd=cwd,
+                        checkpoint_id=checkpoint_id,
+                        provider_store_identity=provider_store_identity,
+                        owner_role=owner_role,
+                        idempotency_key=idempotency_key,
+                        archive_generation=archive_generation,
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    connection.execute(
+                        CodexSessionRow.__table__.insert().values(
+                            **_row_values(session_to_row(item, path_codec=self.path_codec))
+                        )
+                    )
+                    connection.exec_driver_sql("COMMIT")
+                    return item
+            except IntegrityError:
+                existing = existing_idempotent_session()
+                if existing is not None:
+                    return existing
+                if home_uid is not None or attempt == 7:
+                    raise
+                time.sleep(0.005 * (attempt + 1))
+        raise RuntimeError("session allocation failed")
 
     def get_session(self, session_id: str) -> CodexSession:
         with Session(self.engine) as session:
@@ -626,6 +659,38 @@ class SQLiteTaskStore:
     end_session = close_session
     create_codex_session = create_session
     allocate_session = create_session
+
+    def update_session(self, session_id: str, **fields: object) -> CodexSession:
+        allowed = {
+            "provider_session_id",
+            "private_home_path",
+            "private_home_relative_path",
+            "home_uid",
+            "image_digest",
+            "codex_identity",
+            "cwd",
+            "checkpoint_id",
+            "provider_store_identity",
+            "owner_role",
+            "state",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unsupported session fields: {sorted(unknown)}")
+        with Session(self.engine) as session, session.begin():
+            row = session.get(CodexSessionRow, session_id)
+            if row is None:
+                raise KeyError(session_id)
+            for key, value in fields.items():
+                if key in {"private_home_path", "cwd"}:
+                    value = (
+                        self.path_codec.dump(Path(value))
+                        if value is not None
+                        else None
+                    )
+                setattr(row, key, value)
+            row.updated_at = utc_now().isoformat()
+        return self.get_session(session_id)
 
     def create_run(
         self,
@@ -864,6 +929,29 @@ class SQLiteTaskStore:
 
     interrupt_run = mark_run_interrupted
     record_run_interruption = mark_run_interrupted
+
+    def update_run(self, run_id: str, **fields: object) -> TaskRun:
+        allowed = {
+            "provider_run_id",
+            "provider_store_identity",
+            "wrapper_pid",
+            "exec_identity",
+            "exit_code",
+            "exit_signal",
+            "exit_reason",
+            "result_summary",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unsupported run fields: {sorted(unknown)}")
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskRunRow, run_id)
+            if row is None:
+                raise KeyError(run_id)
+            for key, value in fields.items():
+                setattr(row, key, value)
+            row.updated_at = utc_now().isoformat()
+        return self.get_run(run_id)
 
     def link_recovery_run(self, predecessor_run_id: str, **kwargs: object) -> TaskRun:
         predecessor = self.get_run(predecessor_run_id)
@@ -2240,6 +2328,42 @@ class SQLiteTaskStore:
             # This table is additive and independent of task, pipeline, run,
             # and sanitized public-mirror health state.
             TaskArchiveSyncHealthRow.__table__.create(connection, checkfirst=True)
+            session_columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(codex_sessions)")
+            }
+            session_additions = {
+                "private_home_relative_path": "TEXT",
+                "home_uid": "INTEGER",
+                "image_digest": "TEXT",
+                "codex_identity": "TEXT",
+                "cwd": "TEXT",
+                "checkpoint_id": "TEXT",
+                "provider_store_identity": "TEXT",
+                "owner_role": "TEXT",
+            }
+            for column, sql_type in session_additions.items():
+                if column not in session_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE codex_sessions ADD COLUMN {column} {sql_type}"
+                    )
+            run_columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(task_runs)")
+            }
+            for column, sql_type in {
+                "provider_store_identity": "TEXT",
+                "wrapper_pid": "INTEGER",
+                "exec_identity": "TEXT",
+            }.items():
+                if column not in run_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE task_runs ADD COLUMN {column} {sql_type}"
+                    )
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_codex_sessions_home_uid_idx "
+                "ON codex_sessions(home_uid) WHERE home_uid IS NOT NULL"
+            )
             _install_ledger_ownership_triggers(connection)
 
     def _migrate_portable_paths(self) -> None:
@@ -2275,6 +2399,9 @@ class SQLiteTaskStore:
             for row in session.scalars(select(TaskPlanRunRow)).all():
                 for column in plan_columns:
                     setattr(row, column, self._portable_path(getattr(row, column)))
+            for row in session.scalars(select(CodexSessionRow)).all():
+                row.private_home_path = self._portable_path(row.private_home_path)
+                row.cwd = self._portable_path(row.cwd)
             for row in session.scalars(select(ValidationRow)).all():
                 row.output_path = self._portable_path(row.output_path) or row.output_path
                 row.cwd = self._portable_path(row.cwd) or row.cwd
@@ -2487,6 +2614,9 @@ def _run_fields(fields: dict[str, object]) -> dict[str, object]:
             "runtime_version",
             "checkpoint_id",
             "provider_run_id",
+            "provider_store_identity",
+            "wrapper_pid",
+            "exec_identity",
             "exit_code",
             "exit_signal",
             "exit_reason",

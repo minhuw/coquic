@@ -1712,10 +1712,9 @@ class TaskArchive:
         manifest_reference = task.get("manifestPath")
         if manifest_reference not in {None, "manifest.json"}:
             raise ArchiveConflictError("task manifest path conflicts with completion")
-        task["manifestPath"] = "manifest.json"
-        if task.get("terminalStatusObservedAt") is None:
-            task["terminalStatusObservedAt"] = completed_at
-        self.write_json(task_id, "task.json", task)
+        observed_at = task.get("terminalStatusObservedAt")
+        if observed_at is not None and observed_at != completed_at:
+            raise ArchiveConflictError("completion timestamp conflicts with task metadata")
 
         event = self._completion_event(
             task_id,
@@ -1736,8 +1735,12 @@ class TaskArchive:
         if existing_completion:
             if len(existing_completion) != 1 or existing_completion[0] != event:
                 raise ArchiveConflictError("completion identity conflicts with task events")
-            return
-        self.append_event(task_id, event)
+        else:
+            self.append_event(task_id, event)
+
+        task["manifestPath"] = "manifest.json"
+        task["terminalStatusObservedAt"] = completed_at
+        self.write_json(task_id, "task.json", task)
 
     def _completion_event(
         self,
@@ -2008,7 +2011,7 @@ class TaskArchive:
             raise ArchiveSealError("task.json is not valid JSON") from exc
         if (
             not isinstance(task, Mapping)
-            or task.get("terminalStatusObservedAt") is None
+            or task.get("terminalStatusObservedAt") != manifest["completedAt"]
             or task.get("manifestPath") != "manifest.json"
         ):
             raise ArchiveSealError(

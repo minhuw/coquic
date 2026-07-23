@@ -2059,6 +2059,28 @@ def _install_ledger_ownership_triggers(connection: Connection) -> None:
               AND run.session_id = NEW.active_session_id
         );
     """
+    pipeline_reverse_checks = """
+        SELECT RAISE(ABORT, 'execution pipeline ownership mismatch')
+        WHERE EXISTS (
+            SELECT 1 FROM task_executions AS execution
+            WHERE execution.owning_pipeline_id = OLD.id
+              AND (
+                  execution.owning_pipeline_id != NEW.id
+                  OR execution.task_id != NEW.task_id
+                  OR execution.id != NEW.execution_id
+              )
+        );
+        SELECT RAISE(ABORT, 'checkpoint pipeline ownership mismatch')
+        WHERE EXISTS (
+            SELECT 1 FROM task_worktree_checkpoints AS checkpoint
+            WHERE checkpoint.owning_pipeline_id = OLD.id
+              AND (
+                  checkpoint.owning_pipeline_id != NEW.id
+                  OR checkpoint.task_id != NEW.task_id
+                  OR checkpoint.execution_id != NEW.execution_id
+              )
+        );
+    """
     for action in ("INSERT", "UPDATE"):
         connection.exec_driver_sql(
             f"""
@@ -2078,6 +2100,15 @@ def _install_ledger_ownership_triggers(connection: Connection) -> None:
             END
             """
         )
+    connection.exec_driver_sql(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS validate_task_pipeline_reverse_ownership_update
+        BEFORE UPDATE OF id, task_id, execution_id ON task_pipelines
+        BEGIN
+            {pipeline_reverse_checks}
+        END
+        """
+    )
 
 
 def _row_values(row: object) -> dict[str, object]:

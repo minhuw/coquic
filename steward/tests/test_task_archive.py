@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -537,4 +539,48 @@ def test_seal_crash_retries_only_the_exact_completion(
         external_actions_complete=True,
         writer_final=True,
     )
+    assert archive.verify("task-safe")
+
+
+def test_seal_crash_before_completion_event_keeps_retry_consistent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _live_archive(tmp_path)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+    real_append = archive.append_event
+
+    def crash(task_id: str, event: Mapping[str, Any]) -> int:
+        if event.get("kind") == "archive.frozen":
+            raise RuntimeError("injected completion event crash")
+        return real_append(task_id, event)
+
+    monkeypatch.setattr(archive, "append_event", crash)
+    with pytest.raises(RuntimeError, match="completion event crash"):
+        archive.seal(
+            "task-safe",
+            "succeeded",
+            completion_identity="completion-first",
+            completed_at="2026-07-22T00:01:00Z",
+            external_actions_complete=True,
+            writer_final=True,
+        )
+    monkeypatch.setattr(archive, "append_event", real_append)
+
+    archive.seal(
+        "task-safe",
+        "succeeded",
+        completion_identity="completion-second",
+        completed_at="2026-07-22T00:02:00Z",
+        external_actions_complete=True,
+        writer_final=True,
+    )
+    manifest = json.loads(
+        archive.task_path("task-safe", "manifest.json").read_text()
+    )
+    task = json.loads(task_path.read_text())
+    assert manifest["completionIdentity"] == "completion-second"
+    assert task["terminalStatusObservedAt"] == manifest["completedAt"]
     assert archive.verify("task-safe")

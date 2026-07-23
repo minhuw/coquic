@@ -273,6 +273,61 @@ def test_execution_and_checkpoint_pointers_are_task_scoped(
             )
 
 
+def test_referenced_pipeline_cannot_be_reassigned_to_another_task(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+
+    def allocate(title: str):
+        task, _ = store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=title,
+                prompt="prompt",
+            )
+        )
+        return task, store.get_execution(task.id)
+
+    first_task, first_execution = allocate("first")
+    second_task, _ = allocate("second")
+    pipeline = store.create_pipeline(
+        first_task.id,
+        execution_id=first_execution.id,
+        trigger="validation-repair",
+    )
+    store.transition_execution(
+        first_execution.id,
+        "active",
+        pipeline_id=pipeline.id,
+    )
+    store.save_checkpoint(
+        WorktreeCheckpoint(
+            task_id=first_task.id,
+            execution_id=first_execution.id,
+            base_commit="a" * 40,
+            expected_tree="b" * 40,
+            phase="implementation",
+            owning_pipeline_id=pipeline.id,
+        )
+    )
+
+    with sqlite3.connect(config.db_path) as connection:
+        assert connection.execute("PRAGMA foreign_keys").fetchone() == (0,)
+        connection.execute(
+            "UPDATE task_pipelines SET phase = ? WHERE id = ?",
+            ("implementation", pipeline.id),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="ownership"):
+            connection.execute(
+                "UPDATE task_pipelines SET task_id = ? WHERE id = ?",
+                (second_task.id, pipeline.id),
+            )
+
+    assert store.get_pipeline(pipeline.id).task_id == first_task.id
+    assert store.get_pipeline(pipeline.id).phase == "implementation"
+
+
 def test_task_allocation_rolls_back_execution_pipeline_failure(
     config: StewardConfig,
 ) -> None:

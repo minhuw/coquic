@@ -3124,31 +3124,65 @@ class StewardExecutor:
             )
 
         try:
+            gate_kwargs: dict[str, object] = {
+                "label": label,
+                "on_gate_start": on_gate_start,
+                "on_gate_result": on_gate_result,
+            }
+            if command_runner is not None:
+                gate_kwargs["command_runner"] = command_runner
             return [
                 validation.model_copy(update={"iteration": iteration})
                 for validation in run_gates(
                     self.config,
                     task_id,
                     worktree,
-                    label=label,
-                    on_gate_start=on_gate_start,
-                    on_gate_result=on_gate_result,
-                    command_runner=command_runner,
+                    **gate_kwargs,
                 )
             ]
         except TypeError as exc:
-            if not any(
-                name in str(exc)
-                for name in ("label", "on_gate", "command_runner")
-            ):
+            message = str(exc)
+            unsupported = next(
+                (
+                    name
+                    for name in (
+                        "command_runner",
+                        "on_gate_start",
+                        "on_gate_result",
+                        "label",
+                    )
+                    if name in message
+                ),
+                None,
+            )
+            if unsupported is None:
                 raise
-            try:
-                validations = run_gates(
-                    self.config, task_id, worktree, label=label
-                )
-            except TypeError as label_exc:
-                if "label" not in str(label_exc):
-                    raise
+            gate_kwargs.pop(unsupported, None)
+            while gate_kwargs:
+                try:
+                    validations = run_gates(
+                        self.config, task_id, worktree, **gate_kwargs
+                    )
+                    break
+                except TypeError as retry_exc:
+                    retry_message = str(retry_exc)
+                    retry_unsupported = next(
+                        (
+                            name
+                            for name in (
+                                "command_runner",
+                                "on_gate_start",
+                                "on_gate_result",
+                                "label",
+                            )
+                            if name in retry_message
+                        ),
+                        None,
+                    )
+                    if retry_unsupported is None:
+                        raise
+                    gate_kwargs.pop(retry_unsupported, None)
+            else:
                 validations = run_gates(self.config, task_id, worktree)
             validations = [
                 validation.model_copy(update={"iteration": iteration})

@@ -15,9 +15,37 @@ daemon_image = "coquic-steward-daemon"
 runtime_protocol = "task-container-v1"
 integration_mode = "local-only"
 local_only = false
+shutdown_grace_seconds = 30
+# Resume launch attempts are deliberately fixed at two; ordinary role changes
+# always allocate a fresh session.
+resume_attempt_limit = 2
 git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"
+
+# Task containers are disabled by default for local planning fixtures. When
+# enabled, every path is host-local and the image must be locked by digest.
+[steward.container]
+enabled = false
+image = "coquic-steward-task"
+# image_digest = "sha256:<64 lowercase hex characters>"
+# repository_host_path = "/srv/coquic"
+# state_host_path = "/srv/coquic-steward"
+# codex_api_key_path = "/run/secrets/codex-api-key"
+docker_bin = "docker"
+network = "bridge"
+
+# Raw task synchronization is daemon-only and is opt-in. Credentials are file
+# paths, never inline values; preflight rejects missing or unsafe files.
+[steward.task_sync]
+enabled = false
+# remote_user = "archive"
+# remote_host = "receiver.example.test"
+# remote_port = 22
+# identity_path = "/run/secrets/task-sync-key"
+# known_hosts_path = "/etc/coquic/known_hosts"
+# connect_timeout_seconds = 10
+# transfer_timeout_seconds = 300
 
 # Usage telemetry is observational. Codex exec exposes turns, not upstream
 # requests, billing, TTFT, or token streaming rates. Leave billing_mode=unknown

@@ -33,3 +33,19 @@ nix build --no-link .#steward-daemon-image .#steward-task-image
 Use `smoke-test.sh` with fake credentials and fake Codex output for image and
 isolation checks. The Compose file is an example only and contains placeholders
 for every host path and credential.
+
+The daemon preflight resolves the locked task image and verifies host/container
+path mappings before dispatch. The task image receives only its task worktree,
+archive, scratch, Git metadata, and one private session home. It never receives
+Docker, GitHub, SSH, task-sync identity, known-hosts, daemon home, or raw
+subprocess output. Sync credentials and receiver policy stay on the daemon.
+
+Normal SIGINT/SIGTERM stops active task containers after the configured grace
+(30 seconds by default) but preserves their state directories for restart.
+Terminal cleanup removes a container only after a verified archive manifest and
+durable `cleanup_pending`. Use fake values for smoke checks:
+
+```bash
+bash steward/containers/smoke-test.sh --shutdown
+bash steward/containers/smoke-test.sh --sync
+```

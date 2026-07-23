@@ -310,6 +310,37 @@ delayed, and older data as stale. Publication retry state is included in the
 mirror, so an SSH or site problem is visible without exposing local paths,
 prompts, credentials, or raw private transcripts.
 
+### Launch, restart, and stop
+
+Daemon launch acquires the repository lock, validates the 2.0 epoch and SQLite
+integrity, checks enabled Docker/image and task-sync boundaries, then performs
+an identity-ordered startup reconciliation before dispatching work. There is
+no separate dataset-init command. A running wrapper is adopted; a missing
+wrapper is recorded as interrupted and is resumed by exact provider session ID
+when the planning, implementation, or review checkpoint still matches. Resume
+launches are bounded to two attempts; unavailable history falls back to a new
+session with the task-owned transcript and diff evidence. Ordinary repairs and
+role transitions always use fresh sessions.
+
+The worker pool is bounded by `limits.max_active_tasks`; integration, commit,
+and push remain serialized. Raw task archives sync once after reconciliation
+and every monotonic 60 seconds when `[steward.task_sync]` is enabled. Sync
+failure is health-only and never fails or pauses a task.
+
+SIGINT and SIGTERM enter persisted `stopping`, reject new work, interrupt active
+wrappers and validation/Git/SSH commands, and wait at most
+`shutdown_grace_seconds` (30 seconds by default, 5-300 allowed). A second
+signal force-stops remaining wrappers. Every owned task container is stopped,
+not removed; SQLite/WAL, archives, worktrees, checkpoints, and private session
+homes remain available for deterministic restart. At most one bounded final raw
+sync runs after writers quiesce.
+
+When a pipeline reaches `ready_to_seal`, Steward verifies that no writer or
+container is active, seals and independently verifies the immutable task
+manifest, records `cleanup_pending`, and only then removes the owned container,
+disposable worktree, and eligible private session home. Cleanup progress is
+idempotent and retryable; the public task archive is never removed.
+
 Before enabling publication, check the key, host key, remote tools, and sudo
 policy explicitly:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import signal
 
 import typer
 
@@ -41,6 +42,12 @@ app.add_typer(enqueue_app, name="enqueue")
 
 def _context() -> tuple[TaskStore, object]:
     config = load_config()
+    # A repository with no explicit container section is the historical local
+    # CLI fixture. Production launches opt into the strict container boundary.
+    if not config.container.enabled and not config.local_codex_test_harness:
+        config = config.__class__(
+            **{**config.__dict__, "local_codex_test_harness": True}
+        )
     return TaskStore(config.db_path), config
 
 
@@ -119,6 +126,7 @@ def daemon(
                 f"{mirror_state}; publication: {publication_state}"
             )
             if once:
+                daemon_.startup_reconcile()
                 result = daemon_.tick(
                     plan=not no_plan,
                     dispatch=not no_dispatch,
@@ -287,9 +295,26 @@ def audit_invariants() -> None:
 
 
 def _run_until_stopped(daemon_: StewardDaemon) -> None:
+    previous: dict[signal.Signals, object] = {}
+    signal_count = 0
+
+    def request_stop(signum, _frame) -> None:
+        nonlocal signal_count
+        signal_count += 1
+        daemon_.request_shutdown(force=signal_count > 1)
+
     try:
+        for selected in (signal.SIGINT, signal.SIGTERM):
+            previous[selected] = signal.getsignal(selected)
+            signal.signal(selected, request_stop)
         daemon_.run_forever()
     except KeyboardInterrupt:
+        daemon_.request_shutdown()
+    finally:
+        for selected, handler in previous.items():
+            signal.signal(selected, handler)
+        if not daemon_.lifecycle_state.value == "stopped":
+            daemon_.shutdown(force=signal_count > 1)
         typer.echo("Steward daemon stopped.")
 
 

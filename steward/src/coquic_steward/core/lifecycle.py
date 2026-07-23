@@ -13,6 +13,7 @@ from .models import (
     PipelineTrigger,
     TaskStatus,
     TERMINAL_STATUSES,
+    DaemonLifecycleState,
 )
 
 
@@ -25,6 +26,53 @@ class TaskPhase(StrEnum):
     integration = "integration"
     terminal = "terminal"
     recovery = "recovery"
+
+
+class ReconciliationDisposition(StrEnum):
+    adopted = "adopted"
+    resumed = "resumed"
+    interrupted = "interrupted"
+    blocked = "blocked"
+    ingested = "ingested"
+    cleaned = "cleaned"
+    unchanged = "unchanged"
+
+
+@dataclass(frozen=True)
+class ReconciliationOutcome:
+    task_id: str
+    disposition: ReconciliationDisposition | str
+    detail: str = ""
+    run_id: str | None = None
+    container_id: str | None = None
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "disposition": str(self.disposition),
+            "detail": self.detail[:256],
+            "run_id": self.run_id,
+            "container_id": self.container_id,
+            "evidence": dict(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
+class ShutdownResult:
+    state: DaemonLifecycleState = DaemonLifecycleState.stopped
+    forced: bool = False
+    interrupted_runs: int = 0
+    stopped_containers: int = 0
+    final_sync_attempted: bool = False
+
+
+@dataclass(frozen=True)
+class SyncScheduleState:
+    next_due_monotonic: float | None = None
+    cycle_active: bool = False
+    pending_tick: bool = False
+    final_attempted: bool = False
 
 
 @dataclass(frozen=True)

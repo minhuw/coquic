@@ -2,9 +2,13 @@
 set -euo pipefail
 
 mode="all"
+shutdown_check=0
+sync_check=0
 for argument in "$@"; do
   case "$argument" in
     --images|--isolation) mode="${argument#--}" ;;
+    --shutdown) shutdown_check=1 ;;
+    --sync) sync_check=1 ;;
     *) echo "unknown smoke-test option: $argument" >&2; exit 64 ;;
   esac
 done
@@ -457,6 +461,22 @@ run(
     ["python", "-c", scan],
 )
 PY
+fi
+
+if [[ "$shutdown_check" -eq 1 && -n "$container_name" ]]; then
+  docker stop --time 1 "$container_name" >/dev/null
+  running="$(docker inspect --format '{{.State.Running}}' "$container_name" 2>/dev/null || true)"
+  [[ "$running" == "false" ]] || fail "graceful shutdown left task container running"
+  [[ -f "$archive/completed.txt" ]] || fail "shutdown removed public archive state"
+  shutdown_private="$tmp/shutdown-private.txt"
+  docker cp "$container_name:/task/session/session-owner/private.txt" "$shutdown_private" \
+    >/dev/null 2>&1 || fail "shutdown removed private session state"
+  [[ -f "$shutdown_private" ]] || fail "shutdown removed private session state"
+fi
+
+if [[ "$sync_check" -eq 1 ]]; then
+  [[ -f "$isolation_root/daemon-sync" ]] || fail "sync isolation fixture is missing"
+  [[ ! -e "$git_worktree/daemon-sync" ]] || fail "task worktree received sync state"
 fi
 
 echo "steward container smoke test passed ($mode; fake inputs only)"

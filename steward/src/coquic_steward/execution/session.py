@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import threading
@@ -82,6 +83,34 @@ class ResumeResult:
     category: ResumeCategory
     result: SessionResult | None = None
     evidence: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryPacket:
+    predecessor_run_id: str
+    role: str
+    task_intent: str
+    accepted_plan: dict[str, Any] | None
+    transcript_descriptor: str | None
+    diff_descriptor: str | None
+    inline_tail: str
+    interruption: dict[str, Any]
+
+    def prompt(self) -> str:
+        value = {
+            "recovery": {
+                "role": self.role,
+                "task_intent": self.task_intent,
+                "accepted_plan": self.accepted_plan,
+                "transcript": self.transcript_descriptor,
+                "diff": self.diff_descriptor,
+                "tail": self.inline_tail[-4000:],
+                "interruption": self.interruption,
+            }
+        }
+        return _redact_recovery_text(
+            json.dumps(value, sort_keys=True, ensure_ascii=True)
+        )
 
 
 @dataclass(frozen=True)
@@ -453,19 +482,31 @@ class SessionSupervisor:
                 evidence={"field": "checkpoint_id", "reason": "checkpoint mismatch"},
             )
         try:
-            run = self.store.create_run(
-                predecessor.task_id,
-                predecessor.pipeline_id,
-                predecessor.session_id,
-                role=predecessor.role,
-                resume_of_run_id=predecessor.id,
-                model=model or predecessor.model,
-                reasoning=reasoning_effort or predecessor.reasoning,
-                image_version=session.image_digest,
-                runtime_version=self.runtime_identity,
-                checkpoint_id=session.checkpoint_id,
-                provider_store_identity=session.provider_store_identity,
+            existing = next(
+                (
+                    candidate
+                    for candidate in self.store.list_runs(predecessor.task_id, pipeline_id=predecessor.pipeline_id)
+                    if candidate.resume_of_run_id == predecessor.id
+                ),
+                None,
             )
+            if existing is not None:
+                restart = getattr(self.store, "restart_run", None)
+                run = restart(existing.id) if restart is not None else existing
+            else:
+                run = self.store.create_run(
+                    predecessor.task_id,
+                    predecessor.pipeline_id,
+                    predecessor.session_id,
+                    role=predecessor.role,
+                    resume_of_run_id=predecessor.id,
+                    model=model or predecessor.model,
+                    reasoning=reasoning_effort or predecessor.reasoning,
+                    image_version=session.image_digest,
+                    runtime_version=self.runtime_identity,
+                    checkpoint_id=session.checkpoint_id,
+                    provider_store_identity=session.provider_store_identity,
+                )
         except (ValueError, KeyError) as exc:
             return ResumeResult(ResumeCategory.rejected, evidence={"error": str(exc)})
         request = InvocationRequest(
@@ -500,6 +541,127 @@ class SessionSupervisor:
             if result.status is InvocationStatus.succeeded
             else ResumeCategory.transient_provider,
             result=result,
+        )
+
+    def resume_with_retries(
+        self,
+        predecessor_run_id: str,
+        *,
+        prompt: str,
+        max_attempts: int = 2,
+        **kwargs: Any,
+    ) -> ResumeResult:
+        """Attempt explicit-ID resume at most twice for transient failures."""
+
+        attempts = max(1, min(2, int(max_attempts)))
+        last: ResumeResult | None = None
+        for ordinal in range(attempts):
+            last = self.resume(predecessor_run_id, prompt=prompt, **kwargs)
+            if last.category is not ResumeCategory.transient_provider:
+                return last
+            if ordinal + 1 < attempts:
+                self.store.add_event(
+                    self.store.get_run(predecessor_run_id).task_id,
+                    "session.resume_retry",
+                    "transient provider resume failure",
+                    {"attempt": ordinal + 1, "max_attempts": attempts},
+                )
+        return last or ResumeResult(ResumeCategory.unavailable_store)
+
+    def build_recovery_packet(self, predecessor_run_id: str) -> RecoveryPacket:
+        predecessor = self.store.get_run(predecessor_run_id)
+        task = self.store.get(predecessor.task_id)
+        transcript: Path | None = None
+        try:
+            transcript = self.archive.run_transcript_path(task.id, predecessor.id)
+        except Exception:
+            transcript = None
+        if transcript is None or not transcript.exists():
+            transcript = task.transcript_path
+        tail = ""
+        if transcript is not None and transcript.exists():
+            try:
+                tail = transcript.read_text(encoding="utf-8", errors="replace")[-4000:]
+            except OSError:
+                tail = ""
+        try:
+            provider_id = self.store.get_session(predecessor.session_id).provider_session_id
+            if provider_id:
+                tail = tail.replace(provider_id, "<provider-session-redacted>")
+        except Exception:
+            pass
+        diff = task.patch_path
+        descriptor = _archive_descriptor(self.config.tasks_dir, transcript)
+        diff_descriptor = _archive_descriptor(self.config.tasks_dir, diff)
+        accepted_plan = None
+        for event in reversed(self.store.events(task.id)):
+            if event.kind == "pipeline.plan.result" and isinstance(event.data.get("plan"), dict):
+                accepted_plan = dict(event.data["plan"])
+                break
+        return RecoveryPacket(
+            predecessor_run_id=predecessor.id,
+            role=predecessor.role,
+            task_intent=task.spec.prompt,
+            accepted_plan=accepted_plan,
+            transcript_descriptor=descriptor,
+            diff_descriptor=diff_descriptor,
+            inline_tail=tail,
+            interruption={
+                "state": predecessor.state,
+                "exit_code": predecessor.exit_code,
+                "exit_signal": predecessor.exit_signal,
+                "exit_reason": predecessor.exit_reason,
+            },
+        )
+
+    def recover(
+        self,
+        predecessor_run_id: str,
+        *,
+        api_key: str | None = None,
+        max_attempts: int = 2,
+        **kwargs: Any,
+    ) -> ResumeResult:
+        """Build an evidence-rich fresh session after resume is unavailable."""
+
+        packet = self.build_recovery_packet(predecessor_run_id)
+        predecessor = self.store.get_run(predecessor_run_id)
+        session = self.store.get_session(predecessor.session_id)
+        task = self.store.get(predecessor.task_id)
+        cwd = Path(kwargs.pop("cwd", None) or session.cwd or task.worktree_path or self.config.repo_root)
+        role = _runtime_role(predecessor.role)
+        stage = CodexStage.review if predecessor.role in {"review", "reviewer"} else CodexStage.code
+        settings = self.config.codex_settings(stage)
+        result = self.start(
+            task.id,
+            predecessor.pipeline_id,
+            role=role,
+            prompt=packet.prompt(),
+            cwd=cwd,
+            api_key=api_key,
+            model=kwargs.pop("model", None) or predecessor.model or settings.model,
+            reasoning_effort=kwargs.pop("reasoning_effort", None) or predecessor.reasoning or settings.reasoning_effort,
+            stage=stage,
+            checkpoint_id=session.checkpoint_id,
+            image_digest=kwargs.pop("image_digest", None) or session.image_digest,
+            codex_identity=kwargs.pop("codex_identity", None) or session.codex_identity,
+            output_schema=kwargs.pop("output_schema", None),
+            timeout_seconds=kwargs.pop("timeout_seconds", None),
+        )
+        try:
+            self.store.update_run(result.run_id, retry_of_run_id=predecessor_run_id)
+        except Exception:
+            pass
+        self.store.add_event(
+            task.id,
+            "session.recovery_started",
+            "fresh recovery session started",
+            {"predecessor_run_id": predecessor.id, "role": predecessor.role},
+        )
+        return ResumeResult(
+            ResumeCategory.success if result.status is InvocationStatus.succeeded else ResumeCategory.transient_provider,
+            result=result,
+            evidence={"recovery": True},
         )
 
     def interrupt(
@@ -1200,3 +1362,32 @@ def _runtime_role(role: str) -> str:
         "planning": TaskRole.planner.value,
         "review": TaskRole.reviewer.value,
     }.get(role, role)
+
+
+_RECOVERY_URL_RE = re.compile(r"(?i)\b(?:https?|ssh|git)://[^\s\"']+")
+_RECOVERY_SECRET_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|authorization|bearer|credential|"
+    r"password|private[_-]?key|secret|token)\b\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,}]+)"
+)
+_RECOVERY_TOKEN_RE = re.compile(
+    r"(?i)\b(?:ghp_|glpat-|github_pat_|sk-[A-Za-z0-9_-]{8,})[A-Za-z0-9._-]+"
+)
+
+
+def _archive_descriptor(root: Path, path: Path | None) -> str | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _redact_recovery_text(value: str) -> str:
+    """Keep recovery prompts useful without copying credential material."""
+
+    value = _RECOVERY_URL_RE.sub("<redacted-url>", value)
+    value = _RECOVERY_SECRET_RE.sub(r"\1<redacted-secret>", value)
+    value = _RECOVERY_TOKEN_RE.sub("<redacted-secret>", value)
+    return value

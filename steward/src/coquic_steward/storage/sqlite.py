@@ -109,6 +109,7 @@ from .schema import (
     TaskRunRow,
     TaskWorktreeCheckpointRow,
     TaskArchiveSyncHealthRow,
+    DaemonStateRow,
     ValidationRow,
 )
 
@@ -216,6 +217,75 @@ class SQLiteTaskStore:
     @property
     def archive_epoch_path(self) -> Path:
         return self.path.parent / "tasks" / "epoch.json"
+
+    # ------------------------------------------------------------------
+    # Daemon lifecycle ownership
+
+    def get_daemon_state(self) -> dict[str, object] | None:
+        with Session(self.engine) as session:
+            row = session.get(DaemonStateRow, "daemon")
+            if row is None:
+                return None
+            try:
+                value = json.loads(row.state_json)
+            except (TypeError, json.JSONDecodeError):
+                value = {}
+            return {
+                "instance_id": row.instance_id,
+                "lifecycle": row.lifecycle,
+                "updated_at": row.updated_at,
+                **(value if isinstance(value, dict) else {}),
+            }
+
+    def claim_daemon_instance(
+        self, instance_id: str, *, lifecycle: str = "starting", state: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        if not instance_id or len(instance_id) > 128:
+            raise ValueError("daemon instance identity is invalid")
+        now = utc_now().isoformat()
+        payload = dict(state or {})
+        payload.pop("provider_session_id", None)
+        payload.pop("private_home_path", None)
+        with Session(self.engine) as session, session.begin():
+            row = session.get(DaemonStateRow, "daemon")
+            if row is None:
+                row = DaemonStateRow(
+                    id="daemon", instance_id=instance_id, lifecycle=lifecycle,
+                    state_json=json.dumps(payload, sort_keys=True), updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.instance_id = instance_id
+                row.lifecycle = lifecycle
+                row.state_json = json.dumps(payload, sort_keys=True)
+                row.updated_at = now
+        self._notify_change()
+        return self.get_daemon_state() or {"instance_id": instance_id, "lifecycle": lifecycle}
+
+    def set_daemon_lifecycle(
+        self, lifecycle: str, *, instance_id: str | None = None, state: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        current = self.get_daemon_state() or {}
+        selected_instance = instance_id or str(current.get("instance_id") or "")
+        if not selected_instance:
+            selected_instance = "unknown"
+        payload = dict(current)
+        payload.update(state or {})
+        payload.pop("instance_id", None)
+        payload.pop("lifecycle", None)
+        payload.pop("updated_at", None)
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            row = session.get(DaemonStateRow, "daemon")
+            if row is None:
+                row = DaemonStateRow(id="daemon")
+                session.add(row)
+            row.instance_id = selected_instance
+            row.lifecycle = lifecycle
+            row.state_json = json.dumps(payload, sort_keys=True)
+            row.updated_at = now
+        self._notify_change()
+        return self.get_daemon_state() or {}
 
     # ------------------------------------------------------------------
     # Steward 2.0 normalized execution ledger
@@ -1071,6 +1141,31 @@ class SQLiteTaskStore:
     interrupt_run = mark_run_interrupted
     record_run_interruption = mark_run_interrupted
 
+    def restart_run(self, run_id: str, *, reason: str = "resume retry") -> TaskRun:
+        """Re-arm one persisted recovery run for a bounded provider retry."""
+
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskRunRow, run_id)
+            if row is None:
+                raise KeyError(run_id)
+            if row.resume_of_run_id is None:
+                raise ValueError("only a session recovery run can be restarted")
+            row.state = CodexRunState.running.value
+            row.exit_code = None
+            row.exit_signal = None
+            row.exit_reason = reason
+            row.result_summary = None
+            row.completed_at = None
+            row.updated_at = now
+            session_row = session.get(CodexSessionRow, row.session_id)
+            if session_row is not None:
+                session_row.state = "active"
+                session_row.closed_at = None
+                session_row.updated_at = now
+        self._activate_run_ownership(self.get_run(run_id))
+        return self.get_run(run_id)
+
     def update_run(self, run_id: str, **fields: object) -> TaskRun:
         allowed = {
             "provider_run_id",
@@ -1081,6 +1176,8 @@ class SQLiteTaskStore:
             "exit_signal",
             "exit_reason",
             "result_summary",
+            "parent_run_id",
+            "retry_of_run_id",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -1090,6 +1187,10 @@ class SQLiteTaskStore:
             if row is None:
                 raise KeyError(run_id)
             for key, value in fields.items():
+                if key in {"parent_run_id", "retry_of_run_id"} and value is not None:
+                    related = session.get(TaskRunRow, str(value))
+                    if related is None or related.task_id != row.task_id or related.pipeline_id != row.pipeline_id:
+                        raise ValueError(f"{key} must reference the same task pipeline")
                 setattr(row, key, value)
             row.updated_at = utc_now().isoformat()
         return self.get_run(run_id)

@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import os
+import shutil
+import stat
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+
 from ..core.config import StewardConfig
 from ..core.models import IntegrationMode
 from ..core.subprocesses import CommandResult, run_command
@@ -20,6 +27,136 @@ _COMMIT_ENV = {
 
 class StewardPreflightError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class PreflightReport:
+    """Bounded launch checks; values never include subprocess output."""
+
+    checks: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    configured_sync: bool = False
+
+    @property
+    def summary(self) -> str:
+        values = [*self.checks, *(f"warning:{item}" for item in self.warnings)]
+        return ", ".join(values) if values else "ok"
+
+
+def run_preflight(
+    config: StewardConfig,
+    store: object | None = None,
+    *,
+    check_remote_push: bool = True,
+) -> PreflightReport:
+    """Validate all daemon-owned launch boundaries before dispatch.
+
+    Checks are intentionally local and bounded. Docker, SSH, and rsync are
+    required only when their corresponding section is explicitly enabled.
+    """
+
+    config.ensure_dirs()
+    checks: list[str] = ["directories"]
+    warnings: list[str] = []
+    try:
+        config.ensure_epoch()
+    except Exception as exc:
+        raise StewardPreflightError("preflight failed: archive epoch is invalid") from exc
+    checks.append("epoch")
+    if config.db_path.exists():
+        try:
+            with sqlite3.connect(f"file:{config.db_path}?mode=ro", uri=True) as connection:
+                result = connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.Error as exc:
+            raise StewardPreflightError("preflight failed: SQLite is unavailable") from exc
+        if not result or result[0] != "ok":
+            raise StewardPreflightError("preflight failed: SQLite integrity check failed")
+        checks.append("sqlite")
+
+    if config.container.enabled:
+        container = config.container
+        if container.image_digest is None:
+            raise StewardPreflightError("preflight failed: task image digest is required")
+        if container.repository_host_path is None or not container.repository_host_path.exists():
+            raise StewardPreflightError("preflight failed: repository host path is unavailable")
+        if container.state_host_path is None or not container.state_host_path.exists():
+            raise StewardPreflightError("preflight failed: state host path is unavailable")
+        _check_secret_file(container.codex_api_key_path, "Codex API key")
+        _check_executable(container.docker_bin, "Docker")
+        docker = run_command([container.docker_bin, "info"], cwd=config.repo_root, timeout=PREFLIGHT_TIMEOUT_SECONDS)
+        if not docker.ok:
+            raise StewardPreflightError("preflight failed: Docker runtime is unavailable")
+        inspect = run_command(
+            [container.docker_bin, "image", "inspect", container.image_digest],
+            cwd=config.repo_root,
+            timeout=PREFLIGHT_TIMEOUT_SECONDS,
+        )
+        if not inspect.ok:
+            raise StewardPreflightError("preflight failed: locked task image is unavailable")
+        checks.extend(("docker", "task-image"))
+
+    sync_configured = False
+    if config.task_sync.enabled:
+        sync = config.task_sync
+        _check_secret_file(sync.identity_path, "task-sync identity")
+        _check_known_hosts(sync.known_hosts_path)
+        _check_executable("ssh", "SSH")
+        _check_executable("rsync", "rsync")
+        # Construction performs strict host/user/receiver validation without
+        # launching a network operation or reading credential bytes.
+        try:
+            sync.to_archive_sync_config(config.tasks_dir)
+        except Exception as exc:
+            raise StewardPreflightError("preflight failed: task sync configuration is invalid") from exc
+        sync_configured = True
+        checks.append("task-sync")
+
+    if (
+        check_remote_push
+        and config.integration_mode == IntegrationMode.push_main.value
+        and not config.local_only
+    ):
+        preflight_remote_push(config)
+        checks.append("remote-push")
+    return PreflightReport(tuple(checks), tuple(warnings), sync_configured)
+
+
+def _check_executable(value: str, label: str) -> None:
+    if Path(value).is_absolute():
+        candidate = Path(value)
+    else:
+        resolved = shutil.which(value)
+        candidate = Path(resolved) if resolved else Path(value)
+    if not candidate.exists() or not os.access(candidate, os.X_OK):
+        raise StewardPreflightError(f"preflight failed: {label} executable is unavailable")
+
+
+def _check_secret_file(path: Path | None, label: str) -> None:
+    if path is None:
+        raise StewardPreflightError(f"preflight failed: {label} path is missing")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise StewardPreflightError(f"preflight failed: {label} file is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise StewardPreflightError(f"preflight failed: {label} file is not regular")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise StewardPreflightError(f"preflight failed: {label} file permissions are unsafe")
+
+
+def _check_known_hosts(path: Path | None) -> None:
+    if path is None:
+        raise StewardPreflightError("preflight failed: known-hosts path is missing")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise StewardPreflightError("preflight failed: known-hosts file is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise StewardPreflightError("preflight failed: known-hosts file is not regular")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise StewardPreflightError("preflight failed: known-hosts permissions are unsafe")
+    if not path.read_text(encoding="utf-8", errors="replace").strip():
+        raise StewardPreflightError("preflight failed: known-hosts file is empty")
 
 
 def preflight_remote_push(config: StewardConfig) -> bool:

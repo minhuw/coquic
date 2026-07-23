@@ -23,6 +23,8 @@ from .schema import (
     CodexSession,
     TaskRun,
     WorktreeCheckpoint,
+    DaemonStateRow,
+    DaemonState,
 )
 
 TaskStore = SQLiteTaskStore
@@ -167,6 +169,8 @@ __all__ = [
     "CodexSession",
     "TaskRun",
     "WorktreeCheckpoint",
+    "DaemonStateRow",
+    "DaemonState",
     "due_provider_names",
     "idle_fetch_provider_names",
     "scheduler_state",

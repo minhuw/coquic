@@ -267,6 +267,14 @@ class DaemonRuntimeState(StrEnum):
     stopping = "stopping"
 
 
+class DaemonLifecycleState(StrEnum):
+    starting = "starting"
+    reconciling = "reconciling"
+    running = "running"
+    stopping = "stopping"
+    stopped = "stopped"
+
+
 class PublicMirrorPublishState(StrEnum):
     disabled = "disabled"
     pending = "pending"
@@ -703,6 +711,27 @@ class DaemonRuntime(BaseModel):
     current_cycle_reason: str | None = Field(default=None, max_length=64)
     last_completed_cycle: DaemonCycleSummary | None = None
     heartbeat_interval_seconds: int = Field(default=30, ge=5, le=60)
+    lifecycle: DaemonLifecycleState = DaemonLifecycleState.starting
+    reconciliation_complete: bool = False
+    stopping_requested_at: datetime | None = None
+    forced_stop: bool = False
+
+
+class ReconciliationRecord(BaseModel):
+    task_id: str
+    disposition: str
+    detail: str = Field(default="", max_length=256)
+    run_id: str | None = None
+    container_id: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class ShutdownStatus(BaseModel):
+    state: DaemonLifecycleState = DaemonLifecycleState.stopped
+    forced: bool = False
+    interrupted_runs: int = 0
+    stopped_containers: int = 0
+    final_sync_attempted: bool = False
 
 
 class PublicMirrorHealth(BaseModel):

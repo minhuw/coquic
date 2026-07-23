@@ -222,6 +222,18 @@ class TaskArchiveSyncHealthRow(Base):
     )
 
 
+class DaemonStateRow(Base):
+    """One compare-and-set row for daemon ownership and lifecycle state."""
+
+    __tablename__ = "daemon_state"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    instance_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    lifecycle: Mapped[str] = mapped_column(String, nullable=False, default="starting")
+    state_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class TaskExecutionRow(Base):
     """Normalized private execution ownership and phase cursor."""
 
@@ -541,3 +553,4 @@ CodexSession = CodexSessionRow
 TaskRun = TaskRunRow
 WorktreeCheckpoint = TaskWorktreeCheckpointRow
 TaskArchiveSyncHealth = TaskArchiveSyncHealthRow
+DaemonState = DaemonStateRow

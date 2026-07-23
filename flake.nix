@@ -123,6 +123,7 @@
           pkgs.git
           pkgs.gh
           pkgs.openssh
+          pkgs.rsync
           stewardPython
           stewardSource
           stewardLauncher

@@ -64,10 +64,174 @@ DEFAULT_PUBLIC_MIRROR_REMOTE_PATH = (
 VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES = {"none", "redacted", "raw"}
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
+_SAFE_SYNC_USER = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_SAFE_SYNC_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
+
+
+def _bounded_token(value: object, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string")
+    result = value.strip()
+    if not result and not allow_empty:
+        raise ValueError(f"{label} must not be empty")
+    if len(result) > 256 or any(character in result for character in "\x00\r\n"):
+        raise ValueError(f"{label} is invalid or too long")
+    return result
+
+
+def _absolute_path(value: object, label: str) -> Path:
+    if value in (None, ""):
+        raise ValueError(f"{label} is required")
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{label} must be an absolute path")
+    return path
+
+
+@dataclass(frozen=True)
+class StewardContainerConfig:
+    """Daemon-owned settings used to construct task-scoped containers.
+
+    This is intentionally distinct from ``execution.container_config``: that
+    type describes one task's fully resolved mounts, while this type describes
+    the host-side launch boundary shared by all tasks.
+    """
+
+    enabled: bool = False
+    image: str = "coquic-steward-task"
+    image_digest: str | None = None
+    repository_host_path: Path | None = None
+    state_host_path: Path | None = None
+    codex_api_key_path: Path | None = None
+    docker_bin: str = "docker"
+    network: str = "bridge"
+    runtime_protocol: str = "task-container-v1"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("container.enabled must be a boolean")
+        image = _bounded_token(self.image, "container.image")
+        object.__setattr__(self, "image", image)
+        if self.image_digest is not None and not _valid_sha256_digest(self.image_digest):
+            raise ValueError("container.image_digest must be a sha256 digest")
+        if self.enabled:
+            if self.repository_host_path is None or self.state_host_path is None:
+                raise ValueError(
+                    "enabled container configuration requires repository and state paths"
+                )
+            object.__setattr__(
+                self, "repository_host_path", _absolute_path(self.repository_host_path, "container.repository_host_path")
+            )
+            object.__setattr__(
+                self, "state_host_path", _absolute_path(self.state_host_path, "container.state_host_path")
+            )
+            if self.codex_api_key_path is None:
+                raise ValueError("enabled container configuration requires codex_api_key_path")
+            key = _absolute_path(self.codex_api_key_path, "container.codex_api_key_path")
+            object.__setattr__(self, "codex_api_key_path", key)
+        else:
+            if self.repository_host_path is not None:
+                object.__setattr__(self, "repository_host_path", Path(self.repository_host_path).expanduser())
+            if self.state_host_path is not None:
+                object.__setattr__(self, "state_host_path", Path(self.state_host_path).expanduser())
+        if self.runtime_protocol != "task-container-v1":
+            raise ValueError("unsupported container runtime protocol")
+        object.__setattr__(self, "docker_bin", _bounded_token(self.docker_bin, "container.docker_bin"))
+        object.__setattr__(self, "network", _bounded_token(self.network, "container.network"))
+
+    @property
+    def repository_path(self) -> Path | None:
+        return self.repository_host_path
+
+    @property
+    def state_path(self) -> Path | None:
+        return self.state_host_path
+
+    @property
+    def api_key_path(self) -> Path | None:
+        return self.codex_api_key_path
+
+    @property
+    def image_digest_locked(self) -> bool:
+        return self.image_digest is not None
+
+
+@dataclass(frozen=True)
+class StewardTaskSyncConfig:
+    """Optional daemon-only raw task archive transport settings.
+
+    Disabled mode deliberately accepts absent credentials so development and
+    unit tests do not need fake files. Enabled mode is strict and is converted
+    to ``TaskArchiveSyncConfig`` by :meth:`to_archive_sync_config`.
+    """
+
+    enabled: bool = False
+    remote_user: str = ""
+    remote_host: str = ""
+    remote_port: int = 22
+    identity_path: Path | None = None
+    known_hosts_path: Path | None = None
+    connect_timeout_seconds: float = 10.0
+    transfer_timeout_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("task_sync.enabled must be a boolean")
+        if isinstance(self.remote_port, bool) or not isinstance(self.remote_port, int) or not 1 <= self.remote_port <= 65535:
+            raise ValueError("task_sync.remote_port must be between 1 and 65535")
+        for value, label in ((self.connect_timeout_seconds, "connect_timeout_seconds"), (self.transfer_timeout_seconds, "transfer_timeout_seconds")):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < float(value) <= 86400:
+                raise ValueError(f"task_sync.{label} must be between 0 and 86400 seconds")
+        if self.enabled:
+            remote_user = _bounded_token(self.remote_user, "task_sync.remote_user")
+            remote_host = _bounded_token(self.remote_host, "task_sync.remote_host")
+            if _SAFE_SYNC_USER.fullmatch(remote_user) is None:
+                raise ValueError("task_sync.remote_user is not a safe SSH token")
+            if _SAFE_SYNC_HOST.fullmatch(remote_host) is None:
+                raise ValueError("task_sync.remote_host is not a safe hostname")
+            object.__setattr__(self, "remote_user", remote_user)
+            object.__setattr__(self, "remote_host", remote_host)
+            object.__setattr__(self, "identity_path", _absolute_path(self.identity_path, "task_sync.identity_path"))
+            object.__setattr__(self, "known_hosts_path", _absolute_path(self.known_hosts_path, "task_sync.known_hosts_path"))
+        else:
+            if self.identity_path is not None:
+                object.__setattr__(self, "identity_path", Path(self.identity_path).expanduser())
+            if self.known_hosts_path is not None:
+                object.__setattr__(self, "known_hosts_path", Path(self.known_hosts_path).expanduser())
+
+    @property
+    def identity_file(self) -> Path | None:
+        return self.identity_path
+
+    @property
+    def known_hosts_file(self) -> Path | None:
+        return self.known_hosts_path
+
+    def to_archive_sync_config(self, tasks_dir: Path):
+        if not self.enabled:
+            return None
+        from ..task_archive_sync_config import TaskArchiveSyncConfig
+
+        return TaskArchiveSyncConfig(
+            enabled=True,
+            tasks_dir=tasks_dir,
+            remote_user=self.remote_user,
+            remote_host=self.remote_host,
+            remote_port=self.remote_port,
+            identity_path=self.identity_path,
+            known_hosts_path=self.known_hosts_path,
+            connect_timeout_seconds=self.connect_timeout_seconds,
+            transfer_timeout_seconds=self.transfer_timeout_seconds,
+        )
+
+
+# Descriptive aliases used by callers that refer to the host-side boundary.
+DaemonContainerConfig = StewardContainerConfig
+TaskArchiveSyncSettings = StewardTaskSyncConfig
 
 
 def _valid_sha256_digest(value: str) -> bool:
-    return len(value) == 71 and value.startswith("sha256:") and all(
+    return isinstance(value, str) and len(value) == 71 and value.startswith("sha256:") and all(
         character in "0123456789abcdef" for character in value[7:]
     )
 
@@ -181,6 +345,10 @@ class StewardConfig:
     public_mirror: PublicMirrorConfig = field(default_factory=PublicMirrorConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
+    container: StewardContainerConfig = field(default_factory=StewardContainerConfig)
+    task_sync: StewardTaskSyncConfig = field(default_factory=StewardTaskSyncConfig)
+    shutdown_grace_seconds: float = 30.0
+    resume_attempt_limit: int = 2
 
     def __post_init__(self) -> None:
         if self.integration_mode not in VALID_INTEGRATION_MODES:
@@ -189,6 +357,12 @@ class StewardConfig:
                 f"invalid integration_mode {self.integration_mode!r}; expected {choices}"
             )
         _validate_github_repository(self.github_repository)
+        if isinstance(self.shutdown_grace_seconds, bool) or not isinstance(
+            self.shutdown_grace_seconds, (int, float)
+        ) or not 5 <= float(self.shutdown_grace_seconds) <= 300:
+            raise ValueError("shutdown_grace_seconds must be between 5 and 300")
+        if self.resume_attempt_limit != 2:
+            raise ValueError("resume_attempt_limit is fixed at two attempts")
         if not self.task_image or "\n" in self.task_image:
             raise ValueError("task_image must be non-empty and single-line")
         if self.task_image_digest is not None and not _valid_sha256_digest(self.task_image_digest):
@@ -210,6 +384,26 @@ class StewardConfig:
         for name in self.enabled_signals:
             providers.setdefault(name, default_signal_provider_config(name))
         object.__setattr__(self, "signal_providers", providers)
+
+    @property
+    def task_container(self) -> StewardContainerConfig:
+        return self.container
+
+    @property
+    def containers(self) -> StewardContainerConfig:
+        return self.container
+
+    @property
+    def task_archive_sync(self) -> StewardTaskSyncConfig:
+        return self.task_sync
+
+    @property
+    def sync(self) -> StewardTaskSyncConfig:
+        return self.task_sync
+
+    @property
+    def grace_period_seconds(self) -> float:
+        return float(self.shutdown_grace_seconds)
 
     @property
     def coquic_home(self) -> Path:
@@ -463,12 +657,19 @@ def load_config(
     root = find_repo_root(repo_root or Path.cwd())
     data = _read_config(root, config_path)
     steward = data.get("steward", data)
+    if not isinstance(steward, dict):
+        raise ValueError("steward configuration must be a table")
+    _reject_embedded_secrets(steward)
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
     mirror_data = steward.get("public_mirror", {})
     telemetry_data = steward.get("telemetry", {})
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
+    container_data = _section_alias(steward, "container", "containers", "task_container")
+    sync_data = _section_alias(
+        steward, "task_sync", "task_archive_sync", "sync", "archive_sync"
+    )
     enabled_signals = _string_tuple(
         signals_data.get(
             "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
@@ -506,6 +707,9 @@ def load_config(
             else None
         ),
         runtime_protocol=str(steward.get("runtime_protocol", "task-container-v1")),
+        local_codex_test_harness=bool(
+            steward.get("local_codex_test_harness", False)
+        ),
         integration_mode=str(
             steward.get("integration_mode", IntegrationMode.local_only.value)
         ),
@@ -536,6 +740,15 @@ def load_config(
         public_mirror=_public_mirror_config(mirror_data),
         telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
+        container=_container_config(
+            container_data,
+            root,
+            fallback_image=steward.get("task_image"),
+            fallback_digest=steward.get("task_image_digest"),
+        ),
+        task_sync=_task_sync_config(sync_data),
+        shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
+        resume_attempt_limit=int(steward.get("resume_attempt_limit", 2)),
     )
     # Configuration loading is the ordinary process-start boundary. The
     # migrator performs a read-only completeness check before requiring the
@@ -544,6 +757,120 @@ def load_config(
         config.migrate_legacy_database()
     config.ensure_dirs()
     return config
+
+
+def _section_alias(data: dict[str, Any], *names: str) -> dict[str, Any]:
+    selected: dict[str, Any] = {}
+    for name in names:
+        value = data.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ValueError(f"steward.{name} must be a table")
+        if selected and value != selected:
+            raise ValueError(f"conflicting steward configuration sections: {names!r}")
+        selected = value
+    return selected
+
+
+_SECRET_KEY_PARTS = (
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "api_key",
+    "apikey",
+    "private_key",
+)
+
+
+def _reject_embedded_secrets(value: object, path: str = "steward") -> None:
+    """Reject credentials in TOML while allowing paths to secret files."""
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if any(part in normalized for part in _SECRET_KEY_PARTS):
+                if not normalized.endswith(("_path", "_file", "_identity")):
+                    raise ValueError(
+                        f"{path}.{key} must reference a secret file, not a secret value"
+                    )
+            _reject_embedded_secrets(child, f"{path}.{key}")
+    elif isinstance(value, list | tuple):
+        for index, child in enumerate(value):
+            _reject_embedded_secrets(child, f"{path}[{index}]")
+
+
+def _container_config(
+    raw: object,
+    root: Path,
+    *,
+    fallback_image: object | None = None,
+    fallback_digest: object | None = None,
+) -> StewardContainerConfig:
+    data = raw if isinstance(raw, dict) else {}
+    enabled = bool(data.get("enabled", False))
+    repository = data.get("repository_host_path", data.get("repository_path"))
+    state = data.get("state_host_path", data.get("state_path"))
+    if repository is None and enabled:
+        repository = str(root)
+    if state is None and enabled:
+        state = str(Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser())
+    key = data.get("codex_api_key_path", data.get("api_key_path"))
+    return StewardContainerConfig(
+        enabled=enabled,
+        image=str(
+            data.get(
+                "image",
+                data.get(
+                    "task_image",
+                    fallback_image if fallback_image is not None else "coquic-steward-task",
+                ),
+            )
+        ),
+        image_digest=(
+            str(
+                data.get(
+                    "image_digest",
+                    data.get(
+                        "task_image_digest",
+                        fallback_digest,
+                    ),
+                )
+            )
+            if data.get(
+                "image_digest",
+                data.get("task_image_digest", fallback_digest),
+            )
+            is not None
+            else None
+        ),
+        repository_host_path=Path(repository).expanduser() if repository is not None else None,
+        state_host_path=Path(state).expanduser() if state is not None else None,
+        codex_api_key_path=Path(key).expanduser() if key is not None else None,
+        docker_bin=_resolve_executable(str(data.get("docker_bin", "docker"))),
+        network=str(data.get("network", "bridge")),
+        runtime_protocol=str(data.get("runtime_protocol", "task-container-v1")),
+    )
+
+
+def _task_sync_config(raw: object) -> StewardTaskSyncConfig:
+    data = raw if isinstance(raw, dict) else {}
+    enabled = bool(data.get("enabled", False))
+    identity = data.get("identity_path", data.get("identity_file", data.get("ssh_key_path")))
+    known_hosts = data.get("known_hosts_path", data.get("known_hosts_file"))
+    return StewardTaskSyncConfig(
+        enabled=enabled,
+        remote_user=str(data.get("remote_user", data.get("user", ""))),
+        remote_host=str(data.get("remote_host", data.get("host", ""))),
+        remote_port=int(data.get("remote_port", data.get("port", 22))),
+        identity_path=Path(identity).expanduser() if identity is not None else None,
+        known_hosts_path=Path(known_hosts).expanduser() if known_hosts is not None else None,
+        connect_timeout_seconds=float(data.get("connect_timeout_seconds", 10.0)),
+        transfer_timeout_seconds=float(
+            data.get("transfer_timeout_seconds", data.get("timeout_seconds", 300.0))
+        ),
+    )
 
 
 def _codex_stage_configs(raw: object) -> dict[str, CodexStageConfig]:

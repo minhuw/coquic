@@ -47,6 +47,30 @@ the staged tree must equal the last validated and effectively reviewed tree.
 Successful task-owned work stops at durable `ready_to_seal`; lifecycle cleanup,
 terminal sealing, and final sync belong to Plan 006.
 
+## Daemon lifecycle
+
+Startup reconciles the normalized execution ledger, archive generations,
+worktree checkpoint, container labels, wrapper identity, and local/remote Git
+ancestry in task-id order. Matching live wrappers are adopted and complete
+atomic results are ingested once. Missing processes become interrupted evidence;
+only an interrupted planning, implementation, or review run with an exact
+checkpoint may resume by its persisted provider session ID. Resume is limited
+to two transient launch attempts, then a fresh recovery session receives a
+bounded packet pointing at the complete task-owned transcript/diff and inline
+tails. Provider IDs and private homes never enter prompts or public metadata.
+
+Workers advance one durable phase at a time in a bounded pool. A stopping
+daemon rejects new claims, cancels wrappers and subprocesses, waits the bounded
+grace, and stops (without removing) all owned containers. State is retained for
+restart and active tasks are not marked failed or sealed by shutdown.
+
+The raw task synchronizer runs immediately after reconciliation and on a
+monotonic 60-second cadence with no overlap. Its result is health-only. A
+terminal task is sealed only after `ready_to_seal`, writer quiescence, and
+external-action reconciliation. `cleanup_pending` is durable before container,
+worktree, or private-home cleanup; `cleanup_complete` is written only after
+every authorized action succeeds. The public archive remains intact.
+
 ## Budgets
 
 Pipeline, run, validation, review, formality, transport, and no-progress

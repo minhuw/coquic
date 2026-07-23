@@ -15,6 +15,7 @@ services:
     environment:
       COQUIC_HOME: /var/lib/coquic-steward/home
       STEWARD_REPOSITORY: /var/lib/coquic-steward/repository
+      STEWARD_TASK_SYNC_ENABLED: "false"
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=1g
     restart: unless-stopped
@@ -30,3 +31,6 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     network_mode: bridge
+    # No Docker socket, GitHub config, SSH directory, sync key, or daemon home
+    # is mounted here. The trusted daemon creates the real task container with
+    # task-scoped paths and a fresh private session UID.

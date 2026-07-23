@@ -574,7 +574,7 @@ class SessionSupervisor:
         transcript.parent.mkdir(parents=True, exist_ok=True)
 
         def append(line: bytes) -> None:
-            self.archive.append_run_bytes(
+            self.archive.append_run_jsonl(
                 task.id, run.pipeline_id, run.id, "codex.jsonl", line
             )
 

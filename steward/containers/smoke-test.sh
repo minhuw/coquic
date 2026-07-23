@@ -11,7 +11,25 @@ done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+container_name=""
+loaded_image=""
+remove_loaded_image=0
+
+cleanup() {
+  if [[ -n "$container_name" ]]; then
+    docker rm -f "$container_name" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$loaded_image" && -d "$tmp" ]]; then
+    docker run --rm --entrypoint /bin/chmod \
+      --mount "type=bind,src=$tmp,dst=/host" \
+      "$loaded_image" -R a+rwx /host >/dev/null 2>&1 || true
+  fi
+  if [[ "$remove_loaded_image" -eq 1 && -n "$loaded_image" ]]; then
+    docker image rm "$loaded_image" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
 
 fail() {
   echo "smoke failure: $*" >&2
@@ -51,7 +69,7 @@ if labels["coquic.steward.codex-version"] != "0.144.6":
 
 required = {
     "task": ("bin/codex", "bin/git", "bin/pre-commit", "bin/uv", "bin/zig"),
-    "daemon": ("bin/coquic-steward", "bin/docker", "bin/git", "bin/ssh"),
+    "daemon": ("bin/coquic-steward", "bin/docker", "bin/gh", "bin/git", "bin/ssh"),
 }[kind]
 for path in required:
     if path not in names:
@@ -84,70 +102,31 @@ if [[ "$mode" == all || "$mode" == images ]]; then
 fi
 
 if [[ "$mode" == all || "$mode" == isolation ]]; then
-  fake_home="$tmp/session-home"
-  mkdir -p "$fake_home/sessions"
-  chmod 700 "$fake_home" "$fake_home/sessions"
-  printf 'shell_environment_policy = { inherit = "none" }\n' >"$fake_home/config.toml"
-  chmod 600 "$fake_home/config.toml"
+  command -v docker >/dev/null || fail "Docker CLI is unavailable"
+  docker info >/dev/null 2>&1 || fail "Docker runtime is unavailable"
 
-  fake_codex="$tmp/fake-codex"
-  cat >"$fake_codex" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "${CODEX_API_KEY:-}" == "fake-api-key-canary" ]] || exit 70
-last_message=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "--output-last-message" ]]; then
-    last_message="$2"
-    shift 2
-  else
-    shift
+  task_image="$(
+    nix build --no-link --print-out-paths "$root#steward-task-image"
+  )"
+  loaded_image="$(
+    tar -xOzf "$task_image" manifest.json | \
+      python -c 'import json, sys; print(json.load(sys.stdin)[0]["RepoTags"][0])'
+  )"
+  if ! docker image inspect "$loaded_image" >/dev/null 2>&1; then
+    remove_loaded_image=1
   fi
-done
-[[ -n "$last_message" ]] || exit 64
-cat >/dev/null
-printf 'fake completion\n' >"$last_message"
-printf '%s\n' '{"type":"thread.started","thread_id":"fake-provider"}'
-SH
-  chmod 755 "$fake_codex"
-  raw="$tmp/codex.jsonl"
-  last_message="$fake_home/last-message.md"
-  python - <<'PY' | \
-    CODEX_HOME="$fake_home" \
-    COQUIC_STEWARD_RUN_ID="smoke-run" \
-    "$root/steward/containers/task-entrypoint.sh" run \
-      "$fake_codex" --output-last-message "$last_message" >"$raw"
-import sys
-key = b"fake-api-key-canary"
-sys.stdout.buffer.write(len(key).to_bytes(4, "big") + key + b"fake prompt\n")
-PY
-  grep -Fxq '{"type":"thread.started","thread_id":"fake-provider"}' "$raw"
-  grep -Fxq 'fake completion' "$last_message"
-  [[ -s "$fake_home/wrapper-smoke-run.pid" ]] || fail "wrapper PID was not recorded"
-  if rg -q 'fake-api-key-canary' "$fake_home" "$raw"; then
-    fail "fake API key escaped the Codex process boundary"
-  fi
-  [[ ! -e "$fake_home/auth.json" ]] || fail "auth.json was persisted"
+  docker load --input "$task_image" >/dev/null
+  image_digest="$(docker image inspect --format '{{.Id}}' "$loaded_image")"
 
-  printf 'daemon-github-canary\n' >"$tmp/daemon-only"
-  printf 'other-task-canary\n' >"$tmp/other-task"
-  if rg -q 'daemon-github-canary|other-task-canary' "$fake_home" "$raw"; then
-    fail "daemon or other-task canary crossed the task boundary"
-  fi
+  isolation_root="$tmp/isolation"
+  git_root="$isolation_root/git-root"
+  git_worktree="$isolation_root/worktree"
+  archive="$isolation_root/archive"
+  session_root="$isolation_root/sessions"
+  scratch="$isolation_root/scratch"
+  mkdir -p "$isolation_root" "$archive" "$session_root/session-owner/sessions" \
+    "$session_root/session-other/sessions" "$scratch"
 
-  sleep 60 &
-  signal_target=$!
-  COQUIC_STEWARD_SIGNAL=15 \
-    "$root/steward/containers/task-entrypoint.sh" signal "$signal_target"
-  if wait "$signal_target"; then
-    fail "signal target exited successfully"
-  fi
-  if kill -0 "$signal_target" 2>/dev/null; then
-    fail "trusted wrapper did not signal the invocation process"
-  fi
-
-  git_root="$tmp/git-root"
-  git_worktree="$tmp/git-worktree"
   git init -q -b main "$git_root"
   git -C "$git_root" config user.email smoke@example.test
   git -C "$git_root" config user.name "Steward Smoke"
@@ -156,34 +135,328 @@ PY
   git -C "$git_root" commit -qm base
   git -C "$git_root" worktree add -q -b smoke-worktree "$git_worktree"
   linked_git="$(sed 's/^gitdir: //' "$git_worktree/.git")"
-  common_git="$(git -C "$git_worktree" rev-parse --git-common-dir)"
-  GIT_DIR="$linked_git" GIT_COMMON_DIR="$common_git" \
-    GIT_WORK_TREE="$git_worktree" git status --porcelain >/dev/null
+  common_git="$(cd "$git_worktree" && realpath "$(git rev-parse --git-common-dir)")"
 
-  readonly="$tmp/readonly"
-  mkdir "$readonly"
-  printf 'history\n' >"$readonly/completed.txt"
-  chmod 555 "$readonly"
-  chmod 444 "$readonly/completed.txt"
-  if (printf 'mutate\n' >>"$readonly/completed.txt") 2>/dev/null; then
-    fail "completed history was writable"
+  printf 'completed-history\n' >"$archive/completed.txt"
+  printf 'owner-private\n' >"$session_root/session-owner/private.txt"
+  printf 'other-private\n' >"$session_root/session-other/private.txt"
+  printf 'shell_environment_policy = { inherit = "none" }\n' \
+    >"$session_root/session-owner/config.toml"
+  printf 'fake-github-canary\n' >"$isolation_root/daemon-github"
+  printf 'fake-ssh-canary\n' >"$isolation_root/daemon-ssh"
+  printf 'fake-sync-canary\n' >"$isolation_root/daemon-sync"
+  printf 'fake-other-task-canary\n' >"$isolation_root/other-task"
+
+  fake_codex="$git_worktree/fake-codex"
+  cat >"$fake_codex" <<'SH'
+#!/bin/bash
+set -euo pipefail
+key_hash="$(printf %s "${CODEX_API_KEY:-}" | sha256sum | cut -d ' ' -f 1)"
+[[ "$key_hash" == "ff7a01fdf80840b3dedd96ca086b399307d29de841c75e10c2c697a429b63300" ]] || exit 70
+/bin/python - <<'PY'
+from pathlib import Path
+
+try:
+    daemon_environment = Path("/proc/1/environ").read_bytes()
+except PermissionError:
+    daemon_environment = b""
+if b"CODEX_API_KEY" in daemon_environment:
+    raise SystemExit(71)
+PY
+/bin/env -i /bin/bash -c '[[ -z "${CODEX_API_KEY:-}" ]]' || exit 72
+last_message=""
+block=0
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "--output-last-message" ]]; then
+    last_message="$2"
+    shift 2
+  elif [[ "$1" == "--smoke-block" ]]; then
+    block=1
+    shift
+  else
+    shift
   fi
-  grep -Fxq 'history' "$readonly/completed.txt"
-  chmod 755 "$readonly"
-  chmod 644 "$readonly/completed.txt"
+done
+[[ -n "$last_message" ]] || exit 64
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"fake-provider"}'
+if [[ "$block" -eq 1 ]]; then
+  exec /bin/python -c 'import signal; signal.signal(signal.SIGTERM, lambda *_: exit(143)); signal.pause()'
+fi
+printf 'fake completion\n' >"$last_message"
+SH
+  chmod 755 "$fake_codex"
 
-  implementation="$tmp/implementation"
-  mkdir "$implementation"
-  printf 'base\n' >"$implementation/file.txt"
-  chmod 775 "$implementation"
-  chmod 664 "$implementation/file.txt"
-  printf 'implementation-write\n' >>"$implementation/file.txt"
-  grep -Fxq 'implementation-write' "$implementation/file.txt"
+  docker run --rm --entrypoint /bin/bash \
+    --mount "type=bind,src=$isolation_root,dst=/host" \
+    "$loaded_image" -c '
+      set -e
+      chown 0:0 /host/sessions
+      chmod 711 /host/sessions
+      chown -R 10000:10000 /host/sessions/session-owner
+      chmod 700 /host/sessions/session-owner /host/sessions/session-owner/sessions
+      chmod 600 /host/sessions/session-owner/private.txt /host/sessions/session-owner/config.toml
+      chown -R 10001:10001 /host/sessions/session-other
+      chmod 700 /host/sessions/session-other /host/sessions/session-other/sessions
+      chmod 600 /host/sessions/session-other/private.txt
+      chgrp -R 52000 /host/worktree
+      chmod -R u+rwX,g+rwX,o+rX /host/worktree
+      chmod 444 /host/worktree/.git
+      chgrp -R 52001 /host/scratch
+      chmod 2770 /host/scratch
+    '
 
-  nix develop "$root" -c uv run --project "$root/steward" \
-    python -m pytest \
-      "$root/steward/tests/test_container_runtime.py" \
-      "$root/steward/tests/test_codex_sessions.py" -q
+  task_id="smoke-$(basename "$tmp" | tr -cd 'A-Za-z0-9_.-')"
+  container_name="coquic-steward-task-$task_id"
+  SMOKE_ROOT="$isolation_root" \
+  SMOKE_TASK_ID="$task_id" \
+  SMOKE_IMAGE="$loaded_image" \
+  SMOKE_IMAGE_DIGEST="$image_digest" \
+  SMOKE_WORKTREE="$git_worktree" \
+  SMOKE_ARCHIVE="$archive" \
+  SMOKE_SESSIONS="$session_root" \
+  SMOKE_SCRATCH="$scratch" \
+  SMOKE_GIT_DIR="$linked_git" \
+  SMOKE_GIT_COMMON_DIR="$common_git" \
+    nix develop "$root" -c uv run --project "$root/steward" python - <<'PY'
+import os
+import signal
+import time
+from pathlib import Path
+
+from coquic_steward.execution.container import (
+    ContainerBoundaryError,
+    ExecIdentity,
+    TaskContainerRuntime,
+)
+from coquic_steward.execution.container_config import TaskContainerConfig, TaskRole
+
+
+def path(name: str) -> Path:
+    return Path(os.environ[name]).resolve()
+
+
+config = TaskContainerConfig(
+    task_id=os.environ["SMOKE_TASK_ID"],
+    image=os.environ["SMOKE_IMAGE"],
+    image_digest=os.environ["SMOKE_IMAGE_DIGEST"],
+    worktree=path("SMOKE_WORKTREE"),
+    archive=path("SMOKE_ARCHIVE"),
+    private_sessions=path("SMOKE_SESSIONS"),
+    git_dir=path("SMOKE_GIT_DIR"),
+    git_common_dir=path("SMOKE_GIT_COMMON_DIR"),
+    scratch=path("SMOKE_SCRATCH"),
+    labels={"coquic.steward.codex": "fake-codex-smoke"},
+    task_write_gid=52000,
+    validation_gid=52001,
+)
+runtime = TaskContainerRuntime(config)
+runtime.ensure_started()
+inspection = runtime.adopt()
+
+mounts = {item["Destination"]: item for item in inspection.raw["Mounts"]}
+assert set(mounts) == {
+    "/task/worktree-ro",
+    "/task/worktree",
+    "/task/archive",
+    "/task/session",
+    "/task/scratch",
+    "/task/git/linked",
+    "/task/git/common",
+}
+assert mounts["/task/worktree-ro"]["RW"] is False
+assert mounts["/task/worktree"]["RW"] is True
+assert mounts["/task/archive"]["RW"] is False
+assert mounts["/task/session"]["RW"] is True
+assert all("docker.sock" not in item["Source"] for item in mounts.values())
+assert all(inspection.labels.get(key) == value for key, value in config.labels.items())
+assert "canary" not in repr(inspection.labels)
+
+
+def run(role: TaskRole, uid: int, session_id: str, command: list[str]) -> bytes:
+    return runtime.exec(
+        role,
+        session_uid=uid,
+        session_id=session_id,
+        command=command,
+        timeout=10,
+    ).stdout
+
+
+def rejected(role: TaskRole, uid: int, session_id: str, command: list[str]) -> None:
+    try:
+        run(role, uid, session_id, command)
+    except ContainerBoundaryError:
+        return
+    raise AssertionError(f"command unexpectedly succeeded for {role.value}")
+
+
+run(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["git", "-c", "safe.directory=*", "status", "--porcelain"],
+)
+assert run(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["cat", "/task/archive/completed.txt"],
+) == b"completed-history\n"
+rejected(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["bash", "-c", "echo review >> /task/worktree/file.txt"],
+)
+rejected(
+    TaskRole.commit_message,
+    10002,
+    "session-owner",
+    ["bash", "-c", "echo message >> /task/worktree/file.txt"],
+)
+run(
+    TaskRole.implementation,
+    10000,
+    "session-owner",
+    ["bash", "-c", "echo implementation >> /task/worktree/file.txt"],
+)
+run(
+    TaskRole.validation,
+    10003,
+    "session-owner",
+    ["bash", "-c", "echo validation > /task/scratch/result.txt"],
+)
+rejected(
+    TaskRole.validation,
+    10003,
+    "session-owner",
+    ["bash", "-c", "echo validation >> /task/worktree/file.txt"],
+)
+rejected(
+    TaskRole.implementation,
+    10000,
+    "session-owner",
+    ["bash", "-c", "echo mutate >> /task/archive/completed.txt"],
+)
+assert run(
+    TaskRole.implementation,
+    10000,
+    "session-owner",
+    ["cat", "/task/session/session-owner/private.txt"],
+) == b"owner-private\n"
+rejected(
+    TaskRole.reviewer,
+    10001,
+    "session-other",
+    ["cat", "/task/session/session-owner/private.txt"],
+)
+rejected(
+    TaskRole.reviewer,
+    10001,
+    "session-other",
+    ["ls", "/task/session"],
+)
+for canary in ("daemon-github", "daemon-ssh", "daemon-sync", "other-task"):
+    rejected(
+        TaskRole.reviewer,
+        10000,
+        "session-owner",
+        ["cat", f"/host/{canary}"],
+    )
+run(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["bash", "-c", "test ! -S /var/run/docker.sock"],
+)
+
+
+def start_fake(run_id: str, *, block: bool):
+    last = f"/task/session/session-owner/{run_id}-last.md"
+    command = [
+        "/bin/task-entrypoint.sh",
+        "run",
+        "/task/worktree-ro/fake-codex",
+        "--output-last-message",
+        last,
+    ]
+    if block:
+        command.append("--smoke-block")
+    process = runtime.exec_stream(
+        TaskRole.reviewer,
+        session_uid=10000,
+        session_id="session-owner",
+        command=command,
+        env={"COQUIC_STEWARD_RUN_ID": run_id},
+        workdir="/task/worktree-ro",
+    )
+    key = b"fake-api-key-canary"
+    process.stdin.write(len(key).to_bytes(4, "big") + key + b"fake prompt\n")
+    process.stdin.close()
+    return process
+
+
+completed = start_fake("smoke-complete", block=False)
+stdout = completed.stdout.read()
+stderr = completed.stderr.read()
+assert completed.wait(timeout=10) == 0, stderr.decode("utf-8", "replace")
+assert stdout == b'{"type":"thread.started","thread_id":"fake-provider"}\n'
+assert run(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["cat", "/task/session/session-owner/smoke-complete-last.md"],
+) == b"fake completion\n"
+run(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["bash", "-c", "test ! -e /task/session/session-owner/auth.json"],
+)
+
+blocked = start_fake("smoke-blocked", block=True)
+assert blocked.stdout.readline() == b'{"type":"thread.started","thread_id":"fake-provider"}\n'
+deadline = time.monotonic() + 5
+pid_text = b""
+while not pid_text and time.monotonic() < deadline:
+    try:
+        pid_text = run(
+            TaskRole.reviewer,
+            10000,
+            "session-owner",
+            ["cat", "/task/session/session-owner/wrapper-smoke-blocked.pid"],
+        )
+    except ContainerBoundaryError:
+        time.sleep(0.01)
+pid = int(pid_text.strip())
+identity = ExecIdentity(config.container_name, "smoke-blocked", pid, 10000)
+assert runtime.exec_is_live(identity)
+runtime.signal(identity, signal.SIGTERM)
+assert blocked.wait(timeout=10) != 0
+assert not runtime.exec_is_live(identity)
+
+scan = """
+import hashlib
+from pathlib import Path
+
+expected = 'ff7a01fdf80840b3dedd96ca086b399307d29de841c75e10c2c697a429b63300'
+for root in ('/task/worktree-ro', '/task/archive', '/task/session/session-owner'):
+    for item in Path(root).rglob('*'):
+        if not item.is_file():
+            continue
+        data = item.read_bytes()
+        for offset in range(max(0, len(data) - 18)):
+            if hashlib.sha256(data[offset:offset + 19]).hexdigest() == expected:
+                raise SystemExit(73)
+"""
+run(
+    TaskRole.reviewer,
+    10000,
+    "session-owner",
+    ["python", "-c", scan],
+)
+PY
 fi
 
 echo "steward container smoke test passed ($mode; fake inputs only)"

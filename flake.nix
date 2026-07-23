@@ -121,6 +121,7 @@
           pkgs.coreutils
           pkgs.docker
           pkgs.git
+          pkgs.gh
           pkgs.openssh
           stewardPython
           stewardSource

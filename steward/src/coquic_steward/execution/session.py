@@ -323,6 +323,7 @@ class SessionSupervisor:
         codex_identity: str | None = None,
         idempotency_key: str | None = None,
         timeout_seconds: float | None = None,
+        sandbox: str | None = None,
     ) -> SessionResult:
         selected_role = _normalize_role(role)
         task = self.store.get(task_id)
@@ -355,7 +356,7 @@ class SessionSupervisor:
             model=model,
             reasoning_effort=reasoning_effort,
             output_schema=self._copy_private_schema(session, run.id, output_schema),
-            sandbox=self.config.codex_sandbox,
+            sandbox=sandbox or self.config.codex_sandbox,
             role=selected_role,
             session_uid=session.home_uid,
             session_id=session.id,
@@ -482,7 +483,10 @@ class SessionSupervisor:
             run = self.store.get_run(run_id)
             if run.state == CodexRunState.interrupted.value:
                 return InterruptionResult(run_id, InvocationStatus.interrupted, force, run.exit_code)
-            raise KeyError(run_id)
+            if run.state != CodexRunState.running.value:
+                raise KeyError(run_id)
+            runtime, identity = self._persisted_boundary(run)
+            active = {"runtime": runtime, "identity": identity}
         forced = force
         invoker = active.get("invoker")
         runtime = active.get("runtime")
@@ -518,17 +522,50 @@ class SessionSupervisor:
         with self._active_lock:
             active = self._active.get(run_id)
         container = None
+        identity = active.get("identity") if active is not None else None
         runtime = active.get("runtime") if active is not None else None
+        if active is None:
+            run = self.store.get_run(run_id)
+            if run.state != CodexRunState.running.value:
+                return InspectionResult(run_id, False)
+            try:
+                runtime, identity = self._persisted_boundary(run)
+            except (KeyError, ValueError, ContainerBoundaryError):
+                return InspectionResult(run_id, False)
         if runtime is not None:
             try:
                 container = runtime.inspect()
             except ContainerBoundaryError:
                 container = None
         if active is None:
-            return InspectionResult(run_id, False, container)
+            live = bool(
+                runtime is not None
+                and identity is not None
+                and container is not None
+                and container.running
+                and runtime.exec_is_live(identity)
+            )
+            return InspectionResult(run_id, live, container, identity)
         process = active.get("process") or getattr(active.get("invoker"), "process", None)
         live = process.poll() is None if process is not None else bool(active.get("live", True))
-        return InspectionResult(run_id, live, container, active.get("identity"))
+        return InspectionResult(run_id, live, container, identity)
+
+    def _persisted_boundary(
+        self, run: TaskRun
+    ) -> tuple[TaskContainerRuntime, ExecIdentity]:
+        session = self.store.get_session(run.session_id)
+        if run.wrapper_pid is None or run.exec_identity is None or session.home_uid is None:
+            raise ValueError("run does not have a persisted wrapper identity")
+        task = self.store.get(run.task_id)
+        runtime, _ = self._boundary_for(task)
+        if runtime is None:
+            raise ValueError("persisted invocation does not have a container runtime")
+        return runtime, ExecIdentity(
+            runtime.config.container_name,
+            run.exec_identity,
+            run.wrapper_pid,
+            session.home_uid,
+        )
 
     def stop_container(self, task_id: str | None = None, *, timeout: float | None = None) -> None:
         if self.runtime is not None:
@@ -957,6 +994,7 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
         private_sessions = config.private_sessions_dir / task.id
         archive.mkdir(parents=True, exist_ok=True)
         private_sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(private_sessions, 0o711)
         scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
         task_write_gid = _task_group(task.id, 100000)
         validation_gid = _task_group(task.id, 200000)

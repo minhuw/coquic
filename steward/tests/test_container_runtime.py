@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import io
 import subprocess
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,8 +17,11 @@ from coquic_steward.execution import (
     TaskRole,
 )
 from coquic_steward.agents.invocation import InvocationRequest
-from coquic_steward.core.models import CodexStage
+from coquic_steward.core.config import StewardConfig
+from coquic_steward.core.models import CodexStage, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.execution.session import ContainerSessionInvoker
+from coquic_steward.execution.executor import _SessionRunnerAdapter
+from coquic_steward.storage import TaskStore
 
 
 class FakeDocker:
@@ -68,8 +73,102 @@ def test_create_argv_is_locked_and_task_scoped(container_config: TaskContainerCo
     assert argv[-1] == container_config.image_digest
     assert "/usr/local/bin/task-entrypoint.sh" not in argv
     mounts = [argv[index + 1] for index, value in enumerate(argv) if value == "--mount"]
-    assert any("dst=/task/worktree,rw" in value for value in mounts)
-    assert any("dst=/task/scratch,rw" in value for value in mounts)
+    assert any(value.endswith("dst=/task/worktree") for value in mounts)
+    assert any(value.endswith("dst=/task/scratch") for value in mounts)
+    assert any(value.endswith("dst=/task/worktree-ro,readonly") for value in mounts)
+
+
+def test_create_persists_every_configured_label_for_restart_adoption(
+    container_config: TaskContainerConfig,
+) -> None:
+    configured = replace(
+        container_config,
+        labels={"coquic.steward.codex": "codex-0.144.6"},
+    )
+
+    class LifecycleDocker(FakeDocker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created = False
+            self.labels: dict[str, str] = {}
+
+        def run(self, argv: list[str], **_kwargs):
+            self.calls.append(argv)
+            if argv[0] == "inspect" and not self.created:
+                return subprocess.CompletedProcess(
+                    argv, 1, b"", b"Error: No such container"
+                )
+            if argv[0] == "create":
+                self.created = True
+                self.labels = {
+                    argv[index + 1].split("=", 1)[0]: argv[index + 1].split("=", 1)[1]
+                    for index, value in enumerate(argv)
+                    if value == "--label"
+                }
+                return subprocess.CompletedProcess(argv, 0, b"container-id\n", b"")
+            if argv[0] == "inspect":
+                payload = {
+                    "Id": "container-id",
+                    "State": {"Status": "running", "Running": True, "Pid": 41},
+                    "Config": {"Image": configured.image_digest, "Labels": self.labels},
+                }
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps([payload]).encode(), b""
+                )
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    fake = LifecycleDocker()
+    TaskContainerRuntime(configured, client=fake).ensure_started()
+    adopted = TaskContainerRuntime(configured, client=fake).ensure_started()
+    assert adopted == "container-id"
+    assert fake.labels == configured.labels
+
+
+def test_commit_message_stage_reaches_wrapper_without_worktree_group(
+    config: StewardConfig,
+    container_config: TaskContainerConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    last_message = config.private_dir / "commit-message.md"
+    last_message.write_text('{"subject":"test","body":""}\n', encoding="utf-8")
+
+    class RecordingSupervisor:
+        def start(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                status=SimpleNamespace(value="succeeded"),
+                exit_code=0,
+                transcript_path=config.private_dir / "commit-message.jsonl",
+                last_message_path=last_message,
+                provider_session_id=None,
+                diagnostics={},
+            )
+
+    supervisor = RecordingSupervisor()
+    _SessionRunnerAdapter(config, store, supervisor).run(
+        task,
+        "write a commit message",
+        config.repo_root,
+        stage=CodexStage.commit_message,
+        sandbox="read-only",
+    )
+    assert supervisor.kwargs["role"] is TaskRole.commit_message
+    assert supervisor.kwargs["sandbox"] == "read-only"
+
+    argv = TaskContainerRuntime(container_config, client=FakeDocker()).exec_argv(
+        supervisor.kwargs["role"],
+        session_uid=10000,
+        session_id="commit-message-session",
+        command=["true"],
+    )
+    assert str(container_config.task_write_gid) not in argv
+    assert "--group-add" not in argv
+    assert "10000:10000" in argv
+    assert "/task/worktree-ro" in argv
 
 
 def test_role_mounts_and_git_environment_are_kernel_boundary_inputs(
@@ -90,6 +189,8 @@ def test_role_mounts_and_git_environment_are_kernel_boundary_inputs(
     )
     assert "/task/worktree-ro" in read_only
     assert "/task/worktree" in implementation
+    assert "10000:10000" in read_only
+    assert f"10001:{container_config.task_write_gid}" in implementation
     assert "CODEX_HOME=/task/session/session-review" in read_only
     with pytest.raises(Exception):
         runtime.exec_argv(

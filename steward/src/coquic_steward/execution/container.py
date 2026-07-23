@@ -144,15 +144,11 @@ class TaskContainerRuntime:
             str(config.limits.pids),
             "--memory",
             str(config.limits.memory_bytes),
-            "--label",
-            "coquic.steward.task=" + config.task_id,
-            "--label",
-            "coquic.steward.image-digest=" + config.image_digest,
-            "--label",
-            "coquic.steward.runtime=task-container-v1",
         ]
+        for key in sorted(config.labels):
+            argv.extend(["--label", f"{key}={config.labels[key]}"])
         # Both worktree views and the bounded scratch path are fixed at create
-        # time. Kernel DAC plus the per-exec supplemental group selects which
+        # time. Kernel DAC plus the per-exec role group selects which
         # writable view a role can actually use.
         for mount in config.mounts_for(TaskRole.implementation):
             argv.extend(self._mount_argv(mount))
@@ -273,20 +269,23 @@ class TaskContainerRuntime:
         argv = [
             "exec",
             "--user",
-            str(session_uid),
+            f"{session_uid}:{self._role_gid(selected, session_uid)}",
             "--workdir",
             workdir or (self.config.container_worktree_rw if selected.can_write_worktree else self.config.container_worktree_ro),
         ]
-        if selected.can_write_worktree:
-            argv.extend(["--group-add", str(self.config.task_write_gid)])
-        elif selected.needs_scratch:
-            argv.extend(["--group-add", str(self.config.validation_gid)])
         if interactive:
             argv.extend(["--interactive"])
         for key in sorted(allowed):
             argv.extend(["--env", f"{key}={allowed[key]}"])
         argv.extend([self.config.container_name, *command])
         return argv
+
+    def _role_gid(self, role: TaskRole, session_uid: int) -> int:
+        if role.can_write_worktree:
+            return self.config.task_write_gid
+        if role.needs_scratch:
+            return self.config.validation_gid
+        return session_uid
 
     def exec(
         self,
@@ -339,21 +338,7 @@ class TaskContainerRuntime:
         return popen(argv)
 
     def signal(self, identity: ExecIdentity, sig: int | signal.Signals) -> None:
-        if identity.container_id != self.config.container_name:
-            raise ContainerBoundaryError(
-                ContainerErrorCategory.identity_mismatch,
-                "signal identity belongs to another task container",
-            )
-        if (
-            identity.pid is None
-            or identity.pid <= 1
-            or identity.uid is None
-            or not 10000 <= identity.uid <= 60000
-        ):
-            raise ContainerBoundaryError(
-                ContainerErrorCategory.invalid,
-                "exec identity does not contain a validated wrapper PID",
-            )
+        self._validate_exec_identity(identity)
         # Docker has no portable signal-by-exec-id command. The trusted wrapper
         # records its in-container PID before replacing itself with Codex.
         self._run(
@@ -370,6 +355,26 @@ class TaskContainerRuntime:
             ]
         )
 
+    def exec_is_live(self, identity: ExecIdentity) -> bool:
+        """Probe the persisted wrapper PID without treating container liveness as enough."""
+
+        self._validate_exec_identity(identity)
+        result = self._run(
+            [
+                "exec",
+                "--user",
+                str(identity.uid),
+                "--env",
+                "COQUIC_STEWARD_SIGNAL=0",
+                self.config.container_name,
+                "/bin/task-entrypoint.sh",
+                "signal",
+                str(identity.pid),
+            ],
+            allow_not_found=True,
+        )
+        return result.returncode == 0
+
     def stop(self, container_id: str | None = None, *, timeout: float | None = None) -> None:
         identifier = container_id or self.config.container_name
         result = self._run(
@@ -384,13 +389,15 @@ class TaskContainerRuntime:
             )
 
     def _mount_argv(self, mount: ContainerMount) -> list[str]:
-        mode = "ro" if mount.read_only else "rw"
         source = str(mount.source)
         if any(char in source for char in "\x00\n"):
             raise ContainerBoundaryError(
                 ContainerErrorCategory.invalid, "mount source contains control characters"
             )
-        return ["--mount", f"type=bind,src={source},dst={mount.target},{mode}"]
+        value = f"type=bind,src={source},dst={mount.target}"
+        if mount.read_only:
+            value += ",readonly"
+        return ["--mount", value]
 
     def _validate_inspection(self, inspection: ContainerInspection) -> None:
         if inspection.name != self.config.container_name:
@@ -411,6 +418,23 @@ class TaskContainerRuntime:
                     ContainerErrorCategory.identity_mismatch,
                     f"container label mismatch: {key}",
                 )
+
+    def _validate_exec_identity(self, identity: ExecIdentity) -> None:
+        if identity.container_id != self.config.container_name:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.identity_mismatch,
+                "exec identity belongs to another task container",
+            )
+        if (
+            identity.pid is None
+            or identity.pid <= 1
+            or identity.uid is None
+            or not 10000 <= identity.uid <= 60000
+        ):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid,
+                "exec identity does not contain a validated wrapper PID",
+            )
 
     def _run(
         self,
@@ -447,7 +471,11 @@ DockerBoundary = TaskContainerRuntime
 
 def _not_found(value: bytes) -> bool:
     text = value.decode("utf-8", "replace").lower()
-    return "no such container" in text or "not found" in text
+    return (
+        "no such container" in text
+        or "no such object" in text
+        or "not found" in text
+    )
 
 
 def _decode_error(value: bytes) -> str:

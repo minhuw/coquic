@@ -137,6 +137,8 @@ class _SessionRunnerAdapter:
             if stage == CodexStage.implementation_plan
             else TaskRole.reviewer
             if stage == CodexStage.review
+            else TaskRole.commit_message
+            if stage == CodexStage.commit_message
             else TaskRole.implementation
         )
         settings = self.config.codex_settings(stage)
@@ -154,6 +156,7 @@ class _SessionRunnerAdapter:
             reasoning_effort=settings.reasoning_effort,
             output_schema=output_schema,
             stage=stage,
+            sandbox=sandbox,
         )
         return WorkerResult(
             completed=result.status.value == "succeeded",

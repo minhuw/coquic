@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import stat
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,8 +17,9 @@ from coquic_steward.agents.invocation import (
 from coquic_steward.core.config import StewardConfig
 from coquic_steward.core.models import CodexStage, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.execution import ResumeCategory, SessionSupervisor
-from coquic_steward.execution.container import ExecIdentity
+from coquic_steward.execution.container import ContainerInspection, ExecIdentity
 from coquic_steward.execution.executor import StewardExecutor
+from coquic_steward.execution.session import runtime_factory_for_config
 from coquic_steward.planning.planner import CodexPlanner
 from coquic_steward.storage import TaskStore
 
@@ -187,6 +190,113 @@ def test_runtime_factory_is_scoped_per_task(config: StewardConfig) -> None:
     assert first_runtime is repeated_runtime
     assert first_runtime is not second_runtime
     assert [task_id for task_id, _ in created] == [first.id, second.id]
+
+
+def test_task_session_mount_root_is_traversable_by_allocated_uids(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    task.worktree_path = config.repo_root
+    store.save(task)
+    configured = replace(
+        config,
+        task_image_digest="sha256:" + "a" * 64,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.execution.session._provision_group_tree",
+        lambda _root, _gid: None,
+    )
+    runtime = runtime_factory_for_config(configured)(store.get(task.id))
+    mode = stat.S_IMODE(runtime.config.private_sessions.stat().st_mode)
+    assert mode == 0o711
+
+
+def test_inspect_and_interrupt_recover_persisted_container_identity(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session, run = store.create_session_with_run(
+        task.id,
+        pipeline.id,
+        session_id="persisted-session",
+        private_home_path=config.private_sessions_dir / task.id / "persisted-session",
+        private_home_relative_path=f"{task.id}/persisted-session",
+        image_digest="sha256:" + "a" * 64,
+        codex_identity="codex-0.144.6",
+        cwd=config.repo_root,
+        checkpoint_id="checkpoint-one",
+        provider_store_identity="codex-sessions-v1",
+        owner_role="implementation",
+        session_idempotency_key=None,
+        role="implementation",
+        model=None,
+        reasoning=None,
+        image_version="sha256:" + "a" * 64,
+        runtime_version="task-runtime-v1",
+        run_checkpoint_id="checkpoint-one",
+        run_provider_store_identity="codex-sessions-v1",
+    )
+    store.update_run(run.id, wrapper_pid=4321, exec_identity="docker-exec-one")
+
+    class RecoverableRuntime:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(
+                container_name=f"coquic-steward-task-{task.id}"
+            )
+            self.probed = None
+            self.signaled = None
+
+        def inspect(self):
+            return ContainerInspection(
+                container_id="container-id",
+                name=self.config.container_name,
+                state="running",
+                running=True,
+                labels={},
+            )
+
+        def exec_is_live(self, identity):
+            self.probed = identity
+            return True
+
+        def signal(self, identity, sig):
+            self.signaled = (identity, sig)
+
+    created = []
+
+    def factory(_task):
+        runtime = RecoverableRuntime()
+        created.append(runtime)
+        return runtime
+
+    restarted = SessionSupervisor(
+        config,
+        store,
+        runtime_factory=factory,
+        image_digest="sha256:" + "a" * 64,
+    )
+    inspection = restarted.inspect(run.id)
+    expected = ExecIdentity(
+        f"coquic-steward-task-{task.id}",
+        "docker-exec-one",
+        4321,
+        session.home_uid,
+    )
+    assert inspection.live
+    assert inspection.identity == expected
+    assert created[0].probed == expected
+
+    interrupted = restarted.interrupt(run.id)
+    assert not interrupted.forced
+    assert created[0].signaled is not None
+    assert created[0].signaled[0] == expected
 
 
 class _CompletedProcess:

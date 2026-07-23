@@ -309,6 +309,10 @@ def test_fixed_receiver_config_and_harness_are_daemon_scoped(tmp_path: Path) -> 
     for option in ("delete", "remove-source-files", "inplace", "append"):
         assert option in refusal.split()
     assert 'pre-xfer exec = /usr/bin/test "$RSYNC_REQUEST" = "steward-tasks/"' in config
+    assert [line for line in config.splitlines() if line.startswith("exclude =")] == [
+        "exclude = .* .*/ ~*",
+        "exclude = .* .*/ ~*",
+    ]
     harness = FakeTaskArchiveReceiver(root)
     assert harness.accept_command(harness.forced_command)[1:3] == (
         "--server",
@@ -339,6 +343,33 @@ def test_fake_receiver_uses_real_rsync_daemon_over_ssh(tmp_path: Path) -> None:
         assert not (protocol.receiver / ".hidden").exists()
         assert not (protocol.receiver / "link").exists()
         assert not (protocol.receiver / "pipe").exists()
+
+
+def test_receiver_protocol_refuses_hidden_entries_without_sender_filters(
+    tmp_path: Path,
+) -> None:
+    with _actual_receiver(tmp_path) as protocol:
+        (protocol.source / "visible").write_text("public\n", encoding="utf-8")
+        (protocol.source / ".dot-secret").write_text("private\n", encoding="utf-8")
+        (protocol.source / "~tilde-secret").write_text("private\n", encoding="utf-8")
+        nested = protocol.source / "nested"
+        nested.mkdir()
+        (nested / ".dot-secret").write_text("private\n", encoding="utf-8")
+        (nested / "~tilde-secret").write_text("private\n", encoding="utf-8")
+
+        argv = [
+            token
+            for token in build_rsync_argv(protocol.config)
+            if not token.startswith("--exclude=")
+        ]
+        result = subprocess.run(argv, capture_output=True, timeout=30, check=False)
+
+        assert result.returncode == 23, result.stderr
+        assert (protocol.receiver / "visible").read_text(encoding="utf-8") == "public\n"
+        assert not (protocol.receiver / ".dot-secret").exists()
+        assert not (protocol.receiver / "~tilde-secret").exists()
+        assert not (protocol.receiver / "nested" / ".dot-secret").exists()
+        assert not (protocol.receiver / "nested" / "~tilde-secret").exists()
 
 
 def test_sender_copy_links_is_invisible_to_receiver_policy(tmp_path: Path) -> None:
@@ -576,6 +607,65 @@ def test_run_once_timeout_cancel_exception_and_raw_output_secrecy(
         runner=lambda _argv: pytest.fail("disabled cycle launched rsync"),
     ).run_once()
     assert disabled_result.category == TaskArchiveSyncCategory.disabled
+
+
+def test_run_once_cancels_active_subprocess_and_finalizes_health(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+    cancel_event = threading.Event()
+    entered = threading.Event()
+    terminated = threading.Event()
+    results: list[object] = []
+
+    class BlockingProcess:
+        returncode: int | None = None
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            entered.set()
+            if not terminated.wait(timeout):
+                raise subprocess.TimeoutExpired("rsync", timeout)
+            self.returncode = -15
+            return b"", b"private cancellation output"
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            terminated.set()
+
+        def kill(self) -> None:
+            terminated.set()
+
+    def start_process(_argv: list[str], **_kwargs: object) -> BlockingProcess:
+        return BlockingProcess()
+
+    worker = threading.Thread(
+        target=lambda: results.append(
+            TaskArchiveSynchronizer(
+                config,
+                store,
+                runner=start_process,
+                cancel_event=cancel_event,
+            ).run_once()
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    cancel_event.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert terminated.is_set()
+    assert len(results) == 1
+    result = results[0]
+    assert result.category == TaskArchiveSyncCategory.cancelled
+    assert not result.success
+    health = store.get_task_archive_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == TaskArchiveSyncCategory.cancelled
+    assert "private" not in str(health)
 
 
 @pytest.mark.parametrize(

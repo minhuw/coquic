@@ -13,6 +13,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import time
@@ -71,6 +72,9 @@ _RECEIVER_REFUSED_OPTIONS = (
     "delay-updates links hard-links devices specials D owner group perms "
     "acls xattrs"
 )
+_RECEIVER_HIDDEN_EXCLUDES = ".* .*/ ~*"
+_PROCESS_WAIT_SLICE_SECONDS = 0.05
+_PROCESS_STOP_GRACE_SECONDS = 1.0
 
 
 def _receiver_root(task_root: Path) -> Path:
@@ -109,9 +113,7 @@ def build_receiver_rsyncd_config(
         "list = no\n"
         "reverse lookup = no\n"
         f"refuse options = {_RECEIVER_REFUSED_OPTIONS}\n"
-        "exclude = .*\n"
-        "exclude = .*/\n"
-        "exclude = ~*\n"
+        f"exclude = {_RECEIVER_HIDDEN_EXCLUDES}\n"
         f"[{TASK_ARCHIVE_SYNC_MODULE}]\n"
         f"path = {root}\n"
         "read only = no\n"
@@ -119,9 +121,7 @@ def build_receiver_rsyncd_config(
         "list = no\n"
         f"refuse options = {_RECEIVER_REFUSED_OPTIONS}\n"
         f'pre-xfer exec = /usr/bin/test "$RSYNC_REQUEST" = "{TASK_ARCHIVE_SYNC_MODULE}/"\n'
-        "exclude = .*\n"
-        "exclude = .*/\n"
-        "exclude = ~*\n"
+        f"exclude = {_RECEIVER_HIDDEN_EXCLUDES}\n"
     )
 
 
@@ -728,7 +728,8 @@ class TaskArchiveSynchronizer:
     ) -> None:
         self.config = config
         self.store = store
-        self._runner = runner or subprocess_runner or subprocess.run
+        self._owns_process_group = runner is None and subprocess_runner is None
+        self._runner = runner or subprocess_runner or self._start_process
         self._clock = clock or _now_utc
         self._monotonic = monotonic or time.monotonic
         self._cancellation = cancellation or (
@@ -746,6 +747,89 @@ class TaskArchiveSynchronizer:
 
     def _cancelled(self) -> bool:
         return self._cancellation is not None and bool(self._cancellation())
+
+    @staticmethod
+    def _start_process(
+        argv: list[str], *, env: dict[str, str], shell: bool, **_: Any
+    ) -> Any:
+        return subprocess.Popen(  # nosec B603 - argv is fixed and shell is disabled
+            argv,
+            env=env,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+    @staticmethod
+    def _is_process_handle(process_result: Any) -> bool:
+        return all(
+            callable(getattr(process_result, name, None))
+            for name in ("communicate", "poll", "terminate", "kill")
+        )
+
+    def _signal_process(self, process: Any, process_signal: signal.Signals) -> None:
+        if self._owns_process_group:
+            pid = getattr(process, "pid", None)
+            if isinstance(pid, int):
+                try:
+                    os.killpg(pid, process_signal)
+                    return
+                except ProcessLookupError:
+                    return
+                except OSError:
+                    pass
+        method = process.terminate if process_signal == signal.SIGTERM else process.kill
+        try:
+            method()
+        except (OSError, ProcessLookupError):
+            pass
+
+    def _stop_process(self, process: Any) -> None:
+        try:
+            if process.poll() is not None:
+                return
+        except (OSError, ValueError):
+            pass
+        self._signal_process(process, signal.SIGTERM)
+        try:
+            process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            self._signal_process(process, signal.SIGKILL)
+        except (OSError, ValueError):
+            return
+        try:
+            process.communicate(timeout=_PROCESS_STOP_GRACE_SECONDS)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+
+    def _wait_for_process(self, process: Any, argv: list[str]) -> Any:
+        deadline = self._monotonic() + self.config.transfer_timeout_seconds
+        while True:
+            if self._cancelled():
+                self._stop_process(process)
+                raise TaskArchiveSyncCancelled
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                self._stop_process(process)
+                raise subprocess.TimeoutExpired(
+                    argv, self.config.transfer_timeout_seconds
+                )
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=min(_PROCESS_WAIT_SLICE_SECONDS, remaining)
+                )
+            except subprocess.TimeoutExpired:
+                continue
+            if self._cancelled():
+                raise TaskArchiveSyncCancelled
+            return subprocess.CompletedProcess(
+                argv,
+                getattr(process, "returncode", None),
+                stdout,
+                stderr,
+            )
 
     def _invoke_runner(self, argv: list[str]) -> Any:
         kwargs: dict[str, Any] = {
@@ -768,7 +852,12 @@ class TaskArchiveSynchronizer:
                 for name, value in kwargs.items()
                 if name in signature.parameters
             }
-        return self._runner(argv, **kwargs)
+        process_result = self._runner(argv, **kwargs)
+        if self._is_process_handle(process_result):
+            return self._wait_for_process(process_result, argv)
+        if self._cancelled():
+            raise TaskArchiveSyncCancelled
+        return process_result
 
     @staticmethod
     def _returncode(process_result: Any) -> int | None:

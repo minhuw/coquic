@@ -15,6 +15,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
 from ..agents import (
     CodexRunner,
     render_implementation_plan_prompt,
@@ -24,6 +26,7 @@ from ..core.config import StewardConfig
 from ..core.models import (
     IntegrationMode,
     CodexStage,
+    Event,
     TaskRecord,
     TaskKind,
     TaskSpec,
@@ -38,8 +41,10 @@ from ..core.models import (
     WorkerResult,
     utc_now,
 )
-from ..core.subprocesses import run_command
+from ..core.subprocesses import CommandResult, run_command
 from ..storage import TaskStore
+from ..storage.mappers import event_to_row
+from ..storage.schema import EventRow
 from .review import (
     parse_review,
     render_review_prompt,
@@ -114,6 +119,12 @@ _TRANSIENT_PUSH_HTTP_STATUS_RE = re.compile(
     r"\b(?:http(?: status)?|status(?: code)?|unexpected status)\s*[:=]?\s*5\d\d\b",
     re.IGNORECASE,
 )
+
+
+class _PhaseAlreadyClaimed(RuntimeError):
+    def __init__(self, action_id: str):
+        super().__init__(f"phase action already claimed: {action_id}")
+        self.action_id = action_id
 
 
 class PatchPreparationResult(StrEnum):
@@ -233,6 +244,7 @@ class StewardExecutor:
     MAX_VALIDATIONS = 256
     MAX_REVIEWS = 64
     MAX_FORMALITY = 32
+    MAX_CONFLICTS = 8
     MAX_TRANSPORT_RETRIES = 3
 
     def __init__(
@@ -331,7 +343,7 @@ class StewardExecutor:
         cursor = self._pipeline_cursor(task_id, pipeline.id)
         if cursor == PipelineCursorPhase.ready_to_seal:
             return self._seal_ready(task, pipeline)
-        budget_failure = self._budget_failure(task_id)
+        budget_failure = self._budget_failure(task_id, cursor)
         if budget_failure is not None:
             return self._block_pipeline(task, pipeline, budget_failure)
         in_progress = self._in_progress_action(task_id, pipeline.id, cursor)
@@ -339,6 +351,16 @@ class StewardExecutor:
             return in_progress
         try:
             return self._dispatch_durable_phase(task, pipeline, cursor)
+        except _PhaseAlreadyClaimed as exc:
+            return AdvanceResult(
+                task.id,
+                pipeline.id,
+                cursor,
+                None,
+                "in_progress",
+                action_id=exc.action_id,
+                progressed=False,
+            )
         except Exception as exc:
             # The durable action has already recorded its input identity. Keep
             # the worktree untouched and make the ambiguity visible for the
@@ -368,9 +390,8 @@ class StewardExecutor:
 
     def _durable_provision(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.provisioned
-        action = action_identity(task.id, pipeline.id, phase)
         path = task.worktree_path or self.config.worktrees_dir / task.id
-        input_value = self._phase_start(task, pipeline, phase, payload={"path": str(path)})
+        self._phase_start(task, pipeline, phase, payload={"path": str(path)})
         if TaskStatus(task.status) == TaskStatus.queued:
             self.store.start_worker(task.id, "durable pipeline provisioned")
             task = self.store.get(task.id)
@@ -381,18 +402,23 @@ class StewardExecutor:
         self.store.save(task)
         self._set_identity(
             pipeline,
-            base_identity=base,
-            input_identity=tree,
+            base_identity=pipeline.base_identity or base,
+            input_identity=pipeline.input_identity or tree,
             output_identity=tree,
             patch_identity=patch,
             worktree_path=worktree,
             phase=coarse_phase(PipelineCursorPhase.planning),
         )
-        next_phase = (
-            PipelineCursorPhase.planning
-            if implementation_plan_required(task)
-            else PipelineCursorPhase.implementation
-        )
+        packet = self._child_packet(task.id, pipeline)
+        patch_already_applied = bool(packet and packet.get("patch_applied"))
+        if patch_already_applied:
+            next_phase = PipelineCursorPhase.validation
+        elif PipelineTrigger(pipeline.trigger) != PipelineTrigger.initial:
+            next_phase = PipelineCursorPhase.implementation
+        elif implementation_plan_required(task):
+            next_phase = PipelineCursorPhase.planning
+        else:
+            next_phase = PipelineCursorPhase.implementation
         return self._phase_finish(
             task,
             pipeline,
@@ -405,7 +431,9 @@ class StewardExecutor:
                 "output_tree": tree,
                 "patch_identity": patch,
                 "branch": branch,
-                "plan_required": implementation_plan_required(task),
+                "plan_required": implementation_plan_required(task)
+                and PipelineTrigger(pipeline.trigger) == PipelineTrigger.initial,
+                "patch_already_applied": patch_already_applied,
                 "plan_skip_reason": None
                 if implementation_plan_required(task)
                 else deterministic_plan_skip_reason(task),
@@ -423,7 +451,6 @@ class StewardExecutor:
                 evidence={"skipped": True, "reason": deterministic_plan_skip_reason(task)},
             )
         worktree = self._require_worktree(task)
-        self.store.start_implementation_plan(task.id, "durable implementation planning")
         attempt = self._phase_attempt(task.id, pipeline.id, phase)
         action = action_identity(task.id, pipeline.id, f"{phase.value}-{attempt}")
         self._phase_start(
@@ -433,6 +460,7 @@ class StewardExecutor:
             action_id=action,
             payload={"attempt": attempt, "worktree": str(worktree)},
         )
+        self.store.start_implementation_plan(task.id, "durable implementation planning")
         settings = self.config.codex_settings(CodexStage.implementation_plan)
         name = f"implementation-plan-{attempt}"
         transcript, last_message = self.runner.paths(task, name=name)
@@ -516,7 +544,6 @@ class StewardExecutor:
     def _durable_implementation(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.implementation
         worktree = self._require_worktree(task)
-        self.store.start_worker(task.id, "durable implementation")
         iteration = len(self.store.iterations(task.id))
         action = action_identity(task.id, pipeline.id, f"{phase.value}-{iteration}")
         prompt = self._implementation_prompt(task, pipeline)
@@ -528,6 +555,7 @@ class StewardExecutor:
             action_id=action,
             payload={"iteration": iteration, "worktree": str(worktree)},
         )
+        self.store.start_worker(task.id, "durable implementation")
         if not self._iteration_exists(task.id, iteration):
             self.store.begin_iteration(
                 task.id,
@@ -560,6 +588,21 @@ class StewardExecutor:
             phase=coarse_phase(PipelineCursorPhase.validation),
         )
         if patch == sha256(b"").hexdigest() or not self.worktrees.has_changes(worktree):
+            if PipelineTrigger(pipeline.trigger) != PipelineTrigger.initial:
+                fingerprint = bounded_fingerprint(
+                    pipeline.input_identity,
+                    self._child_packet(task.id, pipeline),
+                    "implementation-no-changes",
+                )
+                self.store.add_event(
+                    task.id,
+                    "pipeline.implementation.no_progress",
+                    "repair implementation produced no changes",
+                    {"pipeline_id": pipeline.id, "fingerprint": fingerprint},
+                )
+                return self._block_pipeline(
+                    task, pipeline, "repair implementation made no progress"
+                )
             self.store.finish_task(task.id, TaskStatus.no_changes, "implementation produced no changes")
             return self._phase_finish(
                 task,
@@ -582,10 +625,10 @@ class StewardExecutor:
     def _durable_validation(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.validation
         worktree = self._require_worktree(task)
-        self.store.start_validation(task.id, "durable validation")
         iteration = max(0, len(self.store.iterations(task.id)) - 1)
         action = action_identity(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=action, payload={"iteration": iteration})
+        self.store.start_validation(task.id, "durable validation")
         forbidden = self.worktrees.forbidden_paths(worktree)
         frozen = self.worktrees.frozen_paths(worktree, task)
         if forbidden or frozen:
@@ -595,6 +638,7 @@ class StewardExecutor:
             task.id,
             worktree,
             iteration,
+            pipeline=pipeline,
         )
         task = self.store.get(task.id)
         failed = [item for item in validations if not item.passed]
@@ -621,6 +665,12 @@ class StewardExecutor:
             "patch_identity": patch,
             "patch_path": str(patch_path),
         }
+        self.store.add_event(
+            task.id,
+            "pipeline.validation.result",
+            "failed" if failed else "passed",
+            {"pipeline_id": pipeline.id, **evidence},
+        )
         if failed:
             fingerprint = bounded_fingerprint(
                 patch,
@@ -636,11 +686,11 @@ class StewardExecutor:
     def _durable_review(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.review
         worktree = self._require_worktree(task)
-        self.store.start_review(task.id, "durable review")
         patch_text = self.worktrees.diff(worktree)
         tree = self.worktrees.tree(worktree)
         action = action_identity(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=action, payload={"tree": tree, "patch_identity": sha256(patch_text.encode()).hexdigest()})
+        self.store.start_review(task.id, "durable review")
         plan = self._latest_plan(task.id, pipeline.id)
         validations = [self._validation_evidence(item) for item in task.validations]
         prompt = render_review_prompt(
@@ -705,25 +755,73 @@ class StewardExecutor:
         if examined.escalated:
             return self._block_pipeline(task, pipeline, "formality escalated a review finding")
         if examined.blocking:
-            child = self._new_child_pipeline(task, pipeline, PipelineTrigger.review_repair, {"review": examined.effective_review, "dispositions": [item.as_dict() for item in examined.dispositions]})
+            packet = {
+                "review": examined.effective_review,
+                "dispositions": [item.as_dict() for item in examined.dispositions],
+            }
+            fingerprint = bounded_fingerprint(
+                pipeline.patch_identity,
+                examined.effective_review,
+                packet["dispositions"],
+            )
+            self.store.add_event(
+                task.id,
+                "pipeline.review.failure",
+                "effective review remains blocking",
+                {
+                    "pipeline_id": pipeline.id,
+                    "fingerprint": fingerprint,
+                    **packet,
+                },
+            )
+            if self._fingerprint_seen(task.id, fingerprint):
+                return self._block_pipeline(task, pipeline, "review repair made no progress")
+            packet["fingerprint"] = fingerprint
+            child = self._new_child_pipeline(
+                task, pipeline, PipelineTrigger.review_repair, packet
+            )
             return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence=examined.as_dict())
         return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.integration, evidence=examined.as_dict())
 
     def _durable_integration(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.integration
         worktree = self._require_worktree(task)
-        self.store.start_integration(task.id, "durable integration")
         action = action_identity(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=action, payload={"base": pipeline.base_identity})
+        self.store.start_integration(task.id, "durable integration")
         with _integration_lock(self.config.state_dir):
+            tree = self.worktrees.tree(worktree)
+            patch = self.worktrees.patch_identity(worktree)
+            if pipeline.output_identity is None or tree != pipeline.output_identity:
+                return self._block_pipeline(
+                    task,
+                    pipeline,
+                    "integration worktree differs from the accepted tree",
+                )
+            if pipeline.patch_identity is None or patch != pipeline.patch_identity:
+                return self._block_pipeline(
+                    task,
+                    pipeline,
+                    "integration patch differs from the accepted patch",
+                )
             remote_tip = self._latest_main_identity(worktree)
             base = pipeline.base_identity or self.worktrees.base_commit(worktree)
             if remote_tip and remote_tip != base:
-                self.store.add_event(task.id, "pipeline.integration.base_changed", "main advanced", {"pipeline_id": pipeline.id, "base": base, "latest_main": remote_tip})
-                child = self._new_child_pipeline(task, pipeline, PipelineTrigger.integration_rebase, {"base": base, "latest_main": remote_tip, "patch_identity": pipeline.patch_identity})
+                accepted_patch = self._accepted_patch(task, pipeline)
+                if accepted_patch is None:
+                    return self._block_pipeline(
+                        task, pipeline, "base change has no accepted patch evidence"
+                    )
+                child = self._prepare_base_change_child(
+                    task,
+                    pipeline,
+                    trigger=PipelineTrigger.integration_rebase,
+                    latest_main=remote_tip,
+                    accepted_patch=accepted_patch,
+                )
+                if isinstance(child, AdvanceResult):
+                    return child
                 return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence={"base": base, "latest_main": remote_tip})
-            tree = self.worktrees.tree(worktree)
-            patch = self.worktrees.patch_identity(worktree)
             self._set_identity(pipeline, output_identity=tree, patch_identity=patch, phase=coarse_phase(PipelineCursorPhase.commit_message))
             return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.commit_message, output_identity=tree, patch_identity=patch, evidence={"latest_main": remote_tip, "tree": tree, "patch_identity": patch})
 
@@ -777,11 +875,47 @@ class StewardExecutor:
                 self.store.add_event(task.id, "pipeline.push.ambiguous_resolved", commit, {"pipeline_id": pipeline.id, "commit": commit, "detail": detail})
                 self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
                 return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit, "ambiguous": True})
+            fingerprint = bounded_fingerprint(
+                commit, _stable_push_failure(detail)
+            )
+            self.store.add_event(
+                task.id,
+                "pipeline.push.failure",
+                detail,
+                {
+                    "pipeline_id": pipeline.id,
+                    "attempt": attempt,
+                    "commit": commit,
+                    "fingerprint": fingerprint,
+                },
+            )
+            if self._fingerprint_seen(task.id, fingerprint):
+                return self._block_pipeline(task, pipeline, "push made no progress")
             if _is_transient_push_failure(detail) and attempt < self.MAX_TRANSPORT_RETRIES:
                 self.store.add_event(task.id, "pipeline.push.retry", detail, {"pipeline_id": pipeline.id, "attempt": attempt, "commit": commit})
                 return self._phase_finish(task, pipeline, phase, phase, evidence={"retry": attempt + 1, "detail": detail})
-            if "non-fast-forward" in detail.lower() or "rejected" in detail.lower():
-                child = self._new_child_pipeline(task, pipeline, PipelineTrigger.push_race, {"commit": commit, "detail": detail})
+            if _is_non_fast_forward_push_failure(detail):
+                with _integration_lock(self.config.state_dir):
+                    latest_main = self._latest_main_identity(worktree)
+                    if latest_main is None:
+                        return self._block_pipeline(
+                            task, pipeline, "push race could not resolve latest main"
+                        )
+                    accepted_patch = self._accepted_patch(task, pipeline)
+                    if accepted_patch is None:
+                        return self._block_pipeline(
+                            task, pipeline, "push race has no accepted patch evidence"
+                        )
+                    child = self._prepare_base_change_child(
+                        task,
+                        pipeline,
+                        trigger=PipelineTrigger.push_race,
+                        latest_main=latest_main,
+                        accepted_patch=accepted_patch,
+                        extra_evidence={"commit": commit, "detail": detail},
+                    )
+                if isinstance(child, AdvanceResult):
+                    return child
                 return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence={"commit": commit, "detail": detail})
             return self._block_pipeline(task, pipeline, f"push failed: {detail}")
         self.store.add_event(task.id, "pipeline.push", commit, {"pipeline_id": pipeline.id, "action_id": action, "commit": commit, "result": _command_result_text(result)})
@@ -867,19 +1001,91 @@ class StewardExecutor:
             expected_tree=current_tree,
             payload=payload or {},
         )
-        self.store.add_event(
-            task.id,
-            "pipeline.phase.started",
-            phase.value,
-            {
-                "pipeline_id": pipeline.id,
-                "phase": phase.value,
-                "action_id": selected_action,
-                "input": self._json_safe(value.as_dict()),
-            },
-        )
+        data = {
+            "pipeline_id": pipeline.id,
+            "phase": phase.value,
+            "action_id": selected_action,
+            "input": self._json_safe(value.as_dict()),
+        }
+        if not self._claim_phase_event(task.id, pipeline.id, phase, selected_action, data):
+            raise _PhaseAlreadyClaimed(selected_action)
         self._archive_write(task, pipeline, f"phases/{phase.value}-{_safe_filename(selected_action)}-input.json", value.as_dict())
         return value
+
+    def _claim_phase_event(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        phase: PipelineCursorPhase,
+        action_id: str,
+        data: dict[str, Any],
+    ) -> bool:
+        """Atomically persist one phase claim across daemon processes."""
+
+        engine = getattr(self.store, "engine", None)
+        path_codec = getattr(self.store, "path_codec", None)
+        if engine is None or path_codec is None:
+            if self._in_progress_action(task_id, pipeline_id, phase) is not None:
+                return False
+            self.store.add_event(
+                task_id, "pipeline.phase.started", phase.value, data
+            )
+            return True
+        event = Event(
+            task_id=task_id,
+            kind="pipeline.phase.started",
+            message=phase.value,
+            data=data,
+        )
+        row = event_to_row(event, path_codec=path_codec)
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                records = connection.execute(
+                    select(EventRow.kind, EventRow.data_json).where(
+                        EventRow.task_id == task_id,
+                        EventRow.kind.in_(
+                            ("pipeline.phase.started", "pipeline.phase.finished")
+                        ),
+                    )
+                ).all()
+                starts: set[str] = set()
+                finishes: set[str] = set()
+                for kind, data_json in records:
+                    try:
+                        payload = json.loads(data_json)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if payload.get("pipeline_id") != pipeline_id:
+                        continue
+                    if kind == "pipeline.phase.started" and payload.get("phase") == phase.value:
+                        claimed = payload.get("action_id")
+                        if claimed:
+                            starts.add(str(claimed))
+                    elif kind == "pipeline.phase.finished":
+                        completed = payload.get("output", {}).get("action_id")
+                        if completed:
+                            finishes.add(str(completed))
+                if starts - finishes or action_id in finishes:
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    EventRow.__table__.insert().values(
+                        task_id=row.task_id,
+                        kind=row.kind,
+                        message=row.message,
+                        created_at=row.created_at,
+                        data_json=row.data_json,
+                    )
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        notify = getattr(self.store, "_notify_change", None)
+        if callable(notify):
+            notify()
+        return True
 
     def _phase_finish(
         self,
@@ -1018,19 +1224,42 @@ class StewardExecutor:
                     execution_parameters,
                 )
 
-    def _budget_failure(self, task_id: str) -> str | None:
+    def _budget_failure(
+        self, task_id: str, phase: PipelineCursorPhase | None = None
+    ) -> str | None:
         try:
             if len(self.store.list_pipelines(task_id)) > self.MAX_PIPELINES:
                 return "pipeline budget exhausted"
-            if len(self.store.list_runs(task_id)) > self.MAX_RUNS:
+            if phase in {
+                PipelineCursorPhase.planning,
+                PipelineCursorPhase.implementation,
+                PipelineCursorPhase.review,
+                PipelineCursorPhase.formality,
+                PipelineCursorPhase.commit_message,
+            } and len(self.store.list_runs(task_id)) >= self.MAX_RUNS:
                 return "run budget exhausted"
         except (AttributeError, KeyError):
             pass
         events = self.store.events(task_id)
-        if sum(1 for event in events if event.kind == "pipeline.formality.effective") > self.MAX_FORMALITY:
+        if phase == PipelineCursorPhase.validation and sum(
+            1 for event in events if event.kind == "pipeline.validation.result"
+        ) >= self.MAX_VALIDATIONS:
+            return "validation budget exhausted"
+        if phase == PipelineCursorPhase.formality and sum(
+            1 for event in events if event.kind == "pipeline.formality.effective"
+        ) >= self.MAX_FORMALITY:
             return "formality budget exhausted"
-        if sum(1 for event in events if event.kind == "pipeline.review.raw") > self.MAX_REVIEWS:
+        if phase == PipelineCursorPhase.review and sum(
+            1 for event in events if event.kind == "pipeline.review.raw"
+        ) >= self.MAX_REVIEWS:
             return "review budget exhausted"
+        if phase == PipelineCursorPhase.push and sum(
+            1
+            for event in events
+            if event.kind == "pipeline.phase.started"
+            and event.data.get("phase") == PipelineCursorPhase.push.value
+        ) >= self.MAX_TRANSPORT_RETRIES + 1:
+            return "transport budget exhausted"
         return None
 
     def _block_pipeline(self, task: TaskRecord, pipeline: Any, summary: str) -> AdvanceResult:
@@ -1065,14 +1294,52 @@ class StewardExecutor:
         self.store.add_event(task.id, "pipeline.ready_to_seal", status.value, {"pipeline_id": pipeline.id, "terminal_status": status.value})
         return AdvanceResult(task.id, pipeline.id, PipelineCursorPhase.ready_to_seal, None, "ready_to_seal", progressed=True, evidence={"terminal_status": status.value})
 
-    def _new_child_pipeline(self, task: TaskRecord, parent: Any, trigger: PipelineTrigger, evidence: dict[str, Any]) -> Any:
+    def _new_child_pipeline(
+        self,
+        task: TaskRecord,
+        parent: Any,
+        trigger: PipelineTrigger,
+        evidence: dict[str, Any],
+        *,
+        base_identity: str | None = None,
+        input_identity: str | None = None,
+        output_identity: str | None = None,
+        patch_identity: str | None = None,
+    ) -> Any:
         if len(self.store.list_pipelines(task.id)) >= self.MAX_PIPELINES:
             raise RuntimeError("pipeline budget exhausted")
+        if trigger == PipelineTrigger.integration_conflict or evidence.get("conflict"):
+            conflicts = sum(
+                1
+                for event in self.store.events(task.id)
+                if event.kind == "pipeline.integration.conflict"
+            )
+            current_fingerprint = evidence.get("fingerprint")
+            current_recorded = bool(
+                current_fingerprint
+                and any(
+                    event.kind == "pipeline.integration.conflict"
+                    and event.data.get("fingerprint") == current_fingerprint
+                    for event in self.store.events(task.id)
+                )
+            )
+            if conflicts - int(current_recorded) >= self.MAX_CONFLICTS:
+                raise RuntimeError("conflict budget exhausted")
         try:
             self.store.transition_pipeline(parent.id, PipelineState.superseded.value, phase=coarse_phase(self._pipeline_cursor(task.id, parent.id)).value)
         except ValueError:
             pass
-        child = self.store.create_pipeline(task.id, execution_id=parent.execution_id, trigger=trigger.value, parent_pipeline_id=parent.id, base_identity=parent.base_identity, input_identity=parent.output_identity or parent.input_identity, patch_identity=parent.patch_identity)
+        child = self.store.create_pipeline(
+            task.id,
+            execution_id=parent.execution_id,
+            trigger=trigger.value,
+            parent_pipeline_id=parent.id,
+            base_identity=base_identity or parent.base_identity,
+            input_identity=input_identity or parent.output_identity or parent.input_identity,
+            output_identity=output_identity,
+            patch_identity=patch_identity or parent.patch_identity,
+            metadata={"packet": self._json_safe(evidence)},
+        )
         self.store.add_event(task.id, "pipeline.child.created", trigger.value, {"pipeline_id": child.id, "parent_pipeline_id": parent.id, "trigger": trigger.value, "evidence": evidence})
         return child
 
@@ -1096,17 +1363,57 @@ class StewardExecutor:
 
     def _implementation_prompt(self, task: TaskRecord, pipeline: Any) -> str:
         plan = self._latest_plan(task.id, pipeline.id)
-        if plan is None:
-            return render_worker_prompt(task, self.config, None)
-        return render_worker_prompt(task, self.config, plan)
+        prompt = render_worker_prompt(task, self.config, plan)
+        packet = self._child_packet(task.id, pipeline)
+        if packet is None:
+            return prompt
+        context = {
+            "trigger": str(pipeline.trigger),
+            "original_intent": task.spec.prompt,
+            "accepted_plan": plan,
+            "base_identity": pipeline.base_identity,
+            "input_identity": pipeline.input_identity,
+            "output_identity": pipeline.output_identity,
+            "patch_identity": pipeline.patch_identity,
+            "failure_packet": packet,
+        }
+        return (
+            prompt
+            + "\n\nDurable child pipeline context (authoritative and scope-bounded):\n"
+            + json.dumps(self._json_safe(context), indent=2, sort_keys=True)
+            + "\n\nAddress only the exact failure packet while preserving the original intent and accepted plan."
+        )
 
     def _latest_plan(self, task_id: str, pipeline_id: str) -> dict[str, Any] | None:
+        lineage: set[str] = set()
+        selected_pipeline = self.store.get_pipeline(pipeline_id)
+        while True:
+            lineage.add(selected_pipeline.id)
+            if selected_pipeline.parent_pipeline_id is None:
+                break
+            selected_pipeline = self.store.get_pipeline(
+                selected_pipeline.parent_pipeline_id
+            )
         selected = None
         for event in self.store.events(task_id):
-            if event.kind == "pipeline.plan.result" and event.data.get("pipeline_id") == pipeline_id:
+            if event.kind == "pipeline.plan.result" and event.data.get("pipeline_id") in lineage:
                 plan = event.data.get("plan")
                 if isinstance(plan, dict):
                     selected = plan
+        return selected
+
+    def _child_packet(self, task_id: str, pipeline: Any) -> dict[str, Any] | None:
+        metadata = getattr(pipeline, "metadata", {})
+        if isinstance(metadata, dict) and isinstance(metadata.get("packet"), dict):
+            return dict(metadata["packet"])
+        selected = None
+        for event in self.store.events(task_id):
+            if (
+                event.kind == "pipeline.child.created"
+                and event.data.get("pipeline_id") == pipeline.id
+                and isinstance(event.data.get("evidence"), dict)
+            ):
+                selected = dict(event.data["evidence"])
         return selected
 
     def _declared_scope(self, task: TaskRecord, plan: dict[str, Any] | None) -> list[str]:
@@ -1126,6 +1433,10 @@ class StewardExecutor:
             return False
 
     def _validation_evidence(self, validation: ValidationResult) -> dict[str, Any]:
+        try:
+            output = validation.output_path.read_text(encoding="utf-8")
+        except OSError:
+            output = ""
         return {
             "command": validation.command,
             "cwd": str(validation.cwd),
@@ -1133,6 +1444,7 @@ class StewardExecutor:
             "exit_code": validation.exit_code,
             "output_path": str(validation.output_path),
             "summary": validation.summary,
+            "output": output,
             "started_at": validation.started_at.isoformat(),
             "completed_at": validation.completed_at.isoformat(),
         }
@@ -1187,6 +1499,163 @@ class StewardExecutor:
             result = run_command(["git", "rev-parse", self.config.main_branch], cwd=worktree)
         return result.stdout.strip() if result.ok else None
 
+    def _prepare_base_change_child(
+        self,
+        task: TaskRecord,
+        parent: Any,
+        *,
+        trigger: PipelineTrigger,
+        latest_main: str,
+        accepted_patch: str,
+        extra_evidence: dict[str, Any] | None = None,
+    ) -> Any | AdvanceResult:
+        digest = sha256(
+            accepted_patch.encode("utf-8", errors="surrogateescape")
+        ).hexdigest()
+        if parent.patch_identity is None or digest != parent.patch_identity:
+            return self._block_pipeline(
+                task, parent, "accepted patch evidence does not match its identity"
+            )
+        ordinal = max(item.ordinal for item in self.store.list_pipelines(task.id)) + 1
+        prepared = self.worktrees.prepare_patch_worktree(
+            task,
+            ordinal=ordinal,
+            base_identity=latest_main,
+            patch_text=accepted_patch,
+            accepted_tree=parent.output_identity,
+        )
+        conflict = not prepared.applied
+        if conflict and sum(
+            1
+            for event in self.store.events(task.id)
+            if event.kind == "pipeline.integration.conflict"
+        ) >= self.MAX_CONFLICTS:
+            return self._block_pipeline(task, parent, "conflict budget exhausted")
+        selected_trigger = (
+            PipelineTrigger.integration_conflict
+            if conflict and trigger == PipelineTrigger.integration_rebase
+            else trigger
+        )
+        evidence = {
+            "base": parent.base_identity,
+            "latest_main": latest_main,
+            "accepted_tree": parent.output_identity,
+            "accepted_patch_identity": digest,
+            "prepared_input_tree": prepared.input_identity,
+            "prepared_output_tree": prepared.output_identity,
+            "prepared_patch_identity": prepared.patch_identity,
+            "patch_applied": prepared.applied,
+            "conflict": conflict,
+            "apply_detail": prepared.detail,
+            **(extra_evidence or {}),
+        }
+        fingerprint = bounded_fingerprint(
+            selected_trigger.value,
+            latest_main,
+            digest,
+            prepared.applied,
+            _stable_push_failure(prepared.detail),
+        )
+        evidence["fingerprint"] = fingerprint
+        event_kind = (
+            "pipeline.integration.conflict"
+            if conflict
+            else "pipeline.integration.base_changed"
+        )
+        self.store.add_event(
+            task.id,
+            event_kind,
+            "accepted patch conflicted with latest main"
+            if conflict
+            else "accepted patch applied to latest main",
+            {"pipeline_id": parent.id, **evidence},
+        )
+        if self._fingerprint_seen(task.id, fingerprint):
+            return self._block_pipeline(
+                task, parent, "base-change repair made no progress"
+            )
+        task.worktree_path = prepared.path
+        task.branch_name = prepared.branch
+        self.store.save(task)
+        return self._new_child_pipeline(
+            task,
+            parent,
+            selected_trigger,
+            evidence,
+            base_identity=prepared.base_identity,
+            input_identity=prepared.input_identity,
+            output_identity=prepared.output_identity,
+            patch_identity=prepared.patch_identity,
+        )
+
+    def _accepted_patch(self, task: TaskRecord, pipeline: Any) -> str | None:
+        if task.patch_path is None or not Path(task.patch_path).is_file():
+            return None
+        try:
+            value = Path(task.patch_path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        digest = sha256(value.encode("utf-8", errors="surrogateescape")).hexdigest()
+        return value if digest == pipeline.patch_identity else None
+
+    def _container_validation_runner(
+        self, task: TaskRecord, pipeline: Any
+    ) -> Callable[[list[str], Path, float], CommandResult]:
+        if self.session_supervisor is None:
+            raise RuntimeError("durable validation requires a task container")
+        runtime, _ = self.session_supervisor._boundary_for(task)
+        if runtime is None:
+            raise RuntimeError("durable validation has no task container runtime")
+        runtime.ensure_started()
+        role = TaskRole.validation
+        scratch = getattr(runtime.config, "scratch", None)
+        if scratch is None:
+            raise RuntimeError("validation role requires task scratch storage")
+        scratch_path = Path(scratch) / "validation" / pipeline.id
+        object_directory = scratch_path / "objects"
+        object_directory.mkdir(parents=True, exist_ok=True)
+        alternate = Path(runtime.config.git_common_dir) / "objects"
+        container_objects = runtime.config.container_path(object_directory, role)
+        container_alternate = runtime.config.container_path(alternate, role)
+        session_id = f"validation-{sha256(f'{task.id}:{pipeline.id}'.encode()).hexdigest()[:16]}"
+        session_uid = 10_000 + int(
+            sha256(task.id.encode()).hexdigest()[:8], 16
+        ) % 50_001
+        validation_gid = getattr(runtime.config, "validation_gid", session_uid)
+        validation_home = getattr(runtime.config, "private_sessions", None)
+        writable_paths = [scratch_path, object_directory]
+        if validation_home is not None:
+            home = Path(validation_home) / session_id
+            home.mkdir(parents=True, exist_ok=True)
+            writable_paths.append(home)
+        for path in writable_paths:
+            os.chmod(path, 0o770)
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                os.chown(path, session_uid, validation_gid)
+
+        def execute(command: list[str], cwd: Path, timeout: float) -> CommandResult:
+            result = runtime.exec(
+                role,
+                session_uid=session_uid,
+                session_id=session_id,
+                command=command,
+                env={
+                    "GIT_OBJECT_DIRECTORY": container_objects,
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": container_alternate,
+                },
+                workdir=runtime.config.container_path(cwd, role),
+                timeout=timeout,
+            )
+            return CommandResult(
+                args=command,
+                cwd=cwd,
+                returncode=result.exit_code,
+                stdout=result.stdout.decode("utf-8", errors="replace"),
+                stderr=result.stderr.decode("utf-8", errors="replace"),
+            )
+
+        return execute
+
     def _commit_reachable(self, worktree: Path, commit: str) -> bool:
         remote = f"{self.config.git_remote}/{self.config.main_branch}"
         fetched = run_command(["git", "fetch", self.config.git_remote, self.config.main_branch], cwd=worktree)
@@ -1207,8 +1676,7 @@ class StewardExecutor:
             from .task_archive import TaskArchiveWriter
 
             archive = TaskArchiveWriter(self.config)
-            archive.ensure_epoch()
-            archive.create_task_from_record(task, pipeline=pipeline)
+            self._prepare_archive_task(archive, task, pipeline)
             archive.write_json(task.id, f"pipelines/{pipeline.id}/{relative}", self._json_safe(value))
         except Exception as exc:
             self.store.add_event(task.id, "pipeline.archive.warning", str(exc)[-500:], {"pipeline_id": pipeline.id, "path": relative})
@@ -1218,11 +1686,29 @@ class StewardExecutor:
             from .task_archive import TaskArchiveWriter
 
             archive = TaskArchiveWriter(self.config)
-            archive.ensure_epoch()
-            archive.create_task_from_record(task, pipeline=pipeline)
+            self._prepare_archive_task(archive, task, pipeline)
             archive.write_bytes(task.id, f"pipelines/{pipeline.id}/{relative}", value)
         except Exception as exc:
             self.store.add_event(task.id, "pipeline.archive.warning", str(exc)[-500:], {"pipeline_id": pipeline.id, "path": relative})
+
+    def _prepare_archive_task(
+        self, archive: Any, task: TaskRecord, pipeline: Any
+    ) -> None:
+        archive.ensure_epoch()
+        task_path = archive.task_path(task.id, "task.json")
+        if not task_path.is_file():
+            archive.create_task_from_record(task, pipeline=pipeline)
+        for item in self.store.list_pipelines(task.id):
+            archive._add_task_pipeline_reference(task.id, item.id, item.ordinal)
+        metadata = json.loads(task_path.read_text(encoding="utf-8"))
+        metadata["status"] = str(task.status)
+        metadata["updatedAt"] = task.updated_at.isoformat().replace("+00:00", "Z")
+        metadata["currentPipelineId"] = pipeline.id
+        metadata["summary"] = {
+            "title": task.spec.title,
+            "text": task.summary or task.spec.prompt,
+        }
+        archive.write_json(task.id, "task.json", metadata)
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
@@ -2563,9 +3049,19 @@ class StewardExecutor:
         return False
 
     def _run_gates_for_iteration(
-        self, task_id: str, worktree: Path, iteration: int
+        self,
+        task_id: str,
+        worktree: Path,
+        iteration: int,
+        *,
+        pipeline: Any | None = None,
     ) -> list[ValidationResult]:
         label = _iteration_log_label(iteration)
+        command_runner = None
+        if pipeline is not None and self.session_supervisor is not None:
+            command_runner = self._container_validation_runner(
+                self.store.get(task_id), pipeline
+            )
 
         def on_gate_start(
             position: int, filename: str, command: list[str]
@@ -2611,10 +3107,14 @@ class StewardExecutor:
                     label=label,
                     on_gate_start=on_gate_start,
                     on_gate_result=on_gate_result,
+                    command_runner=command_runner,
                 )
             ]
         except TypeError as exc:
-            if "label" not in str(exc) and "on_gate" not in str(exc):
+            if not any(
+                name in str(exc)
+                for name in ("label", "on_gate", "command_runner")
+            ):
                 raise
             try:
                 validations = run_gates(
@@ -3330,6 +3830,23 @@ def _is_transient_push_failure(message: str) -> bool:
     return any(pattern in lowered for pattern in _TRANSIENT_PUSH_PATTERNS) or bool(
         _TRANSIENT_PUSH_HTTP_STATUS_RE.search(message)
     )
+
+
+def _is_non_fast_forward_push_failure(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "non-fast-forward",
+            "fetch first",
+            "tip of your current branch is behind",
+            "remote contains work that you do not have locally",
+        )
+    )
+
+
+def _stable_push_failure(message: str) -> str:
+    return " ".join(_ANSI_ESCAPE_RE.sub("", message).lower().split())[-2_000:]
 
 
 def _write_integration_command_log(

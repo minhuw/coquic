@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import threading
+from types import SimpleNamespace
+
+import pytest
 
 from coquic_steward.core.models import (
     CodexStage,
@@ -15,6 +20,7 @@ from coquic_steward.core.models import (
 )
 from coquic_steward.core.lifecycle import pipeline_transition_allowed
 from coquic_steward.execution.executor import StewardExecutor
+from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
 
 
@@ -123,6 +129,348 @@ def test_phase_transition_and_legacy_compatibility_are_bounded() -> None:
     assert not pipeline_transition_allowed(
         PipelineCursorPhase.review, PipelineCursorPhase.commit
     )
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        PipelineTrigger.validation_repair,
+        PipelineTrigger.review_repair,
+        PipelineTrigger.integration_rebase,
+        PipelineTrigger.integration_conflict,
+        PipelineTrigger.push_race,
+    ],
+)
+def test_every_child_pipeline_can_validate_its_implementation(trigger) -> None:
+    assert pipeline_transition_allowed(
+        PipelineCursorPhase.implementation,
+        PipelineCursorPhase.validation,
+        trigger=trigger,
+    )
+
+
+def test_phase_claim_is_atomic_across_executor_instances(config) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="claim",
+            prompt="claim once",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def claim() -> None:
+        executor = StewardExecutor(
+            config, TaskStore(config.db_path), runner=FakeRunner(config)
+        )
+        barrier.wait()
+        try:
+            executor._phase_start(task, pipeline, PipelineCursorPhase.implementation)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    starts = [
+        event
+        for event in store.events(task.id)
+        if event.kind == "pipeline.phase.started"
+    ]
+    assert len(starts) == 1
+    assert len(errors) == 1
+
+
+def test_repair_prompt_inherits_plan_and_exact_child_packet(config, monkeypatch) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="repair",
+            prompt="original intent",
+        )
+    )
+    parent = store.list_pipelines(task.id)[0]
+    plan = {"summary": "accepted plan", "steps": []}
+    store.add_event(
+        task.id,
+        "pipeline.plan.result",
+        "accepted",
+        {"pipeline_id": parent.id, "plan": plan},
+    )
+    packet = {
+        "validation": {
+            "validations": [
+                {"command": ["zig", "build", "test"], "exit_code": 1}
+            ]
+        }
+    }
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    child = executor._new_child_pipeline(
+        task, parent, PipelineTrigger.validation_repair, packet
+    )
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.render_worker_prompt",
+        lambda _task, _config, accepted: json.dumps(accepted, sort_keys=True),
+    )
+
+    prompt = executor._implementation_prompt(task, child)
+
+    assert "accepted plan" in prompt
+    assert "original intent" in prompt
+    assert "zig" in prompt
+    assert "validation-repair" in prompt
+
+
+def _advance_to_integration(config, monkeypatch):
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_gates
+    )
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="integrate",
+            prompt="change README",
+        )
+    )
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    for _ in range(4):
+        executor.advance_once(task.id)
+    assert executor._pipeline_cursor(
+        task.id, store.list_pipelines(task.id)[0].id
+    ) == PipelineCursorPhase.integration
+    return store, task, executor
+
+
+def test_integration_applies_accepted_patch_to_latest_main(config, monkeypatch) -> None:
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    (config.repo_root / "LATEST.md").write_text("latest\n", encoding="utf-8")
+    from coquic_steward.core.subprocesses import run_command
+
+    run_command(["git", "add", "LATEST.md"], cwd=config.repo_root, check=True)
+    run_command(
+        ["git", "commit", "-m", "test: advance main"],
+        cwd=config.repo_root,
+        check=True,
+    )
+    latest = run_command(
+        ["git", "rev-parse", "main"], cwd=config.repo_root, check=True
+    ).stdout.strip()
+
+    result = executor.advance_once(task.id)
+
+    child = store.get_pipeline(result.pipeline_id)
+    current_task = store.get(task.id)
+    assert child.trigger == PipelineTrigger.integration_rebase.value
+    assert child.base_identity == latest
+    assert executor.worktrees.base_commit(current_task.worktree_path) == latest
+    assert (current_task.worktree_path / "README.md").read_text() == "changed\n"
+    assert (current_task.worktree_path / "LATEST.md").read_text() == "latest\n"
+
+    provisioned = executor.advance_once(task.id)
+    assert provisioned.next_phase == PipelineCursorPhase.validation
+    validated = executor.advance_once(task.id)
+    assert validated.next_phase == PipelineCursorPhase.review
+
+
+def test_integration_apply_conflict_creates_bounded_conflict_child(
+    config, monkeypatch
+) -> None:
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    (config.repo_root / "README.md").write_text("upstream\n", encoding="utf-8")
+    from coquic_steward.core.subprocesses import run_command
+
+    run_command(["git", "add", "README.md"], cwd=config.repo_root, check=True)
+    run_command(
+        ["git", "commit", "-m", "test: conflict on main"],
+        cwd=config.repo_root,
+        check=True,
+    )
+    latest = run_command(
+        ["git", "rev-parse", "main"], cwd=config.repo_root, check=True
+    ).stdout.strip()
+
+    result = executor.advance_once(task.id)
+
+    child = store.get_pipeline(result.pipeline_id)
+    current_task = store.get(task.id)
+    packet = child.metadata["packet"]
+    assert child.trigger == PipelineTrigger.integration_conflict.value
+    assert child.base_identity == latest
+    assert packet["conflict"] is True
+    assert packet["accepted_patch_identity"]
+    assert (current_task.worktree_path / "README.md").read_text() == "upstream\n"
+
+
+def test_push_race_reapplies_committed_accepted_patch(config, monkeypatch) -> None:
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    executor.advance_once(task.id)
+    executor.advance_once(task.id)
+    executor.advance_once(task.id)
+    parent = store.list_pipelines(task.id)[0]
+    current_task = store.get(task.id)
+    patch = executor._accepted_patch(current_task, parent)
+    assert patch is not None
+
+    (config.repo_root / "LATEST.md").write_text("latest\n", encoding="utf-8")
+    from coquic_steward.core.subprocesses import run_command
+
+    run_command(["git", "add", "LATEST.md"], cwd=config.repo_root, check=True)
+    run_command(
+        ["git", "commit", "-m", "test: push race"],
+        cwd=config.repo_root,
+        check=True,
+    )
+    latest = run_command(
+        ["git", "rev-parse", "main"], cwd=config.repo_root, check=True
+    ).stdout.strip()
+
+    child = executor._prepare_base_change_child(
+        current_task,
+        parent,
+        trigger=PipelineTrigger.push_race,
+        latest_main=latest,
+        accepted_patch=patch,
+    )
+
+    assert child.trigger == PipelineTrigger.push_race.value
+    assert child.base_identity == latest
+    assert child.metadata["packet"]["patch_applied"] is True
+    assert (store.get(task.id).worktree_path / "README.md").read_text() == "changed\n"
+
+
+def test_integration_blocks_tree_changed_after_review(config, monkeypatch) -> None:
+    store, task, executor = _advance_to_integration(config, monkeypatch)
+    worktree = store.get(task.id).worktree_path
+    assert worktree is not None
+    (worktree / "UNREVIEWED.md").write_text("not accepted\n", encoding="utf-8")
+
+    result = executor.advance_once(task.id)
+
+    assert result.status == "blocked"
+    assert "accepted tree" in result.evidence["summary"]
+
+
+def test_validation_uses_container_validation_role(config, monkeypatch) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="validation role",
+            prompt="validate",
+        )
+    )
+    calls = []
+
+    class Runtime:
+        def __init__(self):
+            self.config = SimpleNamespace(
+                scratch=config.private_dir / "task-scratch" / task.id,
+                git_common_dir=config.repo_root / ".git",
+                container_path=lambda path, _role: "/mapped/" + Path(path).name,
+            )
+
+        def ensure_started(self):
+            return "container"
+
+        def exec(self, role, **kwargs):
+            calls.append((role, kwargs))
+            return SimpleNamespace(exit_code=0, stdout=b"ok\n", stderr=b"")
+
+    runtime = Runtime()
+    supervisor = SimpleNamespace(_boundary_for=lambda _task: (runtime, object()))
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    executor.session_supervisor = supervisor
+    runner = executor._container_validation_runner(task, store.list_pipelines(task.id)[0])
+
+    result = runner(["true"], config.repo_root, 10)
+
+    assert result.ok
+    assert calls[0][0].value == "validation"
+    assert "GIT_OBJECT_DIRECTORY" in calls[0][1]["env"]
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" in calls[0][1]["env"]
+
+
+def test_archive_write_preserves_parent_and_child_pipeline_refs(config) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="archive",
+            prompt="preserve history",
+        )
+    )
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    parent = store.list_pipelines(task.id)[0]
+    executor._archive_write(task, parent, "parent.json", {"attempt": 1})
+    child = executor._new_child_pipeline(
+        task, parent, PipelineTrigger.validation_repair, {"failure": "gate"}
+    )
+    executor._archive_write(task, child, "child.json", {"attempt": 2})
+
+    archive = TaskArchiveWriter(config)
+    metadata = json.loads(archive.task_path(task.id, "task.json").read_text())
+    assert {item["pipelineId"] for item in metadata["pipelines"]} == {
+        parent.id,
+        child.id,
+    }
+
+
+def test_validation_conflict_and_phase_budgets_are_explicit(config) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="budgets",
+            prompt="bounded",
+        )
+    )
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    executor.MAX_VALIDATIONS = 1
+    store.add_event(
+        task.id,
+        "pipeline.validation.result",
+        "failed",
+        {"pipeline_id": store.list_pipelines(task.id)[0].id},
+    )
+    assert (
+        executor._budget_failure(task.id, PipelineCursorPhase.validation)
+        == "validation budget exhausted"
+    )
+    assert executor.MAX_CONFLICTS > 0
+
+
+@pytest.mark.parametrize(
+    ("detail", "race"),
+    [
+        ("! [rejected] HEAD -> main (non-fast-forward)", True),
+        ("! [remote rejected] HEAD -> main (protected branch hook declined)", False),
+        ("remote: permission denied; rejected", False),
+    ],
+)
+def test_push_race_classifier_is_strict(detail, race) -> None:
+    from coquic_steward.execution.executor import _is_non_fast_forward_push_failure
+
+    assert _is_non_fast_forward_push_failure(detail) is race
 
 
 def test_child_pipeline_budget_and_no_progress_fingerprint_are_explicit(config) -> None:

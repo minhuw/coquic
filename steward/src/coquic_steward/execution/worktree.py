@@ -36,6 +36,18 @@ class WorktreeIdentity:
     runtime_version: str | None = None
 
 
+@dataclass(frozen=True)
+class PreparedPatchWorktree:
+    path: Path
+    branch: str
+    base_identity: str
+    input_identity: str
+    output_identity: str
+    patch_identity: str
+    applied: bool
+    detail: str = ""
+
+
 class Worktrees:
     def __init__(self, config: StewardConfig):
         self.config = config
@@ -262,6 +274,111 @@ class Worktrees:
             cwd=path,
             input_text=patch_text,
             check=True,
+        )
+
+    def prepare_patch_worktree(
+        self,
+        task: TaskRecord,
+        *,
+        ordinal: int,
+        base_identity: str,
+        patch_text: str,
+        accepted_tree: str | None = None,
+    ) -> PreparedPatchWorktree:
+        """Apply an accepted patch to a new base without discarding its source bytes."""
+
+        source_branch = task.branch_name or f"steward/{_slug(task.spec.kind)}/{_slug(task.id)}"
+        branch = f"{source_branch}-pipeline-{ordinal}"
+        if task.worktree_path is None:
+            raise RuntimeError("base-change preparation requires the task worktree")
+        path = Path(task.worktree_path)
+        if not path.is_dir():
+            raise RuntimeError(f"task worktree is unavailable: {path}")
+        actual_base = self.base_commit(path)
+        existing_patch = self.diff(path)
+        if actual_base == base_identity:
+            if existing_patch and existing_patch != patch_text:
+                raise RuntimeError("prepared worktree contains an unexpected patch")
+        else:
+            head_tree = run_command(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
+            ).stdout.strip()
+            committed_source = (
+                not existing_patch
+                and accepted_tree is not None
+                and head_tree == accepted_tree
+            )
+            if not committed_source and existing_patch != patch_text:
+                raise RuntimeError("source worktree differs from the accepted patch")
+            stash_created = False
+            if existing_patch:
+                stash = run_command(
+                    [
+                        "git",
+                        "stash",
+                        "push",
+                        "--include-untracked",
+                        "--message",
+                        f"steward pipeline {ordinal} base change",
+                    ],
+                    cwd=path,
+                    check=True,
+                )
+                stash_created = "No local changes to save" not in stash.stdout
+                if self.has_changes(path):
+                    raise RuntimeError(
+                        "accepted patch could not be preserved before base change"
+                    )
+            run_command(
+                [
+                    "git",
+                    "switch",
+                    "--detach",
+                    base_identity,
+                ],
+                cwd=path,
+                check=True,
+            )
+            run_command(
+                ["git", "switch", "-C", branch, base_identity],
+                cwd=path,
+                check=True,
+            )
+            if stash_created:
+                run_command(["git", "stash", "drop"], cwd=path, check=True)
+        actual_base = self.base_commit(path)
+        if actual_base != base_identity:
+            raise RuntimeError(
+                f"prepared worktree base mismatch: expected {base_identity}, "
+                f"found {actual_base}"
+            )
+        input_tree = run_command(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
+        ).stdout.strip()
+        existing_patch = self.diff(path)
+        if existing_patch:
+            applied = existing_patch == patch_text
+            detail = "adopted existing prepared patch" if applied else "prepared worktree contains an unexpected patch"
+        else:
+            result = run_command(
+                ["git", "apply", "--binary", "-"],
+                cwd=path,
+                input_text=patch_text,
+            )
+            applied = result.ok
+            detail = (result.stderr or result.stdout).strip()[-2_000:]
+        output_tree = self.tree(path)
+        if not applied and output_tree != input_tree:
+            raise RuntimeError("failed patch application changed the prepared worktree")
+        return PreparedPatchWorktree(
+            path=path,
+            branch=branch,
+            base_identity=actual_base,
+            input_identity=input_tree,
+            output_identity=output_tree,
+            patch_identity=self.patch_identity(path),
+            applied=applied,
+            detail=detail,
         )
 
     def reset_to_main(self, path: Path) -> None:

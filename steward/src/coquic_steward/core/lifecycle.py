@@ -128,7 +128,11 @@ class InvalidPipelineTransition(ValueError):
 
 _PIPELINE_TRANSITIONS: dict[PipelineCursorPhase, frozenset[PipelineCursorPhase]] = {
     PipelineCursorPhase.provisioned: frozenset(
-        {PipelineCursorPhase.planning, PipelineCursorPhase.implementation}
+        {
+            PipelineCursorPhase.planning,
+            PipelineCursorPhase.implementation,
+            PipelineCursorPhase.validation,
+        }
     ),
     PipelineCursorPhase.planning: frozenset({PipelineCursorPhase.implementation}),
     PipelineCursorPhase.implementation: frozenset(
@@ -166,18 +170,11 @@ def pipeline_transition_allowed(
         return False
     if source == destination:
         return True
-    if source == PipelineCursorPhase.provisioned:
-        return destination in _PIPELINE_TRANSITIONS[PipelineCursorPhase.provisioned]
-    if selected_trigger == PipelineTrigger.validation_repair:
-        return source == PipelineCursorPhase.validation and destination == PipelineCursorPhase.repair
-    if selected_trigger == PipelineTrigger.review_repair:
-        return source in {PipelineCursorPhase.review, PipelineCursorPhase.formality} and destination == PipelineCursorPhase.repair
-    if selected_trigger in {
-        PipelineTrigger.integration_rebase,
-        PipelineTrigger.integration_conflict,
-        PipelineTrigger.push_race,
-    }:
-        return destination == PipelineCursorPhase.implementation
+    # A trigger describes why a child pipeline exists; it does not replace the
+    # child's normal phase graph. Trigger-specific repair edges are already
+    # represented in the graph and every child must be able to validate and
+    # review its implementation.
+    _ = selected_trigger
     return destination in _PIPELINE_TRANSITIONS.get(source, frozenset())
 
 

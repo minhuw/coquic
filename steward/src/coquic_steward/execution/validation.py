@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..core.config import StewardConfig
 from ..core.models import TaskRecord, ValidationResult, utc_now
-from ..core.subprocesses import run_command
+from ..core.subprocesses import CommandResult, run_command
 
 VALIDATION_SCOPE_CONTROL = """\
 Validation repair scope control:
@@ -89,12 +89,21 @@ def run_gates(
     label: str | None = None,
     on_gate_start: Callable[[int, str, list[str]], None] | None = None,
     on_gate_result: Callable[[int, ValidationResult], None] | None = None,
+    command_runner: Callable[[list[str], Path, float], CommandResult] | None = None,
 ) -> list[ValidationResult]:
     results: list[ValidationResult] = []
     for index, (filename, command) in enumerate(default_gates(cwd)):
         if on_gate_start is not None:
             on_gate_start(index, filename, command)
-        result = run_validation(config, task_id, cwd, filename, command, label=label)
+        result = run_validation(
+            config,
+            task_id,
+            cwd,
+            filename,
+            command,
+            label=label,
+            command_runner=command_runner,
+        )
         results.append(result)
         if on_gate_result is not None:
             on_gate_result(index, result)
@@ -109,31 +118,32 @@ def run_validation(
     command: list[str],
     *,
     label: str | None = None,
+    command_runner: Callable[[list[str], Path, float], CommandResult] | None = None,
 ) -> ValidationResult:
     output_path = config.logs_dir / task_id / label / filename if label else config.logs_dir / task_id / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
-    git_dir = run_command(
-        ["git", "rev-parse", "--absolute-git-dir"], cwd=cwd
-    ).stdout.strip()
-    object_store = str(Path(git_dir) / "objects") if git_dir else ""
-    environment = os.environ.copy()
-    if object_store:
-        with tempfile.TemporaryDirectory(prefix="coquic-steward-validation-") as temporary:
-            environment["GIT_OBJECT_DIRECTORY"] = temporary
-            environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(Path(object_store).resolve())
-            result = run_command(
-                command,
-                cwd=cwd,
-                timeout=config.limits.validation_timeout_minutes * 60,
-                env=environment,
-            )
+    timeout = config.limits.validation_timeout_minutes * 60
+    if command_runner is not None:
+        result = command_runner(command, cwd, timeout)
     else:
-        result = run_command(
-            command,
-            cwd=cwd,
-            timeout=config.limits.validation_timeout_minutes * 60,
-        )
+        git_dir = run_command(
+            ["git", "rev-parse", "--absolute-git-dir"], cwd=cwd
+        ).stdout.strip()
+        object_store = str(Path(git_dir) / "objects") if git_dir else ""
+        environment = os.environ.copy()
+        if object_store:
+            with tempfile.TemporaryDirectory(prefix="coquic-steward-validation-") as temporary:
+                environment["GIT_OBJECT_DIRECTORY"] = temporary
+                environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = str(Path(object_store).resolve())
+                result = run_command(
+                    command,
+                    cwd=cwd,
+                    timeout=timeout,
+                    env=environment,
+                )
+        else:
+            result = run_command(command, cwd=cwd, timeout=timeout)
     stdout = _bounded_output(result.stdout)
     stderr = _bounded_output(result.stderr)
     output_path.write_text(

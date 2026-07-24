@@ -10,7 +10,7 @@ import secrets
 import signal
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -150,6 +150,7 @@ class FreshPlannerSession:
     def __init__(self, config: StewardConfig, *, invoker: SessionInvoker | None = None):
         self.config = config
         self.invoker = invoker or LocalSessionInvoker()
+        self._interrupt_requested = threading.Event()
 
     def allocate(
         self,
@@ -183,6 +184,7 @@ class FreshPlannerSession:
         api_key: bytes | str | None = None,
         timeout_seconds: float = 1800,
     ) -> FreshPlannerResult:
+        self._interrupt_requested.clear()
         request = self.allocate(
             run_id,
             prompt=prompt,
@@ -205,6 +207,8 @@ class FreshPlannerSession:
             timeout_seconds=timeout_seconds,
             interrupt_grace_seconds=2.0,
         )
+        if self._interrupt_requested.is_set() and not outcome.completed:
+            outcome = replace(outcome, interrupted=True)
         status = (
             InvocationStatus.succeeded
             if outcome.completed
@@ -222,6 +226,7 @@ class FreshPlannerSession:
         )
 
     def interrupt(self, *, force: bool = False) -> None:
+        self._interrupt_requested.set()
         interrupt = getattr(self.invoker, "interrupt", None)
         if callable(interrupt):
             interrupt(force=force)

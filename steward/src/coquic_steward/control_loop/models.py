@@ -73,7 +73,7 @@ class ControlLoopModel(BaseModel):
 class Epoch(ControlLoopModel):
     epoch_id: str = Field(alias="epochId")
     format_version: str = Field(default=CONTROL_LOOP_FORMAT_VERSION, alias="formatVersion")
-    task_format_version: str | None = Field(default=None, alias="taskFormatVersion")
+    task_format_version: str = Field(alias="taskFormatVersion")
     policy: str = CONTROL_LOOP_POLICY
     started_at: datetime = Field(alias="startedAt")
 
@@ -88,6 +88,8 @@ class Epoch(ControlLoopModel):
 
     @model_validator(mode="after")
     def _contract(self) -> "Epoch":
+        if self.format_version != CONTROL_LOOP_FORMAT_VERSION:
+            raise ValueError("unsupported control-loop archive format")
         if self.policy != CONTROL_LOOP_POLICY:
             raise ValueError("control-loop epoch policy must be post-steward-2.0")
         return self

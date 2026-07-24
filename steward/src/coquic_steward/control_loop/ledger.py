@@ -358,6 +358,7 @@ class ControlLoopLedger:
         observations: Iterable[Observation | SignalItem],
         *,
         wakeup: Wakeup | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> tuple[list[Observation], list[CanonicalSignal]]:
         """Persist a fetch and every normalized observation in one transaction."""
 
@@ -365,7 +366,7 @@ class ControlLoopLedger:
         normalized_observations = [_observation(item, fetch_value.fetch_id) for item in observations]
         signals: list[CanonicalSignal] = []
         saved: list[Observation] = []
-        with self.transaction() as db:
+        with self.transaction(connection) as db:
             existing_fetch = db.execute(
                 "SELECT normalized_json FROM control_loop_fetches WHERE fetch_id=?",
                 (fetch_value.fetch_id,),
@@ -421,18 +422,33 @@ class ControlLoopLedger:
                         updatedAt=signal_row[3],
                     )
                     dedupe = "existing"
-                observation = observation.model_copy(
-                    update={"canonical_signal_id": signal.signal_id, "dedupe_result": dedupe}
-                )
-                observation_json = observation.model_dump(by_alias=True, mode="json")
                 previous = db.execute(
                     "SELECT normalized_json FROM control_loop_observations WHERE observation_id=?",
                     (observation.observation_id,),
                 ).fetchone()
                 if previous is not None:
-                    if _loads(previous[0], {}) != observation_json:
+                    stored = Observation.model_validate(_loads(previous[0], {}))
+                    candidate = observation.model_copy(
+                        update={
+                            "canonical_signal_id": stored.canonical_signal_id,
+                            "dedupe_result": stored.dedupe_result,
+                        }
+                    )
+                    if (
+                        stored.canonical_signal_id != signal.signal_id
+                        or candidate.model_dump(by_alias=True, mode="json")
+                        != stored.model_dump(by_alias=True, mode="json")
+                    ):
                         raise LedgerConflictError(f"observation {observation.observation_id} conflicts with stored bytes")
+                    observation = stored
                 else:
+                    observation = observation.model_copy(
+                        update={
+                            "canonical_signal_id": signal.signal_id,
+                            "dedupe_result": dedupe,
+                        }
+                    )
+                    observation_json = observation.model_dump(by_alias=True, mode="json")
                     db.execute(
                         "INSERT INTO control_loop_observations(observation_id,fetch_id,signal_id,provider,fingerprint,dedupe_result,observed_at,normalized_json) VALUES(?,?,?,?,?,?,?,?)",
                         (observation.observation_id, observation.fetch_id, signal.signal_id, observation.provider, observation.fingerprint, dedupe, _dt(observation.observed_at), _json(observation_json)),
@@ -605,6 +621,9 @@ class ControlLoopLedger:
         consume_signal_ids: Iterable[str] = (),
         artifact_sources: Mapping[str, tuple[str, bool]] | None = None,
         reset_retry_key: str | None = None,
+        schedule_retry_key: str | None = None,
+        retry_initial_seconds: int = 30,
+        retry_max_seconds: int = 300,
         connection: sqlite3.Connection | None = None,
     ) -> PlannerRun:
         run_id = validate_id(planner_run_id)
@@ -681,16 +700,31 @@ class ControlLoopLedger:
                 )
             completed = utc_now()
             retry_at = completed + retry_after if retry_after is not None else None
+            diagnostic_values = dict(diagnostics or {})
+            if schedule_retry_key is not None:
+                attempt, retry_at = self._schedule_retry(
+                    db,
+                    schedule_retry_key,
+                    initial_seconds=retry_initial_seconds,
+                    max_seconds=retry_max_seconds,
+                    now=completed,
+                )
+                diagnostic_values.update(
+                    {
+                        "attempt": attempt,
+                        "retry_eligible_at": _dt(retry_at),
+                    }
+                )
             db.execute(
                 "UPDATE control_loop_planner_runs SET state=?,completed_at=?,result_json=?,diagnostics_json=?,retry_eligible_at=? WHERE planner_run_id=?",
-                (state, _dt(completed), _json(dict(result or {})), _json(dict(diagnostics or {})), _dt(retry_at) if retry_at else None, run_id),
+                (state, _dt(completed), _json(dict(result or {})), _json(diagnostic_values), _dt(retry_at) if retry_at else None, run_id),
             )
             if reset_retry_key is not None:
                 db.execute("DELETE FROM control_loop_retry WHERE key=?", (reset_retry_key,))
             self._event(
                 db,
                 EventKind.planner_finished.value,
-                {"plannerRunId": run_id, "state": state, "result": dict(result or {}), "diagnostics": dict(diagnostics or {})},
+                {"plannerRunId": run_id, "state": state, "result": dict(result or {}), "diagnostics": diagnostic_values},
                 event_id=f"planner-finished-{run_id}",
             )
             row = db.execute("SELECT * FROM control_loop_planner_runs WHERE planner_run_id=?", (run_id,)).fetchone()
@@ -825,14 +859,33 @@ class ControlLoopLedger:
     def schedule_retry(self, key: str, *, initial_seconds: int = 30, max_seconds: int = 300, now: datetime | None = None) -> tuple[int, datetime]:
         selected_now = now or utc_now()
         with self.transaction() as db:
-            row = db.execute("SELECT attempt FROM control_loop_retry WHERE key=?", (key,)).fetchone()
-            attempt = int(row[0]) + 1 if row else 1
-            delay = min(max_seconds, initial_seconds * (2 ** (attempt - 1)))
-            eligible = selected_now + timedelta(seconds=delay)
-            db.execute(
-                "INSERT INTO control_loop_retry(key,attempt,eligible_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET attempt=excluded.attempt,eligible_at=excluded.eligible_at,updated_at=excluded.updated_at",
-                (key, attempt, _dt(eligible), _dt(selected_now)),
+            return self._schedule_retry(
+                db,
+                key,
+                initial_seconds=initial_seconds,
+                max_seconds=max_seconds,
+                now=selected_now,
             )
+
+    def _schedule_retry(
+        self,
+        db: sqlite3.Connection,
+        key: str,
+        *,
+        initial_seconds: int,
+        max_seconds: int,
+        now: datetime,
+    ) -> tuple[int, datetime]:
+        row = db.execute(
+            "SELECT attempt FROM control_loop_retry WHERE key=?", (key,)
+        ).fetchone()
+        attempt = int(row[0]) + 1 if row else 1
+        delay = min(max_seconds, initial_seconds * (2 ** (attempt - 1)))
+        eligible = now + timedelta(seconds=delay)
+        db.execute(
+            "INSERT INTO control_loop_retry(key,attempt,eligible_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET attempt=excluded.attempt,eligible_at=excluded.eligible_at,updated_at=excluded.updated_at",
+            (key, attempt, _dt(eligible), _dt(now)),
+        )
         return attempt, eligible
 
     def reset_retry(self, key: str) -> None:

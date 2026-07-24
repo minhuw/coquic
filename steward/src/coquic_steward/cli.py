@@ -16,7 +16,12 @@ from .orchestration import (
     acquire_daemon_lock,
 )
 from .execution.executor import StewardExecutor, default_worker_for_kind
-from .execution.session import SessionSupervisor, runtime_factory_for_config
+from .execution.session import (
+    FreshPlannerSession,
+    SessionSupervisor,
+    planner_session_for_config,
+    runtime_factory_for_config,
+)
 from .core.models import (
     Priority,
     Risk,
@@ -64,6 +69,14 @@ def _configured_supervisor(config, store: TaskStore) -> SessionSupervisor | None
         image_digest=config.task_image_digest,
         codex_identity=config.codex_identity or config.codex_bin,
     )
+
+
+def _configured_planner_session(config) -> FreshPlannerSession:
+    """Build the fresh one-shot boundary used by standalone planning."""
+
+    if config.task_image_digest and not config.local_codex_test_harness:
+        return planner_session_for_config(config)
+    return FreshPlannerSession(config)
 
 
 @app.command()
@@ -143,16 +156,15 @@ def plan(enqueue: bool = False) -> None:
     store, config = _context()
     for collection in collect_signal_items(config):
         provider_config = config.signal_providers.get(collection.provider)
-        saved, created = store.add_signal_items(
+        fetch = collection.fetch.model_copy(
+            update={"item_count": len(collection.items), "new_item_count": 0}
+        )
+        store.ingest_signal_collection(
+            fetch,
             collection.items,
             suppression_hours=(
                 provider_config.suppression_hours if provider_config else 24
             ),
-        )
-        store.add_signal_fetch_run(
-            collection.fetch.model_copy(
-                update={"item_count": len(saved), "new_item_count": created}
-            )
         )
     pending = store.pending_signal_items(limit=config.limits.max_active_tasks)
     actionable, stale_reasons = revalidate_signal_items(config, pending)
@@ -166,7 +178,7 @@ def plan(enqueue: bool = False) -> None:
         config,
         project_signals_from_items(config, actionable),
         store.list_tasks(limit=200),
-        invocation=_configured_supervisor(config, store),
+        invocation=_configured_planner_session(config),
     )
     planned_item_ids: set[str] = set()
     for spec, dedupe_key in planner_run.planned:
@@ -270,8 +282,9 @@ def diagnostics() -> None:
     archive = ControlLoopArchive(config, task_root=config)
     visible_runs: list[str] = []
     invalid_runs: list[str] = []
+    archive_epoch = None
     try:
-        archive.ensure_epoch(authoritative=config.ensure_epoch())
+        archive_epoch = archive.ensure_task_epoch(config.ensure_epoch())
         if archive.planner_runs_root.exists():
             visible_runs = sorted(
                 path.name
@@ -283,10 +296,52 @@ def diagnostics() -> None:
             ]
     except Exception as exc:
         invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
+    retry = ledger.pending_retry("planner") if ledger else None
+    active_run = None
+    last_materialized_sequence = None
+    last_materialized_at = None
+    event_count = 0
+    planning_block_reason = None
+    if ledger is not None:
+        runs = ledger.list_planner_runs(include_terminal=False)
+        active_run = runs[-1].planner_run_id if runs else None
+        with ledger._connect() as connection:
+            event_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM control_loop_events"
+                ).fetchone()[0]
+            )
+            materialized = connection.execute(
+                "SELECT sequence,materialized_at FROM control_loop_outbox "
+                "WHERE materialized_at IS NOT NULL ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+            if materialized is not None:
+                last_materialized_sequence = int(materialized[0])
+                last_materialized_at = materialized[1]
+            blocked = connection.execute(
+                "SELECT value FROM control_loop_meta WHERE key='planning_block_reason'"
+            ).fetchone()
+            planning_block_reason = blocked[0] if blocked is not None else None
     payload = {
         "epochId": ledger.epoch_id if ledger is not None else None,
+        "archiveFormatVersion": (
+            archive_epoch.format_version if archive_epoch is not None else None
+        ),
+        "taskFormatVersion": (
+            archive_epoch.task_format_version if archive_epoch is not None else None
+        ),
         "planningBlocked": bool(ledger and ledger.planning_blocked),
+        "planningBlockReason": planning_block_reason,
+        "ledgerEventCount": event_count,
         "pendingArchiveEvents": len(ledger.outbox(limit=10_000)) if ledger else 0,
+        "lastMaterializedSequence": last_materialized_sequence,
+        "lastMaterializedAt": last_materialized_at,
+        "activePlannerRunId": active_run,
+        "plannerRetryAttempt": retry[0] if retry is not None else 0,
+        "nextPlannerRetryAt": (
+            retry[1].isoformat() if retry is not None and retry[1] is not None else None
+        ),
+        "archiveConflictCount": len(invalid_runs),
         "visiblePlannerRuns": visible_runs,
         "invalidPlannerRuns": invalid_runs,
     }

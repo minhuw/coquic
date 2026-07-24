@@ -299,3 +299,83 @@ def test_task_and_signal_mutations_roll_back_when_completion_fails(
         assert connection.execute(
             "SELECT state FROM control_loop_planner_runs WHERE planner_run_id='planner-run-atomic'"
         ).fetchone()[0] == "claimed"
+
+
+def test_signal_collection_rolls_back_legacy_and_control_rows_together(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _item("observation-ingest-atomic", "ingest-atomic-fingerprint")
+
+    def fail_fetch_row(*_args, **_kwargs):
+        raise RuntimeError("injected public fetch row failure")
+
+    monkeypatch.setattr(store, "add_signal_fetch_run", fail_fetch_row)
+    with pytest.raises(RuntimeError, match="injected public fetch row failure"):
+        store.ingest_signal_collection(_fetch("fetch-ingest-atomic"), [item])
+
+    with sqlite3.connect(store.path) as connection:
+        for table in (
+            "control_loop_fetches",
+            "control_loop_observations",
+            "control_loop_signals",
+            "signal_fetch_runs",
+            "signal_items",
+            "scheduler_wakeups",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_signal_collection_exact_replay_is_idempotent_across_both_ledgers(
+    config,
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _item("observation-ingest-replay", "ingest-replay-fingerprint")
+    fetch = _fetch("fetch-ingest-replay")
+
+    first_items, first_signals, first_created = store.ingest_signal_collection(
+        fetch, [item]
+    )
+    second_items, second_signals, second_created = store.ingest_signal_collection(
+        fetch, [item]
+    )
+
+    assert first_created == 1
+    assert second_created == 0
+    assert first_items[0].id == second_items[0].id
+    assert first_signals[0].signal_id == second_signals[0].signal_id
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM signal_items").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM scheduler_wakeups"
+        ).fetchone()[0] == 1
+
+
+def test_retry_state_rolls_back_when_planner_completion_fails(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _, signals = ledger.ingest_fetch(
+        _fetch("fetch-retry-atomic"),
+        [_item("observation-retry-atomic", "retry-atomic-fingerprint")],
+    )
+    run_id = "planner-run-retry-atomic"
+    ledger.claim_planner_run(run_id, [signals[0].signal_id])
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_planner_completion BEFORE UPDATE ON "
+            "control_loop_planner_runs BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        ledger.complete_planner_run(
+            run_id,
+            [],
+            state="failed",
+            schedule_retry_key="planner",
+        )
+
+    assert ledger.pending_retry("planner") is None
+    assert ledger.list_planner_runs()[-1].state == "claimed"

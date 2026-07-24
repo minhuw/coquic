@@ -164,6 +164,153 @@ def test_startup_reconstructs_terminal_planner_publication(config) -> None:
     assert run_id not in daemon._planner_publication_queue
 
 
+def test_startup_finalizes_claimed_planner_as_interrupted_and_publishes(
+    config,
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _planner_signal(store, "restart-claimed")
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+    assert signal_id is not None
+    run_id = "planner-run-restart-claimed"
+    store.control_loop.claim_planner_run(
+        run_id,
+        [signal_id],
+        prompt={"signalIds": [signal_id]},
+    )
+
+    daemon = StewardDaemon(config, store)
+    daemon._startup_reconcile_control_loop()
+
+    recovered = store.control_loop.list_planner_runs()[-1]
+    assert recovered.state == "interrupted"
+    assert recovered.diagnostics["reason_code"] == "daemon_restart_interrupted_planner"
+    assert store.control_loop.pending_retry("planner") is not None
+    assert daemon._control_loop_archive.verify_planner_run(run_id)
+    assert not store.control_loop.planning_blocked
+
+
+def test_planner_retry_is_not_committed_before_failed_completion(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _planner_signal(store, "completion-failure")
+    daemon = StewardDaemon(config, store)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args, **_kwargs: SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=False,
+            exit_code=1,
+            prompt_path=None,
+            transcript_path=config.private_dir / "failed-completion.jsonl",
+            thread_id=None,
+        ),
+    )
+    monkeypatch.setattr(
+        store,
+        "commit_planner_decision",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected completion failure")
+        ),
+    )
+
+    daemon._plan(TickResult(), [item])
+
+    assert store.control_loop.pending_retry("planner") is None
+    assert store.control_loop.list_planner_runs()[-1].state == "claimed"
+
+
+def test_signal_shutdown_interrupts_active_planner_and_persists_interruption(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _planner_signal(store, "signal-interrupt")
+    started = threading.Event()
+    released = threading.Event()
+
+    class BlockingPlannerSession:
+        def __init__(self):
+            self.interrupt_calls: list[bool] = []
+
+        def interrupt(self, *, force=False):
+            self.interrupt_calls.append(force)
+            released.set()
+
+    planner_session = BlockingPlannerSession()
+    daemon = StewardDaemon(config, store, planner_session=planner_session)
+
+    def blocked_planner(*_args, **_kwargs):
+        started.set()
+        released.wait(timeout=2)
+        return SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=False,
+            exit_code=143,
+            prompt_path=None,
+            transcript_path=config.private_dir / "interrupted-planner.jsonl",
+            thread_id=None,
+            diagnostics={"interrupted": True},
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", blocked_planner
+    )
+    planning = threading.Thread(target=lambda: daemon._plan(TickResult(), [item]))
+    planning.start()
+    assert started.wait(timeout=1)
+
+    daemon.request_shutdown_from_signal()
+    planning.join(timeout=2)
+
+    assert not planning.is_alive()
+    assert planner_session.interrupt_calls == [False]
+    completed = store.control_loop.list_planner_runs()[-1]
+    assert completed.state == "interrupted"
+    assert completed.diagnostics["reason_code"] == "planner_interrupted"
+    assert store.control_loop.pending_retry("planner") is not None
+    assert store.pending_signal_items(limit=10)[0].id == item.id
+
+
+def test_control_loop_epoch_conflict_blocks_planning_without_aborting_preflight(
+    config,
+) -> None:
+    store = TaskStore(config.db_path)
+    task_epoch = config.ensure_epoch()
+    config.control_loop_dir.mkdir(parents=True, exist_ok=True)
+    (config.control_loop_dir / "epoch.json").write_text(
+        json.dumps(
+            {
+                "epochId": "epoch-conflicting-control-loop",
+                "formatVersion": "1.0",
+                "taskFormatVersion": task_epoch["formatVersion"],
+                "policy": task_epoch["policy"],
+                "startedAt": task_epoch["startedAt"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_preflight(config, store, check_remote_push=False)
+
+    assert "planning-blocked" in report.warnings
+    assert store.control_loop.planning_blocked
+    task, created = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="Task pipeline remains available",
+            prompt="Run independently from control-loop planning.",
+        )
+    )
+    assert created
+    assert task.status == TaskStatus.queued
+
+
 def test_locked_daemon_routes_scheduler_planning_through_fresh_boundary(
     config, monkeypatch
 ) -> None:

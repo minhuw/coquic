@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -165,6 +166,8 @@ class StewardDaemon:
             and not config.local_codex_test_harness
         ):
             self.planner_session = planner_session_for_config(config)
+        elif self.planner_session is None and config.local_codex_test_harness:
+            self.planner_session = FreshPlannerSession(config)
         self.executor = StewardExecutor(
             config,
             store,
@@ -289,15 +292,10 @@ class StewardDaemon:
             return
         try:
             task_epoch = self.config.ensure_epoch()
-            archive_epoch = self._control_loop_archive.ensure_epoch(
-                authoritative={
-                    key: task_epoch[key]
-                    for key in ("epochId", "formatVersion", "policy", "startedAt")
-                    if key in task_epoch
-                }
-            )
+            archive_epoch = self._control_loop_archive.ensure_task_epoch(task_epoch)
             if archive_epoch.epoch_id != self._control_loop_ledger.epoch_id:
                 raise ArchiveConflictError("control-loop and ledger epochs differ")
+            self._reconcile_interrupted_planner_runs()
             for run in self._control_loop_ledger.list_planner_runs():
                 if run.completed_at is not None and not self._control_loop_archive.verify_planner_run(
                     run.planner_run_id
@@ -309,6 +307,68 @@ class StewardDaemon:
                 True, reason=f"control-loop startup reconciliation: {exc.__class__.__name__}"
             )
             self._log(f"control-loop reconciliation blocked error={exc.__class__.__name__}")
+
+    def _reconcile_interrupted_planner_runs(self) -> None:
+        ledger = self._control_loop_ledger
+        if ledger is None:
+            return
+        for run in ledger.list_planner_runs(include_terminal=False):
+            if run.planner_run_id == self._active_planner_run_id:
+                continue
+            sources = self._interrupted_planner_artifact_sources(run)
+            completed = ledger.complete_planner_run(
+                run.planner_run_id,
+                [],
+                state="interrupted",
+                result={},
+                diagnostics={"reason_code": "daemon_restart_interrupted_planner"},
+                artifact_sources=sources,
+                schedule_retry_key="planner",
+            )
+            self._planner_publication_queue[run.planner_run_id] = completed
+            self._control_loop_wakeup.set()
+
+    def _interrupted_planner_artifact_sources(
+        self, run: ControlPlannerRun
+    ) -> dict[str, tuple[str, bool]]:
+        safe_run = re.sub(
+            r"[^A-Za-z0-9_.-]", "-", run.planner_run_id
+        ).strip("-") or "planner"
+        run_root = self.config.private_sessions_dir / "planner" / safe_run
+        candidates = (
+            sorted(path for path in run_root.iterdir() if path.is_dir())
+            if run_root.is_dir()
+            else []
+        )
+        if len(candidates) > 1:
+            raise ArchiveConflictError(
+                "interrupted planner run has ambiguous private session evidence"
+            )
+        source_root = candidates[0] if candidates else None
+        fallback = (
+            self.config.private_sessions_dir
+            / "planner-evidence"
+            / run.planner_run_id
+        )
+        fallback.mkdir(parents=True, exist_ok=True, mode=0o700)
+        values: dict[str, bytes] = {
+            "prompt.md": (
+                json.dumps(run.prompt or {}, ensure_ascii=True, sort_keys=True).encode(
+                    "utf-8"
+                )
+                + b"\n"
+            ),
+            "codex.jsonl": b"",
+            "last-message.md": b"",
+        }
+        sources: dict[str, tuple[str, bool]] = {}
+        for name, fallback_bytes in values.items():
+            source = source_root / name if source_root is not None else fallback / name
+            if not source.is_file():
+                source = fallback / name
+                source.write_bytes(fallback_bytes)
+            sources[name] = (str(source), True)
+        return sources
 
     def _build_control_loop_current(self) -> CurrentState | None:
         ledger = self._control_loop_ledger
@@ -1745,6 +1805,11 @@ class StewardDaemon:
         self._shutdown_event.set()
         if force:
             self._force_shutdown_event.set()
+        if self.planner_session is not None and self._active_planner_run_id is not None:
+            try:
+                self.planner_session.interrupt(force=force)
+            except Exception:
+                pass
 
     def _enter_stopping(self, *, force: bool) -> None:
         """Persist stopping state after control has left any signal handler."""
@@ -2535,7 +2600,14 @@ class StewardDaemon:
             )
             ingest = getattr(self.store, "ingest_signal_collection", None)
             if callable(ingest):
-                ingested = ingest(fetch_run, collection.items)
+                provider_config = self.config.signal_providers.get(collection.provider)
+                ingested = ingest(
+                    fetch_run,
+                    collection.items,
+                    suppression_hours=(
+                        provider_config.suppression_hours if provider_config else 24
+                    ),
+                )
                 if isinstance(ingested, tuple) and len(ingested) == 3:
                     saved_items, _signals, created_items = ingested
                     fetch_run = fetch_run.model_copy(
@@ -2585,6 +2657,8 @@ class StewardDaemon:
             )
 
     def _plan_until_idle(self, result: TickResult) -> None:
+        if self._active_planner_run_id is None:
+            self._reconcile_interrupted_planner_runs()
         if self._control_loop_ledger is not None and self._control_loop_ledger.planning_blocked:
             self._log("planner blocked by control-loop reconciliation conflict")
             return
@@ -2688,7 +2762,7 @@ class StewardDaemon:
                     self.config,
                     signals,
                     task_context,
-                    invocation=self.planner_session or self.session_supervisor,
+                    invocation=self.planner_session,
                     run_id=control_run_id,
                 )
             except TypeError as exc:
@@ -2709,18 +2783,20 @@ class StewardDaemon:
             planner_run = _failed_planner_result(planner_error)
         result.planned += len(planner_run.planned)
         state = "succeeded" if planner_run.completed and not planner_run.invalid_output else "failed"
+        if planner_run.diagnostics.get("interrupted") is True:
+            state = "interrupted"
         if planner_error is not None:
             state = "failed"
         diagnostics = dict(planner_run.diagnostics)
         retry_after: timedelta | None = None
-        if state == "failed" and self._control_loop_ledger is not None:
-            attempt, eligible = self._control_loop_ledger.schedule_retry("planner")
-            retry_after = max(timedelta(0), eligible - utc_now())
+        if state in {"failed", "interrupted"}:
             diagnostics.update(
                 {
-                    "reason_code": "planner_failed",
-                    "attempt": attempt,
-                    "retry_eligible_at": control_timestamp(eligible),
+                    "reason_code": (
+                        "planner_interrupted"
+                        if state == "interrupted"
+                        else "planner_failed"
+                    ),
                 }
             )
         if self._control_loop_ledger is not None and control_claim is not None:
@@ -2763,8 +2839,12 @@ class StewardDaemon:
                     diagnostics=diagnostics,
                     retry_after=retry_after,
                     artifact_sources=artifact_sources,
+                    schedule_retry_key=(
+                        "planner" if state in {"failed", "interrupted"} else None
+                    ),
                 )
                 completed = committed["completed"]
+                diagnostics = dict(completed.diagnostics)
                 planned_item_count = int(committed["planned_item_count"])
                 superseded_count = int(committed["superseded_item_count"])
                 consumed_count = planned_item_count + superseded_count

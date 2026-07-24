@@ -1434,7 +1434,12 @@ class SQLiteTaskStore:
             )
         self._notify_change()
 
-    def add_signal_fetch_run(self, run: SignalFetchRun) -> None:
+    def add_signal_fetch_run(
+        self, run: SignalFetchRun, *, _session: Session | None = None
+    ) -> None:
+        if _session is not None:
+            _session.add(signal_fetch_run_to_row(run))
+            return
         with Session(self.engine) as session, session.begin():
             session.add(signal_fetch_run_to_row(run))
         self._notify_change()
@@ -1443,7 +1448,14 @@ class SQLiteTaskStore:
     def control_loop_ledger(self) -> ControlLoopLedger:
         return self.control_loop
 
-    def ingest_signal_collection(self, fetch: object, items: list[object], *, wakeup: object | None = None):
+    def ingest_signal_collection(
+        self,
+        fetch: SignalFetchRun,
+        items: list[SignalItem],
+        *,
+        wakeup: object | None = None,
+        suppression_hours: int = 24,
+    ):
         """Persist one normalized provider collection atomically.
 
         This is the scheduler-facing replacement for per-item insertion.  The
@@ -1451,26 +1463,101 @@ class SQLiteTaskStore:
         every new observation goes through the control-loop graph ledger.
         """
 
-        result = self.control_loop.ingest_fetch(fetch, items, wakeup=wakeup)
-        # Keep the existing scheduler query surface populated while the raw
-        # control-loop ledger becomes the causal source of truth.  The legacy
-        # rows contain only normalized SignalItem fields and no provider or
-        # session internals.
-        saved_items, created_items = self.add_signal_items(
-            items,
-            suppression_hours=24,
-        )
-        fetch_run = fetch
-        if hasattr(fetch, "model_copy"):
-            fetch_run = fetch.model_copy(
-                update={
-                    "item_count": len(saved_items),
-                    "new_item_count": created_items,
-                }
-            )
-        self.add_signal_fetch_run(fetch_run)
+        with Session(self.engine) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                existing_fetch = session.get(SignalFetchRunRow, fetch.id)
+                if existing_fetch is None:
+                    saved_items, created_items = self._add_signal_items_in_session(
+                        session,
+                        items,
+                        suppression_hours=suppression_hours,
+                    )
+                    fetch_run = fetch.model_copy(
+                        update={
+                            "item_count": len(saved_items),
+                            "new_item_count": created_items,
+                        }
+                    )
+                else:
+                    fetch_run = row_to_signal_fetch_run(existing_fetch)
+                    saved_items = []
+                    for item in items:
+                        row = _matching_signal_row(session, item)
+                        if row is None:
+                            raise ValueError(
+                                f"replayed fetch {fetch.id} is missing scheduler signal {item.id}"
+                            )
+                        saved_items.append(
+                            row_to_signal_item(row, path_codec=self.path_codec)
+                        )
+                    created_items = 0
+
+                raw_connection = session.connection().connection.driver_connection
+                raw_connection.row_factory = sqlite3.Row
+                result = self.control_loop.ingest_fetch(
+                    fetch_run,
+                    items,
+                    wakeup=wakeup,
+                    connection=raw_connection,
+                )
+                if existing_fetch is None:
+                    self.add_signal_fetch_run(fetch_run, _session=session)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
         self._notify_change()
         return saved_items, result[1], created_items
+
+    def _add_signal_items_in_session(
+        self,
+        session: Session,
+        items: list[SignalItem],
+        *,
+        suppression_hours: int,
+    ) -> tuple[list[SignalItem], int]:
+        saved: list[SignalItem] = []
+        created = 0
+        for source in items:
+            now = utc_now()
+            item = source.model_copy(
+                update={"created_at": source.created_at, "updated_at": now}
+            )
+            saved_item: SignalItem | None = None
+            existing = _matching_signal_row(session, item)
+            if existing is not None:
+                if _signal_row_suppressed(
+                    session,
+                    existing,
+                    suppression_hours=suppression_hours,
+                ):
+                    existing.updated_at = now.isoformat()
+                    if item.source_fetch_id:
+                        existing.source_fetch_id = item.source_fetch_id
+                    saved_item = row_to_signal_item(
+                        existing, path_codec=self.path_codec
+                    )
+                else:
+                    item = item.model_copy(update={"id": new_signal_item_id()})
+            if saved_item is None:
+                session.add(signal_item_to_row(item, path_codec=self.path_codec))
+                session.add(
+                    scheduler_wakeup_to_row(
+                        SchedulerWakeup(
+                            reason="signal.pending",
+                            data={
+                                "signal_item_id": item.id,
+                                "provider": item.provider,
+                            },
+                        ),
+                        path_codec=self.path_codec,
+                    )
+                )
+                saved_item = item
+                created += 1
+            saved.append(saved_item)
+        return saved, created
 
     ingest_signal_fetch = ingest_signal_collection
 
@@ -1508,6 +1595,7 @@ class SQLiteTaskStore:
         diagnostics: dict[str, object],
         retry_after: timedelta | None,
         artifact_sources: dict[str, tuple[str, bool]],
+        schedule_retry_key: str | None = None,
     ) -> dict[str, object]:
         """Commit tasks, signal mutations, graph edges, and outbox intent once."""
 
@@ -1675,6 +1763,7 @@ class SQLiteTaskStore:
                     ),
                     artifact_sources=artifact_sources,
                     reset_retry_key="planner" if state == "succeeded" else None,
+                    schedule_retry_key=schedule_retry_key,
                     connection=raw_connection,
                 )
                 session.commit()

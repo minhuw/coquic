@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
-from coquic_steward.core.models import ProjectSignals, SignalItem
+from typer.testing import CliRunner
+
+from coquic_steward.cli import app
+from coquic_steward.core.models import (
+    ProjectSignals,
+    SignalFetchRun,
+    SignalFetchStatus,
+    SignalItem,
+)
 from coquic_steward.execution.session import FreshPlannerSession
+from coquic_steward.planning import PlannerRun
 from coquic_steward.planning.verifier import ActiveTaskSummary, PlanVerifier
+from coquic_steward.storage import TaskStore
 
 
 def _signals() -> ProjectSignals:
@@ -124,3 +135,62 @@ def test_fresh_planner_session_allocates_distinct_non_resumed_boundaries(config)
     assert first.resumed is False
     assert second.request.provider_session_id is None
     assert first.request.role == "planner"
+
+
+def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
+    store = TaskStore(config.db_path)
+    item = _signals().items[0]
+    store.ingest_signal_collection(
+        SignalFetchRun(
+            id="fetch-cli-plan",
+            provider=item.provider,
+            status=SignalFetchStatus.ok,
+        ),
+        [item],
+    )
+    invocations: list[object] = []
+
+    def fake_planner(_config, _signals, _tasks, **kwargs):
+        invocations.append(kwargs["invocation"])
+        return PlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.private_dir / "synthetic-cli-plan.jsonl",
+            thread_id=None,
+        )
+
+    monkeypatch.setattr("coquic_steward.cli._context", lambda: (store, config))
+    monkeypatch.setattr("coquic_steward.cli.collect_signal_items", lambda _config: [])
+    monkeypatch.setattr(
+        "coquic_steward.cli.revalidate_signal_items",
+        lambda _config, items: (items, {}),
+    )
+    monkeypatch.setattr("coquic_steward.cli.run_planner", fake_planner)
+
+    result = CliRunner().invoke(app, ["plan"])
+
+    assert result.exit_code == 0
+    assert len(invocations) == 1
+    assert isinstance(invocations[0], FreshPlannerSession)
+
+
+def test_cli_diagnostics_normalizes_task_epoch_and_reports_control_state(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    monkeypatch.setattr("coquic_steward.cli._context", lambda: (store, config))
+
+    result = CliRunner().invoke(app, ["diagnostics"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["archiveFormatVersion"] == "1.0"
+    assert payload["taskFormatVersion"] == "1.0"
+    assert payload["activePlannerRunId"] is None
+    assert payload["plannerRetryAttempt"] == 0
+    assert payload["lastMaterializedSequence"] is None
+    assert payload["archiveConflictCount"] == 0

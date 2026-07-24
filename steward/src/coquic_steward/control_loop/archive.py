@@ -123,12 +123,12 @@ class ControlLoopArchive:
         elif authoritative is not None:
             value = dict(authoritative)
         elif task_epoch is not None:
-            # The task archive has an optional lifecycle-only ``endedAt``
-            # field.  Control-loop epochs intentionally do not copy it.
             value = {
-                key: task_epoch[key]
-                for key in ("epochId", "formatVersion", "taskFormatVersion", "policy", "startedAt")
-                if key in task_epoch
+                "epochId": task_epoch.get("epochId"),
+                "formatVersion": CONTROL_LOOP_FORMAT_VERSION,
+                "taskFormatVersion": task_epoch.get("formatVersion"),
+                "policy": task_epoch.get("policy"),
+                "startedAt": task_epoch.get("startedAt"),
             }
         else:
             value = {}
@@ -136,6 +136,7 @@ class ControlLoopArchive:
             value = {
                 "epochId": self._epoch_id or f"epoch-{sha256(os.urandom(16)).hexdigest()[:20]}",
                 "formatVersion": "1.0",
+                "taskFormatVersion": "1.0",
                 "policy": CONTROL_LOOP_POLICY,
                 "startedAt": timestamp(),
             }
@@ -164,6 +165,22 @@ class ControlLoopArchive:
         self._epoch = epoch
         self._epoch_id = epoch.epoch_id
         return epoch
+
+    def ensure_task_epoch(self, task_epoch: Mapping[str, Any]) -> Epoch:
+        """Create or verify the peer epoch from the authoritative task epoch."""
+
+        required = ("epochId", "formatVersion", "policy", "startedAt")
+        if any(key not in task_epoch for key in required):
+            raise ArchiveValidationError("task epoch is missing required metadata")
+        return self.ensure_epoch(
+            authoritative={
+                "epochId": task_epoch["epochId"],
+                "formatVersion": CONTROL_LOOP_FORMAT_VERSION,
+                "taskFormatVersion": task_epoch["formatVersion"],
+                "policy": task_epoch["policy"],
+                "startedAt": task_epoch["startedAt"],
+            }
+        )
 
     def _require_epoch(self) -> Epoch:
         return self._epoch or self.ensure_epoch()
@@ -420,13 +437,31 @@ class ControlLoopArchive:
                 self.write_current(current)
             except ArchiveConflictError:
                 conflicts += 1
+        hidden_stages = [
+            path.name
+            for path in self.planner_runs_root.iterdir()
+            if path.name.startswith(".")
+        ]
+        if hidden_stages:
+            conflicts += len(hidden_stages)
+            if ledger is not None:
+                ledger.set_planning_blocked(
+                    True,
+                    reason="hidden planner-run stage requires operator reconciliation",
+                )
         runs = [path.name for path in self.planner_runs_root.iterdir() if path.is_dir() and not path.name.startswith(".")]
         invalid_runs = [run_id for run_id in runs if not self.verify_planner_run(run_id)]
         if invalid_runs:
             conflicts += len(invalid_runs)
             if ledger is not None:
                 ledger.set_planning_blocked(True, reason="visible planner-run conflict")
-        return {"materialized": materialized, "conflicts": conflicts, "visibleRuns": len(runs), "invalidRuns": invalid_runs}
+        return {
+            "materialized": materialized,
+            "conflicts": conflicts,
+            "visibleRuns": len(runs),
+            "invalidRuns": invalid_runs,
+            "hiddenStages": sorted(hidden_stages),
+        }
 
     def _assert_confirmed_event_prefix(
         self, event: Mapping[str, Any], ledger: ControlLoopLedger

@@ -1172,8 +1172,28 @@ def validate_control_loop_fixture() -> int:
         if epoch.get(key) != task_epoch.get(key):
             print(f"control-loop epoch.json [{key}-not-shared-with-task-archive]")
             failures += 1
+    if epoch.get("taskFormatVersion") != task_epoch.get("formatVersion"):
+        print("control-loop epoch.json [task-format-version-mismatch]")
+        failures += 1
     if current.get("epochId") != epoch_id:
         print("control-loop current.json [epoch-mismatch]")
+        failures += 1
+
+    event_validator = _control_loop_validator("event")
+    invalid_event = {
+        "eventId": "event-schema-guard",
+        "epochId": epoch_id,
+        "sequence": 0,
+        "occurredAt": "2026-07-24T00:00:00Z",
+        "kind": "totally.unknown",
+        "payload": {},
+    }
+    if not list(event_validator.iter_errors(invalid_event)):
+        print("control-loop schema [unknown-event-kind-accepted]")
+        failures += 1
+    invalid_event["kind"] = "planner.started"
+    if not list(event_validator.iter_errors(invalid_event)):
+        print("control-loop schema [invalid-event-payload-accepted]")
         failures += 1
 
     records: list[dict[str, object]] = []

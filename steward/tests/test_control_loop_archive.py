@@ -52,6 +52,9 @@ def _event(archive: ControlLoopArchive, sequence: int, event_id: str) -> Event:
 
 def test_epoch_current_and_daily_events_are_atomic_and_idempotent(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
+    epoch = json.loads(archive.epoch_path.read_text(encoding="utf-8"))
+    assert epoch["taskFormatVersion"] == "1.0"
+    assert "endedAt" not in epoch
     first = _event(archive, 0, "event-0")
     archive.append_event(first)
     path = archive.events_root / "2026" / "07" / "24.jsonl"
@@ -145,3 +148,24 @@ def test_reconcile_stops_at_temporary_outbox_gap(tmp_path: Path, monkeypatch) ->
     assert second["materialized"] == 2
     path = archive.events_root / "2026" / "07" / "24.jsonl"
     assert [json.loads(line)["sequence"] for line in path.read_bytes().splitlines()] == [0, 1]
+
+
+def test_reconcile_blocks_planning_when_hidden_planner_stage_survives(
+    tmp_path: Path,
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(
+        tmp_path / "steward.sqlite", epoch_id="epoch-archive-test"
+    )
+    stage = archive.planner_runs_root / ".planner-run-hidden.stage-interrupted"
+    stage.mkdir()
+    (stage / "prompt.md").write_text("unsealed evidence\n", encoding="utf-8")
+
+    result = archive.reconcile(ledger)
+
+    assert result["conflicts"] == 1
+    assert result["hiddenStages"] == [stage.name]
+    assert ledger.planning_blocked
+    assert stage.exists()

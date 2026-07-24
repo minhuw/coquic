@@ -1,7 +1,7 @@
 {
   "epochId": "epoch-synthetic-20260722",
   "formatVersion": "1.0",
-  "taskFormatVersion": "2.0",
+  "taskFormatVersion": "1.0",
   "policy": "post-steward-2.0",
   "startedAt": "2026-07-22T00:00:00Z"
 }

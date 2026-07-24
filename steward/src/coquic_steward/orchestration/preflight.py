@@ -11,7 +11,7 @@ from pathlib import Path
 from ..core.config import StewardConfig
 from ..core.models import IntegrationMode
 from ..core.subprocesses import CommandResult, run_command
-from ..control_loop import ControlLoopArchive
+from ..control_loop import ArchiveError, ControlLoopArchive
 
 PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _NONINTERACTIVE_GIT_ENV = {
@@ -60,21 +60,28 @@ def run_preflight(
     config.ensure_dirs()
     checks: list[str] = ["directories"]
     warnings: list[str] = []
+    ledger = getattr(store, "control_loop_ledger", None)
     try:
         task_epoch = config.ensure_epoch()
-        ControlLoopArchive(config, task_root=config).ensure_epoch(
-            authoritative={
-                key: task_epoch[key]
-                for key in ("epochId", "formatVersion", "policy", "startedAt")
-                if key in task_epoch
-            }
-        )
     except Exception as exc:
-        raise StewardPreflightError("preflight failed: archive epoch is invalid") from exc
-    checks.extend(("epoch", "control-loop"))
-    ledger = getattr(store, "control_loop_ledger", None)
-    if ledger is not None and getattr(ledger, "planning_blocked", False):
+        raise StewardPreflightError("preflight failed: task archive epoch is invalid") from exc
+    checks.append("epoch")
+    try:
+        ControlLoopArchive(config, task_root=config).ensure_task_epoch(task_epoch)
+        checks.append("control-loop")
+    except ArchiveError as exc:
+        if ledger is None:
+            raise StewardPreflightError(
+                "preflight failed: control-loop archive is invalid"
+            ) from exc
+        ledger.set_planning_blocked(
+            True,
+            reason=f"control-loop preflight: {exc.__class__.__name__}",
+        )
         warnings.append("planning-blocked")
+    if ledger is not None and getattr(ledger, "planning_blocked", False):
+        if "planning-blocked" not in warnings:
+            warnings.append("planning-blocked")
     if config.db_path.exists():
         try:
             with sqlite3.connect(f"file:{config.db_path}?mode=ro", uri=True) as connection:

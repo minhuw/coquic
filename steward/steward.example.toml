@@ -57,23 +57,10 @@ rsync_bin = "rsync" # must match the executable selected by PATH
 # billing_mode = "unknown" # unknown, chatgpt, or api
 # price_catalog_path = "model-prices.example.json" # fictional example only
 
-# The daemon writes a sanitized v3 snapshot locally and publishes it to the
-# read-only site with an atomic SSH/rsync mirror. Keep transcript_mode=redacted
-# for any public target; raw transcripts are rejected when publish=true.
-[steward.public_mirror]
-enabled = true
-publish = false
-output_path = "public/steward/status.json"
-transcript_mode = "redacted"
-remote_user = "minhuw"
-remote_host = "coquic.minhuw.dev"
-remote_port = 22
-remote_path = "/opt/coquic-demo/current/app/public/steward/status.json"
-ssh_key_path = "~/.ssh/coquic-demo.key"
-known_hosts_path = "~/.ssh/known_hosts"
-connect_timeout_seconds = 10
-retry_initial_seconds = 30
-retry_max_seconds = 300
+# Steward owns the raw task and control-loop archive peers below COQUIC_HOME.
+# Their roots are immutable-by-placement research data. Transfer is configured
+# separately by the Plan 009 transport extension and is intentionally absent
+# from this example.
 
 # Stage settings override the global model/reasoning settings above. Omitted
 # values fall back independently to codex_model and codex_reasoning_effort.

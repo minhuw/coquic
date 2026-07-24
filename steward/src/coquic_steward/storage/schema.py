@@ -202,6 +202,179 @@ class SchedulerWakeupRow(Base):
     data_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
+# The scheduler control-loop ledger is additive to the task ledger.  These
+# normalized rows intentionally keep provider/session internals in private
+# JSON columns owned by Steward; the archive writer selects only normalized
+# control-loop payloads for publication.
+class ControlLoopMetaRow(Base):
+    __tablename__ = "control_loop_meta"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ControlLoopFetchRow(Base):
+    __tablename__ = "control_loop_fetches"
+
+    fetch_id: Mapped[str] = mapped_column(String, primary_key=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str] = mapped_column(String, nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    has_more: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    normalized_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ControlLoopSignalRow(Base):
+    __tablename__ = "control_loop_signals"
+
+    signal_id: Mapped[str] = mapped_column(String, primary_key=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("epoch_id", "provider", "fingerprint", name="uq_control_loop_signal_dedupe"),
+        CheckConstraint("status IN ('pending','planned','superseded','errored')", name="ck_control_loop_signal_status"),
+    )
+
+
+class ControlLoopObservationRow(Base):
+    __tablename__ = "control_loop_observations"
+
+    observation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    fetch_id: Mapped[str] = mapped_column(ForeignKey("control_loop_fetches.fetch_id"), nullable=False, index=True)
+    signal_id: Mapped[str] = mapped_column(ForeignKey("control_loop_signals.signal_id"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    dedupe_result: Mapped[str] = mapped_column(String, nullable=False)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("dedupe_result IN ('new','existing')", name="ck_control_loop_observation_dedupe"),
+    )
+
+
+class ControlLoopWakeupRow(Base):
+    __tablename__ = "control_loop_wakeups"
+
+    wakeup_id: Mapped[str] = mapped_column(String, primary_key=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    consumed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    input_signal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+
+class ControlLoopCycleRow(Base):
+    __tablename__ = "control_loop_cycles"
+
+    cycle_id: Mapped[str] = mapped_column(String, primary_key=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    runtime_state: Mapped[str] = mapped_column(String, nullable=False)
+    input_signal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+
+class ControlLoopPlannerRunRow(Base):
+    __tablename__ = "control_loop_planner_runs"
+
+    planner_run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    input_signal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    active_task_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    prompt_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diagnostics_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    retry_eligible_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        CheckConstraint("state IN ('claimed','running','succeeded','failed','interrupted','cancelled')", name="ck_control_loop_planner_state"),
+        CheckConstraint("attempt >= 1", name="ck_control_loop_planner_attempt"),
+    )
+
+
+class ControlLoopProposalRow(Base):
+    __tablename__ = "control_loop_proposals"
+
+    proposal_id: Mapped[str] = mapped_column(String, primary_key=True)
+    planner_run_id: Mapped[str] = mapped_column(ForeignKey("control_loop_planner_runs.planner_run_id"), nullable=False, index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String, nullable=False)
+    signal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    dedupe_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    proposal_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+    __table_args__ = (
+        UniqueConstraint("planner_run_id", "ordinal", name="uq_control_loop_proposal_ordinal"),
+        CheckConstraint("ordinal >= 1", name="ck_control_loop_proposal_ordinal"),
+        CheckConstraint("outcome IN ('accepted','invalid','policy_rejected','duplicate','capacity_skipped')", name="ck_control_loop_proposal_outcome"),
+    )
+
+
+class ControlLoopEdgeRow(Base):
+    __tablename__ = "control_loop_edges"
+
+    edge_id: Mapped[str] = mapped_column(String, primary_key=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    edge_type: Mapped[str] = mapped_column(String, nullable=False)
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("edge_type", "source_id", "target_id", name="uq_control_loop_edge"),
+    )
+
+
+class ControlLoopEventRow(Base):
+    __tablename__ = "control_loop_events"
+
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ControlLoopOutboxRow(Base):
+    __tablename__ = "control_loop_outbox"
+
+    sequence: Mapped[int] = mapped_column(ForeignKey("control_loop_events.sequence"), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    materialized_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ControlLoopRetryRow(Base):
+    __tablename__ = "control_loop_retry"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    eligible_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class TaskArchiveSyncHealthRow(Base):
     """Single operational row for the standalone raw archive synchronizer."""
 

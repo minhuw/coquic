@@ -57,11 +57,6 @@ DEFAULT_SIGNAL_ERROR_RETRY_MINUTES = 30
 DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES = 30
 DEFAULT_SIGNAL_SUPPRESSION_HOURS = 24
 DEFAULT_SIGNAL_MAX_ITEMS = 12
-DEFAULT_PUBLIC_MIRROR_OUTPUT = "public/steward/status.json"
-DEFAULT_PUBLIC_MIRROR_REMOTE_PATH = (
-    "/opt/coquic-demo/current/app/public/steward/status.json"
-)
-VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES = {"none", "redacted", "raw"}
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
 _SAFE_SYNC_USER = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -258,29 +253,6 @@ class StewardLimits:
 
 
 @dataclass(frozen=True)
-class PublicMirrorConfig:
-    enabled: bool = False
-    output_path: Path | None = None
-    publish: bool = False
-    transcript_mode: str = "redacted"
-    remote_user: str = "minhuw"
-    remote_host: str = "coquic.minhuw.dev"
-    remote_port: int = 22
-    remote_path: str = DEFAULT_PUBLIC_MIRROR_REMOTE_PATH
-    ssh_key_path: Path | None = None
-    known_hosts_path: Path | None = None
-    connect_timeout_seconds: int = 10
-    retry_initial_seconds: int = 30
-    retry_max_seconds: int = 300
-
-    def __post_init__(self) -> None:
-        if self.publish and self.transcript_mode == "raw":
-            raise ValueError(
-                "public_mirror.transcript_mode=raw cannot be used with publish=true"
-            )
-
-
-@dataclass(frozen=True)
 class PathPolicyConfig:
     frozen: tuple[str, ...] = ()
     frozen_by_kind: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -352,7 +324,6 @@ class StewardConfig:
     signal_providers: dict[str, SignalProviderConfig] = field(default_factory=dict)
     scheduler_wait_interval_sec: float = 1.0
     limits: StewardLimits = field(default_factory=StewardLimits)
-    public_mirror: PublicMirrorConfig = field(default_factory=PublicMirrorConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
     container: StewardContainerConfig = field(default_factory=StewardContainerConfig)
@@ -496,6 +467,12 @@ class StewardConfig:
         return self.coquic_home / "tasks"
 
     @property
+    def control_loop_dir(self) -> Path:
+        """Canonical public-by-placement scheduler control-loop root."""
+
+        return self.coquic_home / "control-loop"
+
+    @property
     def private_dir(self) -> Path:
         return self.coquic_home / "private"
 
@@ -583,6 +560,7 @@ class StewardConfig:
             self.coquic_home,
             self.worktrees_dir,
             self.tasks_dir,
+            self.control_loop_dir,
             self.private_dir,
             self.private_sessions_dir,
             self.state_dir,
@@ -723,7 +701,6 @@ def load_config(
     _reject_embedded_secrets(steward)
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
-    mirror_data = steward.get("public_mirror", {})
     telemetry_data = steward.get("telemetry", {})
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
@@ -798,7 +775,6 @@ def load_config(
                 else None
             ),
         ),
-        public_mirror=_public_mirror_config(mirror_data),
         telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
         container=_container_config(
@@ -1079,42 +1055,6 @@ def _signal_provider_configs(
             max_items=int(raw.get("max_items", default.max_items)),
         )
     return providers
-
-
-def _public_mirror_config(raw: object) -> PublicMirrorConfig:
-    data = raw if isinstance(raw, dict) else {}
-    output = _optional_path(data.get("output_path", DEFAULT_PUBLIC_MIRROR_OUTPUT))
-    ssh_key = _optional_path(
-        data.get("ssh_key_path") or os.getenv("COQUIC_DEMO_REMOTE_SSH_KEY_PATH")
-    )
-    known_hosts = _optional_path(data.get("known_hosts_path"))
-    transcript_mode = str(data.get("transcript_mode", "redacted")).strip().lower()
-    if transcript_mode not in VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES:
-        choices = ", ".join(sorted(VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES))
-        raise ValueError(
-            f"invalid public_mirror.transcript_mode {transcript_mode!r}; "
-            f"expected {choices}"
-        )
-    return PublicMirrorConfig(
-        enabled=bool(data.get("enabled", False)),
-        output_path=output,
-        publish=bool(data.get("publish", False)),
-        transcript_mode=transcript_mode,
-        remote_user=str(data.get("remote_user", "minhuw")),
-        remote_host=str(data.get("remote_host", "coquic.minhuw.dev")),
-        remote_port=int(data.get("remote_port", 22)),
-        remote_path=str(
-            data.get("remote_path", DEFAULT_PUBLIC_MIRROR_REMOTE_PATH)
-        ),
-        ssh_key_path=ssh_key,
-        known_hosts_path=known_hosts,
-        connect_timeout_seconds=int(data.get("connect_timeout_seconds", 10)),
-        retry_initial_seconds=max(1, int(data.get("retry_initial_seconds", 30))),
-        retry_max_seconds=max(
-            int(data.get("retry_initial_seconds", 30)),
-            int(data.get("retry_max_seconds", 300)),
-        ),
-    )
 
 
 def _telemetry_config(raw: object) -> TelemetryConfig:

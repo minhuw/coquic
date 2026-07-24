@@ -191,7 +191,10 @@ class CodexRunner:
         run_name: str,
     ) -> WorkerResult:
         retries: list[dict[str, object]] = []
-        active_resume_session = resume_session
+        # Scheduler-planner attempts are deliberately independent processes;
+        # provider session IDs are never carried across planner cycles or
+        # retries.  Task workers retain the established explicit resume path.
+        active_resume_session = None if stage == CodexStage.signal_planner else resume_session
         attempt_prompt = prompt
         capture_enabled = True
         capture_degraded = False
@@ -263,7 +266,11 @@ class CodexRunner:
                 capture_degraded = True
             if archived.get("tool_changes_preserve_failed"):
                 capture_enabled = False
-            next_resume_session = result.thread_id or active_resume_session
+            next_resume_session = (
+                None
+                if stage == CodexStage.signal_planner
+                else result.thread_id or active_resume_session
+            )
             retries.append(
                 {
                     "attempt": attempt + 1,

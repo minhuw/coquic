@@ -1,5 +1,16 @@
 # Raw Steward Task Archive
 
+## Shared epoch and control-loop peer
+
+The task root and the canonical `$COQUIC_HOME/control-loop/` root share one
+immutable `epochId`, UTC start time, and `post-steward-2.0` policy boundary.
+The task root keeps its task-archive `formatVersion`; the control-loop peer
+keeps an independent `formatVersion` in its own `epoch.json`.  Neither format
+version is inferred from the other.  The control-loop contract, including its
+complete-line event ledger and sealed planner-run manifests, is defined in
+[STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md).  No pre-2.0 import or
+legacy mirror scan is performed.
+
 This document defines the public-by-placement archive contract for Steward 2.0.
 It is a separate raw research channel from the sanitized Steward publication
 described in `DATA.md`, `API.md`, and the existing Steward schemas. The archive

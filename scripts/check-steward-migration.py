@@ -102,7 +102,12 @@ def validate_repository(root: Path) -> list[str]:
         or path.startswith("steward/src/coquic_steward/web/")
     ]
     for path in active_scan_paths(root, tracked):
-        violations.extend(check_text(path, (root / path).read_text(encoding="utf-8")))
+        candidate = root / path
+        # A deleted tracked file remains in the index until the change is
+        # committed.  The migration guard must validate the resulting tree,
+        # not fail while trying to read an intentionally removed producer.
+        if candidate.is_file():
+            violations.extend(check_text(path, candidate.read_text(encoding="utf-8")))
     for dependency in sorted(FORBIDDEN_DEPENDENCIES & direct_dependencies(root)):
         violations.append(f"steward direct dependency remains: {dependency}")
     return violations

@@ -49,3 +49,26 @@ durable `cleanup_pending`. Use fake values for smoke checks:
 bash steward/containers/smoke-test.sh --shutdown
 bash steward/containers/smoke-test.sh --sync
 ```
+
+### Scheduler planner container
+
+The scheduler planner is a separate daemon-owned boundary. Its locked image is
+mounted with only:
+
+* read-only sealed `$COQUIC_HOME/control-loop/planner-runs/` history;
+* a fresh private session home for the one planner process; and
+* a private output staging directory.
+
+It uses `network=none` and has no repository, worktree, SQLite/WAL, Docker
+socket, daemon configuration, GitHub/SSH/sync credential, or task image
+authority. Every attempt receives a new planner run and session identity. A
+planner failure is sealed and retried from the ledger; it does not resume a
+provider thread or use `--last`.
+
+The value-object boundary is `PlannerContainerConfig`; production runtime
+construction must reject repository or credential mounts. The image and mount
+contract can be exercised without network access by the planner smoke mode:
+
+```bash
+bash steward/containers/smoke-test.sh --planner
+```

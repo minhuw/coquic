@@ -11,6 +11,7 @@ from pathlib import Path
 from ..core.config import StewardConfig
 from ..core.models import IntegrationMode
 from ..core.subprocesses import CommandResult, run_command
+from ..control_loop import ControlLoopArchive
 
 PREFLIGHT_TIMEOUT_SECONDS = 30.0
 _NONINTERACTIVE_GIT_ENV = {
@@ -60,10 +61,20 @@ def run_preflight(
     checks: list[str] = ["directories"]
     warnings: list[str] = []
     try:
-        config.ensure_epoch()
+        task_epoch = config.ensure_epoch()
+        ControlLoopArchive(config, task_root=config).ensure_epoch(
+            authoritative={
+                key: task_epoch[key]
+                for key in ("epochId", "formatVersion", "policy", "startedAt")
+                if key in task_epoch
+            }
+        )
     except Exception as exc:
         raise StewardPreflightError("preflight failed: archive epoch is invalid") from exc
-    checks.append("epoch")
+    checks.extend(("epoch", "control-loop"))
+    ledger = getattr(store, "control_loop_ledger", None)
+    if ledger is not None and getattr(ledger, "planning_blocked", False):
+        warnings.append("planning-blocked")
     if config.db_path.exists():
         try:
             with sqlite3.connect(f"file:{config.db_path}?mode=ro", uri=True) as connection:

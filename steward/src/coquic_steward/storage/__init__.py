@@ -11,6 +11,7 @@ from ..core.models import (
 )
 from ..task_archive_sync_config import TaskArchiveSyncHealth
 from .sqlite import SQLiteTaskStore
+from ..control_loop import ControlLoopLedger
 from .schema import (
     CodexSessionRow,
     TaskArchiveSyncHealthRow,
@@ -156,6 +157,7 @@ def _now() -> datetime:
 
 __all__ = [
     "SQLiteTaskStore",
+    "ControlLoopLedger",
     "TaskStore",
     "CodexSessionRow",
     "TaskExecutionRow",

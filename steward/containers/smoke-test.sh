@@ -6,7 +6,7 @@ shutdown_check=0
 sync_check=0
 for argument in "$@"; do
   case "$argument" in
-    --images|--isolation) mode="${argument#--}" ;;
+    --images|--isolation|--planner) mode="${argument#--}" ;;
     --shutdown) shutdown_check=1 ;;
     --sync) sync_check=1 ;;
     *) echo "unknown smoke-test option: $argument" >&2; exit 64 ;;
@@ -105,6 +105,40 @@ if [[ "$mode" == all || "$mode" == images ]]; then
   done
 fi
 
+if [[ "$mode" == planner ]]; then
+  nix develop "$root" -c uv run --project "$root/steward" python - <<'PY'
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from coquic_steward.execution.container_config import PlannerContainerConfig
+
+with TemporaryDirectory() as value:
+    root = Path(value)
+    history = root / "history"
+    private = root / "private"
+    output = root / "output"
+    for path in (history, private, output):
+        path.mkdir()
+    config = PlannerContainerConfig(
+        run_id="planner-smoke",
+        image_digest="sha256:" + "a" * 64,
+        history_root=history,
+        private_root=private,
+        output_root=output,
+    )
+    assert config.network == "none"
+    assert [mount.target for mount in config.mounts] == [
+        "/planner/history",
+        "/planner/session",
+        "/planner/output",
+    ]
+    assert all(mount.source not in {Path("/"), Path("/var/run/docker.sock")} for mount in config.mounts)
+print("planner container boundary ok")
+PY
+  echo "steward container smoke test passed ($mode; fake inputs only)"
+  exit 0
+fi
+
 if [[ "$mode" == all || "$mode" == isolation ]]; then
   command -v docker >/dev/null || fail "Docker CLI is unavailable"
   docker info >/dev/null 2>&1 || fail "Docker runtime is unavailable"
@@ -187,6 +221,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"fake-provider"}'
 if [[ "$block" -eq 1 ]]; then
   exec /bin/python -c 'import signal; signal.signal(signal.SIGTERM, lambda *_: exit(143)); signal.pause()'
 fi
+
 printf 'fake completion\n' >"$last_message"
 SH
   chmod 755 "$fake_codex"

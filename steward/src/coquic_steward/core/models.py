@@ -275,22 +275,6 @@ class DaemonLifecycleState(StrEnum):
     stopped = "stopped"
 
 
-class PublicMirrorPublishState(StrEnum):
-    disabled = "disabled"
-    pending = "pending"
-    published = "published"
-    failed = "failed"
-
-
-class PublicMirrorFailureCategory(StrEnum):
-    ssh_preparation = "ssh_preparation"
-    rsync_transfer = "rsync_transfer"
-    timeout = "timeout"
-    serialization = "serialization"
-    permissions = "permissions"
-    unknown = "unknown"
-
-
 TERMINAL_STATUSES = {
     TaskStatus.succeeded,
     TaskStatus.pushed,
@@ -732,20 +716,6 @@ class ShutdownStatus(BaseModel):
     interrupted_runs: int = 0
     stopped_containers: int = 0
     final_sync_attempted: bool = False
-
-
-class PublicMirrorHealth(BaseModel):
-    model_config = ConfigDict(validate_assignment=True, use_enum_values=True)
-
-    state: PublicMirrorPublishState = PublicMirrorPublishState.disabled
-    snapshot_id: str | None = None
-    generated_at: datetime = Field(default_factory=utc_now)
-    last_attempt_at: datetime | None = None
-    last_success_at: datetime | None = None
-    last_failure_at: datetime | None = None
-    last_failure_category: PublicMirrorFailureCategory | None = None
-    retry_count: int = Field(default=0, ge=0, le=10)
-    last_accepted_digest: str | None = None
 
 
 class ProjectSignals(BaseModel):

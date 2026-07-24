@@ -23,6 +23,7 @@ _CONTAINER_ROOTS = {
     "/task/scratch",
     "/task/git",
 }
+_PLANNER_ROOTS = {"/planner/history", "/planner/session", "/planner/output"}
 
 
 class TaskRole(StrEnum):
@@ -78,8 +79,9 @@ class ContainerMount:
         if source.is_symlink():
             raise ValueError(f"mount source must not be a symlink: {source}")
         target = _validate_container_path(self.target)
-        if target not in _CONTAINER_ROOTS and not any(
-            target.startswith(root + "/") for root in _CONTAINER_ROOTS
+        mount_roots = _CONTAINER_ROOTS | _PLANNER_ROOTS
+        if target not in mount_roots and not any(
+            target.startswith(root + "/") for root in mount_roots
         ):
             raise ValueError(f"mount target is outside task boundary: {target}")
         object.__setattr__(self, "source", source)
@@ -250,6 +252,69 @@ class TaskContainerConfig:
 
 
 ContainerConfig = TaskContainerConfig
+
+
+@dataclass(frozen=True)
+class PlannerContainerConfig:
+    """Mount/identity contract for the daemon-owned global planner container."""
+
+    run_id: str
+    image_digest: str
+    history_root: Path
+    private_root: Path
+    output_root: Path
+    network: str = "none"
+    container_history: str = "/planner/history"
+    container_session: str = "/planner/session"
+    container_output: str = "/planner/output"
+    labels: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not _SAFE_ID.fullmatch(self.run_id):
+            raise ValueError("invalid planner run id")
+        if not _DIGEST.fullmatch(self.image_digest):
+            raise ValueError("planner image must be locked by digest")
+        for name in ("history_root", "private_root", "output_root"):
+            value = Path(getattr(self, name))
+            if not value.is_absolute() or value.is_symlink():
+                raise ValueError(f"planner {name} must be an absolute non-symlink path")
+            object.__setattr__(self, name, value)
+        if self.network != "none":
+            raise ValueError("planner container must not have network access")
+        for value in (self.container_history, self.container_session, self.container_output):
+            if not value.startswith("/") or ".." in PurePosixPath(value).parts:
+                raise ValueError("invalid planner container mount path")
+        labels = dict(self.labels)
+        labels.setdefault("coquic.steward.planner", "true")
+        labels.setdefault("coquic.steward.planner-run", self.run_id)
+        labels.setdefault("coquic.steward.image-digest", self.image_digest)
+        labels.setdefault("coquic.steward.runtime", "planner-container-v1")
+        object.__setattr__(self, "labels", labels)
+
+    @property
+    def container_name(self) -> str:
+        return f"coquic-steward-planner-{self.run_id}"
+
+    @property
+    def mounts(self) -> tuple[ContainerMount, ...]:
+        return (
+            ContainerMount(self.history_root, self.container_history),
+            ContainerMount(self.private_root, self.container_session, read_only=False),
+            ContainerMount(self.output_root, self.container_output, read_only=False),
+        )
+
+    def environment(self, session_id: str) -> dict[str, str]:
+        if not _SAFE_ID.fullmatch(session_id):
+            raise ValueError("invalid planner session id")
+        return {
+            "COQUIC_STEWARD_ROLE": "scheduler-planner",
+            "COQUIC_STEWARD_PLANNER_RUN_ID": self.run_id,
+            "HOME": f"{self.container_session}/{session_id}",
+            "CODEX_HOME": f"{self.container_session}/{session_id}",
+        }
+
+
+PlannerConfig = PlannerContainerConfig
 
 
 def _validate_container_path(value: str) -> str:

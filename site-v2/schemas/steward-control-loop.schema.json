@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://coquic.example.test/schemas/steward-control-loop.schema.json",
+  "title": "Raw Steward control-loop archive",
+  "type": "object",
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "epoch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["epochId", "formatVersion", "policy", "startedAt"],
+      "properties": {
+        "epochId": {"$ref": "#/$defs/id"},
+        "formatVersion": {"const": "1.0"},
+        "taskFormatVersion": {"type": "string"},
+        "policy": {"const": "post-steward-2.0"},
+        "startedAt": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "availability", "byteSize", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)*$"},
+        "availability": {"enum": ["available", "partial", "missing", "unavailable"]},
+        "byteSize": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "mode": {"type": "string"}
+      }
+    },
+    "event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventId", "epochId", "sequence", "occurredAt", "kind", "payload"],
+      "properties": {
+        "eventId": {"$ref": "#/$defs/id"},
+        "epochId": {"$ref": "#/$defs/id"},
+        "sequence": {"type": "integer", "minimum": 0},
+        "occurredAt": {"$ref": "#/$defs/timestamp"},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "payload": {"type": "object"}
+      }
+    },
+    "proposal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["proposalId", "plannerRunId", "ordinal", "outcome", "reasonCode", "signalIds"],
+      "properties": {
+        "proposalId": {"$ref": "#/$defs/id"},
+        "plannerRunId": {"$ref": "#/$defs/id"},
+        "ordinal": {"type": "integer", "minimum": 1},
+        "outcome": {"enum": ["accepted", "invalid", "policy_rejected", "duplicate", "capacity_skipped"]},
+        "reasonCode": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "signalIds": {"type": "array", "items": {"$ref": "#/$defs/id"}, "uniqueItems": true},
+        "dedupeKey": {"type": "string", "maxLength": 160},
+        "taskId": {"$ref": "#/$defs/id"},
+        "proposal": {"type": "object"}
+      }
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifestVersion", "epochId", "plannerRunId", "terminalState", "completedAt", "files"],
+      "properties": {
+        "manifestVersion": {"const": "1.0"},
+        "epochId": {"$ref": "#/$defs/id"},
+        "plannerRunId": {"$ref": "#/$defs/id"},
+        "terminalState": {"enum": ["succeeded", "failed", "interrupted", "cancelled"]},
+        "completedAt": {"$ref": "#/$defs/timestamp"},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/artifact"}, "minItems": 1}
+      }
+    },
+    "current": {
+      "type": "object", "additionalProperties": false,
+      "required": ["epochId", "generatedAt", "providerState", "schedulerState", "runtimeState", "counts", "pendingSignalIds", "archive"],
+      "properties": {
+        "epochId": {"$ref": "#/$defs/id"},
+        "generatedAt": {"$ref": "#/$defs/timestamp"},
+        "providerState": {"type": "object"},
+        "schedulerState": {"type": "object"},
+        "runtimeState": {"type": "object"},
+        "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "pendingSignalIds": {"type": "array", "items": {"$ref": "#/$defs/id"}, "uniqueItems": true},
+        "activePlannerRunId": {"type": ["null", "string"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"},
+        "retry": {"type": "object"},
+        "archive": {"type": "object"}
+      }
+    }
+  }
+}

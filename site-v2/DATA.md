@@ -1,5 +1,14 @@
 # Canonical Data Contract
 
+The live dashboard and task summaries are not the source of control-loop
+history.  Steward's durable raw control-loop peer is specified in
+[STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md); it retains normalized
+fetches, repeated observations, canonical signal transitions, planner
+dispositions, and explicit graph edges.  The compact dashboard remains a
+consumer-facing view and must not be treated as a sanitized producer or a
+control plane.  Raw archive disclosure is by placement and is intentionally
+not redacted.
+
 ## Envelope
 
 Every first-party JSON response and static JSON artifact MUST use:

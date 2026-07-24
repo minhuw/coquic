@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,17 +12,11 @@ from coquic_steward.agents.telemetry import (
     TelemetryAggregate,
     TelemetryRecorder,
     TelemetryTurn,
-    aggregate_sidecars,
     estimate_cost,
     load_sidecar,
 )
 from coquic_steward.agents.runner import CodexRunner, _archive_retry_artifacts
 from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind, WorkerResult
-from coquic_steward.public_mirror import (
-    _combine_public_telemetry,
-    _public_telemetry,
-    model_telemetry_payload,
-)
 from coquic_steward.storage import TaskStore
 
 
@@ -238,35 +231,6 @@ def test_chatgpt_and_unknown_cost_are_explicitly_unavailable() -> None:
         assert estimate.reason == reason
 
 
-def test_public_reader_caps_turns_and_global_reports_legacy(config) -> None:
-    transcript_dir = config.transcripts_dir / "task-telemetry" / "worker"
-    transcript_dir.mkdir(parents=True)
-    transcript = transcript_dir / "codex.jsonl"
-    transcript.write_text("legacy\n", encoding="utf-8")
-    recorder = _recorder(transcript_dir / "telemetry.json")
-    for _ in range(101):
-        recorder.observe({"type": "turn.completed", "usage": _usage()})
-    recorder.finalize(process_outcome="completed")
-    public = _public_telemetry(config, transcript)
-    assert public["availability"] == "available"
-    assert public["aggregate"]["completed_turns"] == 101
-    assert len(public["turns"]) == 100
-    assert public["turns_truncated"] is True
-    assert public["unavailable"]["ttft_ms"]["reason"] == "not_exposed_by_codex_exec"
-    combined = _combine_public_telemetry([public])
-    assert combined["aggregate"]["completed_turns"] == 101
-    assert len(combined["turns"]) == 100
-    assert combined["turns_truncated"] is True
-
-    legacy = config.transcripts_dir / "legacy-task" / "worker" / "codex.jsonl"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_text("legacy\n", encoding="utf-8")
-    global_payload = model_telemetry_payload(config)
-    assert global_payload["schema_version"] == 1
-    assert global_payload["coverage"]["legacy_without_telemetry"] >= 1
-    assert global_payload["coverage"]["complete"] is False
-
-
 def test_sidecar_write_failure_does_not_raise(monkeypatch, tmp_path: Path) -> None:
     recorder = _recorder(tmp_path / "telemetry.json")
     recorder.observe({"type": "turn.completed", "usage": _usage()})
@@ -277,6 +241,34 @@ def test_sidecar_write_failure_does_not_raise(monkeypatch, tmp_path: Path) -> No
     payload = recorder.finalize(process_outcome="failed")
     assert payload["completeness"] == "unavailable"
     assert any(issue["category"] == "sidecar_write_failure" for issue in payload["issues"])
+
+
+def test_retry_archives_telemetry_sidecar_without_losing_validated_evidence(
+    config,
+) -> None:
+    transcript = config.transcripts_dir / "task-telemetry" / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"attempt":1}\n', encoding="utf-8")
+    sidecar = transcript.with_name("telemetry.json")
+    recorder = _recorder(sidecar)
+    recorder.observe({"type": "turn.completed", "usage": _usage()})
+    recorder.finalize(process_outcome="failed")
+    result = WorkerResult(
+        completed=False,
+        command=[],
+        cwd=config.repo_root,
+        exit_code=1,
+        transcript_path=transcript,
+        last_message_path=transcript.with_name("last-message.md"),
+    )
+
+    archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
+
+    archived_path = transcript.with_name("telemetry.retry-1.json")
+    assert "telemetry_archive_failed" not in archived
+    assert archived_path.is_file()
+    assert not sidecar.exists()
+    assert load_sidecar(archived_path)["process_outcome"] == "failed"
 
 
 def test_runner_starts_when_telemetry_initial_clock_fails(
@@ -315,59 +307,3 @@ def test_runner_starts_when_telemetry_initial_clock_fails(
     assert sidecar["issues"] == [
         {"category": "telemetry_clock_unavailable", "count": 1}
     ]
-
-
-@pytest.mark.parametrize("preserve_prior", [True, False])
-def test_retry_telemetry_archive_failure_keeps_coverage_partial(
-    config, monkeypatch, preserve_prior: bool
-) -> None:
-    run_dir = config.transcripts_dir / "task-telemetry" / "worker"
-    run_dir.mkdir(parents=True)
-    transcript = run_dir / "codex.jsonl"
-    transcript.write_text('{"attempt":1}\n', encoding="utf-8")
-    previous = _recorder(run_dir / "telemetry.json")
-    previous.observe({"type": "turn.completed", "usage": _usage()})
-    previous.finalize(process_outcome="failed")
-    result = WorkerResult(
-        completed=False,
-        command=[],
-        cwd=config.repo_root,
-        exit_code=1,
-        transcript_path=transcript,
-        last_message_path=run_dir / "last-message.md",
-    )
-    canonical_archive = run_dir / "telemetry.retry-1.json"
-    original_replace = Path.replace
-
-    def fail_archive(source: Path, target: Path) -> Path:
-        if source == run_dir / "telemetry.json" and (
-            target == canonical_archive or not preserve_prior
-        ):
-            raise OSError("telemetry archive unavailable")
-        return original_replace(source, target)
-
-    monkeypatch.setattr(Path, "replace", fail_archive)
-    archived = _archive_retry_artifacts(result, 1, archive_tool_changes=False)
-    monkeypatch.setattr(Path, "replace", original_replace)
-    transcript.write_text('{"attempt":2}\n', encoding="utf-8")
-    current = _recorder(run_dir / "telemetry.json", retry_ordinal=1)
-    current.observe({"type": "turn.completed", "usage": _usage(2, 1, 1, 0)})
-    current.finalize(process_outcome="completed")
-
-    public = _public_telemetry(config, transcript)
-    global_payload = model_telemetry_payload(config)
-
-    assert archived["telemetry_archive_failed"] is True
-    if preserve_prior:
-        assert archived["telemetry_preserved"] is True
-    else:
-        assert archived["telemetry_preserve_failed"] is True
-        assert archived["telemetry_unavailable_marked"] is True
-    assert len(list(run_dir.glob("telemetry.retry-1.unavailable-*.json"))) == 1
-    assert public["availability"] == "partial"
-    assert public["invocation_count"] == 1
-    assert public["aggregate"]["total_tokens"] == 3
-    assert public["issues"] == [{"category": "archive_unavailable", "count": 1}]
-    assert global_payload["coverage"]["complete"] is False
-    assert global_payload["coverage"]["legacy_without_telemetry"] == 1
-    assert global_payload["coverage"]["invalid_or_unsafe"] == 1

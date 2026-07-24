@@ -7,8 +7,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 from pathlib import Path
+from typing import Any, Mapping
 
 from ..core.config import StewardConfig
 from ..core.lifecycle import (
@@ -24,9 +24,6 @@ from ..core.models import (
     DaemonRuntime,
     DaemonRuntimeState,
     PipelineCursorPhase,
-    PublicMirrorFailureCategory,
-    PublicMirrorHealth,
-    PublicMirrorPublishState,
     SignalFetchStatus,
     SignalItem,
     TaskRecord,
@@ -48,12 +45,20 @@ from ..core.subprocesses import (
     run_command,
     use_subprocess_owner,
 )
-from ..planning import run_planner
-from ..public_mirror import (
-    classify_publish_failure,
-    publish_public_mirror,
-    write_public_mirror_status,
+from ..control_loop import (
+    ArchiveConflictError,
+    ArchiveError,
+    ControlLoopArchive,
+    CurrentState,
+    Cycle as ControlLoopCycle,
+    Epoch,
+    PlannerRun as ControlPlannerRun,
+    ProposalDisposition as ControlProposalDisposition,
+    Wakeup as ControlWakeup,
+    new_id as new_control_loop_id,
+    timestamp as control_timestamp,
 )
+from ..planning import PlannerRun as PlanningPlannerRun, run_planner
 from ..storage import (
     TaskStore,
     idle_fetch_provider_names,
@@ -70,8 +75,6 @@ from .preflight import PreflightReport, preflight_remote_push, run_preflight
 
 DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
-PUBLIC_MIRROR_DEBOUNCE_SECONDS = 1.0
-PUBLIC_MIRROR_RETRY_SECONDS = 30.0
 FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
@@ -126,6 +129,14 @@ class StewardDaemon:
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
+        self._control_loop_ledger = getattr(store, "control_loop_ledger", None)
+        self._control_loop_archive = ControlLoopArchive(config, task_root=config)
+        self._control_loop_stop = threading.Event()
+        self._control_loop_wakeup = threading.Event()
+        self._control_loop_thread: threading.Thread | None = None
+        self._control_loop_lock = threading.RLock()
+        self._active_planner_run_id: str | None = None
+        self._planner_publication_queue: dict[str, tuple[ControlPlannerRun, dict[str, bytes]]] = {}
         with use_subprocess_owner(self._subprocess_owner):
             remote_push_ready = preflight_remote_push(config)
         if remote_push_ready:
@@ -151,23 +162,6 @@ class StewardDaemon:
             heartbeat_interval_seconds=DAEMON_HEARTBEAT_INTERVAL_SECONDS
         )
         self._runtime_lock = threading.Lock()
-        self._public_mirror_local_digest: str | None = None
-        self._public_mirror_remote_digest: str | None = None
-        self._public_mirror_health = PublicMirrorHealth(
-            state=(
-                PublicMirrorPublishState.pending
-                if config.public_mirror.enabled and config.public_mirror.publish
-                else PublicMirrorPublishState.disabled
-            )
-        )
-        self._public_mirror_update_lock = threading.Lock()
-        self._public_mirror_thread_lock = threading.Lock()
-        self._public_mirror_dirty = threading.Event()
-        self._public_mirror_stop = threading.Event()
-        self._public_mirror_thread: threading.Thread | None = None
-        self._public_mirror_stopping = False
-        if config.public_mirror.enabled and hasattr(store, "on_change"):
-            store.on_change = self._public_mirror_store_changed
         # This is a local, bounded check. External integrations are checked
         # only when explicitly enabled; remote push remains the compatibility
         # preflight above for existing callers.
@@ -220,6 +214,7 @@ class StewardDaemon:
                     instance_id=self.runtime.instance_id,
                 )
             outcomes: list[ReconciliationOutcome] = []
+            self._startup_reconcile_control_loop()
             for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):
                 outcome = self._reconcile_task(task)
                 outcomes.append(outcome)
@@ -265,7 +260,145 @@ class StewardDaemon:
                     instance_id=self.runtime.instance_id,
                     state={"reconciliation_complete": True},
                 )
+            if self._control_loop_ledger is not None:
+                try:
+                    self._control_loop_ledger.record_runtime(
+                        "running", {"instanceId": self.runtime.instance_id}
+                    )
+                    self._control_loop_wakeup.set()
+                except Exception as exc:
+                    self._log(f"control-loop runtime start lag error={exc.__class__.__name__}")
             return tuple(outcomes)
+
+    def _startup_reconcile_control_loop(self) -> None:
+        """Establish the shared epoch and repair archive lag before dispatch."""
+
+        if self._control_loop_ledger is None:
+            return
+        try:
+            task_epoch = self.config.ensure_epoch()
+            archive_epoch = self._control_loop_archive.ensure_epoch(
+                authoritative={
+                    key: task_epoch[key]
+                    for key in ("epochId", "formatVersion", "policy", "startedAt")
+                    if key in task_epoch
+                }
+            )
+            if archive_epoch.epoch_id != self._control_loop_ledger.epoch_id:
+                raise ArchiveConflictError("control-loop and ledger epochs differ")
+            self._drain_control_loop_once()
+        except Exception as exc:
+            self._control_loop_ledger.set_planning_blocked(
+                True, reason=f"control-loop startup reconciliation: {exc.__class__.__name__}"
+            )
+            self._log(f"control-loop reconciliation blocked error={exc.__class__.__name__}")
+
+    def _build_control_loop_current(self) -> CurrentState | None:
+        ledger = self._control_loop_ledger
+        if ledger is None:
+            return None
+        try:
+            state = scheduler_state(self.config, self.store)
+            pending = self.store.pending_signal_items(limit=200)
+            pending_ids = [
+                signal_id
+                for item in pending
+                if (signal_id := ledger.canonical_signal_id(item.provider, item.fingerprint))
+                is not None
+            ]
+            counts = {
+                "fetches": len(self.store.list_signal_fetch_runs(limit=10_000)),
+                "observations": 0,
+                "signals": 0,
+                "plannerRuns": 0,
+                "pendingSignals": len(pending_ids),
+                "activeTasks": self.store.active_count(),
+            }
+            with ledger._connect() as db:  # bounded local projection query
+                for key, query in (
+                    ("observations", "SELECT COUNT(*) FROM control_loop_observations"),
+                    ("signals", "SELECT COUNT(*) FROM control_loop_signals"),
+                    ("plannerRuns", "SELECT COUNT(*) FROM control_loop_planner_runs"),
+                ):
+                    counts[key] = int(db.execute(query).fetchone()[0])
+            return CurrentState(
+                epochId=ledger.epoch_id,
+                providerState={
+                    item.provider: item.model_dump(mode="json")
+                    for item in state.providers
+                },
+                schedulerState={
+                    **state.model_dump(mode="json"),
+                    "planningBlocked": ledger.planning_blocked,
+                },
+                runtimeState=self._runtime_snapshot().model_dump(mode="json"),
+                counts=counts,
+                pendingSignalIds=pending_ids,
+                activePlannerRunId=self._active_planner_run_id,
+                archive={
+                    "formatVersion": ControlLoopArchive.format_version,
+                    "health": "blocked" if ledger.planning_blocked else "ok",
+                    "lagSequences": len(ledger.outbox(limit=10_000)),
+                },
+            )
+        except Exception:
+            return None
+
+    def _drain_control_loop_once(self) -> dict[str, Any] | None:
+        ledger = self._control_loop_ledger
+        if ledger is None:
+            return None
+        with self._control_loop_lock:
+            try:
+                result = self._control_loop_archive.reconcile(
+                    ledger,
+                    current=self._build_control_loop_current(),
+                )
+            except Exception as exc:
+                # A temporary writer failure must not stop task dispatch.  The
+                # durable outbox remains pending for the next retry.
+                self._log(f"control-loop archive lag error={exc.__class__.__name__}")
+                return {"materialized": 0, "conflicts": 0, "error": exc.__class__.__name__}
+            for run_id, (run, artifacts) in list(self._planner_publication_queue.items()):
+                try:
+                    target = self._control_loop_archive.publish_planner_run(run, artifacts)
+                    if self._control_loop_archive.verify_planner_run(run_id):
+                        self._planner_publication_queue.pop(run_id, None)
+                        self._log(f"planner archive sealed run={run_id} path={target}")
+                except ArchiveConflictError as exc:
+                    ledger.set_planning_blocked(True, reason="visible planner-run conflict")
+                    self._log(f"planner archive blocked run={run_id} error={exc.__class__.__name__}")
+                except (OSError, ArchiveError) as exc:
+                    self._log(f"planner archive lag run={run_id} error={exc.__class__.__name__}")
+            self._control_loop_wakeup.clear()
+            return result
+
+    def _start_control_loop_writer(self) -> None:
+        if self._control_loop_ledger is None:
+            return
+        with self._control_loop_lock:
+            if self._control_loop_thread is not None and self._control_loop_thread.is_alive():
+                return
+            self._control_loop_stop.clear()
+            self._control_loop_thread = threading.Thread(
+                target=self._control_loop_writer_loop,
+                name="steward-control-loop-archive",
+                daemon=True,
+            )
+            self._control_loop_thread.start()
+
+    def _control_loop_writer_loop(self) -> None:
+        while not self._control_loop_stop.is_set():
+            self._drain_control_loop_once()
+            self._control_loop_wakeup.wait(1.0)
+
+    def _stop_control_loop_writer(self) -> None:
+        self._control_loop_stop.set()
+        self._control_loop_wakeup.set()
+        thread = self._control_loop_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._control_loop_thread = None
 
     reconcile_startup = startup_reconcile
     reconcile = startup_reconcile
@@ -1610,6 +1743,15 @@ class StewardDaemon:
                 instance_id=self.runtime.instance_id,
                 state={"forced": force},
             )
+        if self._control_loop_ledger is not None:
+            try:
+                self._control_loop_ledger.record_runtime(
+                    "stopping",
+                    {"instanceId": self.runtime.instance_id, "forced": force},
+                )
+                self._control_loop_wakeup.set()
+            except Exception as exc:
+                self._log(f"control-loop runtime stop lag error={exc.__class__.__name__}")
         self._sync_stop.set()
         self._sync_wakeup.set()
 
@@ -1621,6 +1763,8 @@ class StewardDaemon:
         self.request_shutdown(force=force)
         force = force or self._force_shutdown_event.is_set()
         self._enter_stopping(force=force)
+        self._stop_control_loop_writer()
+        self._drain_control_loop_once()
         deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
         running_runs: list[tuple[str, str]] = []
         tasks = sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id)
@@ -1738,7 +1882,6 @@ class StewardDaemon:
             final=not container_stop_failures,
             deadline=deadline,
         )
-        self._stop_public_mirror_sync()
         self._stop_heartbeat_thread()
         lifecycle = (
             DaemonLifecycleState.stopping
@@ -1946,11 +2089,12 @@ class StewardDaemon:
         result = TickResult()
         if not self._startup_complete:
             self.startup_reconcile()
+        self._drain_control_loop_once()
         self._begin_cycle(reason)
-        self._publish_public_mirror_if_changed()
         try:
             self._poll_adopted_runs()
             wakeups = self.store.pending_wakeups(limit=200)
+            self._record_control_loop_wakeups(wakeups)
             if wakeups:
                 self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
             explicit_fetch_providers = _fetch_providers_from_wakeups(
@@ -2012,8 +2156,33 @@ class StewardDaemon:
             )
         finally:
             self._complete_cycle(result, reason)
-            self._publish_public_mirror_if_changed()
+            self._drain_control_loop_once()
         return result
+
+    def _record_control_loop_wakeups(self, wakeups: list[object]) -> None:
+        ledger = self._control_loop_ledger
+        if ledger is None:
+            return
+        for wakeup in wakeups:
+            try:
+                data = getattr(wakeup, "data", {}) or {}
+                input_ids = [
+                    str(value)
+                    for value in data.get("signal_ids", data.get("input_signal_ids", []))
+                    if isinstance(value, str)
+                ]
+                ledger.record_wakeup(
+                    ControlWakeup(
+                        wakeupId=wakeup.id,
+                        reason=wakeup.reason,
+                        status="pending",
+                        createdAt=wakeup.created_at,
+                        inputSignalIds=input_ids,
+                    )
+                )
+            except Exception as exc:
+                self._log(f"control-loop wakeup lag id={getattr(wakeup, 'id', '-') } error={exc.__class__.__name__}")
+        self._control_loop_wakeup.set()
 
     def _dispatch_queued(
         self,
@@ -2073,7 +2242,6 @@ class StewardDaemon:
                     f"dispatch finish {task.id} status={finished.status} ok=false "
                     f"error={exc.__class__.__name__}"
                 )
-                self._publish_public_mirror_if_changed()
                 continue
             if task_ok:
                 result.dispatched += 1
@@ -2083,14 +2251,12 @@ class StewardDaemon:
                 )
                 if plan:
                     self._plan_until_idle(result)
-                self._publish_public_mirror_if_changed()
             else:
                 result.skipped += 1
                 finished = self.store.get(task.id)
                 self._log(
                     f"dispatch finish {task.id} status={finished.status} ok=false"
                 )
-                self._publish_public_mirror_if_changed()
 
     def _dispatch_queued_pool(
         self,
@@ -2332,15 +2498,31 @@ class StewardDaemon:
                     "new_item_count": 0,
                 }
             )
-            provider_config = self.config.signal_providers.get(collection.provider)
-            saved_items, created_items = self.store.add_signal_items(
-                collection.items,
-                suppression_hours=(
-                    provider_config.suppression_hours if provider_config else 24
-                ),
-            )
-            fetch_run = fetch_run.model_copy(update={"new_item_count": created_items})
-            self.store.add_signal_fetch_run(fetch_run)
+            ingest = getattr(self.store, "ingest_signal_collection", None)
+            if callable(ingest):
+                ingested = ingest(fetch_run, collection.items)
+                if isinstance(ingested, tuple) and len(ingested) == 3:
+                    saved_items, _signals, created_items = ingested
+                    fetch_run = fetch_run.model_copy(
+                        update={"item_count": len(saved_items), "new_item_count": created_items}
+                    )
+                else:
+                    saved_items, _signals = ingested
+                    created_items = sum(
+                        1
+                        for item in saved_items
+                        if getattr(item, "dedupe_result", "new") == "new"
+                    )
+            else:
+                provider_config = self.config.signal_providers.get(collection.provider)
+                saved_items, created_items = self.store.add_signal_items(
+                    collection.items,
+                    suppression_hours=(
+                        provider_config.suppression_hours if provider_config else 24
+                    ),
+                )
+                fetch_run = fetch_run.model_copy(update={"new_item_count": created_items})
+                self.store.add_signal_fetch_run(fetch_run)
             result.signal_items += len(saved_items)
             result.new_signal_items += created_items
             self.store.add_event(
@@ -2368,6 +2550,9 @@ class StewardDaemon:
             )
 
     def _plan_until_idle(self, result: TickResult) -> None:
+        if self._control_loop_ledger is not None and self._control_loop_ledger.planning_blocked:
+            self._log("planner blocked by control-loop reconciliation conflict")
+            return
         turns = 0
         while turns < self.config.limits.max_active_tasks:
             if self.store.source_active_count() >= self.config.limits.max_active_tasks:
@@ -2426,40 +2611,80 @@ class StewardDaemon:
                 "enabled_signals": list(self.config.enabled_signals),
             },
         )
+        control_run_id = new_control_loop_id("planner")
+        canonical_signal_ids = self._canonical_signal_ids(inbox_items)
+        control_claim = None
+        if self._control_loop_ledger is not None:
+            try:
+                control_claim = self._control_loop_ledger.claim_planner_run(
+                    control_run_id,
+                    canonical_signal_ids,
+                    [task.id for task in task_context if not TaskStatus(task.status).terminal],
+                    prompt={
+                        "signalIds": canonical_signal_ids,
+                        "signalItemIds": [item.id for item in inbox_items],
+                        "activeTaskCount": len(task_context),
+                    },
+                )
+                self._active_planner_run_id = control_run_id
+                self._control_loop_wakeup.set()
+            except Exception as exc:
+                self._log(f"planner claim failed error={exc.__class__.__name__}")
+                return
+        planner_run = None
+        planner_error: Exception | None = None
         try:
-            planner_run = run_planner(
-                self.config,
-                signals,
-                task_context,
-                invocation=self.session_supervisor,
-            )
-        except TypeError as exc:
-            # Preserve simple test doubles from the pre-boundary API. A real
-            # invocation TypeError must still propagate unchanged.
-            if "invocation" not in str(exc):
-                raise
-            planner_run = run_planner(self.config, signals, task_context)
+            try:
+                planner_run = run_planner(
+                    self.config,
+                    signals,
+                    task_context,
+                    invocation=self.session_supervisor,
+                    run_id=control_run_id,
+                )
+            except TypeError as exc:
+                # Preserve simple test doubles from the pre-boundary API. A
+                # real invocation TypeError still propagates unchanged.
+                if "invocation" not in str(exc) and "run_id" not in str(exc):
+                    raise
+                planner_run = run_planner(
+                    self.config,
+                    signals,
+                    task_context,
+                    run_id=control_run_id,
+                )
+        except Exception as exc:
+            planner_error = exc
         planned_item_count = 0
         planned_item_ids: set[str] = set()
-        run_id = planner_run.run_id or planner_run.thread_id
-        for spec, dedupe_key in planner_run.planned:
-            result.planned += 1
-            record, created = self.store.add_task(spec, dedupe_key=dedupe_key)
-            if created:
-                result.enqueued += 1
-                selected_ids = _selected_item_ids(spec, planner_run.consumed_item_ids)
-                planned_item_count += self.store.mark_signal_items_planned(
-                    selected_ids,
-                    planner_run_id=run_id,
-                    task_id=record.id,
-                )
-                planned_item_ids.update(selected_ids)
-                self._log(f"enqueued {record.id} {_task_label(record)}")
-            else:
-                result.skipped += 1
-                self._log(
-                    f"skipped duplicate plan {record.id} dedupe={dedupe_key}"
-                )
+        run_id = control_run_id
+        planned_task_ids_by_dedupe: dict[str, str] = {
+            str(task.spec.metadata.get("dedupe_key")): task.id
+            for task in task_context
+            if task.spec.metadata.get("dedupe_key")
+        }
+        if planner_run is not None:
+            for spec, dedupe_key in planner_run.planned:
+                result.planned += 1
+                record, created = self.store.add_task(spec, dedupe_key=dedupe_key)
+                planned_task_ids_by_dedupe.setdefault(dedupe_key, record.id)
+                if created:
+                    result.enqueued += 1
+                    selected_ids = _selected_item_ids(spec, planner_run.consumed_item_ids)
+                    planned_item_count += self.store.mark_signal_items_planned(
+                        selected_ids,
+                        planner_run_id=run_id,
+                        task_id=record.id,
+                    )
+                    planned_item_ids.update(selected_ids)
+                    self._log(f"enqueued {record.id} {_task_label(record)}")
+                else:
+                    result.skipped += 1
+                    self._log(
+                        f"skipped duplicate plan {record.id} dedupe={dedupe_key}"
+                    )
+        else:
+            planner_run = _failed_planner_result(planner_error)
         superseded_count = self.store.supersede_signal_items(
             [
                 item_id
@@ -2469,6 +2694,57 @@ class StewardDaemon:
             planner_run_id=run_id,
         )
         consumed_count = planned_item_count + superseded_count
+        state = "succeeded" if planner_run.completed and not planner_run.invalid_output else "failed"
+        if planner_error is not None:
+            state = "failed"
+        control_dispositions = self._control_loop_dispositions(
+            planner_run,
+            run_id,
+            inbox_items,
+            planned_task_ids_by_dedupe,
+        )
+        diagnostics = dict(planner_run.diagnostics)
+        retry_after: timedelta | None = None
+        if state == "failed" and self._control_loop_ledger is not None:
+            attempt, eligible = self._control_loop_ledger.schedule_retry("planner")
+            retry_after = max(timedelta(0), eligible - utc_now())
+            diagnostics.update(
+                {
+                    "reason_code": "planner_failed",
+                    "attempt": attempt,
+                    "retry_eligible_at": control_timestamp(eligible),
+                }
+            )
+        if self._control_loop_ledger is not None and control_claim is not None:
+            try:
+                completed = self._control_loop_ledger.complete_planner_run(
+                    run_id,
+                    control_dispositions,
+                    state=state,
+                    result={
+                        "acceptedCount": planner_run.accepted_count,
+                        "proposedCount": planner_run.proposed_count,
+                        "consumedItemIds": planner_run.consumed_item_ids,
+                        "plannedItemCount": planned_item_count,
+                        "supersededItemCount": superseded_count,
+                    },
+                    diagnostics=diagnostics,
+                    retry_after=retry_after,
+                    consume_signal_ids=(
+                        self._canonical_ids_for_items(
+                            inbox_items, planner_run.consumed_item_ids
+                        )
+                        if state == "succeeded"
+                        else ()
+                    ),
+                )
+                artifacts = self._planner_artifacts(planner_run, completed)
+                self._planner_publication_queue[run_id] = (completed, artifacts)
+                self._control_loop_wakeup.set()
+            except Exception as exc:
+                self._log(f"planner completion lag run={run_id} error={exc.__class__.__name__}")
+        self._active_planner_run_id = None
+        self._control_loop_wakeup.set()
         self._log(
             "planner finish "
             f"completed={str(planner_run.completed).lower()} "
@@ -2494,15 +2770,103 @@ class StewardDaemon:
                 "consumed_item_count": consumed_count,
                 "planned_item_count": planned_item_count,
                 "superseded_item_count": superseded_count,
-                "run_id": planner_run.run_id,
+                "run_id": run_id,
                 "prompt_path": (
                     str(planner_run.prompt_path) if planner_run.prompt_path else None
                 ),
                 "transcript_path": str(planner_run.transcript_path),
-                "thread_id": planner_run.thread_id,
-                "diagnostics": planner_run.diagnostics,
+                "thread_id": None,
+                "diagnostics": diagnostics,
             },
         )
+
+    def _canonical_signal_ids(self, items: list[SignalItem]) -> list[str]:
+        ledger = self._control_loop_ledger
+        if ledger is None:
+            return []
+        values: list[str] = []
+        for item in items:
+            signal_id = ledger.canonical_signal_id(item.provider, item.fingerprint)
+            if signal_id is not None and signal_id not in values:
+                values.append(signal_id)
+        return values
+
+    def _canonical_ids_for_items(
+        self, items: list[SignalItem], item_ids: list[str]
+    ) -> list[str]:
+        selected = set(item_ids)
+        return self._canonical_signal_ids([item for item in items if item.id in selected])
+
+    def _control_loop_dispositions(
+        self,
+        planner_run,
+        planner_run_id: str,
+        items: list[SignalItem],
+        task_ids_by_dedupe: Mapping[str, str],
+    ) -> list[ControlProposalDisposition]:
+        item_by_id = {item.id: item for item in items}
+        dispositions: list[ControlProposalDisposition] = []
+        for ordinal, disposition in enumerate(planner_run.dispositions, 1):
+            proposal = getattr(disposition, "proposal", {}) or {}
+            dedupe = getattr(disposition, "dedupe_key", None)
+            task_id = task_ids_by_dedupe.get(dedupe) if dedupe else None
+            signal_ids = self._canonical_ids_for_items(
+                items,
+                [value for value in getattr(disposition, "signal_ids", []) if value in item_by_id],
+            )
+            outcome = str(getattr(disposition, "outcome", "invalid"))
+            reason_code = str(getattr(disposition, "reason_code", "invalid_output"))
+            if outcome in {"accepted", "duplicate"} and task_id is None:
+                outcome = "invalid"
+                reason_code = "missing_covering_task"
+            dispositions.append(
+                ControlProposalDisposition(
+                    proposalId=f"{planner_run_id}-proposal-{ordinal}",
+                    plannerRunId=planner_run_id,
+                    ordinal=ordinal,
+                    outcome=outcome,
+                    reasonCode=reason_code,
+                    signalIds=signal_ids,
+                    dedupeKey=dedupe,
+                    taskId=task_id,
+                    proposal=proposal,
+                )
+            )
+        return dispositions
+
+    def _planner_artifacts(
+        self, planner_run, completed: ControlPlannerRun
+    ) -> dict[str, bytes]:
+        artifacts: dict[str, bytes] = {}
+        for name, path in (
+            ("prompt.md", planner_run.prompt_path),
+            ("codex.jsonl", planner_run.transcript_path),
+            ("last-message.md", planner_run.transcript_path.with_name("last-message.md")),
+            ("telemetry.json", planner_run.transcript_path.with_name("telemetry.json")),
+            ("activities.jsonl", planner_run.transcript_path.with_name("activities.jsonl")),
+            ("tool-changes/manifest.jsonl", planner_run.transcript_path.parent / "tool-changes" / "manifest.jsonl"),
+            ("tool-changes/summary.json", planner_run.transcript_path.parent / "tool-changes" / "summary.json"),
+        ):
+            if path is None:
+                continue
+            try:
+                if Path(path).is_file():
+                    artifacts[name] = Path(path).read_bytes()
+            except OSError:
+                continue
+        artifacts["result.json"] = json.dumps(
+            {
+                "plannerRunId": completed.planner_run_id,
+                "state": completed.state,
+                "result": completed.result or {},
+                "diagnostics": completed.diagnostics,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        if not artifacts:
+            artifacts["result.json"] = b"{}\n"
+        return artifacts
 
     def run_forever(self) -> None:
         self._start_heartbeat_thread()
@@ -2510,8 +2874,8 @@ class StewardDaemon:
             self.startup_reconcile()
             if self._shutdown_event.is_set():
                 return
+            self._start_control_loop_writer()
             self.start_task_sync()
-            self._start_public_mirror_sync()
             with self._worker_pool_lock:
                 if self._worker_pool is None:
                     self._worker_pool = concurrent.futures.ThreadPoolExecutor(
@@ -2535,6 +2899,7 @@ class StewardDaemon:
                     reason=trigger.reason,
                 )
         finally:
+            self._stop_control_loop_writer()
             if not self._shutdown_event.is_set():
                 self.request_shutdown()
             self.shutdown(force=self._force_shutdown_event.is_set())
@@ -2552,6 +2917,21 @@ class StewardDaemon:
             self.runtime.state = DaemonRuntimeState.active
             self.runtime.current_cycle_started_at = started_at
             self.runtime.current_cycle_reason = _bounded_cycle_reason(reason)
+        self._current_control_cycle_id = new_control_loop_id("cycle")
+        self._current_control_cycle_started_at = started_at
+        if self._control_loop_ledger is not None:
+            try:
+                self._control_loop_ledger.record_cycle(
+                    ControlLoopCycle(
+                        cycleId=self._current_control_cycle_id,
+                        reason=_bounded_cycle_reason(reason),
+                        startedAt=started_at,
+                        runtimeState="active",
+                    )
+                )
+                self._control_loop_wakeup.set()
+            except Exception as exc:
+                self._log(f"control-loop cycle start lag error={exc.__class__.__name__}")
 
     def _complete_cycle(self, result: TickResult, reason: str) -> None:
         completed_at = utc_now()
@@ -2566,6 +2946,25 @@ class StewardDaemon:
             self.runtime.current_cycle_started_at = None
             self.runtime.current_cycle_reason = None
             self.runtime.last_completed_cycle = summary
+        cycle_id = getattr(self, "_current_control_cycle_id", None)
+        if self._control_loop_ledger is not None and cycle_id is not None:
+            try:
+                self._control_loop_ledger.record_cycle(
+                    ControlLoopCycle(
+                        cycleId=cycle_id,
+                        reason=_bounded_cycle_reason(reason),
+                        startedAt=getattr(
+                            self,
+                            "_current_control_cycle_started_at",
+                            completed_at,
+                        ),
+                        completedAt=completed_at,
+                        runtimeState="idle",
+                    )
+                )
+                self._control_loop_wakeup.set()
+            except Exception as exc:
+                self._log(f"control-loop cycle finish lag error={exc.__class__.__name__}")
 
     def _touch_heartbeat(self) -> None:
         with self._runtime_lock:
@@ -2578,192 +2977,6 @@ class StewardDaemon:
     def _heartbeat_interval_seconds(self) -> int:
         with self._runtime_lock:
             return self.runtime.heartbeat_interval_seconds
-
-    def _start_public_mirror_sync(self) -> None:
-        if not self.config.public_mirror.enabled:
-            return
-        with self._public_mirror_thread_lock:
-            if self._public_mirror_thread is not None or self._public_mirror_stopping:
-                return
-            self._public_mirror_stop.clear()
-            self._public_mirror_dirty.set()
-            thread = threading.Thread(
-                target=self._run_public_mirror_sync,
-                name="steward-public-mirror",
-                daemon=True,
-            )
-            self._public_mirror_thread = thread
-            thread.start()
-
-    def _stop_public_mirror_sync(self) -> None:
-        with self._runtime_lock:
-            self.runtime.heartbeat_at = utc_now()
-            self.runtime.state = DaemonRuntimeState.stopping
-            self.runtime.current_cycle_started_at = None
-            self.runtime.current_cycle_reason = None
-        with self._public_mirror_thread_lock:
-            thread = self._public_mirror_thread
-            if thread is None:
-                return
-            self._public_mirror_stopping = True
-            self._public_mirror_stop.set()
-            self._public_mirror_dirty.set()
-        thread.join()
-        try:
-            needs_final_publish = (
-                self._public_mirror_remote_digest
-                != self._public_mirror_local_digest
-                or self._public_mirror_health.state
-                in {
-                    PublicMirrorPublishState.pending,
-                    PublicMirrorPublishState.failed,
-                }
-            )
-            if needs_final_publish:
-                self._update_public_mirror_if_changed(publish=True)
-        finally:
-            with self._public_mirror_thread_lock:
-                if self._public_mirror_thread is thread:
-                    self._public_mirror_thread = None
-                self._public_mirror_stopping = False
-
-    def _run_public_mirror_sync(self) -> None:
-        while True:
-            dirty = self._public_mirror_dirty.wait(
-                timeout=self._heartbeat_interval_seconds()
-            )
-            self._touch_heartbeat()
-            stopping = self._public_mirror_stop.is_set()
-            if not stopping and dirty and self._public_mirror_stop.wait(
-                PUBLIC_MIRROR_DEBOUNCE_SECONDS
-            ):
-                stopping = True
-            self._public_mirror_dirty.clear()
-            synced = self._update_public_mirror_if_changed(publish=True)
-            if stopping or self._public_mirror_stop.is_set():
-                with self._public_mirror_thread_lock:
-                    if self._public_mirror_dirty.is_set():
-                        continue
-                    if self._public_mirror_thread is threading.current_thread():
-                        self._public_mirror_thread = None
-                    return
-            if synced:
-                continue
-            if self._public_mirror_stop.wait(self._public_mirror_retry_seconds()):
-                self._public_mirror_dirty.set()
-                continue
-            self._public_mirror_dirty.set()
-
-    def _public_mirror_store_changed(self) -> None:
-        with self._public_mirror_thread_lock:
-            if self._public_mirror_thread is not None:
-                self._public_mirror_dirty.set()
-                return
-            if self._public_mirror_stopping:
-                self._update_public_mirror_if_changed(publish=True)
-                return
-        self._write_public_mirror_if_changed()
-
-    def _publish_public_mirror_if_changed(self) -> bool:
-        with self._public_mirror_thread_lock:
-            if self._public_mirror_thread is not None:
-                self._public_mirror_dirty.set()
-                return True
-        return self._update_public_mirror_if_changed(publish=True)
-
-    def _write_public_mirror_if_changed(self) -> bool:
-        return self._update_public_mirror_if_changed(publish=False)
-
-    def _update_public_mirror_if_changed(self, *, publish: bool) -> bool:
-        if not self.config.public_mirror.enabled:
-            return True
-        with self._public_mirror_update_lock:
-            try:
-                should_publish = publish and self.config.public_mirror.publish
-                if should_publish:
-                    self._record_publish_attempt()
-                runtime = self._runtime_snapshot()
-                health = self._public_mirror_health.model_copy(deep=True)
-                path, result = publish_public_mirror(
-                    self.config,
-                    self.store,
-                    runtime=runtime,
-                    publication=health,
-                    publish=should_publish,
-                )
-                if result is not None and not result.ok:
-                    category = classify_publish_failure(result)
-                    self._record_publish_failure(category)
-                    status_path = write_public_mirror_status(
-                        self.config,
-                        self.store,
-                        runtime=runtime,
-                        publication=self._public_mirror_health.model_copy(
-                            deep=True
-                        ),
-                    )
-                    self._public_mirror_local_digest = sha256(
-                        status_path.read_bytes()
-                    ).hexdigest()
-                    self._log(f"public mirror publish failed category={category}")
-                    return False
-                status_path = write_public_mirror_status(
-                    self.config,
-                    self.store,
-                    runtime=runtime,
-                    publication=health,
-                )
-                digest = sha256(status_path.read_bytes()).hexdigest()
-                self._public_mirror_local_digest = digest
-                if result is not None:
-                    self._record_publish_success(digest)
-                    write_public_mirror_status(
-                        self.config,
-                        self.store,
-                        runtime=runtime,
-                        publication=self._public_mirror_health.model_copy(
-                            deep=True
-                        ),
-                    )
-                    self._public_mirror_remote_digest = digest
-                    self._log(f"public mirror published path={path}")
-                else:
-                    self._log(f"public mirror written path={path}")
-                return True
-            except Exception as exc:  # pragma: no cover - daemon boundary guard.
-                self._log(f"public mirror publish failed error={exc}")
-                return False
-
-    def _record_publish_attempt(self) -> None:
-        now = utc_now()
-        self._public_mirror_health.last_attempt_at = now
-        self._public_mirror_health.state = PublicMirrorPublishState.pending
-
-    def _record_publish_failure(self, category: PublicMirrorFailureCategory) -> None:
-        health = self._public_mirror_health
-        health.state = PublicMirrorPublishState.failed
-        health.last_failure_at = utc_now()
-        health.last_failure_category = category
-        health.retry_count = min(10, health.retry_count + 1)
-
-    def _record_publish_success(self, digest: str) -> None:
-        health = self._public_mirror_health
-        health.state = PublicMirrorPublishState.published
-        health.last_success_at = utc_now()
-        health.last_failure_at = None
-        health.last_failure_category = None
-        health.retry_count = 0
-        health.last_accepted_digest = digest
-        health.snapshot_id = digest
-
-    def _public_mirror_retry_seconds(self) -> float:
-        retry_count = self._public_mirror_health.retry_count
-        initial = self.config.public_mirror.retry_initial_seconds
-        if PUBLIC_MIRROR_RETRY_SECONDS != 30.0:
-            initial = min(initial, PUBLIC_MIRROR_RETRY_SECONDS)
-        maximum = self.config.public_mirror.retry_max_seconds
-        return min(maximum, initial * (2 ** max(0, retry_count - 1)))
-
 
 def stale_task_minutes(config: StewardConfig) -> int:
     if config.limits.stale_task_minutes is not None:
@@ -2896,3 +3109,18 @@ def _selected_item_ids(spec, consumed_item_ids: list[str]) -> list[str]:
         ids.append(value)
         seen.add(value)
     return ids
+
+
+def _failed_planner_result(error: Exception | None) -> PlanningPlannerRun:
+    message = str(error)[-2000:] if error is not None else "planner did not return a result"
+    return PlanningPlannerRun(
+        planned=[],
+        accepted_count=0,
+        proposed_count=0,
+        completed=False,
+        exit_code=1,
+        prompt_path=None,
+        transcript_path=Path("planner-unavailable.codex.jsonl"),
+        thread_id=None,
+        diagnostics={"reason_code": "planner_exception", "message": message},
+    )

@@ -4151,23 +4151,13 @@ def parse_commit_message(message: str) -> dict[str, str] | None:
 def _append_steward_task_trailer(
     config: StewardConfig, body: str, source_task_id: str
 ) -> str:
-    trailer = f"Steward-Task: {_public_task_url(config, source_task_id)}"
+    trailer = f"Steward-Task: {source_task_id}"
     body = body.strip()
     if trailer in body.splitlines():
         return body
     if not body:
         return trailer
     return f"{body}\n\n{trailer}"
-
-
-def _public_task_url(config: StewardConfig, task_id: str) -> str:
-    host = config.public_mirror.remote_host.strip().rstrip("/")
-    if host.startswith(("http://", "https://")):
-        base_url = host
-    else:
-        scheme = "http" if host.startswith(("localhost", "127.0.0.1")) else "https"
-        base_url = f"{scheme}://{host}"
-    return f"{base_url}/steward/tasks/{task_id}"
 
 
 COMMIT_MESSAGE_OUTPUT_SCHEMA = {

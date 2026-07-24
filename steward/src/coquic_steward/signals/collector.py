@@ -158,6 +158,35 @@ def collect_signal_items(
     return collections
 
 
+def persist_signal_collections(store: object, collections: list[SignalCollection]) -> tuple[int, int]:
+    """Persist provider fetches and observations through one atomic boundary.
+
+    New stores expose ``ingest_signal_collection``; the fallback preserves the
+    older test-double API without changing provider normalization semantics.
+    """
+
+    total = 0
+    created = 0
+    for collection in collections:
+        fetch = collection.fetch.model_copy(
+            update={"item_count": len(collection.items), "new_item_count": 0}
+        )
+        ingest = getattr(store, "ingest_signal_collection", None)
+        if callable(ingest):
+            observations, _signals = ingest(fetch, collection.items)
+            total += len(observations)
+            created += sum(1 for item in observations if item.dedupe_result == "new")
+            continue
+        add_items = getattr(store, "add_signal_items")
+        saved_items, new_items = add_items(collection.items)
+        getattr(store, "add_signal_fetch_run")(
+            fetch.model_copy(update={"new_item_count": new_items})
+        )
+        total += len(saved_items)
+        created += new_items
+    return total, created
+
+
 def project_signals_from_items(
     config: StewardConfig,
     items: list[SignalItem],

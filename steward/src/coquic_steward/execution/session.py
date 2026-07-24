@@ -65,6 +65,128 @@ class InvocationStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class FreshPlannerRequest:
+    """Private identity allocated for one global scheduler-planner process."""
+
+    run_id: str
+    session_id: str
+    home: Path
+    request: InvocationRequest
+
+    @property
+    def resumed(self) -> bool:
+        return self.request.provider_session_id is not None
+
+
+@dataclass(frozen=True)
+class FreshPlannerResult:
+    request: FreshPlannerRequest
+    outcome: InvocationOutcome | None
+    status: InvocationStatus
+
+
+def build_fresh_planner_request(
+    config: StewardConfig,
+    *,
+    run_id: str,
+    prompt: str,
+    output_last_message: Path,
+    output_schema: Path | None = None,
+    history_root: Path | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> FreshPlannerRequest:
+    """Build a planner request with no provider-session or resume argument."""
+
+    safe_run = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id).strip("-") or "planner"
+    session_id = f"planner-session-{secrets.token_hex(10)}"
+    home = config.private_sessions_dir / "planner" / safe_run / session_id
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # The Codex process receives a clean private home.  Sealed history is
+    # mounted by the planner container runtime; it is intentionally absent
+    # from the request's host cwd and environment.
+    request = InvocationRequest(
+        codex_bin=config.codex_bin,
+        cwd=history_root or config.private_sessions_dir,
+        prompt=prompt,
+        output_last_message=output_last_message,
+        stage=CodexStage.signal_planner,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        output_schema=output_schema,
+        sandbox="read-only",
+        provider_session_id=None,
+        role="planner",
+        session_id=session_id,
+        run_id=run_id,
+    )
+    return FreshPlannerRequest(run_id=run_id, session_id=session_id, home=home, request=request)
+
+
+class FreshPlannerSession:
+    """One-shot global planner boundary; every call allocates new identities."""
+
+    def __init__(self, config: StewardConfig, *, invoker: SessionInvoker | None = None):
+        self.config = config
+        self.invoker = invoker or LocalSessionInvoker()
+
+    def allocate(
+        self,
+        run_id: str,
+        *,
+        prompt: str,
+        output_last_message: Path,
+        output_schema: Path | None = None,
+        history_root: Path | None = None,
+    ) -> FreshPlannerRequest:
+        settings = self.config.codex_settings(CodexStage.signal_planner)
+        return build_fresh_planner_request(
+            self.config,
+            run_id=run_id,
+            prompt=prompt,
+            output_last_message=output_last_message,
+            output_schema=output_schema,
+            history_root=history_root,
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+        )
+
+    def run(
+        self,
+        run_id: str,
+        *,
+        prompt: str,
+        output_last_message: Path,
+        output_schema: Path | None = None,
+        history_root: Path | None = None,
+        api_key: bytes | str | None = None,
+        timeout_seconds: float = 1800,
+    ) -> FreshPlannerResult:
+        request = self.allocate(
+            run_id,
+            prompt=prompt,
+            output_last_message=output_last_message,
+            output_schema=output_schema,
+            history_root=history_root,
+        )
+        outcome = self.invoker.invoke(
+            request.request,
+            api_key=api_key,
+            append=lambda value: None,
+            timeout_seconds=timeout_seconds,
+            interrupt_grace_seconds=2.0,
+        )
+        status = (
+            InvocationStatus.succeeded
+            if outcome.completed
+            else InvocationStatus.interrupted
+            if outcome.interrupted
+            else InvocationStatus.failed
+        )
+        return FreshPlannerResult(request=request, outcome=outcome, status=status)
+
+
+@dataclass(frozen=True)
 class SessionResult:
     task_id: str
     pipeline_id: str
@@ -374,6 +496,7 @@ class SessionSupervisor:
         retry_of_run_id: str | None = None,
         timeout_seconds: float | None = None,
         sandbox: str | None = None,
+        run_id: str | None = None,
     ) -> SessionResult:
         selected_role = _normalize_role(role)
         api_key = self._configured_api_key(api_key)
@@ -398,6 +521,7 @@ class SessionSupervisor:
             retry_of_run_id=retry_of_run_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            run_id=run_id,
         )
         request = InvocationRequest(
             codex_bin=self.config.codex_bin,
@@ -1083,6 +1207,7 @@ class SessionSupervisor:
         resume_session: str | None = None,
         stage: CodexStage = CodexStage.signal_planner,
         sandbox: str | None = None,
+        run_id: str | None = None,
     ) -> WorkerResult:
         """Run a daemon planner turn through the injected invocation boundary."""
 
@@ -1112,6 +1237,7 @@ class SessionSupervisor:
             stage=stage,
             sandbox=sandbox or self.config.codex_sandbox,
             checkpoint_id=checkpoint_id,
+            run_id=run_id,
         )
         message = (
             result.last_message_path.read_text(encoding="utf-8")
@@ -1170,6 +1296,7 @@ class SessionSupervisor:
         retry_of_run_id: str | None,
         model: str | None,
         reasoning_effort: str | None,
+        run_id: str | None = None,
     ) -> tuple[CodexSession, TaskRun]:
         session_id = f"session-{secrets.token_hex(12)}"
         relative = f"{task.id}/{session_id}"
@@ -1194,6 +1321,7 @@ class SessionSupervisor:
             runtime_version=self.runtime_identity,
             run_checkpoint_id=checkpoint_id,
             run_provider_store_identity=self.provider_store_identity,
+            run_id=run_id,
             retry_of_run_id=retry_of_run_id,
         )
         try:

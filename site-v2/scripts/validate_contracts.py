@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "schemas"
 EXAMPLE_DIR = ROOT / "examples"
 DATASET_DIR = EXAMPLE_DIR / "steward-dataset"
+CONTROL_LOOP_DIR = EXAMPLE_DIR / "steward-control-loop"
 
 EXAMPLE_TARGETS = {
     "coverage-snapshot.json": ("evidence.schema.json", "coverageSnapshot"),
@@ -1129,6 +1130,179 @@ def validate_steward_dataset() -> int:
     return failures
 
 
+def _control_loop_validator(definition: str) -> Draft202012Validator:
+    schema = read_json(SCHEMA_DIR / "steward-control-loop.schema.json")
+    registry = Registry().with_resource(schema["$id"], Resource.from_contents(schema))
+    return Draft202012Validator(
+        {"$ref": f"{schema['$id']}#/$defs/{definition}"},
+        registry=registry,
+        format_checker=FormatChecker(),
+    )
+
+
+def _control_loop_validate(path: Path, definition: str) -> int:
+    failures = 0
+    try:
+        value = read_json(path)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"control-loop {path.relative_to(CONTROL_LOOP_DIR)} [json-invalid]: {error}")
+        return 1
+    validator = _control_loop_validator(definition)
+    for error in sorted(validator.iter_errors(value), key=lambda item: list(item.path)):
+        location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+        print(f"control-loop {path.relative_to(CONTROL_LOOP_DIR)} at {location} [schema-invalid]: {error.message}")
+        failures += 1
+    return failures
+
+
+def validate_control_loop_fixture() -> int:
+    """Validate the raw peer fixture and its graph/manifest invariants."""
+
+    failures = 0
+    if not CONTROL_LOOP_DIR.is_dir():
+        print("control-loop fixture is missing")
+        return 1
+    failures += _control_loop_validate(CONTROL_LOOP_DIR / "epoch.json", "epoch")
+    failures += _control_loop_validate(CONTROL_LOOP_DIR / "current.json", "current")
+    epoch = read_json(CONTROL_LOOP_DIR / "epoch.json")
+    current = read_json(CONTROL_LOOP_DIR / "current.json")
+    epoch_id = epoch.get("epochId")
+    if current.get("epochId") != epoch_id:
+        print("control-loop current.json [epoch-mismatch]")
+        failures += 1
+
+    records: list[dict[str, object]] = []
+    event_ids: set[str] = set()
+    sequences: list[int] = []
+    for path in sorted((CONTROL_LOOP_DIR / "events").rglob("*.jsonl")):
+        relative = path.relative_to(CONTROL_LOOP_DIR / "events").as_posix()
+        if not re.fullmatch(r"\d{4}/\d{2}/\d{2}\.jsonl", relative):
+            print(f"control-loop events/{relative} [unsafe-daily-path]")
+            failures += 1
+        data = path.read_bytes()
+        if data and not data.endswith(b"\n"):
+            print(f"control-loop events/{relative} [incomplete-final-line]")
+            failures += 1
+        for line_number, line in enumerate(data.splitlines(), 1):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as error:
+                print(f"control-loop events/{relative}:{line_number} [jsonl-invalid]: {error}")
+                failures += 1
+                continue
+            validator = _control_loop_validator("event")
+            errors = list(validator.iter_errors(value))
+            if errors:
+                failures += len(errors)
+                for error in errors:
+                    print(f"control-loop events/{relative}:{line_number} [schema-invalid]: {error.message}")
+                continue
+            event_id = value["eventId"]
+            sequence = value["sequence"]
+            if event_id in event_ids:
+                print(f"control-loop events/{relative}:{line_number} [duplicate-event-id]")
+                failures += 1
+            if sequence in sequences:
+                print(f"control-loop events/{relative}:{line_number} [duplicate-sequence]")
+                failures += 1
+            if value["epochId"] != epoch_id:
+                print(f"control-loop events/{relative}:{line_number} [epoch-mismatch]")
+                failures += 1
+            event_ids.add(event_id)
+            sequences.append(sequence)
+            records.append(value)
+    if sequences and sequences != list(range(min(sequences), max(sequences) + 1)):
+        print("control-loop events [non-monotonic-sequence]")
+        failures += 1
+
+    run_ids: set[str] = set()
+    for run_root in sorted((CONTROL_LOOP_DIR / "planner-runs").iterdir()):
+        if not run_root.is_dir() or run_root.name.startswith("."):
+            print(f"control-loop planner-runs/{run_root.name} [visible-unsealed-or-special]")
+            failures += 1
+            continue
+        run_ids.add(run_root.name)
+        manifest_path = run_root / "manifest.json"
+        if not manifest_path.exists():
+            print(f"control-loop planner-runs/{run_root.name} [manifest-missing]")
+            failures += 1
+            continue
+        failures += _control_loop_validate(manifest_path, "manifest")
+        try:
+            manifest = read_json(manifest_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if manifest.get("epochId") != epoch_id or manifest.get("plannerRunId") != run_root.name:
+            print(f"control-loop planner-runs/{run_root.name} [manifest-identity]")
+            failures += 1
+        descriptors = {item.get("path"): item for item in manifest.get("files", []) if isinstance(item, dict)}
+        actual: dict[str, Path] = {}
+        for path in run_root.rglob("*"):
+            if path == manifest_path:
+                continue
+            if path.is_symlink() or not path.is_file():
+                print(f"control-loop planner-runs/{run_root.name} [special-file]")
+                failures += 1
+                continue
+            relative = path.relative_to(run_root).as_posix()
+            if not _dataset_path_is_safe(relative):
+                print(f"control-loop planner-runs/{run_root.name}/{relative} [unsafe-path]")
+                failures += 1
+            actual[relative] = path
+        if set(actual) != set(descriptors):
+            print(f"control-loop planner-runs/{run_root.name} [manifest-file-set]")
+            failures += 1
+        for relative, path in actual.items():
+            descriptor = descriptors.get(relative)
+            if not isinstance(descriptor, dict):
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if descriptor.get("byteSize") != path.stat().st_size or descriptor.get("sha256") != digest:
+                print(f"control-loop planner-runs/{run_root.name}/{relative} [manifest-hash]")
+                failures += 1
+
+    proposal_ordinals: dict[str, list[int]] = {}
+    outcomes: set[str] = set()
+    for event in records:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        proposal = payload.get("proposal")
+        if proposal is None and "proposalId" in payload:
+            proposal = payload
+        if not isinstance(proposal, dict):
+            continue
+        failures += _control_loop_validate_value(proposal, "proposal", event.get("eventId", "proposal"))
+        run_id = proposal.get("plannerRunId")
+        if isinstance(run_id, str):
+            proposal_ordinals.setdefault(run_id, []).append(proposal.get("ordinal", 0))
+        outcome = proposal.get("outcome")
+        if isinstance(outcome, str):
+            outcomes.add(outcome)
+        if outcome in {"accepted", "duplicate"} and not isinstance(proposal.get("taskId"), str):
+            print(f"control-loop {event.get('eventId')} [proposal-task-missing]")
+            failures += 1
+    for run_id, ordinals in proposal_ordinals.items():
+        if ordinals != list(range(1, len(ordinals) + 1)):
+            print(f"control-loop planner {run_id} [proposal-ordinal]")
+            failures += 1
+    if not {"accepted", "invalid", "policy_rejected", "duplicate", "capacity_skipped"} <= outcomes:
+        print("control-loop [proposal-outcome-coverage]")
+        failures += 1
+    if not {"planner-synthetic-failed", "planner-synthetic-success"} <= run_ids:
+        print("control-loop [fresh-run-fixtures-missing]")
+        failures += 1
+    return failures
+
+
+def _control_loop_validate_value(value: object, definition: str, label: object) -> int:
+    failures = 0
+    for error in _control_loop_validator(definition).iter_errors(value):
+        print(f"control-loop {label} [schema-invalid]: {error.message}")
+        failures += 1
+    return failures
+
+
 def main() -> int:
     failures = (
         validate_json_contracts()
@@ -1137,6 +1311,7 @@ def main() -> int:
         + validate_steward_observability()
         + validate_steward_growth()
         + validate_steward_dataset()
+        + validate_control_loop_fixture()
     )
     if failures:
         print(f"contract validation failed with {failures} finding(s)")

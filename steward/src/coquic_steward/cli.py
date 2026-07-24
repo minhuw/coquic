@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import signal
+import json
 
 import typer
 
@@ -27,7 +28,7 @@ from .core.models import (
     default_workflow_for_kind,
 )
 from .planning import run_planner
-from .public_mirror import publish_public_mirror, write_public_mirror
+from .control_loop import ControlLoopArchive
 from .signals import (
     collect_signal_items,
     project_signals_from_items,
@@ -117,14 +118,6 @@ def daemon(
     try:
         with acquire_daemon_lock(config):
             daemon_ = StewardDaemon(config, store, logger=typer.echo)
-            mirror_state = "enabled" if config.public_mirror.enabled else "disabled"
-            publication_state = (
-                "enabled" if config.public_mirror.publish else "disabled"
-            )
-            typer.echo(
-                "Steward public mirror: "
-                f"{mirror_state}; publication: {publication_state}"
-            )
             if once:
                 daemon_.startup_reconcile()
                 result = daemon_.tick(
@@ -256,32 +249,6 @@ def tick(
     )
 
 
-@app.command("publish-public-state")
-def publish_public_state(
-    publish: bool = typer.Option(
-        False,
-        "--publish",
-        help="Upload the public mirror using [steward.public_mirror] SSH settings.",
-    ),
-    output: Path | None = typer.Option(
-        None,
-        "--output",
-        "-o",
-        help="Write the public mirror to this path instead of the configured output.",
-    ),
-) -> None:
-    store, config = _context()
-    if publish:
-        path, result = publish_public_mirror(config, store, force=True)
-        if result is not None and not result.ok:
-            typer.echo(result.stderr or result.stdout, err=True)
-            raise typer.Exit(result.returncode)
-        typer.echo(f"published {path}")
-        return
-    path = write_public_mirror(config, store, output_path=output)
-    typer.echo(str(path))
-
-
 @app.command("audit-invariants")
 def audit_invariants() -> None:
     store, _ = _context()
@@ -292,6 +259,38 @@ def audit_invariants() -> None:
     for finding in findings:
         typer.echo(finding)
     raise typer.Exit(1)
+
+
+@app.command()
+def diagnostics() -> None:
+    """Print bounded local scheduler and raw archive diagnostics."""
+
+    store, config = _context()
+    ledger = getattr(store, "control_loop_ledger", None)
+    archive = ControlLoopArchive(config, task_root=config)
+    visible_runs: list[str] = []
+    invalid_runs: list[str] = []
+    try:
+        archive.ensure_epoch(authoritative=config.ensure_epoch())
+        if archive.planner_runs_root.exists():
+            visible_runs = sorted(
+                path.name
+                for path in archive.planner_runs_root.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            )
+            invalid_runs = [
+                run_id for run_id in visible_runs if not archive.verify_planner_run(run_id)
+            ]
+    except Exception as exc:
+        invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
+    payload = {
+        "epochId": ledger.epoch_id if ledger is not None else None,
+        "planningBlocked": bool(ledger and ledger.planning_blocked),
+        "pendingArchiveEvents": len(ledger.outbox(limit=10_000)) if ledger else 0,
+        "visiblePlannerRuns": visible_runs,
+        "invalidPlannerRuns": invalid_runs,
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
 
 
 def _run_until_stopped(daemon_: StewardDaemon) -> None:

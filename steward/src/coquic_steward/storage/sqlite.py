@@ -112,6 +112,7 @@ from .schema import (
     DaemonStateRow,
     ValidationRow,
 )
+from ..control_loop import ControlLoopLedger
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 WORKER_REVISION_STARTED_EVENTS = {
@@ -135,6 +136,13 @@ class SQLiteTaskStore:
     def __init__(self, path: Path, on_change: Callable[[], None] | None = None):
         self.path = path
         self.on_change = on_change
+        # A legacy store is opened only long enough for the explicit database
+        # migration path.  Do not create post-2.0 epoch/ledger tables in that
+        # source database: copying those tables would make the new root look
+        # like an already-published control loop with the wrong epoch.
+        self._legacy_database = (
+            path.name == "steward.sqlite" and path.parent.name == "steward"
+        )
         self.path_codec = PathCodec(path.parent, legacy_dir=path.parent / "steward")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", future=True)
@@ -145,6 +153,20 @@ class SQLiteTaskStore:
         except OSError:
             pass
         self._migrate_schema()
+        # The control-loop ledger starts at the same immutable epoch as the
+        # task archive.  No pre-2.0 rows are inspected or imported.
+        if self._legacy_database:
+            self.control_loop = None
+        else:
+            self._ensure_archive_epoch()
+            try:
+                epoch_value = json.loads(
+                    self.archive_epoch_path.read_text(encoding="utf-8")
+                )
+                epoch_id = epoch_value.get("epochId")
+            except (OSError, json.JSONDecodeError):
+                epoch_id = None
+            self.control_loop = ControlLoopLedger(self.path, epoch_id=epoch_id)
         self._ensure_task_archive_sync_health()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
@@ -152,7 +174,8 @@ class SQLiteTaskStore:
     def add_task(
         self, spec: TaskSpec, *, dedupe_key: str | None = None
     ) -> tuple[TaskRecord, bool]:
-        self._ensure_archive_epoch()
+        if not self._legacy_database:
+            self._ensure_archive_epoch()
         metadata = dict(spec.metadata)
         if dedupe_key is not None:
             existing = self._find_active_dedupe(dedupe_key)
@@ -752,6 +775,7 @@ class SQLiteTaskStore:
         runtime_version: str,
         run_checkpoint_id: str | None,
         run_provider_store_identity: str,
+        run_id: str | None = None,
         retry_of_run_id: str | None = None,
     ) -> tuple[CodexSession, TaskRun]:
         """Allocate a session UID and its mandatory first run atomically."""
@@ -841,6 +865,7 @@ class SQLiteTaskStore:
                         updated_at=now,
                     )
                     run_item = TaskRun(
+                        id=run_id or new_run_id(),
                         task_id=task_id,
                         pipeline_id=pipeline_id,
                         session_id=session_id,
@@ -1409,6 +1434,61 @@ class SQLiteTaskStore:
         with Session(self.engine) as session, session.begin():
             session.add(signal_fetch_run_to_row(run))
         self._notify_change()
+
+    @property
+    def control_loop_ledger(self) -> ControlLoopLedger:
+        return self.control_loop
+
+    def ingest_signal_collection(self, fetch: object, items: list[object], *, wakeup: object | None = None):
+        """Persist one normalized provider collection atomically.
+
+        This is the scheduler-facing replacement for per-item insertion.  The
+        legacy methods remain available for task-archive compatibility, while
+        every new observation goes through the control-loop graph ledger.
+        """
+
+        result = self.control_loop.ingest_fetch(fetch, items, wakeup=wakeup)
+        # Keep the existing scheduler query surface populated while the raw
+        # control-loop ledger becomes the causal source of truth.  The legacy
+        # rows contain only normalized SignalItem fields and no provider or
+        # session internals.
+        saved_items, created_items = self.add_signal_items(
+            items,
+            suppression_hours=24,
+        )
+        fetch_run = fetch
+        if hasattr(fetch, "model_copy"):
+            fetch_run = fetch.model_copy(
+                update={
+                    "item_count": len(saved_items),
+                    "new_item_count": created_items,
+                }
+            )
+        self.add_signal_fetch_run(fetch_run)
+        self._notify_change()
+        return saved_items, result[1], created_items
+
+    ingest_signal_fetch = ingest_signal_collection
+
+    def claim_control_loop_planner_run(self, planner_run_id: str, signal_ids: list[str], active_task_ids: list[str] = (), *, prompt: dict[str, object] | None = None, attempt: int = 1):
+        result = self.control_loop.claim_planner_run(
+            planner_run_id,
+            signal_ids,
+            active_task_ids,
+            prompt=prompt,
+            attempt=attempt,
+        )
+        self._notify_change()
+        return result
+
+    claim_planner_run = claim_control_loop_planner_run
+
+    def complete_control_loop_planner_run(self, planner_run_id: str, dispositions: list[object], **kwargs: object):
+        result = self.control_loop.complete_planner_run(planner_run_id, dispositions, **kwargs)
+        self._notify_change()
+        return result
+
+    complete_planner_run = complete_control_loop_planner_run
 
     def list_signal_fetch_runs(
         self, *, limit: int | None = None

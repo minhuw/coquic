@@ -259,3 +259,24 @@ Deployment creates `/opt/coquic-demo/steward/tasks` and its sibling cache but
 does not provision receiver credentials. An operator must point Plan 004's
 forced receiver at exactly `/opt/coquic-demo/steward/tasks` using the existing
 ownership and SSH policy before live publication begins.
+# Durable raw control-loop peer (Steward 2.0)
+
+Steward publishes `$COQUIC_HOME/control-loop/` as a canonical public archive
+peer of `$COQUIC_HOME/tasks/`.  Both roots share one immutable post-2.0 epoch
+ID and start/policy boundary, while their format versions remain independent.
+Daily complete-line JSONL preserves every normalized fetch and observation,
+including repeated observations that deduplicate to one canonical signal.  The
+archive records explicit observation -> signal -> planner run -> proposal ->
+optional task IDs and terminal planner-run manifests.  `current.json` is only a
+bounded atomic projection; the event ledger is authoritative history.
+
+Global scheduler-planner attempts are fresh isolated Codex sessions.  Sealed
+prior runs are optional read-only untrusted context; no resume/thread file or
+provider session continuity is permitted.  Epoch or visible-byte conflicts
+block new planning but never stop active task pipelines; temporary
+materialization lag retries asynchronously.
+
+The old sanitized Steward mirror is retired after task consumers use the raw
+task root.  Existing legacy mirror bytes are inert and are not automatically
+deleted.  Plan 009 owns transfer of both roots and Plan 010 owns Site V2
+import/index/UI; this decision adds neither.

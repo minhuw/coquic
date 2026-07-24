@@ -51,9 +51,24 @@ class ProposedTask(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProposalDisposition(BaseModel):
+    """One ordinal planner output, including proposals that were rejected."""
+
+    ordinal: int = Field(ge=1)
+    outcome: str
+    reason_code: str
+    signal_ids: list[str] = Field(default_factory=list)
+    dedupe_key: str | None = None
+    task_id: str | None = None
+    proposal: dict[str, Any] = Field(default_factory=dict)
+
+
 class VerifiedPlan(BaseModel):
     planned: list[tuple[TaskSpec, str]] = Field(default_factory=list)
     consumed_item_ids: list[str] = Field(default_factory=list)
+    dispositions: list[ProposalDisposition] = Field(default_factory=list)
+    invalid_output: bool = False
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class PlanVerifier:
@@ -73,28 +88,40 @@ class PlanVerifier:
         raw_json: str,
         signals: ProjectSignals,
         active_tasks: list[ActiveTaskSummary],
+        *,
+        capacity: int | None = None,
     ) -> VerifiedPlan:
         try:
             decoded = json.loads(raw_json)
         except json.JSONDecodeError:
-            return VerifiedPlan()
+            return VerifiedPlan(
+                invalid_output=True,
+                diagnostics={"reason_code": "invalid_output", "message": "planner output is not JSON"},
+            )
         consumed = _consumed_item_ids(decoded, signals)
         proposals = decoded.get("tasks") if isinstance(decoded, dict) else None
         if not isinstance(proposals, list):
-            return VerifiedPlan(consumed_item_ids=consumed)
+            return VerifiedPlan(
+                invalid_output=True,
+                diagnostics={"reason_code": "invalid_output", "message": "planner output has no task list"},
+            )
 
         accepted: list[tuple[TaskSpec, str]] = []
+        dispositions: list[ProposalDisposition] = []
         seen: set[str] = set()
-        rejected = False
         active_dedupes = {
             task.dedupe_key for task in active_tasks if task.dedupe_key is not None
         }
+        active_tasks_by_dedupe = {
+            task.dedupe_key: task.id
+            for task in active_tasks
+            if task.dedupe_key is not None
+        }
         active_kinds = {task.kind for task in active_tasks}
         evidence_ids = _evidence_ids(signals)
-        for item in proposals:
-            if len(accepted) >= self.max_tasks:
-                break
-            proposed = _verified_proposal(
+        limit = self.max_tasks if capacity is None else max(0, min(self.max_tasks, capacity))
+        for ordinal, item in enumerate(proposals, 1):
+            proposed, reason = _verified_proposal_with_reason(
                 item,
                 seen=seen,
                 active_dedupes=active_dedupes,
@@ -102,19 +129,63 @@ class PlanVerifier:
                 evidence_ids=evidence_ids,
                 signals=signals,
             )
+            evidence = _proposal_signal_ids(item, signals)
             if proposed is None:
-                rejected = True
+                outcome = "policy_rejected" if reason.startswith("policy_") else "invalid"
+                if reason in {"duplicate_dedupe", "active_dedupe"}:
+                    outcome = "duplicate"
+                dispositions.append(
+                    ProposalDisposition(
+                        ordinal=ordinal,
+                        outcome=outcome,
+                        reason_code=reason,
+                        signal_ids=evidence,
+                        dedupe_key=_proposal_dedupe(item),
+                        task_id=(
+                            active_tasks_by_dedupe.get(_proposal_dedupe(item))
+                            if reason == "active_dedupe"
+                            else None
+                        ),
+                        proposal=item if isinstance(item, dict) else {},
+                    )
+                )
                 continue
+            if len(accepted) >= limit:
+                dispositions.append(
+                    ProposalDisposition(
+                        ordinal=ordinal,
+                        outcome="capacity_skipped",
+                        reason_code="capacity_exhausted",
+                        signal_ids=evidence,
+                        dedupe_key=proposed.dedupe_key,
+                        proposal=proposed.model_dump(mode="json"),
+                    )
+                )
+                continue
+            task_spec = _task_spec_from_proposal(proposed, signals.items)
             accepted.append(
                 (
-                    _task_spec_from_proposal(proposed, signals.items),
+                    task_spec,
                     proposed.dedupe_key,
                 )
             )
             seen.add(proposed.dedupe_key)
+            dispositions.append(
+                ProposalDisposition(
+                    ordinal=ordinal,
+                    outcome="accepted",
+                    reason_code="accepted",
+                    signal_ids=evidence,
+                    dedupe_key=proposed.dedupe_key,
+                    proposal=proposed.model_dump(mode="json"),
+                )
+            )
+        non_consuming = {"invalid", "policy_rejected", "capacity_skipped", "duplicate"}
+        can_consume = not any(item.outcome in non_consuming for item in dispositions)
         return VerifiedPlan(
             planned=accepted,
-            consumed_item_ids=[] if rejected else consumed,
+            consumed_item_ids=consumed if can_consume else [],
+            dispositions=dispositions,
         )
 
 
@@ -170,6 +241,22 @@ def _consumed_item_ids(
     return consumed
 
 
+def _proposal_dedupe(item: object) -> str | None:
+    if isinstance(item, dict) and isinstance(item.get("dedupe_key"), str):
+        return item["dedupe_key"]
+    return None
+
+
+def _proposal_signal_ids(item: object, signals: ProjectSignals) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    candidates = item.get("evidence")
+    if not isinstance(candidates, list):
+        candidates = []
+    allowed = {signal.id for signal in signals.items}
+    return [value for value in candidates if isinstance(value, str) and value in allowed]
+
+
 def _valid_text(value: str, max_length: int) -> bool:
     stripped = value.strip()
     return bool(stripped) and len(stripped) <= max_length
@@ -198,6 +285,44 @@ def _verified_proposal(
     ):
         return None
     return proposed
+
+
+def _verified_proposal_with_reason(
+    item: object,
+    *,
+    seen: set[str],
+    active_dedupes: set[str],
+    active_kinds: set[str],
+    evidence_ids: set[str],
+    signals: ProjectSignals,
+) -> tuple[ProposedTask | None, str]:
+    try:
+        proposed = ProposedTask.model_validate(item)
+    except ValidationError:
+        return None, "invalid_shape"
+    if not _valid_text(proposed.dedupe_key, 160):
+        return None, "invalid_dedupe_key"
+    if proposed.dedupe_key in seen:
+        return None, "duplicate_dedupe"
+    if proposed.dedupe_key in active_dedupes:
+        return None, "active_dedupe"
+    if proposed.kind.value in active_kinds:
+        return None, "policy_active_kind"
+    if not _valid_text(proposed.title, 200):
+        return None, "invalid_title"
+    if not _valid_text(proposed.prompt, 10_000):
+        return None, "invalid_prompt"
+    if not proposed.evidence:
+        return None, "invalid_missing_evidence"
+    if any(evidence not in evidence_ids for evidence in proposed.evidence):
+        return None, "invalid_evidence_id"
+    if not _metadata_is_bounded(proposed.metadata):
+        return None, "policy_metadata_too_large"
+    if not _feature_issue_proposal_is_safe(proposed, signals):
+        return None, "policy_feature_issue_scope"
+    if proposed.worker not in PLANNABLE_WORKERS:
+        return None, "policy_worker"
+    return proposed, "accepted"
 
 
 def _proposal_is_acceptable(

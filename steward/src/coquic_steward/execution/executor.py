@@ -348,15 +348,54 @@ class StewardExecutor:
         except KeyError:
             action = None
         action = action or predecessor.checkpoint_id
+        events = self.store.events(task.id)
         if action and any(
             event.kind == "pipeline.phase.finished"
             and event.data.get("pipeline_id") == pipeline.id
             and event.data.get("output", {}).get("action_id") == action
-            for event in self.store.events(task.id)
+            for event in events
         ):
-            return None
+            phase = self._pipeline_cursor(task.id, pipeline.id)
+            return AdvanceResult(
+                task.id,
+                pipeline.id,
+                phase,
+                phase,
+                "already_ingested",
+                action_id=action,
+                progressed=False,
+            )
         phase = self._pipeline_cursor(task.id, pipeline.id)
         in_progress = self._in_progress_action(task.id, pipeline.id, phase)
+        if in_progress is None and action is not None:
+            latest_started_action = None
+            action_state = None
+            for event in events:
+                if event.data.get("pipeline_id") != pipeline.id:
+                    continue
+                if (
+                    event.kind == "pipeline.phase.started"
+                    and event.data.get("phase") == phase.value
+                ):
+                    latest_started_action = event.data.get("action_id")
+                    if latest_started_action == action:
+                        action_state = "active"
+                elif (
+                    event.kind == "pipeline.phase.interrupted"
+                    and event.data.get("phase") == phase.value
+                    and event.data.get("action_id") == action
+                ):
+                    action_state = "interrupted"
+            if latest_started_action == action and action_state == "interrupted":
+                in_progress = AdvanceResult(
+                    task.id,
+                    pipeline.id,
+                    phase,
+                    None,
+                    "interrupted",
+                    action_id=action,
+                    progressed=False,
+                )
         if in_progress is None:
             return None
         if action is not None and in_progress.action_id != action:

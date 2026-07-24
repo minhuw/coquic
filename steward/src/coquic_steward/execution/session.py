@@ -996,15 +996,35 @@ class SessionSupervisor:
             session.home_uid,
         )
 
-    def stop_container(self, task_id: str | None = None, *, timeout: float | None = None) -> None:
-        if self.runtime is not None:
-            self.runtime.stop(timeout=timeout)
-            return
+    def stop_container(
+        self, task_id: str | None = None, *, timeout: float | None = None
+    ) -> bool:
+        runtime = self.runtime
+        if runtime is not None:
+            runtime.stop(timeout=timeout)
+            inspection = runtime.inspect()
+            if inspection.running:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.timeout,
+                    "task container remained running after stop",
+                )
+            return True
         if task_id is None:
             raise ValueError("task_id is required for a task-scoped runtime")
         runtime = self._runtimes.get(task_id)
-        if runtime is not None:
-            runtime.stop(timeout=timeout)
+        if runtime is None and self.runtime_factory is not None:
+            runtime = self.runtime_factory(self.store.get(task_id))
+            self._runtimes[task_id] = runtime
+        if runtime is None:
+            return False
+        runtime.stop(timeout=timeout)
+        inspection = runtime.inspect()
+        if inspection.running:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.timeout,
+                "task container remained running after stop",
+            )
+        return True
 
     def reconcile_container(
         self,

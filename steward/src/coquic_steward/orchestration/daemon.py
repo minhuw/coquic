@@ -248,7 +248,11 @@ class StewardDaemon:
                         # The durable reconciliation event remains evidence even
                         # when an older task row cannot accept a terminal block.
                         pass
+                if self._shutdown_event.is_set():
+                    break
             self._reconciliation = outcomes
+            if self._shutdown_event.is_set():
+                return tuple(outcomes)
             self._startup_complete = True
             with self._runtime_lock:
                 self.runtime.lifecycle = DaemonLifecycleState.running
@@ -905,7 +909,7 @@ class StewardDaemon:
                 return None
         result = self._session_result_from_run(saved)
         try:
-            self.executor.reconcile_session_result(run.id, result)
+            reconciled = self.executor.reconcile_session_result(run.id, result)
         except Exception as exc:
             return ReconciliationOutcome(
                 task.id,
@@ -913,6 +917,13 @@ class StewardDaemon:
                 "complete run result conflicts with its durable phase",
                 run_id=run.id,
                 evidence={"error": exc.__class__.__name__},
+            )
+        if reconciled is None:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "complete run result did not advance its durable phase",
+                run_id=run.id,
             )
         self._add_recovery_event_once(
             task.id,
@@ -1107,12 +1118,16 @@ class StewardDaemon:
                 {"predecessor_run_id": predecessor.id, "decision": "resume"},
             )
             try:
-                resume_result = self.session_supervisor.resume_with_retries(
-                    predecessor.id,
-                    prompt=prompt,
-                    max_attempts=self.config.resume_attempt_limit,
-                    cwd=session.cwd,
-                    checkpoint_id=predecessor.checkpoint_id,
+                resume_result = self._await_recovery_operation(
+                    task,
+                    predecessor,
+                    lambda: self.session_supervisor.resume_with_retries(
+                        predecessor.id,
+                        prompt=prompt,
+                        max_attempts=self.config.resume_attempt_limit,
+                        cwd=session.cwd,
+                        checkpoint_id=predecessor.checkpoint_id,
+                    ),
                 )
             except Exception as exc:
                 return ReconciliationOutcome(
@@ -1122,6 +1137,8 @@ class StewardDaemon:
                     run_id=predecessor.id,
                     evidence={"error": exc.__class__.__name__},
                 )
+            if isinstance(resume_result, ReconciliationOutcome):
+                return resume_result
             if resume_result.category is ResumeCategory.success:
                 assert resume_result.result is not None
                 return self._ingest_recovered_result(
@@ -1160,9 +1177,13 @@ class StewardDaemon:
             },
         )
         try:
-            recovered = self.session_supervisor.recover(
-                predecessor.id,
-                cwd=session.cwd,
+            recovered = self._await_recovery_operation(
+                task,
+                predecessor,
+                lambda: self.session_supervisor.recover(
+                    predecessor.id,
+                    cwd=session.cwd,
+                ),
             )
         except Exception as exc:
             return ReconciliationOutcome(
@@ -1172,6 +1193,8 @@ class StewardDaemon:
                 run_id=predecessor.id,
                 evidence={"error": exc.__class__.__name__, "category": category},
             )
+        if isinstance(recovered, ReconciliationOutcome):
+            return recovered
         if recovered.category is not ResumeCategory.success or recovered.result is None:
             return ReconciliationOutcome(
                 task.id,
@@ -1187,6 +1210,86 @@ class StewardDaemon:
             result=recovered.result,
         )
 
+    def _await_recovery_operation(
+        self,
+        task: TaskRecord,
+        predecessor: object,
+        operation: Callable[[], object],
+    ) -> object | ReconciliationOutcome:
+        """Wait only until recovery completes or exposes durable live ownership."""
+
+        completed = threading.Event()
+        state: dict[str, object] = {}
+
+        def invoke() -> None:
+            try:
+                state["result"] = operation()
+            except BaseException as exc:
+                state["error"] = exc
+            finally:
+                completed.set()
+
+        threading.Thread(
+            target=invoke,
+            name=f"steward-recovery-{task.id}",
+            daemon=True,
+        ).start()
+        while not completed.wait(0.05):
+            successor = self._running_recovery_successor(task.id, predecessor.id)
+            if self._shutdown_event.is_set():
+                run_id = successor.id if successor is not None else predecessor.id
+                try:
+                    self.session_supervisor.interrupt(
+                        run_id,
+                        force=self._force_shutdown_event.is_set(),
+                        grace_seconds=0.0,
+                    )
+                except Exception:
+                    pass
+                completed.wait(timeout=0.25)
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.interrupted,
+                    "session recovery interrupted for daemon shutdown",
+                    run_id=run_id,
+                )
+            if successor is not None:
+                self._adopted_runs[task.id] = successor.id
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.adopted,
+                    "matching live recovery wrapper adopted",
+                    run_id=successor.id,
+                )
+            self._touch_heartbeat()
+        error = state.get("error")
+        if isinstance(error, BaseException):
+            raise error
+        return state["result"]
+
+    def _running_recovery_successor(
+        self, task_id: str, predecessor_run_id: str
+    ) -> object | None:
+        lineage = {predecessor_run_id}
+        selected = None
+        pending = list(self.store.list_runs(task_id))
+        changed = True
+        while changed:
+            changed = False
+            for run in pending:
+                if run.id in lineage:
+                    continue
+                if (
+                    run.resume_of_run_id in lineage
+                    or run.retry_of_run_id in lineage
+                    or run.parent_run_id in lineage
+                ):
+                    lineage.add(run.id)
+                    changed = True
+                    if str(run.state) == "running":
+                        selected = run
+        return selected
+
     def _ingest_recovered_result(
         self,
         task: TaskRecord,
@@ -1197,7 +1300,9 @@ class StewardDaemon:
     ) -> ReconciliationOutcome:
         selected = result or self._session_result_from_run(recovered_run)
         try:
-            self.executor.reconcile_session_result(predecessor.id, selected)
+            reconciled = self.executor.reconcile_session_result(
+                predecessor.id, selected
+            )
         except Exception as exc:
             return ReconciliationOutcome(
                 task.id,
@@ -1205,6 +1310,13 @@ class StewardDaemon:
                 "recovered result conflicts with its durable phase",
                 run_id=recovered_run.id,
                 evidence={"error": exc.__class__.__name__},
+            )
+        if reconciled is None:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "recovered result did not advance its durable phase",
+                run_id=recovered_run.id,
             )
         self._add_recovery_event_once(
             task.id,
@@ -1465,12 +1577,21 @@ class StewardDaemon:
 
     seal_terminal_task = finalize_terminal_task
 
+    def request_shutdown_from_signal(self, *, force: bool = False) -> None:
+        """Set signal-safe shutdown intent without locks or persistent writes."""
+
+        self.request_shutdown(force=force)
+
     def request_shutdown(self, *, force: bool = False) -> None:
-        """Request bounded shutdown; signal handlers call only this method."""
+        """Set shutdown intent without locks or persistent writes."""
 
         self._shutdown_event.set()
         if force:
             self._force_shutdown_event.set()
+
+    def _enter_stopping(self, *, force: bool) -> None:
+        """Persist stopping state after control has left any signal handler."""
+
         with self._runtime_lock:
             self.runtime.lifecycle = DaemonLifecycleState.stopping
             self.runtime.state = DaemonRuntimeState.stopping
@@ -1492,6 +1613,8 @@ class StewardDaemon:
         """Stop workers and owned containers while retaining restart state."""
 
         self.request_shutdown(force=force)
+        force = force or self._force_shutdown_event.is_set()
+        self._enter_stopping(force=force)
         deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
         running_runs: list[tuple[str, str]] = []
         tasks = sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id)
@@ -1662,8 +1785,8 @@ class StewardDaemon:
     def _stop_task_container(self, task_id: str) -> bool:
         if self.session_supervisor is None:
             return False
-        self.session_supervisor.stop_container(task_id, timeout=1)
-        return True
+        stopped = self.session_supervisor.stop_container(task_id, timeout=1)
+        return stopped is not False
 
     def start_task_sync(self) -> None:
         """Start immediate and monotonic minute-cadence raw synchronization."""
@@ -2378,17 +2501,19 @@ class StewardDaemon:
         )
 
     def run_forever(self) -> None:
-        self.startup_reconcile()
-        self.start_task_sync()
-        self._start_public_mirror_sync()
-        with self._worker_pool_lock:
-            if self._worker_pool is None:
-                self._worker_pool = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=max(1, self.config.limits.max_active_tasks),
-                    thread_name_prefix="steward-task",
-                )
         self._start_heartbeat_thread()
         try:
+            self.startup_reconcile()
+            if self._shutdown_event.is_set():
+                return
+            self.start_task_sync()
+            self._start_public_mirror_sync()
+            with self._worker_pool_lock:
+                if self._worker_pool is None:
+                    self._worker_pool = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max(1, self.config.limits.max_active_tasks),
+                        thread_name_prefix="steward-task",
+                    )
             while not self._shutdown_event.is_set():
                 try:
                     trigger = wait_for_scheduler_event(

@@ -301,7 +301,7 @@ def _run_until_stopped(daemon_: StewardDaemon) -> None:
     def request_stop(signum, _frame) -> None:
         nonlocal signal_count
         signal_count += 1
-        daemon_.request_shutdown(force=signal_count > 1)
+        daemon_.request_shutdown_from_signal(force=signal_count > 1)
 
     try:
         for selected in (signal.SIGINT, signal.SIGTERM):

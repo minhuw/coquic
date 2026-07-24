@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import shutil
 import subprocess
 import threading
@@ -37,6 +38,7 @@ from coquic_steward.execution.session import (
     worktree_checkpoint,
 )
 from coquic_steward.execution.task_archive import TaskArchiveWriter
+from coquic_steward.cli import _run_until_stopped
 from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
 from coquic_steward.orchestration.preflight import (
     StewardPreflightError,
@@ -410,7 +412,10 @@ def test_complete_atomic_result_is_ingested_once(config, monkeypatch):
     monkeypatch.setattr(
         daemon.executor,
         "reconcile_session_result",
-        lambda predecessor, result: ingested.append((predecessor, result.run_id)),
+        lambda predecessor, result: (
+            ingested.append((predecessor, result.run_id))
+            or SimpleNamespace(status="ingested")
+        ),
     )
 
     first = daemon.startup_reconcile()[0]
@@ -429,7 +434,11 @@ def test_exact_id_resume_is_wired_and_persisted_without_private_identity(
     task, _, run = _interrupted_run(config, store)
     supervisor = FakeSupervisor(config, store)
     daemon = StewardDaemon(config, store, session_supervisor=supervisor)
-    monkeypatch.setattr(daemon.executor, "reconcile_session_result", lambda *_: None)
+    monkeypatch.setattr(
+        daemon.executor,
+        "reconcile_session_result",
+        lambda *_: SimpleNamespace(status="ingested"),
+    )
 
     outcome = daemon.startup_reconcile()[0]
 
@@ -444,6 +453,47 @@ def test_exact_id_resume_is_wired_and_persisted_without_private_identity(
     assert "private-provider-id" not in json.dumps(decisions[-1].data)
 
 
+def test_shutdown_interrupts_blocking_startup_resume(config):
+    store = TaskStore(config.db_path)
+    task, _, predecessor = _interrupted_run(config, store)
+
+    class BlockingSupervisor(FakeSupervisor):
+        def __init__(self, config, store):
+            super().__init__(config, store)
+            self.resume_started = threading.Event()
+            self.release_resume = threading.Event()
+
+        def resume_with_retries(self, run_id, **_kwargs):
+            self.resume_started.set()
+            self.release_resume.wait(timeout=2)
+            return ResumeResult(ResumeCategory.unavailable_store)
+
+        def interrupt(self, run_id, **kwargs):
+            self.calls.append(("interrupt", run_id, kwargs["force"]))
+            self.release_resume.set()
+
+    supervisor = BlockingSupervisor(config, store)
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+    outcomes = []
+    recovery = threading.Thread(
+        target=lambda: outcomes.append(
+            daemon._resume_or_recover(task, predecessor, store.list_runs(task.id))
+        )
+    )
+    recovery.start()
+    assert supervisor.resume_started.wait(timeout=1)
+
+    daemon.request_shutdown(force=True)
+    recovery.join(timeout=1)
+    still_blocking = recovery.is_alive()
+    supervisor.release_resume.set()
+    recovery.join(timeout=2)
+
+    assert still_blocking is False
+    assert ("interrupt", predecessor.id, True) in supervisor.calls
+    assert outcomes and outcomes[0].disposition == "interrupted"
+
+
 def test_corrupt_resume_falls_back_to_fresh_recovery_packet(config, monkeypatch):
     store = TaskStore(config.db_path)
     task, _, run = _interrupted_run(config, store)
@@ -453,7 +503,11 @@ def test_corrupt_resume_falls_back_to_fresh_recovery_packet(config, monkeypatch)
         resume=ResumeCategory.corrupt_store,
     )
     daemon = StewardDaemon(config, store, session_supervisor=supervisor)
-    monkeypatch.setattr(daemon.executor, "reconcile_session_result", lambda *_: None)
+    monkeypatch.setattr(
+        daemon.executor,
+        "reconcile_session_result",
+        lambda *_: SimpleNamespace(status="ingested"),
+    )
 
     outcome = daemon.startup_reconcile()[0]
 
@@ -870,6 +924,45 @@ def test_sigint_sigterm_second_signal_stops_not_removes_restart_state(config):
     assert store.get(task.id).status != TaskStatus.failed
 
 
+def test_cli_signal_handler_only_sets_shutdown_intent(monkeypatch):
+    installed = {}
+    requests = []
+
+    class SignalSafeDaemon:
+        lifecycle_state = SimpleNamespace(value="stopped")
+
+        def request_shutdown_from_signal(self, *, force=False):
+            requests.append(force)
+
+        def request_shutdown(self, **_kwargs):
+            raise AssertionError("signal handler performed full shutdown work")
+
+        def run_forever(self):
+            installed[signal.SIGTERM](signal.SIGTERM, None)
+            installed[signal.SIGINT](signal.SIGINT, None)
+
+    monkeypatch.setattr(signal, "getsignal", lambda _selected: signal.SIG_DFL)
+    monkeypatch.setattr(
+        signal,
+        "signal",
+        lambda selected, handler: installed.__setitem__(selected, handler),
+    )
+
+    _run_until_stopped(SignalSafeDaemon())
+
+    assert requests == [False, True]
+
+
+def test_shutdown_request_is_lock_free(config):
+    daemon = StewardDaemon(config, TaskStore(config.db_path))
+
+    with daemon._runtime_lock:
+        daemon.request_shutdown()
+
+    assert daemon.stopping
+    assert daemon.shutdown(force=True).state.value == "stopped"
+
+
 def test_shutdown_does_not_claim_failed_container_stop(config):
     store = TaskStore(config.db_path)
     task, _ = _task(store, "container stop failure")
@@ -889,6 +982,173 @@ def test_shutdown_does_not_claim_failed_container_stop(config):
     assert result.stopped_containers == 0
     assert result.final_sync_attempted is False
     assert ("stop", task.id) in supervisor.calls
+
+
+def test_shutdown_discovers_and_stops_uncached_owned_container(config):
+    store = TaskStore(config.db_path)
+    task, _ = _task(store, "uncached owned container")
+    task.worktree_path = config.repo_root
+    store.save(task)
+    task_dir = TaskArchiveWriter(config).task_dir(task.id)
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.json").write_text(
+        json.dumps({"taskId": "different-task"}), encoding="utf-8"
+    )
+
+    class ExistingRuntime:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+
+        def stop(self, *, timeout=None):
+            self.stop_calls += 1
+            self.running = False
+
+        def inspect(self):
+            return SimpleNamespace(running=self.running)
+
+    runtime = ExistingRuntime()
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        runtime_factory=lambda _task: runtime,
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    reconciliation = daemon.startup_reconcile()[0]
+    result = daemon.shutdown(force=True)
+
+    assert reconciliation.disposition == "blocked"
+    assert runtime.running is False
+    assert runtime.stop_calls == 1
+    assert result.stopped_containers == 1
+    assert daemon.lifecycle_state.value == "stopped"
+
+
+def test_recovered_result_without_durable_phase_advance_stays_blocked(config):
+    store = TaskStore(config.db_path)
+    task, _, predecessor = _interrupted_run(config, store)
+    supervisor = FakeSupervisor(config, store)
+    recovered = store.create_run(
+        predecessor.task_id,
+        predecessor.pipeline_id,
+        predecessor.session_id,
+        role=predecessor.role,
+        resume_of_run_id=predecessor.id,
+        image_version=predecessor.image_version,
+        runtime_version=predecessor.runtime_version,
+        checkpoint_id=predecessor.checkpoint_id,
+        provider_store_identity=predecessor.provider_store_identity,
+    )
+    result = supervisor._complete(recovered)
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+    daemon.executor = SimpleNamespace(reconcile_session_result=lambda *_args: None)
+
+    outcome = daemon._ingest_recovered_result(
+        task,
+        predecessor,
+        store.get_run(recovered.id),
+        result=result,
+    )
+
+    assert outcome.disposition == "blocked"
+    assert not any(
+        event.kind == "session.recovery.completed" for event in store.events(task.id)
+    )
+
+
+def test_recovered_result_advances_exact_interrupted_phase_once(config):
+    store = TaskStore(config.db_path)
+    task, pipeline, predecessor = _interrupted_run(config, store)
+    task.worktree_path = config.repo_root
+    store.save(task)
+    action = store.get_session(predecessor.session_id).idempotency_key
+    assert action is not None
+    store.add_event(
+        task.id,
+        "pipeline.phase.finished",
+        "provisioned",
+        {
+            "pipeline_id": pipeline.id,
+            "phase": "provisioned",
+            "output": {
+                "action_id": f"{task.id}:{pipeline.id}:provisioned",
+                "next_phase": "implementation",
+            },
+        },
+    )
+    store.add_event(
+        task.id,
+        "pipeline.phase.interrupted",
+        "implementation interrupted",
+        {
+            "pipeline_id": pipeline.id,
+            "phase": "implementation",
+            "action_id": action,
+            "run_id": predecessor.id,
+        },
+    )
+    transcript = config.logs_dir / task.id / "implementation.jsonl"
+    message = config.logs_dir / task.id / "implementation.md"
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial implementation",
+        worker_name="implementation",
+        worker_prompt_path=None,
+        worker_transcript_path=transcript,
+        worker_last_message_path=message,
+    )
+    (config.repo_root / "README.md").write_text(
+        "recovered implementation\n", encoding="utf-8"
+    )
+    supervisor = FakeSupervisor(config, store)
+    recovered = store.create_run(
+        predecessor.task_id,
+        predecessor.pipeline_id,
+        predecessor.session_id,
+        role=predecessor.role,
+        resume_of_run_id=predecessor.id,
+        image_version=predecessor.image_version,
+        runtime_version=predecessor.runtime_version,
+        checkpoint_id=predecessor.checkpoint_id,
+        provider_store_identity=predecessor.provider_store_identity,
+    )
+    result = supervisor._complete(recovered)
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    first = daemon._ingest_recovered_result(
+        task,
+        predecessor,
+        store.get_run(recovered.id),
+        result=result,
+    )
+    second = daemon._ingest_recovered_result(
+        task,
+        predecessor,
+        store.get_run(recovered.id),
+        result=result,
+    )
+
+    events = store.events(task.id)
+    matching_finishes = [
+        event
+        for event in events
+        if event.kind == "pipeline.phase.finished"
+        and event.data.get("output", {}).get("action_id") == action
+    ]
+    matching_completions = [
+        event
+        for event in events
+        if event.kind == "session.recovery.completed"
+        and event.data.get("predecessor_run_id") == predecessor.id
+    ]
+    assert first.disposition == "resumed"
+    assert second.disposition == "resumed"
+    assert len(matching_finishes) == 1
+    assert len(matching_completions) == 1
 
 
 def test_sync_immediate_cadence_coalesces_overlap_and_failure_is_nonblocking(

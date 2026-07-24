@@ -96,6 +96,9 @@ class RecoveryPacket:
     diff_descriptor: str | None
     inline_tail: str
     interruption: dict[str, Any]
+    tree_identity: str | None = None
+    worktree_identity: str | None = None
+    current_diff: str = ""
 
     def prompt(self) -> str:
         value = {
@@ -105,6 +108,9 @@ class RecoveryPacket:
                 "accepted_plan": self.accepted_plan,
                 "transcript": self.transcript_descriptor,
                 "diff": self.diff_descriptor,
+                "tree_identity": self.tree_identity,
+                "worktree_identity": self.worktree_identity,
+                "current_diff": self.current_diff[-4000:],
                 "tail": self.inline_tail[-4000:],
                 "interruption": self.interruption,
             }
@@ -136,7 +142,7 @@ class SessionInvoker(Protocol):
         self,
         request: InvocationRequest,
         *,
-        api_key: str | None,
+        api_key: bytes | str | None,
         append: Any,
         observe: Any = None,
         on_started: Any = None,
@@ -152,7 +158,7 @@ class LocalSessionInvoker:
         self,
         request: InvocationRequest,
         *,
-        api_key: str | None,
+        api_key: bytes | str | None,
         append: Any,
         observe: Any = None,
         on_started: Any = None,
@@ -203,7 +209,7 @@ class ContainerSessionInvoker:
         self,
         request: InvocationRequest,
         *,
-        api_key: str | None,
+        api_key: bytes | str | None,
         append: Any,
         observe: Any = None,
         on_started: Any = None,
@@ -230,7 +236,7 @@ class ContainerSessionInvoker:
         # The wrapper consumes this control prefix before forwarding the prompt
         # to Codex.  It is never part of stdout, argv, environment, or logs.
         if process.stdin is not None:
-            key = (api_key or "").encode("utf-8")
+            key = _api_key_bytes(api_key)
             process.stdin.write(len(key).to_bytes(4, "big") + key)
             process.stdin.flush()
         identity = self._identity(request, process)
@@ -356,7 +362,7 @@ class SessionSupervisor:
         role: TaskRole | str,
         prompt: str,
         cwd: Path,
-        api_key: str | None = None,
+        api_key: bytes | str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         output_schema: Path | None = None,
@@ -369,6 +375,7 @@ class SessionSupervisor:
         sandbox: str | None = None,
     ) -> SessionResult:
         selected_role = _normalize_role(role)
+        api_key = self._configured_api_key(api_key)
         task = self.store.get(task_id)
         runtime, invoker = self._boundary_for(task)
         pipeline = self.store.get_pipeline(pipeline_id)
@@ -422,7 +429,7 @@ class SessionSupervisor:
         predecessor_run_id: str,
         *,
         prompt: str,
-        api_key: str | None = None,
+        api_key: bytes | str | None = None,
         image_digest: str | None = None,
         codex_identity: str | None = None,
         cwd: Path | None = None,
@@ -432,6 +439,7 @@ class SessionSupervisor:
         output_schema: Path | None = None,
         timeout_seconds: float | None = None,
     ) -> ResumeResult:
+        api_key = self._configured_api_key(api_key)
         try:
             predecessor = self.store.get_run(predecessor_run_id)
             session = self.store.get_session(predecessor.session_id)
@@ -637,6 +645,7 @@ class SessionSupervisor:
     def build_recovery_packet(self, predecessor_run_id: str) -> RecoveryPacket:
         predecessor = self.store.get_run(predecessor_run_id)
         task = self.store.get(predecessor.task_id)
+        session = self.store.get_session(predecessor.session_id)
         transcript: Path | None = None
         try:
             transcript = self.archive.run_transcript_path(task.id, predecessor.id)
@@ -657,8 +666,40 @@ class SessionSupervisor:
         except Exception:
             pass
         diff = task.patch_path
+        current_diff = ""
+        tree_identity: str | None = None
+        worktree_identity: str | None = None
+        worktree = task.worktree_path or session.cwd
+        if worktree is not None and Path(worktree).is_dir():
+            try:
+                tree_identity = run_command(
+                    ["git", "rev-parse", "HEAD^{tree}"], cwd=Path(worktree)
+                ).stdout.strip() or None
+                worktree_identity = worktree_checkpoint(self.config, Path(worktree))
+                current_diff = run_command(
+                    ["git", "diff", "--binary", "--no-ext-diff", "--"],
+                    cwd=Path(worktree),
+                ).stdout[-8000:]
+            except (OSError, RuntimeError):
+                current_diff = ""
         descriptor = _archive_descriptor(self.config.tasks_dir, transcript)
         diff_descriptor = _archive_descriptor(self.config.tasks_dir, diff)
+        if current_diff:
+            try:
+                archived_diff = self.archive.write_run_file(
+                    task.id,
+                    predecessor.pipeline_id,
+                    predecessor.id,
+                    "recovery/current.diff",
+                    current_diff,
+                )
+                diff_descriptor = _archive_descriptor(
+                    self.config.tasks_dir, archived_diff
+                )
+            except Exception:
+                # The bounded inline copy remains available even when a
+                # partially written archive cannot accept another file.
+                pass
         accepted_plan = None
         for event in reversed(self.store.events(task.id)):
             if event.kind == "pipeline.plan.result" and isinstance(event.data.get("plan"), dict):
@@ -671,6 +712,9 @@ class SessionSupervisor:
             accepted_plan=accepted_plan,
             transcript_descriptor=descriptor,
             diff_descriptor=diff_descriptor,
+            tree_identity=tree_identity,
+            worktree_identity=worktree_identity,
+            current_diff=current_diff,
             inline_tail=tail,
             interruption={
                 "state": predecessor.state,
@@ -684,12 +728,13 @@ class SessionSupervisor:
         self,
         predecessor_run_id: str,
         *,
-        api_key: str | None = None,
+        api_key: bytes | str | None = None,
         max_attempts: int = 2,
         **kwargs: Any,
     ) -> ResumeResult:
         """Build an evidence-rich fresh session after resume is unavailable."""
 
+        api_key = self._configured_api_key(api_key)
         packet = self.build_recovery_packet(predecessor_run_id)
         predecessor = self.store.get_run(predecessor_run_id)
         session = self.store.get_session(predecessor.session_id)
@@ -800,6 +845,23 @@ class SessionSupervisor:
             run_dir / "codex.jsonl",
             run_dir / "last-message.md",
         )
+
+    def _configured_api_key(self, supplied: bytes | str | None) -> bytes | str | None:
+        """Use the daemon-owned key file and never inherit a credential env var."""
+
+        if supplied is not None:
+            return supplied
+        reader = getattr(self.config, "read_codex_api_key_bytes", None)
+        if callable(reader):
+            configured = reader()
+            if configured is not None:
+                return configured
+        # The local invoker is an explicit test-only boundary.  Preserve its
+        # historical fixture contract without allowing production sessions to
+        # consult the daemon environment for credentials.
+        if getattr(self.config, "local_codex_test_harness", False):
+            return os.environ.get("CODEX_API_KEY")
+        return None
 
     def interrupt(
         self,
@@ -1018,7 +1080,6 @@ class SessionSupervisor:
             role=TaskRole.planner,
             prompt=prompt,
             cwd=effective_cwd,
-            api_key=os.getenv("CODEX_API_KEY"),
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
             output_schema=output_schema,
@@ -1579,3 +1640,13 @@ def _redact_recovery_text(value: str) -> str:
     value = _RECOVERY_SECRET_RE.sub(r"\1<redacted-secret>", value)
     value = _RECOVERY_TOKEN_RE.sub("<redacted-secret>", value)
     return value
+
+
+def _api_key_bytes(value: bytes | str | None) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    raise TypeError("Codex API key must be bytes, text, or None")

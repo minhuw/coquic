@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
 import threading
 import time
 from collections.abc import Callable
@@ -44,7 +43,11 @@ from ..execution.session import (
     runtime_factory_for_config,
 )
 from ..execution.task_archive import TaskArchiveWriter
-from ..core.subprocesses import run_command
+from ..core.subprocesses import (
+    ProcessGroupCancellationOwner,
+    run_command,
+    use_subprocess_owner,
+)
 from ..planning import run_planner
 from ..public_mirror import (
     classify_publish_failure,
@@ -119,7 +122,11 @@ class StewardDaemon:
         self._sync_final_attempted = False
         self._sync_cycle_count = 0
         self._preflight_report: PreflightReport | None = None
-        remote_push_ready = preflight_remote_push(config)
+        self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        with use_subprocess_owner(self._subprocess_owner):
+            remote_push_ready = preflight_remote_push(config)
         if remote_push_ready:
             self._log(
                 "remote push preflight ok "
@@ -165,9 +172,8 @@ class StewardDaemon:
         # preflight above for existing callers.
         # ``preflight_remote_push`` above is retained for the existing startup
         # log contract; avoid running the network-facing check a second time.
-        report = run_preflight(
-            config, store, check_remote_push=False
-        )
+        with use_subprocess_owner(self._subprocess_owner):
+            report = run_preflight(config, store, check_remote_push=False)
         if remote_push_ready:
             report = PreflightReport(
                 checks=(*report.checks, "remote-push"),
@@ -226,6 +232,21 @@ class StewardDaemon:
                 except Exception:
                     # Reconciliation evidence must not hide the identity result.
                     pass
+                if (
+                    outcome.disposition is ReconciliationDisposition.blocked
+                    and _is_identity_conflict(outcome.detail)
+                    and not TaskStatus(task.status).terminal
+                ):
+                    try:
+                        self.store.finish_task(
+                            task.id,
+                            TaskStatus.blocked,
+                            outcome.detail,
+                        )
+                    except Exception:
+                        # The durable reconciliation event remains evidence even
+                        # when an older task row cannot accept a terminal block.
+                        pass
             self._reconciliation = outcomes
             self._startup_complete = True
             with self._runtime_lock:
@@ -488,6 +509,7 @@ class StewardDaemon:
                 inside = run_command(
                     ["git", "rev-parse", "--is-inside-work-tree"],
                     cwd=worktree,
+                    cancellation_owner=self._subprocess_owner,
                 )
                 if not inside.ok or inside.stdout.strip() != "true":
                     return "owned worktree is not a Git worktree", evidence
@@ -496,6 +518,7 @@ class StewardDaemon:
                     exists = run_command(
                         ["git", "cat-file", "-e", f"{base}^{{commit}}"],
                         cwd=worktree,
+                        cancellation_owner=self._subprocess_owner,
                     )
                     if not exists.ok:
                         return "base commit identity is unavailable", evidence
@@ -572,10 +595,15 @@ class StewardDaemon:
                 "commit phase has no exact worktree tree identity",
                 evidence={"phase": phase},
             )
-        tree = run_command(["git", "rev-parse", "HEAD^{tree}"], cwd=worktree)
+        tree = run_command(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=worktree,
+            cancellation_owner=self._subprocess_owner,
+        )
         status = run_command(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=worktree,
+            cancellation_owner=self._subprocess_owner,
         )
         if not tree.ok or not status.ok:
             return ReconciliationOutcome(
@@ -599,7 +627,11 @@ class StewardDaemon:
                 "committed tree conflicts with the accepted tree",
                 evidence={"phase": phase},
             )
-        head = run_command(["git", "rev-parse", "HEAD"], cwd=worktree)
+        head = run_command(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree,
+            cancellation_owner=self._subprocess_owner,
+        )
         if not head.ok:
             return ReconciliationOutcome(
                 task.id,
@@ -672,9 +704,22 @@ class StewardDaemon:
         worktree = Path(task.worktree_path) if task.worktree_path else None
         if commit and worktree is not None and worktree.is_dir():
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
+            fetched = run_command(
+                ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
+                cwd=worktree,
+                cancellation_owner=self._subprocess_owner,
+            )
+            if not fetched.ok:
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.blocked,
+                    "interrupted push remote ancestry could not be fetched",
+                    evidence={"phase": "push", "category": "fetch-failed"},
+                )
             ancestry = run_command(
                 ["git", "merge-base", "--is-ancestor", commit, remote],
                 cwd=worktree,
+                cancellation_owner=self._subprocess_owner,
             )
             if ancestry.ok:
                 self.store.add_event(
@@ -778,6 +823,7 @@ class StewardDaemon:
         exists = run_command(
             ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
             cwd=worktree,
+            cancellation_owner=self._subprocess_owner,
         )
         if not exists.ok:
             return "persisted commit identity is unavailable"
@@ -795,6 +841,7 @@ class StewardDaemon:
             tree = run_command(
                 ["git", "rev-parse", f"{commit}^{{tree}}"],
                 cwd=worktree,
+                cancellation_owner=self._subprocess_owner,
             )
             if not tree.ok or tree.stdout.strip() != expected_tree:
                 return "persisted commit tree conflicts with accepted output"
@@ -805,9 +852,17 @@ class StewardDaemon:
         )
         if pushed and self.config.integration_mode == "push-main" and not self.config.local_only:
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
+            fetched = run_command(
+                ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
+                cwd=worktree,
+                cancellation_owner=self._subprocess_owner,
+            )
+            if not fetched.ok:
+                return "persisted push remote ancestry could not be fetched"
             ancestry = run_command(
                 ["git", "merge-base", "--is-ancestor", commit, remote],
                 cwd=worktree,
+                cancellation_owner=self._subprocess_owner,
             )
             if not ancestry.ok:
                 return "persisted push is not reachable from fetched remote ancestry"
@@ -874,14 +929,55 @@ class StewardDaemon:
 
     @staticmethod
     def _interrupted_recovery_root(runs: list[object]) -> object | None:
+        """Select the newest unresolved interruption lineage.
+
+        A successfully recovered root must not be selected again after a
+        restart.  The latest interrupted descendant is the continuation point
+        when a recovery or retry itself was interrupted.
+        """
+
+        by_parent: dict[str, list[object]] = {}
         for run in runs:
-            if (
-                str(run.state) == "interrupted"
-                and getattr(run, "resume_of_run_id", None) is None
-                and getattr(run, "retry_of_run_id", None) is None
+            for parent_id in (
+                getattr(run, "resume_of_run_id", None),
+                getattr(run, "retry_of_run_id", None),
+                getattr(run, "parent_run_id", None),
             ):
-                return run
-        return None
+                if parent_id:
+                    by_parent.setdefault(str(parent_id), []).append(run)
+
+        def descendants(root: object) -> list[object]:
+            found: list[object] = []
+            pending = [root]
+            seen = {str(getattr(root, "id", ""))}
+            while pending:
+                current = pending.pop()
+                for child in by_parent.get(str(getattr(current, "id", "")), []):
+                    child_id = str(getattr(child, "id", ""))
+                    if child_id in seen:
+                        continue
+                    seen.add(child_id)
+                    found.append(child)
+                    pending.append(child)
+            return found
+
+        def sort_key(run: object) -> str:
+            return str(
+                getattr(run, "updated_at", None)
+                or getattr(run, "started_at", None)
+                or getattr(run, "id", "")
+            )
+
+        candidates: list[object] = []
+        for run in runs:
+            if str(getattr(run, "state", "")) != "interrupted":
+                continue
+            lineage = [run, *descendants(run)]
+            latest = max(lineage, key=sort_key)
+            if str(getattr(latest, "state", "")) == "succeeded":
+                continue
+            candidates.append(run)
+        return max(candidates, key=sort_key) if candidates else None
 
     def _resume_or_recover(
         self,
@@ -995,7 +1091,6 @@ class StewardDaemon:
                     predecessor.id,
                     prompt=prompt,
                     max_attempts=self.config.resume_attempt_limit,
-                    api_key=os.getenv("CODEX_API_KEY"),
                     cwd=session.cwd,
                     checkpoint_id=predecessor.checkpoint_id,
                 )
@@ -1047,7 +1142,6 @@ class StewardDaemon:
         try:
             recovered = self.session_supervisor.recover(
                 predecessor.id,
-                api_key=os.getenv("CODEX_API_KEY"),
                 cwd=session.cwd,
             )
         except Exception as exc:
@@ -1336,42 +1430,67 @@ class StewardDaemon:
 
         self.request_shutdown(force=force)
         deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
-        interrupted_runs = 0
-        for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):
+        running_runs: list[tuple[str, str]] = []
+        tasks = sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id)
+        for task in tasks:
             try:
-                for run in self.store.list_runs(task.id):
-                    if str(run.state) != "running":
-                        continue
-                    interrupted_runs += 1
-                    if self.session_supervisor is not None:
-                        try:
-                            self.session_supervisor.interrupt(
-                                run.id,
-                                force=force or self._force_shutdown_event.is_set(),
-                                grace_seconds=max(0.0, deadline - time.monotonic()),
-                            )
-                        except Exception:
-                            try:
-                                self.store.mark_run_interrupted(run.id, reason="daemon shutdown")
-                            except Exception:
-                                pass
-                    else:
-                        try:
-                            self.store.mark_run_interrupted(
-                                run.id, reason="daemon shutdown without session boundary"
-                            )
-                        except Exception:
-                            pass
+                running_runs.extend(
+                    (task.id, run.id)
+                    for run in self.store.list_runs(task.id)
+                    if str(run.state) == "running"
+                )
             except (AttributeError, KeyError):
                 continue
-            if time.monotonic() >= deadline and not force:
+        interrupted_runs = len(running_runs)
+        self._subprocess_owner.request_cancel(force=force)
+        interrupt_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, min(len(running_runs), self.config.limits.max_active_tasks))
+        ) if running_runs else None
+        interrupt_futures: dict[str, concurrent.futures.Future[object]] = {}
+        if interrupt_pool is not None:
+            for _task_id, run_id in running_runs:
+                interrupt_futures[run_id] = interrupt_pool.submit(
+                    self._interrupt_run,
+                    run_id,
+                    force=force,
+                    grace_seconds=max(0.0, deadline - time.monotonic()),
+                )
+        while interrupt_futures and not force:
+            pending = [future for future in interrupt_futures.values() if not future.done()]
+            if not pending:
+                break
+            if self._force_shutdown_event.is_set() or time.monotonic() >= deadline:
                 force = True
                 self._force_shutdown_event.set()
-            if self.session_supervisor is not None:
-                try:
-                    self.session_supervisor.stop_container(task.id, timeout=1)
-                except Exception:
-                    pass
+                break
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        if force and interrupt_futures:
+            self._subprocess_owner.force_cancel()
+            force_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=max(1, len(interrupt_futures))
+            )
+            forced_futures = [
+                force_pool.submit(self._interrupt_run, run_id, force=True, grace_seconds=0.0)
+                for run_id, future in interrupt_futures.items()
+                if not future.done()
+            ]
+            if forced_futures:
+                concurrent.futures.wait(forced_futures, timeout=2.0)
+            force_pool.shutdown(wait=False, cancel_futures=True)
+        if interrupt_pool is not None:
+            interrupt_pool.shutdown(wait=False, cancel_futures=True)
+        # Stop containers after every phase owner has received cancellation;
+        # this preserves stopped restart inputs while preventing credentials
+        # from remaining live after ordinary daemon exit.
+        stop_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, min(len(tasks), self.config.limits.max_active_tasks))
+        ) if tasks and self.session_supervisor is not None else None
+        if stop_pool is not None:
+            stop_futures = [
+                stop_pool.submit(self._stop_task_container, task.id) for task in tasks
+            ]
+            concurrent.futures.wait(stop_futures, timeout=max(0.0, deadline - time.monotonic()) if not force else 2.0)
+            stop_pool.shutdown(wait=False, cancel_futures=True)
         with self._worker_pool_lock:
             pool = self._worker_pool
             self._worker_pool = None
@@ -1388,15 +1507,28 @@ class StewardDaemon:
                     break
                 if self._force_shutdown_event.is_set():
                     force = True
+                    self._subprocess_owner.force_cancel()
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     force = True
                     self._force_shutdown_event.set()
+                    self._subprocess_owner.force_cancel()
                     break
                 self._force_shutdown_event.wait(min(0.05, remaining))
+            if force:
+                with self._worker_pool_lock:
+                    pending_after_force = [
+                        future
+                        for future in self._active_futures.values()
+                        if not future.done()
+                    ]
+                if pending_after_force:
+                    concurrent.futures.wait(pending_after_force, timeout=0.25)
+        self._subprocess_owner.wait(timeout=0.1 if force else max(0.0, deadline - time.monotonic()))
         self._stop_task_sync(final=True)
         self._stop_public_mirror_sync()
+        self._stop_heartbeat_thread()
         with self._runtime_lock:
             self.runtime.lifecycle = DaemonLifecycleState.stopped
             self.runtime.state = DaemonRuntimeState.stopping
@@ -1413,6 +1545,33 @@ class StewardDaemon:
             stopped_containers=sum(1 for _ in self.store.list_tasks(limit=10000)),
             final_sync_attempted=self._sync_final_attempted,
         )
+
+    def _interrupt_run(self, run_id: str, *, force: bool, grace_seconds: float) -> None:
+        if self.session_supervisor is not None:
+            try:
+                self.session_supervisor.interrupt(
+                    run_id,
+                    force=force or self._force_shutdown_event.is_set(),
+                    grace_seconds=grace_seconds,
+                )
+                return
+            except Exception:
+                pass
+        try:
+            self.store.mark_run_interrupted(
+                run_id,
+                reason="forced daemon shutdown" if force else "daemon shutdown",
+            )
+        except Exception:
+            pass
+
+    def _stop_task_container(self, task_id: str) -> None:
+        if self.session_supervisor is None:
+            return
+        try:
+            self.session_supervisor.stop_container(task_id, timeout=1)
+        except Exception:
+            pass
 
     def start_task_sync(self) -> None:
         """Start immediate and monotonic minute-cadence raw synchronization."""
@@ -1475,16 +1634,18 @@ class StewardDaemon:
                 self._sync_running = False
 
     def _stop_task_sync(self, *, final: bool = False) -> None:
-        if final and self.config.task_sync.enabled and not self._sync_final_attempted:
-            self._sync_final_attempted = True
-            self._sync_stop.clear()
-            self._run_task_sync_cycle()
         self._sync_stop.set()
+        self._sync_wakeup.set()
         thread = self._sync_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=min(5.0, float(self.config.task_sync.transfer_timeout_seconds) if self.config.task_sync.enabled else 5.0))
         with self._sync_lock:
             self._sync_thread = None
+        if final and self.config.task_sync.enabled and not self._sync_final_attempted:
+            self._sync_final_attempted = True
+            self._sync_stop.clear()
+            self._run_task_sync_cycle()
+            self._sync_stop.set()
 
     stop_task_sync = _stop_task_sync
 
@@ -1511,7 +1672,27 @@ class StewardDaemon:
         max_dispatch: int | None = None,
         reason: str = "scheduled",
     ) -> TickResult:
+        with use_subprocess_owner(self._subprocess_owner):
+            return self._run_cycle(
+                plan=plan,
+                dispatch=dispatch,
+                fetch_providers=fetch_providers,
+                max_dispatch=max_dispatch,
+                reason=reason,
+            )
+
+    def _run_cycle(
+        self,
+        *,
+        plan: bool = True,
+        dispatch: bool = True,
+        fetch_providers: list[str] | None = None,
+        max_dispatch: int | None = None,
+        reason: str = "scheduled",
+    ) -> TickResult:
         result = TickResult()
+        if not self._startup_complete:
+            self.startup_reconcile()
         self._begin_cycle(reason)
         self._publish_public_mirror_if_changed()
         try:
@@ -1621,8 +1802,17 @@ class StewardDaemon:
             seen.add(task.id)
             self._log(f"dispatch start {task.id} {_task_label(task)}")
             try:
-                task_ok = self.executor.run_task(task.id)
+                with use_subprocess_owner(self._subprocess_owner):
+                    task_ok = self.executor.run_task(task.id)
             except Exception as exc:  # pragma: no cover - daemon boundary guard.
+                if self._shutdown_event.is_set():
+                    self.store.add_event(
+                        task.id,
+                        "daemon.shutdown_interrupted",
+                        "task dispatch stopped during daemon shutdown",
+                        {"error": exc.__class__.__name__},
+                    )
+                    return
                 result.skipped += 1
                 message = str(exc)[-2000:] or exc.__class__.__name__
                 finished = self._fail_dispatch_exception(task.id, message)
@@ -1664,13 +1854,20 @@ class StewardDaemon:
         available = max(0, self.config.limits.max_active_tasks - len(self._active_futures))
         budget = min(capacity, available)
         seen = set(self._active_futures)
-        for task in self.store.queued_tasks():
+        queued = self.store.queued_tasks()
+        active = [
+            task
+            for task in self.store.list_tasks(limit=10000)
+            if not TaskStatus(task.status).terminal
+            and TaskStatus(task.status) != TaskStatus.queued
+        ]
+        for task in [*queued, *active]:
             if budget <= 0 or task.id in seen:
                 continue
             if _is_integration_manager_task(task):
                 if self.store.integration_active_count() > 0:
                     continue
-            elif self.store.source_active_count() >= self.config.limits.max_active_tasks:
+            elif TaskStatus(task.status) == TaskStatus.queued and self.store.source_active_count() >= self.config.limits.max_active_tasks:
                 continue
             future = pool.submit(self._run_task_worker, task.id)
             with self._worker_pool_lock:
@@ -1689,20 +1886,37 @@ class StewardDaemon:
         except KeyError:
             return False
         while not self._shutdown_event.is_set():
+            serialized = integration or self._task_phase_requires_serialization(task_id)
+            if serialized:
+                self._integration_lock.acquire()
             try:
-                if integration:
-                    with self._integration_lock:
-                        outcome = self.executor.advance_once(task_id)
-                else:
+                with use_subprocess_owner(self._subprocess_owner):
                     outcome = self.executor.advance_once(task_id)
             except Exception as exc:
+                if self._shutdown_event.is_set():
+                    try:
+                        self.store.add_event(
+                            task_id,
+                            "daemon.shutdown_interrupted",
+                            "phase worker stopped during daemon shutdown",
+                            {"error": exc.__class__.__name__},
+                        )
+                    except Exception:
+                        pass
+                    return False
                 self._fail_dispatch_exception(task_id, str(exc)[-2000:])
                 return False
+            finally:
+                if serialized:
+                    self._integration_lock.release()
             status = str(getattr(outcome, "status", ""))
             if status == "interrupted":
                 return False
             if status in {"ready_to_seal", "terminal", "blocked", "legacy_terminal"}:
-                if status in {"ready_to_seal", "blocked", "legacy_terminal"}:
+                if (
+                    status in {"ready_to_seal", "blocked", "legacy_terminal"}
+                    and not self._shutdown_event.is_set()
+                ):
                     self.finalize_terminal_task(task_id)
                 return status in {"ready_to_seal", "terminal", "legacy_terminal"}
             if status == "in_progress":
@@ -1711,6 +1925,51 @@ class StewardDaemon:
             if not getattr(outcome, "progressed", False) and getattr(outcome, "next_phase", None) is None:
                 return False
         return False
+
+    def _start_heartbeat_thread(self) -> None:
+        with self._runtime_lock:
+            if self._heartbeat_thread is not None:
+                return
+            self._heartbeat_stop.clear()
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="steward-heartbeat",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(self._heartbeat_interval_seconds()):
+            self._touch_heartbeat()
+
+    def _stop_heartbeat_thread(self) -> None:
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._heartbeat_thread = None
+
+    def _task_phase_requires_serialization(self, task_id: str) -> bool:
+        """Serialize integration, commit, and push actions across source tasks."""
+
+        try:
+            execution = self.store.get_execution(task_id)
+            pipeline_id = getattr(execution, "owning_pipeline_id", None)
+            if pipeline_id is None:
+                return False
+            cursor = getattr(self.executor, "_pipeline_cursor", None)
+            if callable(cursor):
+                phase = cursor(task_id, pipeline_id)
+            else:
+                phase = getattr(self.store.get_pipeline(pipeline_id), "phase", None)
+            value = getattr(phase, "value", phase)
+            return str(value) in {
+                PipelineCursorPhase.integration.value,
+                PipelineCursorPhase.commit.value,
+                PipelineCursorPhase.push.value,
+            }
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+            return False
 
     def _poll_adopted_runs(self) -> None:
         """Reconcile adopted wrappers until their durable result is consumable."""
@@ -1723,6 +1982,12 @@ class StewardDaemon:
                 continue
             if outcome.disposition != ReconciliationDisposition.adopted:
                 self._adopted_runs.pop(task_id, None)
+                if outcome.disposition in {
+                    ReconciliationDisposition.ingested,
+                    ReconciliationDisposition.resumed,
+                    ReconciliationDisposition.interrupted,
+                }:
+                    self._schedule_task_continuation(task_id)
             self._reconciliation = [
                 item for item in self._reconciliation if item.task_id != task_id
             ]
@@ -1736,6 +2001,26 @@ class StewardDaemon:
                 )
             except Exception:
                 pass
+
+    def _schedule_task_continuation(self, task_id: str) -> bool:
+        """Wake an active task after an adopted run advances its cursor."""
+
+        with self._worker_pool_lock:
+            pool = self._worker_pool
+            existing = self._active_futures.get(task_id)
+            if pool is None or self._shutdown_event.is_set():
+                return False
+            if existing is not None and not existing.done():
+                return False
+            try:
+                task = self.store.get(task_id)
+            except KeyError:
+                return False
+            if TaskStatus(task.status).terminal:
+                return False
+            future = pool.submit(self._run_task_worker, task_id)
+            self._active_futures[task_id] = future
+            return True
 
     def _fail_dispatch_exception(self, task_id: str, message: str) -> TaskRecord:
         summary = f"dispatch failed: {message}"
@@ -1976,6 +2261,7 @@ class StewardDaemon:
                     max_workers=max(1, self.config.limits.max_active_tasks),
                     thread_name_prefix="steward-task",
                 )
+        self._start_heartbeat_thread()
         try:
             while not self._shutdown_event.is_set():
                 try:
@@ -2324,6 +2610,20 @@ def _task_label(task: TaskRecord) -> str:
 
 def _is_integration_manager_task(task: TaskRecord) -> bool:
     return task.spec.worker == WorkerKind.integration_manager.value
+
+
+def _is_identity_conflict(summary: str) -> bool:
+    value = str(summary).lower()
+    return any(
+        marker in value
+        for marker in (
+            "identity",
+            "conflict",
+            "ownership",
+            "checkpoint",
+            "ancestry",
+        )
+    )
 
 
 def _selected_item_ids(spec, consumed_item_ids: list[str]) -> list[str]:

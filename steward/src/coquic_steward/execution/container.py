@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..core.subprocesses import current_subprocess_owner
 from .container_config import ContainerMount, TaskContainerConfig, TaskRole
 
 
@@ -81,18 +82,41 @@ class SubprocessDockerClient:
         input: bytes | None = None,
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(  # nosec B603 - argv is validated by caller
+        process = subprocess.Popen(  # nosec B603 - argv is validated by caller
             [self.docker_bin, *argv],
-            input=input,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
+            stdin=subprocess.PIPE if input is not None else None,
             shell=False,
+            start_new_session=True,
+        )
+        owner = current_subprocess_owner()
+        if owner is not None:
+            owner.register(process)
+        try:
+            stdout, stderr = process.communicate(input=input, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_docker_group(process, signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                _terminate_docker_group(process, signal.SIGKILL)
+                stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(
+                [self.docker_bin, *argv],
+                timeout,
+                output=stdout,
+                stderr=stderr,
+            ) from exc
+        finally:
+            if owner is not None:
+                owner.unregister(process)
+        return subprocess.CompletedProcess(
+            [self.docker_bin, *argv], process.returncode, stdout, stderr
         )
 
     def popen(self, argv: list[str]) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(  # nosec B603 - argv is validated by caller
+        process = subprocess.Popen(  # nosec B603 - argv is validated by caller
             [self.docker_bin, *argv],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -100,6 +124,24 @@ class SubprocessDockerClient:
             shell=False,
             start_new_session=True,
         )
+        owner = current_subprocess_owner()
+        if owner is not None:
+            owner.register(process)
+
+            def unregister() -> None:
+                try:
+                    process.wait()
+                finally:
+                    owner.unregister(process)
+
+            import threading
+
+            threading.Thread(
+                target=unregister,
+                name="steward-docker-exec-reaper",
+                daemon=True,
+            ).start()
+        return process
 
 
 class TaskContainerRuntime:
@@ -512,6 +554,13 @@ def _not_found(value: bytes) -> bool:
         or "no such object" in text
         or "not found" in text
     )
+
+
+def _terminate_docker_group(process: subprocess.Popen[bytes], sig: int) -> None:
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
 
 
 def _process_not_found(value: bytes) -> bool:

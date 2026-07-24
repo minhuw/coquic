@@ -81,6 +81,7 @@ def run_preflight(
             raise StewardPreflightError("preflight failed: repository host path is unavailable")
         if container.state_host_path is None or not container.state_host_path.exists():
             raise StewardPreflightError("preflight failed: state host path is unavailable")
+        _validate_container_host_mapping(config)
         _check_secret_file(container.codex_api_key_path, "Codex API key")
         _check_executable(container.docker_bin, "Docker")
         docker = run_command([container.docker_bin, "info"], cwd=config.repo_root, timeout=PREFLIGHT_TIMEOUT_SECONDS)
@@ -157,6 +158,31 @@ def _check_known_hosts(path: Path | None) -> None:
         raise StewardPreflightError("preflight failed: known-hosts permissions are unsafe")
     if not path.read_text(encoding="utf-8", errors="replace").strip():
         raise StewardPreflightError("preflight failed: known-hosts file is empty")
+
+
+def _validate_container_host_mapping(config: StewardConfig) -> None:
+    """Ensure Docker sees the exact repository and state roots Steward owns."""
+
+    container = config.container
+    assert container.repository_host_path is not None
+    assert container.state_host_path is not None
+    expected_repository = config.repo_root.resolve()
+    expected_state = config.coquic_home.resolve()
+    try:
+        repository = container.repository_host_path.resolve(strict=True)
+        state = container.state_host_path.resolve(strict=True)
+    except OSError as exc:
+        raise StewardPreflightError(
+            "preflight failed: Docker host path mapping cannot be resolved"
+        ) from exc
+    if repository != expected_repository:
+        raise StewardPreflightError(
+            "preflight failed: repository Docker host mapping does not match repository root"
+        )
+    if state != expected_state:
+        raise StewardPreflightError(
+            "preflight failed: state Docker host mapping does not match Steward state root"
+        )
 
 
 def preflight_remote_push(config: StewardConfig) -> bool:

@@ -191,7 +191,6 @@ class _SessionRunnerAdapter:
             role=role,
             prompt=prompt,
             cwd=cwd,
-            api_key=os.getenv("CODEX_API_KEY"),
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
             output_schema=output_schema,

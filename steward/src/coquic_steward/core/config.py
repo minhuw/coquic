@@ -430,6 +430,33 @@ class StewardConfig:
         return float(self.shutdown_grace_seconds)
 
     @property
+    def codex_api_key_path(self) -> Path | None:
+        """Daemon-only path for the configured Codex credential."""
+
+        return self.container.codex_api_key_path
+
+    def read_codex_api_key_bytes(self) -> bytes | None:
+        """Read the configured key without consulting the daemon environment.
+
+        The byte sequence is intentionally returned unchanged.  The session
+        boundary decides how those bytes are delivered to a task wrapper; no
+        caller should place them in prompts, normalized metadata, or logs.
+        """
+
+        path = self.codex_api_key_path
+        if not self.container.enabled or path is None:
+            return None
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise ValueError("configured Codex API key file is not private")
+        value = path.read_bytes()
+        if not value:
+            raise ValueError("configured Codex API key file is empty")
+        return value
+
+    configured_codex_api_key = read_codex_api_key_bytes
+
+    @property
     def coquic_home(self) -> Path:
         # Keep the lexical path so migration can detect a symlinked root before
         # resolving it into an apparently safe directory.

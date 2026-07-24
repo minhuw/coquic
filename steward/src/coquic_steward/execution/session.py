@@ -371,6 +371,7 @@ class SessionSupervisor:
         image_digest: str | None = None,
         codex_identity: str | None = None,
         idempotency_key: str | None = None,
+        retry_of_run_id: str | None = None,
         timeout_seconds: float | None = None,
         sandbox: str | None = None,
     ) -> SessionResult:
@@ -394,6 +395,7 @@ class SessionSupervisor:
             image_digest=selected_image,
             codex_identity=selected_codex,
             idempotency_key=idempotency_key,
+            retry_of_run_id=retry_of_run_id,
             model=model,
             reasoning_effort=reasoning_effort,
         )
@@ -808,11 +810,8 @@ class SessionSupervisor:
             output_schema=kwargs.pop("output_schema", None),
             timeout_seconds=kwargs.pop("timeout_seconds", None),
             idempotency_key=recovery_key,
+            retry_of_run_id=predecessor_run_id,
         )
-        try:
-            self.store.update_run(result.run_id, retry_of_run_id=predecessor_run_id)
-        except Exception:
-            pass
         self.store.add_event(
             task.id,
             "session.recovery_started",
@@ -1141,6 +1140,7 @@ class SessionSupervisor:
         image_digest: str,
         codex_identity: str,
         idempotency_key: str | None,
+        retry_of_run_id: str | None,
         model: str | None,
         reasoning_effort: str | None,
     ) -> tuple[CodexSession, TaskRun]:
@@ -1167,6 +1167,7 @@ class SessionSupervisor:
             runtime_version=self.runtime_identity,
             run_checkpoint_id=checkpoint_id,
             run_provider_store_identity=self.provider_store_identity,
+            retry_of_run_id=retry_of_run_id,
         )
         try:
             self._prepare_home(session)

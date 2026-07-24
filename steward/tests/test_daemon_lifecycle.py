@@ -20,7 +20,11 @@ from coquic_steward.core.models import (
     WorkerResult,
     WorkerKind,
 )
-from coquic_steward.core.config import StewardConfig, StewardContainerConfig
+from coquic_steward.core.config import (
+    StewardConfig,
+    StewardContainerConfig,
+    StewardTaskSyncConfig,
+)
 from coquic_steward.execution.container import TaskContainerRuntime
 from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
@@ -34,6 +38,10 @@ from coquic_steward.execution.session import (
 )
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
+from coquic_steward.orchestration.preflight import (
+    StewardPreflightError,
+    run_preflight,
+)
 from coquic_steward.storage import TaskStore
 
 
@@ -242,6 +250,107 @@ def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):
     assert config.epoch_path.exists()
 
 
+def _task_image_labels(*, runtime_protocol="task-container-v1"):
+    return {
+        "org.opencontainers.image.source-revision": "a" * 32,
+        "coquic.steward.runtime-protocol": runtime_protocol,
+        "coquic.steward.codex-version": "0.144.6",
+        "coquic.steward.closure": "b" * 32,
+    }
+
+
+def test_preflight_rejects_unrelated_task_image_metadata(config, monkeypatch):
+    key = config.coquic_home / "codex-key"
+    key.write_text("fake\n", encoding="utf-8")
+    key.chmod(0o600)
+    docker = config.coquic_home / "bin" / "docker"
+    docker.parent.mkdir()
+    docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o755)
+    container = StewardContainerConfig(
+        enabled=True,
+        image_digest=IMAGE,
+        repository_host_path=config.repo_root,
+        state_host_path=config.coquic_home,
+        codex_api_key_path=key,
+        docker_bin=str(docker),
+    )
+    nested = StewardConfig(
+        repo_root=config.repo_root,
+        container=container,
+        local_codex_test_harness=True,
+    )
+
+    def command(args, **_kwargs):
+        stdout = (
+            json.dumps([{"Config": {"Labels": {"unrelated": "image"}}}])
+            if args[1:3] == ["image", "inspect"]
+            else ""
+        )
+        return SimpleNamespace(ok=True, stdout=stdout)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.preflight.run_command", command
+    )
+
+    with pytest.raises(StewardPreflightError, match="task image identity"):
+        run_preflight(nested, check_remote_push=False)
+
+
+def test_preflight_rejects_unlocked_docker_and_sync_executables(config, monkeypatch):
+    key = config.coquic_home / "codex-key"
+    key.write_text("fake\n", encoding="utf-8")
+    key.chmod(0o600)
+    container = StewardContainerConfig(
+        enabled=True,
+        image_digest=IMAGE,
+        repository_host_path=config.repo_root,
+        state_host_path=config.coquic_home,
+        codex_api_key_path=key,
+        docker_bin="/bin/true",
+    )
+    nested = StewardConfig(
+        repo_root=config.repo_root,
+        container=container,
+        local_codex_test_harness=True,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.preflight.run_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            stdout=json.dumps(
+                [{"Config": {"Labels": _task_image_labels()}}]
+            ),
+        ),
+    )
+
+    with pytest.raises(StewardPreflightError, match="Docker executable identity"):
+        run_preflight(nested, check_remote_push=False)
+
+    identity = config.coquic_home / "task-sync-key"
+    identity.write_text("fake\n", encoding="utf-8")
+    identity.chmod(0o600)
+    known_hosts = config.coquic_home / "known-hosts"
+    known_hosts.write_text("receiver.example.test ssh-ed25519 fake\n", encoding="utf-8")
+    sync = StewardTaskSyncConfig(
+        enabled=True,
+        remote_user="archive",
+        remote_host="receiver.example.test",
+        identity_path=identity,
+        known_hosts_path=known_hosts,
+        ssh_bin="/bin/true",
+        rsync_bin=shutil.which("rsync") or "rsync",
+    )
+    sync_config = StewardConfig(
+        repo_root=config.repo_root,
+        task_sync=sync,
+        local_codex_test_harness=True,
+    )
+
+    with pytest.raises(StewardPreflightError, match="SSH executable identity"):
+        run_preflight(sync_config, check_remote_push=False)
+
+
 def test_startup_reconcile_orders_task_identity_before_dispatch(config):
     store = TaskStore(config.db_path)
     second, _ = _task(store, "z-second")
@@ -358,6 +467,54 @@ def test_corrupt_resume_falls_back_to_fresh_recovery_packet(config, monkeypatch)
     )
     assert recovery.data["resume_category"] == "corrupt-store"
     assert store.get_run(outcome.run_id).retry_of_run_id == run.id
+
+
+def test_fresh_recovery_lineage_is_durable_before_process_returns(
+    config, monkeypatch
+):
+    store = TaskStore(config.db_path)
+    task, _, predecessor = _interrupted_run(config, store)
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        invoker=object(),
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    allocated = []
+
+    def prepare_home(session):
+        assert session.private_home_path is not None
+        session.private_home_path.mkdir(parents=True, exist_ok=True)
+
+    def crash_before_process_returns(_task, _session, run, _request, **_kwargs):
+        allocated.append(store.get_run(run.id))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(supervisor, "_prepare_home", prepare_home)
+    monkeypatch.setattr(supervisor, "_execute", crash_before_process_returns)
+
+    with pytest.raises(KeyboardInterrupt):
+        supervisor.recover(predecessor.id, cwd=config.repo_root)
+
+    assert len(allocated) == 1
+    recovery = allocated[0]
+    assert recovery.retry_of_run_id == predecessor.id
+    store.mark_run_interrupted(recovery.id, reason="daemon crashed during recovery")
+    runs = store.list_runs(task.id)
+    root = StewardDaemon._interrupted_recovery_root(runs)
+    assert root is not None and root.id == predecessor.id
+
+    daemon = StewardDaemon(
+        config,
+        store,
+        session_supervisor=FakeSupervisor(config, store),
+    )
+    outcome = daemon._resume_or_recover(task, root, runs)
+
+    assert outcome.disposition == "blocked"
+    assert outcome.run_id == recovery.id
+    assert outcome.detail == "fresh recovery was interrupted; evidence is preserved"
 
 
 def test_checkpoint_identity_conflict_blocks_without_resume(config):
@@ -713,6 +870,27 @@ def test_sigint_sigterm_second_signal_stops_not_removes_restart_state(config):
     assert store.get(task.id).status != TaskStatus.failed
 
 
+def test_shutdown_does_not_claim_failed_container_stop(config):
+    store = TaskStore(config.db_path)
+    task, _ = _task(store, "container stop failure")
+
+    class StopFailure(FakeSupervisor):
+        def stop_container(self, task_id, **_kwargs):
+            self.calls.append(("stop", task_id))
+            raise RuntimeError("Docker unavailable")
+
+    supervisor = StopFailure(config, store)
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    result = daemon.shutdown(force=True)
+
+    assert result.state.value == "stopping"
+    assert daemon.lifecycle_state.value == "stopping"
+    assert result.stopped_containers == 0
+    assert result.final_sync_attempted is False
+    assert ("stop", task.id) in supervisor.calls
+
+
 def test_sync_immediate_cadence_coalesces_overlap_and_failure_is_nonblocking(
     config, monkeypatch
 ):
@@ -750,11 +928,125 @@ def test_sync_immediate_cadence_coalesces_overlap_and_failure_is_nonblocking(
     assert store.get(task.id).status == TaskStatus.queued
 
 
+def test_final_sync_obeys_shutdown_deadline(config):
+    daemon = StewardDaemon(config, TaskStore(config.db_path))
+    object.__setattr__(
+        daemon.config,
+        "task_sync",
+        SimpleNamespace(
+            enabled=True,
+            transfer_timeout_seconds=30,
+            to_archive_sync_config=lambda _root: object(),
+        ),
+    )
+    release = threading.Event()
+    daemon._run_task_sync_cycle = lambda: release.wait(2)
+
+    started = time.monotonic()
+    daemon._stop_task_sync(final=True, deadline=started + 0.05)
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 0.5
+    assert daemon._sync_final_attempted
+    assert daemon._sync_stop.is_set()
+
+
+def test_terminal_seal_uses_canonical_utc_timestamp(config):
+    store = TaskStore(config.db_path)
+    task, pipeline = _task(store, "canonical terminal timestamp")
+    _, run = store.create_session_with_run(
+        task.id,
+        pipeline.id,
+        session_id="session-terminal",
+        private_home_path=config.private_sessions_dir / task.id / "session-terminal",
+        private_home_relative_path=f"{task.id}/session-terminal",
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+        cwd=config.repo_root,
+        checkpoint_id="terminal-checkpoint",
+        provider_store_identity="codex-sessions-v1",
+        owner_role="implementation",
+        session_idempotency_key=f"{task.id}:{pipeline.id}:implementation",
+        role="implementation",
+        model=None,
+        reasoning=None,
+        image_version=IMAGE,
+        runtime_version="task-runtime-v1",
+        run_checkpoint_id="terminal-checkpoint",
+        run_provider_store_identity="codex-sessions-v1",
+    )
+    store.transition_run(
+        run.id,
+        CodexRunState.failed.value,
+        expected_state=CodexRunState.running.value,
+        exit_code=1,
+        result_summary="terminal",
+    )
+    store.add_event(
+        task.id,
+        "pipeline.ready_to_seal",
+        "failed",
+        {"pipeline_id": pipeline.id, "terminal_status": "failed"},
+    )
+    store.transition_pipeline(pipeline.id, "failed", phase="complete")
+    store.finish_task(task.id, TaskStatus.failed, "terminal")
+    daemon = StewardDaemon(config, store)
+
+    assert daemon.finalize_terminal_task(task.id) is True
+
+    manifest = json.loads(
+        (config.tasks_dir / task.id / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["completedAt"].endswith("Z")
+    assert "+00:00" not in manifest["completedAt"]
+
+
+def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):
+    store = TaskStore(config.db_path)
+    task, pipeline = _task(store, "unresolved terminal action")
+    store.add_event(
+        task.id,
+        "pipeline.phase.started",
+        "push",
+        {
+            "pipeline_id": pipeline.id,
+            "phase": "push",
+            "action_id": f"{task.id}:{pipeline.id}:push",
+        },
+    )
+    store.finish_task(task.id, TaskStatus.blocked, "push unresolved")
+    archive_calls = []
+
+    class RecordingArchive:
+        def __init__(self, _config):
+            archive_calls.append("created")
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.TaskArchiveWriter",
+        RecordingArchive,
+    )
+    daemon = StewardDaemon(config, store)
+
+    assert daemon.finalize_terminal_task(task.id) is False
+    assert archive_calls == []
+    kinds = [event.kind for event in store.events(task.id)]
+    assert "cleanup_blocked" in kinds
+    assert "cleanup_pending" not in kinds
+    assert "cleanup_complete" not in kinds
+
+
 def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
     config, monkeypatch
 ):
     store = TaskStore(config.db_path)
-    task, _ = _task(store, "terminal cleanup")
+    task, pipeline = _task(store, "terminal cleanup")
+    store.add_event(
+        task.id,
+        "pipeline.ready_to_seal",
+        "failed",
+        {"pipeline_id": pipeline.id, "terminal_status": "failed"},
+    )
     store.finish_task(task.id, TaskStatus.failed, "terminal")
     task = store.get(task.id)
     worktree = config.worktrees_dir / task.id
@@ -780,6 +1072,12 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
             path.mkdir(parents=True, exist_ok=True)
             (path / "task.json").write_text("{}", encoding="utf-8")
             return path / "task.json"
+
+        def materialize_run(self, *_args, **_kwargs):
+            return None
+
+        def materialize_pipeline(self, *_args, **_kwargs):
+            return None
 
         def seal(self, task_id, *_args, **_kwargs):
             calls.append(("seal", task_id))

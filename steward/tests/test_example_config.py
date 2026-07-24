@@ -31,3 +31,7 @@ def test_steward_example_config_loads_with_site_mirror_settings(repo: Path) -> N
     assert config.public_mirror.connect_timeout_seconds == 10
     assert config.public_mirror.retry_initial_seconds == 30
     assert config.public_mirror.retry_max_seconds == 300
+    assert Path(config.task_sync.ssh_bin).is_absolute()
+    assert Path(config.task_sync.rsync_bin).is_absolute()
+    assert Path(config.task_sync.ssh_bin).name == "ssh"
+    assert Path(config.task_sync.rsync_bin).name == "rsync"

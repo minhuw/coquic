@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -83,7 +84,7 @@ def run_preflight(
             raise StewardPreflightError("preflight failed: state host path is unavailable")
         _validate_container_host_mapping(config)
         _check_secret_file(container.codex_api_key_path, "Codex API key")
-        _check_executable(container.docker_bin, "Docker")
+        _check_executable(container.docker_bin, "Docker", expected_name="docker")
         docker = run_command([container.docker_bin, "info"], cwd=config.repo_root, timeout=PREFLIGHT_TIMEOUT_SECONDS)
         if not docker.ok:
             raise StewardPreflightError("preflight failed: Docker runtime is unavailable")
@@ -94,6 +95,7 @@ def run_preflight(
         )
         if not inspect.ok:
             raise StewardPreflightError("preflight failed: locked task image is unavailable")
+        _validate_task_image_identity(inspect.stdout, container.runtime_protocol)
         checks.extend(("docker", "task-image"))
 
     sync_configured = False
@@ -101,8 +103,18 @@ def run_preflight(
         sync = config.task_sync
         _check_secret_file(sync.identity_path, "task-sync identity")
         _check_known_hosts(sync.known_hosts_path)
-        _check_executable("ssh", "SSH")
-        _check_executable("rsync", "rsync")
+        _check_executable(
+            sync.ssh_bin,
+            "SSH",
+            expected_name="ssh",
+            path_command="ssh",
+        )
+        _check_executable(
+            sync.rsync_bin,
+            "rsync",
+            expected_name="rsync",
+            path_command="rsync",
+        )
         # Construction performs strict host/user/receiver validation without
         # launching a network operation or reading credential bytes.
         try:
@@ -122,7 +134,13 @@ def run_preflight(
     return PreflightReport(tuple(checks), tuple(warnings), sync_configured)
 
 
-def _check_executable(value: str, label: str) -> None:
+def _check_executable(
+    value: str,
+    label: str,
+    *,
+    expected_name: str | None = None,
+    path_command: str | None = None,
+) -> Path:
     if Path(value).is_absolute():
         candidate = Path(value)
     else:
@@ -130,6 +148,62 @@ def _check_executable(value: str, label: str) -> None:
         candidate = Path(resolved) if resolved else Path(value)
     if not candidate.exists() or not os.access(candidate, os.X_OK):
         raise StewardPreflightError(f"preflight failed: {label} executable is unavailable")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise StewardPreflightError(
+            f"preflight failed: {label} executable identity is unavailable"
+        ) from exc
+    if expected_name is not None and resolved.name != expected_name:
+        raise StewardPreflightError(
+            f"preflight failed: {label} executable identity is invalid"
+        )
+    if path_command is not None:
+        selected = shutil.which(path_command)
+        if selected is None:
+            raise StewardPreflightError(
+                f"preflight failed: {label} executable is unavailable"
+            )
+        try:
+            path_identity = Path(selected).resolve(strict=True)
+        except OSError as exc:
+            raise StewardPreflightError(
+                f"preflight failed: {label} PATH identity is unavailable"
+            ) from exc
+        if path_identity != resolved:
+            raise StewardPreflightError(
+                f"preflight failed: {label} executable does not match its locked PATH identity"
+            )
+    return resolved
+
+
+def _validate_task_image_identity(stdout: str, runtime_protocol: str) -> None:
+    try:
+        payload = json.loads(stdout)
+        image = payload[0]
+        labels = image["Config"]["Labels"]
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise StewardPreflightError(
+            "preflight failed: locked task image metadata is invalid"
+        ) from exc
+    required = {
+        "org.opencontainers.image.source-revision": None,
+        "coquic.steward.runtime-protocol": runtime_protocol,
+        "coquic.steward.codex-version": None,
+        "coquic.steward.closure": None,
+    }
+    for key, expected in required.items():
+        value = labels.get(key) if isinstance(labels, dict) else None
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 128
+            or any(character in value for character in "\x00\r\n")
+            or (expected is not None and value != expected)
+        ):
+            raise StewardPreflightError(
+                "preflight failed: locked task image identity is invalid"
+            )
 
 
 def _check_secret_file(path: Path | None, label: str) -> None:

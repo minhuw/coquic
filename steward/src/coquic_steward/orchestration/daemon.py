@@ -72,6 +72,7 @@ DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 PUBLIC_MIRROR_DEBOUNCE_SECONDS = 1.0
 PUBLIC_MIRROR_RETRY_SECONDS = 30.0
+FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -972,6 +973,15 @@ class StewardDaemon:
         for run in runs:
             if str(getattr(run, "state", "")) != "interrupted":
                 continue
+            if any(
+                getattr(run, field, None) is not None
+                for field in (
+                    "resume_of_run_id",
+                    "retry_of_run_id",
+                    "parent_run_id",
+                )
+            ):
+                continue
             lineage = [run, *descendants(run)]
             latest = max(lineage, key=sort_key)
             if str(getattr(latest, "state", "")) == "succeeded":
@@ -997,6 +1007,16 @@ class StewardDaemon:
         for successor in successors:
             if str(successor.state) == "succeeded":
                 return self._ingest_recovered_result(task, predecessor, successor)
+            if (
+                str(successor.state) == "interrupted"
+                and successor.retry_of_run_id is not None
+            ):
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.blocked,
+                    "fresh recovery was interrupted; evidence is preserved",
+                    run_id=successor.id,
+                )
             if str(successor.state) == "running":
                 try:
                     inspection = self.session_supervisor.inspect(successor.id)
@@ -1267,6 +1287,35 @@ class StewardDaemon:
         cleanup_complete = any(event.kind == "cleanup_complete" for event in events)
         if cleanup_complete:
             return True
+        pipelines = []
+        try:
+            pipelines = self.store.list_pipelines(task.id)
+        except (AttributeError, KeyError):
+            pass
+        for pipeline in pipelines:
+            active = self._unfinished_phase_event(task.id, pipeline.id)
+            if active is not None:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_blocked",
+                    "terminal cleanup requires all phase claims to resolve",
+                    {
+                        "pipeline_id": pipeline.id,
+                        "phase": active.data.get("phase"),
+                    },
+                )
+                return False
+        explicit_terminal = any(
+            event.kind in {"pipeline.ready_to_seal", "pipeline.blocked"}
+            for event in events
+        )
+        if pipelines and not explicit_terminal:
+            self.store.add_event(
+                task.id,
+                "cleanup_blocked",
+                "terminal cleanup requires an explicit pipeline outcome",
+            )
+            return False
         try:
             if any(str(run.state) == "running" for run in self.store.list_runs(task.id)):
                 self.store.add_event(
@@ -1303,11 +1352,25 @@ class StewardDaemon:
                     task,
                     pipeline=self.store.get_pipeline(pipeline_id) if pipeline_id else None,
                 )
+                for pipeline in pipelines:
+                    runs = self.store.list_runs(
+                        task.id,
+                        pipeline_id=pipeline.id,
+                    )
+                    for run in runs:
+                        archive.materialize_run(task.id, pipeline.id, run)
+                    archive.materialize_pipeline(
+                        task.id,
+                        pipeline,
+                        runs=runs,
+                    )
                 archive.seal(
                     task.id,
                     str(task.status),
                     completion_identity=completion_identity,
-                    completed_at=task.updated_at.isoformat(),
+                    completed_at=task.updated_at.astimezone(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                     external_actions_complete=True,
                     writer_final=True,
                 )
@@ -1482,14 +1545,32 @@ class StewardDaemon:
         # Stop containers after every phase owner has received cancellation;
         # this preserves stopped restart inputs while preventing credentials
         # from remaining live after ordinary daemon exit.
+        stopped_container_count = 0
+        container_stop_failures: list[str] = []
         stop_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, min(len(tasks), self.config.limits.max_active_tasks))
         ) if tasks and self.session_supervisor is not None else None
         if stop_pool is not None:
-            stop_futures = [
-                stop_pool.submit(self._stop_task_container, task.id) for task in tasks
-            ]
-            concurrent.futures.wait(stop_futures, timeout=max(0.0, deadline - time.monotonic()) if not force else 2.0)
+            stop_futures = {
+                stop_pool.submit(self._stop_task_container, task.id): task.id
+                for task in tasks
+            }
+            stopped, pending = concurrent.futures.wait(
+                stop_futures,
+                timeout=max(0.0, deadline - time.monotonic()) if not force else 2.0,
+            )
+            for future in stopped:
+                task_id = stop_futures[future]
+                try:
+                    if future.result():
+                        stopped_container_count += 1
+                    else:
+                        container_stop_failures.append(task_id)
+                except Exception:
+                    container_stop_failures.append(task_id)
+            for future in pending:
+                container_stop_failures.append(stop_futures[future])
+                future.cancel()
             stop_pool.shutdown(wait=False, cancel_futures=True)
         with self._worker_pool_lock:
             pool = self._worker_pool
@@ -1526,23 +1607,36 @@ class StewardDaemon:
                 if pending_after_force:
                     concurrent.futures.wait(pending_after_force, timeout=0.25)
         self._subprocess_owner.wait(timeout=0.1 if force else max(0.0, deadline - time.monotonic()))
-        self._stop_task_sync(final=True)
+        self._stop_task_sync(
+            final=not container_stop_failures,
+            deadline=deadline,
+        )
         self._stop_public_mirror_sync()
         self._stop_heartbeat_thread()
+        lifecycle = (
+            DaemonLifecycleState.stopping
+            if container_stop_failures
+            else DaemonLifecycleState.stopped
+        )
         with self._runtime_lock:
-            self.runtime.lifecycle = DaemonLifecycleState.stopped
+            self.runtime.lifecycle = lifecycle
             self.runtime.state = DaemonRuntimeState.stopping
             self.runtime.heartbeat_at = utc_now()
         if hasattr(self.store, "set_daemon_lifecycle"):
             self.store.set_daemon_lifecycle(
-                DaemonLifecycleState.stopped.value,
+                lifecycle.value,
                 instance_id=self.runtime.instance_id,
-                state={"forced": force, "interrupted_runs": interrupted_runs},
+                state={
+                    "forced": force,
+                    "interrupted_runs": interrupted_runs,
+                    "container_stop_failures": len(container_stop_failures),
+                },
             )
         return ShutdownResult(
+            state=lifecycle,
             forced=force,
             interrupted_runs=interrupted_runs,
-            stopped_containers=sum(1 for _ in self.store.list_tasks(limit=10000)),
+            stopped_containers=stopped_container_count,
             final_sync_attempted=self._sync_final_attempted,
         )
 
@@ -1565,13 +1659,11 @@ class StewardDaemon:
         except Exception:
             pass
 
-    def _stop_task_container(self, task_id: str) -> None:
+    def _stop_task_container(self, task_id: str) -> bool:
         if self.session_supervisor is None:
-            return
-        try:
-            self.session_supervisor.stop_container(task_id, timeout=1)
-        except Exception:
-            pass
+            return False
+        self.session_supervisor.stop_container(task_id, timeout=1)
+        return True
 
     def start_task_sync(self) -> None:
         """Start immediate and monotonic minute-cadence raw synchronization."""
@@ -1633,19 +1725,53 @@ class StewardDaemon:
             with self._sync_lock:
                 self._sync_running = False
 
-    def _stop_task_sync(self, *, final: bool = False) -> None:
+    def _stop_task_sync(
+        self,
+        *,
+        final: bool = False,
+        deadline: float | None = None,
+    ) -> None:
         self._sync_stop.set()
         self._sync_wakeup.set()
         thread = self._sync_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=min(5.0, float(self.config.task_sync.transfer_timeout_seconds) if self.config.task_sync.enabled else 5.0))
+            join_timeout = min(
+                FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS,
+                float(self.config.task_sync.transfer_timeout_seconds)
+                if self.config.task_sync.enabled
+                else FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            if deadline is not None:
+                join_timeout = min(
+                    join_timeout,
+                    max(0.0, deadline - time.monotonic()),
+                )
+            thread.join(timeout=join_timeout)
+        periodic_still_running = bool(thread is not None and thread.is_alive())
         with self._sync_lock:
             self._sync_thread = None
         if final and self.config.task_sync.enabled and not self._sync_final_attempted:
             self._sync_final_attempted = True
+            if periodic_still_running:
+                self._log("final task archive sync skipped while cancellation is pending")
+                return
+            final_deadline = time.monotonic() + min(
+                FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS,
+                float(self.config.task_sync.transfer_timeout_seconds),
+            )
+            if deadline is not None:
+                final_deadline = min(final_deadline, deadline)
             self._sync_stop.clear()
-            self._run_task_sync_cycle()
+            final_thread = threading.Thread(
+                target=self._run_task_sync_cycle,
+                name="steward-final-task-archive-sync",
+                daemon=True,
+            )
+            final_thread.start()
+            final_thread.join(timeout=max(0.0, final_deadline - time.monotonic()))
             self._sync_stop.set()
+            if final_thread.is_alive():
+                self._log("final task archive sync reached its shutdown deadline")
 
     stop_task_sync = _stop_task_sync
 

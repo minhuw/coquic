@@ -324,8 +324,9 @@ role transitions always use fresh sessions.
 
 The worker pool is bounded by `limits.max_active_tasks`; integration, commit,
 and push remain serialized. Raw task archives sync once after reconciliation
-and every monotonic 60 seconds when `[steward.task_sync]` is enabled. Sync
-failure is health-only and never fails or pauses a task.
+and every monotonic 60 seconds when `[steward.task_sync]` is enabled. Preflight
+locks `ssh_bin` and `rsync_bin` to the executables selected by the daemon's
+PATH. Sync failure is health-only and never fails or pauses a task.
 
 SIGINT and SIGTERM enter persisted `stopping`, reject new work, interrupt active
 wrappers and validation/Git/SSH commands, and wait at most

@@ -752,12 +752,22 @@ class SQLiteTaskStore:
         runtime_version: str,
         run_checkpoint_id: str | None,
         run_provider_store_identity: str,
+        retry_of_run_id: str | None = None,
     ) -> tuple[CodexSession, TaskRun]:
         """Allocate a session UID and its mandatory first run atomically."""
 
         pipeline = self.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
             raise ValueError("session pipeline does not belong to task")
+        if retry_of_run_id is not None:
+            predecessor = self.get_run(retry_of_run_id)
+            if (
+                predecessor.task_id != task_id
+                or predecessor.pipeline_id != pipeline_id
+            ):
+                raise ValueError(
+                    "retry run must belong to the same task and pipeline"
+                )
 
         def existing_allocation() -> tuple[CodexSession, TaskRun] | None:
             if session_idempotency_key is None:
@@ -784,6 +794,10 @@ class SQLiteTaskStore:
                     raise RuntimeError("session allocation is missing its first run")
                 if run_row.role != role:
                     raise ValueError("session idempotency key conflicts with role")
+                if run_row.retry_of_run_id != retry_of_run_id:
+                    raise ValueError(
+                        "session idempotency key conflicts with retry lineage"
+                    )
                 return (
                     row_to_session(session_row, path_codec=self.path_codec),
                     row_to_run(run_row),
@@ -832,6 +846,7 @@ class SQLiteTaskStore:
                         session_id=session_id,
                         role=role,
                         role_ordinal=int(ordinal),
+                        retry_of_run_id=retry_of_run_id,
                         model=model,
                         reasoning=reasoning,
                         image_version=image_version,

@@ -171,12 +171,22 @@ class StewardTaskSyncConfig:
     remote_port: int = 22
     identity_path: Path | None = None
     known_hosts_path: Path | None = None
+    ssh_bin: str = "ssh"
+    rsync_bin: str = "rsync"
     connect_timeout_seconds: float = 10.0
     transfer_timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("task_sync.enabled must be a boolean")
+        object.__setattr__(
+            self, "ssh_bin", _bounded_token(self.ssh_bin, "task_sync.ssh_bin")
+        )
+        object.__setattr__(
+            self,
+            "rsync_bin",
+            _bounded_token(self.rsync_bin, "task_sync.rsync_bin"),
+        )
         if isinstance(self.remote_port, bool) or not isinstance(self.remote_port, int) or not 1 <= self.remote_port <= 65535:
             raise ValueError("task_sync.remote_port must be between 1 and 65535")
         for value, label in ((self.connect_timeout_seconds, "connect_timeout_seconds"), (self.transfer_timeout_seconds, "transfer_timeout_seconds")):
@@ -917,6 +927,8 @@ def _task_sync_config(raw: object) -> StewardTaskSyncConfig:
         remote_port=int(data.get("remote_port", data.get("port", 22))),
         identity_path=Path(identity).expanduser() if identity is not None else None,
         known_hosts_path=Path(known_hosts).expanduser() if known_hosts is not None else None,
+        ssh_bin=_resolve_executable(str(data.get("ssh_bin", "ssh"))),
+        rsync_bin=_resolve_executable(str(data.get("rsync_bin", "rsync"))),
         connect_timeout_seconds=float(data.get("connect_timeout_seconds", 10.0)),
         transfer_timeout_seconds=float(
             data.get("transfer_timeout_seconds", data.get("timeout_seconds", 300.0))

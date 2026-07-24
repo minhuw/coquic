@@ -44,6 +44,8 @@ enabled = false
 # remote_port = 22
 # identity_path = "/run/secrets/task-sync-key"
 # known_hosts_path = "/etc/coquic/known_hosts"
+ssh_bin = "ssh" # resolved to an absolute locked path when configuration loads
+rsync_bin = "rsync" # must match the executable selected by PATH
 # connect_timeout_seconds = 10
 # transfer_timeout_seconds = 300
 

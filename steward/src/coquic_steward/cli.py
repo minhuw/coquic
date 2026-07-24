@@ -315,6 +315,12 @@ def _run_until_stopped(daemon_: StewardDaemon) -> None:
             signal.signal(selected, handler)
         if not daemon_.lifecycle_state.value == "stopped":
             daemon_.shutdown(force=signal_count > 1)
+        if not daemon_.lifecycle_state.value == "stopped":
+            typer.echo(
+                "Steward daemon shutdown incomplete; owned containers may still be running.",
+                err=True,
+            )
+            raise typer.Exit(1)
         typer.echo("Steward daemon stopped.")
 
 

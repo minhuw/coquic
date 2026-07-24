@@ -34,6 +34,7 @@ from .models import (
     timestamp,
     utc_now,
     validate_id,
+    validate_relative_path,
 )
 
 
@@ -95,7 +96,7 @@ class ControlLoopLedger:
                   fetch_id TEXT PRIMARY KEY,
                   epoch_id TEXT NOT NULL,
                   provider TEXT NOT NULL,
-                  status TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK(status IN ('ok','error')),
                   started_at TEXT NOT NULL,
                   completed_at TEXT NOT NULL,
                   item_count INTEGER NOT NULL CHECK(item_count >= 0),
@@ -171,6 +172,38 @@ class ControlLoopLedger:
                   proposal_json TEXT NOT NULL,
                   UNIQUE(planner_run_id, ordinal)
                 );
+                CREATE TABLE IF NOT EXISTS control_loop_planner_signals (
+                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
+                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+                  signal_id TEXT NOT NULL REFERENCES control_loop_signals(signal_id),
+                  PRIMARY KEY(planner_run_id, signal_id),
+                  UNIQUE(planner_run_id, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS control_loop_planner_tasks (
+                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
+                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+                  task_id TEXT NOT NULL REFERENCES tasks(id),
+                  PRIMARY KEY(planner_run_id, task_id),
+                  UNIQUE(planner_run_id, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS control_loop_proposal_signals (
+                  proposal_id TEXT NOT NULL REFERENCES control_loop_proposals(proposal_id) ON DELETE CASCADE,
+                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+                  signal_id TEXT NOT NULL REFERENCES control_loop_signals(signal_id),
+                  PRIMARY KEY(proposal_id, signal_id),
+                  UNIQUE(proposal_id, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS control_loop_proposal_tasks (
+                  proposal_id TEXT PRIMARY KEY REFERENCES control_loop_proposals(proposal_id) ON DELETE CASCADE,
+                  task_id TEXT NOT NULL REFERENCES tasks(id)
+                );
+                CREATE TABLE IF NOT EXISTS control_loop_planner_artifacts (
+                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
+                  name TEXT NOT NULL,
+                  source_path TEXT NOT NULL,
+                  required INTEGER NOT NULL CHECK(required IN (0,1)),
+                  PRIMARY KEY(planner_run_id, name)
+                );
                 CREATE TABLE IF NOT EXISTS control_loop_edges (
                   edge_id TEXT PRIMARY KEY,
                   epoch_id TEXT NOT NULL,
@@ -198,7 +231,8 @@ class ControlLoopLedger:
                   key TEXT PRIMARY KEY,
                   attempt INTEGER NOT NULL CHECK(attempt >= 0),
                   eligible_at TEXT,
-                  updated_at TEXT NOT NULL
+                  updated_at TEXT NOT NULL,
+                  CHECK((attempt = 0 AND eligible_at IS NULL) OR (attempt > 0 AND eligible_at IS NOT NULL))
                 );
                 CREATE INDEX IF NOT EXISTS ix_control_loop_observations_signal
                   ON control_loop_observations(signal_id, observed_at);
@@ -259,7 +293,12 @@ class ControlLoopLedger:
             db.commit()
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self, connection: sqlite3.Connection | None = None
+    ) -> Iterator[sqlite3.Connection]:
+        if connection is not None:
+            yield connection
+            return
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
@@ -521,6 +560,9 @@ class ControlLoopLedger:
             for signal_id in selected_signals:
                 if db.execute("SELECT 1 FROM control_loop_signals WHERE signal_id=?", (signal_id,)).fetchone() is None:
                     raise LedgerConflictError(f"planner input signal does not exist: {signal_id}")
+            for task_id in selected_tasks:
+                if db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+                    raise LedgerConflictError(f"active planner task does not exist: {task_id}")
             started = utc_now()
             run = PlannerRun(
                 plannerRunId=run_id,
@@ -536,6 +578,16 @@ class ControlLoopLedger:
                 "INSERT INTO control_loop_planner_runs(planner_run_id,epoch_id,state,started_at,completed_at,input_signal_ids_json,active_task_ids_json,prompt_json,result_json,diagnostics_json,retry_eligible_at,attempt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, self.epoch_id, run.state, _dt(started), None, _json(selected_signals), _json(selected_tasks), _json(values["prompt"]) if values["prompt"] is not None else None, None, "{}", None, attempt),
             )
+            for ordinal, signal_id in enumerate(selected_signals, 1):
+                db.execute(
+                    "INSERT INTO control_loop_planner_signals(planner_run_id,ordinal,signal_id) VALUES(?,?,?)",
+                    (run_id, ordinal, signal_id),
+                )
+            for ordinal, task_id in enumerate(selected_tasks, 1):
+                db.execute(
+                    "INSERT INTO control_loop_planner_tasks(planner_run_id,ordinal,task_id) VALUES(?,?,?)",
+                    (run_id, ordinal, task_id),
+                )
             self._event(db, EventKind.planner_started.value, {"plannerRun": values})
             for signal_id in selected_signals:
                 self._edge(db, "signal_planner_run", signal_id, run_id)
@@ -551,6 +603,9 @@ class ControlLoopLedger:
         diagnostics: Mapping[str, Any] | None = None,
         retry_after: timedelta | None = None,
         consume_signal_ids: Iterable[str] = (),
+        artifact_sources: Mapping[str, tuple[str, bool]] | None = None,
+        reset_retry_key: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> PlannerRun:
         run_id = validate_id(planner_run_id)
         values = [
@@ -559,7 +614,7 @@ class ControlLoopLedger:
         ]
         if state not in {"succeeded", "failed", "interrupted", "cancelled"}:
             raise ValueError(f"invalid terminal planner state: {state}")
-        with self.transaction() as db:
+        with self.transaction(connection) as db:
             row = db.execute(
                 "SELECT * FROM control_loop_planner_runs WHERE planner_run_id=?",
                 (run_id,),
@@ -584,6 +639,16 @@ class ControlLoopLedger:
                     "INSERT INTO control_loop_proposals(proposal_id,planner_run_id,ordinal,outcome,reason_code,signal_ids_json,dedupe_key,task_id,proposal_json) VALUES(?,?,?,?,?,?,?,?,?)",
                     (item.proposal_id, run_id, item.ordinal, item.outcome, item.reason_code, _json(item.signal_ids), item.dedupe_key, item.task_id, _json(payload["proposal"])),
                 )
+                for ordinal, signal_id in enumerate(item.signal_ids, 1):
+                    db.execute(
+                        "INSERT INTO control_loop_proposal_signals(proposal_id,ordinal,signal_id) VALUES(?,?,?)",
+                        (item.proposal_id, ordinal, signal_id),
+                    )
+                if item.task_id is not None:
+                    db.execute(
+                        "INSERT INTO control_loop_proposal_tasks(proposal_id,task_id) VALUES(?,?)",
+                        (item.proposal_id, item.task_id),
+                    )
                 self._event(db, EventKind.proposal.value, {"proposal": payload})
                 self._edge(db, "planner_proposal", run_id, item.proposal_id)
                 for signal_id in item.signal_ids:
@@ -596,9 +661,23 @@ class ControlLoopLedger:
                     "planner completion consumes a signal outside its input set"
                 )
             for signal_id in consume:
-                db.execute(
+                changed = db.execute(
                     "UPDATE control_loop_signals SET status='planned',updated_at=? WHERE signal_id=? AND status='pending'",
                     (_dt(), signal_id),
+                ).rowcount
+                if changed:
+                    self._signal_transition(
+                        db,
+                        signal_id,
+                        "pending",
+                        "planned",
+                        planner_run_id=run_id,
+                        reason="planner_consumed",
+                    )
+            for name, (source_path, required) in dict(artifact_sources or {}).items():
+                db.execute(
+                    "INSERT INTO control_loop_planner_artifacts(planner_run_id,name,source_path,required) VALUES(?,?,?,?)",
+                    (run_id, validate_relative_path(name), str(source_path), int(required)),
                 )
             completed = utc_now()
             retry_at = completed + retry_after if retry_after is not None else None
@@ -606,6 +685,8 @@ class ControlLoopLedger:
                 "UPDATE control_loop_planner_runs SET state=?,completed_at=?,result_json=?,diagnostics_json=?,retry_eligible_at=? WHERE planner_run_id=?",
                 (state, _dt(completed), _json(dict(result or {})), _json(dict(diagnostics or {})), _dt(retry_at) if retry_at else None, run_id),
             )
+            if reset_retry_key is not None:
+                db.execute("DELETE FROM control_loop_retry WHERE key=?", (reset_retry_key,))
             self._event(
                 db,
                 EventKind.planner_finished.value,
@@ -615,6 +696,73 @@ class ControlLoopLedger:
             row = db.execute("SELECT * FROM control_loop_planner_runs WHERE planner_run_id=?", (run_id,)).fetchone()
         assert row is not None
         return _planner_from_row(row)
+
+    def _signal_transition(
+        self,
+        db: sqlite3.Connection,
+        signal_id: str,
+        previous: str,
+        status: str,
+        *,
+        planner_run_id: str | None,
+        reason: str,
+    ) -> Event:
+        return self._event(
+            db,
+            EventKind.signal_transition.value,
+            {
+                "transition": {
+                    "signalId": signal_id,
+                    "fromStatus": previous,
+                    "toStatus": status,
+                    "plannerRunId": planner_run_id,
+                    "reasonCode": reason,
+                }
+            },
+        )
+
+    def transition_signal_identities(
+        self,
+        identities: Iterable[tuple[str, str]],
+        status: str,
+        *,
+        planner_run_id: str | None = None,
+        reason: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> int:
+        if status not in {"pending", "planned", "superseded", "errored"}:
+            raise ValueError(f"invalid canonical signal status: {status}")
+        changed = 0
+        with self.transaction(connection) as db:
+            for provider, fingerprint in dict.fromkeys(identities):
+                row = db.execute(
+                    "SELECT signal_id,status FROM control_loop_signals WHERE epoch_id=? AND provider=? AND fingerprint=?",
+                    (self.epoch_id, provider, fingerprint),
+                ).fetchone()
+                if row is None or row[1] == status:
+                    continue
+                db.execute(
+                    "UPDATE control_loop_signals SET status=?,updated_at=? WHERE signal_id=?",
+                    (status, _dt(), row[0]),
+                )
+                self._signal_transition(
+                    db,
+                    row[0],
+                    row[1],
+                    status,
+                    planner_run_id=planner_run_id,
+                    reason=reason,
+                )
+                changed += 1
+        return changed
+
+    def planner_artifact_sources(self, planner_run_id: str) -> dict[str, tuple[Path, bool]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT name,source_path,required FROM control_loop_planner_artifacts WHERE planner_run_id=? ORDER BY name",
+                (validate_id(planner_run_id),),
+            ).fetchall()
+        return {row[0]: (Path(row[1]), bool(row[2])) for row in rows}
 
     def list_events(self, *, after_sequence: int = -1, limit: int | None = None) -> list[Event]:
         sql = "SELECT * FROM control_loop_events WHERE sequence>? ORDER BY sequence"

@@ -120,13 +120,14 @@ with TemporaryDirectory() as value:
     for path in (history, private, output):
         path.mkdir()
     config = PlannerContainerConfig(
-        run_id="planner-smoke",
+        image="coquic-steward-task",
         image_digest="sha256:" + "a" * 64,
         history_root=history,
         private_root=private,
         output_root=output,
     )
-    assert config.network == "none"
+    assert config.network == "bridge"
+    assert config.container_name == "coquic-steward-planner"
     assert [mount.target for mount in config.mounts] == [
         "/planner/history",
         "/planner/session",

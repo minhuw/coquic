@@ -19,9 +19,13 @@ from coquic_steward.core.models import (
     TaskKind,
     TaskSpec,
     TaskStatus,
+    SignalFetchRun,
+    SignalFetchStatus,
+    SignalItem,
     WorkerResult,
     WorkerKind,
 )
+from coquic_steward.planning import PlannerRun as SchedulerPlannerRun
 from coquic_steward.core.config import (
     StewardConfig,
     StewardContainerConfig,
@@ -31,6 +35,7 @@ from coquic_steward.execution.container import TaskContainerRuntime
 from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import (
+    FreshPlannerSession,
     InvocationStatus,
     ResumeCategory,
     ResumeResult,
@@ -62,6 +67,138 @@ def _task(store: TaskStore, title: str = "lifecycle"):
         )
     )
     return task, store.list_pipelines(task.id)[0]
+
+
+def _planner_signal(store: TaskStore, suffix: str = "retry") -> SignalItem:
+    item = SignalItem(
+        id=f"signal-item-{suffix}",
+        provider="synthetic-provider",
+        kind="synthetic.alert",
+        fingerprint=f"fingerprint-{suffix}",
+        title=f"Synthetic {suffix}",
+    )
+    store.ingest_signal_collection(
+        SignalFetchRun(
+            id=f"fetch-{suffix}",
+            provider=item.provider,
+            status=SignalFetchStatus.ok,
+        ),
+        [item],
+    )
+    return item
+
+
+def test_planner_retry_defers_unchanged_input_and_success_resets_state(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _planner_signal(store)
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+    assert signal_id is not None
+    store.control_loop.claim_planner_run("planner-run-failed-retry", [signal_id])
+    store.control_loop.complete_planner_run(
+        "planner-run-failed-retry", [], state="failed"
+    )
+    store.control_loop.schedule_retry("planner")
+    daemon = StewardDaemon(config, store)
+    calls = 0
+
+    def successful_no_work(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.private_dir / "missing-planner.jsonl",
+            thread_id=None,
+            consumed_item_ids=[item.id],
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", successful_no_work
+    )
+    daemon._plan_until_idle(TickResult())
+    assert calls == 0
+    assert store.control_loop.pending_retry("planner") is not None
+
+    daemon._plan(TickResult(), [item])
+    assert calls == 1
+    assert store.control_loop.pending_retry("planner") is None
+
+
+def test_startup_reconstructs_terminal_planner_publication(config) -> None:
+    store = TaskStore(config.db_path)
+    item = _planner_signal(store, "publication")
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+    assert signal_id is not None
+    run_id = "planner-run-publication"
+    source_root = config.private_dir / "planner-publication-source"
+    source_root.mkdir(parents=True)
+    artifacts = {
+        "prompt.md": b"synthetic prompt\n",
+        "codex.jsonl": b'{"type":"failed"}\n',
+        "last-message.md": b"synthetic failure\n",
+    }
+    for name, value in artifacts.items():
+        (source_root / name).write_bytes(value)
+    store.control_loop.claim_planner_run(run_id, [signal_id])
+    store.control_loop.complete_planner_run(
+        run_id,
+        [],
+        state="failed",
+        artifact_sources={
+            name: (str(source_root / name), True) for name in artifacts
+        },
+    )
+
+    daemon = StewardDaemon(config, store)
+    daemon._startup_reconcile_control_loop()
+
+    published = config.control_loop_dir / "planner-runs" / run_id
+    assert daemon._control_loop_archive.verify_planner_run(run_id)
+    assert (published / "prompt.md").read_bytes() == artifacts["prompt.md"]
+    assert run_id not in daemon._planner_publication_queue
+
+
+def test_locked_daemon_routes_scheduler_planning_through_fresh_boundary(
+    config, monkeypatch
+) -> None:
+    configured = replace(
+        config,
+        local_codex_test_harness=False,
+        task_image_digest=IMAGE,
+    )
+    store = TaskStore(configured.db_path)
+    item = _planner_signal(store, "isolated-boundary")
+    seen: list[object] = []
+
+    def fake_run_planner(_config, _signals, _active, **kwargs):
+        seen.append(kwargs.get("invocation"))
+        return SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=configured.private_dir / "missing-planner.jsonl",
+            thread_id=None,
+            consumed_item_ids=[item.id],
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", fake_run_planner
+    )
+    daemon = StewardDaemon(configured, store)
+    daemon._plan(TickResult(), [item])
+
+    assert isinstance(daemon.planner_session, FreshPlannerSession)
+    assert seen == [daemon.planner_session]
+    assert store.list_tasks() == []
 
 
 def _interrupted_run(config, store, *, role="implementation", checkpoint=None):

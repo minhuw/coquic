@@ -403,16 +403,16 @@ class ControlLoopArchive:
                 except ArchiveConflictError:
                     conflicts += 1
                     ledger.set_planning_blocked(True, reason="visible event conflict")
-                    continue
+                    break
                 except OSError:
                     # A filesystem error is lag, not an epoch/identity
                     # conflict.  The daemon's asynchronous writer retries it
                     # on its next wakeup.
-                    continue
+                    break
                 except ArchiveValidationError:
                     conflicts += 1
                     ledger.set_planning_blocked(True, reason="visible event path conflict")
-                    continue
+                    break
                 ledger.mark_materialized(row["sequence"], event_id=row["event_id"])
                 materialized += 1
         if current is not None:

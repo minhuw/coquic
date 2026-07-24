@@ -16,6 +16,8 @@ from coquic_steward.execution import (
     TaskContainerRuntime,
     TaskRole,
 )
+from coquic_steward.execution.container import PlannerContainerRuntime
+from coquic_steward.execution.container_config import PlannerContainerConfig
 from coquic_steward.agents.invocation import InvocationRequest
 from coquic_steward.core.config import StewardConfig
 from coquic_steward.core.models import CodexStage, TaskKind, TaskSpec, WorkerKind
@@ -45,6 +47,33 @@ class FakeDocker:
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps([payload]).encode(), b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def test_planner_container_mounts_only_sealed_history_and_private_io(
+    tmp_path: Path,
+) -> None:
+    history = tmp_path / "control-loop" / "planner-runs"
+    private = tmp_path / "private" / "planner"
+    output = tmp_path / "private" / "planner-output"
+    for path in (history, private, output):
+        path.mkdir(parents=True)
+    config = PlannerContainerConfig(
+        image="coquic-steward-task",
+        image_digest="sha256:" + "a" * 64,
+        history_root=history,
+        private_root=private,
+        output_root=output,
+    )
+    argv = PlannerContainerRuntime(config, client=FakeDocker()).create_argv()
+    mounts = [argv[index + 1] for index, value in enumerate(argv) if value == "--mount"]
+
+    assert config.container_name == "coquic-steward-planner"
+    assert len(mounts) == 3
+    assert any(value.endswith("dst=/planner/history,readonly") for value in mounts)
+    assert any(value.endswith("dst=/planner/session") for value in mounts)
+    assert any(value.endswith("dst=/planner/output") for value in mounts)
+    assert all("worktree" not in value and "/.git" not in value for value in mounts)
+    assert all("steward.sqlite" not in value and "docker.sock" not in value for value in argv)
 
 
 @pytest.fixture

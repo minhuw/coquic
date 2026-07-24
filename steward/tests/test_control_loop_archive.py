@@ -114,3 +114,34 @@ def test_archive_rejects_epoch_and_path_conflicts(tmp_path: Path) -> None:
             ),
             {"../escape": b"no"},
         )
+
+
+def test_reconcile_stops_at_temporary_outbox_gap(tmp_path: Path, monkeypatch) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        ledger._event(connection, "synthetic.event", {"ordinal": 0})
+        ledger._event(connection, "synthetic.event", {"ordinal": 1})
+
+    original = archive.append_event
+    failed = False
+
+    def fail_first(event):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("temporary write failure")
+        return original(event)
+
+    monkeypatch.setattr(archive, "append_event", fail_first)
+    first = archive.reconcile(ledger)
+    assert first["materialized"] == 0
+    assert [row["sequence"] for row in ledger.outbox()] == [0, 1]
+
+    monkeypatch.setattr(archive, "append_event", original)
+    second = archive.reconcile(ledger)
+    assert second["materialized"] == 2
+    path = archive.events_root / "2026" / "07" / "24.jsonl"
+    assert [json.loads(line)["sequence"] for line in path.read_bytes().splitlines()] == [0, 1]

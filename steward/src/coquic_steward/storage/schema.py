@@ -229,6 +229,12 @@ class ControlLoopFetchRow(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     normalized_json: Mapped[str] = mapped_column(Text, nullable=False)
 
+    __table_args__ = (
+        CheckConstraint("status IN ('ok','error')", name="ck_control_loop_fetch_status"),
+        CheckConstraint("item_count >= 0", name="ck_control_loop_fetch_item_count"),
+        CheckConstraint("new_item_count >= 0", name="ck_control_loop_fetch_new_item_count"),
+    )
+
 
 class ControlLoopSignalRow(Base):
     __tablename__ = "control_loop_signals"
@@ -275,6 +281,10 @@ class ControlLoopWakeupRow(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     consumed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     input_signal_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending','consumed')", name="ck_control_loop_wakeup_status"),
+    )
 
 
 class ControlLoopCycleRow(Base):
@@ -331,6 +341,80 @@ class ControlLoopProposalRow(Base):
     )
 
 
+class ControlLoopPlannerSignalRow(Base):
+    __tablename__ = "control_loop_planner_signals"
+
+    planner_run_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_planner_runs.planner_run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    signal_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_signals.signal_id"), primary_key=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("planner_run_id", "ordinal", name="uq_control_loop_planner_signal_ordinal"),
+        CheckConstraint("ordinal >= 1", name="ck_control_loop_planner_signal_ordinal"),
+    )
+
+
+class ControlLoopPlannerTaskRow(Base):
+    __tablename__ = "control_loop_planner_tasks"
+
+    planner_run_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_planner_runs.planner_run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+
+    __table_args__ = (
+        UniqueConstraint("planner_run_id", "ordinal", name="uq_control_loop_planner_task_ordinal"),
+        CheckConstraint("ordinal >= 1", name="ck_control_loop_planner_task_ordinal"),
+    )
+
+
+class ControlLoopProposalSignalRow(Base):
+    __tablename__ = "control_loop_proposal_signals"
+
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_proposals.proposal_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    signal_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_signals.signal_id"), primary_key=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("proposal_id", "ordinal", name="uq_control_loop_proposal_signal_ordinal"),
+        CheckConstraint("ordinal >= 1", name="ck_control_loop_proposal_signal_ordinal"),
+    )
+
+
+class ControlLoopProposalTaskRow(Base):
+    __tablename__ = "control_loop_proposal_tasks"
+
+    proposal_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_proposals.proposal_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+
+
+class ControlLoopPlannerArtifactRow(Base):
+    __tablename__ = "control_loop_planner_artifacts"
+
+    planner_run_id: Mapped[str] = mapped_column(
+        ForeignKey("control_loop_planner_runs.planner_run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
 class ControlLoopEdgeRow(Base):
     __tablename__ = "control_loop_edges"
 
@@ -373,6 +457,14 @@ class ControlLoopRetryRow(Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     eligible_at: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("attempt >= 0", name="ck_control_loop_retry_attempt"),
+        CheckConstraint(
+            "(attempt = 0 AND eligible_at IS NULL) OR (attempt > 0 AND eligible_at IS NOT NULL)",
+            name="ck_control_loop_retry_eligibility",
+        ),
+    )
 
 
 class TaskArchiveSyncHealthRow(Base):

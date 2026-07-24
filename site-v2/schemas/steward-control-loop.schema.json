@@ -51,8 +51,8 @@
         "outcome": {"enum": ["accepted", "invalid", "policy_rejected", "duplicate", "capacity_skipped"]},
         "reasonCode": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
         "signalIds": {"type": "array", "items": {"$ref": "#/$defs/id"}, "uniqueItems": true},
-        "dedupeKey": {"type": "string", "maxLength": 160},
-        "taskId": {"$ref": "#/$defs/id"},
+        "dedupeKey": {"type": ["string", "null"], "maxLength": 160},
+        "taskId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
         "proposal": {"type": "object"}
       }
     },

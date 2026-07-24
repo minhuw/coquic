@@ -1166,7 +1166,12 @@ def validate_control_loop_fixture() -> int:
     failures += _control_loop_validate(CONTROL_LOOP_DIR / "current.json", "current")
     epoch = read_json(CONTROL_LOOP_DIR / "epoch.json")
     current = read_json(CONTROL_LOOP_DIR / "current.json")
+    task_epoch = read_json(DATASET_DIR / "epoch.json")
     epoch_id = epoch.get("epochId")
+    for key in ("epochId", "policy", "startedAt"):
+        if epoch.get(key) != task_epoch.get(key):
+            print(f"control-loop epoch.json [{key}-not-shared-with-task-archive]")
+            failures += 1
     if current.get("epochId") != epoch_id:
         print("control-loop current.json [epoch-mismatch]")
         failures += 1
@@ -1261,18 +1266,140 @@ def validate_control_loop_fixture() -> int:
                 print(f"control-loop planner-runs/{run_root.name}/{relative} [manifest-hash]")
                 failures += 1
 
-    proposal_ordinals: dict[str, list[int]] = {}
-    outcomes: set[str] = set()
+    fetch_ids: set[str] = set()
+    signal_ids: set[str] = set()
+    observation_ids: set[str] = set()
+    planner_event_ids: set[str] = set()
+    proposal_ids: set[str] = set()
+    task_ids: set[str] = set()
+    observations: list[dict[str, object]] = []
+    transitions: list[dict[str, object]] = []
+    planner_inputs: list[dict[str, object]] = []
+    proposals: list[dict[str, object]] = []
+    edges: set[tuple[str, str, str]] = set()
+    edge_ids: set[str] = set()
     for event in records:
+        kind = event.get("kind")
         payload = event.get("payload")
         if not isinstance(payload, dict):
             continue
-        proposal = payload.get("proposal")
-        if proposal is None and "proposalId" in payload:
-            proposal = payload
-        if not isinstance(proposal, dict):
+        nested_key = {
+            "signal_fetch.finished": "fetch",
+            "signal.created": "signal",
+            "signal.observation": "observation",
+            "signal.transition": "transition",
+            "scheduler.wakeup": "wakeup",
+            "daemon.cycle": "cycle",
+            "planner.started": "plannerRun",
+            "planner.proposal": "proposal",
+            "graph.edge": "edge",
+        }.get(kind)
+        if nested_key is not None and not isinstance(payload.get(nested_key), dict):
+            print(f"control-loop {event.get('eventId')} [producer-payload-shape]")
+            failures += 1
             continue
-        failures += _control_loop_validate_value(proposal, "proposal", event.get("eventId", "proposal"))
+        if kind == "signal_fetch.finished":
+            fetch = payload["fetch"]
+            required = {
+                "fetchId",
+                "provider",
+                "status",
+                "startedAt",
+                "completedAt",
+                "itemCount",
+                "newItemCount",
+                "hasMore",
+            }
+            if not required <= fetch.keys():
+                print(f"control-loop {event.get('eventId')} [fetch-shape]")
+                failures += 1
+            if isinstance(fetch.get("fetchId"), str):
+                fetch_ids.add(fetch["fetchId"])
+        elif kind == "signal.created":
+            signal = payload["signal"]
+            if isinstance(signal.get("signalId"), str):
+                signal_ids.add(signal["signalId"])
+        elif kind == "signal.observation":
+            observation = payload["observation"]
+            observations.append(observation)
+            if isinstance(observation.get("observationId"), str):
+                observation_ids.add(observation["observationId"])
+        elif kind == "signal.transition":
+            transitions.append(payload["transition"])
+        elif kind == "planner.started":
+            planner = payload["plannerRun"]
+            planner_inputs.append(planner)
+            if isinstance(planner.get("plannerRunId"), str):
+                planner_event_ids.add(planner["plannerRunId"])
+            if planner.get("epochId") != epoch_id:
+                print(f"control-loop {event.get('eventId')} [planner-epoch]")
+                failures += 1
+        elif kind == "planner.finished":
+            if not isinstance(payload.get("plannerRunId"), str):
+                print(f"control-loop {event.get('eventId')} [planner-finished-shape]")
+                failures += 1
+            else:
+                planner_event_ids.add(payload["plannerRunId"])
+        elif kind == "planner.proposal":
+            proposal = payload["proposal"]
+            proposals.append(proposal)
+            if isinstance(proposal.get("proposalId"), str):
+                proposal_ids.add(proposal["proposalId"])
+            if isinstance(proposal.get("taskId"), str):
+                task_ids.add(proposal["taskId"])
+        elif kind == "graph.edge":
+            edge = payload["edge"]
+            values = (edge.get("edgeType"), edge.get("sourceId"), edge.get("targetId"))
+            if all(isinstance(value, str) for value in values):
+                edges.add(values)
+            else:
+                print(f"control-loop {event.get('eventId')} [edge-shape]")
+                failures += 1
+            edge_id = edge.get("edgeId")
+            if isinstance(edge_id, str):
+                if edge_id in edge_ids:
+                    print(f"control-loop {event.get('eventId')} [duplicate-edge-id]")
+                    failures += 1
+                edge_ids.add(edge_id)
+
+    for observation in observations:
+        if observation.get("fetchId") not in fetch_ids:
+            print(f"control-loop observation {observation.get('observationId')} [fetch-reference]")
+            failures += 1
+        signal_id = observation.get("canonicalSignalId")
+        observation_id = observation.get("observationId")
+        if signal_id not in signal_ids:
+            print(f"control-loop observation {observation_id} [signal-reference]")
+            failures += 1
+        if ("observation_signal", observation_id, signal_id) not in edges:
+            print(f"control-loop observation {observation_id} [edge-missing]")
+            failures += 1
+    for planner in planner_inputs:
+        run_id = planner.get("plannerRunId")
+        for signal_id in planner.get("inputSignalIds", []):
+            if signal_id not in signal_ids or ("signal_planner_run", signal_id, run_id) not in edges:
+                print(f"control-loop planner {run_id} [input-edge]")
+                failures += 1
+    for transition in transitions:
+        if transition.get("signalId") not in signal_ids:
+            print(f"control-loop transition {transition.get('signalId')} [signal-reference]")
+            failures += 1
+        if transition.get("fromStatus") == transition.get("toStatus"):
+            print(f"control-loop transition {transition.get('signalId')} [no-op]")
+            failures += 1
+    if {transition.get("toStatus") for transition in transitions} < {"planned", "superseded"}:
+        print("control-loop [signal-transition-coverage]")
+        failures += 1
+    if not set(current.get("pendingSignalIds", [])) <= signal_ids:
+        print("control-loop current.json [pending-signal-reference]")
+        failures += 1
+
+    proposal_ordinals: dict[str, list[int]] = {}
+    outcomes: set[str] = set()
+    for proposal in proposals:
+        failures += _control_loop_validate_value(
+            proposal, "proposal", proposal.get("proposalId", "proposal")
+        )
         run_id = proposal.get("plannerRunId")
         if isinstance(run_id, str):
             proposal_ordinals.setdefault(run_id, []).append(proposal.get("ordinal", 0))
@@ -1280,7 +1407,19 @@ def validate_control_loop_fixture() -> int:
         if isinstance(outcome, str):
             outcomes.add(outcome)
         if outcome in {"accepted", "duplicate"} and not isinstance(proposal.get("taskId"), str):
-            print(f"control-loop {event.get('eventId')} [proposal-task-missing]")
+            print(f"control-loop {proposal.get('proposalId')} [proposal-task-missing]")
+            failures += 1
+        proposal_id = proposal.get("proposalId")
+        if run_id not in planner_event_ids or ("planner_proposal", run_id, proposal_id) not in edges:
+            print(f"control-loop proposal {proposal_id} [planner-edge]")
+            failures += 1
+        for signal_id in proposal.get("signalIds", []):
+            if signal_id not in signal_ids or ("signal_proposal", signal_id, proposal_id) not in edges:
+                print(f"control-loop proposal {proposal_id} [signal-edge]")
+                failures += 1
+        task_id = proposal.get("taskId")
+        if isinstance(task_id, str) and ("proposal_task", proposal_id, task_id) not in edges:
+            print(f"control-loop proposal {proposal_id} [task-edge]")
             failures += 1
     for run_id, ordinals in proposal_ordinals.items():
         if ordinals != list(range(1, len(ordinals) + 1)):
@@ -1291,6 +1430,18 @@ def validate_control_loop_fixture() -> int:
         failures += 1
     if not {"planner-synthetic-failed", "planner-synthetic-success"} <= run_ids:
         print("control-loop [fresh-run-fixtures-missing]")
+        failures += 1
+    if run_ids != planner_event_ids:
+        print("control-loop [planner-run-event-relation]")
+        failures += 1
+    if not {
+        "observation_signal",
+        "signal_planner_run",
+        "planner_proposal",
+        "signal_proposal",
+        "proposal_task",
+    } <= {edge_type for edge_type, _source, _target in edges}:
+        print("control-loop [full-graph-edge-coverage]")
         failures += 1
     return failures
 

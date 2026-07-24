@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..core.subprocesses import current_subprocess_owner
-from .container_config import ContainerMount, TaskContainerConfig, TaskRole
+from .container_config import (
+    ContainerMount,
+    PlannerContainerConfig,
+    TaskContainerConfig,
+    TaskRole,
+)
 
 
 class ContainerErrorCategory(StrEnum):
@@ -541,6 +546,103 @@ class TaskContainerRuntime:
                 category = ContainerErrorCategory.runtime_unavailable
             raise ContainerBoundaryError(category, _decode_error(result.stderr))
         return result
+
+
+class PlannerContainerRuntime(TaskContainerRuntime):
+    """Reusable container with only sealed history and private planner mounts."""
+
+    config: PlannerContainerConfig
+
+    def __init__(
+        self,
+        config: PlannerContainerConfig,
+        *,
+        client: DockerClient | None = None,
+        docker_bin: str = "docker",
+    ):
+        self.config = config
+        self.client = client or SubprocessDockerClient(docker_bin)
+
+    def create_argv(self) -> list[str]:
+        config = self.config
+        argv = [
+            "create",
+            "--name",
+            config.container_name,
+            "--init",
+            "--network",
+            config.network,
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--cap-drop",
+            "ALL",
+            "--pids-limit",
+            str(config.limits.pids),
+            "--memory",
+            str(config.limits.memory_bytes),
+        ]
+        for key in sorted(config.labels):
+            argv.extend(["--label", f"{key}={config.labels[key]}"])
+        for mount in config.mounts:
+            argv.extend(self._mount_argv(mount))
+        argv.extend(
+            [
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,nodev,size="
+                + str(config.limits.scratch_bytes),
+                config.image_digest,
+            ]
+        )
+        return argv
+
+    def exec_argv(
+        self,
+        role: TaskRole | str,
+        *,
+        session_uid: int,
+        session_id: str,
+        command: list[str],
+        env: dict[str, str] | None = None,
+        workdir: str | None = None,
+        interactive: bool = False,
+    ) -> list[str]:
+        if TaskRole(role) is not TaskRole.planner:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid,
+                "planner container accepts only planner executions",
+            )
+        if not command or any("\x00" in item for item in command):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid, "container exec command is empty or invalid"
+            )
+        allowed = self.config.environment(
+            role, session_uid=session_uid, session_id=session_id
+        )
+        for key, value in dict(env or {}).items():
+            if key in {"CODEX_API_KEY", "HOME", "CODEX_HOME"}:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.invalid,
+                    f"caller cannot override protected environment {key}",
+                )
+            if "\x00" in key or "\x00" in value:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.invalid, "invalid exec environment"
+                )
+            allowed[key] = value
+        argv = [
+            "exec",
+            "--user",
+            f"{session_uid}:{session_uid}",
+            "--workdir",
+            workdir or self.config.container_history,
+        ]
+        if interactive:
+            argv.append("--interactive")
+        for key in sorted(allowed):
+            argv.extend(["--env", f"{key}={allowed[key]}"])
+        argv.extend([self.config.container_name, *command])
+        return argv
 
 
 ContainerRuntime = TaskContainerRuntime

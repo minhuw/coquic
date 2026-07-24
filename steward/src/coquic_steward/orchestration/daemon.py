@@ -33,11 +33,13 @@ from ..core.models import (
 )
 from ..execution.executor import StewardExecutor
 from ..execution.session import (
+    FreshPlannerSession,
     InvocationStatus,
     ResumeCategory,
     SessionResult,
     SessionSupervisor,
     runtime_factory_for_config,
+    planner_session_for_config,
 )
 from ..execution.task_archive import TaskArchiveWriter
 from ..core.subprocesses import (
@@ -59,6 +61,8 @@ from ..control_loop import (
     timestamp as control_timestamp,
 )
 from ..planning import PlannerRun as PlanningPlannerRun, run_planner
+from ..planning.planner import render_planner_prompt
+from ..planning.verifier import summarize_active_tasks
 from ..storage import (
     TaskStore,
     idle_fetch_provider_names,
@@ -104,6 +108,7 @@ class StewardDaemon:
         *,
         logger: Callable[[str], None] | None = None,
         session_supervisor: SessionSupervisor | None = None,
+        planner_session: FreshPlannerSession | None = None,
     ):
         self.config = config
         self.store = store
@@ -136,7 +141,7 @@ class StewardDaemon:
         self._control_loop_thread: threading.Thread | None = None
         self._control_loop_lock = threading.RLock()
         self._active_planner_run_id: str | None = None
-        self._planner_publication_queue: dict[str, tuple[ControlPlannerRun, dict[str, bytes]]] = {}
+        self._planner_publication_queue: dict[str, ControlPlannerRun] = {}
         with use_subprocess_owner(self._subprocess_owner):
             remote_push_ready = preflight_remote_push(config)
         if remote_push_ready:
@@ -153,6 +158,13 @@ class StewardDaemon:
                 image_digest=config.task_image_digest,
                 codex_identity=config.codex_identity or config.codex_bin,
             )
+        self.planner_session = planner_session
+        if (
+            self.planner_session is None
+            and config.task_image_digest
+            and not config.local_codex_test_harness
+        ):
+            self.planner_session = planner_session_for_config(config)
         self.executor = StewardExecutor(
             config,
             store,
@@ -286,6 +298,11 @@ class StewardDaemon:
             )
             if archive_epoch.epoch_id != self._control_loop_ledger.epoch_id:
                 raise ArchiveConflictError("control-loop and ledger epochs differ")
+            for run in self._control_loop_ledger.list_planner_runs():
+                if run.completed_at is not None and not self._control_loop_archive.verify_planner_run(
+                    run.planner_run_id
+                ):
+                    self._planner_publication_queue[run.planner_run_id] = run
             self._drain_control_loop_once()
         except Exception as exc:
             self._control_loop_ledger.set_planning_blocked(
@@ -359,8 +376,9 @@ class StewardDaemon:
                 # durable outbox remains pending for the next retry.
                 self._log(f"control-loop archive lag error={exc.__class__.__name__}")
                 return {"materialized": 0, "conflicts": 0, "error": exc.__class__.__name__}
-            for run_id, (run, artifacts) in list(self._planner_publication_queue.items()):
+            for run_id, run in list(self._planner_publication_queue.items()):
                 try:
+                    artifacts = self._planner_artifacts(run)
                     target = self._control_loop_archive.publish_planner_run(run, artifacts)
                     if self._control_loop_archive.verify_planner_run(run_id):
                         self._planner_publication_queue.pop(run_id, None)
@@ -1778,6 +1796,11 @@ class StewardDaemon:
             except (AttributeError, KeyError):
                 continue
         interrupted_runs = len(running_runs)
+        if self.planner_session is not None and self._active_planner_run_id is not None:
+            try:
+                self.planner_session.interrupt(force=force)
+            except Exception as exc:
+                self._log(f"planner interrupt lag error={exc.__class__.__name__}")
         self._subprocess_owner.request_cancel(force=force)
         interrupt_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, min(len(running_runs), self.config.limits.max_active_tasks))
@@ -1843,6 +1866,18 @@ class StewardDaemon:
                 container_stop_failures.append(stop_futures[future])
                 future.cancel()
             stop_pool.shutdown(wait=False, cancel_futures=True)
+        if self.planner_session is not None:
+            runtime = getattr(self.planner_session.invoker, "runtime", None)
+            if runtime is not None:
+                try:
+                    runtime.stop(
+                        timeout=2.0 if force else max(0.0, deadline - time.monotonic())
+                    )
+                except Exception as exc:
+                    container_stop_failures.append("scheduler-planner")
+                    self._log(
+                        f"planner container stop failed error={exc.__class__.__name__}"
+                    )
         with self._worker_pool_lock:
             pool = self._worker_pool
             self._worker_pool = None
@@ -2564,6 +2599,20 @@ class StewardDaemon:
             )
             if not pending:
                 return
+            if self._control_loop_ledger is not None:
+                retry = self._control_loop_ledger.pending_retry("planner")
+                if retry is not None and retry[1] is not None and retry[1] > utc_now():
+                    current_signal_ids = set(self._canonical_signal_ids(pending))
+                    runs = self._control_loop_ledger.list_planner_runs()
+                    previous_signal_ids = set(runs[-1].input_signal_ids) if runs else set()
+                    if current_signal_ids != previous_signal_ids:
+                        self._control_loop_ledger.reset_retry("planner")
+                    else:
+                        self._log(
+                            "planner retry deferred "
+                            f"attempt={retry[0]} eligible_at={control_timestamp(retry[1])}"
+                        )
+                        return
             turns += 1
             before_pending = {item.id for item in pending}
             actionable, stale_reasons = revalidate_signal_items(self.config, pending)
@@ -2639,7 +2688,7 @@ class StewardDaemon:
                     self.config,
                     signals,
                     task_context,
-                    invocation=self.session_supervisor,
+                    invocation=self.planner_session or self.session_supervisor,
                     run_id=control_run_id,
                 )
             except TypeError as exc:
@@ -2655,54 +2704,13 @@ class StewardDaemon:
                 )
         except Exception as exc:
             planner_error = exc
-        planned_item_count = 0
-        planned_item_ids: set[str] = set()
         run_id = control_run_id
-        planned_task_ids_by_dedupe: dict[str, str] = {
-            str(task.spec.metadata.get("dedupe_key")): task.id
-            for task in task_context
-            if task.spec.metadata.get("dedupe_key")
-        }
-        if planner_run is not None:
-            for spec, dedupe_key in planner_run.planned:
-                result.planned += 1
-                record, created = self.store.add_task(spec, dedupe_key=dedupe_key)
-                planned_task_ids_by_dedupe.setdefault(dedupe_key, record.id)
-                if created:
-                    result.enqueued += 1
-                    selected_ids = _selected_item_ids(spec, planner_run.consumed_item_ids)
-                    planned_item_count += self.store.mark_signal_items_planned(
-                        selected_ids,
-                        planner_run_id=run_id,
-                        task_id=record.id,
-                    )
-                    planned_item_ids.update(selected_ids)
-                    self._log(f"enqueued {record.id} {_task_label(record)}")
-                else:
-                    result.skipped += 1
-                    self._log(
-                        f"skipped duplicate plan {record.id} dedupe={dedupe_key}"
-                    )
-        else:
+        if planner_run is None:
             planner_run = _failed_planner_result(planner_error)
-        superseded_count = self.store.supersede_signal_items(
-            [
-                item_id
-                for item_id in planner_run.consumed_item_ids
-                if item_id not in planned_item_ids
-            ],
-            planner_run_id=run_id,
-        )
-        consumed_count = planned_item_count + superseded_count
+        result.planned += len(planner_run.planned)
         state = "succeeded" if planner_run.completed and not planner_run.invalid_output else "failed"
         if planner_error is not None:
             state = "failed"
-        control_dispositions = self._control_loop_dispositions(
-            planner_run,
-            run_id,
-            inbox_items,
-            planned_task_ids_by_dedupe,
-        )
         diagnostics = dict(planner_run.diagnostics)
         retry_after: timedelta | None = None
         if state == "failed" and self._control_loop_ledger is not None:
@@ -2717,32 +2725,70 @@ class StewardDaemon:
             )
         if self._control_loop_ledger is not None and control_claim is not None:
             try:
-                completed = self._control_loop_ledger.complete_planner_run(
+                canonical_signal_by_item = {
+                    item.id: signal_id
+                    for item in inbox_items
+                    if (
+                        signal_id := self._control_loop_ledger.canonical_signal_id(
+                            item.provider, item.fingerprint
+                        )
+                    )
+                    is not None
+                }
+                selected_item_ids_by_dedupe = {
+                    dedupe_key: _selected_item_ids(
+                        spec, planner_run.consumed_item_ids
+                    )
+                    for spec, dedupe_key in planner_run.planned
+                }
+                artifact_sources = self._planner_artifact_sources(
+                    planner_run,
+                    signals,
+                    task_context,
                     run_id,
-                    control_dispositions,
+                )
+                committed = self.store.commit_planner_decision(
+                    run_id,
+                    planned=planner_run.planned,
+                    planner_dispositions=planner_run.dispositions,
+                    consumed_item_ids=planner_run.consumed_item_ids,
+                    selected_item_ids_by_dedupe=selected_item_ids_by_dedupe,
+                    canonical_signal_by_item=canonical_signal_by_item,
                     state=state,
                     result={
                         "acceptedCount": planner_run.accepted_count,
                         "proposedCount": planner_run.proposed_count,
                         "consumedItemIds": planner_run.consumed_item_ids,
-                        "plannedItemCount": planned_item_count,
-                        "supersededItemCount": superseded_count,
                     },
                     diagnostics=diagnostics,
                     retry_after=retry_after,
-                    consume_signal_ids=(
-                        self._canonical_ids_for_items(
-                            inbox_items, planner_run.consumed_item_ids
-                        )
-                        if state == "succeeded"
-                        else ()
-                    ),
+                    artifact_sources=artifact_sources,
                 )
-                artifacts = self._planner_artifacts(planner_run, completed)
-                self._planner_publication_queue[run_id] = (completed, artifacts)
+                completed = committed["completed"]
+                planned_item_count = int(committed["planned_item_count"])
+                superseded_count = int(committed["superseded_item_count"])
+                consumed_count = planned_item_count + superseded_count
+                for record, created in committed["records"]:
+                    if created:
+                        result.enqueued += 1
+                        self._log(f"enqueued {record.id} {_task_label(record)}")
+                    else:
+                        result.skipped += 1
+                        self._log(
+                            f"skipped duplicate plan {record.id} "
+                            f"dedupe={record.spec.metadata.get('dedupe_key')}"
+                        )
+                self._planner_publication_queue[run_id] = completed
                 self._control_loop_wakeup.set()
             except Exception as exc:
                 self._log(f"planner completion lag run={run_id} error={exc.__class__.__name__}")
+                planned_item_count = 0
+                superseded_count = 0
+                consumed_count = 0
+        else:
+            planned_item_count = 0
+            superseded_count = 0
+            consumed_count = 0
         self._active_planner_run_id = None
         self._control_loop_wakeup.set()
         self._log(
@@ -2834,26 +2880,61 @@ class StewardDaemon:
             )
         return dispositions
 
-    def _planner_artifacts(
-        self, planner_run, completed: ControlPlannerRun
-    ) -> dict[str, bytes]:
-        artifacts: dict[str, bytes] = {}
+    def _planner_artifact_sources(
+        self,
+        planner_run: PlanningPlannerRun,
+        signals,
+        task_context: list[TaskRecord],
+        run_id: str,
+    ) -> dict[str, tuple[str, bool]]:
+        fallback = self.config.private_sessions_dir / "planner-evidence" / run_id
+        fallback.mkdir(parents=True, exist_ok=True, mode=0o700)
+        prompt_path = planner_run.prompt_path
+        if prompt_path is None or not Path(prompt_path).is_file():
+            prompt_path = fallback / "prompt.md"
+            prompt_path.write_text(
+                render_planner_prompt(
+                    signals,
+                    summarize_active_tasks(task_context),
+                    self.config,
+                ),
+                encoding="utf-8",
+            )
+        transcript_path = Path(planner_run.transcript_path)
+        if not transcript_path.is_file():
+            transcript_path = fallback / "codex.jsonl"
+            transcript_path.touch(exist_ok=True)
+        last_message_path = Path(planner_run.transcript_path).with_name("last-message.md")
+        if not last_message_path.is_file():
+            last_message_path = fallback / "last-message.md"
+            last_message_path.write_text("", encoding="utf-8")
+        sources: dict[str, tuple[str, bool]] = {
+            "prompt.md": (str(prompt_path), True),
+            "codex.jsonl": (str(transcript_path), True),
+            "last-message.md": (str(last_message_path), True),
+        }
         for name, path in (
-            ("prompt.md", planner_run.prompt_path),
-            ("codex.jsonl", planner_run.transcript_path),
-            ("last-message.md", planner_run.transcript_path.with_name("last-message.md")),
-            ("telemetry.json", planner_run.transcript_path.with_name("telemetry.json")),
-            ("activities.jsonl", planner_run.transcript_path.with_name("activities.jsonl")),
-            ("tool-changes/manifest.jsonl", planner_run.transcript_path.parent / "tool-changes" / "manifest.jsonl"),
-            ("tool-changes/summary.json", planner_run.transcript_path.parent / "tool-changes" / "summary.json"),
+            ("telemetry.json", Path(planner_run.transcript_path).with_name("telemetry.json")),
+            ("activities.jsonl", Path(planner_run.transcript_path).with_name("activities.jsonl")),
+            ("tool-changes/manifest.jsonl", Path(planner_run.transcript_path).parent / "tool-changes" / "manifest.jsonl"),
+            ("tool-changes/summary.json", Path(planner_run.transcript_path).parent / "tool-changes" / "summary.json"),
         ):
-            if path is None:
-                continue
+            if path.is_file():
+                sources[name] = (str(path), False)
+        return sources
+
+    def _planner_artifacts(self, completed: ControlPlannerRun) -> dict[str, bytes]:
+        artifacts: dict[str, bytes] = {}
+        if self._control_loop_ledger is None:
+            raise ArchiveError("control-loop ledger is unavailable")
+        for name, (path, required) in self._control_loop_ledger.planner_artifact_sources(
+            completed.planner_run_id
+        ).items():
             try:
-                if Path(path).is_file():
-                    artifacts[name] = Path(path).read_bytes()
+                artifacts[name] = path.read_bytes()
             except OSError:
-                continue
+                if required:
+                    raise
         artifacts["result.json"] = json.dumps(
             {
                 "plannerRunId": completed.planner_run_id,
@@ -2864,8 +2945,12 @@ class StewardDaemon:
             ensure_ascii=True,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
-        if not artifacts:
-            artifacts["result.json"] = b"{}\n"
+        missing = {"prompt.md", "codex.jsonl", "last-message.md"} - artifacts.keys()
+        if missing:
+            raise ArchiveError(
+                "planner publication is missing required artifacts: "
+                + ", ".join(sorted(missing))
+            )
         return artifacts
 
     def run_forever(self) -> None:

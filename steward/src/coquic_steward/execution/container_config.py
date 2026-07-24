@@ -258,20 +258,21 @@ ContainerConfig = TaskContainerConfig
 class PlannerContainerConfig:
     """Mount/identity contract for the daemon-owned global planner container."""
 
-    run_id: str
+    image: str
     image_digest: str
     history_root: Path
     private_root: Path
     output_root: Path
-    network: str = "none"
+    limits: ContainerLimits = field(default_factory=ContainerLimits)
+    network: str = "bridge"
     container_history: str = "/planner/history"
     container_session: str = "/planner/session"
     container_output: str = "/planner/output"
     labels: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not _SAFE_ID.fullmatch(self.run_id):
-            raise ValueError("invalid planner run id")
+        if not _IMAGE_REF.fullmatch(self.image):
+            raise ValueError("invalid planner image")
         if not _DIGEST.fullmatch(self.image_digest):
             raise ValueError("planner image must be locked by digest")
         for name in ("history_root", "private_root", "output_root"):
@@ -279,21 +280,20 @@ class PlannerContainerConfig:
             if not value.is_absolute() or value.is_symlink():
                 raise ValueError(f"planner {name} must be an absolute non-symlink path")
             object.__setattr__(self, name, value)
-        if self.network != "none":
-            raise ValueError("planner container must not have network access")
+        if self.network != "bridge":
+            raise ValueError("planner container must use the locked runtime network")
         for value in (self.container_history, self.container_session, self.container_output):
             if not value.startswith("/") or ".." in PurePosixPath(value).parts:
                 raise ValueError("invalid planner container mount path")
         labels = dict(self.labels)
         labels.setdefault("coquic.steward.planner", "true")
-        labels.setdefault("coquic.steward.planner-run", self.run_id)
         labels.setdefault("coquic.steward.image-digest", self.image_digest)
         labels.setdefault("coquic.steward.runtime", "planner-container-v1")
         object.__setattr__(self, "labels", labels)
 
     @property
     def container_name(self) -> str:
-        return f"coquic-steward-planner-{self.run_id}"
+        return "coquic-steward-planner"
 
     @property
     def mounts(self) -> tuple[ContainerMount, ...]:
@@ -303,15 +303,40 @@ class PlannerContainerConfig:
             ContainerMount(self.output_root, self.container_output, read_only=False),
         )
 
-    def environment(self, session_id: str) -> dict[str, str]:
+    def environment(
+        self,
+        role: TaskRole | str,
+        *,
+        session_uid: int,
+        session_id: str,
+    ) -> dict[str, str]:
+        if TaskRole(role) is not TaskRole.planner:
+            raise ValueError("planner container accepts only planner executions")
+        if session_uid < 10000 or session_uid > 60000:
+            raise ValueError("planner session UID is outside the reserved range")
         if not _SAFE_ID.fullmatch(session_id):
             raise ValueError("invalid planner session id")
         return {
             "COQUIC_STEWARD_ROLE": "scheduler-planner",
-            "COQUIC_STEWARD_PLANNER_RUN_ID": self.run_id,
             "HOME": f"{self.container_session}/{session_id}",
             "CODEX_HOME": f"{self.container_session}/{session_id}",
         }
+
+    def container_path(self, host_path: Path, role: TaskRole | str) -> str:
+        if TaskRole(role) is not TaskRole.planner:
+            raise ValueError("planner container accepts only planner paths")
+        path = Path(host_path).resolve()
+        for source, target in (
+            (self.history_root.resolve(), self.container_history),
+            (self.private_root.resolve(), self.container_session),
+            (self.output_root.resolve(), self.container_output),
+        ):
+            try:
+                relative = path.relative_to(source)
+            except ValueError:
+                continue
+            return target if relative == Path(".") else f"{target}/{relative.as_posix()}"
+        raise ValueError(f"path is outside planner container mounts: {host_path}")
 
 
 PlannerConfig = PlannerContainerConfig

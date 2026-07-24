@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..agents import CodexRunner
+from ..execution.session import FreshPlannerSession
 from ..core.config import StewardConfig
 from ..core.models import (
     IntegrationMode,
@@ -142,12 +143,45 @@ class CodexPlanner:
             "output_schema": planner_schema_path(self.config),
             "stage": CodexStage.signal_planner,
         }
-        result = self.runner.run(
-            planner_task,
-            render_planner_prompt(signals, active, self.config),
-            self.config.repo_root,
-            **runner_kwargs,
-        )
+        prompt = render_planner_prompt(signals, active, self.config)
+        if isinstance(self._injected_invocation, FreshPlannerSession):
+            fresh = self._injected_invocation.run(
+                run_id or planner_task.id,
+                prompt=prompt,
+                output_schema=runner_kwargs["output_schema"],
+                history_root=self.config.control_loop_dir / "planner-runs",
+                api_key=self.config.read_codex_api_key_bytes(),
+                timeout_seconds=self.config.limits.worker_timeout_minutes * 60,
+            )
+            outcome = fresh.outcome
+            final_message = (
+                fresh.last_message_path.read_text(encoding="utf-8")
+                if fresh.last_message_path.is_file()
+                else ""
+            )
+            result = type(
+                "FreshPlannerWorkerResult",
+                (),
+                {
+                    "completed": fresh.status.value == "succeeded",
+                    "exit_code": outcome.exit_code if outcome is not None else 1,
+                    "prompt_path": fresh.prompt_path,
+                    "transcript_path": fresh.transcript_path,
+                    "run_id": fresh.request.run_id,
+                    "diagnostics": {
+                        "interrupted": bool(outcome and outcome.interrupted),
+                        "malformed_lines": outcome.malformed_lines if outcome else 0,
+                    },
+                    "final_message": final_message,
+                },
+            )()
+        else:
+            result = self.runner.run(
+                planner_task,
+                prompt,
+                self.config.repo_root,
+                **runner_kwargs,
+            )
         # Every scheduler-planner attempt is a fresh process/session.  Provider
         # thread IDs are private invocation evidence and never become a global
         # resume handle.

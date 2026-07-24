@@ -38,8 +38,9 @@ from .container import (
     ContainerErrorCategory,
     ExecIdentity,
     TaskContainerRuntime,
+    PlannerContainerRuntime,
 )
-from .container_config import TaskContainerConfig, TaskRole
+from .container_config import PlannerContainerConfig, TaskContainerConfig, TaskRole
 from .task_archive import ArchiveError, TaskArchiveWriter
 from .worktree import Worktrees
 
@@ -83,6 +84,9 @@ class FreshPlannerResult:
     request: FreshPlannerRequest
     outcome: InvocationOutcome | None
     status: InvocationStatus
+    prompt_path: Path
+    transcript_path: Path
+    last_message_path: Path
 
 
 def build_fresh_planner_request(
@@ -90,7 +94,7 @@ def build_fresh_planner_request(
     *,
     run_id: str,
     prompt: str,
-    output_last_message: Path,
+    output_last_message: Path | None = None,
     output_schema: Path | None = None,
     history_root: Path | None = None,
     model: str | None = None,
@@ -102,6 +106,22 @@ def build_fresh_planner_request(
     session_id = f"planner-session-{secrets.token_hex(10)}"
     home = config.private_sessions_dir / "planner" / safe_run / session_id
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    session_uid = 10000 + int(hashlib.sha256(session_id.encode("ascii")).hexdigest()[:4], 16) % 50001
+    try:
+        os.chown(home, session_uid, session_uid)
+    except PermissionError:
+        if not config.local_codex_test_harness:
+            raise
+    selected_last_message = output_last_message or home / "last-message.md"
+    selected_schema = output_schema
+    if output_schema is not None:
+        selected_schema = home / "output-schema.json"
+        selected_schema.write_bytes(output_schema.read_bytes())
+        try:
+            os.chown(selected_schema, session_uid, session_uid)
+        except PermissionError:
+            if not config.local_codex_test_harness:
+                raise
     # The Codex process receives a clean private home.  Sealed history is
     # mounted by the planner container runtime; it is intentionally absent
     # from the request's host cwd and environment.
@@ -109,14 +129,15 @@ def build_fresh_planner_request(
         codex_bin=config.codex_bin,
         cwd=history_root or config.private_sessions_dir,
         prompt=prompt,
-        output_last_message=output_last_message,
+        output_last_message=selected_last_message,
         stage=CodexStage.signal_planner,
         model=model,
         reasoning_effort=reasoning_effort,
-        output_schema=output_schema,
+        output_schema=selected_schema,
         sandbox="read-only",
         provider_session_id=None,
         role="planner",
+        session_uid=session_uid,
         session_id=session_id,
         run_id=run_id,
     )
@@ -135,7 +156,7 @@ class FreshPlannerSession:
         run_id: str,
         *,
         prompt: str,
-        output_last_message: Path,
+        output_last_message: Path | None = None,
         output_schema: Path | None = None,
         history_root: Path | None = None,
     ) -> FreshPlannerRequest:
@@ -156,7 +177,7 @@ class FreshPlannerSession:
         run_id: str,
         *,
         prompt: str,
-        output_last_message: Path,
+        output_last_message: Path | None = None,
         output_schema: Path | None = None,
         history_root: Path | None = None,
         api_key: bytes | str | None = None,
@@ -169,10 +190,18 @@ class FreshPlannerSession:
             output_schema=output_schema,
             history_root=history_root,
         )
+        prompt_path = request.home / "prompt.md"
+        transcript_path = request.home / "codex.jsonl"
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+        def append(value: bytes) -> None:
+            with transcript_path.open("ab") as handle:
+                handle.write(value)
+
         outcome = self.invoker.invoke(
             request.request,
             api_key=api_key,
-            append=lambda value: None,
+            append=append,
             timeout_seconds=timeout_seconds,
             interrupt_grace_seconds=2.0,
         )
@@ -183,7 +212,43 @@ class FreshPlannerSession:
             if outcome.interrupted
             else InvocationStatus.failed
         )
-        return FreshPlannerResult(request=request, outcome=outcome, status=status)
+        return FreshPlannerResult(
+            request=request,
+            outcome=outcome,
+            status=status,
+            prompt_path=prompt_path,
+            transcript_path=transcript_path,
+            last_message_path=request.request.output_last_message,
+        )
+
+    def interrupt(self, *, force: bool = False) -> None:
+        interrupt = getattr(self.invoker, "interrupt", None)
+        if callable(interrupt):
+            interrupt(force=force)
+
+
+def planner_session_for_config(config: StewardConfig) -> FreshPlannerSession:
+    """Build the daemon-owned isolated scheduler-planner boundary."""
+
+    if not config.task_image_digest:
+        raise ValueError("task_image_digest must be configured for production planning")
+    history = config.control_loop_dir / "planner-runs"
+    private = config.private_sessions_dir / "planner"
+    output = config.private_dir / "planner-output"
+    for path in (history, private, output):
+        path.mkdir(parents=True, exist_ok=True)
+    private.chmod(0o711)
+    output.chmod(0o711)
+    runtime = PlannerContainerRuntime(
+        PlannerContainerConfig(
+            image=config.task_image,
+            image_digest=config.task_image_digest,
+            history_root=history,
+            private_root=private,
+            output_root=output,
+        )
+    )
+    return FreshPlannerSession(config, invoker=ContainerSessionInvoker(runtime))
 
 
 @dataclass(frozen=True)

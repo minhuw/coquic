@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import sqlite3
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import Connection, Select, create_engine, event, func, select
+from sqlalchemy import Connection, Select, create_engine, event, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -112,7 +113,10 @@ from .schema import (
     DaemonStateRow,
     ValidationRow,
 )
-from ..control_loop import ControlLoopLedger
+from ..control_loop import (
+    ControlLoopLedger,
+    ProposalDisposition as ControlProposalDisposition,
+)
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 WORKER_REVISION_STARTED_EVENTS = {
@@ -1490,6 +1494,208 @@ class SQLiteTaskStore:
 
     complete_planner_run = complete_control_loop_planner_run
 
+    def commit_planner_decision(
+        self,
+        planner_run_id: str,
+        *,
+        planned: list[tuple[TaskSpec, str]],
+        planner_dispositions: list[object],
+        consumed_item_ids: list[str],
+        selected_item_ids_by_dedupe: dict[str, list[str]],
+        canonical_signal_by_item: dict[str, str],
+        state: str,
+        result: dict[str, object],
+        diagnostics: dict[str, object],
+        retry_after: timedelta | None,
+        artifact_sources: dict[str, tuple[str, bool]],
+    ) -> dict[str, object]:
+        """Commit tasks, signal mutations, graph edges, and outbox intent once."""
+
+        created_records: list[TaskRecord] = []
+        selected_records: list[tuple[TaskRecord, bool]] = []
+        with Session(self.engine) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                task_ids_by_dedupe: dict[str, str] = {}
+                for spec, dedupe_key in planned:
+                    existing_row = session.scalar(
+                        select(TaskRow).where(
+                            TaskRow.dedupe_key == dedupe_key,
+                            TaskRow.status.in_([value.value for value in ACTIVE_STATUSES]),
+                        )
+                    )
+                    if existing_row is not None:
+                        existing = row_to_task(existing_row, path_codec=self.path_codec)
+                        selected_records.append((existing, False))
+                        task_ids_by_dedupe[dedupe_key] = existing.id
+                        continue
+                    metadata = dict(spec.metadata)
+                    metadata["dedupe_key"] = dedupe_key
+                    stored_spec = spec.model_copy(update={"metadata": metadata}, deep=True)
+                    record = TaskRecord(spec=stored_spec)
+                    now = utc_now()
+                    execution = TaskExecution(
+                        id=new_execution_id(),
+                        task_id=record.id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    pipeline = TaskPipeline(
+                        id=new_pipeline_id(),
+                        task_id=record.id,
+                        execution_id=execution.id,
+                        ordinal=1,
+                        trigger="initial",
+                        started_at=now,
+                        updated_at=now,
+                    )
+                    execution_row = execution_to_row(execution, path_codec=self.path_codec)
+                    session.add(task_to_row(record, dedupe_key=dedupe_key, path_codec=self.path_codec))
+                    session.add(
+                        event_to_row(
+                            Event(
+                                task_id=record.id,
+                                kind="task.created",
+                                message=record.spec.title,
+                            ),
+                            path_codec=self.path_codec,
+                        )
+                    )
+                    session.flush()
+                    session.add(execution_row)
+                    session.flush()
+                    session.add(pipeline_to_row(pipeline))
+                    session.flush()
+                    execution_row.owning_pipeline_id = pipeline.id
+                    created_records.append(record)
+                    selected_records.append((record, True))
+                    task_ids_by_dedupe[dedupe_key] = record.id
+
+                planned_item_ids: set[str] = set()
+                for record, _created in selected_records:
+                    dedupe_key = str(record.spec.metadata.get("dedupe_key") or "")
+                    selected_ids = selected_item_ids_by_dedupe.get(dedupe_key, [])
+                    rows = session.scalars(
+                        select(SignalItemRow).where(
+                            SignalItemRow.id.in_(selected_ids),
+                            SignalItemRow.status == SignalItemStatus.pending.value,
+                        )
+                    ).all()
+                    now_text = utc_now().isoformat()
+                    for row in rows:
+                        row.status = SignalItemStatus.planned.value
+                        row.planned_at = now_text
+                        row.updated_at = now_text
+                        row.planner_run_id = planner_run_id
+                        row.planned_task_id = record.id
+                        planned_item_ids.add(row.id)
+
+                superseded_rows = session.scalars(
+                    select(SignalItemRow).where(
+                        SignalItemRow.id.in_(
+                            [
+                                item_id
+                                for item_id in consumed_item_ids
+                                if item_id not in planned_item_ids
+                            ]
+                        ),
+                        SignalItemRow.status == SignalItemStatus.pending.value,
+                    )
+                ).all()
+                now_text = utc_now().isoformat()
+                for row in superseded_rows:
+                    row.status = SignalItemStatus.superseded.value
+                    row.updated_at = now_text
+                    row.planner_run_id = planner_run_id
+
+                dispositions: list[ControlProposalDisposition] = []
+                for disposition in planner_dispositions:
+                    dedupe_key = getattr(disposition, "dedupe_key", None)
+                    if not dedupe_key or dedupe_key in task_ids_by_dedupe:
+                        continue
+                    existing_row = session.scalar(
+                        select(TaskRow).where(
+                            TaskRow.dedupe_key == dedupe_key,
+                            TaskRow.status.in_([value.value for value in ACTIVE_STATUSES]),
+                        )
+                    )
+                    if existing_row is not None:
+                        task_ids_by_dedupe[dedupe_key] = existing_row.id
+                for ordinal, disposition in enumerate(planner_dispositions, 1):
+                    dedupe_key = getattr(disposition, "dedupe_key", None)
+                    task_id = task_ids_by_dedupe.get(dedupe_key) if dedupe_key else None
+                    outcome = str(getattr(disposition, "outcome", "invalid"))
+                    reason_code = str(
+                        getattr(disposition, "reason_code", "invalid_output")
+                    )
+                    if outcome in {"accepted", "duplicate"} and task_id is None:
+                        outcome = "invalid"
+                        reason_code = "missing_covering_task"
+                    signal_ids = list(
+                        dict.fromkeys(
+                            canonical_signal_by_item[item_id]
+                            for item_id in getattr(disposition, "signal_ids", [])
+                            if item_id in canonical_signal_by_item
+                        )
+                    )
+                    dispositions.append(
+                        ControlProposalDisposition(
+                            proposalId=f"{planner_run_id}-proposal-{ordinal}",
+                            plannerRunId=planner_run_id,
+                            ordinal=ordinal,
+                            outcome=outcome,
+                            reasonCode=reason_code,
+                            signalIds=signal_ids,
+                            dedupeKey=dedupe_key,
+                            taskId=task_id,
+                            proposal=getattr(disposition, "proposal", {}) or {},
+                        )
+                    )
+
+                session.flush()
+                raw_connection = session.connection().connection.driver_connection
+                raw_connection.row_factory = sqlite3.Row
+                completed = self.control_loop.complete_planner_run(
+                    planner_run_id,
+                    dispositions,
+                    state=state,
+                    result=result,
+                    diagnostics=diagnostics,
+                    retry_after=retry_after,
+                    consume_signal_ids=(
+                        list(
+                            dict.fromkeys(
+                                canonical_signal_by_item[item_id]
+                                for item_id in consumed_item_ids
+                                if item_id in canonical_signal_by_item
+                            )
+                        )
+                        if state == "succeeded"
+                        else ()
+                    ),
+                    artifact_sources=artifact_sources,
+                    reset_retry_key="planner" if state == "succeeded" else None,
+                    connection=raw_connection,
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+
+        for record in created_records:
+            self.request_wakeup(
+                "task.created",
+                {"task_id": record.id, "kind": str(record.spec.kind)},
+            )
+        self._notify_change()
+        return {
+            "completed": completed,
+            "records": selected_records,
+            "planned_item_count": len(planned_item_ids),
+            "superseded_item_count": len(superseded_rows),
+            "dispositions": dispositions,
+        }
+
     def list_signal_fetch_runs(
         self, *, limit: int | None = None
     ) -> list[SignalFetchRun]:
@@ -1981,6 +2187,17 @@ class SQLiteTaskStore:
                 row.updated_at = now
                 row.planner_run_id = planner_run_id
                 row.planned_task_id = task_id
+            session.flush()
+            if self.control_loop is not None:
+                raw_connection = session.connection().connection.driver_connection
+                raw_connection.row_factory = sqlite3.Row
+                self.control_loop.transition_signal_identities(
+                    [(row.provider, row.fingerprint) for row in rows],
+                    "planned",
+                    planner_run_id=planner_run_id,
+                    reason="legacy_signal_planned",
+                    connection=raw_connection,
+                )
             planned = len(rows)
         if planned:
             self._notify_change()
@@ -2044,6 +2261,20 @@ class SQLiteTaskStore:
                 signal_row.planner_run_id = None
                 signal_row.planned_task_id = None
                 requeued += 1
+            session.flush()
+            if requeued and self.control_loop is not None:
+                raw_connection = session.connection().connection.driver_connection
+                raw_connection.row_factory = sqlite3.Row
+                self.control_loop.transition_signal_identities(
+                    [
+                        (signal_row.provider, signal_row.fingerprint)
+                        for signal_row, _task_row in rows
+                        if signal_row.status == SignalItemStatus.pending.value
+                    ],
+                    "pending",
+                    reason="failed_task_requeued",
+                    connection=raw_connection,
+                )
         if requeued:
             self.request_wakeup(
                 "signal.pending",
@@ -2068,6 +2299,17 @@ class SQLiteTaskStore:
                 row.status = SignalItemStatus.superseded.value
                 row.updated_at = now
                 row.planner_run_id = planner_run_id
+            session.flush()
+            if self.control_loop is not None:
+                raw_connection = session.connection().connection.driver_connection
+                raw_connection.row_factory = sqlite3.Row
+                self.control_loop.transition_signal_identities(
+                    [(row.provider, row.fingerprint) for row in rows],
+                    "superseded",
+                    planner_run_id=planner_run_id,
+                    reason="signal_superseded",
+                    connection=raw_connection,
+                )
             superseded = len(rows)
         if superseded:
             self._notify_change()

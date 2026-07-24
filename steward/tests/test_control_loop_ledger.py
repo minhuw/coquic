@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,15 @@ from coquic_steward.control_loop import (
     ProposalDisposition,
     Wakeup,
 )
-from coquic_steward.core.models import SignalFetchRun, SignalFetchStatus, SignalItem
+from coquic_steward.core.models import (
+    SignalFetchRun,
+    SignalFetchStatus,
+    SignalItem,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+)
+from coquic_steward.storage import TaskStore
 
 
 UTC = timezone.utc
@@ -44,7 +53,16 @@ def _item(item_id: str, fingerprint: str) -> SignalItem:
 
 
 def _ledger(tmp_path: Path) -> ControlLoopLedger:
-    return ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-ledger-test")
+    ledger = ControlLoopLedger(
+        tmp_path / "steward.sqlite", epoch_id="epoch-ledger-test"
+    )
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY)")
+        connection.executemany(
+            "INSERT OR IGNORE INTO tasks(id) VALUES(?)",
+            [("task-active-1",), ("task-created-1",)],
+        )
+    return ledger
 
 
 def test_fetch_retains_repeated_observations_and_deduplicates_signal(tmp_path: Path) -> None:
@@ -123,6 +141,7 @@ def test_planner_claim_completion_persists_dispositions_edges_and_outbox(tmp_pat
     edge_types = {edge.edge_type for edge in ledger.list_edges()}
     assert {"signal_planner_run", "planner_proposal", "signal_proposal", "proposal_task"} <= edge_types
     assert any(event.kind == "planner.finished" for event in ledger.list_events())
+    assert any(event.kind == "signal.transition" for event in ledger.list_events())
 
     with sqlite3.connect(ledger.path) as connection:
         status = connection.execute(
@@ -191,3 +210,92 @@ def test_claim_rejects_unknown_input_and_noncontiguous_proposals(tmp_path: Path)
                 )
             ],
         )
+
+
+def test_normalized_graph_relations_and_state_checks_are_enforced(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path)
+    _, signals = ledger.ingest_fetch(
+        _fetch("fetch-constraints"),
+        [_item("observation-constraints", "constraint-fingerprint")],
+    )
+    signal_id = signals[0].signal_id
+    ledger.claim_planner_run(
+        "planner-run-constraints", [signal_id], ["task-active-1"]
+    )
+
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        relations = {
+            row[2]
+            for table in (
+                "control_loop_planner_signals",
+                "control_loop_planner_tasks",
+                "control_loop_proposal_signals",
+                "control_loop_proposal_tasks",
+            )
+            for row in connection.execute(f"PRAGMA foreign_key_list({table})")
+        }
+        assert {"control_loop_signals", "control_loop_planner_runs", "tasks"} <= relations
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO control_loop_planner_signals(planner_run_id,ordinal,signal_id) VALUES(?,?,?)",
+                ("planner-run-constraints", 2, "signal-missing"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO control_loop_retry(key,attempt,eligible_at,updated_at) VALUES(?,?,?,?)",
+                ("invalid", 1, None, NOW.isoformat()),
+            )
+
+
+def test_task_and_signal_mutations_roll_back_when_completion_fails(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _item("observation-atomic", "atomic-fingerprint")
+    store.ingest_signal_collection(_fetch("fetch-atomic"), [item])
+    signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
+    assert signal_id is not None
+    store.control_loop.claim_planner_run("planner-run-atomic", [signal_id])
+    spec = TaskSpec(
+        kind=TaskKind.custom,
+        worker=WorkerKind.custom,
+        title="Atomic planner task",
+        prompt="Prove planner completion rollback.",
+        metadata={"selected_signal_item_ids": [item.id]},
+    )
+
+    def fail_completion(*_args, **_kwargs):
+        raise RuntimeError("injected ledger failure")
+
+    monkeypatch.setattr(store.control_loop, "complete_planner_run", fail_completion)
+    with pytest.raises(RuntimeError, match="injected ledger failure"):
+        store.commit_planner_decision(
+            "planner-run-atomic",
+            planned=[(spec, "atomic-dedupe")],
+            planner_dispositions=[
+                SimpleNamespace(
+                    outcome="accepted",
+                    reason_code="accepted",
+                    dedupe_key="atomic-dedupe",
+                    signal_ids=[item.id],
+                    proposal={"title": spec.title},
+                )
+            ],
+            consumed_item_ids=[item.id],
+            selected_item_ids_by_dedupe={"atomic-dedupe": [item.id]},
+            canonical_signal_by_item={item.id: signal_id},
+            state="succeeded",
+            result={},
+            diagnostics={},
+            retry_after=None,
+            artifact_sources={},
+        )
+
+    assert store.list_tasks() == []
+    assert store.pending_signal_items(limit=10)[0].id == item.id
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM control_loop_proposals").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM control_loop_planner_runs WHERE planner_run_id='planner-run-atomic'"
+        ).fetchone()[0] == "claimed"

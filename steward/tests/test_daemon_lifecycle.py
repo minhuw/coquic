@@ -17,15 +17,20 @@ from coquic_steward.core.models import (
     TaskKind,
     TaskSpec,
     TaskStatus,
+    WorkerResult,
     WorkerKind,
 )
+from coquic_steward.core.config import StewardConfig, StewardContainerConfig
 from coquic_steward.execution.container import TaskContainerRuntime
 from coquic_steward.execution.container_config import TaskContainerConfig
+from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import (
     InvocationStatus,
     ResumeCategory,
     ResumeResult,
     SessionResult,
+    SessionSupervisor,
+    worktree_checkpoint,
 )
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
@@ -49,7 +54,8 @@ def _task(store: TaskStore, title: str = "lifecycle"):
 
 def _interrupted_run(config, store, *, role="implementation", checkpoint=None):
     task, pipeline = _task(store, role)
-    action = checkpoint or f"{task.id}:{pipeline.id}:implementation-0"
+    action = f"{task.id}:{pipeline.id}:implementation-0"
+    checkpoint_id = checkpoint or worktree_checkpoint(config, config.repo_root)
     store.add_event(
         task.id,
         "pipeline.phase.started",
@@ -70,20 +76,23 @@ def _interrupted_run(config, store, *, role="implementation", checkpoint=None):
         image_digest=IMAGE,
         codex_identity="codex-test",
         cwd=config.repo_root,
-        checkpoint_id=action,
+        checkpoint_id=checkpoint_id,
         provider_store_identity="codex-sessions-v1",
         owner_role=role,
-        session_idempotency_key="original-action",
+        session_idempotency_key=action,
         role=role,
         model=None,
         reasoning=None,
         image_version=IMAGE,
         runtime_version="task-runtime-v1",
-        run_checkpoint_id=action,
+        run_checkpoint_id=checkpoint_id,
         run_provider_store_identity="codex-sessions-v1",
     )
     private_home.mkdir(parents=True, exist_ok=True)
     (private_home / "sessions").mkdir()
+    (private_home / "sessions" / "provider.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
     store.update_session(session.id, provider_session_id="private-provider-id")
     store.mark_run_interrupted(run.id, reason="test interruption")
     return task, pipeline, store.get_run(run.id)
@@ -258,11 +267,13 @@ def test_reconcile_adopts_matching_live_wrapper_without_duplicate(config):
     daemon = StewardDaemon(config, store, session_supervisor=supervisor)
 
     outcome = daemon.startup_reconcile()[0]
+    daemon.run_cycle(plan=False, dispatch=False)
 
     assert outcome.disposition == "adopted"
     assert not any(call[0] == "resume" for call in supervisor.calls)
     assert store.get_run(run.id).state == "running"
     assert outcome.task_id == task.id
+    assert sum(call[0] == "inspect" for call in supervisor.calls) == 2
 
 
 def test_complete_atomic_result_is_ingested_once(config, monkeypatch):
@@ -362,6 +373,32 @@ def test_checkpoint_identity_conflict_blocks_without_resume(config):
     assert "checkpoint" in outcome.detail
     assert not any(call[0] in {"resume", "recover"} for call in supervisor.calls)
     assert store.get(task.id).status != TaskStatus.failed
+
+
+def test_resume_rejects_worktree_mutation_after_interruption(config):
+    store = TaskStore(config.db_path)
+    task, _, run = _interrupted_run(config, store)
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        invoker=object(),
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    checkpoint = run.checkpoint_id
+    assert checkpoint is not None
+    tracked = config.repo_root / "README.md"
+    tracked.write_text("changed after interruption\n", encoding="utf-8")
+
+    resumed = supervisor.resume(
+        run.id,
+        prompt="continue",
+        cwd=config.repo_root,
+        checkpoint_id=checkpoint,
+    )
+
+    assert resumed.category is ResumeCategory.checkpoint_drift
+    assert len(store.list_runs(task.id)) == 1
 
 
 def test_commit_and_remote_ancestry_identity_conflict_blocks(config):
@@ -518,6 +555,138 @@ def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(confi
     daemon._complete_cycle(TickResult(), "heartbeat")
     release.set()
     pool.shutdown(wait=True)
+
+
+def test_shutdown_grace_bounds_blocked_worker_pool(config):
+    object.__setattr__(config, "shutdown_grace_seconds", 5.0)
+    store = TaskStore(config.db_path)
+    daemon = StewardDaemon(config, store)
+    release = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(release.wait, 30)
+    daemon._worker_pool = pool
+    daemon._active_futures["blocked"] = future
+
+    started = time.monotonic()
+    result = daemon.shutdown()
+    elapsed = time.monotonic() - started
+    release.set()
+    future.result(timeout=1)
+
+    assert result.forced
+    assert elapsed < config.shutdown_grace_seconds + 1
+
+
+def test_shutdown_interrupted_implementation_preserves_restart_state(config):
+    store = TaskStore(config.db_path)
+    task, pipeline = _task(store, "interrupted implementation")
+    task.worktree_path = config.repo_root
+    store.save(task)
+
+    class InterruptedRunner:
+        def paths(self, task, *, name="worker"):
+            root = config.logs_dir / task.id / name
+            return root / "codex.jsonl", root / "last-message.md"
+
+        def run(self, task, _prompt, cwd, **_kwargs):
+            transcript, message = self.paths(task)
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text("{}\n", encoding="utf-8")
+            message.write_text("interrupted\n", encoding="utf-8")
+            return WorkerResult(
+                completed=False,
+                command=["fake-codex"],
+                cwd=cwd,
+                exit_code=143,
+                transcript_path=transcript,
+                last_message_path=message,
+                diagnostics={"status": "interrupted"},
+            )
+
+    executor = StewardExecutor(config, store, runner=InterruptedRunner())
+    outcome = executor._durable_implementation(
+        store.get(task.id), store.get_pipeline(pipeline.id)
+    )
+    daemon = StewardDaemon(config, store)
+    daemon.executor = SimpleNamespace(advance_once=lambda _task_id: outcome)
+    finalized = []
+    daemon.finalize_terminal_task = finalized.append
+
+    assert outcome.status == "interrupted"
+    assert store.get(task.id).status == TaskStatus.running
+    assert daemon._run_task_worker(task.id) is False
+    assert finalized == []
+
+
+def test_session_runner_preserves_interrupted_run_identity(config):
+    store = TaskStore(config.db_path)
+    task, pipeline = _task(store, "session interruption")
+    task.worktree_path = config.repo_root
+    store.save(task)
+    transcript = config.logs_dir / task.id / "codex.jsonl"
+    message = config.logs_dir / task.id / "last-message.md"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    message.write_text("interrupted\n", encoding="utf-8")
+
+    class InterruptedSupervisor:
+        def start(self, *_args, **_kwargs):
+            return SessionResult(
+                task.id,
+                pipeline.id,
+                "session-test",
+                "run-test",
+                InvocationStatus.interrupted,
+                143,
+                None,
+                transcript,
+                message,
+            )
+
+    executor = StewardExecutor(
+        config,
+        store,
+        session_supervisor=InterruptedSupervisor(),
+    )
+
+    result = executor.runner.run(task, "implement", config.repo_root)
+
+    assert result.session_id == "session-test"
+    assert result.run_id == "run-test"
+    assert result.pipeline_id == pipeline.id
+    assert result.diagnostics["status"] == "interrupted"
+
+
+def test_enabled_nested_container_config_drives_runtime_fields(config):
+    state = config.repo_root.parent / "container-state"
+    state.mkdir()
+    key = config.repo_root.parent / "codex-api-key"
+    key.write_text("fake\n", encoding="utf-8")
+    key.chmod(0o600)
+    container = StewardContainerConfig(
+        enabled=True,
+        image="nested-task-image",
+        image_digest=IMAGE,
+        repository_host_path=config.repo_root,
+        state_host_path=state,
+        codex_api_key_path=key,
+        docker_bin="/bin/true",
+    )
+    nested = StewardConfig(repo_root=config.repo_root, container=container)
+    nested.ensure_dirs()
+
+    executor = StewardExecutor(nested, TaskStore(nested.db_path))
+
+    assert nested.task_image == container.image
+    assert nested.task_image_digest == container.image_digest
+    assert executor.session_supervisor is not None
+
+    with pytest.raises(ValueError, match="conflicts"):
+        StewardConfig(
+            repo_root=config.repo_root,
+            task_image_digest="sha256:" + "b" * 64,
+            container=container,
+        )
 
 
 def test_sigint_sigterm_second_signal_stops_not_removes_restart_state(config):

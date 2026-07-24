@@ -1176,6 +1176,7 @@ class SQLiteTaskStore:
             "exit_signal",
             "exit_reason",
             "result_summary",
+            "checkpoint_id",
             "parent_run_id",
             "retry_of_run_id",
         }

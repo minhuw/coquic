@@ -351,6 +351,30 @@ class StewardConfig:
     resume_attempt_limit: int = 2
 
     def __post_init__(self) -> None:
+        if self.container.enabled:
+            if (
+                self.task_image_digest is not None
+                and self.task_image_digest != self.container.image_digest
+            ):
+                raise ValueError(
+                    "task_image_digest conflicts with container.image_digest"
+                )
+            if self.task_image not in {
+                "coquic-steward-task",
+                self.container.image,
+            }:
+                raise ValueError("task_image conflicts with container.image")
+            if self.runtime_protocol != self.container.runtime_protocol:
+                raise ValueError(
+                    "runtime_protocol conflicts with container.runtime_protocol"
+                )
+            object.__setattr__(self, "task_image", self.container.image)
+            object.__setattr__(
+                self, "task_image_digest", self.container.image_digest
+            )
+            object.__setattr__(
+                self, "runtime_protocol", self.container.runtime_protocol
+            )
         if self.integration_mode not in VALID_INTEGRATION_MODES:
             choices = ", ".join(sorted(VALID_INTEGRATION_MODES))
             raise ValueError(

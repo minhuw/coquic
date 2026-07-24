@@ -69,7 +69,13 @@ from .implementation_plan import (
 )
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
-from .session import InvocationStatus, SessionResult, SessionSupervisor
+from .session import (
+    InvocationStatus,
+    SessionResult,
+    SessionSupervisor,
+    runtime_factory_for_config,
+    worktree_checkpoint,
+)
 from .container_config import TaskRole
 from ..core.lifecycle import (
     AdvanceResult,
@@ -190,7 +196,7 @@ class _SessionRunnerAdapter:
             reasoning_effort=settings.reasoning_effort,
             output_schema=output_schema,
             stage=stage,
-            checkpoint_id=idempotency_key,
+            checkpoint_id=worktree_checkpoint(self.config, cwd),
             sandbox=sandbox,
             idempotency_key=idempotency_key,
         )
@@ -207,10 +213,16 @@ class _SessionRunnerAdapter:
                 else ""
             ),
             thread_id=result.provider_session_id,
+            session_id=getattr(result, "session_id", None),
+            run_id=getattr(result, "run_id", None),
+            pipeline_id=getattr(result, "pipeline_id", None),
             stage=stage,
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
-            diagnostics=result.diagnostics or {},
+            diagnostics={
+                **(result.diagnostics or {}),
+                "status": result.status.value,
+            },
         )
 
     def run_review(
@@ -260,6 +272,18 @@ class StewardExecutor:
         self.store = store
         if session_supervisor is not None and runner is not None:
             raise ValueError("provide either session_supervisor or runner, not both")
+        if (
+            session_supervisor is None
+            and runner is None
+            and config.container.enabled
+        ):
+            session_supervisor = SessionSupervisor(
+                config,
+                store,
+                runtime_factory=runtime_factory_for_config(config),
+                image_digest=config.task_image_digest,
+                codex_identity=config.codex_identity or config.codex_bin,
+            )
         if (
             session_supervisor is None
             and runner is None
@@ -320,7 +344,11 @@ class StewardExecutor:
         predecessor = self.store.get_run(predecessor_run_id)
         task = self.store.get(predecessor.task_id)
         pipeline = self.store.get_pipeline(predecessor.pipeline_id)
-        action = predecessor.checkpoint_id
+        try:
+            action = self.store.get_session(predecessor.session_id).idempotency_key
+        except KeyError:
+            action = None
+        action = action or predecessor.checkpoint_id
         if action and any(
             event.kind == "pipeline.phase.finished"
             and event.data.get("pipeline_id") == pipeline.id
@@ -851,6 +879,28 @@ class StewardExecutor:
             idempotency_key=action,
         )
         self.store.finish_iteration_worker(task.id, iteration, result)
+        if _worker_was_interrupted(result):
+            self.store.add_event(
+                task.id,
+                "pipeline.phase.interrupted",
+                "implementation interrupted for daemon shutdown",
+                {
+                    "pipeline_id": pipeline.id,
+                    "phase": phase.value,
+                    "action_id": action,
+                    "run_id": result.run_id,
+                },
+            )
+            return AdvanceResult(
+                task.id,
+                pipeline.id,
+                phase,
+                phase,
+                "interrupted",
+                action_id=action,
+                progressed=False,
+                evidence={"run_id": result.run_id},
+            )
         if not result.completed:
             return self._block_pipeline(task, pipeline, result.final_message or "implementation failed")
         base, output_tree, patch = self.worktrees.snapshot(worktree)
@@ -4173,6 +4223,13 @@ def _stable_validation_diagnostics(validation: ValidationResult) -> str:
         match.group(0).strip() for match in _GTEST_FAILED_TEST_RE.finditer(text)
     )
     return "\n\n".join(sorted(signatures)) if signatures else text
+
+
+def _worker_was_interrupted(result: WorkerResult) -> bool:
+    return str(result.diagnostics.get("status", "")) in {
+        InvocationStatus.interrupted.value,
+        InvocationStatus.forced.value,
+    }
 
 
 def _replace_path_reference(value: str, source: str, target: str) -> str:

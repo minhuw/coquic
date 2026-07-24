@@ -106,6 +106,7 @@ class StewardDaemon:
         self._force_shutdown_event = threading.Event()
         self._startup_complete = False
         self._reconciliation: list[ReconciliationOutcome] = []
+        self._adopted_runs: dict[str, str] = {}
         self._active_futures: dict[str, concurrent.futures.Future[object]] = {}
         self._worker_pool: concurrent.futures.ThreadPoolExecutor | None = None
         self._worker_pool_lock = threading.RLock()
@@ -338,6 +339,7 @@ class StewardDaemon:
                     evidence={"error": exc.__class__.__name__},
                 )
             if inspection.live:
+                self._adopted_runs[task.id] = run.id
                 return ReconciliationOutcome(
                     task.id,
                     ReconciliationDisposition.adopted,
@@ -911,6 +913,7 @@ class StewardDaemon:
                         evidence={"error": exc.__class__.__name__},
                     )
                 if inspection.live:
+                    self._adopted_runs[task.id] = successor.id
                     return ReconciliationOutcome(
                         task.id,
                         ReconciliationDisposition.adopted,
@@ -957,14 +960,14 @@ class StewardDaemon:
             predecessor.pipeline_id,
         )
         if (
-            predecessor.checkpoint_id is not None
+            session.idempotency_key is not None
             and unfinished is not None
-            and predecessor.checkpoint_id != unfinished
+            and session.idempotency_key != unfinished
         ):
             return ReconciliationOutcome(
                 task.id,
                 ReconciliationDisposition.blocked,
-                "run checkpoint does not own the interrupted phase",
+                "session action does not own the interrupted phase",
                 run_id=predecessor.id,
             )
 
@@ -1373,7 +1376,25 @@ class StewardDaemon:
             pool = self._worker_pool
             self._worker_pool = None
         if pool is not None:
-            pool.shutdown(wait=not force, cancel_futures=True)
+            pool.shutdown(wait=False, cancel_futures=True)
+            while not force:
+                with self._worker_pool_lock:
+                    pending = [
+                        future
+                        for future in self._active_futures.values()
+                        if not future.done()
+                    ]
+                if not pending:
+                    break
+                if self._force_shutdown_event.is_set():
+                    force = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    force = True
+                    self._force_shutdown_event.set()
+                    break
+                self._force_shutdown_event.wait(min(0.05, remaining))
         self._stop_task_sync(final=True)
         self._stop_public_mirror_sync()
         with self._runtime_lock:
@@ -1494,6 +1515,7 @@ class StewardDaemon:
         self._begin_cycle(reason)
         self._publish_public_mirror_if_changed()
         try:
+            self._poll_adopted_runs()
             wakeups = self.store.pending_wakeups(limit=200)
             if wakeups:
                 self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
@@ -1677,6 +1699,8 @@ class StewardDaemon:
                 self._fail_dispatch_exception(task_id, str(exc)[-2000:])
                 return False
             status = str(getattr(outcome, "status", ""))
+            if status == "interrupted":
+                return False
             if status in {"ready_to_seal", "terminal", "blocked", "legacy_terminal"}:
                 if status in {"ready_to_seal", "blocked", "legacy_terminal"}:
                     self.finalize_terminal_task(task_id)
@@ -1687,6 +1711,31 @@ class StewardDaemon:
             if not getattr(outcome, "progressed", False) and getattr(outcome, "next_phase", None) is None:
                 return False
         return False
+
+    def _poll_adopted_runs(self) -> None:
+        """Reconcile adopted wrappers until their durable result is consumable."""
+
+        for task_id in sorted(tuple(self._adopted_runs)):
+            try:
+                outcome = self._reconcile_task(self.store.get(task_id))
+            except KeyError:
+                self._adopted_runs.pop(task_id, None)
+                continue
+            if outcome.disposition != ReconciliationDisposition.adopted:
+                self._adopted_runs.pop(task_id, None)
+            self._reconciliation = [
+                item for item in self._reconciliation if item.task_id != task_id
+            ]
+            self._reconciliation.append(outcome)
+            try:
+                self.store.add_event(
+                    task_id,
+                    "daemon.reconciled",
+                    outcome.disposition.value,
+                    outcome.as_dict(),
+                )
+            except Exception:
+                pass
 
     def _fail_dispatch_exception(self, task_id: str, message: str) -> TaskRecord:
         summary = f"dispatch failed: {message}"

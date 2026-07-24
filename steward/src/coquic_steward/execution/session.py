@@ -41,6 +41,7 @@ from .container import (
 )
 from .container_config import TaskContainerConfig, TaskRole
 from .task_archive import ArchiveError, TaskArchiveWriter
+from .worktree import Worktrees
 
 
 class ResumeCategory(StrEnum):
@@ -481,6 +482,33 @@ class SessionSupervisor:
                 ResumeCategory.checkpoint_drift,
                 evidence={"field": "checkpoint_id", "reason": "checkpoint mismatch"},
             )
+        if session.checkpoint_id == session.idempotency_key:
+            return ResumeResult(
+                ResumeCategory.checkpoint_drift,
+                evidence={
+                    "field": "checkpoint_id",
+                    "reason": "a phase action is not a worktree checkpoint",
+                },
+            )
+        if session.checkpoint_id.startswith("worktree-v1-"):
+            try:
+                current_checkpoint = worktree_checkpoint(self.config, Path(expected_cwd))
+            except (OSError, RuntimeError):
+                return ResumeResult(
+                    ResumeCategory.checkpoint_drift,
+                    evidence={
+                        "field": "checkpoint_id",
+                        "reason": "current worktree checkpoint is unavailable",
+                    },
+                )
+            if current_checkpoint != session.checkpoint_id:
+                return ResumeResult(
+                    ResumeCategory.checkpoint_drift,
+                    evidence={
+                        "field": "checkpoint_id",
+                        "reason": "worktree changed after interruption",
+                    },
+                )
         try:
             existing = next(
                 (
@@ -975,7 +1003,7 @@ class SessionSupervisor:
         task = self._ensure_planner_task(task)
         runtime, _ = self._boundary_for(task)
         effective_cwd = runtime.config.worktree if runtime is not None else cwd
-        checkpoint_id = _clean_worktree_checkpoint(effective_cwd)
+        checkpoint_id = worktree_checkpoint(self.config, effective_cwd)
         execution = self.store.get_execution(task.id)
         pipeline_id = execution.owning_pipeline_id
         if pipeline_id is None:
@@ -1212,6 +1240,20 @@ class SessionSupervisor:
             if outcome.completed
             else CodexRunState.failed.value
         )
+        if (
+            (outcome.interrupted or outcome.forced)
+            and session.checkpoint_id is not None
+            and session.checkpoint_id.startswith("worktree-v1-")
+        ):
+            try:
+                checkpoint_id = worktree_checkpoint(self.config, request.cwd)
+            except (OSError, RuntimeError):
+                checkpoint_id = None
+            if checkpoint_id is not None:
+                session = self.store.update_session(
+                    session.id, checkpoint_id=checkpoint_id
+                )
+                run = self.store.update_run(run.id, checkpoint_id=checkpoint_id)
         try:
             self.store.transition_run(
                 run.id,
@@ -1412,29 +1454,27 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
             git_common_dir=common_git,
             repo_root=config.repo_root,
             scratch=scratch,
+            network=config.container.network,
             labels={"coquic.steward.codex": config.codex_identity or config.codex_bin},
             task_write_gid=task_write_gid,
             validation_gid=validation_gid,
         )
-        return TaskContainerRuntime(container_config)
+        return TaskContainerRuntime(
+            container_config,
+            docker_bin=config.container.docker_bin,
+        )
 
     return build
 
 
-def _clean_worktree_checkpoint(path: Path) -> str:
-    status = run_command(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=path,
-        check=True,
+def worktree_checkpoint(config: StewardConfig, path: Path) -> str:
+    """Return an opaque identity for the current commit, tree, and patch."""
+
+    base, tree, patch = Worktrees(config).snapshot(path)
+    identity = "\0".join((base, tree, patch)).encode(
+        "utf-8", errors="surrogateescape"
     )
-    if status.stdout:
-        raise RuntimeError("planner worktree checkpoint is ambiguous")
-    tree = run_command(
-        ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
-    ).stdout.strip()
-    if not tree or any(character not in "0123456789abcdef" for character in tree):
-        raise RuntimeError("planner worktree checkpoint is invalid")
-    return f"git-tree-{tree}"
+    return f"worktree-v1-{hashlib.sha256(identity).hexdigest()}"
 
 
 def _is_unambiguous_checkpoint(value: str | None) -> bool:

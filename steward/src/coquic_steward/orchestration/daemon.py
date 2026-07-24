@@ -1288,7 +1288,13 @@ class StewardDaemon:
                     changed = True
                     if str(run.state) == "running":
                         selected = run
-        return selected
+        if selected is None:
+            return None
+        try:
+            inspection = self.session_supervisor.inspect(selected.id)
+        except Exception:
+            return None
+        return selected if inspection.live else None
 
     def _ingest_recovered_result(
         self,
@@ -1687,8 +1693,6 @@ class StewardDaemon:
                 try:
                     if future.result():
                         stopped_container_count += 1
-                    else:
-                        container_stop_failures.append(task_id)
                 except Exception:
                     container_stop_failures.append(task_id)
             for future in pending:

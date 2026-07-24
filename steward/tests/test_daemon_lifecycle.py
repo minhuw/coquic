@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +36,7 @@ from coquic_steward.execution.session import (
     ResumeResult,
     SessionResult,
     SessionSupervisor,
+    runtime_factory_for_config,
     worktree_checkpoint,
 )
 from coquic_steward.execution.task_archive import TaskArchiveWriter
@@ -1025,6 +1027,97 @@ def test_shutdown_discovers_and_stops_uncached_owned_container(config):
     assert runtime.stop_calls == 1
     assert result.stopped_containers == 1
     assert daemon.lifecycle_state.value == "stopped"
+
+
+def test_shutdown_treats_queued_task_without_container_as_noop(config):
+    configured = replace(config, task_image_digest=IMAGE)
+    store = TaskStore(configured.db_path)
+    task, _ = _task(store, "queued without container")
+    supervisor = SessionSupervisor(
+        configured,
+        store,
+        runtime_factory=runtime_factory_for_config(configured),
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    daemon = StewardDaemon(configured, store, session_supervisor=supervisor)
+
+    result = daemon.shutdown(force=True)
+
+    assert store.get(task.id).status == TaskStatus.queued
+    assert result.stopped_containers == 0
+    assert result.state.value == "stopped"
+    assert daemon.lifecycle_state.value == "stopped"
+
+
+def test_recovery_waits_for_live_wrapper_before_adoption(config, monkeypatch):
+    store = TaskStore(config.db_path)
+    task, _, predecessor = _interrupted_run(config, store)
+
+    class SlowLaunchSupervisor(FakeSupervisor):
+        def __init__(self, config, store):
+            super().__init__(config, store)
+            self.successor_created = threading.Event()
+            self.inspection_attempted = threading.Event()
+            self.release_launch = threading.Event()
+            self.launch_completed = threading.Event()
+            self.successor_id = None
+
+        def resume_with_retries(self, run_id, **_kwargs):
+            predecessor = self.store.get_run(run_id)
+            successor = self.store.create_run(
+                predecessor.task_id,
+                predecessor.pipeline_id,
+                predecessor.session_id,
+                role=predecessor.role,
+                resume_of_run_id=predecessor.id,
+                image_version=predecessor.image_version,
+                runtime_version=predecessor.runtime_version,
+                checkpoint_id=predecessor.checkpoint_id,
+                provider_store_identity=predecessor.provider_store_identity,
+            )
+            self.successor_id = successor.id
+            self.successor_created.set()
+            self.release_launch.wait(timeout=2)
+            result = ResumeResult(
+                ResumeCategory.success,
+                result=self._complete(successor),
+            )
+            self.launch_completed.set()
+            return result
+
+        def inspect(self, run_id):
+            self.calls.append(("inspect", run_id))
+            self.inspection_attempted.set()
+            return SimpleNamespace(live=False, container=None)
+
+    supervisor = SlowLaunchSupervisor(config, store)
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+    monkeypatch.setattr(
+        daemon.executor,
+        "reconcile_session_result",
+        lambda *_: SimpleNamespace(status="ingested"),
+    )
+    outcomes = []
+    recovery = threading.Thread(
+        target=lambda: outcomes.append(
+            daemon._resume_or_recover(task, predecessor, store.list_runs(task.id))
+        )
+    )
+    recovery.start()
+    assert supervisor.successor_created.wait(timeout=1)
+
+    inspection_attempted = supervisor.inspection_attempted.wait(timeout=1)
+    finished_before_wrapper = not recovery.is_alive()
+    adopted_before_wrapper = daemon._adopted_runs.get(task.id)
+    supervisor.release_launch.set()
+    recovery.join(timeout=2)
+    assert supervisor.launch_completed.wait(timeout=1)
+
+    assert inspection_attempted is True
+    assert finished_before_wrapper is False
+    assert adopted_before_wrapper is None
+    assert outcomes and outcomes[0].disposition == "resumed"
 
 
 def test_recovered_result_without_durable_phase_advance_stays_blocked(config):

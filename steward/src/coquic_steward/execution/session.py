@@ -1013,7 +1013,10 @@ class SessionSupervisor:
             raise ValueError("task_id is required for a task-scoped runtime")
         runtime = self._runtimes.get(task_id)
         if runtime is None and self.runtime_factory is not None:
-            runtime = self.runtime_factory(self.store.get(task_id))
+            task = self.store.get(task_id)
+            if task.worktree_path is None:
+                return False
+            runtime = self.runtime_factory(task)
             self._runtimes[task_id] = runtime
         if runtime is None:
             return False

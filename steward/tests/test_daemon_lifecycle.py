@@ -1120,6 +1120,81 @@ def test_recovery_waits_for_live_wrapper_before_adoption(config, monkeypatch):
     assert outcomes and outcomes[0].disposition == "resumed"
 
 
+def test_recovery_does_not_adopt_before_wrapper_is_published(config):
+    store = TaskStore(config.db_path)
+    task, pipeline, predecessor = _interrupted_run(config, store)
+
+    class SlowRuntime:
+        def __init__(self):
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.config = SimpleNamespace(
+                container_name="steward-test",
+                container_path=lambda path, _role: path,
+            )
+
+        def ensure_started(self):
+            self.entered.set()
+            self.release.wait(timeout=3)
+            raise RuntimeError("launch stopped before wrapper creation")
+
+        def inspect(self):
+            return SimpleNamespace(running=True, container_id="container-test")
+
+    runtime = SlowRuntime()
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        runtime=runtime,
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    def launch():
+        return supervisor.start(
+            task.id,
+            pipeline.id,
+            role="implementation",
+            prompt="recover",
+            cwd=config.repo_root,
+            checkpoint_id=predecessor.checkpoint_id,
+            retry_of_run_id=predecessor.id,
+        )
+
+    outcomes = []
+    recovery = threading.Thread(
+        target=lambda: outcomes.append(
+            daemon._await_recovery_operation(task, predecessor, launch)
+        )
+    )
+    recovery.start()
+    try:
+        assert runtime.entered.wait(timeout=1)
+        recovery.join(timeout=0.2)
+        successors = [
+            run
+            for run in store.list_runs(task.id)
+            if run.retry_of_run_id == predecessor.id
+        ]
+        assert successors
+        successor = successors[-1]
+
+        inspection = supervisor.inspect(successor.id)
+
+        assert recovery.is_alive()
+        assert inspection.live is False
+        assert inspection.identity is None
+        assert daemon._adopted_runs.get(task.id) is None
+    finally:
+        runtime.release.set()
+        recovery.join(timeout=2)
+
+    assert not recovery.is_alive()
+    assert outcomes and outcomes[0].status == "unavailable"
+    assert store.get_run(successor.id).state == "failed"
+
+
 def test_recovered_result_without_durable_phase_advance_stays_blocked(config):
     store = TaskStore(config.db_path)
     task, _, predecessor = _interrupted_run(config, store)

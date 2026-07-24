@@ -976,7 +976,11 @@ class SessionSupervisor:
             )
             return InspectionResult(run_id, live, container, identity)
         process = active.get("process") or getattr(active.get("invoker"), "process", None)
-        live = process.poll() is None if process is not None else bool(active.get("live", True))
+        live = bool(
+            identity is not None
+            and process is not None
+            and process.poll() is None
+        )
         return InspectionResult(run_id, live, container, identity)
 
     def _persisted_boundary(

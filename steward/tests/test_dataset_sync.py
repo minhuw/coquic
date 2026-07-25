@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import getpass
+import os
 import shutil
 import socket
 import sqlite3
 import stat
 import subprocess
-import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +24,6 @@ from coquic_steward.dataset_sync import (
     build_rsync_argv,
     classify_rsync_result,
     validate_forced_receiver_command,
-    validate_receiver_relative_path,
     validate_rsync_argv,
 )
 from coquic_steward.dataset_sync_config import DatasetSyncConfig, validate_dataset_roots
@@ -83,6 +82,60 @@ def _config(tmp_path: Path, *, enabled: bool = True) -> DatasetSyncConfig:
         connect_timeout_seconds=2,
         transfer_timeout_seconds=10,
     )
+
+
+def _public_bytes(*roots: Path) -> dict[Path, bytes]:
+    result: dict[Path, bytes] = {}
+    for root in roots:
+        for path in root.rglob("*"):
+            relative = path.relative_to(root)
+            if any(part.startswith((".", "~")) for part in relative.parts):
+                continue
+            if stat.S_ISREG(path.lstat().st_mode):
+                result[Path(root.name) / relative] = path.read_bytes()
+    return result
+
+
+def _copy_visible_dataset(
+    argv: list[str],
+    receiver: Path,
+    *,
+    manifests_only: bool = False,
+) -> tuple[list[Path], int]:
+    """Model rsync's visible-regular default temporary replacement."""
+
+    validate_rsync_argv(argv)
+    copied: list[Path] = []
+    largest_temporary = 0
+    for source_text in argv[-3:-1]:
+        source = Path(source_text)
+        for path in source.rglob("*"):
+            relative = path.relative_to(source)
+            if any(part.startswith((".", "~")) for part in relative.parts):
+                continue
+            destination = receiver / source.name / relative
+            metadata = path.lstat()
+            if stat.S_ISDIR(metadata.st_mode):
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            if manifests_only and path.name != "manifest.json":
+                continue
+            if destination.exists():
+                destination_metadata = destination.stat()
+                if (
+                    destination_metadata.st_size == metadata.st_size
+                    and destination_metadata.st_mtime_ns == metadata.st_mtime_ns
+                ):
+                    continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.rsync-tmp")
+            shutil.copy2(path, temporary)
+            largest_temporary = max(largest_temporary, temporary.stat().st_size)
+            os.replace(temporary, destination)
+            copied.append(Path(source.name) / relative)
+    return copied, largest_temporary
 
 
 def test_config_requires_canonical_siblings_and_shared_epoch(tmp_path: Path) -> None:
@@ -181,7 +234,9 @@ def test_partial_dataset_health_migration_is_rejected_without_canonical_row(
     with pytest.raises(RuntimeError, match="ambiguous"):
         TaskStore(path)
     with sqlite3.connect(path) as connection:
-        ids = [row[0] for row in connection.execute("SELECT id FROM dataset_sync_health")]
+        ids = [
+            row[0] for row in connection.execute("SELECT id FROM dataset_sync_health")
+        ]
     assert ids == ["partial-dataset-sync"]
 
 
@@ -193,7 +248,9 @@ def test_valid_task_only_health_migration_is_idempotent(tmp_path: Path) -> None:
         connection.execute(
             "UPDATE dataset_sync_health SET id='task-archive-sync' WHERE id='dataset-sync'"
         )
-        connection.execute("ALTER TABLE dataset_sync_health RENAME TO task_archive_sync_health")
+        connection.execute(
+            "ALTER TABLE dataset_sync_health RENAME TO task_archive_sync_health"
+        )
         connection.commit()
     migrated = TaskStore(path)
     assert migrated.get_dataset_sync_health().enabled is False
@@ -212,7 +269,9 @@ def test_valid_task_only_health_migration_is_idempotent(tmp_path: Path) -> None:
     assert "dataset_sync_health" in tables
 
 
-def test_argv_has_exact_two_sources_and_fixed_relative_destination(tmp_path: Path) -> None:
+def test_argv_has_exact_two_sources_and_fixed_relative_destination(
+    tmp_path: Path,
+) -> None:
     argv = build_rsync_argv(_config(tmp_path))
     assert argv[-3:] == [
         str(tmp_path / "tasks"),
@@ -230,7 +289,9 @@ def test_argv_has_exact_two_sources_and_fixed_relative_destination(tmp_path: Pat
         validate_rsync_argv([*argv[:-3], "/private", *argv[-3:]])
 
 
-def test_receiver_confines_top_level_names_and_forbidden_options(tmp_path: Path) -> None:
+def test_receiver_confines_top_level_names_and_forbidden_options(
+    tmp_path: Path,
+) -> None:
     receiver = tmp_path / "receiver"
     (receiver / "tasks").mkdir(parents=True)
     (receiver / "control-loop").mkdir()
@@ -255,16 +316,25 @@ def test_receiver_confines_top_level_names_and_forbidden_options(tmp_path: Path)
         )
 
 
-def test_real_rsync_two_root_transfer_through_forced_daemon(tmp_path: Path) -> None:
+def test_direct_real_rsync_incremental_interrupted_storage_and_no_delete(
+    tmp_path: Path,
+) -> None:
     """Exercise rsync 3.2.7's two-source daemon-over-SSH framing."""
 
     required = ("/usr/sbin/sshd", "ssh-keygen", "ssh-keyscan", "rsync")
     if any(shutil.which(item) is None for item in required):
         pytest.skip("OpenSSH and rsync are required for the daemon protocol fixture")
     if subprocess.run(["sudo", "-n", "true"], check=False).returncode != 0:
-        pytest.skip("passwordless sudo is required to install the fixed local fixture config")
+        pytest.skip(
+            "passwordless sudo is required to install the fixed local fixture config"
+        )
     fixed_config = Path("/fixed/rsyncd.conf")
-    if subprocess.run(["sudo", "-n", "test", "-e", str(fixed_config)], check=False).returncode == 0:
+    if (
+        subprocess.run(
+            ["sudo", "-n", "test", "-e", str(fixed_config)], check=False
+        ).returncode
+        == 0
+    ):
         pytest.skip("fixed receiver config is already managed by the host")
 
     source_base = tmp_path / "source"
@@ -276,6 +346,10 @@ def test_real_rsync_two_root_transfer_through_forced_daemon(tmp_path: Path) -> N
     receiver.chmod(0o755)
     (source_tasks / "task.json").write_text("task\n", encoding="utf-8")
     (source_control / "event.jsonl").write_text("event\n", encoding="utf-8")
+    private = source_base / "private.sqlite"
+    private.write_text("private\n", encoding="utf-8")
+    retained = receiver / "tasks" / "retained.json"
+    retained.write_text("history\n", encoding="utf-8")
     identity = tmp_path / "identity"
     subprocess.run(
         ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(identity)],
@@ -365,12 +439,259 @@ def test_real_rsync_two_root_transfer_through_forced_daemon(tmp_path: Path) -> N
         argv = build_rsync_argv(config)
         result = subprocess.run(argv, capture_output=True, timeout=30, check=False)
         assert result.returncode == 0, result.stderr
-        assert (receiver / "tasks" / "task.json").read_text(encoding="utf-8") == "task\n"
-        assert (receiver / "control-loop" / "event.jsonl").read_text(encoding="utf-8") == "event\n"
+        assert (receiver / "tasks" / "task.json").read_text(
+            encoding="utf-8"
+        ) == "task\n"
+        assert (receiver / "control-loop" / "event.jsonl").read_text(
+            encoding="utf-8"
+        ) == "event\n"
+        remote_task = receiver / "tasks" / "task.json"
+        unchanged_inode = remote_task.stat().st_ino
+        unchanged_mtime = remote_task.stat().st_mtime_ns
+        repeated = subprocess.run(argv, capture_output=True, timeout=30, check=False)
+        assert repeated.returncode == 0, repeated.stderr
+        assert remote_task.stat().st_ino == unchanged_inode
+        assert remote_task.stat().st_mtime_ns == unchanged_mtime
+
+        source_mtime = (source_tasks / "task.json").stat().st_mtime_ns
+        (source_tasks / "task.json").write_text("TASK\n", encoding="utf-8")
+        os.utime(source_tasks / "task.json", ns=(source_mtime + 1, source_mtime + 1))
+        with (source_control / "event.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write("event-2\n")
+        sealed = source_control / "planner-runs" / "run-1"
+        sealed.mkdir(parents=True)
+        (sealed / "manifest.json").write_text("manifest\n", encoding="utf-8")
+        incremental = subprocess.run(argv, capture_output=True, timeout=30, check=False)
+        assert incremental.returncode == 0, incremental.stderr
+        assert remote_task.read_text(encoding="utf-8") == "TASK\n"
+        assert (receiver / "control-loop" / "event.jsonl").read_text(
+            encoding="utf-8"
+        ) == "event\nevent-2\n"
+        assert (
+            receiver / "control-loop" / "planner-runs" / "run-1" / "manifest.json"
+        ).read_text(encoding="utf-8") == "manifest\n"
+        assert retained.read_text(encoding="utf-8") == "history\n"
+        assert not (receiver / private.name).exists()
+
+        payload = b"x" * (4 * 1024 * 1024)
+        large = source_tasks / "large.bin"
+        large.write_bytes(payload)
+        remote_large = receiver / "tasks" / large.name
+        remote_large.write_bytes(b"old")
+        slow_argv = list(argv)
+        slow_argv[-3:-3] = ["--bwlimit=512"]
+        process = subprocess.Popen(
+            slow_argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        largest_temporary = 0
+        deadline = time.monotonic() + 5
+        try:
+            while time.monotonic() < deadline:
+                temporary_files = [
+                    path
+                    for path in remote_large.parent.iterdir()
+                    if path.is_file() and path.name.startswith(f".{large.name}.")
+                ]
+                if temporary_files:
+                    largest_temporary = max(
+                        path.stat().st_size for path in temporary_files
+                    )
+                    if largest_temporary > 0:
+                        break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.02)
+            assert process.poll() is None, process.communicate()[1]
+            assert 0 < largest_temporary <= len(payload)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=5)
+        assert remote_large.read_bytes() == b"old"
+        assert not any(receiver.rglob(".partial"))
+        retry = subprocess.run(argv, capture_output=True, timeout=30, check=False)
+        assert retry.returncode == 0, retry.stderr
+        assert remote_large.read_bytes() == payload
     finally:
         daemon.terminate()
         daemon.wait(timeout=5)
         subprocess.run(["sudo", "-n", "rm", "-rf", "/fixed"], check=True)
+
+
+def test_monotonic_incremental_storage_has_no_projection_or_private_disclosure(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    config = _config(source)
+    task = config.tasks_dir / "2026-07" / "task-1"
+    task.mkdir(parents=True)
+    task_events = task / "events.jsonl"
+    task_events.write_bytes(b'{"event":1}\n')
+    task_metadata = task / "metadata.json"
+    task_metadata.write_bytes(b"AAAA")
+    (task / "manifest.json").write_bytes(b'{"terminal":true}\n')
+    control_events = config.control_loop_dir / "events" / "2026-07-25.jsonl"
+    control_events.parent.mkdir()
+    control_events.write_bytes(b'{"signal":1}\n')
+    (config.control_loop_dir / "current.json").write_bytes(b"1111")
+
+    private = source / "private.sqlite"
+    private.write_bytes(b"must-not-transfer")
+    (task / ".temporary").write_bytes(b"hidden")
+    (task / "~draft").write_bytes(b"hidden")
+    (task / "private-link").symlink_to(private)
+    os.mkfifo(task / "stream.fifo")
+
+    receiver = tmp_path / "receiver"
+    (receiver / "tasks").mkdir(parents=True)
+    (receiver / "control-loop").mkdir()
+    (receiver / "cache").mkdir()
+    cache_canary = receiver / "cache" / "site-v2.sqlite"
+    cache_canary.write_bytes(b"cache")
+    retained = receiver / "tasks" / "retained-history.json"
+    retained.write_bytes(b"history")
+    copied_cycles: list[list[Path]] = []
+    temporary_bounds: list[int] = []
+    process_argv: list[list[str]] = []
+
+    def fake_transfer(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        process_argv.append(argv)
+        copied, largest_temporary = _copy_visible_dataset(argv, receiver)
+        copied_cycles.append(copied)
+        temporary_bounds.append(largest_temporary)
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    store = TaskStore(tmp_path / "state.sqlite")
+    synchronizer = StewardDatasetSynchronizer(config, store, runner=fake_transfer)
+    assert synchronizer.run_once().success
+    expected = _public_bytes(config.tasks_dir, config.control_loop_dir)
+    for relative, payload in expected.items():
+        assert (receiver / relative).read_bytes() == payload
+
+    unchanged_source = _public_bytes(config.tasks_dir, config.control_loop_dir)
+    assert synchronizer.run_once().success
+    assert copied_cycles[-1] == []
+    assert temporary_bounds[-1] == 0
+    assert _public_bytes(config.tasks_dir, config.control_loop_dir) == unchanged_source
+
+    with task_events.open("ab") as handle:
+        handle.write(b'{"event":2}\n')
+    with control_events.open("ab") as handle:
+        handle.write(b'{"signal":2}\n')
+    metadata_mtime = task_metadata.stat().st_mtime_ns
+    task_metadata.write_bytes(b"BBBB")
+    os.utime(task_metadata, ns=(metadata_mtime + 1, metadata_mtime + 1))
+    current = config.control_loop_dir / "current.json"
+    current_mtime = current.stat().st_mtime_ns
+    current.write_bytes(b"2222")
+    os.utime(current, ns=(current_mtime + 1, current_mtime + 1))
+    planner_run = config.control_loop_dir / "planner-runs" / "run-1"
+    planner_run.mkdir(parents=True)
+    (planner_run / "result.json").write_bytes(b'{"result":1}\n')
+    (planner_run / "manifest.json").write_bytes(b'{"sealed":true}\n')
+    sealed_task = config.tasks_dir / "2026-07" / "task-2"
+    sealed_task.mkdir()
+    (sealed_task / "manifest.json").write_bytes(b'{"terminal":true}\n')
+
+    assert synchronizer.run_once().success
+    expected = _public_bytes(config.tasks_dir, config.control_loop_dir)
+    for relative, payload in expected.items():
+        assert (receiver / relative).read_bytes() == payload
+    assert len(process_argv) == 3
+    assert all(
+        argv[-3:-1] == [str(config.tasks_dir), str(config.control_loop_dir)]
+        for argv in process_argv
+    )
+    assert retained.read_bytes() == b"history"
+    assert cache_canary.read_bytes() == b"cache"
+    assert not (receiver / private.name).exists()
+    assert not (receiver / "tasks" / "2026-07" / "task-1" / ".temporary").exists()
+    assert not (receiver / "tasks" / "2026-07" / "task-1" / "~draft").exists()
+    assert not (receiver / "tasks" / "2026-07" / "task-1" / "private-link").exists()
+    assert not (receiver / "tasks" / "2026-07" / "task-1" / "stream.fifo").exists()
+    assert all(bound <= max(map(len, expected.values())) for bound in temporary_bounds)
+    assert not any(receiver.rglob("*.rsync-tmp"))
+    assert not any(
+        (source / name).exists()
+        for name in ("raw-dataset", "projection", "revision", "stage", "cache")
+    )
+
+
+def test_manifest_first_ordering_and_interrupted_retry_converge(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    config = _config(source)
+    task = config.tasks_dir / "2026-07" / "task-1"
+    task.mkdir(parents=True)
+    (task / "events.jsonl").write_bytes(b'{"event":1}\n')
+    (task / "manifest.json").write_bytes(b'{"terminal":true}\n')
+    planner = config.control_loop_dir / "planner-runs" / "run-1"
+    planner.mkdir(parents=True)
+    (planner / "result.json").write_bytes(b'{"result":1}\n')
+    (planner / "manifest.json").write_bytes(b'{"sealed":true}\n')
+    receiver = tmp_path / "receiver"
+    (receiver / "tasks").mkdir(parents=True)
+    (receiver / "control-loop").mkdir()
+    calls = 0
+
+    def interrupted_then_complete(
+        argv: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        _copy_visible_dataset(argv, receiver, manifests_only=calls == 1)
+        return SimpleNamespace(returncode=24 if calls == 1 else 0, stderr=b"")
+
+    synchronizer = StewardDatasetSynchronizer(
+        config,
+        TaskStore(tmp_path / "state.sqlite"),
+        runner=interrupted_then_complete,
+    )
+    interrupted = synchronizer.run_once()
+    assert interrupted.category == DatasetSyncCategory.incomplete
+    assert interrupted.retryable
+    assert (receiver / "tasks" / "2026-07" / "task-1" / "manifest.json").exists()
+    assert not (receiver / "tasks" / "2026-07" / "task-1" / "events.jsonl").exists()
+    assert (
+        receiver / "control-loop" / "planner-runs" / "run-1" / "manifest.json"
+    ).exists()
+    assert not (
+        receiver / "control-loop" / "planner-runs" / "run-1" / "result.json"
+    ).exists()
+
+    assert synchronizer.run_once().success
+    assert calls == 2
+    for relative, payload in _public_bytes(
+        config.tasks_dir, config.control_loop_dir
+    ).items():
+        assert (receiver / relative).read_bytes() == payload
+
+
+def test_enospc_storage_failure_preserves_history_without_delete(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    retained = tmp_path / "remote-retained"
+    retained.write_bytes(b"history")
+    store = TaskStore(tmp_path / "state.sqlite")
+    result = StewardDatasetSynchronizer(
+        config,
+        store,
+        runner=lambda _argv, **_kwargs: SimpleNamespace(
+            returncode=23,
+            stderr=b"write failed: No space left on device (28) private-canary",
+        ),
+    ).run_once()
+    assert result.category == DatasetSyncCategory.remote_space
+    assert result.retryable
+    assert retained.read_bytes() == b"history"
+    health = store.get_dataset_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == DatasetSyncCategory.remote_space
+    assert "private-canary" not in str(health)
 
 
 def test_classification_keeps_exit24_retryable_and_output_bounded() -> None:

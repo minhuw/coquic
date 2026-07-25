@@ -7,6 +7,7 @@ import { getArchiveConfig, type ArchiveConfig } from "./config";
 import { assertDirectoryRoot, isSafeId, isSafeRelativePath, resolveDirectoryContainedPath, resolveRegularContainedPath } from "./paths";
 import { isRecord, parseCompleteJson, safeInteger, safeString, validateEpoch, validateManifest, validatePipeline, validateReview, validateRun, validateTask, validateValidation, type JsonRecord } from "./schema";
 import type { DatabaseSync } from "node:sqlite";
+import { reconcileControlLoop } from "./control-loop";
 
 export type ImportState = "indexing" | "ready" | "degraded" | "unavailable" | "incompatible" | "archive-corrupt";
 
@@ -279,6 +280,7 @@ export class StewardArchiveImporter {
   private running = false;
   private queued = false;
   private watcher: FSWatcher | null = null;
+  private controlWatcher: FSWatcher | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private importDiagnostics: ImportDiagnostics = { jsonlFilesReused: 0, jsonlFilesAppended: 0, jsonlFilesRebuilt: 0, jsonlRecordsParsed: 0, recordRowsStaged: 0 };
 
@@ -301,7 +303,7 @@ export class StewardArchiveImporter {
     const verifiedTaskCount = Number(this.db.prepare("SELECT count(*) AS count FROM tasks WHERE archive_state='verified'").get()?.count ?? 0);
     const errorCount = Number(this.db.prepare("SELECT coalesce(sum(count), 0) AS count FROM importer_errors").get()?.count ?? 0);
     const lagSeconds = meta.lastSuccessAt ? Math.max(0, Math.floor((Date.now() - Date.parse(meta.lastSuccessAt)) / 1000)) : null;
-    return { ...meta, state: meta.state as ImportState, taskCount, verifiedTaskCount, errorCount, lagSeconds, watchState: this.watcher ? "watching" : "stopped" };
+    return { ...meta, state: meta.state as ImportState, taskCount, verifiedTaskCount, errorCount, lagSeconds, watchState: this.watcher || this.controlWatcher ? "watching" : "stopped" };
   }
 
   revision() { const meta = readDatabaseMeta(this.db); return { revision: meta.revision, state: meta.state as ImportState }; }
@@ -312,11 +314,15 @@ export class StewardArchiveImporter {
     if (this.watcher || this.timer) return;
     try { this.watcher = fsWatch(this.config.tasksRoot, { recursive: true }, () => { void this.requestReconcile(); }); updateDatabaseMeta(this.db, { watchState: "watching" }); }
     catch { updateDatabaseMeta(this.db, { watchState: "unavailable" }); }
+    if (this.config.controlLoopRoot) {
+      try { this.controlWatcher = fsWatch(this.config.controlLoopRoot, { recursive: true }, () => { void this.requestReconcile(); }); }
+      catch { /* the periodic reconciliation still handles an unavailable control-loop root */ }
+    }
     this.timer = setInterval(() => { void this.requestReconcile(); }, this.config.reconcileMs); this.timer.unref?.();
     void this.requestReconcile();
   }
 
-  stop() { this.watcher?.close(); this.watcher = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
+  stop() { this.watcher?.close(); this.watcher = null; this.controlWatcher?.close(); this.controlWatcher = null; if (this.timer) clearInterval(this.timer); this.timer = null; }
 
   async requestReconcile() {
     if (this.running) { this.queued = true; return; }
@@ -325,6 +331,25 @@ export class StewardArchiveImporter {
   }
 
   async reconcile() {
+    await this.reconcileTasks();
+    let controlResult;
+    try { controlResult = await reconcileControlLoop(this.db, this.config); }
+    catch {
+      controlResult = { changed: false, state: "degraded" as const, epochId: null, errorCategory: "control-loop-import", lastSuccessAt: null };
+    }
+    const meta = readDatabaseMeta(this.db);
+    const taskState = meta.state as ImportState;
+    this.db.prepare(`INSERT INTO domain_health(domain, state, epoch_id, last_attempt_at, last_success_at, last_error_category, last_error_count, lag_seconds) VALUES('tasks', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(domain) DO UPDATE SET state=excluded.state,epoch_id=excluded.epoch_id,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at,last_error_category=excluded.last_error_category,last_error_count=excluded.last_error_count,lag_seconds=excluded.lag_seconds`).run(taskState, meta.epochId, meta.lastAttemptAt, meta.lastSuccessAt, meta.lastErrorCategory, meta.lastErrorCount, meta.lastSuccessAt ? Math.max(0, Math.floor((Date.now() - Date.parse(meta.lastSuccessAt)) / 1000)) : null);
+    const combinedState: ImportState = controlResult.state === "archive-corrupt" || controlResult.state === "incompatible" ? controlResult.state : taskState;
+    updateDatabaseMeta(this.db, {
+      state: combinedState,
+      revision: meta.revision + (controlResult.changed ? 1 : 0),
+      lastErrorCategory: combinedState === "ready" ? null : meta.lastErrorCategory,
+      lastSuccessAt: controlResult.lastSuccessAt ?? meta.lastSuccessAt,
+    });
+  }
+
+  private async reconcileTasks() {
     const diagnostics: ImportDiagnostics = { jsonlFilesReused: 0, jsonlFilesAppended: 0, jsonlFilesRebuilt: 0, jsonlRecordsParsed: 0, recordRowsStaged: 0 };
     this.importDiagnostics = diagnostics;
     updateDatabaseMeta(this.db, { lastAttemptAt: now() });

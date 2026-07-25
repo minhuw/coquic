@@ -79,9 +79,11 @@ app_env_vars=(
   COQUIC_DEMO_QA_ENABLED
   COQUIC_V2_PREVIEW_PASSWORD
   COQUIC_STEWARD_TASKS_ROOT
+  COQUIC_STEWARD_CONTROL_LOOP_ROOT
   COQUIC_STEWARD_CACHE_PATH
 )
 COQUIC_STEWARD_TASKS_ROOT="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
+COQUIC_STEWARD_CONTROL_LOOP_ROOT="${COQUIC_STEWARD_CONTROL_LOOP_ROOT:-/opt/coquic-demo/steward/control-loop}"
 COQUIC_STEWARD_CACHE_PATH="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
 remote_prefix="${COQUIC_DEPLOY_OFFLINE_ROOT:-}"
@@ -615,6 +617,7 @@ ensure_steward_state_dir() {
 }
 ensure_steward_state_dir "${remote_steward_root}"
 ensure_steward_state_dir "${remote_steward_root}/tasks"
+ensure_steward_state_dir "${remote_steward_root}/control-loop"
 ensure_steward_state_dir "${remote_steward_root}/cache"
 sudo install -d -m 755 "${remote_config_root}"
 sudo install -d -m 755 "${remote_config_root}/tls"

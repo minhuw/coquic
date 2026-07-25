@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const DATABASE_SCHEMA_VERSION = 4;
+export const DATABASE_SCHEMA_VERSION = 5;
 
 export interface DatabaseMeta {
   state: string;
@@ -161,10 +161,177 @@ export function openArchiveDatabase(cachePath: string) {
       last_seen_at TEXT NOT NULL,
       UNIQUE(task_id, category)
     );
+    CREATE TABLE IF NOT EXISTS domain_health (
+      domain TEXT PRIMARY KEY,
+      state TEXT NOT NULL,
+      epoch_id TEXT,
+      root_revision TEXT,
+      last_attempt_at TEXT,
+      last_success_at TEXT,
+      last_error_category TEXT,
+      last_error_count INTEGER NOT NULL DEFAULT 0,
+      lag_seconds INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS control_files (
+      relative_path TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      actual_size INTEGER,
+      accepted_end INTEGER NOT NULL DEFAULT 0,
+      prefix_hash TEXT,
+      prefix_revision INTEGER NOT NULL DEFAULT 0,
+      complete_records INTEGER NOT NULL DEFAULT 0,
+      file_revision TEXT,
+      device_id TEXT,
+      inode_id TEXT,
+      mtime_ns TEXT,
+      ctime_ns TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      reason TEXT
+    );
+    CREATE TABLE IF NOT EXISTS control_records (
+      event_id TEXT PRIMARY KEY,
+      relative_path TEXT NOT NULL REFERENCES control_files(relative_path) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      byte_start INTEGER NOT NULL,
+      byte_end INTEGER NOT NULL,
+      occurred_at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      UNIQUE(relative_path, ordinal),
+      UNIQUE(sequence)
+    );
+    CREATE INDEX IF NOT EXISTS control_records_order ON control_records(sequence, event_id);
+    CREATE TABLE IF NOT EXISTS control_fetches (
+      fetch_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      completed_at TEXT NOT NULL,
+      item_count INTEGER NOT NULL,
+      new_item_count INTEGER NOT NULL,
+      has_more INTEGER NOT NULL,
+      error_reason TEXT,
+      summary TEXT NOT NULL,
+      event_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS control_observations (
+      observation_id TEXT PRIMARY KEY,
+      fetch_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      severity TEXT,
+      canonical_signal_id TEXT NOT NULL,
+      dedupe_result TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      event_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS control_observations_signal ON control_observations(canonical_signal_id, observed_at, observation_id);
+    CREATE TABLE IF NOT EXISTS control_signals (
+      signal_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      transition_reason TEXT,
+      event_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS control_signals_activity ON control_signals(updated_at DESC, signal_id);
+    CREATE TABLE IF NOT EXISTS control_transitions (
+      transition_id TEXT PRIMARY KEY,
+      signal_id TEXT NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      planner_run_id TEXT,
+      reason_code TEXT NOT NULL,
+      event_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS control_wakeups (
+      wakeup_id TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      consumed_at TEXT,
+      input_signal_ids TEXT NOT NULL,
+      event_id TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS control_planner_runs (
+      planner_run_id TEXT PRIMARY KEY,
+      epoch_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      input_signal_ids TEXT NOT NULL,
+      active_task_ids TEXT NOT NULL,
+      started_event_id TEXT NOT NULL,
+      finished_event_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS control_planner_runs_activity ON control_planner_runs(started_at DESC, planner_run_id);
+    CREATE TABLE IF NOT EXISTS control_proposals (
+      proposal_id TEXT PRIMARY KEY,
+      planner_run_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      outcome TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      signal_ids TEXT NOT NULL,
+      dedupe_key TEXT,
+      task_id TEXT,
+      event_id TEXT NOT NULL,
+      UNIQUE(planner_run_id, ordinal)
+    );
+    CREATE INDEX IF NOT EXISTS control_proposals_run ON control_proposals(planner_run_id, ordinal);
+    CREATE TABLE IF NOT EXISTS control_edges (
+      edge_id TEXT PRIMARY KEY,
+      edge_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      event_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS control_edges_source ON control_edges(source_id, edge_type);
+    CREATE INDEX IF NOT EXISTS control_edges_target ON control_edges(target_id, edge_type);
+    CREATE TABLE IF NOT EXISTS control_artifacts (
+      planner_run_id TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      media_type TEXT,
+      availability TEXT NOT NULL,
+      declared_size INTEGER NOT NULL,
+      declared_sha256 TEXT NOT NULL,
+      actual_size INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',
+      PRIMARY KEY(planner_run_id, relative_path)
+    );
+    CREATE TABLE IF NOT EXISTS control_current (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+      epoch_id TEXT NOT NULL,
+      generated_at TEXT NOT NULL,
+      fetch_count INTEGER,
+      observation_count INTEGER,
+      signal_count INTEGER,
+      planner_run_count INTEGER,
+      pending_signal_count INTEGER,
+      active_planner_run_id TEXT,
+      status TEXT NOT NULL,
+      file_revision TEXT
+    );
+    CREATE TABLE IF NOT EXISTS control_pending_links (
+      edge_id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      edge_type TEXT NOT NULL,
+      reason TEXT NOT NULL
+    );
   `);
   const existing = db.prepare("SELECT schema_version FROM archive_meta WHERE singleton = 1").get();
   if (!existing) db.prepare("INSERT INTO archive_meta(singleton, schema_version, state) VALUES(1, ?, 'indexing')").run(DATABASE_SCHEMA_VERSION);
-  else if (Number(existing.schema_version) !== DATABASE_SCHEMA_VERSION) throw new Error("unsupported archive cache schema");
+  else if (Number(existing.schema_version) === DATABASE_SCHEMA_VERSION) {
+    // Current schema is already present.
+  } else if (Number(existing.schema_version) === 4) {
+    db.prepare("UPDATE archive_meta SET schema_version=? WHERE singleton=1").run(DATABASE_SCHEMA_VERSION);
+  } else throw new Error("unsupported archive cache schema");
   return db;
 }
 

@@ -248,17 +248,19 @@ are opaque and bound to the current file identity; changed prefixes invalidate
 continuations. Active tasks and terminal history use independent bounded cursor
 pages so active work stays prominent without making any indexed task
 unreachable. Pipeline-owned run selection is validated and retained in URL
-state. Signals and Planning remain a separate raw control-loop archive channel
-and production renders them not connected.
+state. Signals and Planning now consume the same cache through the raw
+control-loop peer, while selected evidence is read lazily from validated byte
+ranges or manifest-verified planner-run artifacts.
 
 Rejected alternatives are an importer/API sidecar, a second service or custom
 Next server, a full-payload SQLite copy, request-time cross-task scans,
 fixture-backed production, SSE/WebSocket refresh, and a task-page redesign.
 
-Deployment creates `/opt/coquic-demo/steward/tasks` and its sibling cache but
-does not provision receiver credentials. An operator must point Plan 004's
-forced receiver at exactly `/opt/coquic-demo/steward/tasks` using the existing
-ownership and SSH policy before live publication begins.
+Deployment creates `/opt/coquic-demo/steward/tasks`,
+`/opt/coquic-demo/steward/control-loop`, and the sibling cache but does not
+provision receiver credentials. An operator must point the forced receiver at
+the two raw roots using the existing ownership and SSH policy before live
+publication begins.
 # Durable raw control-loop peer (Steward 2.0)
 
 Steward publishes `$COQUIC_HOME/control-loop/` as a canonical public archive
@@ -280,3 +282,21 @@ The old sanitized Steward mirror is retired after task consumers use the raw
 task root.  Existing legacy mirror bytes are inert and are not automatically
 deleted.  Plan 009 owns transfer of both roots and Plan 010 owns Site V2
 import/index/UI; this decision adds neither.
+
+## D-022: One cache indexes both public archive peers
+
+Site V2 consumes the task and raw control-loop peers through one asynchronous
+in-process importer, one SQLite cache, one cache revision, and one lifecycle.
+Aggregate requests are SQLite-only. A selected signal or planner run may read
+only its indexed complete event ranges or its manifest-verified run artifact;
+raw bodies are never copied into SQLite. The task and control-loop roots are
+reconciled independently and joined only when their immutable epoch IDs match.
+Unordered direct sync is handled by last-valid per-domain generations, with
+pending, incompatible, corrupt, and missing states preserved. Explicit graph
+IDs drive both-direction signal/planner/proposal/task navigation.
+
+Rejected alternatives are a sidecar importer, snapshot or acknowledgement
+protocol, raw-body cache, inferred edges, a second timer/process/database,
+retention or sanitization, and a Steward command channel. Signals and Planning
+therefore replace the earlier not-connected placeholder without changing the
+Steward visual system or task-detail composition.

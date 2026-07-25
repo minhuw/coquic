@@ -182,6 +182,38 @@ returns the same import state grouped by pending metadata, missing artifacts,
 parse retries, and terminal verification. These are eventual-consistency
 diagnostics, not a claim that transport is realtime.
 
+## Raw control-loop archive
+
+`COQUIC_STEWARD_CONTROL_LOOP_ROOT` defaults to
+`/opt/coquic-demo/steward/control-loop` in production. The task and
+control-loop roots are indexed by the same asynchronous importer and SQLite
+cache. `GET /api/steward/status` reports separate `domains` health plus
+control-loop counts, epoch compatibility, pending links, and current-projection
+freshness. A missing peer is `unavailable`; an epoch conflict is
+`incompatible`; malformed replacement files retain their last valid generation.
+
+`GET /api/steward/signals?cursor={opaque}` and
+`GET /api/steward/planner-runs?cursor={opaque}` return complete compatible
+history in newest-activity-first pages of 50. Cursors bind to the selected
+collection and cache revision. `GET /api/steward/signals/{signalId}` and
+`GET /api/steward/planner-runs/{plannerRunId}` return bounded normalized
+metadata, explicit graph IDs, proposal dispositions, and safe artifact
+locators; they never expose raw bodies or filesystem paths.
+
+`GET /api/steward/signals/{signalId}/events?cursor={opaque}` returns complete
+validated event records in archive sequence order. `GET
+/api/steward/planner-runs/{plannerRunId}/transcript?artifact=codex.jsonl&cursor={opaque}`
+returns complete transcript records in file order and reports an incomplete
+terminal tail only as metadata. Both cursors bind to the selected ID, accepted
+file identity, generation, and cache revision; stale cursors return `409`.
+
+`GET /api/steward/planner-runs/{plannerRunId}/artifacts/{artifact}` streams one
+manifest-verified public file with declared safe content type,
+`Content-Disposition`, `nosniff`, and `no-store`. The caller cannot provide an
+absolute path or select an unindexed file. Lists and aggregates remain
+SQLite-only; only selected signal ranges and selected verified planner-run
+artifacts perform raw reads.
+
 ## Legacy compatibility
 
 During migration, these paths remain stable: `/perf-results.json`,

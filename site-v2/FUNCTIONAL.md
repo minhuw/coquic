@@ -289,5 +289,13 @@ announced without replacing retained valid evidence with an error message.
   prefix returns a stale-cursor response.
 - Every transcript-bearing run owned by a pipeline has an accessible selector;
   the validated pipeline/run selection is shareable through URL state.
-- Signals and Planning remain visible route choices but production renders an
-  explicit not-connected state; no checked-in fixture records are used there.
+- Signals and Planning consume the compatible raw control-loop archive through
+  the same SQLite index as Tasks. Their 50-row master lists are newest-activity
+  first and keep selected IDs in URL state (`signal`, `run`, and `proposal`). A
+  selected signal exposes observations, transitions, explicit planner/task
+  edges, and every indexed event through accessible load-more chunks. A selected
+  planner run exposes wakeup/input IDs, every proposal disposition (including
+  invalid, duplicate, policy-rejected, and capacity-skipped outcomes), linked
+  tasks, and manifest-verified prompt/transcript/output/diagnostic artifacts.
+  Missing, pending, delayed, incompatible, and corrupt domains remain explicit;
+  checked-in fixtures are never a production fallback.

@@ -451,6 +451,7 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
   const archiveData = await loadArchiveTaskView(repository, taskId);
   const data = archiveData as TaskData | null;
   if (!data) notFound();
+  const provenance = repository.getTaskProvenance(taskId);
   const requestedView = typeof query.artifact === "string" ? query.artifact : "transcript";
   const artifact: ArtifactView = artifactViews.includes(requestedView as ArtifactView) ? requestedView as ArtifactView : "transcript";
   const requestedAttempt = typeof query.attempt === "string" ? Number(query.attempt) : data.attempts.at(-1)?.number ?? 0;
@@ -489,6 +490,7 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
         </div>
       </header>
 
+      {provenance ? <section aria-label="Control-loop provenance" className="border-y border-line py-5"><p className="text-xs font-medium text-muted">Control-loop provenance</p><div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs">{provenance.proposals.map((proposal) => <Link key={proposal.proposalId} href={`/steward?view=planning&run=${encodeURIComponent(proposal.plannerRunId)}&proposal=${encodeURIComponent(proposal.proposalId)}`} className="text-accent">{proposal.plannerRunId} · {proposal.outcome}</Link>)}{provenance.signals.map((signalId) => <Link key={signalId} href={`/steward?view=signals&signal=${encodeURIComponent(signalId)}`} className="text-accent">Signal {signalId}</Link>)}</div></section> : null}
       <PipelineGraph stages={data.pipeline.stages} transitions={data.pipeline.transitions} />
       <ImplementationPlan plan={data.plan} />
       {data.planRuns?.length ? <PlanningRuns runs={data.planRuns} taskId={taskId} privateTranscripts={privatePlanTranscripts} /> : null}

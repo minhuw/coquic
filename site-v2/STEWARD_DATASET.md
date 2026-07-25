@@ -200,3 +200,21 @@ The JSON Schema in `schemas/steward-dataset.schema.json` defines the structural
 contract. It deliberately does not define an arbitrary Codex JSONL record
 schema. The running and complete trees in `examples/steward-dataset/` are
 synthetic fixtures for producer and importer tests, not a generated dataset.
+
+## Site V2 peer consumer
+
+Site V2 receives this task root beside the raw control-loop root through one
+in-process importer and one rebuildable SQLite cache. `COQUIC_STEWARD_TASKS_ROOT`
+and `COQUIC_STEWARD_CONTROL_LOOP_ROOT` are configured independently, but rows
+join only when both `epoch.json` values match. Missing peers, pending files,
+dangling proposal/task links, and direct-sync reordering are recoverable
+per-domain states; a mismatch is incompatible and retains each last-valid
+domain. Lists, counts, usage, history, and revision requests use SQLite only.
+
+The selected task boundary remains one task root. The selected signal boundary
+is its indexed complete event-record ranges. The selected planner-run boundary
+is its manifest-verified run directory and requested artifact. All raw reads
+revalidate file identity, safe relative containment, and accepted generation.
+The cache contains no raw event, prompt, transcript, planner-output,
+diagnostic, normalized observation payload, or artifact body. Retention and
+sanitization policies are deliberately outside this consumer contract.

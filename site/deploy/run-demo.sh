@@ -34,6 +34,7 @@ transcript_archive_path="${COQUIC_TRANSCRIPT_ARCHIVE_PATH:-${transcript_dataset_
 transcript_sqlite_path="${COQUIC_TRANSCRIPT_SQLITE_PATH:-${transcript_dataset_dir}/transcripts.sqlite}"
 transcript_archive_url="${COQUIC_TRANSCRIPT_ARCHIVE_URL:-/dataset/${transcript_archive_name}}"
 steward_tasks_root="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
+steward_control_loop_root="${COQUIC_STEWARD_CONTROL_LOOP_ROOT:-/opt/coquic-demo/steward/control-loop}"
 steward_cache_path="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
 next_root="${release_dir}/app"
@@ -51,6 +52,14 @@ case "${steward_cache_path}" in
   /*) ;;
   *) echo "COQUIC_STEWARD_CACHE_PATH must be absolute" >&2; exit 1 ;;
 esac
+case "${steward_control_loop_root}" in
+  /*) ;;
+  *) echo "COQUIC_STEWARD_CONTROL_LOOP_ROOT must be absolute" >&2; exit 1 ;;
+esac
+if [[ "$(basename "${steward_tasks_root}")" != "tasks" || "$(basename "${steward_control_loop_root}")" != "control-loop" ]]; then
+  echo "Steward raw roots must use tasks and control-loop basenames" >&2
+  exit 1
+fi
 case "${steward_tasks_root}" in
   "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward archive must be outside the release" >&2; exit 1 ;;
 esac
@@ -63,12 +72,28 @@ esac
 case "${steward_tasks_root}" in
   "${steward_cache_path}"|"${steward_cache_path}"/*) echo "Steward raw archive must not contain the cache" >&2; exit 1 ;;
 esac
+case "${steward_control_loop_root}" in
+  "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward control-loop archive must be outside the release" >&2; exit 1 ;;
+  "${steward_tasks_root}"|"${steward_tasks_root}"/*) echo "Steward raw roots must be separate" >&2; exit 1 ;;
+  "${steward_cache_path}"|"${steward_cache_path}"/*) echo "Steward control-loop archive must be outside the cache" >&2; exit 1 ;;
+esac
+case "${steward_cache_path}" in
+  "${steward_control_loop_root}"|"${steward_control_loop_root}"/*) echo "Steward cache must be outside the control-loop archive" >&2; exit 1 ;;
+esac
 if [[ -e "${steward_tasks_root}" && ! -d "${steward_tasks_root}" ]]; then
   echo "Steward raw root is not a directory: ${steward_tasks_root}" >&2
   exit 1
 fi
 if [[ -e "${steward_tasks_root}" && ! -r "${steward_tasks_root}" ]]; then
   echo "Steward raw root is not readable" >&2
+  exit 1
+fi
+if [[ -e "${steward_control_loop_root}" && ! -d "${steward_control_loop_root}" ]]; then
+  echo "Steward control-loop root is not a directory: ${steward_control_loop_root}" >&2
+  exit 1
+fi
+if [[ -e "${steward_control_loop_root}" && ! -r "${steward_control_loop_root}" ]]; then
+  echo "Steward control-loop root is not readable" >&2
   exit 1
 fi
 steward_cache_parent="$(dirname "${steward_cache_path}")"
@@ -206,6 +231,7 @@ fi
   COQUIC_TRANSCRIPT_ARCHIVE_URL="${transcript_archive_url}" \
   COQUIC_TRANSCRIPT_SQLITE_PATH="${transcript_sqlite_path}" \
   COQUIC_STEWARD_TASKS_ROOT="${steward_tasks_root}" \
+  COQUIC_STEWARD_CONTROL_LOOP_ROOT="${steward_control_loop_root}" \
   COQUIC_STEWARD_CACHE_PATH="${steward_cache_path}" \
   HOSTNAME="${next_host}" \
   PORT="${next_port}" \

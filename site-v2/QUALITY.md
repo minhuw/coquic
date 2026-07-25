@@ -103,3 +103,15 @@ browser gates MUST cover the 50-row opaque cursor, missing-versus-zero coverage,
 the 51st active task, every owned run selector, `Load more` transcript
 pagination, one refresh per revision, hidden-tab pause, bounded retry backoff,
 200% zoom, and timer/listener cleanup.
+
+Control-loop quality gates additionally cover both-root configuration,
+independent domain health, matching/missing/mismatched epoch IDs, complete-line
+event cursors, append/replacement/truncation retention, all proposal outcomes,
+manifest-first and content-first planner runs, explicit graph edges in both
+directions, 50-row signal/planner history, stale selected-resource cursors,
+safe raw-download headers, and no request-time directory scan for lists or
+aggregates. Browser coverage must progressively load every selected event and
+transcript record without a display ceiling while retaining URL selection and
+focus after revision refresh. Deployment probes must pass both persistent raw
+roots and one cache to the same standalone process and report task and
+control-loop health separately.

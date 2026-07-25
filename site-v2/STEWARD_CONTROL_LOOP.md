@@ -103,3 +103,25 @@ directory manually after identifying it.
 Control-loop transfer is owned by Plan 009.  Site V2 import, SQLite indexing,
 APIs, routes, and UI are owned by Plan 010; this contract performs no transfer,
 request handling, deployment, or external mutation.
+
+## Site V2 consumption boundary
+
+Site V2 configures this root with `COQUIC_STEWARD_CONTROL_LOOP_ROOT`, beside
+`COQUIC_STEWARD_TASKS_ROOT`, and indexes both through one asynchronous
+in-process importer and one disposable SQLite cache. The importer watches both
+roots as latency hints and performs one startup plus complete 60-second
+reconciliation. Domain health is independent; a missing peer is unavailable,
+while a shared epoch mismatch is incompatible and never merges or erases the
+last valid rows.
+
+The cache stores IDs, normalized bounded metadata, aggregates, explicit graph
+edges, safe relative locators, event-file identities, accepted complete-line
+byte ranges, manifest state, and retry health. It never stores raw event
+bodies, arbitrary normalized observation payloads, prompts, Codex transcript
+records, planner output, diagnostics, or artifact bytes. Aggregate and list
+requests are SQLite-only. A selected signal reads only its indexed event
+ranges; a selected planner run reads only its manifest-verified run directory.
+Both reads revalidate containment and accepted file identity. Cursors bind to
+the selected ID, file/generation identity, ordering, and cache revision;
+stale cursors return a bounded conflict. Raw downloads stream exact validated
+bytes with safe disposition and content type.

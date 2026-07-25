@@ -10,7 +10,8 @@ function publicError() {
 
 export async function GET() {
   try {
-    const status = getArchiveRepository().getImportStatus();
-    return NextResponse.json({ schemaVersion: "2.0", generatedAt: new Date().toISOString(), data: { state: status.state, schemaVersion: status.schemaVersion, epochId: status.epochId, revision: status.revision, taskCount: status.taskCount, verifiedTaskCount: status.verifiedTaskCount, errorCount: status.errorCount, lastAttemptAt: status.lastAttemptAt, lastSuccessfulImportAt: status.lastSuccessAt, lagSeconds: status.lagSeconds, watchState: status.watchState } }, { headers: { "Cache-Control": "no-store" } });
+    const repository = getArchiveRepository();
+    const status = repository.getImportStatus();
+    return NextResponse.json({ schemaVersion: "2.0", generatedAt: new Date().toISOString(), data: { state: status.state, schemaVersion: status.schemaVersion, epochId: status.epochId, revision: status.revision, taskCount: status.taskCount, verifiedTaskCount: status.verifiedTaskCount, errorCount: status.errorCount, lastAttemptAt: status.lastAttemptAt, lastSuccessfulImportAt: status.lastSuccessAt, lagSeconds: status.lagSeconds, watchState: status.watchState, domains: repository.getDomainHealth(), controlLoop: repository.getControlLoopStatus() } }, { headers: { "Cache-Control": "no-store" } });
   } catch { return publicError(); }
 }

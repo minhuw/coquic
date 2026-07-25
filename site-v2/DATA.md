@@ -238,6 +238,35 @@ from zero and every aggregate reports available-run coverage.
   when any family begins after the selected boundary, and consumers MUST disclose
   that mismatch rather than extrapolate missing history.
 
+## Raw control-loop consumer
+
+The raw control-loop peer is configured by
+`COQUIC_STEWARD_CONTROL_LOOP_ROOT` and defaults to
+`/opt/coquic-demo/steward/control-loop` only in production. It shares the task
+epoch but has its own event-file generations and health. The disposable SQLite
+cache stores normalized IDs, statuses, counts, graph edges, safe relative
+locators, accepted complete-line byte ranges, manifest hashes, and bounded
+retry state. It never stores event bodies, arbitrary normalized observation
+objects, prompts, transcript records, planner output, diagnostics, or artifact
+bytes.
+
+Events are accepted only after newline termination and schema validation. An
+append continues from its accepted prefix; truncation, replacement, duplicate
+sequence, or malformed complete lines stage a replacement and retain the last
+valid generation until the new file is valid. `current.json` is a freshness
+hint and cannot erase event history. Planner-run directories are indexed only
+after a schema-valid manifest covers every other regular file with exact size
+and SHA-256. A later byte conflict is `archive-corrupt`.
+
+Signals, observations, planner runs, proposals, and tasks join only through
+producer IDs in explicit graph edges. Missing peers and dangling links remain
+pending; an epoch mismatch is `incompatible` and does not merge or delete the
+last compatible rows. Aggregate and pagination requests query SQLite only.
+Selected signal events and planner transcripts/artifacts may read one
+manifest- or cursor-verified raw file on demand. Every response preserves
+missing, partial, pending, unavailable, incompatible, and corrupt states rather
+than converting them to zero or empty success.
+
 ## Content catalogs
 
 Documentation, blog metadata, search entries, and Workbench scenarios MUST be

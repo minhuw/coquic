@@ -7,7 +7,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { getArchiveConfig, type ArchiveConfig } from "./config";
 import { getArchiveImporter, type ImportStatus, type StewardArchiveImporter } from "./importer";
 import { isSafeId, isSafeRelativePath, resolveDirectoryContainedPath, resolveRegularContainedPath } from "./paths";
-import { isRecord, parseCompleteJson, validatePipeline, validateRun, validateTask, validateValidation, validateReview, type JsonRecord } from "./schema";
+import { isRecord, parseCompleteJson, validateControlEvent, validatePipeline, validateRun, validateTask, validateValidation, validateReview, type JsonRecord } from "./schema";
+import { openControlArtifact } from "./control-loop";
 
 export type CursorError = Error & { code?: "STALE_CURSOR" | "INVALID_CURSOR" };
 
@@ -32,6 +33,40 @@ export interface TaskDashboard {
 }
 
 export interface TaskPage { tasks: TaskRow[]; nextCursor: string | null; previousCursor: string | null; total: number; revision: number; }
+
+export interface DomainHealth {
+  domain: "tasks" | "control-loop";
+  state: string;
+  epochId: string | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastErrorCategory: string | null;
+  lagSeconds: number | null;
+}
+
+export interface SignalRow {
+  signalId: string;
+  provider: string;
+  fingerprint: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  observationCount: number;
+  plannerRunCount: number;
+  taskCount: number;
+}
+
+export interface PlannerRunRow {
+  plannerRunId: string;
+  state: string;
+  startedAt: string;
+  completedAt: string | null;
+  proposalCount: number;
+  inputSignalCount: number;
+  taskCount: number;
+}
+
+export interface ControlPage<T> { items: T[]; nextCursor: string | null; previousCursor: string | null; total: number; revision: number; }
 
 const ACTIVE_STATES = ["queued", "running", "reviewing", "integrating"] as const;
 const ALL_STATES = ["queued", "running", "reviewing", "integrating", "succeeded", "pushed", "no_changes", "blocked", "failed", "cancelled"] as const;
@@ -92,6 +127,18 @@ function renderTranscriptValue(source: string, indexedType: unknown) {
   return Object.fromEntries(Object.entries({ record_type: type, text, command, output, exit_code: exitCode }).filter(([, item]) => item !== undefined));
 }
 
+function renderPlannerValue(source: string) {
+  let value: JsonRecord;
+  try { value = JSON.parse(source) as JsonRecord; } catch { return { opaque: true, category: "unrecognized-record" }; }
+  if (!isRecord(value)) return { opaque: true, category: "unrecognized-record" };
+  const type = typeof value.record_type === "string" ? value.record_type : typeof value.type === "string" ? value.type : "record";
+  const text = boundedString(value.text, 8_192) ?? boundedString(value.message, 8_192);
+  const command = boundedString(value.command, 2_048);
+  const output = boundedString(value.output, 8_192);
+  const role = boundedString(value.role, 64);
+  return Object.fromEntries(Object.entries({ record_type: type, role, text, command, output }).filter(([, item]) => item !== undefined));
+}
+
 export class StewardArchiveRepository {
   readonly importer: StewardArchiveImporter;
   readonly config: ArchiveConfig;
@@ -101,6 +148,187 @@ export class StewardArchiveRepository {
 
   getImportStatus(): ImportStatus { return this.importer.status(); }
   getRevision() { return this.importer.revision(); }
+
+  getDomainHealth(): DomainHealth[] {
+    const rows = this.db.prepare("SELECT domain, state, epoch_id, last_attempt_at, last_success_at, last_error_category, lag_seconds FROM domain_health ORDER BY domain").all();
+    const task = this.getImportStatus();
+    const result: DomainHealth[] = [{ domain: "tasks", state: task.state, epochId: task.epochId, lastAttemptAt: task.lastAttemptAt, lastSuccessAt: task.lastSuccessAt, lastErrorCategory: task.lastErrorCategory, lagSeconds: task.lagSeconds }];
+    for (const row of rows) if (String(row.domain) === "control-loop") result.push({ domain: "control-loop", state: String(row.state), epochId: row.epoch_id == null ? null : String(row.epoch_id), lastAttemptAt: row.last_attempt_at == null ? null : String(row.last_attempt_at), lastSuccessAt: row.last_success_at == null ? null : String(row.last_success_at), lastErrorCategory: row.last_error_category == null ? null : String(row.last_error_category), lagSeconds: row.lag_seconds == null ? null : Number(row.lag_seconds) });
+    if (!result.some((item) => item.domain === "control-loop")) result.push({ domain: "control-loop", state: "unavailable", epochId: null, lastAttemptAt: null, lastSuccessAt: null, lastErrorCategory: "root-unconfigured", lagSeconds: null });
+    return result;
+  }
+
+  getControlLoopStatus() {
+    const control = this.getDomainHealth().find((item) => item.domain === "control-loop")!;
+    const counts = {
+      fetches: Number(this.db.prepare("SELECT count(*) AS count FROM control_fetches").get()?.count ?? 0),
+      observations: Number(this.db.prepare("SELECT count(*) AS count FROM control_observations").get()?.count ?? 0),
+      signals: Number(this.db.prepare("SELECT count(*) AS count FROM control_signals").get()?.count ?? 0),
+      plannerRuns: Number(this.db.prepare("SELECT count(*) AS count FROM control_planner_runs").get()?.count ?? 0),
+      proposals: Number(this.db.prepare("SELECT count(*) AS count FROM control_proposals").get()?.count ?? 0),
+      edges: Number(this.db.prepare("SELECT count(*) AS count FROM control_edges").get()?.count ?? 0),
+      pendingLinks: Number(this.db.prepare("SELECT count(*) AS count FROM control_pending_links").get()?.count ?? 0),
+    };
+    const current = this.db.prepare("SELECT generated_at, fetch_count, observation_count, signal_count, planner_run_count, pending_signal_count, active_planner_run_id, status FROM control_current WHERE singleton=1").get();
+    return { state: control.state, epochId: control.epochId, revision: this.getRevision().revision, freshness: control, counts, current: current ? { generatedAt: String(current.generated_at), fetches: current.fetch_count == null ? null : Number(current.fetch_count), observations: current.observation_count == null ? null : Number(current.observation_count), signals: current.signal_count == null ? null : Number(current.signal_count), plannerRuns: current.planner_run_count == null ? null : Number(current.planner_run_count), pendingSignals: current.pending_signal_count == null ? null : Number(current.pending_signal_count), activePlannerRunId: current.active_planner_run_id == null ? null : String(current.active_planner_run_id), status: String(current.status) } : null };
+  }
+
+  private controlRevision() { return this.getRevision().revision; }
+
+  listSignalsPage(cursor?: string | null, limit = 50): ControlPage<SignalRow> {
+    const bounded = Math.min(50, Math.max(1, limit));
+    const decoded = cursor ? decodeCursor(cursor) : null;
+    if (decoded && (decoded.scope !== "signals" || typeof decoded.revision !== "number" || decoded.revision !== this.controlRevision() || !["next", "previous"].includes(String(decoded.direction)))) throw staleCursor("signal list cursor is stale");
+    let rows: Array<Record<string, unknown>>;
+    if (!decoded) rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, (SELECT count(*) FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN tasks t ON t.task_id=p.task_id WHERE e.edge_type='signal_proposal' AND e.source_id=s.signal_id) AS task_count FROM control_signals s ORDER BY s.updated_at DESC, s.signal_id DESC LIMIT ?`).all(bounded);
+    else {
+      if (typeof decoded.updatedAt !== "string" || typeof decoded.signalId !== "string" || !isSafeId(decoded.signalId)) throw invalidCursor();
+      const updatedAt = decoded.updatedAt; const signalId = decoded.signalId;
+      const taskCount = "(SELECT count(DISTINCT p.task_id) FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN tasks t ON t.task_id=p.task_id WHERE e.edge_type='signal_proposal' AND e.source_id=s.signal_id) AS task_count";
+      if (decoded.direction === "next") rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, ${taskCount} FROM control_signals s WHERE (s.updated_at < ? OR (s.updated_at=? AND s.signal_id<?)) ORDER BY s.updated_at DESC, s.signal_id DESC LIMIT ?`).all(updatedAt, updatedAt, signalId, bounded);
+      else rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, ${taskCount} FROM control_signals s WHERE (s.updated_at > ? OR (s.updated_at=? AND s.signal_id>?)) ORDER BY s.updated_at ASC, s.signal_id ASC LIMIT ?`).all(updatedAt, updatedAt, signalId, bounded).reverse();
+    }
+    const items = rows.map((row) => ({ signalId: String(row.signal_id), provider: String(row.provider), fingerprint: String(row.fingerprint), status: String(row.status), createdAt: String(row.created_at), updatedAt: String(row.updated_at), observationCount: Number(row.observation_count ?? 0), plannerRunCount: Number(row.planner_run_count ?? 0), taskCount: Number(row.task_count ?? 0) }));
+    const first = items[0]; const last = items.at(-1); const total = Number(this.db.prepare("SELECT count(*) AS count FROM control_signals").get()?.count ?? 0); const revision = this.controlRevision();
+    const next = last && Boolean(this.db.prepare("SELECT 1 FROM control_signals WHERE updated_at < ? OR (updated_at=? AND signal_id<?) LIMIT 1").get(last.updatedAt, last.updatedAt, last.signalId)) ? encodeCursor({ scope: "signals", direction: "next", updatedAt: last.updatedAt, signalId: last.signalId, revision }) : null;
+    const previous = first && Boolean(this.db.prepare("SELECT 1 FROM control_signals WHERE updated_at > ? OR (updated_at=? AND signal_id>? ) LIMIT 1").get(first.updatedAt, first.updatedAt, first.signalId)) ? encodeCursor({ scope: "signals", direction: "previous", updatedAt: first.updatedAt, signalId: first.signalId, revision }) : null;
+    return { items, nextCursor: next, previousCursor: previous, total, revision };
+  }
+
+  listPlannerRunsPage(cursor?: string | null, limit = 50): ControlPage<PlannerRunRow> {
+    const bounded = Math.min(50, Math.max(1, limit));
+    const decoded = cursor ? decodeCursor(cursor) : null;
+    if (decoded && (decoded.scope !== "planner-runs" || typeof decoded.revision !== "number" || decoded.revision !== this.controlRevision() || !["next", "previous"].includes(String(decoded.direction)))) throw staleCursor("planner-run list cursor is stale");
+    let rows: Array<Record<string, unknown>>;
+    if (!decoded) rows = this.db.prepare(`SELECT r.*, (SELECT count(*) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id) AS proposal_count, (SELECT json_array_length(r.input_signal_ids)) AS input_signal_count, (SELECT count(DISTINCT p.task_id) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id AND p.task_id IS NOT NULL) AS task_count FROM control_planner_runs r ORDER BY r.started_at DESC, r.planner_run_id DESC LIMIT ?`).all(bounded);
+    else {
+      if (typeof decoded.startedAt !== "string" || typeof decoded.plannerRunId !== "string" || !isSafeId(decoded.plannerRunId)) throw invalidCursor();
+      const startedAt = decoded.startedAt; const runId = decoded.plannerRunId;
+      const query = `SELECT r.*, (SELECT count(*) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id) AS proposal_count, (SELECT json_array_length(r.input_signal_ids)) AS input_signal_count, (SELECT count(DISTINCT p.task_id) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id AND p.task_id IS NOT NULL) AS task_count FROM control_planner_runs r WHERE (r.started_at ${decoded.direction === "next" ? "<" : ">"} ? OR (r.started_at=? AND r.planner_run_id ${decoded.direction === "next" ? "<" : ">"} ?)) ORDER BY r.started_at ${decoded.direction === "next" ? "DESC" : "ASC"}, r.planner_run_id ${decoded.direction === "next" ? "DESC" : "ASC"} LIMIT ?`;
+      rows = this.db.prepare(query).all(startedAt, startedAt, runId, bounded); if (decoded.direction === "previous") rows.reverse();
+    }
+    const items = rows.map((row) => ({ plannerRunId: String(row.planner_run_id), state: String(row.state), startedAt: String(row.started_at), completedAt: row.completed_at == null ? null : String(row.completed_at), proposalCount: Number(row.proposal_count ?? 0), inputSignalCount: Number(row.input_signal_count ?? 0), taskCount: Number(row.task_count ?? 0) }));
+    const first = items[0]; const last = items.at(-1); const total = Number(this.db.prepare("SELECT count(*) AS count FROM control_planner_runs").get()?.count ?? 0); const revision = this.controlRevision();
+    const next = last && Boolean(this.db.prepare("SELECT 1 FROM control_planner_runs WHERE started_at < ? OR (started_at=? AND planner_run_id<?) LIMIT 1").get(last.startedAt, last.startedAt, last.plannerRunId)) ? encodeCursor({ scope: "planner-runs", direction: "next", startedAt: last.startedAt, plannerRunId: last.plannerRunId, revision }) : null;
+    const previous = first && Boolean(this.db.prepare("SELECT 1 FROM control_planner_runs WHERE started_at > ? OR (started_at=? AND planner_run_id>? ) LIMIT 1").get(first.startedAt, first.startedAt, first.plannerRunId)) ? encodeCursor({ scope: "planner-runs", direction: "previous", startedAt: first.startedAt, plannerRunId: first.plannerRunId, revision }) : null;
+    return { items, nextCursor: next, previousCursor: previous, total, revision };
+  }
+
+  getSignalDetail(signalId: string) {
+    if (!isSafeId(signalId)) return null;
+    const signal = this.db.prepare("SELECT * FROM control_signals WHERE signal_id=?").get(signalId);
+    if (!signal) return null;
+    const observations = this.db.prepare("SELECT observation_id, fetch_id, provider, kind, fingerprint, title, summary, severity, canonical_signal_id, dedupe_result, observed_at, event_id FROM control_observations WHERE canonical_signal_id=? ORDER BY observed_at, observation_id").all(signalId).map((row) => ({ observationId: String(row.observation_id), fetchId: String(row.fetch_id), provider: String(row.provider), kind: String(row.kind), fingerprint: String(row.fingerprint), title: String(row.title), summary: String(row.summary), severity: row.severity == null ? null : String(row.severity), canonicalSignalId: String(row.canonical_signal_id), dedupeResult: String(row.dedupe_result), observedAt: String(row.observed_at), eventId: String(row.event_id) }));
+    const transitions = this.db.prepare("SELECT transition_id, signal_id, from_status, to_status, planner_run_id, reason_code, event_id FROM control_transitions WHERE signal_id=? ORDER BY event_id").all(signalId).map((row) => ({ transitionId: String(row.transition_id), fromStatus: String(row.from_status), toStatus: String(row.to_status), plannerRunId: row.planner_run_id == null ? null : String(row.planner_run_id), reasonCode: String(row.reason_code), eventId: String(row.event_id) }));
+    const edges = this.db.prepare("SELECT edge_id, edge_type, source_id, target_id, created_at, event_id FROM control_edges WHERE source_id=? OR target_id=? ORDER BY created_at, edge_id").all(signalId, signalId).map((row) => ({ edgeId: String(row.edge_id), edgeType: String(row.edge_type), sourceId: String(row.source_id), targetId: String(row.target_id), createdAt: String(row.created_at), eventId: String(row.event_id) }));
+    const runIds = edges.filter((edge) => edge.edgeType === "signal_planner_run" && edge.sourceId === signalId).map((edge) => edge.targetId);
+    const proposalIds = edges.filter((edge) => edge.edgeType === "signal_proposal" && edge.sourceId === signalId).map((edge) => edge.targetId);
+    const plannerRuns = runIds.map((id) => this.db.prepare("SELECT planner_run_id, state, started_at, completed_at FROM control_planner_runs WHERE planner_run_id=?").get(id)).filter(Boolean).map((row) => ({ plannerRunId: String(row!.planner_run_id), state: String(row!.state), startedAt: String(row!.started_at), completedAt: row!.completed_at == null ? null : String(row!.completed_at) }));
+    const proposals = proposalIds.map((id) => this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, task_id FROM control_proposals WHERE proposal_id=?").get(id)).filter(Boolean).map((row) => ({ proposalId: String(row!.proposal_id), plannerRunId: String(row!.planner_run_id), ordinal: Number(row!.ordinal), outcome: String(row!.outcome), reasonCode: String(row!.reason_code), taskId: row!.task_id == null ? null : String(row!.task_id) }));
+    const fetchIds = [...new Set(observations.map((item) => item.fetchId))];
+    const fetchEventIds = fetchIds.length ? this.db.prepare(`SELECT event_id FROM control_fetches WHERE fetch_id IN (${fetchIds.map(() => "?").join(",")})`).all(...fetchIds).map((row) => String(row.event_id)) : [];
+    const eventIds = [String(signal.event_id), ...observations.map((row) => row.eventId), ...transitions.map((row) => row.eventId), ...edges.map((row) => row.eventId), ...fetchEventIds];
+    return { signalId, provider: String(signal.provider), fingerprint: String(signal.fingerprint), status: String(signal.status), createdAt: String(signal.created_at), updatedAt: String(signal.updated_at), observations, transitions, plannerRuns, proposals, edges, eventCount: new Set(eventIds).size, revision: this.controlRevision() };
+  }
+
+  async readSignalEvents(signalId: string, cursor?: string | null, limit = 50) {
+    const detail = this.getSignalDetail(signalId); if (!detail) return null;
+    const decoded = cursor ? decodeCursor(cursor) : null;
+    if (decoded && (decoded.scope !== "signal-events" || decoded.signalId !== signalId || decoded.revision !== this.controlRevision())) throw staleCursor("signal evidence cursor is stale");
+    const ids = new Set<string>([...detail.observations.map((item) => item.eventId), ...detail.transitions.map((item) => item.eventId), ...detail.edges.map((item) => item.eventId)]);
+    const fetchIds = [...new Set(detail.observations.map((item) => item.fetchId))];
+    if (fetchIds.length) {
+      const placeholders = fetchIds.map(() => "?").join(",");
+      for (const row of this.db.prepare(`SELECT event_id FROM control_fetches WHERE fetch_id IN (${placeholders})`).all(...fetchIds)) ids.add(String(row.event_id));
+    }
+    ids.add(String(this.db.prepare("SELECT event_id FROM control_signals WHERE signal_id=?").get(signalId)?.event_id ?? ""));
+    const records = this.db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records ORDER BY sequence, event_id").all().filter((row) => ids.has(String(row.event_id)));
+    const generation = [...new Set(records.map((row) => `${String(row.relative_path)}:${String(this.db.prepare("SELECT file_revision FROM control_files WHERE relative_path=?").get(String(row.relative_path))?.file_revision ?? "")}`))].sort().join("|");
+    if (decoded && decoded.generation !== generation) throw staleCursor("signal evidence generation is stale");
+    const start = decoded ? Number(decoded.index) : 0;
+    if (!Number.isSafeInteger(start) || start < 0 || decoded && typeof decoded.generation !== "string") throw invalidCursor();
+    const bounded = Math.min(100, Math.max(1, Math.floor(limit))); const page = records.slice(start, start + bounded);
+    const values = [];
+    const handles = new Map<string, Awaited<ReturnType<StewardArchiveRepository["acceptedControlFile"]>>>();
+    try {
+      for (const row of page) {
+        const relativePath = String(row.relative_path);
+        let accepted = handles.get(relativePath);
+        if (!accepted) { accepted = await this.acceptedControlFile(relativePath); handles.set(relativePath, accepted); }
+        const bytes = await readHandleRange(accepted.handle, Number(row.byte_start), Number(row.byte_end));
+        if (bytes[bytes.length - 1] !== 10) throw staleCursor("control-loop event boundary changed");
+        const event = validateControlEvent(parseCompleteJson(bytes.subarray(0, bytes.length - 1).toString("utf8"), relativePath));
+        values.push({ eventId: String(row.event_id), sequence: Number(row.sequence), occurredAt: String(row.occurred_at), kind: String(row.kind), payload: event.payload });
+      }
+    } finally { for (const accepted of handles.values()) await accepted.handle.close(); }
+    const nextIndex = start + page.length; const nextCursor = nextIndex < records.length ? encodeCursor({ scope: "signal-events", signalId, revision: this.controlRevision(), generation, index: nextIndex }) : null;
+    return { signalId, records: values, nextCursor, hasMore: Boolean(nextCursor), revision: this.controlRevision() };
+  }
+
+  getPlannerRunDetail(plannerRunId: string) {
+    if (!isSafeId(plannerRunId)) return null;
+    const run = this.db.prepare("SELECT * FROM control_planner_runs WHERE planner_run_id=?").get(plannerRunId); if (!run) return null;
+    const proposals = this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id FROM control_proposals WHERE planner_run_id=? ORDER BY ordinal").all(plannerRunId).map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), ordinal: Number(row.ordinal), outcome: String(row.outcome), reasonCode: String(row.reason_code), signalIds: JSON.parse(String(row.signal_ids)) as string[], dedupeKey: row.dedupe_key == null ? null : String(row.dedupe_key), taskId: row.task_id == null ? null : String(row.task_id), eventId: String(row.event_id) }));
+    const edges = this.db.prepare("SELECT edge_id, edge_type, source_id, target_id, created_at, event_id FROM control_edges WHERE source_id=? OR target_id=? ORDER BY created_at, edge_id").all(plannerRunId, plannerRunId).map((row) => ({ edgeId: String(row.edge_id), edgeType: String(row.edge_type), sourceId: String(row.source_id), targetId: String(row.target_id), createdAt: String(row.created_at), eventId: String(row.event_id) }));
+    const artifacts = this.db.prepare("SELECT relative_path, media_type, availability, declared_size, declared_sha256, actual_size, status FROM control_artifacts WHERE planner_run_id=? ORDER BY relative_path").all(plannerRunId).map((row) => ({ path: String(row.relative_path), mediaType: row.media_type == null ? null : String(row.media_type), availability: String(row.availability), size: row.actual_size == null ? Number(row.declared_size) : Number(row.actual_size), sha256: String(row.declared_sha256), status: String(row.status) }));
+    return { plannerRunId, state: String(run.state), epochId: String(run.epoch_id), startedAt: String(run.started_at), completedAt: run.completed_at == null ? null : String(run.completed_at), inputSignalIds: JSON.parse(String(run.input_signal_ids)) as string[], activeTaskIds: JSON.parse(String(run.active_task_ids)) as string[], proposals, edges, artifacts, revision: this.controlRevision() };
+  }
+
+  getTaskProvenance(taskId: string) {
+    if (!isSafeId(taskId)) return null;
+    const rows = this.db.prepare("SELECT p.proposal_id, p.planner_run_id, p.outcome, p.reason_code FROM control_proposals p JOIN control_edges e ON e.edge_type='proposal_task' AND e.source_id=p.proposal_id AND e.target_id=? ORDER BY p.planner_run_id, p.ordinal").all(taskId);
+    if (!rows.length) return null;
+    const proposals = rows.map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), outcome: String(row.outcome), reasonCode: String(row.reason_code) }));
+    const signals = this.db.prepare("SELECT DISTINCT e.source_id FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN control_edges pt ON pt.edge_type='proposal_task' AND pt.source_id=p.proposal_id AND pt.target_id=? WHERE e.edge_type='signal_proposal' ORDER BY e.source_id").all(taskId).map((row) => String(row.source_id));
+    return { taskId, proposals, signals, revision: this.controlRevision() };
+  }
+
+  async readPlannerTranscript(plannerRunId: string, cursor?: string | null, limit = 50, artifactPath = "codex.jsonl") {
+    const detail = this.getPlannerRunDetail(plannerRunId); if (!detail) return null;
+    const artifact = detail.artifacts.find((item) => item.path === artifactPath); if (!artifact || artifact.status !== "verified") throw new Error("planner artifact is unavailable");
+    const accepted = await this.acceptedControlArtifact(plannerRunId, artifactPath);
+    try {
+      const bytes = await readHandleRange(accepted.handle, 0, accepted.size);
+      const completeEnd = bytes.lastIndexOf(10) + 1;
+      const decoded = cursor ? decodeCursor(cursor) : null;
+      if (decoded && (decoded.scope !== "planner-transcript" || decoded.plannerRunId !== plannerRunId || decoded.path !== artifactPath || decoded.revision !== this.controlRevision() || decoded.fileRevision !== artifact.sha256)) throw staleCursor("planner transcript cursor is stale");
+      const startLine = decoded ? Number(decoded.line) : 0;
+      if (!Number.isSafeInteger(startLine) || startLine < 0) throw invalidCursor();
+      const lines = bytes.subarray(0, completeEnd).toString("utf8").split("\n").filter((line) => line.length > 0); const bounded = Math.min(100, Math.max(1, Math.floor(limit))); const page = lines.slice(startLine, startLine + bounded).map((line, index) => ({ ordinal: startLine + index, value: renderPlannerValue(line) })); const nextLine = startLine + page.length; const nextCursor = nextLine < lines.length ? encodeCursor({ scope: "planner-transcript", plannerRunId, path: artifactPath, revision: this.controlRevision(), fileRevision: artifact.sha256, line: nextLine }) : null;
+      return { plannerRunId, artifact: artifactPath, records: page, nextCursor, hasMore: Boolean(nextCursor), revision: this.controlRevision(), incompleteTail: completeEnd < bytes.length };
+    } finally { await accepted.handle.close(); }
+  }
+
+  private async acceptedControlArtifact(plannerRunId: string, relativePath: string) {
+    if (!isSafeId(plannerRunId) || !isSafeRelativePath(relativePath)) throw new Error("invalid planner artifact locator");
+    const row = this.db.prepare("SELECT * FROM control_artifacts WHERE planner_run_id=? AND relative_path=? AND status='verified'").get(plannerRunId, relativePath);
+    if (!row) throw new Error("planner artifact is unavailable");
+    const resolved = await openControlArtifact(this.config.controlLoopRoot, `planner-runs/${plannerRunId}/${relativePath}`);
+    const handle = await open(resolved.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { const actual = await handle.stat(); if (!actual.isFile() || actual.size !== Number(row.declared_size) || await hashHandlePrefix(handle, actual.size) !== String(row.declared_sha256)) throw staleCursor("planner artifact identity changed"); return { handle, path: resolved.path, size: actual.size }; } catch (error) { await handle.close(); throw error; }
+  }
+
+  private async acceptedControlFile(relativePath: string) {
+    if (!isSafeRelativePath(relativePath) || !relativePath.startsWith("events/")) throw new Error("invalid control-loop event locator");
+    const file = this.db.prepare("SELECT * FROM control_files WHERE relative_path=? AND status='ready'").get(relativePath);
+    if (!file) throw staleCursor("control-loop event generation is unavailable");
+    const resolved = await openControlArtifact(this.config.controlLoopRoot, relativePath);
+    const handle = await open(resolved.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const actual = await handle.stat();
+      const acceptedEnd = Number(file.accepted_end);
+      if (!actual.isFile() || actual.dev !== resolved.stat.dev || actual.ino !== resolved.stat.ino || String(actual.dev) !== String(file.device_id) || String(actual.ino) !== String(file.inode_id) || actual.size < acceptedEnd || await hashHandlePrefix(handle, acceptedEnd) !== String(file.prefix_hash)) throw staleCursor("control-loop event generation changed");
+      return { handle, path: resolved.path, acceptedEnd, file };
+    } catch (error) { await handle.close(); throw error; }
+  }
+
+  async readPlannerArtifact(plannerRunId: string, relativePath: string) {
+    const accepted = await this.acceptedControlArtifact(plannerRunId, relativePath);
+    const mediaType = String(this.db.prepare("SELECT media_type FROM control_artifacts WHERE planner_run_id=? AND relative_path=?").get(plannerRunId, relativePath)?.media_type ?? "application/octet-stream");
+    const stream = accepted.size === 0 ? Readable.from([]) : accepted.handle.createReadStream({ start: 0, end: accepted.size - 1, autoClose: true });
+    if (accepted.size === 0) await accepted.handle.close();
+    return { stream, contentType: ["application/json", "application/x-ndjson", "text/plain", "text/markdown"].includes(mediaType) ? mediaType : "application/octet-stream", filename: basename(relativePath), size: accepted.size };
+  }
 
   getTaskDashboard(): TaskDashboard {
     const status = this.getImportStatus();

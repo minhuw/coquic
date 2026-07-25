@@ -32,18 +32,19 @@ void (async () => {
     const release = join(root, "release");
     const app = join(release, "app");
     const tasks = join(root, "persistent", "steward", "tasks");
+    const controlLoop = join(root, "persistent", "steward", "control-loop");
     const cache = join(root, "persistent", "steward", "cache", "site-v2.sqlite");
     const fakeBin = join(root, "bin");
     const processLog = join(root, "process.log");
     const curlLog = join(root, "curl.log");
-    await mkdir(app, { recursive: true }); await mkdir(tasks, { recursive: true }); await mkdir(dirname(cache), { recursive: true }); await mkdir(fakeBin);
+    await mkdir(app, { recursive: true }); await mkdir(tasks, { recursive: true }); await mkdir(controlLoop, { recursive: true }); await mkdir(dirname(cache), { recursive: true }); await mkdir(fakeBin);
     await writeFile(join(app, "server.js"), "// fake Next entry\n");
     await executable(join(release, "h3-server"), "#!/usr/bin/env bash\necho h3 >>\"${FAKE_PROCESS_LOG}\"\nsleep 0.2\n");
     await executable(join(fakeBin, "node"), `#!/usr/bin/env bash
 if [[ "\${1:-}" == "-e" ]]; then [[ "\${FAKE_NODE_SQLITE:-1}" == "1" ]]; exit; fi
 if [[ "\${1:-}" == "-p" ]]; then printf '%s\\n' 24; exit; fi
 if [[ "\${1:-}" == "--version" ]]; then printf '%s\\n' v24.0.0; exit; fi
-echo "next:\${COQUIC_STEWARD_TASKS_ROOT}:\${COQUIC_STEWARD_CACHE_PATH}" >>"\${FAKE_PROCESS_LOG}"
+echo "next:\${COQUIC_STEWARD_TASKS_ROOT}:\${COQUIC_STEWARD_CONTROL_LOOP_ROOT}:\${COQUIC_STEWARD_CACHE_PATH}" >>"\${FAKE_PROCESS_LOG}"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 `);
@@ -52,12 +53,12 @@ url="\${!#}"
 echo "\${url}" >>"\${FAKE_CURL_LOG}"
 if [[ "\${url}" == */api/steward/status ]]; then printf '%s\\n' '{"data":{"state":"indexing"}}'; else printf '%s\\n' ready; fi
 `);
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CACHE_PATH: cache, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_NODE_SQLITE: "1" };
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoop, COQUIC_STEWARD_CACHE_PATH: cache, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_NODE_SQLITE: "1" };
     const first = await run("bash", [runDemo], env);
     assert.equal(first.code, 0, first.output);
     const processes = await readFile(processLog, "utf8");
     assert.equal(processes.split("\n").filter((line) => line.startsWith("next:")).length, 1, "exactly one Next process owns the importer");
-    assert.match(processes, new RegExp(`next:${tasks.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:${cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(processes, new RegExp(`next:${tasks.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:${controlLoop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:${cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(await readFile(curlLog, "utf8"), /\/api\/steward\/status/);
     const repeated = await run("bash", [runDemo], env);
     assert.equal(repeated.code, 0, repeated.output);
@@ -66,8 +67,8 @@ if [[ "\${url}" == */api/steward/status ]]; then printf '%s\\n' '{"data":{"state
     assert.notEqual(unsafe.code, 0); assert.match(unsafe.output, /outside the release/);
     const noSqlite = await run("bash", [runDemo], { ...env, FAKE_NODE_SQLITE: "0" });
     assert.notEqual(noSqlite.code, 0); assert.match(noSqlite.output, /node:sqlite/);
-    const config = getArchiveConfig({ NODE_ENV: "test", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CACHE_PATH: cache });
-    assert.equal(config.tasksRoot, tasks); assert.equal(config.cachePath, cache);
+    const config = getArchiveConfig({ NODE_ENV: "test", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoop, COQUIC_STEWARD_CACHE_PATH: cache });
+    assert.equal(config.tasksRoot, tasks); assert.equal(config.controlLoopRoot, controlLoop); assert.equal(config.cachePath, cache);
 
     const remoteRoot = join(root, "remote");
     const remoteState = join(remoteRoot, ".fake-systemd");
@@ -130,6 +131,7 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     const stewardRoot = join(remoteRoot, "opt", "coquic-demo", "steward");
     await writeFile(join(stewardRoot, "tasks", "publisher.marker"), "raw-preserved\n");
     await writeFile(join(stewardRoot, "cache", "index.marker"), "cache-preserved\n");
+    await writeFile(join(stewardRoot, "control-loop", "publisher.marker"), "raw-preserved\n");
     const repaired = await run("bash", [deployRemote, binary, deployApp], deployEnv);
     assert.equal(repaired.code, 0, repaired.output);
     assert.equal(await readlink(current), firstTarget, "same-release repair preserves the release identity");
@@ -138,6 +140,7 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal(await readlink(current), firstTarget, "failed verification restores the previous release");
     assert.equal((await readFile(join(stewardRoot, "tasks", "publisher.marker"), "utf8")).trim(), "raw-preserved");
     assert.equal((await readFile(join(stewardRoot, "cache", "index.marker"), "utf8")).trim(), "cache-preserved");
+    assert.equal((await readFile(join(stewardRoot, "control-loop", "publisher.marker"), "utf8")).trim(), "raw-preserved");
     assert.equal((await readFile(join(remoteState, "active"), "utf8")).length, 0);
     const deploySource = await readFile(deployRemote, "utf8");
     assert.doesNotMatch(deploySource, /COQUIC_DEPLOY_TEST_MODE/);

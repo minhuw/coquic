@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import signal
 from types import SimpleNamespace
 import threading
 
@@ -15,7 +16,11 @@ from coquic_steward.core.models import (
     SignalFetchStatus,
     SignalItem,
 )
-from coquic_steward.execution.session import ContainerSessionInvoker, FreshPlannerSession
+from coquic_steward.execution.session import (
+    ContainerSessionInvoker,
+    FreshPlannerSession,
+    _InvocationLaunchGate,
+)
 from coquic_steward.planning import PlannerRun
 from coquic_steward.planning.verifier import ActiveTaskSummary, PlanVerifier
 from coquic_steward.storage import TaskStore
@@ -151,6 +156,32 @@ def test_fresh_planner_session_does_not_launch_after_interrupt(config) -> None:
     assert result.outcome is not None
     assert result.outcome.interrupted is True
     assert result.prompt_path.read_text(encoding="utf-8") == "synthetic prompt"
+
+
+def test_launch_gate_defers_same_thread_signal_interrupt_until_publication() -> None:
+    interrupted = threading.Event()
+    gate = _InvocationLaunchGate(interrupted)
+    order: list[str] = []
+    previous_handler = signal.signal(
+        signal.SIGUSR1,
+        lambda _signum, _frame: gate.interrupt(lambda: order.append("interrupt")),
+    )
+
+    def launch() -> str:
+        order.append("launching")
+        signal.raise_signal(signal.SIGUSR1)
+        order.append("published")
+        return "process"
+
+    try:
+        launched, result = gate.launch(launch)
+    finally:
+        signal.signal(signal.SIGUSR1, previous_handler)
+
+    assert launched is True
+    assert result == "process"
+    assert interrupted.is_set()
+    assert order == ["launching", "published", "interrupt"]
 
 
 def test_fresh_planner_interrupt_during_container_startup_prevents_exec(config) -> None:

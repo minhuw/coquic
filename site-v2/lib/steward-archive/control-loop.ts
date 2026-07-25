@@ -75,6 +75,13 @@ async function identity(path: string): Promise<FileIdentity> {
   return { size, acceptedEnd: end, prefixHash: await prefixHash(path, end), deviceId: String(file.dev), inodeId: String(file.ino), mtimeNs: String(file.mtimeNs), ctimeNs: String(file.ctimeNs) };
 }
 
+async function immutableIdentity(path: string): Promise<FileIdentity> {
+  const file = await stat(path, { bigint: true });
+  const bytes = await readFile(path);
+  const size = Number(file.size);
+  return { size, acceptedEnd: size, prefixHash: createHash("sha256").update(bytes).digest("hex"), deviceId: String(file.dev), inodeId: String(file.ino), mtimeNs: String(file.mtimeNs), ctimeNs: String(file.ctimeNs) };
+}
+
 async function listEventFiles(root: string, relative = "events"): Promise<string[]> {
   const directory = await resolveDirectoryContainedPath(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -187,6 +194,37 @@ function normalizeEvent(db: DatabaseSync, row: EventRow) {
   }
 }
 
+async function replayNormalizedEvents(db: DatabaseSync, root: string, epochId: string) {
+  const records = db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records ORDER BY sequence, event_id").all();
+  const sources = new Map<string, Buffer>();
+  for (const record of records) {
+    const relativePath = String(record.relative_path);
+    if (sources.has(relativePath)) continue;
+    const file = db.prepare("SELECT accepted_end, prefix_hash, device_id, inode_id FROM control_files WHERE relative_path=? AND status='ready'").get(relativePath);
+    if (!file) return false;
+    const resolved = await resolveRegularContainedPath(root, relativePath);
+    const bytes = await readFile(resolved.path);
+    const end = Number(file.accepted_end);
+    const hash = createHash("sha256").update(bytes.subarray(0, end)).digest("hex");
+    if (!Number.isSafeInteger(end) || end < 0 || bytes.length < end || String(resolved.stat.dev) !== String(file.device_id) || String(resolved.stat.ino) !== String(file.inode_id) || hash !== String(file.prefix_hash)) return false;
+    sources.set(relativePath, bytes);
+  }
+  const events: EventRow[] = [];
+  for (const record of records) {
+    const bytes = sources.get(String(record.relative_path));
+    const start = Number(record.byte_start); const end = Number(record.byte_end);
+    if (!bytes || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > bytes.length || bytes[end - 1] !== 10) return false;
+    const value = validateControlEvent(parseCompleteJson(bytes.subarray(start, end - 1).toString("utf8"), String(record.relative_path)));
+    if (value.eventId !== record.event_id || value.epochId !== epochId || value.sequence !== record.sequence || value.kind !== record.kind) return false;
+    events.push({ eventId: String(record.event_id), epochId, sequence: Number(record.sequence), occurredAt: String(record.occurred_at), kind: String(record.kind), payload: value.payload as JsonRecord, ordinal: Number(record.ordinal), byteStart: start, byteEnd: end });
+  }
+  withTransaction(db, () => {
+    deleteEventData(db, events.map((event) => event.eventId));
+    for (const event of events) normalizeEvent(db, event);
+  });
+  return true;
+}
+
 function resolvePendingLinks(db: DatabaseSync) {
   db.exec("DELETE FROM control_pending_links");
   const edges = db.prepare("SELECT edge_id, edge_type, source_id, target_id FROM control_edges").all();
@@ -202,14 +240,17 @@ async function reconcileEvents(db: DatabaseSync, root: string, epochId: string):
   const seen = new Set(files);
   let changed = false;
   let degraded = false;
+  let needsReplay = false;
   for (const relativePath of files) {
     const resolved = await resolveRegularContainedPath(root, relativePath);
     const current = await identity(resolved.path);
-    if (current.size > current.acceptedEnd) degraded = true;
+    const incomplete = current.size > current.acceptedEnd;
+    if (incomplete) degraded = true;
     const previous = db.prepare("SELECT * FROM control_files WHERE relative_path=?").get(relativePath);
     const sameFile = previous && String(previous.device_id) === current.deviceId && String(previous.inode_id) === current.inodeId;
     const previousEnd = Number(previous?.accepted_end ?? 0);
     const append = Boolean(sameFile && current.acceptedEnd >= previousEnd && previous?.prefix_hash === await prefixHash(resolved.path, previousEnd));
+    if (previous && !append && incomplete) continue;
     const start = append ? previousEnd : 0;
     const startOrdinal = append ? Number(previous?.complete_records ?? 0) : 0;
     let events: EventRow[];
@@ -234,6 +275,8 @@ async function reconcileEvents(db: DatabaseSync, root: string, epochId: string):
       continue;
     }
     const oldIds = append ? [] : db.prepare("SELECT event_id FROM control_records WHERE relative_path=?").all(relativePath).map((row) => String(row.event_id));
+    const otherMaximum = Number(db.prepare("SELECT max(sequence) AS sequence FROM control_records WHERE relative_path != ?").get(relativePath)?.sequence ?? -1);
+    needsReplay ||= Boolean(previous && !append) || events.some((event) => event.sequence <= otherMaximum);
     withTransaction(db, () => {
       if (!append) {
         deleteEventData(db, oldIds);
@@ -254,7 +297,9 @@ async function reconcileEvents(db: DatabaseSync, root: string, epochId: string):
     const oldIds = db.prepare("SELECT event_id FROM control_records WHERE relative_path=?").all(path).map((row) => String(row.event_id));
     withTransaction(db, () => { deleteEventData(db, oldIds); db.prepare("DELETE FROM control_records WHERE relative_path=?").run(path); db.prepare("DELETE FROM control_files WHERE relative_path=?").run(path); });
     changed = true;
+    needsReplay = true;
   }
+  if (needsReplay && !await replayNormalizedEvents(db, root, epochId)) degraded = true;
   resolvePendingLinks(db);
   return { changed, degraded };
 }
@@ -294,10 +339,25 @@ async function reconcileRuns(db: DatabaseSync, root: string, epochId: string): P
     if (entry.name.startsWith(".") || !entry.isDirectory() || !RUN_PATH.test(relativePath)) { degraded = true; continue; }
     seen.add(entry.name);
     const runId = entry.name;
+    const manifestPath = `${relativePath}/manifest.json`;
+    const retainedManifest = db.prepare("SELECT * FROM control_files WHERE relative_path=?").get(manifestPath);
+    const prior = db.prepare("SELECT status FROM control_artifacts WHERE planner_run_id=? LIMIT 1").get(runId);
+    const priorArtifacts = db.prepare("SELECT relative_path, declared_size, declared_sha256, status FROM control_artifacts WHERE planner_run_id=? ORDER BY relative_path").all(runId);
+    const markCorrupt = () => {
+      corrupt = true;
+      const artifacts = db.prepare("UPDATE control_artifacts SET status='corrupt' WHERE planner_run_id=? AND status!='corrupt'").run(runId) as { changes: number | bigint };
+      const manifest = retainedManifest ? db.prepare("UPDATE control_files SET status='corrupt', reason='immutable-manifest-conflict' WHERE relative_path=? AND status!='corrupt'").run(manifestPath) as { changes: number | bigint } : { changes: 0 };
+      changed ||= Number(artifacts.changes) > 0 || Number(manifest.changes) > 0;
+    };
     let manifest: JsonRecord;
-    try { manifest = validateControlManifest(parseCompleteJson(await readFile((await resolveRegularContainedPath(root, `${relativePath}/manifest.json`)).path, "utf8"), "planner manifest.json")); }
-    catch { degraded = true; continue; }
-    if (manifest.epochId !== epochId || manifest.plannerRunId !== runId) { degraded = true; continue; }
+    let manifestIdentity: FileIdentity;
+    try {
+      const resolved = await resolveRegularContainedPath(root, manifestPath);
+      manifestIdentity = await immutableIdentity(resolved.path);
+      if (retainedManifest && (Number(retainedManifest.actual_size) !== manifestIdentity.size || String(retainedManifest.prefix_hash) !== manifestIdentity.prefixHash)) { markCorrupt(); continue; }
+      manifest = validateControlManifest(parseCompleteJson(await readFile(resolved.path, "utf8"), "planner manifest.json"));
+    } catch { if (retainedManifest || prior?.status === "verified" || prior?.status === "corrupt") markCorrupt(); else degraded = true; continue; }
+    if (manifest.epochId !== epochId || manifest.plannerRunId !== runId) { if (retainedManifest || prior?.status === "verified" || prior?.status === "corrupt") markCorrupt(); else degraded = true; continue; }
     let files: string[];
     try { files = await listRunFiles(root, relativePath); } catch { degraded = true; continue; }
     const declared = (manifest.files as JsonRecord[]).map((item) => String(item.path));
@@ -309,8 +369,6 @@ async function reconcileRuns(db: DatabaseSync, root: string, epochId: string): P
         if (resolved.stat.size !== Number(item.byteSize) || await prefixHash(resolved.path, resolved.stat.size) !== String(item.sha256)) { valid = false; break; }
       } catch { valid = false; break; }
     }
-    const prior = db.prepare("SELECT status FROM control_artifacts WHERE planner_run_id=? LIMIT 1").get(runId);
-    const priorArtifacts = db.prepare("SELECT relative_path, declared_size, declared_sha256, status FROM control_artifacts WHERE planner_run_id=? ORDER BY relative_path").all(runId);
     const artifactChanged = priorArtifacts.length !== (manifest.files as JsonRecord[]).length || (manifest.files as JsonRecord[]).some((item, index) => String(priorArtifacts[index]?.relative_path ?? "") !== String(item.path) || Number(priorArtifacts[index]?.declared_size ?? -1) !== Number(item.byteSize) || String(priorArtifacts[index]?.declared_sha256 ?? "") !== String(item.sha256) || String(priorArtifacts[index]?.status ?? "") !== "verified");
     if (!valid) {
       if (prior?.status === "verified" || prior?.status === "corrupt") corrupt = true;
@@ -323,12 +381,13 @@ async function reconcileRuns(db: DatabaseSync, root: string, epochId: string): P
       continue;
     }
     withTransaction(db, () => {
+      db.prepare(`INSERT INTO control_files(relative_path, kind, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, device_id, inode_id, mtime_ns, ctime_ns, status, reason) VALUES(?, 'manifest', ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, 'ready', NULL) ON CONFLICT(relative_path) DO UPDATE SET status='ready',reason=NULL`).run(manifestPath, manifestIdentity.size, manifestIdentity.acceptedEnd, manifestIdentity.prefixHash, `sha256:${manifestIdentity.prefixHash}`, manifestIdentity.deviceId, manifestIdentity.inodeId, manifestIdentity.mtimeNs, manifestIdentity.ctimeNs);
       db.prepare("DELETE FROM control_artifacts WHERE planner_run_id=?").run(runId);
       for (const item of manifest.files as JsonRecord[]) db.prepare("INSERT INTO control_artifacts(planner_run_id, relative_path, media_type, availability, declared_size, declared_sha256, actual_size, status) VALUES(?, ?, ?, ?, ?, ?, ?, 'verified')").run(runId, String(item.path), mediaType(String(item.path)), String(item.availability), Number(item.byteSize), String(item.sha256), Number(item.byteSize));
       db.prepare("UPDATE control_planner_runs SET state=?, completed_at=coalesce(completed_at, ?), epoch_id=? WHERE planner_run_id=?").run(String(manifest.terminalState), String(manifest.completedAt), epochId, runId);
       if (!db.prepare("SELECT 1 FROM control_planner_runs WHERE planner_run_id=?").get(runId)) db.prepare("INSERT INTO control_planner_runs(planner_run_id, epoch_id, state, started_at, completed_at, input_signal_ids, active_task_ids, started_event_id, finished_event_id) VALUES(?, ?, ?, ?, ?, '[]', '[]', ?, NULL)").run(runId, epochId, String(manifest.terminalState), String(manifest.completedAt), String(manifest.completedAt), `manifest:${runId}`);
     });
-    changed ||= artifactChanged || !prior;
+    changed ||= artifactChanged || !prior || !retainedManifest;
   }
   return { changed, corrupt, degraded };
 }
@@ -337,40 +396,45 @@ function domainStatus(db: DatabaseSync) {
   return db.prepare("SELECT state, epoch_id, last_error_category, last_success_at FROM domain_health WHERE domain='control-loop'").get();
 }
 
+function domainHealthChanged(previous: ReturnType<typeof domainStatus>, state: ControlLoopState, epochId: string | null, errorCategory: string | null) {
+  return !previous || String(previous.state) !== state || (previous.epoch_id == null ? null : String(previous.epoch_id)) !== epochId || (previous.last_error_category == null ? null : String(previous.last_error_category)) !== errorCategory;
+}
+
 export async function reconcileControlLoop(db: DatabaseSync, config: ArchiveConfig): Promise<ControlLoopReconcileResult> {
   const attemptedAt = now();
+  const prior = domainStatus(db);
   if (!config.controlLoopRoot) {
     db.prepare(`INSERT INTO domain_health(domain, state, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'unavailable', ?, 'root-unconfigured', 1) ON CONFLICT(domain) DO UPDATE SET state='unavailable',last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(attemptedAt);
-    return { changed: false, state: "unavailable", epochId: null, errorCategory: "root-unconfigured", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "unavailable", null, "root-unconfigured"), state: "unavailable", epochId: null, errorCategory: "root-unconfigured", lastSuccessAt: null };
   }
   try {
     await assertDirectoryRoot(config.controlLoopRoot);
   } catch {
     db.prepare(`INSERT INTO domain_health(domain, state, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'unavailable', ?, 'root-unavailable', 1) ON CONFLICT(domain) DO UPDATE SET state='unavailable',last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(attemptedAt);
-    return { changed: false, state: "unavailable", epochId: null, errorCategory: "root-unavailable", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "unavailable", null, "root-unavailable"), state: "unavailable", epochId: null, errorCategory: "root-unavailable", lastSuccessAt: null };
   }
   let epoch: ReturnType<typeof validateControlEpoch>;
   try { epoch = validateControlEpoch(parseCompleteJson(await readFile((await resolveRegularContainedPath(config.controlLoopRoot, "epoch.json")).path, "utf8"), "control-loop epoch.json")); }
   catch {
     db.prepare(`INSERT INTO domain_health(domain, state, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'degraded', ?, 'epoch-invalid', 1) ON CONFLICT(domain) DO UPDATE SET state='degraded',last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(attemptedAt);
-    return { changed: false, state: "degraded", epochId: null, errorCategory: "epoch-invalid", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "degraded", null, "epoch-invalid"), state: "degraded", epochId: null, errorCategory: "epoch-invalid", lastSuccessAt: null };
   }
-  const prior = domainStatus(db);
   const taskEpoch = readDatabaseMeta(db).epochId;
   if ((prior?.epoch_id && String(prior.epoch_id) !== epoch.epochId) || (taskEpoch && taskEpoch !== epoch.epochId)) {
     db.prepare(`INSERT INTO domain_health(domain, state, epoch_id, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'incompatible', ?, ?, 'epoch-mismatch', 1) ON CONFLICT(domain) DO UPDATE SET state='incompatible',epoch_id=excluded.epoch_id,last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(epoch.epochId, attemptedAt);
-    return { changed: false, state: "incompatible", epochId: epoch.epochId, errorCategory: "epoch-mismatch", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "incompatible", epoch.epochId, "epoch-mismatch"), state: "incompatible", epochId: epoch.epochId, errorCategory: "epoch-mismatch", lastSuccessAt: null };
   }
   db.prepare(`INSERT INTO domain_health(domain, state, epoch_id, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'indexing', ?, ?, NULL, 0) ON CONFLICT(domain) DO UPDATE SET state='indexing',epoch_id=excluded.epoch_id,last_attempt_at=excluded.last_attempt_at,last_error_category=NULL,last_error_count=0`).run(epoch.epochId, attemptedAt);
   const eventResult = await reconcileEvents(db, config.controlLoopRoot, epoch.epochId);
   const currentResult = await reconcileCurrent(db, config.controlLoopRoot, epoch.epochId);
   const runResult = await reconcileRuns(db, config.controlLoopRoot, epoch.epochId);
   resolvePendingLinks(db);
-  const changed = eventResult.changed || currentResult.changed || runResult.changed;
   const state: ControlLoopState = runResult.corrupt ? "archive-corrupt" : eventResult.degraded || currentResult.degraded || runResult.degraded ? "degraded" : "ready";
+  const errorCategory = state === "ready" ? null : runResult.corrupt ? "archive-corrupt" : "control-loop-pending";
+  const changed = eventResult.changed || currentResult.changed || runResult.changed || domainHealthChanged(prior, state, epoch.epochId, errorCategory);
   const succeededAt = now();
-  db.prepare(`UPDATE domain_health SET state=?, root_revision=?, last_success_at=?, last_error_category=?, last_error_count=?, lag_seconds=0 WHERE domain='control-loop'`).run(state, `epoch:${epoch.epochId}`, succeededAt, state === "ready" ? null : runResult.corrupt ? "archive-corrupt" : "control-loop-pending", state === "ready" ? 0 : 1);
-  return { changed, state, epochId: epoch.epochId, errorCategory: state === "ready" ? null : runResult.corrupt ? "archive-corrupt" : "control-loop-pending", lastSuccessAt: succeededAt };
+  db.prepare(`UPDATE domain_health SET state=?, root_revision=?, last_success_at=?, last_error_category=?, last_error_count=?, lag_seconds=0 WHERE domain='control-loop'`).run(state, `epoch:${epoch.epochId}`, succeededAt, errorCategory, state === "ready" ? 0 : 1);
+  return { changed, state, epochId: epoch.epochId, errorCategory, lastSuccessAt: succeededAt };
 }
 
 export async function readControlEventRecord(root: string, relativePath: string, start: number, end: number) {

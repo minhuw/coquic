@@ -265,7 +265,17 @@ for _ in $(seq 1 50); do
     exit 1
   fi
   steward_status="$(curl -fsS "http://${next_host}:${next_port}/api/steward/status" 2>/dev/null || true)"
-  if grep -Eq '"state":"(indexing|ready|degraded|unavailable|incompatible|archive-corrupt)"' <<<"${steward_status}"; then
+  if STEWARD_STATUS_PAYLOAD="${steward_status}" node -e '
+    try {
+      const data = JSON.parse(process.env.STEWARD_STATUS_PAYLOAD || "").data;
+      const allowed = new Set(["indexing", "ready", "degraded"]);
+      if (!data || !allowed.has(data.state) || !Array.isArray(data.domains)) process.exit(1);
+      for (const name of ["tasks", "control-loop"]) {
+        const matches = data.domains.filter((domain) => domain && domain.domain === name);
+        if (matches.length !== 1 || !allowed.has(matches[0].state)) process.exit(1);
+      }
+    } catch { process.exit(1); }
+  '; then
     steward_status_ready=1
     break
   fi

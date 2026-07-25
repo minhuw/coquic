@@ -41,7 +41,10 @@ void (async () => {
     await writeFile(join(app, "server.js"), "// fake Next entry\n");
     await executable(join(release, "h3-server"), "#!/usr/bin/env bash\necho h3 >>\"${FAKE_PROCESS_LOG}\"\nsleep 0.2\n");
     await executable(join(fakeBin, "node"), `#!/usr/bin/env bash
-if [[ "\${1:-}" == "-e" ]]; then [[ "\${FAKE_NODE_SQLITE:-1}" == "1" ]]; exit; fi
+if [[ "\${1:-}" == "-e" ]]; then
+  if [[ "\${2:-}" == *"node:sqlite"* ]]; then [[ "\${FAKE_NODE_SQLITE:-1}" == "1" ]]; exit; fi
+  exec "\${FAKE_REAL_NODE}" "$@"
+fi
 if [[ "\${1:-}" == "-p" ]]; then printf '%s\\n' 24; exit; fi
 if [[ "\${1:-}" == "--version" ]]; then printf '%s\\n' v24.0.0; exit; fi
 echo "next:\${COQUIC_STEWARD_TASKS_ROOT}:\${COQUIC_STEWARD_CONTROL_LOOP_ROOT}:\${COQUIC_STEWARD_CACHE_PATH}" >>"\${FAKE_PROCESS_LOG}"
@@ -51,9 +54,12 @@ while :; do sleep 1; done
     await executable(join(fakeBin, "curl"), `#!/usr/bin/env bash
 url="\${!#}"
 echo "\${url}" >>"\${FAKE_CURL_LOG}"
-if [[ "\${url}" == */api/steward/status ]]; then printf '%s\\n' '{"data":{"state":"indexing"}}'; else printf '%s\\n' ready; fi
+if [[ "\${url}" == */api/steward/status ]]; then
+  if [[ -n "\${FAKE_STEWARD_STATUS:-}" ]]; then printf '%s\\n' "\${FAKE_STEWARD_STATUS}";
+  else printf '%s\\n' '{"data":{"state":"indexing","domains":[{"domain":"tasks","state":"indexing"},{"domain":"control-loop","state":"indexing"}]}}'; fi
+else printf '%s\\n' ready; fi
 `);
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoop, COQUIC_STEWARD_CACHE_PATH: cache, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_NODE_SQLITE: "1" };
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoop, COQUIC_STEWARD_CACHE_PATH: cache, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_NODE_SQLITE: "1", FAKE_REAL_NODE: process.execPath };
     const first = await run("bash", [runDemo], env);
     assert.equal(first.code, 0, first.output);
     const processes = await readFile(processLog, "utf8");
@@ -63,6 +69,9 @@ if [[ "\${url}" == */api/steward/status ]]; then printf '%s\\n' '{"data":{"state
     const repeated = await run("bash", [runDemo], env);
     assert.equal(repeated.code, 0, repeated.output);
     assert.equal((await readFile(processLog, "utf8")).split("\n").filter((line) => line.startsWith("next:")).length, 2);
+    const incompatibleStatus = JSON.stringify({ data: { state: "incompatible", domains: [{ domain: "tasks", state: "ready" }, { domain: "control-loop", state: "incompatible" }] } });
+    const incompatible = await run("bash", [runDemo], { ...env, FAKE_STEWARD_STATUS: incompatibleStatus });
+    assert.notEqual(incompatible.code, 0); assert.match(incompatible.output, /status did not become available/);
     const unsafe = await run("bash", [runDemo], { ...env, COQUIC_STEWARD_TASKS_ROOT: join(release, "tasks") });
     assert.notEqual(unsafe.code, 0); assert.match(unsafe.output, /outside the release/);
     const noSqlite = await run("bash", [runDemo], { ...env, FAKE_NODE_SQLITE: "0" });

@@ -333,7 +333,8 @@ def test_direct_real_rsync_incremental_interrupted_storage_and_no_delete(
         pytest.skip(
             "passwordless sudo is required to install the fixed local fixture config"
         )
-    fixed_config = Path("/fixed/rsyncd.conf")
+    fixed_dir = Path("/fixed")
+    fixed_config = fixed_dir / "rsyncd.conf"
     if (
         subprocess.run(
             ["sudo", "-n", "test", "-e", str(fixed_config)], check=False
@@ -404,16 +405,59 @@ def test_direct_real_rsync_incremental_interrupted_storage_and_no_delete(
         stderr=subprocess.PIPE,
         text=True,
     )
+    fixed_dir_created = False
+    fixed_config_created = False
+    staged_config: Path | None = None
     try:
         receiver_config = build_receiver_rsyncd_config(receiver)
-        subprocess.run(["sudo", "-n", "mkdir", "-p", "/fixed"], check=True)
+        mkdir_result = subprocess.run(
+            ["sudo", "-n", "mkdir", "--", str(fixed_dir)],
+            capture_output=True,
+            check=False,
+        )
+        if mkdir_result.returncode == 0:
+            fixed_dir_created = True
+        elif (
+            subprocess.run(
+                ["sudo", "-n", "test", "-d", str(fixed_dir)], check=False
+            ).returncode
+            != 0
+        ):
+            mkdir_result.check_returncode()
+
+        staged_result = subprocess.run(
+            ["sudo", "-n", "mktemp", f"{fixed_dir}/.rsyncd.conf.XXXXXX"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        staged_config = Path(staged_result.stdout.strip())
+        assert staged_config.parent == fixed_dir
+        assert staged_config.name.startswith(".rsyncd.conf.")
         subprocess.run(
-            ["sudo", "-n", "tee", str(fixed_config)],
+            ["sudo", "-n", "tee", str(staged_config)],
             input=receiver_config.encode("utf-8"),
             stdout=subprocess.DEVNULL,
             check=True,
         )
-        subprocess.run(["sudo", "-n", "chmod", "644", str(fixed_config)], check=True)
+        subprocess.run(
+            ["sudo", "-n", "chmod", "644", str(staged_config)], check=True
+        )
+        link_result = subprocess.run(
+            ["sudo", "-n", "ln", "--", str(staged_config), str(fixed_config)],
+            capture_output=True,
+            check=False,
+        )
+        if link_result.returncode != 0:
+            if (
+                subprocess.run(
+                    ["sudo", "-n", "test", "-e", str(fixed_config)], check=False
+                ).returncode
+                == 0
+            ):
+                pytest.skip("fixed receiver config became managed by the host")
+            link_result.check_returncode()
+        fixed_config_created = True
         known_hosts = tmp_path / "known_hosts"
         scan = None
         for _ in range(80):
@@ -520,7 +564,18 @@ def test_direct_real_rsync_incremental_interrupted_storage_and_no_delete(
     finally:
         daemon.terminate()
         daemon.wait(timeout=5)
-        subprocess.run(["sudo", "-n", "rm", "-rf", "/fixed"], check=True)
+        if fixed_config_created:
+            subprocess.run(
+                ["sudo", "-n", "rm", "--", str(fixed_config)], check=True
+            )
+        if staged_config is not None:
+            subprocess.run(
+                ["sudo", "-n", "rm", "--", str(staged_config)], check=True
+            )
+        if fixed_dir_created:
+            subprocess.run(
+                ["sudo", "-n", "rmdir", "--", str(fixed_dir)], check=False
+            )
 
 
 def test_monotonic_incremental_storage_has_no_projection_or_private_disclosure(

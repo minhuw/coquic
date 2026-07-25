@@ -467,10 +467,10 @@ class ControlLoopRetryRow(Base):
     )
 
 
-class TaskArchiveSyncHealthRow(Base):
-    """Single operational row for the standalone raw archive synchronizer."""
+class DatasetSyncHealthRow(Base):
+    """Single operational row for the standalone raw dataset synchronizer."""
 
-    __tablename__ = "task_archive_sync_health"
+    __tablename__ = "dataset_sync_health"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -817,5 +817,5 @@ TaskPipeline = TaskPipelineRow
 CodexSession = CodexSessionRow
 TaskRun = TaskRunRow
 WorktreeCheckpoint = TaskWorktreeCheckpointRow
-TaskArchiveSyncHealth = TaskArchiveSyncHealthRow
+DatasetSyncHealth = DatasetSyncHealthRow
 DaemonState = DaemonStateRow

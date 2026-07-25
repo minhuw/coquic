@@ -75,7 +75,7 @@ from ..signals import (
     project_signals_from_items,
     revalidate_signal_items,
 )
-from ..task_archive_sync import TaskArchiveSynchronizer
+from ..dataset_sync import StewardDatasetSynchronizer
 from .preflight import PreflightReport, preflight_remote_push, run_preflight
 
 DAEMON_EVENT_TASK_ID = "daemon"
@@ -1978,7 +1978,7 @@ class StewardDaemon:
                 if pending_after_force:
                     concurrent.futures.wait(pending_after_force, timeout=0.25)
         self._subprocess_owner.wait(timeout=0.1 if force else max(0.0, deadline - time.monotonic()))
-        self._stop_task_sync(
+        self._stop_dataset_sync(
             final=not container_stop_failures,
             deadline=deadline,
         )
@@ -2035,67 +2035,83 @@ class StewardDaemon:
         stopped = self.session_supervisor.stop_container(task_id, timeout=1)
         return stopped is not False
 
-    def start_task_sync(self) -> None:
+    def start_dataset_sync(self) -> None:
         """Start immediate and monotonic minute-cadence raw synchronization."""
 
-        if not self.config.task_sync.enabled:
+        if not self.config.dataset_sync.enabled:
             return
         with self._sync_lock:
             if self._sync_thread is not None:
                 return
-            if hasattr(self.store, "reconcile_interrupted_task_archive_sync"):
-                self.store.reconcile_interrupted_task_archive_sync()
+            if hasattr(self.store, "reconcile_interrupted_dataset_sync"):
+                self.store.reconcile_interrupted_dataset_sync()
             self._sync_stop.clear()
             self._sync_wakeup.clear()
             self._sync_final_attempted = False
             self._sync_thread = threading.Thread(
-                target=self._task_sync_loop,
-                name="steward-task-archive-sync",
+                target=self._dataset_sync_loop,
+                name="steward-dataset-sync",
                 daemon=True,
             )
             self._sync_thread.start()
 
-    _start_task_sync = start_task_sync
+    _start_dataset_sync = start_dataset_sync
 
-    def _task_sync_loop(self) -> None:
+    def _dataset_sync_loop(self) -> None:
         next_due = time.monotonic()
         while not self._sync_stop.is_set():
             wait_for = max(0.0, next_due - time.monotonic())
             if self._sync_stop.wait(wait_for):
                 return
-            self._run_task_sync_cycle()
+            self._run_dataset_sync_cycle()
             # Coalesce missed ticks after a slow cycle instead of queuing work.
             next_due = max(next_due + 60.0, time.monotonic())
 
-    def _run_task_sync_cycle(self) -> bool:
-        if not self.config.task_sync.enabled or self._sync_stop.is_set() and self._sync_final_attempted:
+    def _run_dataset_sync_cycle(self) -> bool:
+        if not self.config.dataset_sync.enabled or self._sync_stop.is_set() and self._sync_final_attempted:
             return False
         with self._sync_lock:
             if self._sync_running:
                 return False
             self._sync_running = True
         try:
-            sync_config = self.config.task_sync.to_archive_sync_config(self.config.tasks_dir)
+            sync_config = self.config.dataset_sync.to_dataset_sync_config(
+                self.config.tasks_dir, self.config.control_loop_dir
+            )
             if sync_config is None:
                 return False
-            synchronizer = TaskArchiveSynchronizer(
+            synchronizer = StewardDatasetSynchronizer(
                 sync_config,
                 self.store,
                 cancel_event=self._sync_stop,
             )
             result = synchronizer.run_once()
             self._sync_cycle_count += 1
-            self._log(f"task archive sync category={result.category} cycle={self._sync_cycle_count}")
+            self._log(f"dataset sync category={result.category} cycle={self._sync_cycle_count}")
             return bool(result.success)
         except Exception as exc:
             # Transport errors are health-only and must not affect task state.
-            self._log(f"task archive sync health error={exc.__class__.__name__}")
+            self._log(f"dataset sync health error={exc.__class__.__name__}")
             return False
         finally:
             with self._sync_lock:
                 self._sync_running = False
 
-    def _stop_task_sync(
+    def _public_writers_quiescent(self) -> bool:
+        """Return whether task and control-loop public writers are stopped."""
+
+        control_thread = self._control_loop_thread
+        if control_thread is not None and control_thread.is_alive():
+            return False
+        try:
+            return (
+                self.store.source_active_count() == 0
+            )
+        except Exception:
+            # A missing introspection method is not proof of quiescence.
+            return False
+
+    def _stop_dataset_sync(
         self,
         *,
         final: bool = False,
@@ -2107,8 +2123,8 @@ class StewardDaemon:
         if thread is not None and thread is not threading.current_thread():
             join_timeout = min(
                 FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS,
-                float(self.config.task_sync.transfer_timeout_seconds)
-                if self.config.task_sync.enabled
+                float(self.config.dataset_sync.transfer_timeout_seconds)
+                if self.config.dataset_sync.enabled
                 else FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS,
             )
             if deadline is not None:
@@ -2120,30 +2136,33 @@ class StewardDaemon:
         periodic_still_running = bool(thread is not None and thread.is_alive())
         with self._sync_lock:
             self._sync_thread = None
-        if final and self.config.task_sync.enabled and not self._sync_final_attempted:
+        if final and self.config.dataset_sync.enabled and not self._sync_final_attempted:
             self._sync_final_attempted = True
             if periodic_still_running:
-                self._log("final task archive sync skipped while cancellation is pending")
+                self._log("final dataset sync skipped while cancellation is pending")
+                return
+            if not self._public_writers_quiescent():
+                self._log("final dataset sync skipped while public writers are active")
                 return
             final_deadline = time.monotonic() + min(
                 FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS,
-                float(self.config.task_sync.transfer_timeout_seconds),
+                float(self.config.dataset_sync.transfer_timeout_seconds),
             )
             if deadline is not None:
                 final_deadline = min(final_deadline, deadline)
             self._sync_stop.clear()
             final_thread = threading.Thread(
-                target=self._run_task_sync_cycle,
-                name="steward-final-task-archive-sync",
+                target=self._run_dataset_sync_cycle,
+                name="steward-final-dataset-sync",
                 daemon=True,
             )
             final_thread.start()
             final_thread.join(timeout=max(0.0, final_deadline - time.monotonic()))
             self._sync_stop.set()
             if final_thread.is_alive():
-                self._log("final task archive sync reached its shutdown deadline")
+                self._log("final dataset sync reached its shutdown deadline")
 
-    stop_task_sync = _stop_task_sync
+    stop_dataset_sync = _stop_dataset_sync
 
     def tick(
         self,
@@ -3040,7 +3059,7 @@ class StewardDaemon:
             if self._shutdown_event.is_set():
                 return
             self._start_control_loop_writer()
-            self.start_task_sync()
+            self.start_dataset_sync()
             with self._worker_pool_lock:
                 if self._worker_pool is None:
                     self._worker_pool = concurrent.futures.ThreadPoolExecutor(

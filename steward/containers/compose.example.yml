@@ -11,11 +11,11 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "${STEWARD_GITHUB_CONFIG:?set a daemon-only GitHub config}:/root/.config/gh:ro"
       - "${STEWARD_SSH_DIR:?set a daemon-only SSH directory}:/root/.ssh:ro"
-      - "${STEWARD_SYNC_KEY:?set a daemon-only sync key}:/run/secrets/sync-key:ro"
+      - "${STEWARD_DATASET_SYNC_KEY:?set a daemon-only dataset key}:/run/secrets/dataset-sync-key:ro"
     environment:
       COQUIC_HOME: /var/lib/coquic-steward/home
       STEWARD_REPOSITORY: /var/lib/coquic-steward/repository
-      STEWARD_TASK_SYNC_ENABLED: "false"
+      STEWARD_DATASET_SYNC_ENABLED: "false"
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=1g
     restart: unless-stopped

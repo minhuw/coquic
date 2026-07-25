@@ -63,6 +63,29 @@ replaced; consumers reconstruct history from events and sealed runs.
 See [CONTROL_LOOP_ARCHIVE.md](CONTROL_LOOP_ARCHIVE.md) for the storage and
 recovery contract.
 
+## Dataset synchronization
+
+The optional daemon-only publisher transfers exactly the sibling
+`$COQUIC_HOME/tasks/` and `$COQUIC_HOME/control-loop/` roots in one restricted
+rsync process. Both `epoch.json` files must be schema-valid and carry the same
+immutable epoch ID immediately before launch. Sources are passed as directories
+so the receiver sees stable `tasks/` and `control-loop/` names below its fixed
+dataset parent; the destination is always `user@host::steward-dataset` over the
+locked SSH transport.
+
+Arrival order is intentionally eventual: epoch, manifest, event, and sealed-run
+files may arrive independently. Exit 0 records only transport completion;
+exit 24 and live source races record an incomplete retryable cycle. There is no
+delete, staging tree, archive bundle, remote acknowledgement, or Site V2 import
+claim. SQLite keeps one bounded dataset health row with timestamps, category,
+duration, exit code, active cycle, and consecutive failures.
+
+The dedicated identity is readable only by the daemon sync boundary. The
+receiver key is `restrict`-confined to a write-only rsync process; its parent
+and cache are owned separately and only pre-created public roots are writable.
+Real key installation, account ownership, and receiver provisioning remain
+operator work. See [DATASET_SYNC.md](DATASET_SYNC.md) for the contract.
+
 ## Planner boundary
 
 The scheduler planner is one global Codex process per attempt. Every attempt
@@ -138,6 +161,7 @@ retention bundle, or outbound publication as part of the scheduler.
 nix develop -c uv run --project steward python -m pytest steward/tests
 nix develop -c ./scripts/check-steward-migration.py
 bash steward/containers/smoke-test.sh
+bash steward/containers/smoke-test.sh --dataset-sync
 git diff --check
 ```
 

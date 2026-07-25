@@ -117,9 +117,9 @@ def run_preflight(
         checks.extend(("docker", "task-image"))
 
     sync_configured = False
-    if config.task_sync.enabled:
-        sync = config.task_sync
-        _check_secret_file(sync.identity_path, "task-sync identity")
+    if config.dataset_sync.enabled:
+        sync = config.dataset_sync
+        _check_secret_file(sync.identity_path, "dataset-sync identity")
         _check_known_hosts(sync.known_hosts_path)
         _check_executable(
             sync.ssh_bin,
@@ -136,11 +136,11 @@ def run_preflight(
         # Construction performs strict host/user/receiver validation without
         # launching a network operation or reading credential bytes.
         try:
-            sync.to_archive_sync_config(config.tasks_dir)
+            sync.to_dataset_sync_config(config.tasks_dir, config.control_loop_dir)
         except Exception as exc:
-            raise StewardPreflightError("preflight failed: task sync configuration is invalid") from exc
+            raise StewardPreflightError("preflight failed: dataset sync configuration is invalid") from exc
         sync_configured = True
-        checks.append("task-sync")
+        checks.append("dataset-sync")
 
     if (
         check_remote_push

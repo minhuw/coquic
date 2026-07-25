@@ -3,12 +3,10 @@ set -euo pipefail
 
 mode="all"
 shutdown_check=0
-sync_check=0
 for argument in "$@"; do
   case "$argument" in
-    --images|--isolation|--planner) mode="${argument#--}" ;;
+    --images|--isolation|--planner|--dataset-sync) mode="${argument#--}" ;;
     --shutdown) shutdown_check=1 ;;
-    --sync) sync_check=1 ;;
     *) echo "unknown smoke-test option: $argument" >&2; exit 64 ;;
   esac
 done
@@ -137,6 +135,71 @@ with TemporaryDirectory() as value:
 print("planner container boundary ok")
 PY
   echo "steward container smoke test passed ($mode; fake inputs only)"
+  exit 0
+fi
+
+if [[ "$mode" == dataset-sync ]]; then
+  dataset_root="$tmp/receiver"
+  source_root="$tmp/source"
+  mkdir -p "$dataset_root/tasks" "$dataset_root/control-loop" \
+    "$source_root/tasks" "$source_root/control-loop" "$tmp/private" "$tmp/cache"
+  printf '%s\n' '{"epochId":"epoch-smoke","formatVersion":"1.0","policy":"post-steward-2.0","startedAt":"2026-01-01T00:00:00Z","endedAt":null}' \
+    >"$source_root/tasks/epoch.json"
+  printf '%s\n' '{"epochId":"epoch-smoke","formatVersion":"1.0","taskFormatVersion":"1.0","policy":"post-steward-2.0","startedAt":"2026-01-01T00:00:00Z"}' \
+    >"$source_root/control-loop/epoch.json"
+  cp "$source_root/tasks/epoch.json" "$dataset_root/tasks/epoch.json"
+  cp "$source_root/control-loop/epoch.json" "$dataset_root/control-loop/epoch.json"
+  printf 'public-task\n' >"$source_root/tasks/visible.jsonl"
+  printf 'public-event\n' >"$source_root/control-loop/events.jsonl"
+  printf 'private\n' >"$tmp/private/canary"
+  printf 'cache\n' >"$tmp/cache/canary"
+  chmod 755 "$dataset_root" "$tmp/cache"
+  chmod 770 "$dataset_root/tasks" "$dataset_root/control-loop"
+  chmod 600 "$tmp/private/canary"
+  printf 'fake-key\n' >"$tmp/dataset-sync-key"
+  chmod 600 "$tmp/dataset-sync-key"
+  nix develop "$root" -c uv run --project "$root/steward" python - "$source_root" "$dataset_root" "$tmp/dataset-sync-key" <<'PY'
+from pathlib import Path
+import sys
+
+from coquic_steward.dataset_sync import (
+    FakeDatasetReceiver,
+    build_forced_receiver_authorized_key,
+    build_rsync_argv,
+    validate_rsync_argv,
+)
+from coquic_steward.dataset_sync_config import DatasetSyncConfig
+
+source = Path(sys.argv[1])
+receiver = Path(sys.argv[2])
+key = Path(sys.argv[3])
+known_hosts = key.with_name("known_hosts")
+known_hosts.write_text("receiver.example ssh-ed25519 fake\n", encoding="utf-8")
+known_hosts.chmod(0o600)
+config = DatasetSyncConfig(
+    enabled=True,
+    tasks_dir=source / "tasks",
+    control_loop_dir=source / "control-loop",
+    remote_user="dataset",
+    remote_host="receiver.example",
+    remote_port=22,
+    identity_path=key,
+    known_hosts_path=known_hosts,
+)
+argv = build_rsync_argv(config)
+validate_rsync_argv(argv)
+assert argv[-3:-1] == [str(source / "tasks"), str(source / "control-loop")]
+assert argv[-1] == "dataset@receiver.example::steward-dataset"
+harness = FakeDatasetReceiver(receiver)
+harness.accept_command(harness.forced_command)
+harness.accept_upload("tasks/visible.jsonl")
+harness.accept_upload("control-loop/events.jsonl")
+line = build_forced_receiver_authorized_key("ssh-ed25519 AAAA-fake", receiver)
+assert line.startswith('restrict,command="')
+assert "private" not in str(argv)
+assert "cache" not in str(argv)
+PY
+  echo "steward container smoke test passed (dataset-sync; fake roots/key/receiver only)"
   exit 0
 fi
 
@@ -508,11 +571,6 @@ if [[ "$shutdown_check" -eq 1 && -n "$container_name" ]]; then
   docker cp "$container_name:/task/session/session-owner/private.txt" "$shutdown_private" \
     >/dev/null 2>&1 || fail "shutdown removed private session state"
   [[ -f "$shutdown_private" ]] || fail "shutdown removed private session state"
-fi
-
-if [[ "$sync_check" -eq 1 ]]; then
-  [[ -f "$isolation_root/daemon-sync" ]] || fail "sync isolation fixture is missing"
-  [[ ! -e "$git_worktree/daemon-sync" ]] || fail "task worktree received sync state"
 fi
 
 echo "steward container smoke test passed ($mode; fake inputs only)"

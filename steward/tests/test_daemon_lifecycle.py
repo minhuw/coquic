@@ -33,7 +33,7 @@ from coquic_steward.planning import (
 from coquic_steward.core.config import (
     StewardConfig,
     StewardContainerConfig,
-    StewardTaskSyncConfig,
+    StewardDatasetSyncConfig,
 )
 from coquic_steward.execution.container import TaskContainerRuntime
 from coquic_steward.execution.container_config import TaskContainerConfig
@@ -672,7 +672,7 @@ def test_preflight_rejects_unlocked_docker_and_sync_executables(config, monkeypa
     identity.chmod(0o600)
     known_hosts = config.coquic_home / "known-hosts"
     known_hosts.write_text("receiver.example.test ssh-ed25519 fake\n", encoding="utf-8")
-    sync = StewardTaskSyncConfig(
+    sync = StewardDatasetSyncConfig(
         enabled=True,
         remote_user="archive",
         remote_host="receiver.example.test",
@@ -683,7 +683,7 @@ def test_preflight_rejects_unlocked_docker_and_sync_executables(config, monkeypa
     )
     sync_config = StewardConfig(
         repo_root=config.repo_root,
-        task_sync=sync,
+        dataset_sync=sync,
         local_codex_test_harness=True,
     )
 
@@ -1663,11 +1663,11 @@ def test_sync_immediate_cadence_coalesces_overlap_and_failure_is_nonblocking(
     daemon = StewardDaemon(config, store)
     object.__setattr__(
         daemon.config,
-        "task_sync",
+        "dataset_sync",
         SimpleNamespace(
             enabled=True,
             transfer_timeout_seconds=1,
-            to_archive_sync_config=lambda _root: object(),
+            to_dataset_sync_config=lambda *_roots: object(),
         ),
     )
     calls = []
@@ -1680,14 +1680,14 @@ def test_sync_immediate_cadence_coalesces_overlap_and_failure_is_nonblocking(
             raise RuntimeError("fake receiver unavailable")
 
     monkeypatch.setattr(
-        "coquic_steward.orchestration.daemon.TaskArchiveSynchronizer",
+        "coquic_steward.orchestration.daemon.StewardDatasetSynchronizer",
         FailingSync,
     )
     daemon._sync_running = True
-    assert daemon._run_task_sync_cycle() is False
+    assert daemon._run_dataset_sync_cycle() is False
     assert calls == []
     daemon._sync_running = False
-    assert daemon._run_task_sync_cycle() is False
+    assert daemon._run_dataset_sync_cycle() is False
     assert calls == ["start"]
     assert store.get(task.id).status == TaskStatus.queued
 
@@ -1696,18 +1696,18 @@ def test_final_sync_obeys_shutdown_deadline(config):
     daemon = StewardDaemon(config, TaskStore(config.db_path))
     object.__setattr__(
         daemon.config,
-        "task_sync",
+        "dataset_sync",
         SimpleNamespace(
             enabled=True,
             transfer_timeout_seconds=30,
-            to_archive_sync_config=lambda _root: object(),
+            to_dataset_sync_config=lambda *_roots: object(),
         ),
     )
     release = threading.Event()
-    daemon._run_task_sync_cycle = lambda: release.wait(2)
+    daemon._run_dataset_sync_cycle = lambda: release.wait(2)
 
     started = time.monotonic()
-    daemon._stop_task_sync(final=True, deadline=started + 0.05)
+    daemon._stop_dataset_sync(final=True, deadline=started + 0.05)
     elapsed = time.monotonic() - started
     release.set()
 

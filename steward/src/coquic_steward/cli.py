@@ -297,6 +297,31 @@ def diagnostics() -> None:
     except Exception as exc:
         invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
     retry = ledger.pending_retry("planner") if ledger else None
+    dataset_health = None
+    if hasattr(store, "get_dataset_sync_health"):
+        try:
+            health = store.get_dataset_sync_health()
+            dataset_health = {
+                "enabled": health.enabled,
+                "active": health.active,
+                "activeCycleId": health.active_cycle_id,
+                "lastStartedAt": health.last_started_at.isoformat()
+                if health.last_started_at is not None
+                else None,
+                "lastFinishedAt": health.last_finished_at.isoformat()
+                if health.last_finished_at is not None
+                else None,
+                "lastSuccessAt": health.last_success_at.isoformat()
+                if health.last_success_at is not None
+                else None,
+                "lastDurationSeconds": health.last_duration_seconds,
+                "lastExitCode": health.last_exit_code,
+                "lastCategory": health.last_category,
+                "lastDetail": health.last_detail,
+                "consecutiveFailureCount": health.consecutive_failure_count,
+            }
+        except Exception:
+            dataset_health = None
     active_run = None
     last_materialized_sequence = None
     last_materialized_at = None
@@ -344,6 +369,7 @@ def diagnostics() -> None:
         "archiveConflictCount": len(invalid_runs),
         "visiblePlannerRuns": visible_runs,
         "invalidPlannerRuns": invalid_runs,
+        "datasetSync": dataset_health,
     }
     typer.echo(json.dumps(payload, sort_keys=True))
 

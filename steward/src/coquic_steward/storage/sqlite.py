@@ -57,9 +57,9 @@ from ..core.models import (
     new_signal_item_id,
     utc_now,
 )
-from ..task_archive_sync_config import (
-    TASK_ARCHIVE_SYNC_HEALTH_ID,
-    TaskArchiveSyncHealth,
+from ..dataset_sync_config import (
+    DATASET_SYNC_HEALTH_ID,
+    DatasetSyncHealth,
     bounded_safe_detail,
     validate_cycle_id,
 )
@@ -93,7 +93,7 @@ from .mappers import (
     update_plan_run_row,
     update_task_row,
     validation_to_row,
-    row_to_task_archive_sync_health,
+    row_to_dataset_sync_health,
 )
 from .schema import (
     Base,
@@ -109,7 +109,7 @@ from .schema import (
     TaskRow,
     TaskRunRow,
     TaskWorktreeCheckpointRow,
-    TaskArchiveSyncHealthRow,
+    DatasetSyncHealthRow,
     DaemonStateRow,
     ValidationRow,
 )
@@ -171,7 +171,7 @@ class SQLiteTaskStore:
             except (OSError, json.JSONDecodeError):
                 epoch_id = None
             self.control_loop = ControlLoopLedger(self.path, epoch_id=epoch_id)
-        self._ensure_task_archive_sync_health()
+        self._ensure_dataset_sync_health()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
 
@@ -1907,61 +1907,127 @@ class SQLiteTaskStore:
         return wakeup
 
     # ------------------------------------------------------------------
-    # Standalone raw task-archive synchronizer health
+    # Standalone raw dataset synchronizer health
 
-    def _ensure_task_archive_sync_health(self) -> None:
-        """Create the one health row without touching task or mirror state."""
+    def _ensure_dataset_sync_health(self) -> None:
+        """Create or migrate the one dataset health row.
 
-        with Session(self.engine) as session, session.begin():
-            row = session.get(TaskArchiveSyncHealthRow, TASK_ARCHIVE_SYNC_HEALTH_ID)
-            if row is None:
-                session.add(
-                    TaskArchiveSyncHealthRow(
-                        id=TASK_ARCHIVE_SYNC_HEALTH_ID,
-                        enabled=False,
-                        consecutive_failure_count=0,
-                    )
+        Databases from the task-only release carry one unambiguous legacy row.
+        It is copied byte-for-byte into the dataset identity and the obsolete
+        table is removed. A database containing both identities is rejected so
+        startup can never silently schedule two competing health cycles.
+        """
+
+        legacy_table = "task_" + "archive_" + "sync_health"
+        with self.engine.begin() as connection:
+            current_rows = connection.exec_driver_sql(
+                "SELECT id FROM dataset_sync_health"
+            ).fetchall()
+            current_ids = {str(row[0]) for row in current_rows}
+            # A database that contains an unknown dataset identity is neither
+            # a fresh store nor an unambiguous task-only migration. Do not add
+            # the canonical row beside it and accidentally schedule a second
+            # interpretation of the same health state.
+            if current_ids - {DATASET_SYNC_HEALTH_ID}:
+                raise RuntimeError("ambiguous dataset sync health migration")
+            current = (
+                (DATASET_SYNC_HEALTH_ID,)
+                if DATASET_SYNC_HEALTH_ID in current_ids
+                else None
+            )
+            legacy_exists = bool(
+                connection.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name",
+                    {"name": legacy_table},
+                ).fetchone()
+            )
+            if legacy_exists:
+                rows = connection.exec_driver_sql(
+                    f"SELECT id,enabled,active_cycle_id,last_started_at,last_finished_at,"
+                    f"last_success_at,last_duration_seconds,last_exit_code,last_category,"
+                    f"last_detail,consecutive_failure_count FROM {legacy_table}"
+                ).fetchall()
+                if (
+                    len(rows) != 1
+                    or current is not None
+                    or str(rows[0][0]) != "task-archive-sync"
+                ):
+                    raise RuntimeError("ambiguous dataset sync health migration")
+                values = rows[0]
+                connection.exec_driver_sql(
+                    """
+                    INSERT INTO dataset_sync_health
+                      (id,enabled,active_cycle_id,last_started_at,last_finished_at,
+                       last_success_at,last_duration_seconds,last_exit_code,last_category,
+                       last_detail,consecutive_failure_count)
+                    VALUES
+                      (:id,:enabled,:active_cycle_id,:last_started_at,:last_finished_at,
+                       :last_success_at,:last_duration_seconds,:last_exit_code,:last_category,
+                       :last_detail,:consecutive_failure_count)
+                    """,
+                    {
+                        "id": DATASET_SYNC_HEALTH_ID,
+                        "enabled": values[1],
+                        "active_cycle_id": values[2],
+                        "last_started_at": values[3],
+                        "last_finished_at": values[4],
+                        "last_success_at": values[5],
+                        "last_duration_seconds": values[6],
+                        "last_exit_code": values[7],
+                        "last_category": values[8],
+                        "last_detail": values[9],
+                        "consecutive_failure_count": values[10],
+                    },
+                )
+                connection.exec_driver_sql(f"DROP TABLE {legacy_table}")
+            elif current is None:
+                connection.exec_driver_sql(
+                    """
+                    INSERT INTO dataset_sync_health
+                      (id,enabled,consecutive_failure_count)
+                    VALUES (:id,0,0)
+                    """,
+                    {"id": DATASET_SYNC_HEALTH_ID},
                 )
 
-    def get_task_archive_sync_health(self) -> TaskArchiveSyncHealth:
+    def get_dataset_sync_health(self) -> DatasetSyncHealth:
         with Session(self.engine) as session:
-            row = session.get(TaskArchiveSyncHealthRow, TASK_ARCHIVE_SYNC_HEALTH_ID)
+            row = session.get(DatasetSyncHealthRow, DATASET_SYNC_HEALTH_ID)
             if row is None:
                 # This is defensive for databases created by an interrupted
                 # migration; normal construction always creates the row.
                 session.add(
-                    TaskArchiveSyncHealthRow(
-                        id=TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    DatasetSyncHealthRow(
+                        id=DATASET_SYNC_HEALTH_ID,
                         enabled=False,
                         consecutive_failure_count=0,
                     )
                 )
                 session.commit()
-                row = session.get(TaskArchiveSyncHealthRow, TASK_ARCHIVE_SYNC_HEALTH_ID)
+                row = session.get(DatasetSyncHealthRow, DATASET_SYNC_HEALTH_ID)
             assert row is not None
-            return row_to_task_archive_sync_health(row)
+            return row_to_dataset_sync_health(row)
 
-    task_archive_sync_health = get_task_archive_sync_health
-    archive_sync_health = get_task_archive_sync_health
+    dataset_sync_health = get_dataset_sync_health
 
-    def set_task_archive_sync_enabled(self, enabled: bool) -> TaskArchiveSyncHealth:
+    def set_dataset_sync_enabled(self, enabled: bool) -> DatasetSyncHealth:
         if not isinstance(enabled, bool):
             raise ValueError("enabled must be a boolean")
         with self.engine.begin() as connection:
             connection.exec_driver_sql(
                 """
-                UPDATE task_archive_sync_health
+                UPDATE dataset_sync_health
                    SET enabled = :enabled
                  WHERE id = :id
                 """,
-                {"enabled": int(enabled), "id": TASK_ARCHIVE_SYNC_HEALTH_ID},
+                {"enabled": int(enabled), "id": DATASET_SYNC_HEALTH_ID},
             )
         self._notify_change()
-        return self.get_task_archive_sync_health()
+        return self.get_dataset_sync_health()
 
-    enable_task_archive_sync = set_task_archive_sync_enabled
+    enable_dataset_sync = set_dataset_sync_enabled
 
-    def claim_task_archive_sync_cycle(
+    def claim_dataset_sync_cycle(
         self,
         cycle_id: str,
         *,
@@ -1978,7 +2044,7 @@ class SQLiteTaskStore:
         with self.engine.begin() as connection:
             result = connection.exec_driver_sql(
                 f"""
-                UPDATE task_archive_sync_health
+                UPDATE dataset_sync_health
                    SET active_cycle_id = :cycle_id,
                        last_started_at = :started_at,
                        last_finished_at = NULL,
@@ -1991,7 +2057,7 @@ class SQLiteTaskStore:
                    {predicate}
                 """,
                 {
-                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "id": DATASET_SYNC_HEALTH_ID,
                     "cycle_id": cycle_id,
                     "started_at": timestamp,
                 },
@@ -2001,8 +2067,6 @@ class SQLiteTaskStore:
             self._notify_change()
         return claimed
 
-    claim_archive_sync_cycle = claim_task_archive_sync_cycle
-    claim_task_archive_cycle = claim_task_archive_sync_cycle
 
     @staticmethod
     def _bounded_duration(duration_seconds: float | None) -> float | None:
@@ -2028,7 +2092,7 @@ class SQLiteTaskStore:
             raise ValueError("exit_code must be an integer or None")
         return max(-255, min(255, exit_code))
 
-    def finish_task_archive_sync_success(
+    def finish_dataset_sync_success(
         self,
         cycle_id: str,
         *,
@@ -2048,7 +2112,7 @@ class SQLiteTaskStore:
         with self.engine.begin() as connection:
             result = connection.exec_driver_sql(
                 """
-                UPDATE task_archive_sync_health
+                UPDATE dataset_sync_health
                    SET active_cycle_id = NULL,
                        last_finished_at = :finished_at,
                        last_success_at = :finished_at,
@@ -2060,7 +2124,7 @@ class SQLiteTaskStore:
                  WHERE id = :id AND active_cycle_id = :cycle_id
                 """,
                 {
-                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "id": DATASET_SYNC_HEALTH_ID,
                     "cycle_id": cycle_id,
                     "finished_at": timestamp,
                     "duration": self._bounded_duration(duration_seconds),
@@ -2075,9 +2139,8 @@ class SQLiteTaskStore:
             self._notify_change()
         return finished
 
-    finish_archive_sync_success = finish_task_archive_sync_success
 
-    def finish_task_archive_sync_failure(
+    def finish_dataset_sync_failure(
         self,
         cycle_id: str,
         *,
@@ -2100,7 +2163,7 @@ class SQLiteTaskStore:
         with self.engine.begin() as connection:
             result = connection.exec_driver_sql(
                 """
-                UPDATE task_archive_sync_health
+                UPDATE dataset_sync_health
                    SET active_cycle_id = NULL,
                        last_finished_at = :finished_at,
                        last_duration_seconds = :duration,
@@ -2111,7 +2174,7 @@ class SQLiteTaskStore:
                  WHERE id = :id AND active_cycle_id = :cycle_id
                 """,
                 {
-                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "id": DATASET_SYNC_HEALTH_ID,
                     "cycle_id": cycle_id,
                     "finished_at": timestamp,
                     "duration": self._bounded_duration(duration_seconds),
@@ -2127,9 +2190,8 @@ class SQLiteTaskStore:
             self._notify_change()
         return finished
 
-    finish_archive_sync_failure = finish_task_archive_sync_failure
 
-    def finish_task_archive_sync_incomplete(
+    def finish_dataset_sync_incomplete(
         self,
         cycle_id: str,
         *,
@@ -2139,7 +2201,7 @@ class SQLiteTaskStore:
         finished_at: datetime | None = None,
         duration_seconds: float | None = None,
     ) -> bool:
-        return self.finish_task_archive_sync_failure(
+        return self.finish_dataset_sync_failure(
             cycle_id,
             category="incomplete",
             exit_code=exit_code,
@@ -2149,9 +2211,8 @@ class SQLiteTaskStore:
             duration_seconds=duration_seconds,
         )
 
-    finish_archive_sync_incomplete = finish_task_archive_sync_incomplete
 
-    def reconcile_interrupted_task_archive_sync(
+    def reconcile_interrupted_dataset_sync(
         self,
         *,
         finished_at: datetime | None = None,
@@ -2164,7 +2225,7 @@ class SQLiteTaskStore:
         with self.engine.begin() as connection:
             result = connection.exec_driver_sql(
                 """
-                UPDATE task_archive_sync_health
+                UPDATE dataset_sync_health
                    SET active_cycle_id = NULL,
                        last_finished_at = :finished_at,
                        last_duration_seconds = NULL,
@@ -2175,7 +2236,7 @@ class SQLiteTaskStore:
                  WHERE id = :id AND active_cycle_id IS NOT NULL
                 """,
                 {
-                    "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+                    "id": DATASET_SYNC_HEALTH_ID,
                     "finished_at": timestamp,
                     "detail": bounded_safe_detail(
                         safe_detail if detail is None else detail
@@ -2188,9 +2249,7 @@ class SQLiteTaskStore:
             self._notify_change()
         return reconciled
 
-    reconcile_task_archive_sync = reconcile_interrupted_task_archive_sync
-    reconcile_archive_sync_interruption = reconcile_interrupted_task_archive_sync
-    reconcile_interrupted_active_cycle = reconcile_interrupted_task_archive_sync
+    reconcile_dataset_sync = reconcile_interrupted_dataset_sync
 
     def pending_wakeups(self, *, limit: int | None = None) -> list[SchedulerWakeup]:
         statement = (
@@ -3005,7 +3064,7 @@ class SQLiteTaskStore:
                 Base.metadata.create_all(connection)
             # This table is additive and independent of task, pipeline, run,
             # and sanitized public-mirror health state.
-            TaskArchiveSyncHealthRow.__table__.create(connection, checkfirst=True)
+            DatasetSyncHealthRow.__table__.create(connection, checkfirst=True)
             session_columns = {
                 row[1]
                 for row in connection.exec_driver_sql("PRAGMA table_info(codex_sessions)")

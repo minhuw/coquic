@@ -1,8 +1,8 @@
 # Steward task containers
 
 The daemon image is the trusted control side. It owns Docker, GitHub/SSH
-integration credentials, SQLite, worktrees, public task archives, and the
-transcript-sync key. The task image is an untrusted development closure and is
+integration credentials, SQLite, worktrees, public task/control-loop archives,
+and the dedicated dataset-sync key. The task image is an untrusted development closure and is
 created once per active task with only task-scoped mounts.
 
 The daemon creates a task container with the locked `sha256` image digest,
@@ -37,8 +37,8 @@ for every host path and credential.
 The daemon preflight resolves the locked task image and verifies host/container
 path mappings before dispatch. The task image receives only its task worktree,
 archive, scratch, Git metadata, and one private session home. It never receives
-Docker, GitHub, SSH, task-sync identity, known-hosts, daemon home, or raw
-subprocess output. Sync credentials and receiver policy stay on the daemon.
+Docker, GitHub, SSH, dataset-sync identity, known-hosts, daemon home, or raw
+subprocess output. Dataset credentials and receiver policy stay on the daemon.
 
 Normal SIGINT/SIGTERM stops active task containers after the configured grace
 (30 seconds by default) but preserves their state directories for restart.
@@ -47,7 +47,7 @@ durable `cleanup_pending`. Use fake values for smoke checks:
 
 ```bash
 bash steward/containers/smoke-test.sh --shutdown
-bash steward/containers/smoke-test.sh --sync
+bash steward/containers/smoke-test.sh --dataset-sync
 ```
 
 ### Scheduler planner container

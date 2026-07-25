@@ -21,9 +21,9 @@ from ..core.models import (
     TaskSpec,
     ValidationResult,
 )
-from ..task_archive_sync_config import (
-    TASK_ARCHIVE_SYNC_HEALTH_ID,
-    TaskArchiveSyncHealth,
+from ..dataset_sync_config import (
+    DATASET_SYNC_HEALTH_ID,
+    DatasetSyncHealth,
 )
 from .schema import (
     CodexSessionRow,
@@ -38,7 +38,7 @@ from .schema import (
     TaskRow,
     TaskRunRow,
     TaskWorktreeCheckpointRow,
-    TaskArchiveSyncHealthRow,
+    DatasetSyncHealthRow,
     ValidationRow,
 )
 
@@ -786,13 +786,13 @@ def row_to_scheduler_wakeup(
     )
 
 
-def task_archive_sync_health_to_row(
-    health: TaskArchiveSyncHealth,
+def dataset_sync_health_to_row(
+    health: DatasetSyncHealth,
     *,
-    row: TaskArchiveSyncHealthRow | None = None,
-) -> TaskArchiveSyncHealthRow:
+    row: DatasetSyncHealthRow | None = None,
+) -> DatasetSyncHealthRow:
     values = {
-        "id": TASK_ARCHIVE_SYNC_HEALTH_ID,
+        "id": DATASET_SYNC_HEALTH_ID,
         "enabled": health.enabled,
         "active_cycle_id": health.active_cycle_id,
         "last_started_at": _dump_datetime(health.last_started_at)
@@ -811,17 +811,17 @@ def task_archive_sync_health_to_row(
         "consecutive_failure_count": health.consecutive_failure_count,
     }
     if row is None:
-        return TaskArchiveSyncHealthRow(**values)
+        return DatasetSyncHealthRow(**values)
     for name, value in values.items():
         if name != "id":
             setattr(row, name, value)
     return row
 
 
-def row_to_task_archive_sync_health(
-    row: TaskArchiveSyncHealthRow,
-) -> TaskArchiveSyncHealth:
-    return TaskArchiveSyncHealth(
+def row_to_dataset_sync_health(
+    row: DatasetSyncHealthRow,
+) -> DatasetSyncHealth:
+    return DatasetSyncHealth(
         enabled=bool(row.enabled),
         active_cycle_id=row.active_cycle_id,
         last_started_at=_load_datetime(row.last_started_at)
@@ -839,11 +839,6 @@ def row_to_task_archive_sync_health(
         last_detail=row.last_detail,
         consecutive_failure_count=int(row.consecutive_failure_count),
     )
-
-
-# Short aliases keep storage callers independent of the SQL row name.
-archive_sync_health_to_row = task_archive_sync_health_to_row
-row_to_archive_sync_health = row_to_task_archive_sync_health
 
 
 def _dedupe_key(record: TaskRecord) -> str | None:

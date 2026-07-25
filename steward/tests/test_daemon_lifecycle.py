@@ -1716,6 +1716,35 @@ def test_final_sync_obeys_shutdown_deadline(config):
     assert daemon._sync_stop.is_set()
 
 
+def test_final_sync_requires_control_loop_writer_to_stop(config):
+    daemon = StewardDaemon(config, TaskStore(config.db_path))
+
+    class StuckWriter:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeouts: list[float | None] = []
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    writer = StuckWriter()
+    daemon._control_loop_thread = writer
+
+    daemon._stop_control_loop_writer()
+
+    assert writer.join_timeouts == [2.0]
+    assert daemon._control_loop_thread is writer
+    assert not daemon._public_writers_quiescent()
+
+    writer.alive = False
+    daemon._stop_control_loop_writer()
+    assert daemon._control_loop_thread is None
+    assert daemon._public_writers_quiescent()
+
+
 def test_terminal_seal_uses_canonical_utc_timestamp(config):
     store = TaskStore(config.db_path)
     task, pipeline = _task(store, "canonical terminal timestamp")

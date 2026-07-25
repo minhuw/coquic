@@ -476,7 +476,12 @@ class StewardDaemon:
         thread = self._control_loop_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
-        self._control_loop_thread = None
+        if (
+            thread is not None
+            and not thread.is_alive()
+            and self._control_loop_thread is thread
+        ):
+            self._control_loop_thread = None
 
     reconcile_startup = startup_reconcile
     reconcile = startup_reconcile

@@ -8,6 +8,8 @@ import socket
 import sqlite3
 import stat
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -304,8 +306,11 @@ def test_receiver_confines_top_level_names_and_forbidden_options(
         harness.accept_upload("cache/private")
     with pytest.raises(DatasetSyncReceiverError):
         harness.accept_upload("tasks/.hidden")
-    with pytest.raises(DatasetSyncReceiverError):
-        harness.accept_upload("tasks/file", options=("--delete",))
+    for option in ("--delete", "--archive", "-a", "-av", "-rlptgoD"):
+        with pytest.raises(DatasetSyncReceiverError):
+            harness.accept_upload("tasks/file", options=(option,))
+    for option in ("--recursive", "--times", "-r", "-rtv"):
+        assert harness.accept_upload("tasks/file", options=(option,)) == receiver
     line = build_forced_receiver_authorized_key("ssh-ed25519 AAAA-fake", receiver)
     assert line.startswith('restrict,command="')
     assert validate_forced_receiver_command(harness.forced_command)
@@ -718,6 +723,147 @@ def test_run_once_claims_one_process_and_persists_health(tmp_path: Path) -> None
     assert health.last_category == "success"
     assert health.active_cycle_id is None
     assert "private output" not in str(health)
+
+
+def test_run_once_timeout_releases_claim_without_raw_output(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+
+    def runner(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        raise subprocess.TimeoutExpired(
+            argv,
+            config.transfer_timeout_seconds,
+            output=b"private-timeout-output",
+            stderr=b"private-timeout-error",
+        )
+
+    result = StewardDatasetSynchronizer(config, store, runner=runner).run_once()
+
+    assert result.category == DatasetSyncCategory.timeout
+    assert result.retryable
+    health = store.get_dataset_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == DatasetSyncCategory.timeout
+    assert "private-timeout" not in str(result)
+    assert "private-timeout" not in str(health)
+
+
+def test_run_once_cancel_stops_active_child_and_releases_claim(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+    cancelled = threading.Event()
+    child: subprocess.Popen[bytes] | None = None
+    timer: threading.Timer | None = None
+
+    def runner(_argv: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal child, timer
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        timer = threading.Timer(0.05, cancelled.set)
+        timer.start()
+        return child
+
+    child_stopped = False
+    try:
+        result = StewardDatasetSynchronizer(
+            config,
+            store,
+            runner=runner,
+            cancel_event=cancelled,
+        ).run_once()
+        child_stopped = child is not None and child.poll() is not None
+    finally:
+        if timer is not None:
+            timer.join()
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate()
+
+    assert result.category == DatasetSyncCategory.cancelled
+    assert child_stopped
+    health = store.get_dataset_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == DatasetSyncCategory.cancelled
+
+
+def test_run_once_contains_runner_exception_and_releases_claim(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+
+    class UnexpectedRunnerError(Exception):
+        pass
+
+    def runner(_argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        raise UnexpectedRunnerError("private-runner-detail")
+
+    result = StewardDatasetSynchronizer(config, store, runner=runner).run_once()
+
+    assert result.category == DatasetSyncCategory.unknown
+    assert result.retryable
+    health = store.get_dataset_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == DatasetSyncCategory.unknown
+    assert "private-runner-detail" not in str(result)
+    assert "private-runner-detail" not in str(health)
+
+
+def test_run_once_interrupt_stops_active_child_and_reconciles_health(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = TaskStore(tmp_path / "state.sqlite")
+
+    class InterruptingProcess:
+        def __init__(self) -> None:
+            self.child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.interrupted = False
+
+        @property
+        def returncode(self) -> int | None:
+            return self.child.returncode
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt
+            return self.child.communicate(timeout=timeout)
+
+        def poll(self) -> int | None:
+            return self.child.poll()
+
+        def terminate(self) -> None:
+            self.child.terminate()
+
+        def kill(self) -> None:
+            self.child.kill()
+
+    process = InterruptingProcess()
+    child_stopped = False
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            StewardDatasetSynchronizer(
+                config,
+                store,
+                runner=lambda _argv, **_kwargs: process,
+            ).run_once()
+        child_stopped = process.poll() is not None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.child.communicate()
+
+    assert child_stopped
+    health = store.get_dataset_sync_health()
+    assert health.active_cycle_id is None
+    assert health.last_category == DatasetSyncCategory.interrupted
+    assert health.last_detail == "cycle interrupted before completion"
 
 
 def test_run_once_rejects_epoch_mismatch_without_launch(tmp_path: Path) -> None:

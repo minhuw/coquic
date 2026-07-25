@@ -78,6 +78,7 @@ _PROCESS_STOP_GRACE_SECONDS = 1.0
 
 
 _PUBLIC_ROOTS = frozenset({"tasks", "control-loop"})
+_FORBIDDEN_SHORT_RSYNC_FLAGS = frozenset("aAlLDogpHKRX")
 
 
 def _receiver_root(dataset_root: Path) -> Path:
@@ -177,6 +178,7 @@ def validate_receiver_upload(
     if relative_path not in {"", ".", "./"}:
         validate_receiver_relative_path(relative_path, dataset_root or Path("/fixed/steward"))
     forbidden = {
+        "archive",
         "delete",
         "delete-excluded",
         "delete-delay",
@@ -211,8 +213,13 @@ def validate_receiver_upload(
         "X",
     }
     for option in options:
-        token = str(option).lstrip("-").split("=", 1)[0]
-        if token in forbidden:
+        raw = str(option)
+        token = raw.lstrip("-").split("=", 1)[0]
+        if token in forbidden or (
+            raw.startswith("-")
+            and not raw.startswith("--")
+            and any(flag in _FORBIDDEN_SHORT_RSYNC_FLAGS for flag in token)
+        ):
             raise DatasetSyncReceiverError("receiver option is refused")
     return Path(dataset_root) if dataset_root is not None else Path(".")
 
@@ -589,9 +596,6 @@ def build_rsync_argv(config: DatasetSyncConfig) -> list[str]:
     ]
     _assert_safe_rsync_argv(argv)
     return argv
-
-
-_FORBIDDEN_SHORT_RSYNC_FLAGS = frozenset("aAlLDogpHKRX")
 
 
 def _assert_safe_rsync_argv(argv: Sequence[str]) -> None:

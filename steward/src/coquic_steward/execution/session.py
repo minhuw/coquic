@@ -184,7 +184,6 @@ class FreshPlannerSession:
         api_key: bytes | str | None = None,
         timeout_seconds: float = 1800,
     ) -> FreshPlannerResult:
-        self._interrupt_requested.clear()
         request = self.allocate(
             run_id,
             prompt=prompt,
@@ -200,13 +199,24 @@ class FreshPlannerSession:
             with transcript_path.open("ab") as handle:
                 handle.write(value)
 
-        outcome = self.invoker.invoke(
-            request.request,
-            api_key=api_key,
-            append=append,
-            timeout_seconds=timeout_seconds,
-            interrupt_grace_seconds=2.0,
-        )
+        if self._interrupt_requested.is_set():
+            outcome = InvocationOutcome(
+                exit_code=130,
+                stdout=b"",
+                stderr=b"",
+                incomplete_suffix=b"",
+                events=(),
+                provider_session_id=None,
+                interrupted=True,
+            )
+        else:
+            outcome = self.invoker.invoke(
+                request.request,
+                api_key=api_key,
+                append=append,
+                timeout_seconds=timeout_seconds,
+                interrupt_grace_seconds=2.0,
+            )
         if self._interrupt_requested.is_set() and not outcome.completed:
             outcome = replace(outcome, interrupted=True)
         status = (

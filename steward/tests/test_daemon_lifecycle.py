@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from coquic_steward.agents.invocation import InvocationOutcome
 from coquic_steward.core.models import (
     CodexRunState,
     PipelineCursorPhase,
@@ -25,7 +26,10 @@ from coquic_steward.core.models import (
     WorkerResult,
     WorkerKind,
 )
-from coquic_steward.planning import PlannerRun as SchedulerPlannerRun
+from coquic_steward.planning import (
+    PlannerRun as SchedulerPlannerRun,
+    run_planner as execute_scheduler_planner,
+)
 from coquic_steward.core.config import (
     StewardConfig,
     StewardContainerConfig,
@@ -273,6 +277,54 @@ def test_signal_shutdown_interrupts_active_planner_and_persists_interruption(
     assert completed.state == "interrupted"
     assert completed.diagnostics["reason_code"] == "planner_interrupted"
     assert store.control_loop.pending_retry("planner") is not None
+    assert store.pending_signal_items(limit=10)[0].id == item.id
+
+
+def test_shutdown_after_planner_claim_prevents_launch_and_preserves_signal(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    item = _planner_signal(store, "claim-window-interrupt")
+
+    class RecordingInvoker:
+        def __init__(self):
+            self.requests: list[object] = []
+            self.interrupt_calls: list[bool] = []
+
+        def interrupt(self, *, force=False):
+            self.interrupt_calls.append(force)
+
+        def invoke(self, request, **_kwargs):
+            self.requests.append(request)
+            return InvocationOutcome(
+                exit_code=0,
+                stdout=b"",
+                stderr=b"",
+                incomplete_suffix=b"",
+                events=(),
+                provider_session_id=None,
+            )
+
+    invoker = RecordingInvoker()
+    planner_session = FreshPlannerSession(config, invoker=invoker)
+    daemon = StewardDaemon(config, store, planner_session=planner_session)
+
+    def interrupt_after_claim(*args, **kwargs):
+        assert daemon._active_planner_run_id == kwargs["run_id"]
+        daemon.request_shutdown_from_signal()
+        return execute_scheduler_planner(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", interrupt_after_claim
+    )
+
+    daemon._plan(TickResult(), [item])
+
+    assert invoker.interrupt_calls == [False]
+    assert invoker.requests == []
+    completed = store.control_loop.list_planner_runs()[-1]
+    assert completed.state == "interrupted"
+    assert completed.diagnostics["reason_code"] == "planner_interrupted"
     assert store.pending_signal_items(limit=10)[0].id == item.id
 
 

@@ -137,6 +137,20 @@ def test_fresh_planner_session_allocates_distinct_non_resumed_boundaries(config)
     assert first.request.role == "planner"
 
 
+def test_fresh_planner_session_does_not_launch_after_interrupt(config) -> None:
+    invoker = _FakeInvoker([])
+    session = FreshPlannerSession(config, invoker=invoker)
+
+    session.interrupt()
+    result = session.run("planner-run-interrupted-before-launch", prompt="synthetic prompt")
+
+    assert invoker.requests == []
+    assert result.status.value == "interrupted"
+    assert result.outcome is not None
+    assert result.outcome.interrupted is True
+    assert result.prompt_path.read_text(encoding="utf-8") == "synthetic prompt"
+
+
 def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
     store = TaskStore(config.db_path)
     item = _signals().items[0]

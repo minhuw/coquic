@@ -100,18 +100,17 @@ class _InvocationLaunchGate:
 
     def launch(self, callback: Callable[[], Any]) -> tuple[bool, Any]:
         with self._lock:
-            if self._interrupt_requested.is_set():
-                return False, None
             self._launching = True
             try:
-                result = callback()
+                if self._interrupt_requested.is_set():
+                    return False, None
+                return True, callback()
             finally:
                 self._launching = False
                 interrupt = self._deferred_interrupt
                 self._deferred_interrupt = None
                 if interrupt is not None:
                     interrupt()
-            return True, result
 
     def interrupt(self, callback: Callable[[], None]) -> None:
         with self._lock:

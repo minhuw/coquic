@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import json
 from pathlib import Path
 import signal
+import sys
 from types import SimpleNamespace
 import threading
 
@@ -182,6 +184,51 @@ def test_launch_gate_defers_same_thread_signal_interrupt_until_publication() -> 
     assert result == "process"
     assert interrupted.is_set()
     assert order == ["launching", "published", "interrupt"]
+
+
+def test_launch_gate_establishes_state_before_interrupt_check() -> None:
+    interrupted = threading.Event()
+    gate = _InvocationLaunchGate(interrupted)
+    order: list[str] = []
+    launching_states: list[bool] = []
+    armed = True
+    source, start_line = inspect.getsourcelines(_InvocationLaunchGate.launch)
+    check_line = next(
+        start_line + offset
+        for offset, line in enumerate(source)
+        if line.strip() == "if self._interrupt_requested.is_set():"
+    )
+
+    def handle_signal(_signum, _frame) -> None:
+        launching_states.append(gate._launching)
+        gate.interrupt(lambda: order.append("interrupt"))
+
+    def trace(frame, trace_event, _arg):
+        nonlocal armed
+        if (
+            armed
+            and trace_event == "line"
+            and frame.f_code is _InvocationLaunchGate.launch.__code__
+            and frame.f_lineno == check_line
+        ):
+            armed = False
+            signal.raise_signal(signal.SIGUSR1)
+        return trace
+
+    previous_handler = signal.signal(signal.SIGUSR1, handle_signal)
+    previous_trace = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        launched, result = gate.launch(lambda: order.append("exec"))
+    finally:
+        sys.settrace(previous_trace)
+        signal.signal(signal.SIGUSR1, previous_handler)
+
+    assert launched is False
+    assert result is None
+    assert interrupted.is_set()
+    assert launching_states == [True]
+    assert order == ["interrupt"]
 
 
 def test_fresh_planner_interrupt_during_container_startup_prevents_exec(config) -> None:

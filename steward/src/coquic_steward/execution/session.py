@@ -89,6 +89,37 @@ class FreshPlannerResult:
     last_message_path: Path
 
 
+class _InvocationLaunchGate:
+    """Order an interrupt before launch or after process publication."""
+
+    def __init__(self, interrupt_requested: threading.Event) -> None:
+        self._interrupt_requested = interrupt_requested
+        self._lock = threading.Lock()
+
+    def launch(self, callback: Callable[[], Any]) -> tuple[bool, Any]:
+        with self._lock:
+            if self._interrupt_requested.is_set():
+                return False, None
+            return True, callback()
+
+    def interrupt(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._interrupt_requested.set()
+            callback()
+
+
+def _interrupted_invocation_outcome() -> InvocationOutcome:
+    return InvocationOutcome(
+        exit_code=130,
+        stdout=b"",
+        stderr=b"",
+        incomplete_suffix=b"",
+        events=(),
+        provider_session_id=None,
+        interrupted=True,
+    )
+
+
 def build_fresh_planner_request(
     config: StewardConfig,
     *,
@@ -151,6 +182,7 @@ class FreshPlannerSession:
         self.config = config
         self.invoker = invoker or LocalSessionInvoker()
         self._interrupt_requested = threading.Event()
+        self._launch_gate = _InvocationLaunchGate(self._interrupt_requested)
 
     def allocate(
         self,
@@ -200,15 +232,7 @@ class FreshPlannerSession:
                 handle.write(value)
 
         if self._interrupt_requested.is_set():
-            outcome = InvocationOutcome(
-                exit_code=130,
-                stdout=b"",
-                stderr=b"",
-                incomplete_suffix=b"",
-                events=(),
-                provider_session_id=None,
-                interrupted=True,
-            )
+            outcome = _interrupted_invocation_outcome()
         else:
             outcome = self.invoker.invoke(
                 request.request,
@@ -216,6 +240,7 @@ class FreshPlannerSession:
                 append=append,
                 timeout_seconds=timeout_seconds,
                 interrupt_grace_seconds=2.0,
+                launch_gate=self._launch_gate,
             )
         if self._interrupt_requested.is_set() and not outcome.completed:
             outcome = replace(outcome, interrupted=True)
@@ -236,10 +261,10 @@ class FreshPlannerSession:
         )
 
     def interrupt(self, *, force: bool = False) -> None:
-        self._interrupt_requested.set()
         interrupt = getattr(self.invoker, "interrupt", None)
-        if callable(interrupt):
-            interrupt(force=force)
+        self._launch_gate.interrupt(
+            lambda: interrupt(force=force) if callable(interrupt) else None
+        )
 
 
 def planner_session_for_config(config: StewardConfig) -> FreshPlannerSession:
@@ -350,6 +375,7 @@ class SessionInvoker(Protocol):
         on_started: Any = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
+        launch_gate: _InvocationLaunchGate | None = None,
     ) -> InvocationOutcome: ...
 
 
@@ -366,18 +392,27 @@ class LocalSessionInvoker:
         on_started: Any = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
+        launch_gate: _InvocationLaunchGate | None = None,
     ) -> InvocationOutcome:
-        process = launch_local(request, api_key=api_key)
-        self.process = process
-        if on_started is not None:
-            on_started(
-                ExecIdentity(
-                    "local",
-                    request.run_id or "local",
-                    process.pid,
-                    request.session_uid,
+        def launch() -> Any:
+            process = launch_local(request, api_key=api_key)
+            self.process = process
+            if on_started is not None:
+                on_started(
+                    ExecIdentity(
+                        "local",
+                        request.run_id or "local",
+                        process.pid,
+                        request.session_uid,
+                    )
                 )
-            )
+            return process
+
+        launched, process = (
+            launch_gate.launch(launch) if launch_gate is not None else (True, launch())
+        )
+        if not launched:
+            return _interrupted_invocation_outcome()
         try:
             return stream_process(
                 process,
@@ -417,36 +452,46 @@ class ContainerSessionInvoker:
         on_started: Any = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
+        launch_gate: _InvocationLaunchGate | None = None,
     ) -> InvocationOutcome:
         if request.session_uid is None or request.session_id is None or request.run_id is None:
             raise ValueError("container invocation requires session and run identities")
         role = TaskRole(request.role)
         self.runtime.ensure_started()
         path_mapper = lambda path: self.runtime.config.container_path(path, role)
-        process = self.runtime.exec_stream(
-            role,
-            session_uid=request.session_uid,
-            session_id=request.session_id,
-            command=[
-                "/bin/task-entrypoint.sh",
-                "run",
-                *request.argv(codex_bin="codex", path_mapper=path_mapper),
-            ],
-            env={"COQUIC_STEWARD_RUN_ID": request.run_id},
-            workdir=path_mapper(request.cwd),
+
+        def launch() -> _ContainerProcess:
+            process = self.runtime.exec_stream(
+                role,
+                session_uid=request.session_uid,
+                session_id=request.session_id,
+                command=[
+                    "/bin/task-entrypoint.sh",
+                    "run",
+                    *request.argv(codex_bin="codex", path_mapper=path_mapper),
+                ],
+                env={"COQUIC_STEWARD_RUN_ID": request.run_id},
+                workdir=path_mapper(request.cwd),
+            )
+            # The wrapper consumes this control prefix before forwarding the prompt
+            # to Codex.  It is never part of stdout, argv, environment, or logs.
+            if process.stdin is not None:
+                key = _api_key_bytes(api_key)
+                process.stdin.write(len(key).to_bytes(4, "big") + key)
+                process.stdin.flush()
+            identity = self._identity(request, process)
+            self.identity = identity
+            supervised_process = _ContainerProcess(process, self.runtime, identity)
+            self.process = supervised_process
+            if on_started is not None:
+                on_started(identity)
+            return supervised_process
+
+        launched, supervised_process = (
+            launch_gate.launch(launch) if launch_gate is not None else (True, launch())
         )
-        # The wrapper consumes this control prefix before forwarding the prompt
-        # to Codex.  It is never part of stdout, argv, environment, or logs.
-        if process.stdin is not None:
-            key = _api_key_bytes(api_key)
-            process.stdin.write(len(key).to_bytes(4, "big") + key)
-            process.stdin.flush()
-        identity = self._identity(request, process)
-        self.identity = identity
-        supervised_process = _ContainerProcess(process, self.runtime, identity)
-        self.process = supervised_process
-        if on_started is not None:
-            on_started(identity)
+        if not launched:
+            return _interrupted_invocation_outcome()
         try:
             return stream_process(
                 supervised_process,

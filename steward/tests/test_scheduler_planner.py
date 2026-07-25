@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from types import SimpleNamespace
+import threading
 
 from typer.testing import CliRunner
 
@@ -13,7 +15,7 @@ from coquic_steward.core.models import (
     SignalFetchStatus,
     SignalItem,
 )
-from coquic_steward.execution.session import FreshPlannerSession
+from coquic_steward.execution.session import ContainerSessionInvoker, FreshPlannerSession
 from coquic_steward.planning import PlannerRun
 from coquic_steward.planning.verifier import ActiveTaskSummary, PlanVerifier
 from coquic_steward.storage import TaskStore
@@ -149,6 +151,54 @@ def test_fresh_planner_session_does_not_launch_after_interrupt(config) -> None:
     assert result.outcome is not None
     assert result.outcome.interrupted is True
     assert result.prompt_path.read_text(encoding="utf-8") == "synthetic prompt"
+
+
+def test_fresh_planner_interrupt_during_container_startup_prevents_exec(config) -> None:
+    class BarrierRuntime:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.exec_calls = 0
+            self.config = SimpleNamespace(
+                container_name="planner-test",
+                container_path=lambda path, _role: path,
+            )
+
+        def ensure_started(self) -> None:
+            self.entered.set()
+            assert self.release.wait(timeout=2)
+
+        def exec_stream(self, *_args, **_kwargs):
+            self.exec_calls += 1
+            raise AssertionError("planner exec launched after interruption")
+
+    runtime = BarrierRuntime()
+    session = FreshPlannerSession(config, invoker=ContainerSessionInvoker(runtime))
+    results = []
+    failures = []
+
+    def run() -> None:
+        try:
+            results.append(session.run("planner-run-startup-race", prompt="synthetic"))
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert runtime.entered.wait(timeout=2)
+        session.interrupt()
+    finally:
+        runtime.release.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert runtime.exec_calls == 0
+    assert len(results) == 1
+    assert results[0].status.value == "interrupted"
+    assert results[0].outcome is not None
+    assert results[0].outcome.interrupted is True
 
 
 def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:

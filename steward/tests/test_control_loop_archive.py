@@ -125,8 +125,8 @@ def test_reconcile_stops_at_temporary_outbox_gap(tmp_path: Path, monkeypatch) ->
 
     ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
     with ledger.transaction() as connection:
-        ledger._event(connection, "synthetic.event", {"ordinal": 0})
-        ledger._event(connection, "synthetic.event", {"ordinal": 1})
+        ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+        ledger._event(connection, "synthetic.event", {"ordinal": 1}, occurred_at=NOW)
 
     original = archive.append_event
     failed = False

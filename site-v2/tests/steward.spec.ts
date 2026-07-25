@@ -31,12 +31,50 @@ test("the 51st active task remains reachable while terminal history stays pagina
   expect(historyPayload.data.tasks.every((task) => !["queued", "running", "reviewing", "integrating"].includes(task.status))).toBeTruthy();
 });
 
-test("global signals and planning remain explicitly disconnected", async ({ page }) => {
-  for (const view of ["signals", "planning"]) {
-    await page.goto(`/steward?view=${view}`);
-    await expect(page.getByText("Not connected in this archive consumer. No checked-in fixture records are displayed.", { exact: true })).toBeVisible();
-    await expect(page.getByText("Synthetic completed task", { exact: true })).toHaveCount(0);
-  }
+test("archive-backed signals and planning expose progressive evidence and honest pending links", async ({ page, request }) => {
+  await page.goto("/steward?view=signals&signal=signal-synthetic-consumed");
+  await expect(page.getByRole("heading", { name: "Signals, observations, and their decisions" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "fingerprint-consumed" })).toBeVisible();
+  const signalEvidence = page.getByLabel("Signal evidence");
+  await expect(signalEvidence.locator("ol > li")).toHaveCount(11);
+  await expect(page.getByText("Task task-synthetic-accepted pending archive arrival", { exact: true })).toBeVisible();
+
+  await page.goto("/steward?view=planning&run=planner-synthetic-success&proposal=proposal-synthetic-1");
+  await expect(page.getByRole("heading", { name: "Every planner run and proposal disposition" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Scheduler wakeups" })).toBeVisible();
+  await expect(page.getByText("signal-synthetic-consumed", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Task task-synthetic-accepted pending archive arrival; disposition remains accepted.", { exact: true })).toBeVisible();
+  const transcript = page.getByLabel("Planner transcript");
+  const records = transcript.locator("ol > li");
+  await expect(records).toHaveCount(50);
+  await transcript.getByRole("button", { name: "Load more transcript records" }).click();
+  await expect(records).toHaveCount(77);
+  await expect(transcript.getByText(/"compatible":/).first()).toBeVisible();
+
+  expect((await request.get("/api/steward/signals")).status()).toBe(404);
+  expect((await request.get("/api/steward/signals/signal-synthetic-consumed")).status()).toBe(404);
+  expect((await request.get("/api/steward/planner-runs")).status()).toBe(404);
+  expect((await request.get("/api/steward/planner-runs/planner-synthetic-success")).status()).toBe(404);
+});
+
+test("selected signal evidence appends on revision without resetting loaded records", async ({ page, request }) => {
+  await page.addInitScript(() => {
+    const nativeTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => nativeTimeout(handler, timeout && timeout >= 30_000 ? 50 : timeout, ...args)) as typeof window.setTimeout;
+  });
+  await page.goto("/steward?view=signals&signal=signal-synthetic-consumed");
+  const evidence = page.getByLabel("Signal evidence");
+  const records = evidence.locator("ol > li");
+  await expect(records).toHaveCount(11);
+  const before = await (await request.get("/api/steward/revision")).json() as { data: { revision: number } };
+  const root = process.env.STEWARD_TEST_CONTROL_LOOP_ROOT!;
+  const event = { eventId: "event-browser-refresh", epochId: "epoch-synthetic-20260722", sequence: 39, occurredAt: "2026-07-25T00:00:00Z", kind: "signal.transition", payload: { transition: { signalId: "signal-synthetic-consumed", fromStatus: "planned", toStatus: "superseded", plannerRunId: "planner-synthetic-success", reasonCode: "refresh_visible" } } };
+  await appendFile(join(root, "events", "2026", "07", "24.jsonl"), `${JSON.stringify(event)}\n`);
+  await expect.poll(async () => ((await (await request.get("/api/steward/revision")).json()) as { data: { revision: number } }).data.revision).toBeGreaterThan(before.data.revision);
+  await expect(records).toHaveCount(12);
+  await expect(evidence.getByText(/refresh_visible/).first()).toBeVisible();
+  const ids = await records.evaluateAll((nodes) => nodes.map((node) => node.textContent));
+  expect(new Set(ids).size).toBe(12);
 });
 
 test("revision monitoring refreshes once per revision and pauses while hidden", async ({ page }) => {

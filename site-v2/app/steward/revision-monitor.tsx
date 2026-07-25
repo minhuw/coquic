@@ -24,7 +24,10 @@ export function RevisionMonitor({ initialRevision }: { initialRevision?: number 
         if (!response.ok) throw new Error("revision unavailable");
         const payload = await response.json() as { data?: { revision?: number } };
         const next = payload.data?.revision === undefined ? null : String(payload.data.revision);
-        if (next !== null && revision.current !== null && next !== revision.current) router.refresh();
+        if (next !== null && revision.current !== null && next !== revision.current) {
+          window.dispatchEvent(new CustomEvent("steward-revision", { detail: Number(next) }));
+          router.refresh();
+        }
         if (next !== null) revision.current = next;
         delay = 30_000;
         failures.current = 0; setDegraded(false);

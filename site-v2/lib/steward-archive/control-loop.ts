@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import type { DatabaseSync } from "node:sqlite";
 import type { ArchiveConfig } from "./config";
 import { readDatabaseMeta, withTransaction } from "./database";
 import { assertDirectoryRoot, resolveDirectoryContainedPath, resolveRegularContainedPath } from "./paths";
-import { isRecord, parseCompleteJson, safeInteger, safeString, validateControlCurrent, validateControlEpoch, validateControlEvent, validateControlManifest, type JsonRecord } from "./schema";
+import { isRecord, parseCompleteJson, safeInteger, validateControlCurrent, validateControlEpoch, validateControlEvent, validateControlManifest, type JsonRecord } from "./schema";
 
 export type ControlLoopState = "indexing" | "ready" | "degraded" | "unavailable" | "incompatible" | "archive-corrupt";
 
@@ -51,20 +52,36 @@ function yieldToEventLoop() { return new Promise<void>((resolve) => setImmediate
 function json(value: unknown) { return JSON.stringify(value); }
 function text(value: unknown) { return typeof value === "string" ? value : null; }
 function int(value: unknown) { return typeof value === "number" && Number.isSafeInteger(value) ? value : null; }
-function arrayIds(value: unknown) { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").join("\u001f") : ""; }
 function arrayFrom(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 function mediaType(path: string) { if (path.endsWith(".jsonl")) return "application/x-ndjson"; if (path.endsWith(".json")) return "application/json"; if (path.endsWith(".md")) return "text/markdown"; if (path.endsWith(".log")) return "text/plain"; return "application/octet-stream"; }
 
 async function acceptedEnd(path: string, size: number) {
   if (size === 0) return 0;
-  const bytes = await readFile(path);
-  const newline = bytes.lastIndexOf(10);
-  return newline < 0 ? 0 : newline + 1;
+  const handle = await open(path, "r");
+  try {
+    const chunkSize = 64 * 1024;
+    for (let end = size; end > 0;) {
+      const start = Math.max(0, end - chunkSize);
+      const buffer = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+      if (bytesRead !== buffer.length) throw new Error("control-loop event file changed while reading");
+      const newline = buffer.lastIndexOf(10);
+      if (newline >= 0) return start + newline + 1;
+      end = start;
+      await yieldToEventLoop();
+    }
+    return 0;
+  } finally { await handle.close(); }
 }
 
 async function prefixHash(path: string, end: number) {
   const digest = createHash("sha256");
-  if (end > 0) digest.update((await readFile(path)).subarray(0, end));
+  if (end > 0) {
+    for await (const chunk of createReadStream(path, { start: 0, end: end - 1, highWaterMark: 64 * 1024 })) {
+      digest.update(chunk as Buffer);
+      await yieldToEventLoop();
+    }
+  }
   return digest.digest("hex");
 }
 
@@ -77,9 +94,8 @@ async function identity(path: string): Promise<FileIdentity> {
 
 async function immutableIdentity(path: string): Promise<FileIdentity> {
   const file = await stat(path, { bigint: true });
-  const bytes = await readFile(path);
   const size = Number(file.size);
-  return { size, acceptedEnd: size, prefixHash: createHash("sha256").update(bytes).digest("hex"), deviceId: String(file.dev), inodeId: String(file.ino), mtimeNs: String(file.mtimeNs), ctimeNs: String(file.ctimeNs) };
+  return { size, acceptedEnd: size, prefixHash: await prefixHash(path, size), deviceId: String(file.dev), inodeId: String(file.ino), mtimeNs: String(file.mtimeNs), ctimeNs: String(file.ctimeNs) };
 }
 
 async function listEventFiles(root: string, relative = "events"): Promise<string[]> {
@@ -115,132 +131,222 @@ async function listRunFiles(root: string, runRelative: string): Promise<string[]
   return files.sort();
 }
 
-async function parseEvents(path: string, end: number, startOffset: number, startOrdinal: number, expectedEpoch: string): Promise<EventRow[]> {
-  if (end <= startOffset) return [];
-  const source = (await readFile(path)).subarray(startOffset, end);
-  const rows: EventRow[] = [];
+async function scanEventBatches(path: string, end: number, startOffset: number, startOrdinal: number, expectedEpoch: string, batchSize: number, onBatch: (rows: EventRow[]) => void) {
+  if (end <= startOffset) return 0;
+  let lineFragments: Buffer[] = [];
   let lineStart = startOffset;
-  let position = 0;
+  let streamOffset = startOffset;
   let ordinal = startOrdinal;
-  while (position < source.length) {
-    const newline = source.indexOf(10, position);
-    if (newline < 0) break;
-    const line = source.subarray(position, newline).toString("utf8");
-    const value = validateControlEvent(parseCompleteJson(line, "control-loop event"));
-    if (value.epochId !== expectedEpoch || !CONTROL_EVENT_KINDS.has(String(value.kind))) throw new Error("control-loop event identity mismatch");
-    const sequence = safeInteger(value.sequence);
-    if (sequence === null) throw new Error("control-loop event sequence is invalid");
-    rows.push({ eventId: String(value.eventId), epochId: String(value.epochId), sequence, occurredAt: String(value.occurredAt), kind: String(value.kind), payload: value.payload as JsonRecord, ordinal, byteStart: lineStart, byteEnd: startOffset + newline + 1 });
-    ordinal += 1;
-    lineStart = startOffset + newline + 1;
-    position = newline + 1;
-  }
-  return rows;
-}
-
-function deleteEventData(db: DatabaseSync, eventIds: string[]) {
-  if (!eventIds.length) return;
-  const statements = [
-    "DELETE FROM control_edges WHERE event_id=?", "DELETE FROM control_transitions WHERE event_id=?",
-    "DELETE FROM control_proposals WHERE event_id=?", "DELETE FROM control_observations WHERE event_id=?",
-    "DELETE FROM control_signals WHERE event_id=?", "DELETE FROM control_wakeups WHERE event_id=?",
-    "DELETE FROM control_fetches WHERE event_id=?", "DELETE FROM control_planner_runs WHERE started_event_id=? OR finished_event_id=?",
-  ];
-  for (const eventId of eventIds) {
-    for (const statement of statements) {
-      if (statement.includes("OR")) db.prepare(statement).run(eventId, eventId);
-      else db.prepare(statement).run(eventId);
+  let batch: EventRow[] = [];
+  for await (const value of createReadStream(path, { start: startOffset, end: end - 1, highWaterMark: 64 * 1024 })) {
+    const chunk = value as Buffer;
+    let position = 0;
+    while (position < chunk.length) {
+      const newline = chunk.indexOf(10, position);
+      const segmentEnd = newline < 0 ? chunk.length : newline;
+      lineFragments.push(chunk.subarray(position, segmentEnd));
+      if (newline < 0) break;
+      const event = validateControlEvent(parseCompleteJson(Buffer.concat(lineFragments).toString("utf8"), "control-loop event"));
+      if (event.epochId !== expectedEpoch || !CONTROL_EVENT_KINDS.has(String(event.kind))) throw new Error("control-loop event identity mismatch");
+      const sequence = safeInteger(event.sequence);
+      if (sequence === null) throw new Error("control-loop event sequence is invalid");
+      const byteEnd = streamOffset + newline + 1;
+      batch.push({ eventId: String(event.eventId), epochId: String(event.epochId), sequence, occurredAt: String(event.occurredAt), kind: String(event.kind), payload: event.payload as JsonRecord, ordinal, byteStart: lineStart, byteEnd });
+      ordinal += 1;
+      lineStart = byteEnd;
+      lineFragments = [];
+      position = newline + 1;
+      if (batch.length >= batchSize) { onBatch(batch); batch = []; await yieldToEventLoop(); }
     }
+    streamOffset += chunk.length;
+    await yieldToEventLoop();
   }
+  if (lineFragments.length) throw new Error("control-loop accepted prefix is incomplete");
+  if (batch.length) onBatch(batch);
+  return ordinal - startOrdinal;
 }
 
-function normalizeEvent(db: DatabaseSync, row: EventRow) {
+function normalizedMetadata(row: EventRow): JsonRecord {
   const payload = row.payload;
   if (row.kind === "signal_fetch.started" || row.kind === "signal_fetch.finished") {
     const fetch = isRecord(payload.fetch) ? payload.fetch : null;
-    if (!fetch) return;
-    db.prepare(`INSERT INTO control_fetches(fetch_id, provider, status, started_at, completed_at, item_count, new_item_count, has_more, error_reason, summary, event_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(fetch_id) DO UPDATE SET provider=excluded.provider,status=excluded.status,started_at=excluded.started_at,completed_at=excluded.completed_at,item_count=excluded.item_count,new_item_count=excluded.new_item_count,has_more=excluded.has_more,error_reason=excluded.error_reason,summary=excluded.summary,event_id=excluded.event_id`).run(String(fetch.fetchId), String(fetch.provider), String(fetch.status), String(fetch.startedAt), String(fetch.completedAt), Number(fetch.itemCount), Number(fetch.newItemCount), fetch.hasMore ? 1 : 0, text(fetch.error), String(fetch.summary), row.eventId);
+    return fetch ? { fetchId: String(fetch.fetchId), provider: String(fetch.provider), status: String(fetch.status), startedAt: String(fetch.startedAt), completedAt: String(fetch.completedAt), itemCount: Number(fetch.itemCount), newItemCount: Number(fetch.newItemCount), hasMore: fetch.hasMore === true, error: text(fetch.error), summary: String(fetch.summary) } : {};
   } else if (row.kind === "signal.created") {
     const signal = isRecord(payload.signal) ? payload.signal : null;
-    if (!signal) return;
-    db.prepare(`INSERT INTO control_signals(signal_id, provider, fingerprint, status, created_at, updated_at, transition_reason, event_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(signal_id) DO UPDATE SET provider=excluded.provider,fingerprint=excluded.fingerprint,status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at,transition_reason=excluded.transition_reason,event_id=excluded.event_id`).run(String(signal.signalId), String(signal.provider), String(signal.fingerprint), String(signal.status), String(signal.createdAt), String(signal.updatedAt), text(signal.transition), row.eventId);
+    return signal ? { signalId: String(signal.signalId), provider: String(signal.provider), fingerprint: String(signal.fingerprint), status: String(signal.status), createdAt: String(signal.createdAt), updatedAt: String(signal.updatedAt), transition: text(signal.transition) } : {};
   } else if (row.kind === "signal.observation") {
     const observation = isRecord(payload.observation) ? payload.observation : null;
-    if (!observation) return;
-    db.prepare(`INSERT INTO control_observations(observation_id, fetch_id, provider, kind, fingerprint, title, summary, severity, canonical_signal_id, dedupe_result, observed_at, event_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(observation_id) DO UPDATE SET fetch_id=excluded.fetch_id,provider=excluded.provider,kind=excluded.kind,fingerprint=excluded.fingerprint,title=excluded.title,summary=excluded.summary,severity=excluded.severity,canonical_signal_id=excluded.canonical_signal_id,dedupe_result=excluded.dedupe_result,observed_at=excluded.observed_at,event_id=excluded.event_id`).run(String(observation.observationId), String(observation.fetchId), String(observation.provider), String(observation.kind), String(observation.fingerprint), String(observation.title), String(observation.summary), text(observation.severity), String(observation.canonicalSignalId), String(observation.dedupeResult), String(observation.observedAt), row.eventId);
+    return observation ? { observationId: String(observation.observationId), fetchId: String(observation.fetchId), provider: String(observation.provider), kind: String(observation.kind), fingerprint: String(observation.fingerprint), title: String(observation.title), summary: String(observation.summary), severity: text(observation.severity), canonicalSignalId: String(observation.canonicalSignalId), dedupeResult: String(observation.dedupeResult), observedAt: String(observation.observedAt) } : {};
   } else if (row.kind === "signal.transition") {
     const transition = isRecord(payload.transition) ? payload.transition : null;
-    if (!transition) return;
-    db.prepare(`INSERT INTO control_transitions(transition_id, signal_id, from_status, to_status, planner_run_id, reason_code, event_id) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(transition_id) DO UPDATE SET signal_id=excluded.signal_id,from_status=excluded.from_status,to_status=excluded.to_status,planner_run_id=excluded.planner_run_id,reason_code=excluded.reason_code,event_id=excluded.event_id`).run(row.eventId, String(transition.signalId), String(transition.fromStatus), String(transition.toStatus), text(transition.plannerRunId), String(transition.reasonCode), row.eventId);
-    db.prepare("UPDATE control_signals SET status=?, transition_reason=?, updated_at=? WHERE signal_id=?").run(String(transition.toStatus), String(transition.reasonCode), row.occurredAt, String(transition.signalId));
+    return transition ? { signalId: String(transition.signalId), fromStatus: String(transition.fromStatus), toStatus: String(transition.toStatus), plannerRunId: text(transition.plannerRunId), reasonCode: String(transition.reasonCode) } : {};
   } else if (row.kind === "scheduler.wakeup") {
     const wakeup = isRecord(payload.wakeup) ? payload.wakeup : null;
-    if (!wakeup) return;
-    db.prepare(`INSERT INTO control_wakeups(wakeup_id, reason, status, created_at, consumed_at, input_signal_ids, event_id) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(wakeup_id) DO UPDATE SET reason=excluded.reason,status=excluded.status,created_at=excluded.created_at,consumed_at=excluded.consumed_at,input_signal_ids=excluded.input_signal_ids,event_id=excluded.event_id`).run(String(wakeup.wakeupId), String(wakeup.reason), String(wakeup.status), String(wakeup.createdAt), text(wakeup.consumedAt), json(arrayFrom(wakeup.inputSignalIds)), row.eventId);
+    return wakeup ? { wakeupId: String(wakeup.wakeupId), reason: String(wakeup.reason), status: String(wakeup.status), createdAt: String(wakeup.createdAt), consumedAt: text(wakeup.consumedAt), inputSignalIds: arrayFrom(wakeup.inputSignalIds) } : {};
   } else if (row.kind === "planner.started") {
     const planner = isRecord(payload.plannerRun) ? payload.plannerRun : null;
-    if (!planner) return;
-    db.prepare(`INSERT INTO control_planner_runs(planner_run_id, epoch_id, state, started_at, completed_at, input_signal_ids, active_task_ids, started_event_id, finished_event_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(planner_run_id) DO UPDATE SET epoch_id=excluded.epoch_id,state=excluded.state,started_at=excluded.started_at,completed_at=excluded.completed_at,input_signal_ids=excluded.input_signal_ids,active_task_ids=excluded.active_task_ids,started_event_id=excluded.started_event_id`).run(String(planner.plannerRunId), String(planner.epochId), String(planner.state), String(planner.startedAt), text(planner.completedAt), json(arrayFrom(planner.inputSignalIds)), json(arrayFrom(planner.activeTaskIds)), row.eventId);
+    return planner ? { plannerRunId: String(planner.plannerRunId), epochId: String(planner.epochId), state: String(planner.state), startedAt: String(planner.startedAt), completedAt: text(planner.completedAt), inputSignalIds: arrayFrom(planner.inputSignalIds), activeTaskIds: arrayFrom(planner.activeTaskIds) } : {};
   } else if (row.kind === "planner.finished") {
-    db.prepare("UPDATE control_planner_runs SET state=?, completed_at=?, finished_event_id=? WHERE planner_run_id=?").run(String(payload.state), row.occurredAt, row.eventId, String(payload.plannerRunId));
+    return { plannerRunId: String(payload.plannerRunId), state: String(payload.state) };
   } else if (row.kind === "planner.proposal") {
     const proposal = isRecord(payload.proposal) ? payload.proposal : null;
-    if (!proposal) return;
-    db.prepare(`INSERT INTO control_proposals(proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(proposal_id) DO UPDATE SET planner_run_id=excluded.planner_run_id,ordinal=excluded.ordinal,outcome=excluded.outcome,reason_code=excluded.reason_code,signal_ids=excluded.signal_ids,dedupe_key=excluded.dedupe_key,task_id=excluded.task_id,event_id=excluded.event_id`).run(String(proposal.proposalId), String(proposal.plannerRunId), Number(proposal.ordinal), String(proposal.outcome), String(proposal.reasonCode), json(arrayFrom(proposal.signalIds)), text(proposal.dedupeKey), text(proposal.taskId), row.eventId);
+    return proposal ? { proposalId: String(proposal.proposalId), plannerRunId: String(proposal.plannerRunId), ordinal: Number(proposal.ordinal), outcome: String(proposal.outcome), reasonCode: String(proposal.reasonCode), signalIds: arrayFrom(proposal.signalIds), dedupeKey: text(proposal.dedupeKey), taskId: text(proposal.taskId) } : {};
   } else if (row.kind === "graph.edge") {
     const edge = isRecord(payload.edge) ? payload.edge : null;
-    if (!edge) return;
-    db.prepare(`INSERT INTO control_edges(edge_id, edge_type, source_id, target_id, created_at, event_id) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(edge_id) DO UPDATE SET edge_type=excluded.edge_type,source_id=excluded.source_id,target_id=excluded.target_id,created_at=excluded.created_at,event_id=excluded.event_id`).run(String(edge.edgeId), String(edge.edgeType), String(edge.sourceId), String(edge.targetId), String(edge.createdAt), row.eventId);
+    return edge ? { edgeId: String(edge.edgeId), edgeType: String(edge.edgeType), sourceId: String(edge.sourceId), targetId: String(edge.targetId), createdAt: String(edge.createdAt) } : {};
   }
+  return {};
 }
 
-async function replayNormalizedEvents(db: DatabaseSync, root: string, epochId: string) {
-  const records = db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records ORDER BY sequence, event_id").all();
-  const sources = new Map<string, Buffer>();
-  for (const record of records) {
-    const relativePath = String(record.relative_path);
-    if (sources.has(relativePath)) continue;
-    const file = db.prepare("SELECT accepted_end, prefix_hash, device_id, inode_id FROM control_files WHERE relative_path=? AND status='ready'").get(relativePath);
-    if (!file) return false;
-    const resolved = await resolveRegularContainedPath(root, relativePath);
-    const bytes = await readFile(resolved.path);
-    const end = Number(file.accepted_end);
-    const hash = createHash("sha256").update(bytes.subarray(0, end)).digest("hex");
-    if (!Number.isSafeInteger(end) || end < 0 || bytes.length < end || String(resolved.stat.dev) !== String(file.device_id) || String(resolved.stat.ino) !== String(file.inode_id) || hash !== String(file.prefix_hash)) return false;
-    sources.set(relativePath, bytes);
-  }
-  const events: EventRow[] = [];
-  for (const record of records) {
-    const bytes = sources.get(String(record.relative_path));
-    const start = Number(record.byte_start); const end = Number(record.byte_end);
-    if (!bytes || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > bytes.length || bytes[end - 1] !== 10) return false;
-    const value = validateControlEvent(parseCompleteJson(bytes.subarray(start, end - 1).toString("utf8"), String(record.relative_path)));
-    if (value.eventId !== record.event_id || value.epochId !== epochId || value.sequence !== record.sequence || value.kind !== record.kind) return false;
-    events.push({ eventId: String(record.event_id), epochId, sequence: Number(record.sequence), occurredAt: String(record.occurred_at), kind: String(record.kind), payload: value.payload as JsonRecord, ordinal: Number(record.ordinal), byteStart: start, byteEnd: end });
-  }
+
+function clearStaging(db: DatabaseSync, importToken: string) {
+  db.prepare("DELETE FROM control_record_staging WHERE import_token=?").run(importToken);
+  db.prepare("DELETE FROM control_normalized_staging WHERE import_token=?").run(importToken);
+  db.prepare("DELETE FROM control_pending_link_staging WHERE import_token=?").run(importToken);
+}
+
+function stageEventBatch(db: DatabaseSync, importToken: string, relativePath: string, rows: EventRow[], excludedLivePath: string | null) {
   withTransaction(db, () => {
-    deleteEventData(db, events.map((event) => event.eventId));
-    for (const event of events) normalizeEvent(db, event);
+    for (const row of rows) {
+      const conflict = excludedLivePath === null
+        ? db.prepare("SELECT 1 FROM control_records WHERE event_id=? OR sequence=? LIMIT 1").get(row.eventId, row.sequence)
+        : db.prepare("SELECT 1 FROM control_records WHERE relative_path != ? AND (event_id=? OR sequence=?) LIMIT 1").get(excludedLivePath, row.eventId, row.sequence);
+      if (conflict) throw new Error("control-loop event identity conflict");
+      db.prepare("INSERT INTO control_record_staging(import_token, event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)").run(importToken, row.eventId, relativePath, row.ordinal, row.sequence, row.byteStart, row.byteEnd, row.occurredAt, row.kind);
+      db.prepare("INSERT INTO control_normalized_staging(import_token, event_id, sequence, occurred_at, kind, normalized_metadata) VALUES(?, ?, ?, ?, ?, ?)").run(importToken, row.eventId, row.sequence, row.occurredAt, row.kind, json(normalizedMetadata(row)));
+    }
   });
-  return true;
 }
 
-function resolvePendingLinks(db: DatabaseSync) {
-  db.exec("DELETE FROM control_pending_links");
-  const edges = db.prepare("SELECT edge_id, edge_type, source_id, target_id FROM control_edges").all();
-  for (const edge of edges) {
-    const exists = (id: string) => Boolean(db.prepare("SELECT 1 FROM control_signals WHERE signal_id=? UNION SELECT 1 FROM control_observations WHERE observation_id=? UNION SELECT 1 FROM control_planner_runs WHERE planner_run_id=? UNION SELECT 1 FROM control_proposals WHERE proposal_id=? UNION SELECT 1 FROM tasks WHERE task_id=? LIMIT 1").get(id, id, id, id, id));
-    if (!exists(String(edge.source_id)) || !exists(String(edge.target_id))) db.prepare("INSERT INTO control_pending_links(edge_id, source_id, target_id, edge_type, reason) VALUES(?, ?, ?, ?, ?)").run(edge.edge_id, edge.source_id, edge.target_id, edge.edge_type, "endpoint-pending");
+function applyStagedNormalized(db: DatabaseSync, importToken: string) {
+  db.prepare(`INSERT INTO control_fetches(fetch_id, provider, status, started_at, completed_at, item_count, new_item_count, has_more, error_reason, summary, event_id)
+    SELECT json_extract(s.normalized_metadata, '$.fetchId'), json_extract(s.normalized_metadata, '$.provider'), json_extract(s.normalized_metadata, '$.status'), json_extract(s.normalized_metadata, '$.startedAt'), json_extract(s.normalized_metadata, '$.completedAt'), json_extract(s.normalized_metadata, '$.itemCount'), json_extract(s.normalized_metadata, '$.newItemCount'), json_extract(s.normalized_metadata, '$.hasMore'), json_extract(s.normalized_metadata, '$.error'), json_extract(s.normalized_metadata, '$.summary'), s.event_id
+    FROM control_normalized_staging s WHERE s.import_token=? AND s.kind IN ('signal_fetch.started','signal_fetch.finished') AND s.sequence=(SELECT max(s2.sequence) FROM control_normalized_staging s2 WHERE s2.import_token=s.import_token AND s2.kind IN ('signal_fetch.started','signal_fetch.finished') AND json_extract(s2.normalized_metadata, '$.fetchId')=json_extract(s.normalized_metadata, '$.fetchId'))
+    ON CONFLICT(fetch_id) DO UPDATE SET provider=excluded.provider,status=excluded.status,started_at=excluded.started_at,completed_at=excluded.completed_at,item_count=excluded.item_count,new_item_count=excluded.new_item_count,has_more=excluded.has_more,error_reason=excluded.error_reason,summary=excluded.summary,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_signals(signal_id, provider, fingerprint, status, created_at, updated_at, transition_reason, event_id)
+    SELECT json_extract(normalized_metadata, '$.signalId'), json_extract(normalized_metadata, '$.provider'), json_extract(normalized_metadata, '$.fingerprint'), json_extract(normalized_metadata, '$.status'), json_extract(normalized_metadata, '$.createdAt'), json_extract(normalized_metadata, '$.updatedAt'), json_extract(normalized_metadata, '$.transition'), event_id
+    FROM control_normalized_staging WHERE import_token=? AND kind='signal.created'
+    ON CONFLICT(signal_id) DO UPDATE SET provider=excluded.provider,fingerprint=excluded.fingerprint,status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at,transition_reason=excluded.transition_reason,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_observations(observation_id, fetch_id, provider, kind, fingerprint, title, summary, severity, canonical_signal_id, dedupe_result, observed_at, event_id)
+    SELECT json_extract(normalized_metadata, '$.observationId'), json_extract(normalized_metadata, '$.fetchId'), json_extract(normalized_metadata, '$.provider'), json_extract(normalized_metadata, '$.kind'), json_extract(normalized_metadata, '$.fingerprint'), json_extract(normalized_metadata, '$.title'), json_extract(normalized_metadata, '$.summary'), json_extract(normalized_metadata, '$.severity'), json_extract(normalized_metadata, '$.canonicalSignalId'), json_extract(normalized_metadata, '$.dedupeResult'), json_extract(normalized_metadata, '$.observedAt'), event_id
+    FROM control_normalized_staging WHERE import_token=? AND kind='signal.observation'
+    ON CONFLICT(observation_id) DO UPDATE SET fetch_id=excluded.fetch_id,provider=excluded.provider,kind=excluded.kind,fingerprint=excluded.fingerprint,title=excluded.title,summary=excluded.summary,severity=excluded.severity,canonical_signal_id=excluded.canonical_signal_id,dedupe_result=excluded.dedupe_result,observed_at=excluded.observed_at,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_transitions(transition_id, signal_id, from_status, to_status, planner_run_id, reason_code, event_id)
+    SELECT event_id, json_extract(normalized_metadata, '$.signalId'), json_extract(normalized_metadata, '$.fromStatus'), json_extract(normalized_metadata, '$.toStatus'), json_extract(normalized_metadata, '$.plannerRunId'), json_extract(normalized_metadata, '$.reasonCode'), event_id
+    FROM control_normalized_staging WHERE import_token=? AND kind='signal.transition'
+    ON CONFLICT(transition_id) DO UPDATE SET signal_id=excluded.signal_id,from_status=excluded.from_status,to_status=excluded.to_status,planner_run_id=excluded.planner_run_id,reason_code=excluded.reason_code,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_wakeups(wakeup_id, reason, status, created_at, consumed_at, input_signal_ids, event_id)
+    SELECT json_extract(normalized_metadata, '$.wakeupId'), json_extract(normalized_metadata, '$.reason'), json_extract(normalized_metadata, '$.status'), json_extract(normalized_metadata, '$.createdAt'), json_extract(normalized_metadata, '$.consumedAt'), json_extract(normalized_metadata, '$.inputSignalIds'), event_id
+    FROM control_normalized_staging WHERE import_token=? AND kind='scheduler.wakeup'
+    ON CONFLICT(wakeup_id) DO UPDATE SET reason=excluded.reason,status=excluded.status,created_at=excluded.created_at,consumed_at=excluded.consumed_at,input_signal_ids=excluded.input_signal_ids,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_planner_runs(planner_run_id, epoch_id, state, started_at, completed_at, input_signal_ids, active_task_ids, started_event_id, finished_event_id)
+    SELECT json_extract(normalized_metadata, '$.plannerRunId'), json_extract(normalized_metadata, '$.epochId'), json_extract(normalized_metadata, '$.state'), json_extract(normalized_metadata, '$.startedAt'), json_extract(normalized_metadata, '$.completedAt'), json_extract(normalized_metadata, '$.inputSignalIds'), json_extract(normalized_metadata, '$.activeTaskIds'), event_id, NULL
+    FROM control_normalized_staging WHERE import_token=? AND kind='planner.started'
+    ON CONFLICT(planner_run_id) DO UPDATE SET epoch_id=excluded.epoch_id,state=excluded.state,started_at=excluded.started_at,completed_at=excluded.completed_at,input_signal_ids=excluded.input_signal_ids,active_task_ids=excluded.active_task_ids,started_event_id=excluded.started_event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_proposals(proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id)
+    SELECT json_extract(normalized_metadata, '$.proposalId'), json_extract(normalized_metadata, '$.plannerRunId'), json_extract(normalized_metadata, '$.ordinal'), json_extract(normalized_metadata, '$.outcome'), json_extract(normalized_metadata, '$.reasonCode'), json_extract(normalized_metadata, '$.signalIds'), json_extract(normalized_metadata, '$.dedupeKey'), json_extract(normalized_metadata, '$.taskId'), event_id
+    FROM control_normalized_staging WHERE import_token=? AND kind='planner.proposal'
+    ON CONFLICT(proposal_id) DO UPDATE SET planner_run_id=excluded.planner_run_id,ordinal=excluded.ordinal,outcome=excluded.outcome,reason_code=excluded.reason_code,signal_ids=excluded.signal_ids,dedupe_key=excluded.dedupe_key,task_id=excluded.task_id,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`INSERT INTO control_edges(edge_id, edge_type, source_id, target_id, created_at, event_id)
+    SELECT json_extract(normalized_metadata, '$.edgeId'), json_extract(normalized_metadata, '$.edgeType'), json_extract(normalized_metadata, '$.sourceId'), json_extract(normalized_metadata, '$.targetId'), json_extract(normalized_metadata, '$.createdAt'), event_id
+    FROM control_normalized_staging WHERE import_token=? AND kind='graph.edge'
+    ON CONFLICT(edge_id) DO UPDATE SET edge_type=excluded.edge_type,source_id=excluded.source_id,target_id=excluded.target_id,created_at=excluded.created_at,event_id=excluded.event_id`).run(importToken);
+  db.prepare(`UPDATE control_signals AS signal SET
+    status=(SELECT json_extract(normalized_metadata, '$.toStatus') FROM control_normalized_staging WHERE import_token=? AND kind='signal.transition' AND json_extract(normalized_metadata, '$.signalId')=signal.signal_id ORDER BY sequence DESC LIMIT 1),
+    transition_reason=(SELECT json_extract(normalized_metadata, '$.reasonCode') FROM control_normalized_staging WHERE import_token=? AND kind='signal.transition' AND json_extract(normalized_metadata, '$.signalId')=signal.signal_id ORDER BY sequence DESC LIMIT 1),
+    updated_at=(SELECT occurred_at FROM control_normalized_staging WHERE import_token=? AND kind='signal.transition' AND json_extract(normalized_metadata, '$.signalId')=signal.signal_id ORDER BY sequence DESC LIMIT 1)
+    WHERE EXISTS(SELECT 1 FROM control_normalized_staging WHERE import_token=? AND kind='signal.transition' AND json_extract(normalized_metadata, '$.signalId')=signal.signal_id)`).run(importToken, importToken, importToken, importToken);
+  db.prepare(`UPDATE control_planner_runs AS run SET
+    state=(SELECT json_extract(normalized_metadata, '$.state') FROM control_normalized_staging WHERE import_token=? AND kind='planner.finished' AND json_extract(normalized_metadata, '$.plannerRunId')=run.planner_run_id ORDER BY sequence DESC LIMIT 1),
+    completed_at=(SELECT occurred_at FROM control_normalized_staging WHERE import_token=? AND kind='planner.finished' AND json_extract(normalized_metadata, '$.plannerRunId')=run.planner_run_id ORDER BY sequence DESC LIMIT 1),
+    finished_event_id=(SELECT event_id FROM control_normalized_staging WHERE import_token=? AND kind='planner.finished' AND json_extract(normalized_metadata, '$.plannerRunId')=run.planner_run_id ORDER BY sequence DESC LIMIT 1)
+    WHERE EXISTS(SELECT 1 FROM control_normalized_staging WHERE import_token=? AND kind='planner.finished' AND json_extract(normalized_metadata, '$.plannerRunId')=run.planner_run_id)`).run(importToken, importToken, importToken, importToken);
+}
+
+function replaceNormalizedGeneration(db: DatabaseSync, importToken: string) {
+  db.exec("DELETE FROM control_edges; DELETE FROM control_transitions; DELETE FROM control_proposals; DELETE FROM control_observations; DELETE FROM control_signals; DELETE FROM control_wakeups; DELETE FROM control_fetches; DELETE FROM control_planner_runs WHERE started_event_id NOT LIKE 'manifest:%';");
+  applyStagedNormalized(db, importToken);
+}
+
+async function stageNormalizedGeneration(db: DatabaseSync, root: string, epochId: string, sourceToken: string | null, excludedPath: string | null, batchSize: number) {
+  const records = excludedPath === null
+    ? db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records ORDER BY sequence, event_id").all()
+    : db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records WHERE relative_path != ? ORDER BY sequence, event_id").all(excludedPath);
+  const importToken = randomUUID();
+  const handles = new Map<string, Awaited<ReturnType<typeof open>>>();
+  try {
+    let staged: EventRow[] = [];
+    const flush = () => {
+      if (!staged.length) return;
+      withTransaction(db, () => {
+        for (const event of staged) db.prepare("INSERT INTO control_normalized_staging(import_token, event_id, sequence, occurred_at, kind, normalized_metadata) VALUES(?, ?, ?, ?, ?, ?)").run(importToken, event.eventId, event.sequence, event.occurredAt, event.kind, json(normalizedMetadata(event)));
+      });
+      staged = [];
+    };
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      const relativePath = String(record.relative_path);
+      let handle = handles.get(relativePath);
+      if (!handle) {
+        const file = db.prepare("SELECT accepted_end, prefix_hash, device_id, inode_id FROM control_files WHERE relative_path=? AND status='ready'").get(relativePath);
+        if (!file) throw new Error("control-loop event file metadata is unavailable");
+        const resolved = await resolveRegularContainedPath(root, relativePath);
+        const end = Number(file.accepted_end);
+        if (!Number.isSafeInteger(end) || end < 0 || resolved.stat.size < end || String(resolved.stat.dev) !== String(file.device_id) || String(resolved.stat.ino) !== String(file.inode_id) || await prefixHash(resolved.path, end) !== String(file.prefix_hash)) throw new Error("control-loop event file identity changed");
+        handle = await open(resolved.path, "r");
+        handles.set(relativePath, handle);
+      }
+      const start = Number(record.byte_start); const end = Number(record.byte_end);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start) throw new Error("control-loop event range is invalid");
+      const bytes = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+      if (bytesRead !== bytes.length || bytes.at(-1) !== 10) throw new Error("control-loop event range changed");
+      const value = validateControlEvent(parseCompleteJson(bytes.subarray(0, bytes.length - 1).toString("utf8"), relativePath));
+      if (value.eventId !== record.event_id || value.epochId !== epochId || value.sequence !== record.sequence || value.kind !== record.kind) throw new Error("control-loop event record changed");
+      const event = { eventId: String(record.event_id), epochId, sequence: Number(record.sequence), occurredAt: String(record.occurred_at), kind: String(record.kind), payload: value.payload as JsonRecord, ordinal: Number(record.ordinal), byteStart: start, byteEnd: end };
+      staged.push(event);
+      if (staged.length >= batchSize) { flush(); await yieldToEventLoop(); }
+    }
+    flush();
+    if (sourceToken) db.prepare("INSERT INTO control_normalized_staging(import_token, event_id, sequence, occurred_at, kind, normalized_metadata) SELECT ?, event_id, sequence, occurred_at, kind, normalized_metadata FROM control_normalized_staging WHERE import_token=? ORDER BY sequence, event_id").run(importToken, sourceToken);
+    return importToken;
+  } catch {
+    clearStaging(db, importToken);
+    throw new Error("control-loop normalized generation is invalid");
+  } finally {
+    for (const handle of handles.values()) await handle.close();
   }
 }
 
-async function reconcileEvents(db: DatabaseSync, root: string, epochId: string): Promise<{ changed: boolean; degraded: boolean }> {
+async function resolvePendingLinks(db: DatabaseSync, batchSize: number) {
+  const importToken = randomUUID();
+  let after = "";
+  try {
+    while (true) {
+      const edges = db.prepare("SELECT edge_id, edge_type, source_id, target_id FROM control_edges WHERE edge_id > ? ORDER BY edge_id LIMIT ?").all(after, batchSize);
+      if (!edges.length) break;
+      withTransaction(db, () => {
+        for (const edge of edges) {
+          const exists = (id: string) => Boolean(db.prepare("SELECT 1 FROM control_signals WHERE signal_id=? UNION SELECT 1 FROM control_observations WHERE observation_id=? UNION SELECT 1 FROM control_planner_runs WHERE planner_run_id=? UNION SELECT 1 FROM control_proposals WHERE proposal_id=? UNION SELECT 1 FROM tasks WHERE task_id=? LIMIT 1").get(id, id, id, id, id));
+          if (!exists(String(edge.source_id)) || !exists(String(edge.target_id))) db.prepare("INSERT INTO control_pending_link_staging(import_token, edge_id, source_id, target_id, edge_type, reason) VALUES(?, ?, ?, ?, ?, ?)").run(importToken, edge.edge_id, edge.source_id, edge.target_id, edge.edge_type, "endpoint-pending");
+        }
+      });
+      after = String(edges.at(-1)!.edge_id);
+      await yieldToEventLoop();
+    }
+    withTransaction(db, () => {
+      db.exec("DELETE FROM control_pending_links");
+      db.prepare("INSERT INTO control_pending_links(edge_id, source_id, target_id, edge_type, reason) SELECT edge_id, source_id, target_id, edge_type, reason FROM control_pending_link_staging WHERE import_token=? ORDER BY edge_id").run(importToken);
+    });
+  } finally { clearStaging(db, importToken); }
+}
+
+async function reconcileEvents(db: DatabaseSync, root: string, epochId: string, batchSize: number): Promise<{ changed: boolean; degraded: boolean }> {
   let files: string[];
   try { files = await listEventFiles(root); } catch (error) { if ((error as { code?: string }).code === "ENOENT") files = []; else return { changed: false, degraded: true }; }
   const seen = new Set(files);
   let changed = false;
   let degraded = false;
-  let needsReplay = false;
   for (const relativePath of files) {
     const resolved = await resolveRegularContainedPath(root, relativePath);
     const current = await identity(resolved.path);
@@ -253,54 +359,73 @@ async function reconcileEvents(db: DatabaseSync, root: string, epochId: string):
     if (previous && !append && incomplete) continue;
     const start = append ? previousEnd : 0;
     const startOrdinal = append ? Number(previous?.complete_records ?? 0) : 0;
-    let events: EventRow[];
-    try { events = await parseEvents(resolved.path, current.acceptedEnd, start, startOrdinal, epochId); }
-    catch {
+    const importToken = randomUUID();
+    let parsedRecords = 0;
+    let priorSequence: number | null = null;
+    try {
+      parsedRecords = await scanEventBatches(resolved.path, current.acceptedEnd, start, startOrdinal, epochId, batchSize, (events) => {
+        for (const event of events) {
+          if (priorSequence !== null && event.sequence <= priorSequence) throw new Error("control-loop event sequence is not monotonic");
+          priorSequence = event.sequence;
+        }
+        stageEventBatch(db, importToken, relativePath, events, append ? null : relativePath);
+      });
+    } catch {
+      clearStaging(db, importToken);
       degraded = true;
       if (previous) db.prepare("UPDATE control_files SET status='ready', reason=? WHERE relative_path=?").run("event-invalid", relativePath);
       continue;
     }
-    const allSequences = db.prepare("SELECT sequence FROM control_records WHERE relative_path != ?").all(relativePath).map((row) => Number(row.sequence));
-    const sequenceSet = new Set(allSequences);
-    let valid = true;
-    let priorSequence: number | null = null;
-    for (const event of events) {
-      if (sequenceSet.has(event.sequence) || priorSequence !== null && event.sequence <= priorSequence) { valid = false; break; }
-      sequenceSet.add(event.sequence);
-      priorSequence = event.sequence;
+    const otherMaximum = Number(db.prepare("SELECT max(sequence) AS sequence FROM control_records WHERE relative_path != ?").get(relativePath)?.sequence ?? -1);
+    const stagedMinimum = db.prepare("SELECT min(sequence) AS sequence FROM control_record_staging WHERE import_token=?").get(importToken)?.sequence;
+    const needsGeneration = Boolean(previous && !append) || stagedMinimum != null && Number(stagedMinimum) <= otherMaximum;
+    let generationToken: string | null = null;
+    if (needsGeneration) {
+      try { generationToken = await stageNormalizedGeneration(db, root, epochId, importToken, append ? null : relativePath, batchSize); }
+      catch {
+        degraded = true;
+        clearStaging(db, importToken);
+        if (previous) db.prepare("UPDATE control_files SET status='ready', reason=? WHERE relative_path=?").run("event-generation-invalid", relativePath);
+        continue;
+      }
     }
-    if (!valid) {
+    try {
+      withTransaction(db, () => {
+        if (!append) {
+          db.prepare("DELETE FROM control_records WHERE relative_path=?").run(relativePath);
+        }
+        db.prepare(`INSERT INTO control_files(relative_path, kind, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, device_id, inode_id, mtime_ns, ctime_ns, status, reason) VALUES(?, 'jsonl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL) ON CONFLICT(relative_path) DO UPDATE SET actual_size=excluded.actual_size,accepted_end=excluded.accepted_end,prefix_hash=excluded.prefix_hash,prefix_revision=excluded.prefix_revision,complete_records=excluded.complete_records,file_revision=excluded.file_revision,device_id=excluded.device_id,inode_id=excluded.inode_id,mtime_ns=excluded.mtime_ns,ctime_ns=excluded.ctime_ns,status='pending',reason=NULL`).run(relativePath, current.size, current.acceptedEnd, current.prefixHash, Number(previous?.prefix_revision ?? 0) + (append ? 0 : 1), startOrdinal + parsedRecords, append ? String(previous?.file_revision ?? `sha256:${current.prefixHash}`) : `sha256:${current.prefixHash}`, current.deviceId, current.inodeId, current.mtimeNs, current.ctimeNs);
+        db.prepare("INSERT INTO control_records(event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind) SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_record_staging WHERE import_token=? ORDER BY ordinal").run(importToken);
+        if (generationToken) replaceNormalizedGeneration(db, generationToken);
+        else applyStagedNormalized(db, importToken);
+        db.prepare("UPDATE control_files SET status='ready', reason=NULL WHERE relative_path=?").run(relativePath);
+      });
+    } catch {
       degraded = true;
-      if (previous) db.prepare("UPDATE control_files SET status='ready', reason=? WHERE relative_path=?").run("event-sequence-conflict", relativePath);
+      clearStaging(db, importToken);
+      if (generationToken) clearStaging(db, generationToken);
+      if (previous) db.prepare("UPDATE control_files SET status='ready', reason=? WHERE relative_path=?").run("event-commit-conflict", relativePath);
       continue;
     }
-    const oldIds = append ? [] : db.prepare("SELECT event_id FROM control_records WHERE relative_path=?").all(relativePath).map((row) => String(row.event_id));
-    const otherMaximum = Number(db.prepare("SELECT max(sequence) AS sequence FROM control_records WHERE relative_path != ?").get(relativePath)?.sequence ?? -1);
-    needsReplay ||= Boolean(previous && !append) || events.some((event) => event.sequence <= otherMaximum);
-    withTransaction(db, () => {
-      if (!append) {
-        deleteEventData(db, oldIds);
-        db.prepare("DELETE FROM control_records WHERE relative_path=?").run(relativePath);
-      }
-      db.prepare(`INSERT INTO control_files(relative_path, kind, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, device_id, inode_id, mtime_ns, ctime_ns, status, reason) VALUES(?, 'jsonl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL) ON CONFLICT(relative_path) DO UPDATE SET actual_size=excluded.actual_size,accepted_end=excluded.accepted_end,prefix_hash=excluded.prefix_hash,prefix_revision=excluded.prefix_revision,complete_records=excluded.complete_records,file_revision=excluded.file_revision,device_id=excluded.device_id,inode_id=excluded.inode_id,mtime_ns=excluded.mtime_ns,ctime_ns=excluded.ctime_ns,status='pending',reason=NULL`).run(relativePath, current.size, current.acceptedEnd, current.prefixHash, Number(previous?.prefix_revision ?? 0) + (append ? 0 : 1), Number(previous?.complete_records ?? 0) + events.length, append ? String(previous?.file_revision ?? `sha256:${current.prefixHash}`) : `sha256:${current.prefixHash}`, current.deviceId, current.inodeId, current.mtimeNs, current.ctimeNs);
-      for (const event of events) {
-        db.prepare("INSERT OR REPLACE INTO control_records(event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind) VALUES(?, ?, ?, ?, ?, ?, ?, ?)").run(event.eventId, relativePath, event.ordinal, event.sequence, event.byteStart, event.byteEnd, event.occurredAt, event.kind);
-        normalizeEvent(db, event);
-      }
-      db.prepare("UPDATE control_files SET status='ready', reason=NULL WHERE relative_path=?").run(relativePath);
-    });
-    changed ||= events.length > 0 || !previous || Number(previous.accepted_end) !== current.acceptedEnd || previous.prefix_hash !== current.prefixHash;
+    clearStaging(db, importToken);
+    if (generationToken) clearStaging(db, generationToken);
+    changed ||= parsedRecords > 0 || !previous || Number(previous.accepted_end) !== current.acceptedEnd || previous.prefix_hash !== current.prefixHash;
     await yieldToEventLoop();
   }
   const stale = db.prepare("SELECT relative_path FROM control_files WHERE relative_path LIKE 'events/%'").all().map((row) => String(row.relative_path)).filter((path) => !seen.has(path));
   for (const path of stale) {
-    const oldIds = db.prepare("SELECT event_id FROM control_records WHERE relative_path=?").all(path).map((row) => String(row.event_id));
-    withTransaction(db, () => { deleteEventData(db, oldIds); db.prepare("DELETE FROM control_records WHERE relative_path=?").run(path); db.prepare("DELETE FROM control_files WHERE relative_path=?").run(path); });
-    changed = true;
-    needsReplay = true;
+    let generationToken: string;
+    try { generationToken = await stageNormalizedGeneration(db, root, epochId, null, path, batchSize); }
+    catch { degraded = true; continue; }
+    try {
+      withTransaction(db, () => {
+        db.prepare("DELETE FROM control_records WHERE relative_path=?").run(path);
+        db.prepare("DELETE FROM control_files WHERE relative_path=?").run(path);
+        replaceNormalizedGeneration(db, generationToken);
+      });
+      changed = true;
+    } finally { clearStaging(db, generationToken); }
   }
-  if (needsReplay && !await replayNormalizedEvents(db, root, epochId)) degraded = true;
-  resolvePendingLinks(db);
   return { changed, degraded };
 }
 
@@ -403,21 +528,23 @@ function domainHealthChanged(previous: ReturnType<typeof domainStatus>, state: C
 export async function reconcileControlLoop(db: DatabaseSync, config: ArchiveConfig): Promise<ControlLoopReconcileResult> {
   const attemptedAt = now();
   const prior = domainStatus(db);
+  const retainedEpochId = prior?.epoch_id == null ? null : String(prior.epoch_id);
+  const retainedSuccessAt = prior?.last_success_at == null ? null : String(prior.last_success_at);
   if (!config.controlLoopRoot) {
     db.prepare(`INSERT INTO domain_health(domain, state, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'unavailable', ?, 'root-unconfigured', 1) ON CONFLICT(domain) DO UPDATE SET state='unavailable',last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(attemptedAt);
-    return { changed: domainHealthChanged(prior, "unavailable", null, "root-unconfigured"), state: "unavailable", epochId: null, errorCategory: "root-unconfigured", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "unavailable", retainedEpochId, "root-unconfigured"), state: "unavailable", epochId: retainedEpochId, errorCategory: "root-unconfigured", lastSuccessAt: retainedSuccessAt };
   }
   try {
     await assertDirectoryRoot(config.controlLoopRoot);
   } catch {
     db.prepare(`INSERT INTO domain_health(domain, state, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'unavailable', ?, 'root-unavailable', 1) ON CONFLICT(domain) DO UPDATE SET state='unavailable',last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(attemptedAt);
-    return { changed: domainHealthChanged(prior, "unavailable", null, "root-unavailable"), state: "unavailable", epochId: null, errorCategory: "root-unavailable", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "unavailable", retainedEpochId, "root-unavailable"), state: "unavailable", epochId: retainedEpochId, errorCategory: "root-unavailable", lastSuccessAt: retainedSuccessAt };
   }
   let epoch: ReturnType<typeof validateControlEpoch>;
   try { epoch = validateControlEpoch(parseCompleteJson(await readFile((await resolveRegularContainedPath(config.controlLoopRoot, "epoch.json")).path, "utf8"), "control-loop epoch.json")); }
   catch {
     db.prepare(`INSERT INTO domain_health(domain, state, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'degraded', ?, 'epoch-invalid', 1) ON CONFLICT(domain) DO UPDATE SET state='degraded',last_attempt_at=excluded.last_attempt_at,last_error_category=excluded.last_error_category,last_error_count=1`).run(attemptedAt);
-    return { changed: domainHealthChanged(prior, "degraded", null, "epoch-invalid"), state: "degraded", epochId: null, errorCategory: "epoch-invalid", lastSuccessAt: null };
+    return { changed: domainHealthChanged(prior, "degraded", retainedEpochId, "epoch-invalid"), state: "degraded", epochId: retainedEpochId, errorCategory: "epoch-invalid", lastSuccessAt: retainedSuccessAt };
   }
   const taskEpoch = readDatabaseMeta(db).epochId;
   if ((prior?.epoch_id && String(prior.epoch_id) !== epoch.epochId) || (taskEpoch && taskEpoch !== epoch.epochId)) {
@@ -425,10 +552,10 @@ export async function reconcileControlLoop(db: DatabaseSync, config: ArchiveConf
     return { changed: domainHealthChanged(prior, "incompatible", epoch.epochId, "epoch-mismatch"), state: "incompatible", epochId: epoch.epochId, errorCategory: "epoch-mismatch", lastSuccessAt: null };
   }
   db.prepare(`INSERT INTO domain_health(domain, state, epoch_id, last_attempt_at, last_error_category, last_error_count) VALUES('control-loop', 'indexing', ?, ?, NULL, 0) ON CONFLICT(domain) DO UPDATE SET state='indexing',epoch_id=excluded.epoch_id,last_attempt_at=excluded.last_attempt_at,last_error_category=NULL,last_error_count=0`).run(epoch.epochId, attemptedAt);
-  const eventResult = await reconcileEvents(db, config.controlLoopRoot, epoch.epochId);
+  const eventResult = await reconcileEvents(db, config.controlLoopRoot, epoch.epochId, config.batchSize);
   const currentResult = await reconcileCurrent(db, config.controlLoopRoot, epoch.epochId);
   const runResult = await reconcileRuns(db, config.controlLoopRoot, epoch.epochId);
-  resolvePendingLinks(db);
+  await resolvePendingLinks(db, config.batchSize);
   const state: ControlLoopState = runResult.corrupt ? "archive-corrupt" : eventResult.degraded || currentResult.degraded || runResult.degraded ? "degraded" : "ready";
   const errorCategory = state === "ready" ? null : runResult.corrupt ? "archive-corrupt" : "control-loop-pending";
   const changed = eventResult.changed || currentResult.changed || runResult.changed || domainHealthChanged(prior, state, epoch.epochId, errorCategory);
@@ -439,9 +566,14 @@ export async function reconcileControlLoop(db: DatabaseSync, config: ArchiveConf
 
 export async function readControlEventRecord(root: string, relativePath: string, start: number, end: number) {
   const resolved = await resolveRegularContainedPath(root, relativePath);
-  const bytes = await readFile(resolved.path);
-  if (start < 0 || end <= start || end > bytes.length || bytes[end - 1] !== 10) throw new Error("control-loop event cursor is stale");
-  return validateControlEvent(parseCompleteJson(bytes.subarray(start, end - 1).toString("utf8"), relativePath));
+  if (start < 0 || end <= start || end > resolved.stat.size) throw new Error("control-loop event cursor is stale");
+  const handle = await open(resolved.path, "r");
+  try {
+    const bytes = Buffer.allocUnsafe(end - start);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+    if (bytesRead !== bytes.length || bytes.at(-1) !== 10) throw new Error("control-loop event cursor is stale");
+    return validateControlEvent(parseCompleteJson(bytes.subarray(0, bytes.length - 1).toString("utf8"), relativePath));
+  } finally { await handle.close(); }
 }
 
 export async function openControlArtifact(root: string, relativePath: string) {

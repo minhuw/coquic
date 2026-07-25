@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { appendFile, cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -55,11 +56,13 @@ void (async () => {
   const siteRoot = fileURLToPath(new URL("..", import.meta.url));
   const root = await mkdtemp(join(tmpdir(), "coquic-steward-browser-"));
   const tasksRoot = join(root, "tasks");
+  const controlLoopRoot = join(root, "control-loop");
   const cachePath = join(root, "cache", "site-v2.sqlite");
   const serverRoot = join(root, "standalone");
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   await cp(new URL("../examples/steward-dataset", import.meta.url), tasksRoot, { recursive: true });
+  await cp(new URL("../examples/steward-control-loop", import.meta.url), controlLoopRoot, { recursive: true });
   const runningTemplate = join(tasksRoot, "task-running");
   for (let index = 0; index < 50; index += 1) {
     const taskId = `task-browser-active-${String(index).padStart(3, "0")}`;
@@ -78,10 +81,18 @@ void (async () => {
   if (existsSync(join(siteRoot, "public"))) await cp(join(siteRoot, "public"), join(serverRoot, "public"), { recursive: true });
   const activeTranscript = join(tasksRoot, "task-running", "pipelines", "pipeline-initial", "runs", "run-implementation-recovery", "codex.jsonl");
   for (let ordinal = 0; ordinal < 75; ordinal += 1) await appendFile(activeTranscript, `${JSON.stringify({ record_type: "assistant.message", timestamp: `2026-07-22T09:${String(ordinal % 60).padStart(2, "0")}:00Z`, text: `Lazy archive record ${ordinal + 1}` })}\n`);
+  const plannerTranscript = join(controlLoopRoot, "planner-runs", "planner-synthetic-success", "codex.jsonl");
+  for (let ordinal = 0; ordinal < 75; ordinal += 1) await appendFile(plannerTranscript, `${JSON.stringify({ record_type: "assistant.message", text: `Progressive planner record ${ordinal + 1}`, compatible: { ordinal } })}\n`);
+  const plannerManifestPath = join(controlLoopRoot, "planner-runs", "planner-synthetic-success", "manifest.json");
+  const plannerManifest = JSON.parse(await readFile(plannerManifestPath, "utf8")) as { files: Array<{ path: string; byteSize: number; sha256: string }> };
+  const plannerBytes = await readFile(plannerTranscript);
+  const plannerDescriptor = plannerManifest.files.find((file) => file.path === "codex.jsonl");
+  assert(plannerDescriptor); plannerDescriptor.byteSize = plannerBytes.length; plannerDescriptor.sha256 = createHash("sha256").update(plannerBytes).digest("hex");
+  await writeFile(plannerManifestPath, `${JSON.stringify(plannerManifest, null, 2)}\n`);
 
   const server = spawn(process.execPath, [join(serverRoot, "server.js")], {
     cwd: serverRoot,
-    env: { ...process.env, HOSTNAME: "127.0.0.1", PORT: String(port), NODE_ENV: "production", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_RECONCILE_MS: "60000", COQUIC_STEWARD_BATCH_SIZE: "1" },
+    env: { ...process.env, HOSTNAME: "127.0.0.1", PORT: String(port), NODE_ENV: "production", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoopRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_RECONCILE_MS: "60000", COQUIC_STEWARD_BATCH_SIZE: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverOutput = "";
@@ -91,7 +102,7 @@ void (async () => {
     await waitForStatus(baseUrl, server);
     const playwright = spawn(process.execPath, [resolve(siteRoot, "node_modules/@playwright/test/cli.js"), "test", "tests/steward.spec.ts", "--config", "playwright.config.ts", "--workers=1"], {
       cwd: siteRoot,
-      env: { ...process.env, PLAYWRIGHT_BASE_URL: baseUrl, STEWARD_TEST_TASKS_ROOT: tasksRoot },
+      env: { ...process.env, PLAYWRIGHT_BASE_URL: baseUrl, STEWARD_TEST_TASKS_ROOT: tasksRoot, STEWARD_TEST_CONTROL_LOOP_ROOT: controlLoopRoot },
       stdio: "inherit",
     });
     const code = await new Promise<number>((resolveExit) => playwright.once("exit", (value) => resolveExit(value ?? 1)));

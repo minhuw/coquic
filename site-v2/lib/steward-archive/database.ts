@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const DATABASE_SCHEMA_VERSION = 5;
+export const DATABASE_SCHEMA_VERSION = 6;
 
 export interface DatabaseMeta {
   state: string;
@@ -201,6 +201,32 @@ export function openArchiveDatabase(cachePath: string) {
       UNIQUE(sequence)
     );
     CREATE INDEX IF NOT EXISTS control_records_order ON control_records(sequence, event_id);
+    CREATE TABLE IF NOT EXISTS control_record_staging (
+      import_token TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      byte_start INTEGER NOT NULL,
+      byte_end INTEGER NOT NULL,
+      occurred_at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      PRIMARY KEY(import_token, event_id),
+      UNIQUE(import_token, relative_path, ordinal),
+      UNIQUE(import_token, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS control_record_staging_order ON control_record_staging(import_token, sequence, event_id);
+    CREATE TABLE IF NOT EXISTS control_normalized_staging (
+      import_token TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      occurred_at TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      normalized_metadata TEXT NOT NULL,
+      PRIMARY KEY(import_token, event_id),
+      UNIQUE(import_token, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS control_normalized_staging_order ON control_normalized_staging(import_token, sequence, event_id);
     CREATE TABLE IF NOT EXISTS control_fetches (
       fetch_id TEXT PRIMARY KEY,
       provider TEXT NOT NULL,
@@ -324,12 +350,21 @@ export function openArchiveDatabase(cachePath: string) {
       edge_type TEXT NOT NULL,
       reason TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS control_pending_link_staging (
+      import_token TEXT NOT NULL,
+      edge_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      edge_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      PRIMARY KEY(import_token, edge_id)
+    );
   `);
   const existing = db.prepare("SELECT schema_version FROM archive_meta WHERE singleton = 1").get();
   if (!existing) db.prepare("INSERT INTO archive_meta(singleton, schema_version, state) VALUES(1, ?, 'indexing')").run(DATABASE_SCHEMA_VERSION);
   else if (Number(existing.schema_version) === DATABASE_SCHEMA_VERSION) {
     // Current schema is already present.
-  } else if (Number(existing.schema_version) === 4) {
+  } else if ([4, 5].includes(Number(existing.schema_version))) {
     db.prepare("UPDATE archive_meta SET schema_version=? WHERE singleton=1").run(DATABASE_SCHEMA_VERSION);
   } else throw new Error("unsupported archive cache schema");
   return db;

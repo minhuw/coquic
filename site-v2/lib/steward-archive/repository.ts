@@ -131,12 +131,42 @@ function renderPlannerValue(source: string) {
   let value: JsonRecord;
   try { value = JSON.parse(source) as JsonRecord; } catch { return { opaque: true, category: "unrecognized-record" }; }
   if (!isRecord(value)) return { opaque: true, category: "unrecognized-record" };
-  const type = typeof value.record_type === "string" ? value.record_type : typeof value.type === "string" ? value.type : "record";
-  const text = boundedString(value.text, 8_192) ?? boundedString(value.message, 8_192);
-  const command = boundedString(value.command, 2_048);
-  const output = boundedString(value.output, 8_192);
-  const role = boundedString(value.role, 64);
-  return Object.fromEntries(Object.entries({ record_type: type, role, text, command, output }).filter(([, item]) => item !== undefined));
+  return value;
+}
+
+async function readJsonlPage(handle: FileHandle, start: number, end: number, limit: number) {
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const records: JsonRecord[] = [];
+  let fragments: Buffer[] = [];
+  let position = start;
+  let nextOffset = start;
+  let reachedLimit = false;
+  while (position < end && !reachedLimit) {
+    const length = Math.min(buffer.length, end - position);
+    const { bytesRead } = await handle.read(buffer, 0, length, position);
+    if (bytesRead !== length) throw staleCursor("accepted planner transcript changed");
+    let chunkPosition = 0;
+    while (chunkPosition < bytesRead) {
+      const newline = buffer.indexOf(10, chunkPosition);
+      const segmentEnd = newline < 0 || newline >= bytesRead ? bytesRead : newline;
+      fragments.push(Buffer.from(buffer.subarray(chunkPosition, segmentEnd)));
+      if (newline < 0 || newline >= bytesRead) break;
+      const source = Buffer.concat(fragments).toString("utf8");
+      nextOffset = position + newline + 1;
+      fragments = [];
+      chunkPosition = newline + 1;
+      if (source.length > 0) records.push(renderPlannerValue(source));
+      if (records.length >= limit) { reachedLimit = true; break; }
+    }
+    position += bytesRead;
+    await yieldToEventLoop();
+  }
+  return {
+    records,
+    nextOffset,
+    hasMore: reachedLimit && nextOffset < end,
+    incompleteTail: !reachedLimit && position >= end && fragments.length > 0,
+  };
 }
 
 export class StewardArchiveRepository {
@@ -224,7 +254,7 @@ export class StewardArchiveRepository {
     const runIds = edges.filter((edge) => edge.edgeType === "signal_planner_run" && edge.sourceId === signalId).map((edge) => edge.targetId);
     const proposalIds = edges.filter((edge) => edge.edgeType === "signal_proposal" && edge.sourceId === signalId).map((edge) => edge.targetId);
     const plannerRuns = runIds.map((id) => this.db.prepare("SELECT planner_run_id, state, started_at, completed_at FROM control_planner_runs WHERE planner_run_id=?").get(id)).filter(Boolean).map((row) => ({ plannerRunId: String(row!.planner_run_id), state: String(row!.state), startedAt: String(row!.started_at), completedAt: row!.completed_at == null ? null : String(row!.completed_at) }));
-    const proposals = proposalIds.map((id) => this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, task_id FROM control_proposals WHERE proposal_id=?").get(id)).filter(Boolean).map((row) => ({ proposalId: String(row!.proposal_id), plannerRunId: String(row!.planner_run_id), ordinal: Number(row!.ordinal), outcome: String(row!.outcome), reasonCode: String(row!.reason_code), taskId: row!.task_id == null ? null : String(row!.task_id) }));
+    const proposals = proposalIds.map((id) => this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, task_id, EXISTS(SELECT 1 FROM tasks WHERE task_id=control_proposals.task_id) AS task_available FROM control_proposals WHERE proposal_id=?").get(id)).filter(Boolean).map((row) => ({ proposalId: String(row!.proposal_id), plannerRunId: String(row!.planner_run_id), ordinal: Number(row!.ordinal), outcome: String(row!.outcome), reasonCode: String(row!.reason_code), taskId: row!.task_id == null ? null : String(row!.task_id), taskAvailable: Boolean(row!.task_available) }));
     const fetchIds = [...new Set(observations.map((item) => item.fetchId))];
     const fetchEventIds = fetchIds.length ? this.db.prepare(`SELECT event_id FROM control_fetches WHERE fetch_id IN (${fetchIds.map(() => "?").join(",")})`).all(...fetchIds).map((row) => String(row.event_id)) : [];
     const eventIds = [String(signal.event_id), ...observations.map((row) => row.eventId), ...transitions.map((row) => row.eventId), ...edges.map((row) => row.eventId), ...fetchEventIds];
@@ -234,7 +264,7 @@ export class StewardArchiveRepository {
   async readSignalEvents(signalId: string, cursor?: string | null, limit = 50) {
     const detail = this.getSignalDetail(signalId); if (!detail) return null;
     const decoded = cursor ? decodeCursor(cursor) : null;
-    if (decoded && (decoded.scope !== "signal-events" || decoded.signalId !== signalId || decoded.revision !== this.controlRevision())) throw staleCursor("signal evidence cursor is stale");
+    if (decoded && (decoded.scope !== "signal-events" || decoded.signalId !== signalId)) throw staleCursor("signal evidence cursor is stale");
     const ids = new Set<string>([...detail.observations.map((item) => item.eventId), ...detail.transitions.map((item) => item.eventId), ...detail.edges.map((item) => item.eventId)]);
     const fetchIds = [...new Set(detail.observations.map((item) => item.fetchId))];
     if (fetchIds.length) {
@@ -261,17 +291,22 @@ export class StewardArchiveRepository {
         values.push({ eventId: String(row.event_id), sequence: Number(row.sequence), occurredAt: String(row.occurred_at), kind: String(row.kind), payload: event.payload });
       }
     } finally { for (const accepted of handles.values()) await accepted.handle.close(); }
-    const nextIndex = start + page.length; const nextCursor = nextIndex < records.length ? encodeCursor({ scope: "signal-events", signalId, revision: this.controlRevision(), generation, index: nextIndex }) : null;
-    return { signalId, records: values, nextCursor, hasMore: Boolean(nextCursor), revision: this.controlRevision() };
+    const nextIndex = start + page.length;
+    const cursorValue = encodeCursor({ scope: "signal-events", signalId, generation, index: nextIndex });
+    const nextCursor = nextIndex < records.length ? cursorValue : null;
+    return { signalId, records: values, nextCursor, resumeCursor: cursorValue, hasMore: Boolean(nextCursor), revision: this.controlRevision() };
   }
 
   getPlannerRunDetail(plannerRunId: string) {
     if (!isSafeId(plannerRunId)) return null;
     const run = this.db.prepare("SELECT * FROM control_planner_runs WHERE planner_run_id=?").get(plannerRunId); if (!run) return null;
-    const proposals = this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id FROM control_proposals WHERE planner_run_id=? ORDER BY ordinal").all(plannerRunId).map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), ordinal: Number(row.ordinal), outcome: String(row.outcome), reasonCode: String(row.reason_code), signalIds: JSON.parse(String(row.signal_ids)) as string[], dedupeKey: row.dedupe_key == null ? null : String(row.dedupe_key), taskId: row.task_id == null ? null : String(row.task_id), eventId: String(row.event_id) }));
+    const proposals = this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id, EXISTS(SELECT 1 FROM tasks WHERE task_id=control_proposals.task_id) AS task_available FROM control_proposals WHERE planner_run_id=? ORDER BY ordinal").all(plannerRunId).map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), ordinal: Number(row.ordinal), outcome: String(row.outcome), reasonCode: String(row.reason_code), signalIds: JSON.parse(String(row.signal_ids)) as string[], dedupeKey: row.dedupe_key == null ? null : String(row.dedupe_key), taskId: row.task_id == null ? null : String(row.task_id), taskAvailable: Boolean(row.task_available), eventId: String(row.event_id) }));
     const edges = this.db.prepare("SELECT edge_id, edge_type, source_id, target_id, created_at, event_id FROM control_edges WHERE source_id=? OR target_id=? ORDER BY created_at, edge_id").all(plannerRunId, plannerRunId).map((row) => ({ edgeId: String(row.edge_id), edgeType: String(row.edge_type), sourceId: String(row.source_id), targetId: String(row.target_id), createdAt: String(row.created_at), eventId: String(row.event_id) }));
     const artifacts = this.db.prepare("SELECT relative_path, media_type, availability, declared_size, declared_sha256, actual_size, status FROM control_artifacts WHERE planner_run_id=? ORDER BY relative_path").all(plannerRunId).map((row) => ({ path: String(row.relative_path), mediaType: row.media_type == null ? null : String(row.media_type), availability: String(row.availability), size: row.actual_size == null ? Number(row.declared_size) : Number(row.actual_size), sha256: String(row.declared_sha256), status: String(row.status) }));
-    return { plannerRunId, state: String(run.state), epochId: String(run.epoch_id), startedAt: String(run.started_at), completedAt: run.completed_at == null ? null : String(run.completed_at), inputSignalIds: JSON.parse(String(run.input_signal_ids)) as string[], activeTaskIds: JSON.parse(String(run.active_task_ids)) as string[], proposals, edges, artifacts, revision: this.controlRevision() };
+    const wakeups = this.db.prepare("SELECT wakeup_id, reason, status, created_at, consumed_at, input_signal_ids, event_id FROM control_wakeups ORDER BY created_at DESC, wakeup_id DESC LIMIT 50").all().map((row) => ({ wakeupId: String(row.wakeup_id), reason: String(row.reason), status: String(row.status), createdAt: String(row.created_at), consumedAt: row.consumed_at == null ? null : String(row.consumed_at), inputSignalIds: JSON.parse(String(row.input_signal_ids)) as string[], eventId: String(row.event_id) }));
+    const currentRow = this.db.prepare("SELECT generated_at, pending_signal_count, active_planner_run_id, status FROM control_current WHERE singleton=1").get();
+    const current = currentRow ? { generatedAt: String(currentRow.generated_at), pendingSignalCount: currentRow.pending_signal_count == null ? null : Number(currentRow.pending_signal_count), activePlannerRunId: currentRow.active_planner_run_id == null ? null : String(currentRow.active_planner_run_id), status: String(currentRow.status) } : null;
+    return { plannerRunId, state: String(run.state), epochId: String(run.epoch_id), startedAt: String(run.started_at), completedAt: run.completed_at == null ? null : String(run.completed_at), inputSignalIds: JSON.parse(String(run.input_signal_ids)) as string[], activeTaskIds: JSON.parse(String(run.active_task_ids)) as string[], wakeups, current, proposals, edges, artifacts, revision: this.controlRevision() };
   }
 
   getTaskProvenance(taskId: string) {
@@ -288,14 +323,17 @@ export class StewardArchiveRepository {
     const artifact = detail.artifacts.find((item) => item.path === artifactPath); if (!artifact || artifact.status !== "verified") throw new Error("planner artifact is unavailable");
     const accepted = await this.acceptedControlArtifact(plannerRunId, artifactPath);
     try {
-      const bytes = await readHandleRange(accepted.handle, 0, accepted.size);
-      const completeEnd = bytes.lastIndexOf(10) + 1;
       const decoded = cursor ? decodeCursor(cursor) : null;
-      if (decoded && (decoded.scope !== "planner-transcript" || decoded.plannerRunId !== plannerRunId || decoded.path !== artifactPath || decoded.revision !== this.controlRevision() || decoded.fileRevision !== artifact.sha256)) throw staleCursor("planner transcript cursor is stale");
-      const startLine = decoded ? Number(decoded.line) : 0;
-      if (!Number.isSafeInteger(startLine) || startLine < 0) throw invalidCursor();
-      const lines = bytes.subarray(0, completeEnd).toString("utf8").split("\n").filter((line) => line.length > 0); const bounded = Math.min(100, Math.max(1, Math.floor(limit))); const page = lines.slice(startLine, startLine + bounded).map((line, index) => ({ ordinal: startLine + index, value: renderPlannerValue(line) })); const nextLine = startLine + page.length; const nextCursor = nextLine < lines.length ? encodeCursor({ scope: "planner-transcript", plannerRunId, path: artifactPath, revision: this.controlRevision(), fileRevision: artifact.sha256, line: nextLine }) : null;
-      return { plannerRunId, artifact: artifactPath, records: page, nextCursor, hasMore: Boolean(nextCursor), revision: this.controlRevision(), incompleteTail: completeEnd < bytes.length };
+      if (decoded && (decoded.scope !== "planner-transcript" || decoded.plannerRunId !== plannerRunId || decoded.path !== artifactPath || decoded.fileRevision !== artifact.sha256)) throw staleCursor("planner transcript cursor is stale");
+      const start = decoded ? Number(decoded.offset) : 0;
+      const startOrdinal = decoded ? Number(decoded.ordinal) : 0;
+      if (!Number.isSafeInteger(start) || start < 0 || start > accepted.size || !Number.isSafeInteger(startOrdinal) || startOrdinal < 0) throw invalidCursor();
+      const bounded = Math.min(100, Math.max(1, Math.floor(limit)));
+      const page = await readJsonlPage(accepted.handle, start, accepted.size, bounded);
+      const records = page.records.map((value, index) => ({ ordinal: startOrdinal + index, value }));
+      const nextOrdinal = startOrdinal + records.length;
+      const cursorValue = encodeCursor({ scope: "planner-transcript", plannerRunId, path: artifactPath, fileRevision: artifact.sha256, offset: page.nextOffset, ordinal: nextOrdinal });
+      return { plannerRunId, artifact: artifactPath, records, nextCursor: page.hasMore ? cursorValue : null, resumeCursor: cursorValue, hasMore: page.hasMore, revision: this.controlRevision(), incompleteTail: page.incompleteTail };
     } finally { await accepted.handle.close(); }
   }
 

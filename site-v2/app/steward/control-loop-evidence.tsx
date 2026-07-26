@@ -5,9 +5,28 @@ import { useEffect, useRef, useState } from "react";
 type EvidenceRecord = { eventId?: string; sequence?: number; occurredAt?: string; kind?: string; ordinal?: number; value?: Record<string, unknown>; payload?: Record<string, unknown> };
 type EvidencePage = { records: EvidenceRecord[]; nextCursor: string | null; resumeCursor: string };
 
-function mergeRecords(current: EvidenceRecord[], incoming: EvidenceRecord[], key: (record: EvidenceRecord) => string) {
+export function mergeEvidenceRecords(current: EvidenceRecord[], incoming: EvidenceRecord[], key: (record: EvidenceRecord) => string) {
   const seen = new Set(current.map(key));
   return [...current, ...incoming.filter((record) => !seen.has(key(record)) && seen.add(key(record)))];
+}
+
+export async function loadEvidenceFrontier(request: (cursor: string | null) => Promise<EvidencePage>, cursor: string | null, key: (record: EvidenceRecord) => string) {
+  let page = await request(cursor);
+  let records = page.records;
+  while (page.nextCursor) {
+    page = await request(page.nextCursor);
+    records = mergeEvidenceRecords(records, page.records, key);
+  }
+  return { ...page, records };
+}
+
+export async function refreshEvidenceFrontier(request: (cursor: string | null) => Promise<EvidencePage>, cursor: string | null, key: (record: EvidenceRecord) => string) {
+  try {
+    return await loadEvidenceFrontier(request, cursor, key);
+  } catch (error) {
+    if ((error as { status?: number }).status !== 409) throw error;
+    return loadEvidenceFrontier(request, null, key);
+  }
 }
 
 export function SignalEvidence({ signalId }: { signalId: string }) {
@@ -25,7 +44,7 @@ export function SignalEvidence({ signalId }: { signalId: string }) {
     return body.data;
   };
   const apply = (page: EvidencePage, replace: boolean) => {
-    const next = replace ? page.records : mergeRecords(recordsRef.current, page.records, (record) => String(record.eventId));
+    const next = replace ? page.records : mergeEvidenceRecords(recordsRef.current, page.records, (record) => String(record.eventId));
     recordsRef.current = next; setRecords(next); setCursor(page.nextCursor); resumeRef.current = page.resumeCursor;
   };
   const load = async (next: string | null, replace = false) => {
@@ -36,19 +55,9 @@ export function SignalEvidence({ signalId }: { signalId: string }) {
   useEffect(() => {
     const refresh = async () => {
       setLoading(true); setError(false);
-      try {
-        if (resumeRef.current) apply(await request(resumeRef.current), false);
-        else apply(await request(null), recordsRef.current.length === 0);
-      } catch (refreshError) {
-        if ((refreshError as { status?: number }).status !== 409) { setError(true); return; }
-        try {
-          const target = recordsRef.current.length;
-          let page = await request(null);
-          let fresh = page.records;
-          while (page.nextCursor && fresh.length < target) { page = await request(page.nextCursor); fresh = mergeRecords(fresh, page.records, (record) => String(record.eventId)); }
-          recordsRef.current = fresh; setRecords(fresh); setCursor(page.nextCursor); resumeRef.current = page.resumeCursor;
-        } catch { setError(true); }
-      } finally { setLoading(false); }
+      try { apply(await refreshEvidenceFrontier(request, resumeRef.current, (record) => String(record.eventId)), false); }
+      catch { setError(true); }
+      finally { setLoading(false); }
     };
     const onRevision = () => { void refresh(); };
     window.addEventListener("steward-revision", onRevision);
@@ -74,7 +83,7 @@ export function PlannerTranscript({ plannerRunId, artifact = "codex.jsonl" }: { 
     return body.data;
   };
   const apply = (page: EvidencePage, replace: boolean) => {
-    const next = replace ? page.records : mergeRecords(recordsRef.current, page.records, (record) => String(record.ordinal));
+    const next = replace ? page.records : mergeEvidenceRecords(recordsRef.current, page.records, (record) => String(record.ordinal));
     recordsRef.current = next; setRecords(next); setCursor(page.nextCursor); resumeRef.current = page.resumeCursor;
   };
   const load = async (next: string | null, replace = false) => {
@@ -85,7 +94,7 @@ export function PlannerTranscript({ plannerRunId, artifact = "codex.jsonl" }: { 
   useEffect(() => {
     const refresh = async () => {
       setLoading(true); setError(false);
-      try { apply(await request(resumeRef.current), recordsRef.current.length === 0); }
+      try { apply(await loadEvidenceFrontier(request, resumeRef.current, (record) => String(record.ordinal)), recordsRef.current.length === 0); }
       catch { setError(true); }
       finally { setLoading(false); }
     };

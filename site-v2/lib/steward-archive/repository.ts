@@ -112,6 +112,18 @@ async function readHandleRange(handle: FileHandle, start: number, end: number) {
   return buffer;
 }
 
+type AcceptedArtifactIdentity = { size: string; deviceId: string; inodeId: string; mtimeNs: string; ctimeNs: string };
+
+async function matchesArtifactIdentity(handle: FileHandle, expected: AcceptedArtifactIdentity) {
+  const actual = await handle.stat({ bigint: true });
+  return actual.isFile()
+    && String(actual.size) === expected.size
+    && String(actual.dev) === expected.deviceId
+    && String(actual.ino) === expected.inodeId
+    && String(actual.mtimeNs) === expected.mtimeNs
+    && String(actual.ctimeNs) === expected.ctimeNs;
+}
+
 const KNOWN_TRANSCRIPT_TYPES = new Set(["assistant.message", "user.message", "tool.call", "tool.result", "file.change", "synthetic.assistant", "synthetic.tool"]);
 function boundedString(value: unknown, limit: number) { return typeof value === "string" ? value.slice(0, limit) : undefined; }
 function renderTranscriptValue(source: string, indexedType: unknown) {
@@ -210,11 +222,11 @@ export class StewardArchiveRepository {
     const decoded = cursor ? decodeCursor(cursor) : null;
     if (decoded && (decoded.scope !== "signals" || typeof decoded.revision !== "number" || decoded.revision !== this.controlRevision() || !["next", "previous"].includes(String(decoded.direction)))) throw staleCursor("signal list cursor is stale");
     let rows: Array<Record<string, unknown>>;
-    if (!decoded) rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, (SELECT count(*) FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN tasks t ON t.task_id=p.task_id WHERE e.edge_type='signal_proposal' AND e.source_id=s.signal_id) AS task_count FROM control_signals s ORDER BY s.updated_at DESC, s.signal_id DESC LIMIT ?`).all(bounded);
+    if (!decoded) rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, (SELECT count(DISTINCT pt.target_id) FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN control_edges pt ON pt.edge_type='proposal_task' AND pt.source_id=p.proposal_id AND pt.target_id=p.task_id JOIN tasks t ON t.task_id=pt.target_id WHERE e.edge_type='signal_proposal' AND e.source_id=s.signal_id) AS task_count FROM control_signals s ORDER BY s.updated_at DESC, s.signal_id DESC LIMIT ?`).all(bounded);
     else {
       if (typeof decoded.updatedAt !== "string" || typeof decoded.signalId !== "string" || !isSafeId(decoded.signalId)) throw invalidCursor();
       const updatedAt = decoded.updatedAt; const signalId = decoded.signalId;
-      const taskCount = "(SELECT count(DISTINCT p.task_id) FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN tasks t ON t.task_id=p.task_id WHERE e.edge_type='signal_proposal' AND e.source_id=s.signal_id) AS task_count";
+      const taskCount = "(SELECT count(DISTINCT pt.target_id) FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN control_edges pt ON pt.edge_type='proposal_task' AND pt.source_id=p.proposal_id AND pt.target_id=p.task_id JOIN tasks t ON t.task_id=pt.target_id WHERE e.edge_type='signal_proposal' AND e.source_id=s.signal_id) AS task_count";
       if (decoded.direction === "next") rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, ${taskCount} FROM control_signals s WHERE (s.updated_at < ? OR (s.updated_at=? AND s.signal_id<?)) ORDER BY s.updated_at DESC, s.signal_id DESC LIMIT ?`).all(updatedAt, updatedAt, signalId, bounded);
       else rows = this.db.prepare(`SELECT s.*, (SELECT count(*) FROM control_observations o WHERE o.canonical_signal_id=s.signal_id) AS observation_count, (SELECT count(*) FROM control_edges e WHERE e.edge_type='signal_planner_run' AND e.source_id=s.signal_id) AS planner_run_count, ${taskCount} FROM control_signals s WHERE (s.updated_at > ? OR (s.updated_at=? AND s.signal_id>?)) ORDER BY s.updated_at ASC, s.signal_id ASC LIMIT ?`).all(updatedAt, updatedAt, signalId, bounded).reverse();
     }
@@ -230,11 +242,11 @@ export class StewardArchiveRepository {
     const decoded = cursor ? decodeCursor(cursor) : null;
     if (decoded && (decoded.scope !== "planner-runs" || typeof decoded.revision !== "number" || decoded.revision !== this.controlRevision() || !["next", "previous"].includes(String(decoded.direction)))) throw staleCursor("planner-run list cursor is stale");
     let rows: Array<Record<string, unknown>>;
-    if (!decoded) rows = this.db.prepare(`SELECT r.*, (SELECT count(*) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id) AS proposal_count, (SELECT json_array_length(r.input_signal_ids)) AS input_signal_count, (SELECT count(DISTINCT p.task_id) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id AND p.task_id IS NOT NULL) AS task_count FROM control_planner_runs r ORDER BY r.started_at DESC, r.planner_run_id DESC LIMIT ?`).all(bounded);
+    if (!decoded) rows = this.db.prepare(`SELECT r.*, (SELECT count(*) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id) AS proposal_count, (SELECT json_array_length(r.input_signal_ids)) AS input_signal_count, (SELECT count(DISTINCT pt.target_id) FROM control_proposals p JOIN control_edges pt ON pt.edge_type='proposal_task' AND pt.source_id=p.proposal_id AND pt.target_id=p.task_id JOIN tasks t ON t.task_id=pt.target_id WHERE p.planner_run_id=r.planner_run_id) AS task_count FROM control_planner_runs r ORDER BY r.started_at DESC, r.planner_run_id DESC LIMIT ?`).all(bounded);
     else {
       if (typeof decoded.startedAt !== "string" || typeof decoded.plannerRunId !== "string" || !isSafeId(decoded.plannerRunId)) throw invalidCursor();
       const startedAt = decoded.startedAt; const runId = decoded.plannerRunId;
-      const query = `SELECT r.*, (SELECT count(*) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id) AS proposal_count, (SELECT json_array_length(r.input_signal_ids)) AS input_signal_count, (SELECT count(DISTINCT p.task_id) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id AND p.task_id IS NOT NULL) AS task_count FROM control_planner_runs r WHERE (r.started_at ${decoded.direction === "next" ? "<" : ">"} ? OR (r.started_at=? AND r.planner_run_id ${decoded.direction === "next" ? "<" : ">"} ?)) ORDER BY r.started_at ${decoded.direction === "next" ? "DESC" : "ASC"}, r.planner_run_id ${decoded.direction === "next" ? "DESC" : "ASC"} LIMIT ?`;
+      const query = `SELECT r.*, (SELECT count(*) FROM control_proposals p WHERE p.planner_run_id=r.planner_run_id) AS proposal_count, (SELECT json_array_length(r.input_signal_ids)) AS input_signal_count, (SELECT count(DISTINCT pt.target_id) FROM control_proposals p JOIN control_edges pt ON pt.edge_type='proposal_task' AND pt.source_id=p.proposal_id AND pt.target_id=p.task_id JOIN tasks t ON t.task_id=pt.target_id WHERE p.planner_run_id=r.planner_run_id) AS task_count FROM control_planner_runs r WHERE (r.started_at ${decoded.direction === "next" ? "<" : ">"} ? OR (r.started_at=? AND r.planner_run_id ${decoded.direction === "next" ? "<" : ">"} ?)) ORDER BY r.started_at ${decoded.direction === "next" ? "DESC" : "ASC"}, r.planner_run_id ${decoded.direction === "next" ? "DESC" : "ASC"} LIMIT ?`;
       rows = this.db.prepare(query).all(startedAt, startedAt, runId, bounded); if (decoded.direction === "previous") rows.reverse();
     }
     const items = rows.map((row) => ({ plannerRunId: String(row.planner_run_id), state: String(row.state), startedAt: String(row.started_at), completedAt: row.completed_at == null ? null : String(row.completed_at), proposalCount: Number(row.proposal_count ?? 0), inputSignalCount: Number(row.input_signal_count ?? 0), taskCount: Number(row.task_count ?? 0) }));
@@ -254,7 +266,7 @@ export class StewardArchiveRepository {
     const runIds = edges.filter((edge) => edge.edgeType === "signal_planner_run" && edge.sourceId === signalId).map((edge) => edge.targetId);
     const proposalIds = edges.filter((edge) => edge.edgeType === "signal_proposal" && edge.sourceId === signalId).map((edge) => edge.targetId);
     const plannerRuns = runIds.map((id) => this.db.prepare("SELECT planner_run_id, state, started_at, completed_at FROM control_planner_runs WHERE planner_run_id=?").get(id)).filter(Boolean).map((row) => ({ plannerRunId: String(row!.planner_run_id), state: String(row!.state), startedAt: String(row!.started_at), completedAt: row!.completed_at == null ? null : String(row!.completed_at) }));
-    const proposals = proposalIds.map((id) => this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, task_id, EXISTS(SELECT 1 FROM tasks WHERE task_id=control_proposals.task_id) AS task_available FROM control_proposals WHERE proposal_id=?").get(id)).filter(Boolean).map((row) => ({ proposalId: String(row!.proposal_id), plannerRunId: String(row!.planner_run_id), ordinal: Number(row!.ordinal), outcome: String(row!.outcome), reasonCode: String(row!.reason_code), taskId: row!.task_id == null ? null : String(row!.task_id), taskAvailable: Boolean(row!.task_available) }));
+    const proposals = proposalIds.map((id) => this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, task_id, EXISTS(SELECT 1 FROM control_edges edge JOIN tasks task ON task.task_id=edge.target_id WHERE edge.edge_type='proposal_task' AND edge.source_id=control_proposals.proposal_id AND edge.target_id=control_proposals.task_id) AS task_available FROM control_proposals WHERE proposal_id=?").get(id)).filter(Boolean).map((row) => ({ proposalId: String(row!.proposal_id), plannerRunId: String(row!.planner_run_id), ordinal: Number(row!.ordinal), outcome: String(row!.outcome), reasonCode: String(row!.reason_code), taskId: row!.task_id == null ? null : String(row!.task_id), taskAvailable: Boolean(row!.task_available) }));
     const fetchIds = [...new Set(observations.map((item) => item.fetchId))];
     const fetchEventIds = fetchIds.length ? this.db.prepare(`SELECT event_id FROM control_fetches WHERE fetch_id IN (${fetchIds.map(() => "?").join(",")})`).all(...fetchIds).map((row) => String(row.event_id)) : [];
     const eventIds = [String(signal.event_id), ...observations.map((row) => row.eventId), ...transitions.map((row) => row.eventId), ...edges.map((row) => row.eventId), ...fetchEventIds];
@@ -300,7 +312,7 @@ export class StewardArchiveRepository {
   getPlannerRunDetail(plannerRunId: string) {
     if (!isSafeId(plannerRunId)) return null;
     const run = this.db.prepare("SELECT * FROM control_planner_runs WHERE planner_run_id=?").get(plannerRunId); if (!run) return null;
-    const proposals = this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id, EXISTS(SELECT 1 FROM tasks WHERE task_id=control_proposals.task_id) AS task_available FROM control_proposals WHERE planner_run_id=? ORDER BY ordinal").all(plannerRunId).map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), ordinal: Number(row.ordinal), outcome: String(row.outcome), reasonCode: String(row.reason_code), signalIds: JSON.parse(String(row.signal_ids)) as string[], dedupeKey: row.dedupe_key == null ? null : String(row.dedupe_key), taskId: row.task_id == null ? null : String(row.task_id), taskAvailable: Boolean(row.task_available), eventId: String(row.event_id) }));
+    const proposals = this.db.prepare("SELECT proposal_id, planner_run_id, ordinal, outcome, reason_code, signal_ids, dedupe_key, task_id, event_id, EXISTS(SELECT 1 FROM control_edges edge JOIN tasks task ON task.task_id=edge.target_id WHERE edge.edge_type='proposal_task' AND edge.source_id=control_proposals.proposal_id AND edge.target_id=control_proposals.task_id) AS task_available FROM control_proposals WHERE planner_run_id=? ORDER BY ordinal").all(plannerRunId).map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), ordinal: Number(row.ordinal), outcome: String(row.outcome), reasonCode: String(row.reason_code), signalIds: JSON.parse(String(row.signal_ids)) as string[], dedupeKey: row.dedupe_key == null ? null : String(row.dedupe_key), taskId: row.task_id == null ? null : String(row.task_id), taskAvailable: Boolean(row.task_available), eventId: String(row.event_id) }));
     const edges = this.db.prepare("SELECT edge_id, edge_type, source_id, target_id, created_at, event_id FROM control_edges WHERE source_id=? OR target_id=? ORDER BY created_at, edge_id").all(plannerRunId, plannerRunId).map((row) => ({ edgeId: String(row.edge_id), edgeType: String(row.edge_type), sourceId: String(row.source_id), targetId: String(row.target_id), createdAt: String(row.created_at), eventId: String(row.event_id) }));
     const artifacts = this.db.prepare("SELECT relative_path, media_type, availability, declared_size, declared_sha256, actual_size, status FROM control_artifacts WHERE planner_run_id=? ORDER BY relative_path").all(plannerRunId).map((row) => ({ path: String(row.relative_path), mediaType: row.media_type == null ? null : String(row.media_type), availability: String(row.availability), size: row.actual_size == null ? Number(row.declared_size) : Number(row.actual_size), sha256: String(row.declared_sha256), status: String(row.status) }));
     const wakeups = this.db.prepare("SELECT wakeup_id, reason, status, created_at, consumed_at, input_signal_ids, event_id FROM control_wakeups ORDER BY created_at DESC, wakeup_id DESC LIMIT 50").all().map((row) => ({ wakeupId: String(row.wakeup_id), reason: String(row.reason), status: String(row.status), createdAt: String(row.created_at), consumedAt: row.consumed_at == null ? null : String(row.consumed_at), inputSignalIds: JSON.parse(String(row.input_signal_ids)) as string[], eventId: String(row.event_id) }));
@@ -311,7 +323,7 @@ export class StewardArchiveRepository {
 
   getTaskProvenance(taskId: string) {
     if (!isSafeId(taskId)) return null;
-    const rows = this.db.prepare("SELECT p.proposal_id, p.planner_run_id, p.outcome, p.reason_code FROM control_proposals p JOIN control_edges e ON e.edge_type='proposal_task' AND e.source_id=p.proposal_id AND e.target_id=? ORDER BY p.planner_run_id, p.ordinal").all(taskId);
+    const rows = this.db.prepare("SELECT p.proposal_id, p.planner_run_id, p.outcome, p.reason_code FROM control_proposals p JOIN control_edges e ON e.edge_type='proposal_task' AND e.source_id=p.proposal_id AND e.target_id=p.task_id JOIN tasks t ON t.task_id=e.target_id WHERE e.target_id=? ORDER BY p.planner_run_id, p.ordinal").all(taskId);
     if (!rows.length) return null;
     const proposals = rows.map((row) => ({ proposalId: String(row.proposal_id), plannerRunId: String(row.planner_run_id), outcome: String(row.outcome), reasonCode: String(row.reason_code) }));
     const signals = this.db.prepare("SELECT DISTINCT e.source_id FROM control_edges e JOIN control_proposals p ON p.proposal_id=e.target_id JOIN control_edges pt ON pt.edge_type='proposal_task' AND pt.source_id=p.proposal_id AND pt.target_id=? WHERE e.edge_type='signal_proposal' ORDER BY e.source_id").all(taskId).map((row) => String(row.source_id));
@@ -330,6 +342,7 @@ export class StewardArchiveRepository {
       if (!Number.isSafeInteger(start) || start < 0 || start > accepted.size || !Number.isSafeInteger(startOrdinal) || startOrdinal < 0) throw invalidCursor();
       const bounded = Math.min(100, Math.max(1, Math.floor(limit)));
       const page = await readJsonlPage(accepted.handle, start, accepted.size, bounded);
+      if (!await matchesArtifactIdentity(accepted.handle, accepted.identity)) throw staleCursor("planner artifact identity changed");
       const records = page.records.map((value, index) => ({ ordinal: startOrdinal + index, value }));
       const nextOrdinal = startOrdinal + records.length;
       const cursorValue = encodeCursor({ scope: "planner-transcript", plannerRunId, path: artifactPath, fileRevision: artifact.sha256, offset: page.nextOffset, ordinal: nextOrdinal });
@@ -343,7 +356,12 @@ export class StewardArchiveRepository {
     if (!row) throw new Error("planner artifact is unavailable");
     const resolved = await openControlArtifact(this.config.controlLoopRoot, `planner-runs/${plannerRunId}/${relativePath}`);
     const handle = await open(resolved.path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try { const actual = await handle.stat(); if (!actual.isFile() || actual.size !== Number(row.declared_size) || await hashHandlePrefix(handle, actual.size) !== String(row.declared_sha256)) throw staleCursor("planner artifact identity changed"); return { handle, path: resolved.path, size: actual.size }; } catch (error) { await handle.close(); throw error; }
+    try {
+      if ([row.device_id, row.inode_id, row.mtime_ns, row.ctime_ns].some((value) => value == null)) throw staleCursor("planner artifact identity is unavailable");
+      const identity = { size: String(row.declared_size), deviceId: String(row.device_id), inodeId: String(row.inode_id), mtimeNs: String(row.mtime_ns), ctimeNs: String(row.ctime_ns) };
+      if (!await matchesArtifactIdentity(handle, identity)) throw staleCursor("planner artifact identity changed");
+      return { handle, path: resolved.path, size: Number(row.declared_size), identity };
+    } catch (error) { await handle.close(); throw error; }
   }
 
   private async acceptedControlFile(relativePath: string) {

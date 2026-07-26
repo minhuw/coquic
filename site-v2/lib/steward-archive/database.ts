@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 
-export const DATABASE_SCHEMA_VERSION = 6;
+export const DATABASE_SCHEMA_VERSION = 7;
 
 export interface DatabaseMeta {
   state: string;
@@ -327,6 +327,10 @@ export function openArchiveDatabase(cachePath: string) {
       declared_size INTEGER NOT NULL,
       declared_sha256 TEXT NOT NULL,
       actual_size INTEGER,
+      device_id TEXT,
+      inode_id TEXT,
+      mtime_ns TEXT,
+      ctime_ns TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       PRIMARY KEY(planner_run_id, relative_path)
     );
@@ -364,8 +368,19 @@ export function openArchiveDatabase(cachePath: string) {
   if (!existing) db.prepare("INSERT INTO archive_meta(singleton, schema_version, state) VALUES(1, ?, 'indexing')").run(DATABASE_SCHEMA_VERSION);
   else if (Number(existing.schema_version) === DATABASE_SCHEMA_VERSION) {
     // Current schema is already present.
-  } else if ([4, 5].includes(Number(existing.schema_version))) {
-    db.prepare("UPDATE archive_meta SET schema_version=? WHERE singleton=1").run(DATABASE_SCHEMA_VERSION);
+  } else if ([4, 5, 6].includes(Number(existing.schema_version))) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const columns = new Set(db.prepare("PRAGMA table_info(control_artifacts)").all().map((row) => String(row.name)));
+      for (const column of ["device_id", "inode_id", "mtime_ns", "ctime_ns"]) {
+        if (!columns.has(column)) db.exec(`ALTER TABLE control_artifacts ADD COLUMN ${column} TEXT`);
+      }
+      db.prepare("UPDATE archive_meta SET schema_version=? WHERE singleton=1").run(DATABASE_SCHEMA_VERSION);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   } else throw new Error("unsupported archive cache schema");
   return db;
 }

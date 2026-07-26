@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { getArchiveConfig } from "@/lib/steward-archive/config";
+import { DATABASE_SCHEMA_VERSION, openArchiveDatabase } from "@/lib/steward-archive/database";
 import { StewardArchiveImporter } from "@/lib/steward-archive/importer";
 import { StewardArchiveRepository } from "@/lib/steward-archive/repository";
 import { resolveArchiveSelection } from "@/app/steward/archive-selection";
+import { mergeEvidenceRecords, refreshEvidenceFrontier } from "@/app/steward/control-loop-evidence";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "coquic-control-loop-"));
@@ -154,6 +156,8 @@ test("selected readers expose complete records and manifest-verified downloads o
   const artifact = await state.repository.readPlannerArtifact("planner-synthetic-success", "prompt.md");
   const chunks: Buffer[] = []; for await (const chunk of artifact.stream) chunks.push(Buffer.from(chunk));
   assert.match(Buffer.concat(chunks).toString("utf8"), /Current signal/);
+  assert.equal(state.repository.getTaskProvenance("task-synthetic-accepted"), null);
+  state.importer.db.prepare("INSERT INTO tasks(task_id, epoch_id, status, title, summary, prompt_path, events_path, current_pipeline_id, created_at, updated_at, archive_state, root_relative_path) SELECT 'task-synthetic-accepted', epoch_id, status, title, summary, prompt_path, events_path, current_pipeline_id, created_at, updated_at, archive_state, root_relative_path FROM tasks LIMIT 1").run();
   assert(state.repository.getTaskProvenance("task-synthetic-accepted"));
   state.importer.db.prepare("DELETE FROM control_edges WHERE edge_type='proposal_task' AND target_id=?").run("task-synthetic-accepted");
   assert.equal(state.repository.getTaskProvenance("task-synthetic-accepted"), null);
@@ -181,6 +185,21 @@ test("F008 large event replacement is staged in bounded batches before generatio
   assert.equal(state.importer.db.prepare("SELECT count(*) AS count FROM control_record_staging").get()?.count, 0);
   assert.equal(state.importer.db.prepare("SELECT count(*) AS count FROM control_normalized_staging").get()?.count, 0);
   assert.equal(state.importer.db.prepare("SELECT complete_records FROM control_files WHERE relative_path='events/2026/07/24.jsonl'").get()?.complete_records, 257);
+
+  const august = join(state.controlLoopRoot, "events/2026/08");
+  await mkdir(august, { recursive: true });
+  for (let index = 0; index < 12; index += 1) {
+    const sequence = 257 + index;
+    const event = { eventId: `event-ledger-${sequence}`, epochId: "epoch-synthetic-20260722", sequence, occurredAt: `2026-08-${String(index + 1).padStart(2, "0")}T00:00:00Z`, kind: "daemon.runtime", payload: { state: "running", instanceId: `instance-ledger-${sequence}` } };
+    await writeFile(join(august, `${String(index + 1).padStart(2, "0")}.jsonl`), `${JSON.stringify(event)}\n`);
+  }
+  await state.importer.reconcile();
+  assert.equal(state.importer.db.prepare("SELECT count(*) AS count FROM control_records").get()?.count, 269);
+
+  await rm(join(august, "01.jsonl"));
+  await state.importer.reconcile();
+  assert.equal(state.importer.db.prepare("SELECT count(*) AS count FROM control_records WHERE event_id='event-ledger-257'").get()?.count, 0);
+  assert.equal(state.importer.db.prepare("SELECT count(*) AS count FROM control_records").get()?.count, 268);
 });
 
 test("F009 duplicate same-file append rejects the complete append atomically", async (t) => {
@@ -208,12 +227,65 @@ test("F010 planner transcript byte cursors preserve long and arbitrary compatibl
   const artifactPath = join(directory, "codex.jsonl");
   await writeFile(artifactPath, source);
   const sha256 = createHash("sha256").update(source).digest("hex");
+  const identity = await stat(artifactPath, { bigint: true });
   state.importer.db.prepare("INSERT INTO control_planner_runs(planner_run_id, epoch_id, state, started_at, completed_at, input_signal_ids, active_task_ids, started_event_id, finished_event_id) VALUES(?, 'epoch-synthetic-20260722', 'succeeded', '2026-07-25T00:00:00Z', '2026-07-25T00:00:01Z', '[]', '[]', ?, NULL)").run(runId, `manifest:${runId}`);
-  state.importer.db.prepare("INSERT INTO control_artifacts(planner_run_id, relative_path, media_type, availability, declared_size, declared_sha256, actual_size, status) VALUES(?, 'codex.jsonl', 'application/x-ndjson', 'available', ?, ?, ?, 'verified')").run(runId, Buffer.byteLength(source), sha256, Buffer.byteLength(source));
+  state.importer.db.prepare("INSERT INTO control_artifacts(planner_run_id, relative_path, media_type, availability, declared_size, declared_sha256, actual_size, device_id, inode_id, mtime_ns, ctime_ns, status) VALUES(?, 'codex.jsonl', 'application/x-ndjson', 'available', ?, ?, ?, ?, ?, ?, ?, 'verified')").run(runId, Buffer.byteLength(source), sha256, Buffer.byteLength(source), String(identity.dev), String(identity.ino), String(identity.mtimeNs), String(identity.ctimeNs));
+
+  const probe = await open(artifactPath, "r");
+  const prototype = Object.getPrototypeOf(probe) as { read: (...args: unknown[]) => Promise<{ bytesRead: number }> };
+  const originalRead = prototype.read;
+  await probe.close();
+  let bytesRead = 0;
+  t.mock.method(prototype, "read", async function (this: object, ...args: unknown[]) {
+    const result = await originalRead.apply(this, args);
+    bytesRead += result.bytesRead;
+    return result;
+  });
   const first = await state.repository.readPlannerTranscript(runId, null, 1);
   assert(first); assert.equal(first.records[0].value.text, longText); assert.deepEqual(first.records[0].value.compatible, { nested: [1, 2, 3] }); assert(first.nextCursor);
+  assert(bytesRead <= Buffer.byteLength(source));
+  bytesRead = 0;
   const second = await state.repository.readPlannerTranscript(runId, first.nextCursor, 1);
   assert(second); assert.deepEqual(second.records[0].value, { type: "future.record", future: true, payload: { answer: 42 } }); assert.equal(second.nextCursor, null);
+  assert(bytesRead < Buffer.byteLength(source));
+
+  await writeFile(artifactPath, source.replace("future.record", "future.recorx"));
+  bytesRead = 0;
+  await assert.rejects(() => state.repository.readPlannerTranscript(runId, first.nextCursor, 1), (error: Error & { code?: string }) => error.code === "STALE_CURSOR");
+  assert.equal(bytesRead, 0);
+});
+
+test("F010 schema migration adds validated planner artifact identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "coquic-control-schema-"));
+  const cachePath = join(root, "cache", "site-v2.sqlite");
+  try {
+    const previous = openArchiveDatabase(cachePath);
+    try {
+      previous.exec(`
+        ALTER TABLE control_artifacts RENAME TO control_artifacts_v7;
+        CREATE TABLE control_artifacts (
+          planner_run_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          media_type TEXT,
+          availability TEXT NOT NULL,
+          declared_size INTEGER NOT NULL,
+          declared_sha256 TEXT NOT NULL,
+          actual_size INTEGER,
+          status TEXT NOT NULL DEFAULT 'pending',
+          PRIMARY KEY(planner_run_id, relative_path)
+        );
+        DROP TABLE control_artifacts_v7;
+        UPDATE archive_meta SET schema_version=6 WHERE singleton=1;
+      `);
+    } finally { previous.close(); }
+
+    const migrated = openArchiveDatabase(cachePath);
+    try {
+      assert.equal(migrated.prepare("SELECT schema_version FROM archive_meta WHERE singleton=1").get()?.schema_version, DATABASE_SCHEMA_VERSION);
+      const columns = new Set(migrated.prepare("PRAGMA table_info(control_artifacts)").all().map((row) => String(row.name)));
+      assert.deepEqual([...columns].filter((column) => ["device_id", "inode_id", "mtime_ns", "ctime_ns"].includes(column)), ["device_id", "inode_id", "mtime_ns", "ctime_ns"]);
+    } finally { migrated.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("F011 unchanged invalid and unavailable control-loop health keeps revision stable", async (t) => {
@@ -233,12 +305,18 @@ test("F011 unchanged invalid and unavailable control-loop health keeps revision 
   await rename(unavailableRoot, state.controlLoopRoot);
 });
 
-test("F012 and F013 planner detail marks dangling tasks pending and exposes wakeup/current evidence", async (t) => {
+test("F012 and F013 planner detail requires an explicit task edge and exposes wakeup/current evidence", async (t) => {
   const state = await fixture();
   t.after(() => { state.importer.db.close(); return rm(state.root, { recursive: true, force: true }); });
-  const detail = state.repository.getPlannerRunDetail("planner-synthetic-success");
+  state.importer.db.prepare("INSERT INTO tasks(task_id, epoch_id, status, title, summary, prompt_path, events_path, current_pipeline_id, created_at, updated_at, archive_state, root_relative_path) SELECT 'task-synthetic-accepted', epoch_id, status, title, summary, prompt_path, events_path, current_pipeline_id, created_at, updated_at, archive_state, root_relative_path FROM tasks LIMIT 1").run();
+  let detail = state.repository.getPlannerRunDetail("planner-synthetic-success");
+  assert(detail);
+  assert.equal(detail.proposals.find((proposal) => proposal.proposalId === "proposal-synthetic-1")?.taskAvailable, true);
+  state.importer.db.prepare("DELETE FROM control_edges WHERE edge_type='proposal_task' AND source_id='proposal-synthetic-1'").run();
+  detail = state.repository.getPlannerRunDetail("planner-synthetic-success");
   assert(detail);
   assert.equal(detail.proposals.find((proposal) => proposal.proposalId === "proposal-synthetic-1")?.taskAvailable, false);
+  assert.equal(state.repository.getSignalDetail("signal-synthetic-consumed")?.proposals.find((proposal) => proposal.proposalId === "proposal-synthetic-1")?.taskAvailable, false);
   assert.equal(detail.wakeups[0]?.wakeupId, "wakeup-synthetic-1");
   assert.deepEqual(detail.wakeups[0]?.inputSignalIds, ["signal-synthetic-consumed"]);
   assert.equal(detail.current?.status, "ready");
@@ -255,4 +333,20 @@ test("F014 an end cursor resumes newly indexed signal evidence without duplicati
   const resumed = await state.repository.readSignalEvents("signal-synthetic-open", first.resumeCursor, 100);
   assert(resumed); assert.deepEqual(resumed.records.map((record) => record.eventId), ["event-open-refresh"]);
   assert.equal(new Set([...first.records, ...resumed.records].map((record) => record.eventId)).size, first.records.length + 1);
+});
+
+test("F014 stale refresh crosses an exact page boundary through the refreshed frontier", async () => {
+  const loaded = Array.from({ length: 50 }, (_, index) => ({ eventId: `event-refresh-${index}`, sequence: index }));
+  const requested: Array<string | null> = [];
+  const refreshed = await refreshEvidenceFrontier(async (cursor) => {
+    requested.push(cursor);
+    if (cursor === "stale") throw Object.assign(new Error("stale"), { status: 409 });
+    if (cursor === null) return { records: loaded, nextCursor: "next-page", resumeCursor: "first-page-end" };
+    return { records: [{ eventId: "event-refresh-50", sequence: 50 }], nextCursor: null, resumeCursor: "refreshed-frontier" };
+  }, "stale", (record) => String(record.eventId));
+  const visible = mergeEvidenceRecords(loaded, refreshed.records, (record) => String(record.eventId));
+  assert.deepEqual(requested, ["stale", null, "next-page"]);
+  assert.equal(refreshed.resumeCursor, "refreshed-frontier");
+  assert.equal(visible.length, 51);
+  assert.equal(visible.at(-1)?.eventId, "event-refresh-50");
 });

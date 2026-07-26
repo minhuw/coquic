@@ -269,52 +269,80 @@ function replaceNormalizedGeneration(db: DatabaseSync, importToken: string) {
 }
 
 async function stageNormalizedGeneration(db: DatabaseSync, root: string, epochId: string, sourceToken: string | null, excludedPath: string | null, batchSize: number) {
-  const records = excludedPath === null
-    ? db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records ORDER BY sequence, event_id").all()
-    : db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records WHERE relative_path != ? ORDER BY sequence, event_id").all(excludedPath);
   const importToken = randomUUID();
-  const handles = new Map<string, Awaited<ReturnType<typeof open>>>();
+  const recordsPage = excludedPath === null
+    ? db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records WHERE sequence > ? OR (sequence = ? AND event_id > ?) ORDER BY sequence, event_id LIMIT ?")
+    : db.prepare("SELECT event_id, relative_path, ordinal, sequence, byte_start, byte_end, occurred_at, kind FROM control_records WHERE relative_path != ? AND (sequence > ? OR (sequence = ? AND event_id > ?)) ORDER BY sequence, event_id LIMIT ?");
+  const sourcePage = sourceToken ? db.prepare("SELECT event_id, sequence, occurred_at, kind, normalized_metadata FROM control_normalized_staging WHERE import_token=? AND (sequence > ? OR (sequence = ? AND event_id > ?)) ORDER BY sequence, event_id LIMIT ?") : null;
+  const insertNormalized = db.prepare("INSERT INTO control_normalized_staging(import_token, event_id, sequence, occurred_at, kind, normalized_metadata) VALUES(?, ?, ?, ?, ?, ?)");
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let handlePath: string | null = null;
   try {
     let staged: EventRow[] = [];
     const flush = () => {
       if (!staged.length) return;
       withTransaction(db, () => {
-        for (const event of staged) db.prepare("INSERT INTO control_normalized_staging(import_token, event_id, sequence, occurred_at, kind, normalized_metadata) VALUES(?, ?, ?, ?, ?, ?)").run(importToken, event.eventId, event.sequence, event.occurredAt, event.kind, json(normalizedMetadata(event)));
+        for (const event of staged) insertNormalized.run(importToken, event.eventId, event.sequence, event.occurredAt, event.kind, json(normalizedMetadata(event)));
       });
       staged = [];
     };
-    for (let index = 0; index < records.length; index += 1) {
-      const record = records[index];
-      const relativePath = String(record.relative_path);
-      let handle = handles.get(relativePath);
-      if (!handle) {
-        const file = db.prepare("SELECT accepted_end, prefix_hash, device_id, inode_id FROM control_files WHERE relative_path=? AND status='ready'").get(relativePath);
-        if (!file) throw new Error("control-loop event file metadata is unavailable");
-        const resolved = await resolveRegularContainedPath(root, relativePath);
-        const end = Number(file.accepted_end);
-        if (!Number.isSafeInteger(end) || end < 0 || resolved.stat.size < end || String(resolved.stat.dev) !== String(file.device_id) || String(resolved.stat.ino) !== String(file.inode_id) || await prefixHash(resolved.path, end) !== String(file.prefix_hash)) throw new Error("control-loop event file identity changed");
-        handle = await open(resolved.path, "r");
-        handles.set(relativePath, handle);
+    let afterSequence = -1;
+    let afterEventId = "";
+    while (true) {
+      const records = excludedPath === null
+        ? recordsPage.all(afterSequence, afterSequence, afterEventId, batchSize)
+        : recordsPage.all(excludedPath, afterSequence, afterSequence, afterEventId, batchSize);
+      if (!records.length) break;
+      for (const record of records) {
+        const relativePath = String(record.relative_path);
+        if (!handle || handlePath !== relativePath) {
+          if (handle) await handle.close();
+          handle = null;
+          handlePath = null;
+          const file = db.prepare("SELECT accepted_end, prefix_hash, device_id, inode_id FROM control_files WHERE relative_path=? AND status='ready'").get(relativePath);
+          if (!file) throw new Error("control-loop event file metadata is unavailable");
+          const resolved = await resolveRegularContainedPath(root, relativePath);
+          const end = Number(file.accepted_end);
+          if (!Number.isSafeInteger(end) || end < 0 || resolved.stat.size < end || String(resolved.stat.dev) !== String(file.device_id) || String(resolved.stat.ino) !== String(file.inode_id) || await prefixHash(resolved.path, end) !== String(file.prefix_hash)) throw new Error("control-loop event file identity changed");
+          handle = await open(resolved.path, "r");
+          handlePath = relativePath;
+        }
+        const start = Number(record.byte_start); const end = Number(record.byte_end);
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start) throw new Error("control-loop event range is invalid");
+        const bytes = Buffer.allocUnsafe(end - start);
+        const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
+        if (bytesRead !== bytes.length || bytes.at(-1) !== 10) throw new Error("control-loop event range changed");
+        const value = validateControlEvent(parseCompleteJson(bytes.subarray(0, bytes.length - 1).toString("utf8"), relativePath));
+        if (value.eventId !== record.event_id || value.epochId !== epochId || value.sequence !== record.sequence || value.kind !== record.kind) throw new Error("control-loop event record changed");
+        staged.push({ eventId: String(record.event_id), epochId, sequence: Number(record.sequence), occurredAt: String(record.occurred_at), kind: String(record.kind), payload: value.payload as JsonRecord, ordinal: Number(record.ordinal), byteStart: start, byteEnd: end });
       }
-      const start = Number(record.byte_start); const end = Number(record.byte_end);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start) throw new Error("control-loop event range is invalid");
-      const bytes = Buffer.allocUnsafe(end - start);
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, start);
-      if (bytesRead !== bytes.length || bytes.at(-1) !== 10) throw new Error("control-loop event range changed");
-      const value = validateControlEvent(parseCompleteJson(bytes.subarray(0, bytes.length - 1).toString("utf8"), relativePath));
-      if (value.eventId !== record.event_id || value.epochId !== epochId || value.sequence !== record.sequence || value.kind !== record.kind) throw new Error("control-loop event record changed");
-      const event = { eventId: String(record.event_id), epochId, sequence: Number(record.sequence), occurredAt: String(record.occurred_at), kind: String(record.kind), payload: value.payload as JsonRecord, ordinal: Number(record.ordinal), byteStart: start, byteEnd: end };
-      staged.push(event);
-      if (staged.length >= batchSize) { flush(); await yieldToEventLoop(); }
+      flush();
+      const last = records.at(-1)!;
+      afterSequence = Number(last.sequence);
+      afterEventId = String(last.event_id);
+      await yieldToEventLoop();
     }
-    flush();
-    if (sourceToken) db.prepare("INSERT INTO control_normalized_staging(import_token, event_id, sequence, occurred_at, kind, normalized_metadata) SELECT ?, event_id, sequence, occurred_at, kind, normalized_metadata FROM control_normalized_staging WHERE import_token=? ORDER BY sequence, event_id").run(importToken, sourceToken);
+    if (sourceToken && sourcePage) {
+      afterSequence = -1;
+      afterEventId = "";
+      while (true) {
+        const rows = sourcePage.all(sourceToken, afterSequence, afterSequence, afterEventId, batchSize);
+        if (!rows.length) break;
+        withTransaction(db, () => {
+          for (const row of rows) insertNormalized.run(importToken, row.event_id, row.sequence, row.occurred_at, row.kind, row.normalized_metadata);
+        });
+        const last = rows.at(-1)!;
+        afterSequence = Number(last.sequence);
+        afterEventId = String(last.event_id);
+        await yieldToEventLoop();
+      }
+    }
     return importToken;
   } catch {
     clearStaging(db, importToken);
     throw new Error("control-loop normalized generation is invalid");
   } finally {
-    for (const handle of handles.values()) await handle.close();
+    if (handle) await handle.close();
   }
 }
 
@@ -487,11 +515,14 @@ async function reconcileRuns(db: DatabaseSync, root: string, epochId: string): P
     try { files = await listRunFiles(root, relativePath); } catch { degraded = true; continue; }
     const declared = (manifest.files as JsonRecord[]).map((item) => String(item.path));
     if (declared.length !== files.length || declared.some((path, index) => path !== files[index])) { degraded = true; continue; }
+    const verifiedArtifacts: Array<{ item: JsonRecord; identity: FileIdentity }> = [];
     let valid = true;
     for (const item of manifest.files as JsonRecord[]) {
       try {
         const resolved = await resolveRegularContainedPath(root, `${relativePath}/${String(item.path)}`);
-        if (resolved.stat.size !== Number(item.byteSize) || await prefixHash(resolved.path, resolved.stat.size) !== String(item.sha256)) { valid = false; break; }
+        const artifactIdentity = await immutableIdentity(resolved.path);
+        if (artifactIdentity.size !== Number(item.byteSize) || artifactIdentity.prefixHash !== String(item.sha256)) { valid = false; break; }
+        verifiedArtifacts.push({ item, identity: artifactIdentity });
       } catch { valid = false; break; }
     }
     const artifactChanged = priorArtifacts.length !== (manifest.files as JsonRecord[]).length || (manifest.files as JsonRecord[]).some((item, index) => String(priorArtifacts[index]?.relative_path ?? "") !== String(item.path) || Number(priorArtifacts[index]?.declared_size ?? -1) !== Number(item.byteSize) || String(priorArtifacts[index]?.declared_sha256 ?? "") !== String(item.sha256) || String(priorArtifacts[index]?.status ?? "") !== "verified");
@@ -508,7 +539,7 @@ async function reconcileRuns(db: DatabaseSync, root: string, epochId: string): P
     withTransaction(db, () => {
       db.prepare(`INSERT INTO control_files(relative_path, kind, actual_size, accepted_end, prefix_hash, prefix_revision, complete_records, file_revision, device_id, inode_id, mtime_ns, ctime_ns, status, reason) VALUES(?, 'manifest', ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, 'ready', NULL) ON CONFLICT(relative_path) DO UPDATE SET status='ready',reason=NULL`).run(manifestPath, manifestIdentity.size, manifestIdentity.acceptedEnd, manifestIdentity.prefixHash, `sha256:${manifestIdentity.prefixHash}`, manifestIdentity.deviceId, manifestIdentity.inodeId, manifestIdentity.mtimeNs, manifestIdentity.ctimeNs);
       db.prepare("DELETE FROM control_artifacts WHERE planner_run_id=?").run(runId);
-      for (const item of manifest.files as JsonRecord[]) db.prepare("INSERT INTO control_artifacts(planner_run_id, relative_path, media_type, availability, declared_size, declared_sha256, actual_size, status) VALUES(?, ?, ?, ?, ?, ?, ?, 'verified')").run(runId, String(item.path), mediaType(String(item.path)), String(item.availability), Number(item.byteSize), String(item.sha256), Number(item.byteSize));
+      for (const artifact of verifiedArtifacts) db.prepare("INSERT INTO control_artifacts(planner_run_id, relative_path, media_type, availability, declared_size, declared_sha256, actual_size, device_id, inode_id, mtime_ns, ctime_ns, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified')").run(runId, String(artifact.item.path), mediaType(String(artifact.item.path)), String(artifact.item.availability), Number(artifact.item.byteSize), String(artifact.item.sha256), artifact.identity.size, artifact.identity.deviceId, artifact.identity.inodeId, artifact.identity.mtimeNs, artifact.identity.ctimeNs);
       db.prepare("UPDATE control_planner_runs SET state=?, completed_at=coalesce(completed_at, ?), epoch_id=? WHERE planner_run_id=?").run(String(manifest.terminalState), String(manifest.completedAt), epochId, runId);
       if (!db.prepare("SELECT 1 FROM control_planner_runs WHERE planner_run_id=?").get(runId)) db.prepare("INSERT INTO control_planner_runs(planner_run_id, epoch_id, state, started_at, completed_at, input_signal_ids, active_task_ids, started_event_id, finished_event_id) VALUES(?, ?, ?, ?, ?, '[]', '[]', ?, NULL)").run(runId, epochId, String(manifest.terminalState), String(manifest.completedAt), String(manifest.completedAt), `manifest:${runId}`);
     });

@@ -289,6 +289,7 @@ class StewardDaemon:
     def _retry_cleanup_pending_tasks(self) -> None:
         """Retry each durable terminal cleanup transaction once per cycle."""
 
+        self.executor.retry_validation_cleanup_pending()
         for task in self.store.list_tasks(limit=10_000):
             if not TaskStatus(task.status).terminal:
                 continue
@@ -313,6 +314,7 @@ class StewardDaemon:
                     instance_id=self.runtime.instance_id,
                 )
             outcomes: list[ReconciliationOutcome] = []
+            self.executor.retry_validation_cleanup_pending()
             self._reconcile_docker_resources()
             self._startup_reconcile_control_loop()
             for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):

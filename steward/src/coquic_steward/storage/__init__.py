@@ -28,9 +28,11 @@ from .schema import (
     DaemonState,
     StewardImageReleaseRow,
     StewardContainerReferenceRow,
+    StewardValidationCleanupRow,
     StewardResourcePressureRow,
     StewardImageRelease,
     StewardContainerReference,
+    StewardValidationCleanup,
     StewardResourcePressure,
 )
 
@@ -181,9 +183,11 @@ __all__ = [
     "DaemonState",
     "StewardImageReleaseRow",
     "StewardContainerReferenceRow",
+    "StewardValidationCleanupRow",
     "StewardResourcePressureRow",
     "StewardImageRelease",
     "StewardContainerReference",
+    "StewardValidationCleanup",
     "StewardResourcePressure",
     "due_provider_names",
     "idle_fetch_provider_names",

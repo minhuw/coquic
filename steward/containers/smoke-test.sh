@@ -142,23 +142,66 @@ if [[ "$mode" == all || "$mode" == images ]]; then
     validation_id="$(docker image inspect --format '{{.Id}}' "$validation_ref")"
     loaded_image="$validation_id"
     remove_loaded_image=$((1 - validation_preloaded))
+    validation_git_common="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)"
+    [[ "$validation_git_common" == /* && -d "$validation_git_common" ]] || fail "validation Git metadata is unavailable"
     mkdir -p "$tmp/output" "$tmp/store"
+    validation_status=0
     docker run --rm \
       --network none \
       --read-only \
       --cap-drop ALL \
       --security-opt no-new-privileges:true \
-      --pids-limit 128 \
-      --memory 536870912 \
-      --user 10000:10000 \
-      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+      --pids-limit 512 \
+      --memory 17179869184 \
+      --user "$(id -u):$(id -g)" \
+      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8g,mode=1777 \
+      --tmpfs "/validation/worktree/.zig-cache:rw,exec,nosuid,nodev,size=8g,mode=0755,uid=$(id -u),gid=$(id -g)" \
+      --tmpfs "/validation/worktree/site/next:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid=$(id -u),gid=$(id -g)" \
+      --tmpfs "/validation/worktree/.duvet:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid=$(id -u),gid=$(id -g)" \
+      --tmpfs "/nix/store:rw,nosuid,nodev,size=8g,mode=0755,uid=$(id -u),gid=$(id -g)" \
+      --tmpfs "/nix/var/log/nix:rw,noexec,nosuid,nodev,size=64m,mode=0755,uid=$(id -u),gid=$(id -g)" \
+      --tmpfs "$validation_git_common/objects:rw,nosuid,nodev,size=256m,mode=0755,uid=$(id -u),gid=$(id -g)" \
       --env HOME=/tmp \
       --env COQUIC_HOME=/tmp/coquic-home \
-      --entrypoint /usr/bin/env \
+      --env "VALIDATION_SOURCE_WORKTREE=$root" \
+      --env "VALIDATION_GIT_OBJECTS_DIR=$validation_git_common/objects" \
+      --env VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects \
       --mount "type=bind,src=$root,dst=/validation/worktree,readonly" \
+      --mount "type=bind,src=$root,dst=$root,readonly" \
+      --mount "type=bind,src=$validation_git_common,dst=$validation_git_common,readonly" \
+      --mount "type=bind,src=$validation_git_common,dst=/validation/git-common-ro,readonly" \
       --mount "type=bind,src=$tmp/output,dst=/validation/output" \
-      --mount "type=bind,src=$tmp/store,dst=/validation/store" \
-      "$validation_id"
+      --mount "type=bind,src=$tmp/store,dst=/nix/var/nix" \
+      "$validation_id" || validation_status=$?
+    if [[ "$validation_status" -ne 0 ]]; then
+      for result in "$tmp"/output/*.txt; do
+        [[ -f "$result" ]] || continue
+        echo "validation gate output: $(basename "$result")" >&2
+        cat "$result" >&2
+      done
+      fail "validation container exited with status $validation_status"
+    fi
+    python - "$tmp/output/results.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+gates = value.get("gates")
+expected = [
+    ("git-diff-check.txt", ["git", "diff", "--cached", "--check", "HEAD", "--"]),
+    ("nix-flake-check.txt", ["nix", "flake", "check", "--no-build", "--no-update-lock-file", "."]),
+    ("zig-build-test.txt", ["zig", "build", "test"]),
+    ("pre-commit.txt", ["env", "COQUIC_CLANG_TIDY_IN_NIX=1", "pre-commit", "run", "--all-files"]),
+]
+if not isinstance(gates, list) or len(gates) != len(expected):
+    raise SystemExit("validation image did not execute all four canonical gates")
+for gate, (filename, suffix) in zip(gates, expected, strict=True):
+    command = gate.get("command")
+    if gate.get("filename") != filename or gate.get("exitCode") != 0:
+        raise SystemExit(f"validation gate failed or changed identity: {filename}")
+    if not isinstance(command, list) or command[-len(suffix):] != suffix:
+        raise SystemExit(f"validation command changed identity: {filename}")
+    if "git+file:///validation/worktree#lint" not in command:
+        raise SystemExit(f"validation gate is not pinned to the mounted worktree: {filename}")
+PY
   fi
 fi
 

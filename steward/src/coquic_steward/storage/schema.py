@@ -529,6 +529,29 @@ class StewardContainerReferenceRow(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class StewardValidationCleanupRow(Base):
+    """Private pre-create cleanup intent for one disposable validation run."""
+
+    __tablename__ = "steward_validation_cleanups"
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    pipeline_id: Mapped[str] = mapped_column(String, nullable=False)
+    owner_instance_id: Mapped[str] = mapped_column(String, nullable=False)
+    container_name: Mapped[str] = mapped_column(String, nullable=False)
+    image_id: Mapped[str] = mapped_column(String, nullable=False)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False)
+    release_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    deployment_id: Mapped[str] = mapped_column(String, nullable=False)
+    worktree_path: Mapped[str] = mapped_column(Text, nullable=False)
+    root_path: Mapped[str] = mapped_column(Text, nullable=False)
+    cleanup_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cleanup_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="cleanup_pending"
+    )
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class StewardResourcePressureRow(Base):
     """Durable, bounded resource-pressure facts (never raw Docker output)."""
 
@@ -865,4 +888,5 @@ DatasetSyncHealth = DatasetSyncHealthRow
 DaemonState = DaemonStateRow
 StewardImageRelease = StewardImageReleaseRow
 StewardContainerReference = StewardContainerReferenceRow
+StewardValidationCleanup = StewardValidationCleanupRow
 StewardResourcePressure = StewardResourcePressureRow

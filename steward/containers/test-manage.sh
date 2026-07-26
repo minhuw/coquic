@@ -66,6 +66,7 @@ export STEWARD_MANAGE_FAKE=1
 export STEWARD_FAKE_DAEMON_ID=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export STEWARD_FAKE_TASK_ID=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export STEWARD_FAKE_VALIDATION_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+export STEWARD_FAKE_VALIDATION_REF=coquic-steward-validation:synthetic-tag
 
 case "$mode" in
   --config)
@@ -85,6 +86,12 @@ assert service["user"] == f"{sys.argv[1]}:{sys.argv[2]}"
 PY
     ;;
   --bootstrap)
+    mkdir -p "$home/private/deployment/bootstrap-repository.tmp"
+    printf 'foreign\n' >"$home/private/deployment/bootstrap-repository.tmp/marker"
+    printf '%s\n' '{"phase":"layout","outcome":"pending"}' >"$home/private/deployment/operation.journal"
+    ! "$manage" bootstrap >/dev/null 2>&1
+    [[ -f "$home/private/deployment/bootstrap-repository.tmp/marker" ]]
+    printf '%s\n' '{"phase":"clone","outcome":"pending","cloneTemporary":"bootstrap-repository.tmp"}' >"$home/private/deployment/operation.journal"
     "$manage" bootstrap >/dev/null
     first="$(cat "$home/private/deployment/current")"
     python - "$home/private/deployment/releases/$first.json" <<'PY'
@@ -134,6 +141,11 @@ PY
     unset STEWARD_FAKE_HEALTH_FAIL_RELEASE
     [[ "$(cat "$home/private/deployment/current")" == "$candidate" ]]
     [[ "$(cat "$home/private/deployment/service.release")" == "$candidate" ]]
+    export STEWARD_FAKE_BUSY=1
+    ! "$manage" rollback >/dev/null 2>&1
+    [[ "$(cat "$home/private/deployment/current")" == "$candidate" ]]
+    [[ "$(cat "$home/private/deployment/service.release")" == "$candidate" ]]
+    unset STEWARD_FAKE_BUSY
     "$manage" rollback
     [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
     ;;

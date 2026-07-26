@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,13 +13,20 @@ import coquic_steward.cli as cli_module
 from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
 from coquic_steward.core.lifecycle import DockerResourceManager
 from coquic_steward.execution.container import (
+    ContainerBoundaryError,
+    ContainerErrorCategory,
     TaskContainerRuntime,
+    ValidationContainerRuntime,
     bind_deployment_identity,
     deployment_runtime_factory,
 )
-from coquic_steward.execution.container_config import ContainerLimits, TaskContainerConfig
+from coquic_steward.execution.container_config import (
+    ContainerLimits,
+    TaskContainerConfig,
+)
 from coquic_steward.execution.container_config import ValidationContainerConfig
-from coquic_steward.execution.container import ValidationContainerRuntime
+from coquic_steward.execution.executor import StewardExecutor
+from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.storage import TaskStore
 
 
@@ -48,7 +56,9 @@ def test_deployment_requires_hysteresis(tmp_path: Path) -> None:
         _deployment(tmp_path, recovery_free_bytes=1000)
 
 
-def test_validation_container_is_no_network_and_separate_from_task_image(tmp_path: Path) -> None:
+def test_validation_container_is_no_network_and_separate_from_task_image(
+    tmp_path: Path,
+) -> None:
     worktree = tmp_path / "worktree"
     output = tmp_path / "output"
     store = tmp_path / "store"
@@ -66,12 +76,225 @@ def test_validation_container_is_no_network_and_separate_from_task_image(tmp_pat
     assert argv[argv.index("--network") + 1] == "none"
     assert argv[argv.index("--restart") + 1] == "no"
     assert "--read-only" in argv
+    assert "/tmp:rw,noexec,nosuid,nodev,size=8589934592,mode=1777" in argv
     assert "/validation/worktree" in " ".join(argv)
     assert "/var/run/docker.sock" not in " ".join(argv)
 
 
+def _validation_inspection(config: ValidationContainerConfig) -> dict[str, object]:
+    return {
+        "Id": "d" * 64,
+        "Name": f"/{config.container_name}",
+        "Image": config.image_digest,
+        "State": {"Status": "running", "Running": True, "Pid": 41},
+        "Config": {
+            "Image": config.image_digest,
+            "User": f"{config.uid}:{config.gid}",
+            "Labels": config.labels,
+            "Entrypoint": ["/bootstrap/sh"],
+            "Cmd": ["/bootstrap/validation-entrypoint.sh", "--idle"],
+            "WorkingDir": "/validation/worktree",
+            "Env": [
+                "NIX_REGISTRATION=/validation/closure-info/registration",
+                "NIX_MATERIALIZED_STORE_PATHS=/validation/closure-info/materialized-store-paths",
+                "NIX_STORE_PATHS=/validation/closure-info/store-paths",
+                "PYTHONPATH=/nix/store/source/opt/coquic/steward/src",
+                "ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache",
+                "ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache",
+                f"VALIDATION_SOURCE_WORKTREE={config.worktree}",
+                *(
+                    [
+                        f"VALIDATION_GIT_OBJECTS_DIR={config.git_common_dir / 'objects'}",
+                        "VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects",
+                    ]
+                    if config.git_common_dir is not None
+                    else []
+                ),
+            ],
+        },
+        "HostConfig": {
+            "NetworkMode": "none",
+            "Privileged": False,
+            "ReadonlyRootfs": True,
+            "Init": True,
+            "Memory": config.limits.memory_bytes,
+            "PidsLimit": config.limits.pids,
+            "RestartPolicy": {"Name": "no"},
+            "CapDrop": ["ALL"],
+            "SecurityOpt": ["no-new-privileges:true"],
+            "LogConfig": {
+                "Type": "local",
+                "Config": {
+                    "max-file": str(config.limits.log_max_files),
+                    "max-size": f"{config.limits.log_max_bytes}b",
+                },
+            },
+            "Tmpfs": {
+                "/tmp": "rw,noexec,nosuid,nodev,size=8589934592,mode=1777",
+                "/run": "rw,noexec,nosuid,nodev,size=16m",
+                "/validation/worktree/.zig-cache": "rw,exec,nosuid,nodev,size=8589934592,mode=0755,uid=10000,gid=10000",
+                "/validation/worktree/site/next": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid=10000,gid=10000",
+                "/validation/worktree/.duvet": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid=10000,gid=10000",
+                "/nix/store": "rw,nosuid,nodev,size=8589934592,mode=0755,uid=10000,gid=10000",
+                "/nix/var/log/nix": "rw,noexec,nosuid,nodev,size=64m,mode=0755,uid=10000,gid=10000",
+            },
+        },
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": str(mount.source),
+                "Destination": mount.target,
+                "RW": not mount.read_only,
+            }
+            for mount in config.mounts
+        ],
+    }
+
+
+def test_validation_container_refuses_same_name_foreign_image(tmp_path: Path) -> None:
+    paths = [tmp_path / name for name in ("worktree", "output", "store")]
+    for path in paths:
+        path.mkdir()
+    config = ValidationContainerConfig(
+        run_id="collision",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "c" * 64,
+        worktree=paths[0],
+        output=paths[1],
+        store=paths[2],
+    )
+    payload = _validation_inspection(config)
+    payload["Image"] = "sha256:" + "f" * 64
+
+    class ForeignDocker:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv: list[str], **_kwargs):
+            self.calls.append(argv)
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps(payload).encode(), b""
+            )
+
+    docker = ForeignDocker()
+    runtime = ValidationContainerRuntime(config, client=docker)
+
+    with pytest.raises(ContainerBoundaryError) as error:
+        runtime.ensure_started()
+
+    assert error.value.category is ContainerErrorCategory.identity_mismatch
+    assert [call[0] for call in docker.calls] == ["inspect"]
+
+
+def test_validation_container_refuses_same_image_with_foreign_runtime(
+    tmp_path: Path,
+) -> None:
+    paths = [tmp_path / name for name in ("worktree", "output", "store")]
+    for path in paths:
+        path.mkdir()
+    config = ValidationContainerConfig(
+        run_id="collision-runtime",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "c" * 64,
+        worktree=paths[0],
+        output=paths[1],
+        store=paths[2],
+    )
+    payload = _validation_inspection(config)
+    payload["HostConfig"]["Memory"] = config.limits.memory_bytes // 2
+
+    class ForeignDocker:
+        def run(self, argv: list[str], **_kwargs):
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps(payload).encode(), b""
+            )
+
+    runtime = ValidationContainerRuntime(config, client=ForeignDocker())
+
+    with pytest.raises(ContainerBoundaryError) as error:
+        runtime.ensure_started()
+
+    assert error.value.category is ContainerErrorCategory.identity_mismatch
+
+
+def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
+    config: StewardConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = "sha256:" + "c" * 64
+    deployment = replace(
+        config.deployment,
+        max_memory_bytes=5 * 1024**3,
+        max_pids=321,
+        max_scratch_bytes=6 * 1024**3,
+        max_log_bytes=7 * 1024**2,
+    )
+    config = replace(
+        config,
+        validation_image="coquic-steward-validation",
+        validation_image_digest=digest,
+        deployment=deployment,
+    )
+    store = TaskStore(config.db_path)
+    task, _created = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="validation cleanup",
+            prompt="validate",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    store.claim_daemon_instance("daemon-before-crash")
+    observed_pending: list[dict[str, object]] = []
+    cleaned: list[str] = []
+    runtime_configs: list[ValidationContainerConfig] = []
+
+    class RecordingValidationRuntime:
+        def __init__(self, runtime_config, **_kwargs) -> None:
+            self.config = runtime_config
+            runtime_configs.append(runtime_config)
+
+        def ensure_started(self) -> str:
+            observed_pending.extend(store.list_validation_cleanup_pending())
+            return "d" * 64
+
+        def cleanup_owned(self, *, timeout: float = 5) -> None:
+            cleaned.append(self.config.container_name)
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.container.ValidationContainerRuntime",
+        RecordingValidationRuntime,
+    )
+    executor = StewardExecutor(config, store)
+    executor._isolated_validation_runner(task, pipeline, digest)
+
+    assert len(observed_pending) == 1
+    assert observed_pending[0]["cleanup_ready"] is False
+    assert digest in store.referenced_image_ids()
+    root = Path(str(observed_pending[0]["root_path"]))
+    assert root.is_dir()
+
+    store.claim_daemon_instance("daemon-after-crash")
+    assert executor.retry_validation_cleanup_pending() == 1
+    assert store.list_validation_cleanup_pending() == []
+    assert digest not in store.referenced_image_ids()
+    assert not root.exists()
+    assert cleaned == [str(observed_pending[0]["container_name"])]
+    assert len(runtime_configs) == 2
+    assert runtime_configs[0].limits == runtime_configs[1].limits
+    assert runtime_configs[1].limits == ContainerLimits(
+        memory_bytes=deployment.max_memory_bytes,
+        pids=deployment.max_pids,
+        scratch_bytes=deployment.max_scratch_bytes,
+        log_max_bytes=deployment.max_log_bytes,
+    )
+
+
 def test_task_create_argv_has_bounded_restart_and_logs(tmp_path: Path) -> None:
-    roots = [tmp_path / name for name in ("worktree", "archive", "sessions", "git", "common", "scratch")]
+    roots = [
+        tmp_path / name
+        for name in ("worktree", "archive", "sessions", "git", "common", "scratch")
+    ]
     for root in roots:
         root.mkdir()
     config = TaskContainerConfig(
@@ -96,8 +319,7 @@ def test_deployment_runtime_factory_adds_exact_release_and_epoch_labels(
     tmp_path: Path,
 ) -> None:
     roots = [
-        tmp_path / name
-        for name in ("worktree", "archive", "sessions", "git", "common")
+        tmp_path / name for name in ("worktree", "archive", "sessions", "git", "common")
     ]
     for root in roots:
         root.mkdir()
@@ -140,8 +362,7 @@ def test_deployment_runtime_factory_adds_exact_release_and_epoch_labels(
 
 def test_deployment_runtime_identity_requires_an_exact_release(tmp_path: Path) -> None:
     roots = [
-        tmp_path / name
-        for name in ("worktree", "archive", "sessions", "git", "common")
+        tmp_path / name for name in ("worktree", "archive", "sessions", "git", "common")
     ]
     for root in roots:
         root.mkdir()

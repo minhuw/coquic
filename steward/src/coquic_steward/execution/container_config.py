@@ -26,6 +26,9 @@ _CONTAINER_ROOTS = {
     "/validation/output",
     "/validation/store",
     "/validation/scratch",
+    "/validation/git-common-ro",
+    "/nix/var/nix",
+    "/nix/store/.links",
 }
 _PLANNER_ROOTS = {"/planner/history", "/planner/session", "/planner/output"}
 
@@ -84,6 +87,7 @@ class ContainerMount:
     source: Path
     target: str
     read_only: bool = True
+    exact_host_target: bool = False
 
     def __post_init__(self) -> None:
         source = Path(self.source)
@@ -93,9 +97,16 @@ class ContainerMount:
             raise ValueError(f"mount source must not be a symlink: {source}")
         target = _validate_container_path(self.target)
         mount_roots = _CONTAINER_ROOTS | _PLANNER_ROOTS
-        if target not in mount_roots and not any(
+        inside_boundary = target in mount_roots or any(
             target.startswith(root + "/") for root in mount_roots
-        ):
+        )
+        exact_read_only = (
+            self.exact_host_target
+            and self.read_only
+            and source != Path("/")
+            and target == source.as_posix()
+        )
+        if not inside_boundary and not exact_read_only:
             raise ValueError(f"mount target is outside task boundary: {target}")
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "target", target)
@@ -386,6 +397,7 @@ class ValidationContainerConfig:
     worktree: Path
     output: Path
     store: Path
+    git_common_dir: Path | None = None
     scratch: Path | None = None
     limits: ContainerLimits = field(default_factory=ContainerLimits)
     labels: dict[str, str] = field(default_factory=dict)
@@ -402,13 +414,20 @@ class ValidationContainerConfig:
             if not value.is_absolute() or value.is_symlink():
                 raise ValueError(f"validation {name} must be an absolute non-symlink path")
             object.__setattr__(self, name, value)
+        if self.git_common_dir is not None:
+            git_common_dir = Path(self.git_common_dir)
+            if not git_common_dir.is_absolute() or git_common_dir.is_symlink():
+                raise ValueError(
+                    "validation Git metadata must be an absolute non-symlink path"
+                )
+            object.__setattr__(self, "git_common_dir", git_common_dir)
         if self.scratch is not None:
             scratch = Path(self.scratch)
             if not scratch.is_absolute() or scratch.is_symlink():
                 raise ValueError("validation scratch must be an absolute non-symlink path")
             object.__setattr__(self, "scratch", scratch)
-        if not 10000 <= self.uid <= 60000 or self.gid <= 0:
-            raise ValueError("validation identity is outside the reserved range")
+        if not 1 <= self.uid <= 65535 or not 1 <= self.gid <= 65535:
+            raise ValueError("validation identity must be a non-root numeric UID/GID")
         labels = dict(self.labels)
         labels.setdefault("coquic.steward.owner", "steward")
         labels.setdefault("coquic.steward.runtime", "validation-container-v1")
@@ -429,9 +448,23 @@ class ValidationContainerConfig:
     def mounts(self) -> tuple[ContainerMount, ...]:
         mounts = (
             ContainerMount(self.worktree, "/validation/worktree"),
+            ContainerMount(
+                self.worktree,
+                self.worktree.as_posix(),
+                exact_host_target=True,
+            ),
             ContainerMount(self.output, "/validation/output", read_only=False),
-            ContainerMount(self.store, "/validation/store", read_only=False),
+            ContainerMount(self.store, "/nix/var/nix", read_only=False),
         )
+        if self.git_common_dir is not None:
+            mounts += (
+                ContainerMount(
+                    self.git_common_dir,
+                    self.git_common_dir.as_posix(),
+                    exact_host_target=True,
+                ),
+                ContainerMount(self.git_common_dir, "/validation/git-common-ro"),
+            )
         if self.scratch is not None:
             mounts += (ContainerMount(self.scratch, "/validation/scratch", read_only=False),)
         return mounts
@@ -441,7 +474,7 @@ class ValidationContainerConfig:
         mappings = [
             (self.worktree.resolve(), "/validation/worktree"),
             (self.output.resolve(), "/validation/output"),
-            (self.store.resolve(), "/validation/store"),
+            (self.store.resolve(), "/nix/var/nix"),
         ]
         if self.scratch is not None:
             mappings.append((self.scratch.resolve(), "/validation/scratch"))

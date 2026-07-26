@@ -5,6 +5,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -2050,28 +2051,34 @@ class StewardExecutor:
         output = root / "output"
         store = root / "store"
         scratch = root / "scratch"
-        for path in (output, store, scratch):
-            path.mkdir(parents=True, exist_ok=True)
         deployment = getattr(self.config, "deployment", None)
+        daemon_state = self.store.get_daemon_state() or {}
+        owner_instance_id = str(daemon_state.get("instance_id") or "standalone")
+        epoch_id = str(self.config.ensure_epoch()["epochId"])
+        deployment_id = getattr(deployment, "compose_project", "local")
+        release_id = getattr(deployment, "release_id", None)
+        host_uid = getattr(deployment, "host_uid", None)
+        host_gid = getattr(deployment, "host_gid", None)
+        validation_uid = 10000 if host_uid is None else int(host_uid)
+        validation_gid = 10000 if host_gid is None else int(host_gid)
+        worktree = Path(task.worktree_path or self.config.repo_root).resolve()
+        git_common_dir = self._validation_git_common_dir(worktree)
         labels = {
             "coquic.steward.task": task.id,
             "coquic.steward.pipeline": pipeline.id,
-            "coquic.steward.deployment": getattr(deployment, "compose_project", "local"),
+            "coquic.steward.deployment": deployment_id,
+            "coquic.steward.epoch": epoch_id,
         }
-        if deployment is not None and getattr(deployment, "release_id", None):
-            labels["coquic.steward.release"] = str(deployment.release_id)
-        try:
-            epoch_id = str(self.config.ensure_epoch()["epochId"])
-            labels["coquic.steward.epoch"] = epoch_id
-        except Exception:
-            pass
+        if release_id:
+            labels["coquic.steward.release"] = str(release_id)
         config = ValidationContainerConfig(
             run_id=run_id,
             image=getattr(self.config, "validation_image", "coquic-steward-validation"),
             image_digest=image_digest,
-            worktree=Path(task.worktree_path or self.config.repo_root).resolve(),
+            worktree=worktree,
             output=output,
             store=store,
+            git_common_dir=git_common_dir,
             scratch=scratch,
             limits=ContainerLimits(
                 memory_bytes=getattr(deployment, "max_memory_bytes", 4 * 1024 * 1024 * 1024),
@@ -2080,13 +2087,59 @@ class StewardExecutor:
                 log_max_bytes=getattr(deployment, "max_log_bytes", 64 * 1024 * 1024),
             ),
             labels=labels,
+            uid=validation_uid,
+            gid=validation_gid,
         )
-        runtime = ValidationContainerRuntime(config, docker_bin=getattr(getattr(self.config, "container", None), "docker_bin", "docker"))
-        runtime.ensure_started()
-        gate_count = 0
+        cleanup_record: dict[str, object] = {
+            "run_id": run_id,
+            "task_id": task.id,
+            "pipeline_id": pipeline.id,
+            "owner_instance_id": owner_instance_id,
+            "container_name": config.container_name,
+            "image_id": image_digest,
+            "epoch_id": epoch_id,
+            "release_id": str(release_id) if release_id else None,
+            "deployment_id": deployment_id,
+            "worktree_path": str(config.worktree),
+            "root_path": str(root),
+            "cleanup_ready": False,
+        }
+        self.store.record_validation_cleanup_pending(
+            **{
+                key: value
+                for key, value in cleanup_record.items()
+                if key != "cleanup_ready"
+            }
+        )
+        runtime = ValidationContainerRuntime(
+            config,
+            docker_bin=getattr(
+                getattr(self.config, "container", None), "docker_bin", "docker"
+            ),
+        )
+
+        def cleanup() -> None:
+            if cleanup_record.get("cleanup_ready"):
+                return
+            cleanup_record["cleanup_ready"] = True
+            try:
+                self.store.mark_validation_cleanup_ready(run_id)
+                runtime.cleanup_owned(timeout=5)
+                self._remove_validation_root(cleanup_record)
+                self.store.complete_validation_cleanup(run_id)
+            except Exception:
+                # The private pending row remains eligible for bounded retry.
+                return
+
+        try:
+            for path in (output, store, scratch):
+                path.mkdir(parents=True, exist_ok=True)
+            runtime.ensure_started()
+        except Exception:
+            cleanup()
+            raise
 
         def execute(command: list[str], cwd: Path, timeout: float) -> CommandResult:
-            nonlocal gate_count
             container_command = [
                 _rewrite_mounted_argument(item, cwd, config.container_path(cwd))
                 for item in command
@@ -2096,17 +2149,6 @@ class StewardExecutor:
                 workdir=config.container_path(cwd),
                 timeout=timeout,
             )
-            # The command/result evidence is written by run_validation before
-            # this final cleanup. Remove only this exact labeled sibling after
-            # the fourth gate has returned.
-            gate_count += 1
-            if gate_count >= 4:
-                try:
-                    runtime.stop(timeout=5)
-                    runtime.remove()
-                except Exception:
-                    # The durable cleanup pass retries the exact labeled run.
-                    pass
             return CommandResult(
                 args=command,
                 cwd=cwd,
@@ -2115,7 +2157,128 @@ class StewardExecutor:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
+        setattr(execute, "cleanup", cleanup)
         return execute
+
+    def _remove_validation_root(self, record: dict[str, object]) -> None:
+        task_id = str(record["task_id"])
+        pipeline_id = str(record["pipeline_id"])
+        run_id = str(record["run_id"])
+        expected_run = f"validation-{sha256(f'{task_id}:{pipeline_id}'.encode()).hexdigest()[:16]}"
+        expected_root = (
+            self.config.private_dir / "validation" / task_id / pipeline_id
+        ).resolve()
+        root = Path(str(record["root_path"]))
+        if (
+            run_id != expected_run
+            or not root.is_absolute()
+            or root.is_symlink()
+            or root.resolve() != expected_root
+        ):
+            raise ValueError("validation cleanup root identity is mismatched")
+        if root.exists():
+            shutil.rmtree(root)
+
+    def _validation_runtime_for_cleanup(self, record: dict[str, object]) -> Any:
+        from .container import ValidationContainerRuntime
+        from .container_config import ContainerLimits, ValidationContainerConfig
+
+        task_id = str(record["task_id"])
+        pipeline_id = str(record["pipeline_id"])
+        root = Path(str(record["root_path"]))
+        labels = {
+            "coquic.steward.task": task_id,
+            "coquic.steward.pipeline": pipeline_id,
+            "coquic.steward.deployment": str(record["deployment_id"]),
+            "coquic.steward.epoch": str(record["epoch_id"]),
+        }
+        if record.get("release_id"):
+            labels["coquic.steward.release"] = str(record["release_id"])
+        worktree = Path(str(record["worktree_path"]))
+        deployment = self.config.deployment
+        config = ValidationContainerConfig(
+            run_id=str(record["run_id"]),
+            image=self.config.validation_image,
+            image_digest=str(record["image_id"]),
+            worktree=worktree,
+            output=root / "output",
+            store=root / "store",
+            git_common_dir=self._validation_git_common_dir(worktree),
+            scratch=root / "scratch",
+            limits=ContainerLimits(
+                memory_bytes=deployment.max_memory_bytes,
+                pids=deployment.max_pids,
+                scratch_bytes=deployment.max_scratch_bytes,
+                log_max_bytes=deployment.max_log_bytes,
+            ),
+            labels=labels,
+            uid=(
+                10000
+                if deployment.host_uid is None
+                else int(deployment.host_uid)
+            ),
+            gid=(
+                10000
+                if deployment.host_gid is None
+                else int(deployment.host_gid)
+            ),
+        )
+        if config.container_name != record["container_name"]:
+            raise ValueError("validation cleanup container identity is mismatched")
+        return ValidationContainerRuntime(
+            config,
+            docker_bin=getattr(
+                getattr(self.config, "container", None), "docker_bin", "docker"
+            ),
+        )
+
+    @staticmethod
+    def _validation_git_common_dir(worktree: Path) -> Path:
+        common = run_command(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=worktree,
+        )
+        git_dir = run_command(
+            ["git", "rev-parse", "--absolute-git-dir"], cwd=worktree
+        )
+        if not common.ok or not git_dir.ok:
+            raise ValueError("validation worktree Git metadata is unavailable")
+        common_path = Path(common.stdout.strip()).resolve()
+        git_dir_path = Path(git_dir.stdout.strip()).resolve()
+        if (
+            not common_path.is_dir()
+            or common_path.is_symlink()
+            or not git_dir_path.is_relative_to(common_path)
+        ):
+            raise ValueError("validation worktree Git metadata is ambiguous")
+        return common_path
+
+    def retry_validation_cleanup_pending(self) -> int:
+        """Retry ready or previous-daemon validation cleanup records."""
+
+        pending_provider = getattr(self.store, "list_validation_cleanup_pending", None)
+        if not callable(pending_provider):
+            return 0
+        daemon_state_provider = getattr(self.store, "get_daemon_state", None)
+        daemon_state = daemon_state_provider() if callable(daemon_state_provider) else {}
+        daemon_state = daemon_state or {}
+        current_instance = str(daemon_state.get("instance_id") or "standalone")
+        completed = 0
+        for record in pending_provider():
+            if (
+                not bool(record["cleanup_ready"])
+                and record["owner_instance_id"] == current_instance
+            ):
+                continue
+            try:
+                runtime = self._validation_runtime_for_cleanup(record)
+                runtime.cleanup_owned(timeout=5)
+                self._remove_validation_root(record)
+                self.store.complete_validation_cleanup(str(record["run_id"]))
+            except Exception:
+                continue
+            completed += 1
+        return completed
 
     def _commit_reachable(self, worktree: Path, commit: str) -> bool:
         remote = f"{self.config.git_remote}/{self.config.main_branch}"
@@ -3583,50 +3746,27 @@ class StewardExecutor:
                 },
             )
 
+        gate_kwargs: dict[str, object] = {
+            "label": label,
+            "on_gate_start": on_gate_start,
+            "on_gate_result": on_gate_result,
+        }
+        if command_runner is not None:
+            gate_kwargs["command_runner"] = command_runner
+        compatibility_fallback = False
         try:
-            gate_kwargs: dict[str, object] = {
-                "label": label,
-                "on_gate_start": on_gate_start,
-                "on_gate_result": on_gate_result,
-            }
-            if command_runner is not None:
-                gate_kwargs["command_runner"] = command_runner
-            return [
-                validation.model_copy(update={"iteration": iteration})
-                for validation in run_gates(
-                    self.config,
-                    task_id,
-                    worktree,
-                    **gate_kwargs,
-                )
-            ]
-        except TypeError as exc:
-            message = str(exc)
-            unsupported = next(
-                (
-                    name
-                    for name in (
-                        "command_runner",
-                        "on_gate_start",
-                        "on_gate_result",
-                        "label",
-                    )
-                    if name in message
-                ),
-                None,
-            )
-            if unsupported is None:
-                raise
-            gate_kwargs.pop(unsupported, None)
-            while gate_kwargs:
+            while True:
                 try:
                     validations = run_gates(
-                        self.config, task_id, worktree, **gate_kwargs
+                        self.config,
+                        task_id,
+                        worktree,
+                        **gate_kwargs,
                     )
                     break
-                except TypeError as retry_exc:
-                    retry_message = str(retry_exc)
-                    retry_unsupported = next(
+                except TypeError as exc:
+                    message = str(exc)
+                    unsupported = next(
                         (
                             name
                             for name in (
@@ -3635,21 +3775,30 @@ class StewardExecutor:
                                 "on_gate_result",
                                 "label",
                             )
-                            if name in retry_message
+                            if name in message
                         ),
                         None,
                     )
-                    if retry_unsupported is None:
+                    if unsupported is None:
                         raise
-                    gate_kwargs.pop(retry_unsupported, None)
-            else:
-                validations = run_gates(self.config, task_id, worktree)
+                    compatibility_fallback = True
+                    gate_kwargs.pop(unsupported, None)
+                    if not gate_kwargs:
+                        validations = run_gates(self.config, task_id, worktree)
+                        break
             validations = [
                 validation.model_copy(update={"iteration": iteration})
                 for validation in validations
             ]
-            self.store.record_iteration_validations(task_id, iteration, validations)
+            if compatibility_fallback:
+                self.store.record_iteration_validations(
+                    task_id, iteration, validations
+                )
             return validations
+        finally:
+            cleanup = getattr(command_runner, "cleanup", None)
+            if callable(cleanup):
+                cleanup()
 
     def _handle_integration_validation_failure(
         self,

@@ -165,11 +165,66 @@
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];
       };
-      stewardValidationFilesystem = pkgs.runCommand "coquic-steward-validation-filesystem" { } ''
-        mkdir -p $out/validation/worktree $out/validation/output $out/validation/store $out/validation/scratch
-        mkdir -p $out/tmp $out/run
-        touch $out/validation/worktree/.keep $out/validation/output/.keep $out/validation/store/.keep $out/validation/scratch/.keep
-        touch $out/tmp/.keep $out/run/.keep
+      stewardValidationRegistration = pkgs.closureInfo {
+        rootPaths = [
+          stewardValidationToolClosure
+          stewardSource
+          lintShell
+          projectSrc
+          nixpkgs
+          git-hooks
+          git-hooks.inputs.flake-compat
+          git-hooks.inputs.gitignore
+          git-hooks.inputs.nixpkgs
+        ];
+      };
+      stewardValidationFilesystem = pkgs.runCommand "coquic-steward-validation-filesystem" {
+        # The closure is relocated below /validation/lower so /nix/store can
+        # be a bounded per-run tmpfs. Runtime symlinks retain logical store
+        # identities without making the image root writable.
+        __structuredAttrs = true;
+        unsafeDiscardReferences.out = true;
+      } ''
+        mkdir -p \
+          $out/bin \
+          $out/bootstrap \
+          $out/etc \
+          $out/nix/store \
+          $out/nix/var/nix \
+          $out/run \
+          $out/tmp \
+          $out/usr/bin \
+          $out/validation/closure-info \
+          $out/validation/lower/nix/store \
+          $out/validation/output \
+          $out/validation/scratch \
+          $out/validation/worktree
+
+        while IFS= read -r store_path; do
+          cp -a "$store_path" $out/validation/lower/nix/store/
+        done < ${stewardValidationRegistration}/store-paths
+        cp ${stewardValidationRegistration}/registration $out/validation/closure-info/registration
+        cp ${stewardValidationRegistration}/store-paths $out/validation/closure-info/store-paths
+        printf '%s\n' \
+          ${projectSrc} \
+          ${nixpkgs} \
+          ${git-hooks} \
+          ${git-hooks.inputs.flake-compat} \
+          ${git-hooks.inputs.gitignore} \
+          ${git-hooks.inputs.nixpkgs} \
+          > $out/validation/closure-info/materialized-store-paths
+
+        install -m 0755 ${pkgs.pkgsStatic.busybox}/bin/busybox $out/bootstrap/sh
+        cp ${stewardValidationEntrypoint}/bin/validation-entrypoint.sh \
+          $out/bootstrap/validation-entrypoint.sh
+        chmod 0755 $out/bootstrap/validation-entrypoint.sh
+        for applet in cat chmod cp ln mkdir readlink sh sleep; do
+          ln $out/bootstrap/sh $out/bin/$applet
+        done
+        ln $out/bootstrap/sh $out/usr/bin/env
+        cp -an ${stewardValidationToolClosure}/bin/. $out/bin/
+        cp -rL ${pkgs.dockerTools.caCertificates}/etc/. $out/etc/
+        cp -rL ${pkgs.dockerTools.fakeNss}/etc/. $out/etc/
       '';
       stewardTaskImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-steward-task";
@@ -229,20 +284,22 @@
           };
         };
       };
-      stewardValidationImage = pkgs.dockerTools.buildLayeredImage {
+      stewardValidationImage = pkgs.dockerTools.buildImage {
         name = "coquic-steward-validation";
         tag = stewardSourceIdentity;
-        contents = [
-          stewardValidationToolClosure
-          stewardValidationFilesystem
-          pkgs.dockerTools.binSh
-          pkgs.dockerTools.usrBinEnv
-          pkgs.dockerTools.caCertificates
-          pkgs.dockerTools.fakeNss
-        ];
+        copyToRoot = stewardValidationFilesystem;
+        keepContentsDirlinks = true;
         config = {
-          Entrypoint = [ "${stewardValidationEntrypoint}/bin/validation-entrypoint.sh" ];
+          Entrypoint = [ "/bootstrap/sh" "/bootstrap/validation-entrypoint.sh" ];
           WorkingDir = "/validation/worktree";
+          Env = [
+            "NIX_REGISTRATION=/validation/closure-info/registration"
+            "NIX_MATERIALIZED_STORE_PATHS=/validation/closure-info/materialized-store-paths"
+            "NIX_STORE_PATHS=/validation/closure-info/store-paths"
+            "PYTHONPATH=${stewardSource}/opt/coquic/steward/src"
+            "ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache"
+            "ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache"
+          ];
           Labels = {
             "org.opencontainers.image.source-revision" = stewardSourceIdentity;
             "org.opencontainers.image.revision" = stewardSourceIdentity;
@@ -2147,6 +2204,7 @@ EOF
             pkgs.pre-commit
             pkgs.python3
             pkgs.util-linux
+            duvetTool
           ]
           ++ pre-commit-shell.enabledPackages;
       };

@@ -2187,6 +2187,152 @@ class SQLiteTaskStore:
             for row in rows
         ]
 
+    def record_validation_cleanup_pending(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        pipeline_id: str,
+        owner_instance_id: str,
+        container_name: str,
+        image_id: str,
+        epoch_id: str,
+        release_id: str | None,
+        deployment_id: str,
+        worktree_path: Path,
+        root_path: Path,
+    ) -> None:
+        """Persist cleanup authority before creating validation state."""
+
+        tokens = (
+            run_id,
+            task_id,
+            pipeline_id,
+            owner_instance_id,
+            container_name,
+            epoch_id,
+            deployment_id,
+        )
+        if any(not value or len(value) > 256 or "\n" in value for value in tokens):
+            raise ValueError("validation cleanup identity is invalid")
+        if release_id is not None and (
+            not release_id or len(release_id) > 128 or "\n" in release_id
+        ):
+            raise ValueError("validation cleanup release identity is invalid")
+        if (
+            len(image_id) != 71
+            or not image_id.startswith("sha256:")
+            or any(value not in "0123456789abcdef" for value in image_id[7:])
+        ):
+            raise ValueError("validation cleanup image identity is invalid")
+        paths = (Path(worktree_path), Path(root_path))
+        if any(not path.is_absolute() or path.is_symlink() for path in paths):
+            raise ValueError("validation cleanup paths must be absolute non-symlinks")
+        timestamp = utc_now().isoformat()
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            existing = connection.exec_driver_sql(
+                "SELECT cleanup_status FROM steward_validation_cleanups WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if existing is not None and existing[0] != "cleanup_complete":
+                connection.exec_driver_sql("ROLLBACK")
+                raise ValueError("validation cleanup is already pending")
+            connection.exec_driver_sql(
+                """
+                INSERT INTO steward_validation_cleanups
+                  (run_id,task_id,pipeline_id,owner_instance_id,container_name,
+                   image_id,epoch_id,release_id,deployment_id,worktree_path,
+                   root_path,cleanup_ready,cleanup_status,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'cleanup_pending',?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                  task_id=excluded.task_id,pipeline_id=excluded.pipeline_id,
+                  owner_instance_id=excluded.owner_instance_id,
+                  container_name=excluded.container_name,image_id=excluded.image_id,
+                  epoch_id=excluded.epoch_id,release_id=excluded.release_id,
+                  deployment_id=excluded.deployment_id,
+                  worktree_path=excluded.worktree_path,root_path=excluded.root_path,
+                  cleanup_ready=0,cleanup_status='cleanup_pending',
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    run_id,
+                    task_id,
+                    pipeline_id,
+                    owner_instance_id,
+                    container_name,
+                    image_id,
+                    epoch_id,
+                    release_id,
+                    deployment_id,
+                    str(paths[0]),
+                    str(paths[1]),
+                    timestamp,
+                ),
+            )
+            connection.exec_driver_sql("COMMIT")
+        self._notify_change()
+
+    def mark_validation_cleanup_ready(self, run_id: str) -> None:
+        with self.engine.begin() as connection:
+            result = connection.exec_driver_sql(
+                """
+                UPDATE steward_validation_cleanups
+                SET cleanup_ready=1,updated_at=?
+                WHERE run_id=? AND cleanup_status='cleanup_pending'
+                """,
+                (utc_now().isoformat(), run_id),
+            )
+            if result.rowcount != 1:
+                raise ValueError("validation cleanup record is unavailable")
+        self._notify_change()
+
+    def complete_validation_cleanup(self, run_id: str) -> None:
+        with self.engine.begin() as connection:
+            result = connection.exec_driver_sql(
+                """
+                UPDATE steward_validation_cleanups
+                SET cleanup_ready=1,cleanup_status='cleanup_complete',updated_at=?
+                WHERE run_id=? AND cleanup_status='cleanup_pending'
+                """,
+                (utc_now().isoformat(), run_id),
+            )
+            if result.rowcount != 1:
+                raise ValueError("validation cleanup record is unavailable")
+        self._notify_change()
+
+    def list_validation_cleanup_pending(self) -> list[dict[str, object]]:
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                """
+                SELECT run_id,task_id,pipeline_id,owner_instance_id,container_name,
+                       image_id,epoch_id,release_id,deployment_id,worktree_path,
+                       root_path,cleanup_ready,updated_at
+                FROM steward_validation_cleanups
+                WHERE cleanup_status='cleanup_pending'
+                ORDER BY updated_at,run_id
+                """
+            ).fetchall()
+        names = (
+            "run_id",
+            "task_id",
+            "pipeline_id",
+            "owner_instance_id",
+            "container_name",
+            "image_id",
+            "epoch_id",
+            "release_id",
+            "deployment_id",
+            "worktree_path",
+            "root_path",
+            "cleanup_ready",
+            "updated_at",
+        )
+        records = [dict(zip(names, row, strict=True)) for row in rows]
+        for record in records:
+            record["cleanup_ready"] = bool(record["cleanup_ready"])
+        return records
+
     def referenced_image_ids(self) -> frozenset[str]:
         """Return exact images protected by deployment, ledger, or containers."""
 
@@ -2196,6 +2342,9 @@ class SQLiteTaskStore:
             ).fetchall()
             containers = connection.exec_driver_sql(
                 "SELECT DISTINCT image_id FROM steward_container_references"
+            ).fetchall()
+            validation_cleanups = connection.exec_driver_sql(
+                "SELECT DISTINCT image_id FROM steward_validation_cleanups WHERE cleanup_status='cleanup_pending'"
             ).fetchall()
             sessions = connection.exec_driver_sql(
                 """
@@ -2213,6 +2362,7 @@ class SQLiteTaskStore:
                 """
             ).fetchall()
         values = {str(row[0]) for row in containers if row[0]}
+        values.update(str(row[0]) for row in validation_cleanups if row[0])
         values.update(str(row[0]) for row in sessions if row[0])
         for daemon_image_id, task_image_id, validation_image_id in releases:
             values.update((str(daemon_image_id), str(task_image_id)))

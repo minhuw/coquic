@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess  # nosec B404 - explicit argv, shell=False below
 from collections.abc import Callable
@@ -24,6 +25,9 @@ from .container_config import (
     TaskRole,
     ValidationContainerConfig,
 )
+
+
+_DOCKER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 
 
 class ContainerErrorCategory(StrEnum):
@@ -75,7 +79,13 @@ class ExecResult:
 
 
 class DockerClient(Protocol):
-    def run(self, argv: list[str], *, input: bytes | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[bytes]: ...
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: bytes | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[bytes]: ...
 
 
 class SubprocessDockerClient:
@@ -215,8 +225,7 @@ class TaskContainerRuntime:
         argv.extend(
             [
                 "--tmpfs",
-                "/tmp:rw,noexec,nosuid,nodev,size="
-                + str(config.limits.scratch_bytes),
+                "/tmp:rw,noexec,nosuid,nodev,size=" + str(config.limits.scratch_bytes),
                 "--tmpfs",
                 "/run:rw,noexec,nosuid,nodev,size=16m",
             ]
@@ -309,7 +318,8 @@ class TaskContainerRuntime:
     ) -> list[str]:
         if not command or any("\x00" in item for item in command):
             raise ContainerBoundaryError(
-                ContainerErrorCategory.invalid, "container exec command is empty or invalid"
+                ContainerErrorCategory.invalid,
+                "container exec command is empty or invalid",
             )
         selected = TaskRole(role)
         allowed = self.config.environment(
@@ -332,7 +342,12 @@ class TaskContainerRuntime:
             "--user",
             f"{session_uid}:{self._role_gid(selected, session_uid)}",
             "--workdir",
-            workdir or (self.config.container_worktree_rw if selected.can_write_worktree else self.config.container_worktree_ro),
+            workdir
+            or (
+                self.config.container_worktree_rw
+                if selected.can_write_worktree
+                else self.config.container_worktree_ro
+            ),
         ]
         if interactive:
             argv.extend(["--interactive"])
@@ -368,7 +383,9 @@ class TaskContainerRuntime:
             workdir=workdir,
         )
         result = self._run(argv, timeout=timeout)
-        identity = ExecIdentity(self.config.container_name, _exec_id(result) or "unknown")
+        identity = ExecIdentity(
+            self.config.container_name, _exec_id(result) or "unknown"
+        )
         return ExecResult(identity, result.returncode, result.stdout, result.stderr)
 
     def exec_stream(
@@ -445,7 +462,9 @@ class TaskContainerRuntime:
         )
         raise ContainerBoundaryError(category, _decode_error(result.stderr))
 
-    def stop(self, container_id: str | None = None, *, timeout: float | None = None) -> None:
+    def stop(
+        self, container_id: str | None = None, *, timeout: float | None = None
+    ) -> None:
         identifier = container_id or self.config.container_name
         result = self._run(
             ["stop", "--time", str(max(1, int(timeout or 10))), identifier],
@@ -489,7 +508,8 @@ class TaskContainerRuntime:
         source = str(mount.source)
         if any(char in source for char in "\x00\n"):
             raise ContainerBoundaryError(
-                ContainerErrorCategory.invalid, "mount source contains control characters"
+                ContainerErrorCategory.invalid,
+                "mount source contains control characters",
             )
         value = f"type=bind,src={source},dst={mount.target}"
         if mount.read_only:
@@ -513,7 +533,10 @@ class TaskContainerRuntime:
             # Older persisted fake identities predate the ownership labels;
             # they are accepted for read-only tests, while any supplied value
             # is still checked exactly.
-            if key in {"coquic.steward.owner", "coquic.steward.restart-policy"} and key not in inspection.labels:
+            if (
+                key in {"coquic.steward.owner", "coquic.steward.restart-policy"}
+                and key not in inspection.labels
+            ):
                 continue
             if inspection.labels.get(key) != expected_value:
                 raise ContainerBoundaryError(
@@ -618,8 +641,7 @@ class PlannerContainerRuntime(TaskContainerRuntime):
         argv.extend(
             [
                 "--tmpfs",
-                "/tmp:rw,noexec,nosuid,nodev,size="
-                + str(config.limits.scratch_bytes),
+                "/tmp:rw,noexec,nosuid,nodev,size=" + str(config.limits.scratch_bytes),
                 "--tmpfs",
                 "/run:rw,noexec,nosuid,nodev,size=16m",
                 config.image_digest,
@@ -645,7 +667,8 @@ class PlannerContainerRuntime(TaskContainerRuntime):
             )
         if not command or any("\x00" in item for item in command):
             raise ContainerBoundaryError(
-                ContainerErrorCategory.invalid, "container exec command is empty or invalid"
+                ContainerErrorCategory.invalid,
+                "container exec command is empty or invalid",
             )
         allowed = self.config.environment(
             role, session_uid=session_uid, session_id=session_id
@@ -689,13 +712,31 @@ class ValidationContainerRuntime:
         self.config = config
         self.client = client or SubprocessDockerClient(docker_bin)
 
-    def _run(self, argv: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
+    def _run(
+        self,
+        argv: list[str],
+        *,
+        timeout: float | None = None,
+        allow_not_found: bool = False,
+    ) -> subprocess.CompletedProcess[bytes]:
         try:
             result = self.client.run(argv, timeout=timeout)
         except FileNotFoundError as exc:
-            raise ContainerBoundaryError(ContainerErrorCategory.runtime_unavailable, "Docker executable is unavailable") from exc
-        if result.returncode:
-            raise ContainerBoundaryError(ContainerErrorCategory.runtime_unavailable, _decode_error(result.stderr))
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.runtime_unavailable,
+                "Docker executable is unavailable",
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.timeout, "Docker command timed out"
+            ) from exc
+        if result.returncode and not allow_not_found:
+            category = (
+                ContainerErrorCategory.not_found
+                if _not_found(result.stderr)
+                else ContainerErrorCategory.runtime_unavailable
+            )
+            raise ContainerBoundaryError(category, _decode_error(result.stderr))
         return result
 
     def _mount_argv(self, mount: ContainerMount) -> list[str]:
@@ -707,69 +748,386 @@ class ValidationContainerRuntime:
     def create_argv(self) -> list[str]:
         config = self.config
         argv = [
-            "create", "--name", config.container_name, "--init", "--network", "none",
-            "--restart", "no", "--read-only", "--security-opt", "no-new-privileges:true",
-            "--cap-drop", "ALL", "--pids-limit", str(config.limits.pids),
-            "--memory", str(config.limits.memory_bytes), "--stop-timeout",
-            str(config.limits.stop_timeout_seconds), "--log-driver", "local",
-            "--log-opt", f"max-size={config.limits.log_max_bytes}b",
-            "--log-opt", f"max-file={config.limits.log_max_files}",
+            "create",
+            "--name",
+            config.container_name,
+            "--init",
+            "--network",
+            "none",
+            "--restart",
+            "no",
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--cap-drop",
+            "ALL",
+            "--pids-limit",
+            str(config.limits.pids),
+            "--memory",
+            str(config.limits.memory_bytes),
+            "--stop-timeout",
+            str(config.limits.stop_timeout_seconds),
+            "--log-driver",
+            "local",
+            "--log-opt",
+            f"max-size={config.limits.log_max_bytes}b",
+            "--log-opt",
+            f"max-file={config.limits.log_max_files}",
+            "--user",
+            f"{config.uid}:{config.gid}",
         ]
         for key in sorted(config.labels):
             argv.extend(["--label", f"{key}={config.labels[key]}"])
         for mount in config.mounts:
             argv.extend(self._mount_argv(mount))
-        argv.extend([
-            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + str(config.limits.scratch_bytes),
-            "--tmpfs", "/run:rw,noexec,nosuid,nodev,size=16m",
-            "--entrypoint", "/bin/sh", config.image_digest,
-            "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done",
-        ])
+        argv.extend(
+            ["--env", f"VALIDATION_SOURCE_WORKTREE={config.worktree.as_posix()}"]
+        )
+        if config.git_common_dir is not None:
+            argv.extend(
+                [
+                    "--env",
+                    f"VALIDATION_GIT_OBJECTS_DIR={config.git_common_dir / 'objects'}",
+                    "--env",
+                    "VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects",
+                    "--tmpfs",
+                    f"{config.git_common_dir / 'objects'}:rw,nosuid,nodev,size=256m,mode=0755,uid={config.uid},gid={config.gid}",
+                ]
+            )
+        argv.extend(
+            [
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,nodev,size="
+                + str(config.limits.scratch_bytes)
+                + ",mode=1777",
+                "--tmpfs",
+                "/validation/worktree/.zig-cache:rw,exec,nosuid,nodev,size="
+                + str(config.limits.scratch_bytes)
+                + ",mode=0755,uid="
+                + str(config.uid)
+                + ",gid="
+                + str(config.gid),
+                "--tmpfs",
+                "/validation/worktree/site/next:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
+                + str(config.uid)
+                + ",gid="
+                + str(config.gid),
+                "--tmpfs",
+                "/validation/worktree/.duvet:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
+                + str(config.uid)
+                + ",gid="
+                + str(config.gid),
+                "--tmpfs",
+                "/run:rw,noexec,nosuid,nodev,size=16m",
+                "--tmpfs",
+                "/nix/store:rw,nosuid,nodev,size="
+                + str(config.limits.scratch_bytes)
+                + ",mode=0755,uid="
+                + str(config.uid)
+                + ",gid="
+                + str(config.gid),
+                "--tmpfs",
+                "/nix/var/log/nix:rw,noexec,nosuid,nodev,size=64m,mode=0755,uid="
+                + str(config.uid)
+                + ",gid="
+                + str(config.gid),
+                "--entrypoint",
+                "/bootstrap/sh",
+                config.image_digest,
+                "/bootstrap/validation-entrypoint.sh",
+                "--idle",
+            ]
+        )
         return argv
 
     def create(self) -> str:
         result = self._run(self.create_argv())
         identity = result.stdout.decode("utf-8", "replace").strip()
         if not identity:
-            raise ContainerBoundaryError(ContainerErrorCategory.ambiguous, "Docker create returned no validation identity")
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.ambiguous,
+                "Docker create returned no validation identity",
+            )
         return identity
 
     def ensure_started(self) -> str:
         try:
-            self._run(["inspect", self.config.container_name])
+            inspection = self.inspect()
         except ContainerBoundaryError as exc:
-            if exc.category is not ContainerErrorCategory.runtime_unavailable:
+            if exc.category is not ContainerErrorCategory.not_found:
                 raise
             identity = self.create()
             self._run(["start", identity])
             return identity
-        self._run(["start", self.config.container_name])
-        return self.config.container_name
+        self._validate_inspection(inspection)
+        if not inspection.running:
+            self._run(["start", inspection.container_id])
+        return inspection.container_id
 
-    def exec_argv(self, command: list[str], *, workdir: str = "/validation/worktree") -> list[str]:
+    def inspect(self) -> ContainerInspection:
+        result = self._run(
+            ["inspect", "--format", "{{json .}}", self.config.container_name],
+            allow_not_found=True,
+        )
+        if result.returncode:
+            if _not_found(result.stderr):
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.not_found,
+                    f"validation container not found: {self.config.container_name}",
+                )
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.runtime_unavailable,
+                _decode_error(result.stderr),
+            )
+        try:
+            value = json.loads(result.stdout.decode("utf-8"))
+            if isinstance(value, list):
+                value = value[0]
+            state = value.get("State") or {}
+            config = value.get("Config") or {}
+            labels = dict(config.get("Labels") or {})
+            name = str(value.get("Name") or "").removeprefix("/")
+            return ContainerInspection(
+                container_id=str(value.get("Id") or ""),
+                name=name,
+                state=str(state.get("Status") or "unknown"),
+                running=bool(state.get("Running")),
+                labels={str(key): str(item) for key, item in labels.items()},
+                image=str(value.get("Image") or config.get("Image") or ""),
+                image_digest=labels.get("coquic.steward.image-digest"),
+                pid=int(state["Pid"]) if state.get("Pid") else None,
+                raw=value,
+            )
+        except (
+            IndexError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.ambiguous,
+                "Docker inspect returned malformed validation identity",
+            ) from exc
+
+    def _validate_inspection(self, inspection: ContainerInspection) -> None:
+        config = self.config
+        raw = inspection.raw if isinstance(inspection.raw, dict) else {}
+        host_config = raw.get("HostConfig") or {}
+        container_config = raw.get("Config") or {}
+        if (
+            inspection.name != config.container_name
+            or _DOCKER_ID.fullmatch(inspection.container_id) is None
+            or inspection.image != config.image_digest
+            or container_config.get("User") != f"{config.uid}:{config.gid}"
+        ):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.identity_mismatch,
+                "validation container identity or image is mismatched",
+            )
+        for key, expected in config.labels.items():
+            if inspection.labels.get(key) != expected:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.identity_mismatch,
+                    f"validation container label mismatch: {key}",
+                )
+        expected_mounts = {
+            (str(mount.source), mount.target, not mount.read_only)
+            for mount in config.mounts
+        }
+        actual_mounts = {
+            (
+                str(mount.get("Source") or ""),
+                str(mount.get("Destination") or ""),
+                bool(mount.get("RW")),
+            )
+            for mount in raw.get("Mounts") or []
+            if mount.get("Type") == "bind"
+        }
+        security = [str(value) for value in host_config.get("SecurityOpt") or []]
+        restart = str((host_config.get("RestartPolicy") or {}).get("Name") or "no")
+        expected_environment = {
+            "VALIDATION_SOURCE_WORKTREE": config.worktree.as_posix(),
+        }
+        if config.git_common_dir is not None:
+            expected_environment.update(
+                {
+                    "VALIDATION_GIT_OBJECTS_DIR": str(
+                        config.git_common_dir / "objects"
+                    ),
+                    "VALIDATION_GIT_ALTERNATE_OBJECTS": "/validation/git-common-ro/objects",
+                }
+            )
+        actual_environment: dict[str, str] = {}
+        allowed_environment = {
+            "NIX_REGISTRATION",
+            "NIX_MATERIALIZED_STORE_PATHS",
+            "NIX_STORE_PATHS",
+            "PYTHONPATH",
+            "ZIG_GLOBAL_CACHE_DIR",
+            "ZIG_LOCAL_CACHE_DIR",
+            *expected_environment,
+        }
+        for item in container_config.get("Env") or []:
+            key, separator, value = str(item).partition("=")
+            if not separator or key in actual_environment:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.identity_mismatch,
+                    "validation container environment is malformed",
+                )
+            actual_environment[key] = value
+        expected_tmpfs = {
+            "/tmp": "rw,noexec,nosuid,nodev,size="
+            + str(config.limits.scratch_bytes)
+            + ",mode=1777",
+            "/run": "rw,noexec,nosuid,nodev,size=16m",
+            "/validation/worktree/.zig-cache": "rw,exec,nosuid,nodev,size="
+            + str(config.limits.scratch_bytes)
+            + ",mode=0755,uid="
+            + str(config.uid)
+            + ",gid="
+            + str(config.gid),
+            "/validation/worktree/site/next": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
+            + str(config.uid)
+            + ",gid="
+            + str(config.gid),
+            "/validation/worktree/.duvet": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
+            + str(config.uid)
+            + ",gid="
+            + str(config.gid),
+            "/nix/store": "rw,nosuid,nodev,size="
+            + str(config.limits.scratch_bytes)
+            + ",mode=0755,uid="
+            + str(config.uid)
+            + ",gid="
+            + str(config.gid),
+            "/nix/var/log/nix": "rw,noexec,nosuid,nodev,size=64m,mode=0755,uid="
+            + str(config.uid)
+            + ",gid="
+            + str(config.gid),
+        }
+        if config.git_common_dir is not None:
+            expected_tmpfs[str(config.git_common_dir / "objects")] = (
+                "rw,nosuid,nodev,size=256m,mode=0755,uid="
+                + str(config.uid)
+                + ",gid="
+                + str(config.gid)
+            )
+        if (
+            actual_mounts != expected_mounts
+            or dict(host_config.get("Tmpfs") or {}) != expected_tmpfs
+            or any(
+                actual_environment.get(key) != value
+                for key, value in expected_environment.items()
+            )
+            or set(actual_environment) != allowed_environment
+            or container_config.get("Entrypoint") != ["/bootstrap/sh"]
+            or container_config.get("Cmd")
+            != ["/bootstrap/validation-entrypoint.sh", "--idle"]
+            or container_config.get("WorkingDir") != "/validation/worktree"
+            or host_config.get("NetworkMode") != "none"
+            or bool(host_config.get("Privileged"))
+            or host_config.get("ReadonlyRootfs") is not True
+            or host_config.get("Init") is not True
+            or int(host_config.get("Memory") or 0) != config.limits.memory_bytes
+            or int(host_config.get("PidsLimit") or 0) != config.limits.pids
+            or (host_config.get("LogConfig") or {}).get("Type") != "local"
+            or (host_config.get("LogConfig") or {}).get("Config")
+            != {
+                "max-file": str(config.limits.log_max_files),
+                "max-size": f"{config.limits.log_max_bytes}b",
+            }
+            or restart != "no"
+            or "ALL"
+            not in [str(value).upper() for value in host_config.get("CapDrop") or []]
+            or not any(value.startswith("no-new-privileges") for value in security)
+        ):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.identity_mismatch,
+                "validation container isolation boundary is mismatched",
+            )
+
+    def exec_argv(
+        self, command: list[str], *, workdir: str = "/validation/worktree"
+    ) -> list[str]:
         if not command or any("\x00" in value for value in command):
-            raise ContainerBoundaryError(ContainerErrorCategory.invalid, "validation command is empty or invalid")
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid, "validation command is empty or invalid"
+            )
         if not workdir.startswith("/validation/"):
-            raise ContainerBoundaryError(ContainerErrorCategory.invalid, "validation workdir is outside its boundary")
-        return ["exec", "--user", f"{self.config.uid}:{self.config.gid}", "--workdir", workdir, self.config.container_name, *command]
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid,
+                "validation workdir is outside its boundary",
+            )
+        return [
+            "exec",
+            "--user",
+            f"{self.config.uid}:{self.config.gid}",
+            "--workdir",
+            workdir,
+            self.config.container_name,
+            *command,
+        ]
 
-    def exec(self, command: list[str], *, workdir: str = "/validation/worktree", timeout: float | None = None) -> ExecResult:
+    def exec(
+        self,
+        command: list[str],
+        *,
+        workdir: str = "/validation/worktree",
+        timeout: float | None = None,
+    ) -> ExecResult:
         result = self._run(self.exec_argv(command, workdir=workdir), timeout=timeout)
-        return ExecResult(ExecIdentity(self.config.container_name, _exec_id(result) or "unknown", uid=self.config.uid), result.returncode, result.stdout, result.stderr)
+        return ExecResult(
+            ExecIdentity(
+                self.config.container_name,
+                _exec_id(result) or "unknown",
+                uid=self.config.uid,
+            ),
+            result.returncode,
+            result.stdout,
+            result.stderr,
+        )
 
-    def stop(self, *, timeout: float | None = None) -> None:
+    def stop(
+        self, *, identifier: str | None = None, timeout: float | None = None
+    ) -> None:
         try:
-            self._run(["stop", "--time", str(max(1, int(timeout or self.config.limits.stop_timeout_seconds))), self.config.container_name], timeout=timeout)
+            self._run(
+                [
+                    "stop",
+                    "--time",
+                    str(
+                        max(1, int(timeout or self.config.limits.stop_timeout_seconds))
+                    ),
+                    identifier or self.config.container_name,
+                ],
+                timeout=timeout,
+            )
         except ContainerBoundaryError as exc:
-            if exc.category is not ContainerErrorCategory.runtime_unavailable:
+            if exc.category is not ContainerErrorCategory.not_found:
                 raise
 
-    def remove(self) -> None:
+    def remove(self, *, identifier: str | None = None) -> None:
         try:
-            self._run(["rm", self.config.container_name])
+            self._run(["rm", identifier or self.config.container_name])
         except ContainerBoundaryError as exc:
-            if exc.category is not ContainerErrorCategory.runtime_unavailable:
+            if exc.category is not ContainerErrorCategory.not_found:
                 raise
+
+    def cleanup_owned(self, *, timeout: float = 5) -> None:
+        """Remove only an exactly inspected validation sibling."""
+
+        try:
+            inspection = self.inspect()
+        except ContainerBoundaryError as exc:
+            if exc.category is ContainerErrorCategory.not_found:
+                return
+            raise
+        self._validate_inspection(inspection)
+        if inspection.running:
+            self.stop(identifier=inspection.container_id, timeout=timeout)
+        self.remove(identifier=inspection.container_id)
+
 
 ContainerRuntime = TaskContainerRuntime
 DockerBoundary = TaskContainerRuntime
@@ -834,9 +1192,7 @@ def deployment_runtime_factory(
 def _not_found(value: bytes) -> bool:
     text = value.decode("utf-8", "replace").lower()
     return (
-        "no such container" in text
-        or "no such object" in text
-        or "not found" in text
+        "no such container" in text or "no such object" in text or "not found" in text
     )
 
 

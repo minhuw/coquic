@@ -127,9 +127,13 @@ compose_run() {
 }
 
 journal() {
-  local phase="$1" outcome="${2:-pending}" candidate="${3:-}"
+  local phase="$1" outcome="${2:-pending}" candidate="${3:-}" clone_temp="${4:-}"
   mkdir -p -m 700 "$deployment"
-  if [[ -n "$candidate" ]]; then
+  if [[ -n "$clone_temp" ]]; then
+    [[ "$clone_temp" == bootstrap-repository.tmp ]] || die 'journal clone identity is invalid'
+    printf '{"phase":"%s","outcome":"%s","cloneTemporary":"%s"}\n' \
+      "$phase" "$outcome" "$clone_temp" >"$deployment/operation.journal.tmp"
+  elif [[ -n "$candidate" ]]; then
     release_token "$candidate" || die 'journal candidate release identity is invalid'
     printf '{"phase":"%s","outcome":"%s","candidateRelease":"%s"}\n' \
       "$phase" "$outcome" "$candidate" >"$deployment/operation.journal.tmp"
@@ -174,7 +178,7 @@ build_release() {
     validation_id="${STEWARD_FAKE_VALIDATION_ID:-sha256:3333333333333333333333333333333333333333333333333333333333333333}"
     daemon_ref="$daemon_id"
     task_ref="$task_id"
-    validation_ref="$validation_id"
+    validation_ref="${STEWARD_FAKE_VALIDATION_REF:-$validation_id}"
   else
     validate_socket
     command -v nix >/dev/null || die 'Nix is unavailable for pinned image build'
@@ -196,6 +200,7 @@ build_release() {
     daemon_ref="$daemon_id"
     task_ref="$task_id"
   fi
+  validation_ref="$validation_id"
   image_id "$daemon_id" && image_id "$task_id" && image_id "$validation_id" || die 'loaded image IDs are not immutable'
   release="$(release_id_from_values "$daemon_id" "$task_id" "$validation_id")"
   release_token "$release" || die 'release identity is invalid'
@@ -237,30 +242,50 @@ PY
 }
 
 validate_repository() {
-  [[ -d "$repository/.git" || -f "$repository/.git" ]] || die 'canonical repository is not a Git checkout'
+  local repository_path="${1:-$repository}"
+  [[ -d "$repository_path/.git" || -f "$repository_path/.git" ]] || die 'canonical repository is not a Git checkout'
   local remote branch dirty expected_url actual_url
   local -a worktree_paths=()
   remote="${STEWARD_EXPECTED_REMOTE:-origin}"
   branch="${STEWARD_EXPECTED_BRANCH:-main}"
-  actual_url="$(git -C "$repository" config --get "remote.$remote.url" || true)"
+  actual_url="$(git -C "$repository_path" config --get "remote.$remote.url" || true)"
   [[ -n "$actual_url" ]] || die 'expected Git remote is missing'
   expected_url="${COQUIC_REMOTE_URL:-}"
   if [[ -n "$expected_url" && "$actual_url" != "$expected_url" ]]; then
     die 'canonical repository remote does not match the configured remote'
   fi
-  [[ "$(git -C "$repository" symbolic-ref --quiet --short HEAD)" == "$branch" ]] || die 'repository is detached or on wrong branch'
-  [[ -z "$(git -C "$repository" status --porcelain)" ]] || die 'canonical repository is dirty'
+  [[ "$(git -C "$repository_path" symbolic-ref --quiet --short HEAD)" == "$branch" ]] || die 'repository is detached or on wrong branch'
+  [[ -z "$(git -C "$repository_path" status --porcelain)" ]] || die 'canonical repository is dirty'
   mapfile -t worktree_paths < <(
-    git -C "$repository" worktree list --porcelain | sed -n 's/^worktree //p'
+    git -C "$repository_path" worktree list --porcelain | sed -n 's/^worktree //p'
   )
-  [[ "${#worktree_paths[@]}" -eq 1 && "${worktree_paths[0]}" == "$repository" ]] || \
+  [[ "${#worktree_paths[@]}" -eq 1 && "${worktree_paths[0]}" == "$repository_path" ]] || \
     die 'repository has an unexpected linked worktree'
+}
+
+recover_interrupted_clone() {
+  local clone_tmp="$deployment/bootstrap-repository.tmp"
+  [[ -e "$clone_tmp" ]] || return 0
+  [[ ! -L "$clone_tmp" ]] || die 'interrupted clone path is a symlink'
+  [[ -f "$deployment/operation.journal" ]] || die 'interrupted clone has no ownership journal'
+  python - "$deployment/operation.journal" <<'PY' || die 'interrupted clone is not journal-owned'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if value == {
+    "phase": "clone",
+    "outcome": "pending",
+    "cloneTemporary": "bootstrap-repository.tmp",
+} else 1)
+PY
+  rm -rf -- "$clone_tmp"
 }
 
 bootstrap() {
   require_paths; require_numeric_config; validate_credentials; with_lock
   if [[ -e "$repository" ]]; then
     validate_repository
+  else
+    recover_interrupted_clone
   fi
   journal layout
   mkdir -p -m 700 "$home" "$home/private" "$home/private/runtime" "$home/private/codex-sessions" "$home/private/credentials" "$home/private/deployment" "$home/worktrees" "$home/tasks" "$home/control-loop"
@@ -270,8 +295,12 @@ bootstrap() {
     local unexpected
     unexpected="$(find "$home" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | while read -r entry; do case "$entry" in private|worktrees|tasks|control-loop) ;; *) printf '%s\n' "$entry" ;; esac; done | head -n 1)"
     [[ -z "$unexpected" ]] || die 'repository parent contains unexpected state'
-    journal clone
-    git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$repository" >/dev/null
+    local clone_tmp="$deployment/bootstrap-repository.tmp"
+    journal clone pending '' bootstrap-repository.tmp
+    git clone --branch "${STEWARD_EXPECTED_BRANCH:-main}" --single-branch "$COQUIC_REMOTE_URL" "$clone_tmp" >/dev/null
+    validate_repository "$clone_tmp"
+    [[ ! -e "$repository" ]] || die 'repository appeared while bootstrap was cloning'
+    mv -- "$clone_tmp" "$repository"
   }
   validate_repository
   local release
@@ -341,21 +370,25 @@ restore_release() {
   recreate_release "$release" && verify_release_health "$release" || die 'candidate failed and the previous release could not be restored'
 }
 
+require_quiescence() {
+  local operation="$1" health
+  if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
+    [[ "${STEWARD_FAKE_BUSY:-0}" != 1 ]] || die "$operation requires proven quiescence"
+  elif command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    health="$(compose_run exec -T --workdir "$repository" steward /usr/bin/env coquic-steward health 2>/dev/null)" || die "$operation quiescence is ambiguous"
+    python -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("quiescent") is True else 1)' <<<"$health" || die "$operation requires proven quiescence"
+  else
+    die "$operation quiescence is ambiguous without the daemon health API"
+  fi
+}
+
 upgrade_service() {
   require_paths; require_numeric_config; validate_socket; with_lock
   local force=0 arg
   for arg in "$@"; do [[ "$arg" == --force ]] && force=1 || die 'upgrade accepts only --force'; done
   [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'
   if (( force == 0 )); then
-    if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
-      [[ "${STEWARD_FAKE_BUSY:-0}" != 1 ]] || die 'upgrade requires proven quiescence; use --force explicitly'
-    elif command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-      local health
-      health="$(compose_run exec -T --workdir "$repository" steward /usr/bin/env coquic-steward health 2>/dev/null)" || die 'upgrade quiescence is ambiguous'
-      python -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("quiescent") is True else 1)' <<<"$health" || die 'upgrade requires proven quiescence; use --force explicitly'
-    else
-      die 'upgrade quiescence is ambiguous without the daemon health API'
-    fi
+    require_quiescence upgrade
   fi
   local old candidate
   old="$(tr -d '\n' <"$deployment/current")"
@@ -383,12 +416,13 @@ upgrade_service() {
 }
 
 rollback_service() {
-  require_paths; validate_socket; with_lock
+  require_paths; require_numeric_config; validate_socket; with_lock
   [[ -f "$deployment/previous" ]] || die 'no previous verified release is recorded'
   local previous current
   previous="$(tr -d '\n' <"$deployment/previous")"
   current="$(tr -d '\n' <"$deployment/current")"
   [[ -f "$deployment/releases/$previous.json" ]] || die 'previous release record is unavailable'
+  require_quiescence rollback
   journal rollback
   if ! recreate_release "$previous" || ! verify_release_health "$previous"; then
     restore_release "$current"

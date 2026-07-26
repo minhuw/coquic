@@ -1975,6 +1975,9 @@ class StewardExecutor:
     def _container_validation_runner(
         self, task: TaskRecord, pipeline: Any
     ) -> Callable[[list[str], Path, float], CommandResult]:
+        validation_digest = getattr(self.config, "validation_image_digest", None)
+        if validation_digest and getattr(self.config, "validation_runtime", "") == "validation-container-v1":
+            return self._isolated_validation_runner(task, pipeline, validation_digest)
         if self.session_supervisor is None:
             raise RuntimeError("durable validation requires a task container")
         runtime, _ = self.session_supervisor._boundary_for(task)
@@ -2025,6 +2028,85 @@ class StewardExecutor:
                 workdir=container_workdir,
                 timeout=timeout,
             )
+            return CommandResult(
+                args=command,
+                cwd=cwd,
+                returncode=result.exit_code,
+                stdout=result.stdout.decode("utf-8", errors="replace"),
+                stderr=result.stderr.decode("utf-8", errors="replace"),
+            )
+
+        return execute
+
+    def _isolated_validation_runner(
+        self, task: TaskRecord, pipeline: Any, image_digest: str
+    ) -> Callable[[list[str], Path, float], CommandResult]:
+        """Create one disposable validation sibling and route every gate through it."""
+        from .container import ValidationContainerRuntime
+        from .container_config import ContainerLimits, ValidationContainerConfig
+
+        run_id = f"validation-{sha256(f'{task.id}:{pipeline.id}'.encode()).hexdigest()[:16]}"
+        root = self.config.private_dir / "validation" / task.id / pipeline.id
+        output = root / "output"
+        store = root / "store"
+        scratch = root / "scratch"
+        for path in (output, store, scratch):
+            path.mkdir(parents=True, exist_ok=True)
+        deployment = getattr(self.config, "deployment", None)
+        labels = {
+            "coquic.steward.task": task.id,
+            "coquic.steward.pipeline": pipeline.id,
+            "coquic.steward.deployment": getattr(deployment, "compose_project", "local"),
+        }
+        if deployment is not None and getattr(deployment, "release_id", None):
+            labels["coquic.steward.release"] = str(deployment.release_id)
+        try:
+            epoch_id = str(self.config.ensure_epoch()["epochId"])
+            labels["coquic.steward.epoch"] = epoch_id
+        except Exception:
+            pass
+        config = ValidationContainerConfig(
+            run_id=run_id,
+            image=getattr(self.config, "validation_image", "coquic-steward-validation"),
+            image_digest=image_digest,
+            worktree=Path(task.worktree_path or self.config.repo_root).resolve(),
+            output=output,
+            store=store,
+            scratch=scratch,
+            limits=ContainerLimits(
+                memory_bytes=getattr(deployment, "max_memory_bytes", 4 * 1024 * 1024 * 1024),
+                pids=getattr(deployment, "max_pids", 512),
+                scratch_bytes=getattr(deployment, "max_scratch_bytes", 8 * 1024 * 1024 * 1024),
+                log_max_bytes=getattr(deployment, "max_log_bytes", 64 * 1024 * 1024),
+            ),
+            labels=labels,
+        )
+        runtime = ValidationContainerRuntime(config, docker_bin=getattr(getattr(self.config, "container", None), "docker_bin", "docker"))
+        runtime.ensure_started()
+        gate_count = 0
+
+        def execute(command: list[str], cwd: Path, timeout: float) -> CommandResult:
+            nonlocal gate_count
+            container_command = [
+                _rewrite_mounted_argument(item, cwd, config.container_path(cwd))
+                for item in command
+            ]
+            result = runtime.exec(
+                container_command,
+                workdir=config.container_path(cwd),
+                timeout=timeout,
+            )
+            # The command/result evidence is written by run_validation before
+            # this final cleanup. Remove only this exact labeled sibling after
+            # the fourth gate has returned.
+            gate_count += 1
+            if gate_count >= 4:
+                try:
+                    runtime.stop(timeout=5)
+                    runtime.remove()
+                except Exception:
+                    # The durable cleanup pass retries the exact labeled run.
+                    pass
             return CommandResult(
                 args=command,
                 cwd=cwd,

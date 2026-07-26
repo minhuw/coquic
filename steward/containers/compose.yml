@@ -1,0 +1,86 @@
+name: ${STEWARD_COMPOSE_PROJECT:?set STEWARD_COMPOSE_PROJECT}
+
+services:
+  steward:
+    image: ${STEWARD_DAEMON_IMAGE:?set verified daemon image identity}
+    init: true
+    user: "${STEWARD_UID:?}:${STEWARD_GID:?}"
+    group_add:
+      - "${STEWARD_DOCKER_GID:?}"
+    restart: unless-stopped
+    stop_grace_period: ${STEWARD_STOP_GRACE:?}s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: ${STEWARD_MAX_PIDS:?}
+    mem_limit: ${STEWARD_MAX_MEMORY:?}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=${STEWARD_MAX_SCRATCH_BYTES:?}
+      - /run:rw,noexec,nosuid,nodev,size=16m
+    logging:
+      driver: local
+      options:
+        max-size: ${STEWARD_MAX_LOG_BYTES:?}b
+        max-file: "3"
+    labels:
+      coquic.steward.owner: steward
+      coquic.steward.deployment: ${STEWARD_COMPOSE_PROJECT:?}
+      coquic.steward.runtime: daemon-compose-v1
+      coquic.steward.release: ${STEWARD_RELEASE_ID:?}
+    environment:
+      COQUIC_HOME: ${COQUIC_HOME:?}
+      COQUIC_REPOSITORY: ${COQUIC_REPOSITORY:?}
+      DOCKER_SOCKET: ${DOCKER_SOCKET:?}
+      STEWARD_UID: ${STEWARD_UID:?}
+      STEWARD_GID: ${STEWARD_GID:?}
+      STEWARD_DOCKER_GID: ${STEWARD_DOCKER_GID:?}
+      STEWARD_CONFIG_PATH: ${STEWARD_CONFIG_PATH:?}
+      STEWARD_RELEASE_ID: ${STEWARD_RELEASE_ID:?}
+      STEWARD_DAEMON_IMAGE: ${STEWARD_DAEMON_IMAGE:?}
+      STEWARD_TASK_IMAGE: ${STEWARD_TASK_IMAGE:?}
+      STEWARD_VALIDATION_IMAGE: ${STEWARD_VALIDATION_IMAGE:?}
+      STEWARD_STOP_GRACE: ${STEWARD_STOP_GRACE:?}
+      STEWARD_MIN_FREE_BYTES: ${STEWARD_MIN_FREE_BYTES:?}
+      STEWARD_MAX_OWNED_DOCKER_BYTES: ${STEWARD_MAX_OWNED_DOCKER_BYTES:?}
+      STEWARD_RECOVERY_FREE_BYTES: ${STEWARD_RECOVERY_FREE_BYTES:?}
+      STEWARD_RECOVERY_OWNED_DOCKER_BYTES: ${STEWARD_RECOVERY_OWNED_DOCKER_BYTES:?}
+    volumes:
+      - type: bind
+        source: ${COQUIC_HOME:?}
+        target: ${COQUIC_HOME:?}
+        read_only: false
+      - type: bind
+        source: ${DOCKER_SOCKET:?}
+        target: ${DOCKER_SOCKET:?}
+        read_only: false
+      - type: bind
+        source: ${STEWARD_CONFIG_PATH:?}
+        target: /etc/coquic-steward/steward.toml
+        read_only: true
+      - type: bind
+        source: ${KNOWN_HOSTS_PATH:?}
+        target: /etc/coquic-steward/known_hosts
+        read_only: true
+    secrets:
+      - source: codex_api_key
+        target: /run/secrets/codex-api-key
+      - source: github_identity
+        target: /run/secrets/github-identity
+      - source: dataset_identity
+        target: /run/secrets/dataset-identity
+    healthcheck:
+      test: ["CMD", "/usr/bin/env", "coquic-steward", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+secrets:
+  codex_api_key:
+    file: ${CODEX_API_KEY_PATH:?}
+  github_identity:
+    file: ${GITHUB_IDENTITY_PATH:?}
+  dataset_identity:
+    file: ${DATASET_IDENTITY_PATH:?}

@@ -3,9 +3,11 @@ set -euo pipefail
 
 mode="all"
 shutdown_check=0
+full_validation=0
 for argument in "$@"; do
   case "$argument" in
-    --images|--isolation|--planner|--dataset-sync) mode="${argument#--}" ;;
+    --images|--isolation|--planner|--dataset-sync|--production-compose) mode="${argument#--}" ;;
+    --full-validation) full_validation=1 ;;
     --shutdown) shutdown_check=1 ;;
     *) echo "unknown smoke-test option: $argument" >&2; exit 64 ;;
   esac
@@ -38,6 +40,14 @@ fail() {
   exit 1
 }
 
+if [[ "$mode" == production-compose ]]; then
+  bash "$root/steward/containers/test-manage.sh" --config
+  bash "$root/steward/containers/test-manage.sh" --bootstrap
+  bash "$root/steward/containers/test-manage.sh" --lifecycle
+  echo "steward container smoke test passed (production-compose; fake state only)"
+  exit 0
+fi
+
 inspect_image() {
   local image="$1" kind="$2"
   local unpacked="$tmp/image-$kind" names="$tmp/$kind.names"
@@ -60,18 +70,23 @@ if not any(str(item).endswith(expected_entrypoint) for item in config.get("Entry
     raise SystemExit(f"{kind} image entrypoint is missing")
 for key in (
     "org.opencontainers.image.source-revision",
+    "org.opencontainers.image.architecture",
     "coquic.steward.runtime-protocol",
     "coquic.steward.codex-version",
     "coquic.steward.closure",
+    "coquic.steward.owner",
 ):
     if not labels.get(key):
         raise SystemExit(f"{kind} image label is missing: {key}")
-if labels["coquic.steward.codex-version"] != "0.144.6":
+if kind != "validation" and labels["coquic.steward.codex-version"] != "0.144.6":
     raise SystemExit(f"{kind} image has the wrong Codex identity")
+if labels["coquic.steward.owner"] != "steward":
+    raise SystemExit(f"{kind} image has the wrong ownership identity")
 
 required = {
-    "task": ("bin/codex", "bin/git", "bin/pre-commit", "bin/uv", "bin/zig"),
+    "task": ("bin/codex", "bin/git", "bin/pre-commit", "bin/steward-task-validate", "bin/uv", "bin/zig"),
     "daemon": ("bin/coquic-steward", "bin/docker", "bin/gh", "bin/git", "bin/ssh"),
+    "validation": ("bin/git", "bin/nix", "bin/pre-commit", "bin/uv", "bin/zig", "bin/validation-entrypoint.sh"),
 }[kind]
 for path in required:
     if path not in names:
@@ -85,22 +100,66 @@ if kind == "task":
     for path in names:
         if any(item in path for item in forbidden):
             raise SystemExit(f"task image contains daemon authority material: {path}")
+if kind == "validation":
+    if labels.get("coquic.steward.runtime") != "validation-container-v1":
+        raise SystemExit("validation image runtime label is missing")
+    if labels.get("coquic.steward.codex-version") != "none":
+        raise SystemExit("validation image unexpectedly contains Codex identity")
+    forbidden = ("bin/codex", "bin/docker", "bin/gh", "auth.json", ".ssh/id_")
+    for path in names:
+        if any(item in path for item in forbidden):
+            raise SystemExit(f"validation image contains forbidden authority material: {path}")
 PY
 }
 
 if [[ "$mode" == all || "$mode" == images ]]; then
   mapfile -t images < <(
     nix build --no-link --print-out-paths \
-      "$root#steward-daemon-image" "$root#steward-task-image"
+      "$root#steward-daemon-image" "$root#steward-task-image" "$root#steward-validation-image"
   )
-  [[ "${#images[@]}" -eq 2 ]] || fail "Nix did not return both OCI archives"
+  [[ "${#images[@]}" -eq 3 ]] || fail "Nix did not return all OCI archives"
   for image in "${images[@]}"; do
     case "$(basename "$image")" in
       *daemon*) inspect_image "$image" daemon ;;
       *task*) inspect_image "$image" task ;;
+      *validation*) inspect_image "$image" validation ;;
       *) fail "unexpected OCI archive: $image" ;;
     esac
   done
+  if [[ "$full_validation" -eq 1 ]]; then
+    validation_archive="${images[2]}"
+    if [[ "$(basename "$validation_archive")" != *validation* ]]; then
+      for candidate in "${images[@]}"; do
+        [[ "$(basename "$candidate")" == *validation* ]] && validation_archive="$candidate"
+      done
+    fi
+    validation_ref="$(tar -xOzf "$validation_archive" manifest.json | python -c 'import json,sys; print(json.load(sys.stdin)[0]["RepoTags"][0])')"
+    validation_preloaded=1
+    if ! docker image inspect "$validation_ref" >/dev/null 2>&1; then
+      validation_preloaded=0
+    fi
+    docker load --input "$validation_archive" >/dev/null
+    validation_id="$(docker image inspect --format '{{.Id}}' "$validation_ref")"
+    loaded_image="$validation_id"
+    remove_loaded_image=$((1 - validation_preloaded))
+    mkdir -p "$tmp/output" "$tmp/store"
+    docker run --rm \
+      --network none \
+      --read-only \
+      --cap-drop ALL \
+      --security-opt no-new-privileges:true \
+      --pids-limit 128 \
+      --memory 536870912 \
+      --user 10000:10000 \
+      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+      --env HOME=/tmp \
+      --env COQUIC_HOME=/tmp/coquic-home \
+      --entrypoint /usr/bin/env \
+      --mount "type=bind,src=$root,dst=/validation/worktree,readonly" \
+      --mount "type=bind,src=$tmp/output,dst=/validation/output" \
+      --mount "type=bind,src=$tmp/store,dst=/validation/store" \
+      "$validation_id"
+  fi
 fi
 
 if [[ "$mode" == planner ]]; then

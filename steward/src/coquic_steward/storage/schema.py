@@ -499,6 +499,50 @@ class DaemonStateRow(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class StewardImageReleaseRow(Base):
+    """Private verified image pair retained for recovery and rollback."""
+
+    __tablename__ = "steward_image_releases"
+
+    release_id: Mapped[str] = mapped_column(String, primary_key=True)
+    daemon_image_id: Mapped[str] = mapped_column(String, nullable=False)
+    task_image_id: Mapped[str] = mapped_column(String, nullable=False)
+    validation_image_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    labels_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    verified_at: Mapped[str] = mapped_column(String, nullable=False)
+    selected_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    selected_previous: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class StewardContainerReferenceRow(Base):
+    """Exact label/ledger reference used by cleanup and image retention."""
+
+    __tablename__ = "steward_container_references"
+
+    container_id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    image_id: Mapped[str] = mapped_column(String, nullable=False)
+    epoch_id: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    cleanup_status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class StewardResourcePressureRow(Base):
+    """Durable, bounded resource-pressure facts (never raw Docker output)."""
+
+    __tablename__ = "steward_resource_pressure"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="normal")
+    home_free_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    owned_docker_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cleanup_pending_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class TaskExecutionRow(Base):
     """Normalized private execution ownership and phase cursor."""
 
@@ -819,3 +863,6 @@ TaskRun = TaskRunRow
 WorktreeCheckpoint = TaskWorktreeCheckpointRow
 DatasetSyncHealth = DatasetSyncHealthRow
 DaemonState = DaemonStateRow
+StewardImageRelease = StewardImageReleaseRow
+StewardContainerReference = StewardContainerReferenceRow
+StewardResourcePressure = StewardResourcePressureRow

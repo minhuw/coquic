@@ -5,6 +5,34 @@ SQLite task queue, collects configured signals, runs Codex in task-scoped
 boundaries, validates work, and optionally integrates approved changes into
 `main`.
 
+## Docker Compose operation
+
+The trusted daemon is deployed as one Docker Compose service. It runs as the
+configured numeric host UID/GID plus the Docker socket group and creates task
+and scheduler-planner siblings through the standard local Unix Docker socket.
+The daemon-owned clone is always `$COQUIC_HOME/repository/`; an interactive
+checkout is rejected. Codex, GitHub, and dataset-publication identities are
+individual read-only files exposed only to the trusted service as
+`/run/secrets/` targets. No task container receives the socket, whole home,
+credentials, or daemon configuration. See
+[CONTAINER_OPERATIONS.md](CONTAINER_OPERATIONS.md) for the durable contract.
+
+Use the checked-in wrapper for bootstrap and lifecycle; it never calls
+`docker compose down` or a global Docker prune:
+
+```bash
+bash steward/containers/manage.sh bootstrap
+bash steward/containers/manage.sh start
+bash steward/containers/manage.sh status
+```
+
+Bootstrap builds the pinned Nix `steward-daemon-image`, `steward-task-image`,
+and no-Codex `steward-validation-image`, records exact local image IDs, validates the private
+layout and credentials, and clones only an absent canonical repository. It
+does not create credentials, initialize SQLite/epochs, contact the receiver, or
+start work. Upgrades require proven quiescence unless the operator explicitly
+uses `--force`; ordinary stop preserves recoverable state.
+
 ## Quick start
 
 Steward reads `$COQUIC_HOME/steward.toml` (`~/.coquic` by default).
@@ -116,7 +144,7 @@ GitHub/SSH/sync credential, or daemon home.
 Build and inspect the locked images with:
 
 ```bash
-nix build --no-link .#steward-daemon-image .#steward-task-image
+nix build --no-link .#steward-daemon-image .#steward-task-image .#steward-validation-image
 bash steward/containers/smoke-test.sh --images
 bash steward/containers/smoke-test.sh --isolation
 ```

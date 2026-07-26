@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess  # nosec B404 - fixed validation Docker argv
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -91,6 +92,12 @@ def run_gates(
     on_gate_result: Callable[[int, ValidationResult], None] | None = None,
     command_runner: Callable[[list[str], Path, float], CommandResult] | None = None,
 ) -> list[ValidationResult]:
+    if (
+        command_runner is None
+        and getattr(config, "validation_image_digest", None)
+        and not getattr(config, "local_codex_test_harness", False)
+    ):
+        command_runner = _docker_validation_runner(config, task_id, cwd)
     results: list[ValidationResult] = []
     for index, (filename, command) in enumerate(default_gates(cwd)):
         if on_gate_start is not None:
@@ -108,6 +115,72 @@ def run_gates(
         if on_gate_result is not None:
             on_gate_result(index, result)
     return results
+
+
+def _docker_validation_runner(
+    config: StewardConfig, task_id: str, cwd: Path
+) -> Callable[[list[str], Path, float], CommandResult]:
+    """Return a no-network, read-only-source runner for one validation run.
+
+    The daemon-side executor normally supplies the persistent sibling runtime;
+    this fallback keeps direct integration callers on the same validation image
+    and rejects task-image or host-Docker fallbacks.
+    """
+    digest = str(config.validation_image_digest)
+    if not digest.startswith("sha256:"):
+        raise ValueError("validation requires an exact image digest")
+    docker_bin = getattr(config.container, "docker_bin", "docker")
+    output_root = config.logs_dir / task_id / "validation-container"
+    output_root.mkdir(parents=True, exist_ok=True)
+    store_root = config.private_dir / "validation-store" / task_id
+    store_root.mkdir(parents=True, exist_ok=True)
+
+    def execute(command: list[str], workdir: Path, timeout: float) -> CommandResult:
+        mapped = [
+            item.replace(str(workdir.resolve()), "/validation/worktree")
+            .replace(workdir.resolve().as_uri(), "file:///validation/worktree")
+            for item in command
+        ]
+        argv = [
+            docker_bin,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "128",
+            "--mount",
+            f"type=bind,src={workdir.resolve()},dst=/validation/worktree,readonly",
+            "--mount",
+            f"type=bind,src={output_root},dst=/validation/output",
+            "--mount",
+            f"type=bind,src={store_root},dst=/validation/store",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--user",
+            "10000:10000",
+            digest,
+            *mapped,
+        ]
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=workdir,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(command, workdir, 124, "", "validation container timed out")
+        return CommandResult(command, workdir, result.returncode, result.stdout, result.stderr)
+
+    return execute
 
 
 def run_validation(

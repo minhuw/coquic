@@ -1850,7 +1850,7 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
     private_home.mkdir(parents=True)
     (private_home / "history").write_text("private", encoding="utf-8")
     supervisor = FakeSupervisor(config, store)
-    supervisor.remove_failures = 1
+    supervisor.remove_failures = 2
     calls = supervisor.calls
 
     class FakeArchive:
@@ -1898,7 +1898,9 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
     assert daemon.finalize_terminal_task(task.id) is False
     assert any(event.kind == "cleanup_pending" for event in store.events(task.id))
     assert worktree.exists() and private_home.exists()
-    assert daemon.finalize_terminal_task(task.id) is True
+    daemon.startup_reconcile()
+    assert worktree.exists() and private_home.exists()
+    daemon.run_cycle(plan=False, dispatch=False)
 
     kinds = [event.kind for event in store.events(task.id)]
     assert kinds.index("cleanup_pending") < kinds.index("cleanup.container_removed")
@@ -1906,6 +1908,7 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
         "cleanup.worktree_removed"
     )
     assert kinds[-1] == "cleanup_complete"
+    assert calls.count(("remove", task.id)) == 3
     assert not worktree.exists()
     assert not private_home.exists()
     assert (config.tasks_dir / task.id / "manifest.json").read_bytes() == (

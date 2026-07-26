@@ -22,6 +22,10 @@ _CONTAINER_ROOTS = {
     "/task/session",
     "/task/scratch",
     "/task/git",
+    "/validation/worktree",
+    "/validation/output",
+    "/validation/store",
+    "/validation/scratch",
 }
 _PLANNER_ROOTS = {"/planner/history", "/planner/session", "/planner/output"}
 
@@ -54,6 +58,9 @@ class ContainerLimits:
     pids: int = 512
     timeout_seconds: int = 7200
     scratch_bytes: int = 8 * 1024 * 1024 * 1024
+    log_max_bytes: int = 64 * 1024 * 1024
+    log_max_files: int = 3
+    stop_timeout_seconds: int = 30
 
     def __post_init__(self) -> None:
         if self.memory_bytes <= 0:
@@ -64,6 +71,12 @@ class ContainerLimits:
             raise ValueError("timeout_seconds must be positive")
         if self.scratch_bytes <= 0:
             raise ValueError("scratch_bytes must be positive")
+        if self.log_max_bytes <= 0:
+            raise ValueError("log_max_bytes must be positive")
+        if self.log_max_files <= 0 or self.log_max_files > 32:
+            raise ValueError("log_max_files must be between 1 and 32")
+        if self.stop_timeout_seconds <= 0:
+            raise ValueError("stop_timeout_seconds must be positive")
 
 
 @dataclass(frozen=True)
@@ -115,6 +128,8 @@ class TaskContainerConfig:
     daemon_uid: int = 0
     task_write_gid: int = 2000
     validation_gid: int = 2001
+    epoch_id: str | None = None
+    release_id: str | None = None
 
     def __post_init__(self) -> None:
         if not _SAFE_ID.fullmatch(self.task_id):
@@ -158,6 +173,16 @@ class TaskContainerConfig:
         labels.setdefault("coquic.steward.task", self.task_id)
         labels.setdefault("coquic.steward.image-digest", self.image_digest)
         labels.setdefault("coquic.steward.runtime", "task-container-v1")
+        labels.setdefault("coquic.steward.owner", "steward")
+        labels.setdefault("coquic.steward.restart-policy", "no")
+        if self.epoch_id is not None:
+            if not _SAFE_ID.fullmatch(self.epoch_id):
+                raise ValueError("invalid task epoch identity")
+            labels.setdefault("coquic.steward.epoch", self.epoch_id)
+        if self.release_id is not None:
+            if not _SAFE_ID.fullmatch(self.release_id):
+                raise ValueError("invalid task release identity")
+            labels.setdefault("coquic.steward.release", self.release_id)
         for key, value in labels.items():
             if not _SAFE_ID.fullmatch(str(key).replace("/", "-")):
                 raise ValueError(f"invalid container label key: {key!r}")
@@ -269,6 +294,8 @@ class PlannerContainerConfig:
     container_session: str = "/planner/session"
     container_output: str = "/planner/output"
     labels: dict[str, str] = field(default_factory=dict)
+    epoch_id: str | None = None
+    release_id: str | None = None
 
     def __post_init__(self) -> None:
         if not _IMAGE_REF.fullmatch(self.image):
@@ -289,6 +316,16 @@ class PlannerContainerConfig:
         labels.setdefault("coquic.steward.planner", "true")
         labels.setdefault("coquic.steward.image-digest", self.image_digest)
         labels.setdefault("coquic.steward.runtime", "planner-container-v1")
+        labels.setdefault("coquic.steward.owner", "steward")
+        labels.setdefault("coquic.steward.restart-policy", "no")
+        if self.epoch_id is not None:
+            if not _SAFE_ID.fullmatch(self.epoch_id):
+                raise ValueError("invalid planner epoch identity")
+            labels.setdefault("coquic.steward.epoch", self.epoch_id)
+        if self.release_id is not None:
+            if not _SAFE_ID.fullmatch(self.release_id):
+                raise ValueError("invalid planner release identity")
+            labels.setdefault("coquic.steward.release", self.release_id)
         object.__setattr__(self, "labels", labels)
 
     @property
@@ -337,6 +374,84 @@ class PlannerContainerConfig:
                 continue
             return target if relative == Path(".") else f"{target}/{relative.as_posix()}"
         raise ValueError(f"path is outside planner container mounts: {host_path}")
+
+
+@dataclass(frozen=True)
+class ValidationContainerConfig:
+    """One-shot no-Codex boundary for the canonical four validation gates."""
+
+    run_id: str
+    image: str
+    image_digest: str
+    worktree: Path
+    output: Path
+    store: Path
+    scratch: Path | None = None
+    limits: ContainerLimits = field(default_factory=ContainerLimits)
+    labels: dict[str, str] = field(default_factory=dict)
+    uid: int = 10000
+    gid: int = 10000
+
+    def __post_init__(self) -> None:
+        if not _SAFE_ID.fullmatch(self.run_id):
+            raise ValueError("invalid validation run identity")
+        if not _IMAGE_REF.fullmatch(self.image) or not _DIGEST.fullmatch(self.image_digest):
+            raise ValueError("validation image must be a locked digest")
+        for name in ("worktree", "output", "store"):
+            value = Path(getattr(self, name))
+            if not value.is_absolute() or value.is_symlink():
+                raise ValueError(f"validation {name} must be an absolute non-symlink path")
+            object.__setattr__(self, name, value)
+        if self.scratch is not None:
+            scratch = Path(self.scratch)
+            if not scratch.is_absolute() or scratch.is_symlink():
+                raise ValueError("validation scratch must be an absolute non-symlink path")
+            object.__setattr__(self, "scratch", scratch)
+        if not 10000 <= self.uid <= 60000 or self.gid <= 0:
+            raise ValueError("validation identity is outside the reserved range")
+        labels = dict(self.labels)
+        labels.setdefault("coquic.steward.owner", "steward")
+        labels.setdefault("coquic.steward.runtime", "validation-container-v1")
+        labels.setdefault("coquic.steward.run", self.run_id)
+        labels.setdefault("coquic.steward.image-digest", self.image_digest)
+        labels.setdefault("coquic.steward.restart-policy", "no")
+        if labels["coquic.steward.runtime"] != "validation-container-v1":
+            raise ValueError("validation runtime label is fixed")
+        if any(not value or "\n" in value for value in labels.values()):
+            raise ValueError("validation label values are invalid")
+        object.__setattr__(self, "labels", labels)
+
+    @property
+    def container_name(self) -> str:
+        return f"coquic-steward-validation-{self.run_id}"
+
+    @property
+    def mounts(self) -> tuple[ContainerMount, ...]:
+        mounts = (
+            ContainerMount(self.worktree, "/validation/worktree"),
+            ContainerMount(self.output, "/validation/output", read_only=False),
+            ContainerMount(self.store, "/validation/store", read_only=False),
+        )
+        if self.scratch is not None:
+            mounts += (ContainerMount(self.scratch, "/validation/scratch", read_only=False),)
+        return mounts
+
+    def container_path(self, host_path: Path) -> str:
+        path = Path(host_path).resolve()
+        mappings = [
+            (self.worktree.resolve(), "/validation/worktree"),
+            (self.output.resolve(), "/validation/output"),
+            (self.store.resolve(), "/validation/store"),
+        ]
+        if self.scratch is not None:
+            mappings.append((self.scratch.resolve(), "/validation/scratch"))
+        for source, target in mappings:
+            try:
+                relative = path.relative_to(source)
+            except ValueError:
+                continue
+            return target if relative == Path(".") else f"{target}/{relative.as_posix()}"
+        raise ValueError(f"path is outside validation mounts: {host_path}")
 
 
 PlannerConfig = PlannerContainerConfig

@@ -52,6 +52,7 @@
       projectSrc = lib.cleanSource ./.;
       stewardPython = pkgs.python3.withPackages (ps: [
         ps.pydantic
+        ps.pytest
         ps.sqlalchemy
         ps.typer
       ]);
@@ -68,6 +69,12 @@
       stewardLauncher = pkgs.writeShellScriptBin "coquic-steward" ''
         export PYTHONPATH="${stewardSource}/opt/coquic/steward/src''${PYTHONPATH:+:$PYTHONPATH}"
         exec ${stewardPython}/bin/python -m coquic_steward.cli "$@"
+      '';
+      stewardTaskValidation = pkgs.writeShellScriptBin "steward-task-validate" ''
+        export PYTHONPATH="${stewardSource}/opt/coquic/steward/src''${PYTHONPATH:+:$PYTHONPATH}"
+        exec ${stewardPython}/bin/python -m pytest \
+          -p no:cacheprovider \
+          ${stewardSource}/opt/coquic/steward/tests/test_container_runtime.py -q
       '';
       codexCli = pkgs.stdenvNoCC.mkDerivation {
         pname = "codex-cli";
@@ -91,6 +98,9 @@
       stewardDaemonEntrypoint = pkgs.writeShellScriptBin "daemon-entrypoint.sh" (
         builtins.readFile ./steward/containers/daemon-entrypoint.sh
       );
+      stewardValidationEntrypoint = pkgs.writeShellScriptBin "validation-entrypoint.sh" (
+        builtins.readFile ./steward/containers/validation-entrypoint.sh
+      );
       stewardSourceIdentity = builtins.substring 0 32 (
         builtins.hashString "sha256" (toString projectSrc)
       );
@@ -104,13 +114,14 @@
           pkgs.git
           pkgs.gnutar
           pkgs.gzip
-          pkgs.nix
           pkgs.pre-commit
           pkgs.uv
           zig
           codexCli
           stewardPython
+          stewardSource
           stewardTaskEntrypoint
+          stewardTaskValidation
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];
       };
@@ -131,37 +142,121 @@
         ];
         pathsToLink = [ "/bin" "/lib" "/share" ];
       };
+      # Validation is deliberately a separate closure: it contains the four
+      # repository gates and their build tools, but never Codex, Docker, SSH,
+      # GitHub credentials, or the daemon launcher.
+      stewardValidationToolClosure = pkgs.buildEnv {
+        name = "coquic-steward-validation-tools";
+        paths = [
+          pkgs.bash
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.gawk
+          pkgs.git
+          pkgs.gnutar
+          pkgs.gzip
+          pkgs.nix
+          pkgs.pre-commit
+          pkgs.uv
+          zig
+          stewardPython
+          stewardSource
+          stewardValidationEntrypoint
+        ];
+        pathsToLink = [ "/bin" "/lib" "/share" ];
+      };
+      stewardValidationFilesystem = pkgs.runCommand "coquic-steward-validation-filesystem" { } ''
+        mkdir -p $out/validation/worktree $out/validation/output $out/validation/store $out/validation/scratch
+        mkdir -p $out/tmp $out/run
+        touch $out/validation/worktree/.keep $out/validation/output/.keep $out/validation/store/.keep $out/validation/scratch/.keep
+        touch $out/tmp/.keep $out/run/.keep
+      '';
       stewardTaskImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-steward-task";
         tag = stewardSourceIdentity;
-        contents = [ stewardTaskToolClosure ];
+        contents = [
+          stewardTaskToolClosure
+          pkgs.dockerTools.binSh
+          pkgs.dockerTools.usrBinEnv
+          pkgs.dockerTools.caCertificates
+          pkgs.dockerTools.fakeNss
+        ];
         config = {
           Entrypoint = [ "${stewardTaskEntrypoint}/bin/task-entrypoint.sh" ];
           WorkingDir = "/task/worktree-ro";
           Labels = {
             "org.opencontainers.image.source-revision" = stewardSourceIdentity;
+            "org.opencontainers.image.revision" = stewardSourceIdentity;
+            "org.opencontainers.image.architecture" = "x86_64-linux";
+            "org.opencontainers.image.title" = "CoQUIC Steward task runtime";
             "coquic.steward.runtime-protocol" = "task-container-v1";
+            "coquic.steward.release" = stewardSourceIdentity;
             "coquic.steward.codex-version" = "0.144.6";
+            "coquic.steward.task-runtime" = "python-zig-validation";
             "coquic.steward.closure" = builtins.substring 0 32 (
               builtins.hashString "sha256" (toString stewardTaskToolClosure)
             );
+            "coquic.steward.owner" = "steward";
           };
         };
       };
       stewardDaemonImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-steward-daemon";
         tag = stewardSourceIdentity;
-        contents = [ stewardDaemonToolClosure ];
+        contents = [
+          stewardDaemonToolClosure
+          pkgs.dockerTools.binSh
+          pkgs.dockerTools.usrBinEnv
+          pkgs.dockerTools.caCertificates
+          pkgs.dockerTools.fakeNss
+        ];
         config = {
           Entrypoint = [ "${stewardDaemonEntrypoint}/bin/daemon-entrypoint.sh" ];
           WorkingDir = "/var/lib/coquic-steward";
           Labels = {
             "org.opencontainers.image.source-revision" = stewardSourceIdentity;
+            "org.opencontainers.image.revision" = stewardSourceIdentity;
+            "org.opencontainers.image.architecture" = "x86_64-linux";
+            "org.opencontainers.image.title" = "CoQUIC Steward trusted daemon";
             "coquic.steward.runtime-protocol" = "task-container-v1";
+            "coquic.steward.release" = stewardSourceIdentity;
             "coquic.steward.codex-version" = "0.144.6";
+            "coquic.steward.task-runtime" = "docker-compose-controller";
             "coquic.steward.closure" = builtins.substring 0 32 (
               builtins.hashString "sha256" (toString stewardDaemonToolClosure)
             );
+            "coquic.steward.owner" = "steward";
+          };
+        };
+      };
+      stewardValidationImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-steward-validation";
+        tag = stewardSourceIdentity;
+        contents = [
+          stewardValidationToolClosure
+          stewardValidationFilesystem
+          pkgs.dockerTools.binSh
+          pkgs.dockerTools.usrBinEnv
+          pkgs.dockerTools.caCertificates
+          pkgs.dockerTools.fakeNss
+        ];
+        config = {
+          Entrypoint = [ "${stewardValidationEntrypoint}/bin/validation-entrypoint.sh" ];
+          WorkingDir = "/validation/worktree";
+          Labels = {
+            "org.opencontainers.image.source-revision" = stewardSourceIdentity;
+            "org.opencontainers.image.revision" = stewardSourceIdentity;
+            "org.opencontainers.image.architecture" = "x86_64-linux";
+            "org.opencontainers.image.title" = "CoQUIC Steward isolated validation";
+            "coquic.steward.runtime-protocol" = "task-container-v1";
+            "coquic.steward.runtime" = "validation-container-v1";
+            "coquic.steward.release" = stewardSourceIdentity;
+            "coquic.steward.codex-version" = "none";
+            "coquic.steward.task-runtime" = "four-canonical-gates";
+            "coquic.steward.closure" = builtins.substring 0 32 (
+              builtins.hashString "sha256" (toString stewardValidationToolClosure)
+            );
+            "coquic.steward.owner" = "steward";
           };
         };
       };
@@ -2267,6 +2362,7 @@ EOF
         neqo-perf-client = neqoPerfClient;
         steward-daemon-image = stewardDaemonImage;
         steward-task-image = stewardTaskImage;
+        steward-validation-image = stewardValidationImage;
       };
 
       apps.${system} = {

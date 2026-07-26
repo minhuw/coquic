@@ -12,6 +12,8 @@ task_image = "coquic-steward-task"
 # task_image_digest = "sha256:<64 lowercase hex characters>"
 daemon_image = "coquic-steward-daemon"
 # daemon_image_digest = "sha256:<64 lowercase hex characters>"
+validation_image = "coquic-steward-validation"
+# validation_image_digest = "sha256:<64 lowercase hex characters>"
 runtime_protocol = "task-container-v1"
 integration_mode = "local-only"
 local_only = false
@@ -35,6 +37,35 @@ image = "coquic-steward-task"
 docker_bin = "docker"
 network = "bridge"
 
+# Production Compose values are explicit and private. These fake examples are
+# intentionally disabled; no machine-independent resource threshold is used.
+# [steward.deployment]
+# enabled = false
+# home = "/tmp/fake-coquic-home"
+# repository = "/tmp/fake-coquic-home/repository"
+# docker_socket = "/tmp/fake-docker.sock"
+# host_uid = 10000
+# host_gid = 10000
+# docker_gid = 10001
+# expected_remote = "origin"
+# expected_branch = "main"
+# compose_project = "coquic-steward-fake"
+# codex_credential_path = "/tmp/fake-coquic-home/private/credentials/codex-api"
+# github_credential_path = "/tmp/fake-coquic-home/private/credentials/github"
+# dataset_identity_path = "/tmp/fake-coquic-home/private/credentials/dataset-sync"
+# known_hosts_path = "/tmp/fake-coquic-home/private/credentials/known_hosts"
+# daemon_image = "coquic-steward-daemon"
+# daemon_image_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# task_image = "coquic-steward-task"
+# task_image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+# validation_image = "coquic-steward-validation"
+# validation_image_id = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+# stop_grace_seconds = 45
+# min_free_bytes = 1048576
+# max_owned_docker_bytes = 4194304
+# recovery_free_bytes = 2097152
+# recovery_owned_docker_bytes = 2097152
+
 # Raw dataset synchronization is daemon-only and is opt-in. Credentials are file
 # paths, never inline values; preflight rejects missing or unsafe files.
 [steward.dataset_sync]
@@ -48,6 +79,40 @@ ssh_bin = "ssh" # resolved to an absolute locked path when configuration loads
 rsync_bin = "rsync" # must match the executable selected by PATH
 # connect_timeout_seconds = 10
 # transfer_timeout_seconds = 300
+
+# Docker Compose deployment is opt-in. Production must uncomment every path,
+# numeric identity, credential file, image ID, and resource threshold; these
+# values are deliberately fake examples and never contain secret values.
+[steward.deployment]
+enabled = false
+# home = "/srv/coquic-steward"
+# repository = "/srv/coquic-steward/repository"
+docker_socket = "/var/run/docker.sock"
+# host_uid = 1000
+# host_gid = 1000
+# docker_gid = 999
+expected_remote = "origin"
+expected_branch = "main"
+compose_project = "coquic-steward"
+# codex_credential_path = "/srv/coquic-steward/private/credentials/codex-api"
+# github_credential_path = "/srv/coquic-steward/private/credentials/github"
+# dataset_identity_path = "/srv/coquic-steward/private/credentials/dataset-sync"
+# known_hosts_path = "/srv/coquic-steward/private/credentials/known_hosts"
+# release_id = "release-example"
+# daemon_image_id = "sha256:<64 lowercase hex characters>"
+# task_image_id = "sha256:<64 lowercase hex characters>"
+stop_grace_seconds = 45
+max_active_tasks = 4
+max_pids = 512
+max_memory_bytes = 4294967296
+max_log_bytes = 67108864
+max_scratch_bytes = 8589934592
+# Production has no implicit pressure defaults. The following fake values are
+# intentionally commented until an operator chooses machine-specific limits.
+# min_free_bytes = 1073741824
+# max_owned_docker_bytes = 4294967296
+# recovery_free_bytes = 2147483648
+# recovery_owned_docker_bytes = 3221225472
 
 # Usage telemetry is observational. Codex exec exposes turns, not upstream
 # requests, billing, TTFT, or token streaming rates. Leave billing_mode=unknown

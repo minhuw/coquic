@@ -14,6 +14,8 @@ from typing import Any, Mapping
 from ..core.config import StewardConfig
 from ..core.lifecycle import (
     DaemonLifecycleState,
+    DockerResourceManager,
+    ResourcePressureController,
     ReconciliationDisposition,
     ReconciliationOutcome,
     ShutdownResult,
@@ -33,6 +35,7 @@ from ..core.models import (
     WorkerKind,
 )
 from ..execution.executor import StewardExecutor
+from ..execution.container import bind_deployment_identity, deployment_runtime_factory
 from ..execution.session import (
     FreshPlannerSession,
     InvocationStatus,
@@ -143,6 +146,24 @@ class StewardDaemon:
         self._control_loop_lock = threading.RLock()
         self._active_planner_run_id: str | None = None
         self._planner_publication_queue: dict[str, ControlPlannerRun] = {}
+        self._docker_resources: DockerResourceManager | None = None
+        self._resource_reconciliation_failed = False
+        usage_provider = None
+        if config.deployment.enabled:
+            self._docker_resources = DockerResourceManager(
+                config.container.docker_bin,
+                deployment_id=config.deployment.compose_project,
+            )
+
+            def usage_provider() -> object:
+                if self._resource_reconciliation_failed:
+                    raise RuntimeError("owned Docker reconciliation is ambiguous")
+                assert self._docker_resources is not None
+                return self._docker_resources.owned_usage()
+
+        self._resource_pressure = ResourcePressureController(
+            config, usage_provider=usage_provider
+        )
         with use_subprocess_owner(self._subprocess_owner):
             remote_push_ready = preflight_remote_push(config)
         if remote_push_ready:
@@ -155,7 +176,9 @@ class StewardDaemon:
             self.session_supervisor = SessionSupervisor(
                 config,
                 store,
-                runtime_factory=runtime_factory_for_config(config),
+                runtime_factory=deployment_runtime_factory(
+                    config, runtime_factory_for_config(config)
+                ),
                 image_digest=config.task_image_digest,
                 codex_identity=config.codex_identity or config.codex_bin,
             )
@@ -166,6 +189,7 @@ class StewardDaemon:
             and not config.local_codex_test_harness
         ):
             self.planner_session = planner_session_for_config(config)
+            bind_deployment_identity(self.planner_session.invoker.runtime, config)
         elif self.planner_session is None and config.local_codex_test_harness:
             self.planner_session = FreshPlannerSession(config)
         self.executor = StewardExecutor(
@@ -214,6 +238,66 @@ class StewardDaemon:
     def stopping(self) -> bool:
         return self._shutdown_event.is_set()
 
+    @property
+    def resource_pressure(self) -> dict[str, Any]:
+        return self._resource_pressure.measure().as_dict()
+
+    def admission_allowed(self) -> bool:
+        """Return whether a new planner/task claim may be admitted."""
+
+        return self._resource_pressure.admission_allowed()
+
+    def _refresh_resource_pressure(self) -> dict[str, Any]:
+        self._reconcile_docker_resources()
+        report = self._resource_pressure.measure()
+        report_dict = report.as_dict()
+        try:
+            pending = 0
+            for task in self.store.list_tasks(limit=10_000):
+                events = self.store.events(task.id, limit=200)
+                if any(event.kind == "cleanup_pending" for event in events) and not any(
+                    event.kind == "cleanup_complete" for event in events
+                ):
+                    pending += 1
+            report_dict["cleanupPending"] = pending
+        except Exception:
+            report_dict["cleanupPending"] = None
+        recorder = getattr(self.store, "record_resource_pressure", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    state=report_dict["state"],
+                    home_free_bytes=report_dict.get("homeFreeBytes"),
+                    owned_docker_bytes=report_dict.get("ownedBytes"),
+                    cleanup_pending_count=int(report_dict.get("cleanupPending") or 0),
+                    reason=report_dict.get("reason"),
+                )
+            except Exception as exc:
+                self._log(f"resource pressure health write failed error={exc.__class__.__name__}")
+        return report_dict
+
+    def _reconcile_docker_resources(self) -> None:
+        if self._docker_resources is None:
+            return
+        try:
+            self._docker_resources.reconcile(self.store, self.config.deployment)
+            self._resource_reconciliation_failed = False
+        except Exception as exc:
+            self._resource_reconciliation_failed = True
+            self._log(f"owned Docker reconciliation failed error={exc.__class__.__name__}")
+
+    def _retry_cleanup_pending_tasks(self) -> None:
+        """Retry each durable terminal cleanup transaction once per cycle."""
+
+        for task in self.store.list_tasks(limit=10_000):
+            if not TaskStatus(task.status).terminal:
+                continue
+            events = self.store.events(task.id)
+            if any(event.kind == "cleanup_pending" for event in events) and not any(
+                event.kind == "cleanup_complete" for event in events
+            ):
+                self.finalize_terminal_task(task.id)
+
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Reconcile durable ownership before any new dispatch is allowed."""
 
@@ -229,6 +313,7 @@ class StewardDaemon:
                     instance_id=self.runtime.instance_id,
                 )
             outcomes: list[ReconciliationOutcome] = []
+            self._reconcile_docker_resources()
             self._startup_reconcile_control_loop()
             for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):
                 outcome = self._reconcile_task(task)
@@ -496,6 +581,18 @@ class StewardDaemon:
                 task.id,
                 ReconciliationDisposition.unchanged,
                 "terminal cleanup already complete",
+            )
+        if terminal and any(event.kind == "cleanup_pending" for event in events):
+            if self.finalize_terminal_task(task.id):
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.cleaned,
+                    "pending terminal cleanup converged",
+                )
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "terminal cleanup remains pending",
             )
         try:
             execution = self.store.get_execution(task.id)
@@ -2211,8 +2308,14 @@ class StewardDaemon:
         reason: str = "scheduled",
     ) -> TickResult:
         result = TickResult()
+        startup_was_complete = self._startup_complete
         if not self._startup_complete:
             self.startup_reconcile()
+        if startup_was_complete:
+            self._retry_cleanup_pending_tasks()
+        pressure = self._refresh_resource_pressure()
+        if pressure.get("state") == "resource_pressure":
+            self._log("resource pressure active; admission is bounded")
         self._drain_control_loop_once()
         self._begin_cycle(reason)
         try:
@@ -2264,9 +2367,15 @@ class StewardDaemon:
                             + ",".join(idle_providers)
                         )
                         self._fetch_signals(result, idle_providers)
-                self._plan_until_idle(result)
+                if self.admission_allowed():
+                    self._plan_until_idle(result)
+                else:
+                    self._log("resource pressure: planner admission paused")
             if dispatch:
-                self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
+                if self.admission_allowed():
+                    self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
+                else:
+                    self._log("resource pressure: task admission paused")
             self._log(
                 "cycle finish "
                 f"recovered={result.recovered} "

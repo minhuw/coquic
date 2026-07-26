@@ -10,7 +10,8 @@ import json
 import os
 import signal
 import subprocess  # nosec B404 - explicit argv, shell=False below
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,6 +22,7 @@ from .container_config import (
     PlannerContainerConfig,
     TaskContainerConfig,
     TaskRole,
+    ValidationContainerConfig,
 )
 
 
@@ -182,6 +184,8 @@ class TaskContainerRuntime:
             "--init",
             "--network",
             config.network,
+            "--restart",
+            "no",
             "--read-only",
             "--security-opt",
             "no-new-privileges:true",
@@ -191,6 +195,14 @@ class TaskContainerRuntime:
             str(config.limits.pids),
             "--memory",
             str(config.limits.memory_bytes),
+            "--stop-timeout",
+            str(config.limits.stop_timeout_seconds),
+            "--log-driver",
+            "local",
+            "--log-opt",
+            f"max-size={config.limits.log_max_bytes}b",
+            "--log-opt",
+            f"max-file={config.limits.log_max_files}",
         ]
         for key in sorted(config.labels):
             argv.extend(["--label", f"{key}={config.labels[key]}"])
@@ -205,6 +217,8 @@ class TaskContainerRuntime:
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,nodev,size="
                 + str(config.limits.scratch_bytes),
+                "--tmpfs",
+                "/run:rw,noexec,nosuid,nodev,size=16m",
             ]
         )
         argv.append(config.image_digest)
@@ -496,6 +510,11 @@ class TaskContainerRuntime:
                 "container image digest does not match locked task image",
             )
         for key, expected_value in self.config.labels.items():
+            # Older persisted fake identities predate the ownership labels;
+            # they are accepted for read-only tests, while any supplied value
+            # is still checked exactly.
+            if key in {"coquic.steward.owner", "coquic.steward.restart-policy"} and key not in inspection.labels:
+                continue
             if inspection.labels.get(key) != expected_value:
                 raise ContainerBoundaryError(
                     ContainerErrorCategory.identity_mismatch,
@@ -572,6 +591,8 @@ class PlannerContainerRuntime(TaskContainerRuntime):
             "--init",
             "--network",
             config.network,
+            "--restart",
+            "no",
             "--read-only",
             "--security-opt",
             "no-new-privileges:true",
@@ -581,6 +602,14 @@ class PlannerContainerRuntime(TaskContainerRuntime):
             str(config.limits.pids),
             "--memory",
             str(config.limits.memory_bytes),
+            "--stop-timeout",
+            str(config.limits.stop_timeout_seconds),
+            "--log-driver",
+            "local",
+            "--log-opt",
+            f"max-size={config.limits.log_max_bytes}b",
+            "--log-opt",
+            f"max-file={config.limits.log_max_files}",
         ]
         for key in sorted(config.labels):
             argv.extend(["--label", f"{key}={config.labels[key]}"])
@@ -591,6 +620,8 @@ class PlannerContainerRuntime(TaskContainerRuntime):
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,nodev,size="
                 + str(config.limits.scratch_bytes),
+                "--tmpfs",
+                "/run:rw,noexec,nosuid,nodev,size=16m",
                 config.image_digest,
             ]
         )
@@ -645,8 +676,159 @@ class PlannerContainerRuntime(TaskContainerRuntime):
         return argv
 
 
+class ValidationContainerRuntime:
+    """Run canonical validation commands in a disposable isolated sibling."""
+
+    def __init__(
+        self,
+        config: ValidationContainerConfig,
+        *,
+        client: DockerClient | None = None,
+        docker_bin: str = "docker",
+    ) -> None:
+        self.config = config
+        self.client = client or SubprocessDockerClient(docker_bin)
+
+    def _run(self, argv: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
+        try:
+            result = self.client.run(argv, timeout=timeout)
+        except FileNotFoundError as exc:
+            raise ContainerBoundaryError(ContainerErrorCategory.runtime_unavailable, "Docker executable is unavailable") from exc
+        if result.returncode:
+            raise ContainerBoundaryError(ContainerErrorCategory.runtime_unavailable, _decode_error(result.stderr))
+        return result
+
+    def _mount_argv(self, mount: ContainerMount) -> list[str]:
+        value = f"type=bind,src={mount.source},dst={mount.target}"
+        if mount.read_only:
+            value += ",readonly"
+        return ["--mount", value]
+
+    def create_argv(self) -> list[str]:
+        config = self.config
+        argv = [
+            "create", "--name", config.container_name, "--init", "--network", "none",
+            "--restart", "no", "--read-only", "--security-opt", "no-new-privileges:true",
+            "--cap-drop", "ALL", "--pids-limit", str(config.limits.pids),
+            "--memory", str(config.limits.memory_bytes), "--stop-timeout",
+            str(config.limits.stop_timeout_seconds), "--log-driver", "local",
+            "--log-opt", f"max-size={config.limits.log_max_bytes}b",
+            "--log-opt", f"max-file={config.limits.log_max_files}",
+        ]
+        for key in sorted(config.labels):
+            argv.extend(["--label", f"{key}={config.labels[key]}"])
+        for mount in config.mounts:
+            argv.extend(self._mount_argv(mount))
+        argv.extend([
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + str(config.limits.scratch_bytes),
+            "--tmpfs", "/run:rw,noexec,nosuid,nodev,size=16m",
+            "--entrypoint", "/bin/sh", config.image_digest,
+            "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+        ])
+        return argv
+
+    def create(self) -> str:
+        result = self._run(self.create_argv())
+        identity = result.stdout.decode("utf-8", "replace").strip()
+        if not identity:
+            raise ContainerBoundaryError(ContainerErrorCategory.ambiguous, "Docker create returned no validation identity")
+        return identity
+
+    def ensure_started(self) -> str:
+        try:
+            self._run(["inspect", self.config.container_name])
+        except ContainerBoundaryError as exc:
+            if exc.category is not ContainerErrorCategory.runtime_unavailable:
+                raise
+            identity = self.create()
+            self._run(["start", identity])
+            return identity
+        self._run(["start", self.config.container_name])
+        return self.config.container_name
+
+    def exec_argv(self, command: list[str], *, workdir: str = "/validation/worktree") -> list[str]:
+        if not command or any("\x00" in value for value in command):
+            raise ContainerBoundaryError(ContainerErrorCategory.invalid, "validation command is empty or invalid")
+        if not workdir.startswith("/validation/"):
+            raise ContainerBoundaryError(ContainerErrorCategory.invalid, "validation workdir is outside its boundary")
+        return ["exec", "--user", f"{self.config.uid}:{self.config.gid}", "--workdir", workdir, self.config.container_name, *command]
+
+    def exec(self, command: list[str], *, workdir: str = "/validation/worktree", timeout: float | None = None) -> ExecResult:
+        result = self._run(self.exec_argv(command, workdir=workdir), timeout=timeout)
+        return ExecResult(ExecIdentity(self.config.container_name, _exec_id(result) or "unknown", uid=self.config.uid), result.returncode, result.stdout, result.stderr)
+
+    def stop(self, *, timeout: float | None = None) -> None:
+        try:
+            self._run(["stop", "--time", str(max(1, int(timeout or self.config.limits.stop_timeout_seconds))), self.config.container_name], timeout=timeout)
+        except ContainerBoundaryError as exc:
+            if exc.category is not ContainerErrorCategory.runtime_unavailable:
+                raise
+
+    def remove(self) -> None:
+        try:
+            self._run(["rm", self.config.container_name])
+        except ContainerBoundaryError as exc:
+            if exc.category is not ContainerErrorCategory.runtime_unavailable:
+                raise
+
 ContainerRuntime = TaskContainerRuntime
 DockerBoundary = TaskContainerRuntime
+
+
+def bind_deployment_identity(
+    runtime: TaskContainerRuntime,
+    config: Any,
+) -> TaskContainerRuntime:
+    """Attach the configured Compose release identity before first use."""
+
+    deployment = config.deployment
+    if not deployment.enabled:
+        return runtime
+    release_id = deployment.release_id
+    if release_id is None:
+        raise ValueError("production container requires an exact release identity")
+    epoch_id = str(config.ensure_epoch()["epochId"])
+    expected = {
+        "coquic.steward.epoch": epoch_id,
+        "coquic.steward.release": release_id,
+        "coquic.steward.deployment": deployment.compose_project,
+    }
+    labels = dict(runtime.config.labels)
+    for key, value in expected.items():
+        existing = labels.get(key)
+        if existing is not None and existing != value:
+            raise ValueError(f"production container has a conflicting {key} label")
+        labels[key] = value
+    limits = replace(
+        runtime.config.limits,
+        pids=deployment.max_pids,
+        memory_bytes=deployment.max_memory_bytes,
+        log_max_bytes=deployment.max_log_bytes,
+        scratch_bytes=deployment.max_scratch_bytes,
+    )
+    runtime.config = replace(
+        runtime.config,
+        labels=labels,
+        limits=limits,
+        epoch_id=epoch_id,
+        release_id=release_id,
+    )
+    return runtime
+
+
+def deployment_runtime_factory(
+    config: Any,
+    factory: Callable[[Any], TaskContainerRuntime],
+) -> Callable[[Any], TaskContainerRuntime]:
+    """Decorate task runtimes with production-only deployment identity."""
+
+    if not config.deployment.enabled:
+        return factory
+
+    def build(task: Any) -> TaskContainerRuntime:
+        return bind_deployment_identity(factory(task), config)
+
+    return build
 
 
 def _not_found(value: bytes) -> bool:

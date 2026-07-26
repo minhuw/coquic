@@ -26,6 +26,12 @@ from .schema import (
     WorktreeCheckpoint,
     DaemonStateRow,
     DaemonState,
+    StewardImageReleaseRow,
+    StewardContainerReferenceRow,
+    StewardResourcePressureRow,
+    StewardImageRelease,
+    StewardContainerReference,
+    StewardResourcePressure,
 )
 
 TaskStore = SQLiteTaskStore
@@ -173,6 +179,12 @@ __all__ = [
     "WorktreeCheckpoint",
     "DaemonStateRow",
     "DaemonState",
+    "StewardImageReleaseRow",
+    "StewardContainerReferenceRow",
+    "StewardResourcePressureRow",
+    "StewardImageRelease",
+    "StewardContainerReference",
+    "StewardResourcePressure",
     "due_provider_names",
     "idle_fetch_provider_names",
     "scheduler_state",

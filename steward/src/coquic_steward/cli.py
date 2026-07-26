@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 import signal
 import json
+import os
 
 import typer
 
@@ -16,6 +17,7 @@ from .orchestration import (
     acquire_daemon_lock,
 )
 from .execution.executor import StewardExecutor, default_worker_for_kind
+from .execution.container import bind_deployment_identity, deployment_runtime_factory
 from .execution.session import (
     FreshPlannerSession,
     SessionSupervisor,
@@ -65,7 +67,9 @@ def _configured_supervisor(config, store: TaskStore) -> SessionSupervisor | None
     return SessionSupervisor(
         config,
         store,
-        runtime_factory=runtime_factory_for_config(config),
+        runtime_factory=deployment_runtime_factory(
+            config, runtime_factory_for_config(config)
+        ),
         image_digest=config.task_image_digest,
         codex_identity=config.codex_identity or config.codex_bin,
     )
@@ -75,7 +79,9 @@ def _configured_planner_session(config) -> FreshPlannerSession:
     """Build the fresh one-shot boundary used by standalone planning."""
 
     if config.task_image_digest and not config.local_codex_test_harness:
-        return planner_session_for_config(config)
+        session = planner_session_for_config(config)
+        bind_deployment_identity(session.invoker.runtime, config)
+        return session
     return FreshPlannerSession(config)
 
 
@@ -372,6 +378,115 @@ def diagnostics() -> None:
         "datasetSync": dataset_health,
     }
     typer.echo(json.dumps(payload, sort_keys=True))
+
+
+@app.command()
+def health() -> None:
+    """Return bounded local health facts for Compose and operators."""
+
+    config = load_config()
+    active_tasks = 0
+    cleanup_pending = 0
+    sync_active = False
+    planner_active = False
+    archive_pending = False
+    database_healthy = False
+    persisted_pressure: dict[str, object] | None = None
+    container_counts = {"owned": 0, "active": 0, "cleanupPending": 0, "unknown": 0}
+    try:
+        store = TaskStore(config.db_path)
+        active_tasks = int(store.active_count())
+        for task in store.list_tasks(limit=10_000):
+            events = store.events(task.id, limit=200)
+            if any(event.kind == "cleanup_pending" for event in events) and not any(
+                event.kind == "cleanup_complete" for event in events
+            ):
+                cleanup_pending += 1
+        sync = store.get_dataset_sync_health()
+        sync_active = bool(sync.active)
+        ledger = getattr(store, "control_loop_ledger", None)
+        planner_active = bool(ledger and ledger.list_planner_runs(include_terminal=False))
+        archive_pending = bool(ledger and ledger.outbox(limit=1))
+        persisted_pressure = store.get_resource_pressure()
+        references = store.list_container_references()
+        container_counts["owned"] = len(references)
+        for reference in references:
+            status = str(reference.get("cleanup_status", "active"))
+            state = str(reference.get("state", "unknown"))
+            if status in {"cleanup_pending", "cleanup_retryable"}:
+                container_counts["cleanupPending"] += 1
+            elif state in {"running", "created"}:
+                container_counts["active"] += 1
+            elif state not in {"exited", "dead", "created", "running"}:
+                container_counts["unknown"] += 1
+        database_healthy = True
+    except Exception:
+        # Health must remain safe and bounded when the database is unavailable.
+        active_tasks = cleanup_pending = 0
+        archive_pending = False
+    free_bytes = None
+    try:
+        free_bytes = int(os.statvfs(config.coquic_home).f_bavail * os.statvfs(config.coquic_home).f_frsize)
+    except OSError:
+        pass
+    pressure = (
+        str(persisted_pressure.get("state", "resource_pressure"))
+        if persisted_pressure is not None
+        else "resource_pressure"
+    )
+    deployment = config.deployment
+    if (
+        deployment.enabled
+        and free_bytes is not None
+        and deployment.min_free_bytes is not None
+        and free_bytes < deployment.min_free_bytes
+    ):
+        pressure = "resource_pressure"
+    payload = {
+        "lifecycle": "running" if database_healthy else "ambiguous",
+        "heartbeat": "ok" if database_healthy else "degraded",
+        "quiescent": database_healthy
+        and not (
+            active_tasks
+            or cleanup_pending
+            or sync_active
+            or planner_active
+            or archive_pending
+        ),
+        "activeTasks": active_tasks,
+        "cleanupPending": cleanup_pending,
+        "syncActive": sync_active,
+        "plannerActive": planner_active,
+        "archivePending": archive_pending,
+        "pressure": pressure,
+        "homeFreeBytes": free_bytes,
+        "ownedDockerBytes": (
+            persisted_pressure.get("owned_docker_bytes")
+            if persisted_pressure is not None
+            else None
+        ),
+        "resourceThresholds": {
+            "minimumHomeFreeBytes": deployment.min_free_bytes,
+            "maximumOwnedDockerBytes": deployment.max_owned_docker_bytes,
+            "recoveryHomeFreeBytes": deployment.recovery_free_bytes,
+            "recoveryOwnedDockerBytes": deployment.recovery_owned_docker_bytes,
+        },
+        "containerCounts": container_counts,
+        "syncHealth": (
+            {
+                "active": bool(sync_active),
+                "category": getattr(sync, "last_category", None),
+                "consecutiveFailures": getattr(sync, "consecutive_failure_count", 0),
+            }
+            if database_healthy
+            else None
+        ),
+        "release": deployment.release_id,
+        "runtimeProtocol": config.runtime_protocol,
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
+    if not database_healthy:
+        raise typer.Exit(code=1)
 
 
 def _run_until_stopped(daemon_: StewardDaemon) -> None:

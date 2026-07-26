@@ -1,36 +1,41 @@
+# Synthetic fixture only. Production uses compose.yml and the checked-in
+# management command. Values here are intentionally fake and non-secret.
 services:
-  steward-daemon:
-    image: "${STEWARD_DAEMON_IMAGE:?set a locked daemon image digest}"
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop: [ALL]
-    volumes:
-      - "${COQUIC_REPOSITORY:?set a repository path}:/var/lib/coquic-steward/repository:rw"
-      - "${COQUIC_HOME:?set a state path}:/var/lib/coquic-steward/home:rw"
-      - "/var/run/docker.sock:/var/run/docker.sock"
-      - "${STEWARD_GITHUB_CONFIG:?set a daemon-only GitHub config}:/root/.config/gh:ro"
-      - "${STEWARD_SSH_DIR:?set a daemon-only SSH directory}:/root/.ssh:ro"
-      - "${STEWARD_DATASET_SYNC_KEY:?set a daemon-only dataset key}:/run/secrets/dataset-sync-key:ro"
-    environment:
-      COQUIC_HOME: /var/lib/coquic-steward/home
-      STEWARD_REPOSITORY: /var/lib/coquic-steward/repository
-      STEWARD_DATASET_SYNC_ENABLED: "false"
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=1g
+  steward:
+    image: fake-steward-daemon@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    init: true
+    user: "1000:1000"
+    group_add: ["999"]
     restart: unless-stopped
-
-  # Task containers are created by the trusted daemon. This service is only a
-  # documentation fixture and deliberately has no Docker, GitHub, SSH, or sync
-  # credential mounts.
-  task-example:
-    image: "${STEWARD_TASK_IMAGE:?set a locked task image digest}"
-    profiles: [example-only]
+    stop_grace_period: 45s
     read_only: true
-    security_opt:
-      - no-new-privileges:true
+    security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    network_mode: bridge
-    # No Docker socket, GitHub config, SSH directory, sync key, or daemon home
-    # is mounted here. The trusted daemon creates the real task container with
-    # task-scoped paths and a fresh private session UID.
+    pids_limit: 128
+    mem_limit: 128m
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,nodev,size=16m"
+      - "/run:rw,noexec,nosuid,nodev,size=4m"
+    volumes:
+      - type: bind
+        source: /tmp/fake-coquic-home
+        target: /tmp/fake-coquic-home
+        read_only: false
+      - type: bind
+        source: /tmp/fake-docker.sock
+        target: /tmp/fake-docker.sock
+    secrets:
+      - source: codex
+        target: /run/secrets/codex-api
+      - source: github
+        target: /run/secrets/github-identity
+      - source: dataset
+        target: /run/secrets/dataset-identity
+
+secrets:
+  codex:
+    file: /tmp/fake-codex
+  github:
+    file: /tmp/fake-github
+  dataset:
+    file: /tmp/fake-dataset

@@ -71,6 +71,14 @@ external-action reconciliation. `cleanup_pending` is durable before container,
 worktree, or private-home cleanup; `cleanup_complete` is written only after
 every authorized action succeeds. The public archive remains intact.
 
+When operated through Docker Compose, this lifecycle remains the sole owner of
+shutdown, reconciliation, and terminal cleanup. Compose supervises only the
+trusted daemon service; task and planner siblings have `restart=no` and are
+adopted by exact ledger/image/epoch labels. A Compose stop preserves stopped
+containers and session evidence. The finalization call removes an exact
+stopped container immediately after sealing and verification, then records
+`cleanup_complete`; it does not wait for a periodic garbage collector.
+
 ## Budgets
 
 Pipeline, run, validation, review, formality, transport, and no-progress

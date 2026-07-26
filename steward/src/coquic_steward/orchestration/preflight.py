@@ -60,6 +60,9 @@ def run_preflight(
     config.ensure_dirs()
     checks: list[str] = ["directories"]
     warnings: list[str] = []
+    if config.deployment.enabled:
+        _validate_deployment_boundary(config)
+        checks.append("deployment")
     ledger = getattr(store, "control_loop_ledger", None)
     try:
         task_epoch = config.ensure_epoch()
@@ -152,6 +155,62 @@ def run_preflight(
     return PreflightReport(tuple(checks), tuple(warnings), sync_configured)
 
 
+def _validate_deployment_boundary(config: StewardConfig) -> None:
+    """Validate the Compose host contract without mutating host state."""
+
+    deployment = config.deployment
+    home = config.coquic_home
+    repository = config.repository_path
+    if not home.is_absolute() or home.is_symlink():
+        raise StewardPreflightError("preflight failed: COQUIC_HOME is not an absolute non-symlink path")
+    if repository != home / "repository" or repository.is_symlink():
+        raise StewardPreflightError("preflight failed: repository must be COQUIC_HOME/repository")
+    if not repository.is_dir():
+        raise StewardPreflightError("preflight failed: dedicated repository clone is unavailable")
+    if config.repo_root.resolve() != repository.resolve():
+        raise StewardPreflightError("preflight failed: daemon repo_root is not the dedicated clone")
+    socket = deployment.docker_socket
+    try:
+        socket_stat = socket.lstat()
+    except OSError as exc:
+        raise StewardPreflightError("preflight failed: Docker socket is unavailable") from exc
+    if not stat.S_ISSOCK(socket_stat.st_mode):
+        raise StewardPreflightError("preflight failed: Docker endpoint must be a local Unix socket")
+    if deployment.docker_gid is not None and socket_stat.st_gid != deployment.docker_gid:
+        raise StewardPreflightError("preflight failed: Docker socket group ownership is mismatched")
+    if deployment.host_uid is not None and os.getuid() != deployment.host_uid:
+        raise StewardPreflightError("preflight failed: daemon UID does not match configured host UID")
+    if deployment.host_gid is not None and os.getgid() != deployment.host_gid:
+        raise StewardPreflightError("preflight failed: daemon GID does not match configured host GID")
+    if deployment.docker_gid is not None and deployment.docker_gid not in os.getgroups() and os.getgid() != deployment.docker_gid:
+        raise StewardPreflightError("preflight failed: daemon lacks configured Docker socket group")
+    credentials = (
+        (deployment.codex_credential_path, "Codex API credential"),
+        (deployment.github_credential_path, "GitHub integration identity"),
+        (deployment.dataset_identity_path, "dataset publication identity"),
+    )
+    for path, label in credentials:
+        _check_secret_file(path, label)
+        assert path is not None
+        if deployment.host_uid is not None and path.lstat().st_uid != deployment.host_uid:
+            raise StewardPreflightError(f"preflight failed: {label} owner is mismatched")
+    _check_known_hosts(deployment.known_hosts_path)
+    if deployment.host_uid is not None and deployment.known_hosts_path is not None and deployment.known_hosts_path.lstat().st_uid != deployment.host_uid:
+        raise StewardPreflightError("preflight failed: known-hosts owner is mismatched")
+    remote = run_command(["git", "config", "--get", f"remote.{deployment.expected_remote}.url"], cwd=repository)
+    if not remote.ok or remote.stdout.strip() == "":
+        raise StewardPreflightError("preflight failed: expected Git remote is unavailable")
+    branch = run_command(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repository)
+    if not branch.ok or branch.stdout.strip() != deployment.expected_branch:
+        raise StewardPreflightError("preflight failed: repository is detached or on the wrong branch")
+    dirty = run_command(["git", "status", "--porcelain"], cwd=repository)
+    if not dirty.ok or dirty.stdout.strip():
+        raise StewardPreflightError("preflight failed: daemon repository is dirty")
+    worktree = run_command(["git", "worktree", "list", "--porcelain"], cwd=repository)
+    if not worktree.ok or not worktree.stdout.startswith(f"worktree {repository}\n"):
+        raise StewardPreflightError("preflight failed: repository worktree identity is ambiguous")
+
+
 def _check_executable(
     value: str,
     label: str,
@@ -222,6 +281,9 @@ def _validate_task_image_identity(stdout: str, runtime_protocol: str) -> None:
             raise StewardPreflightError(
                 "preflight failed: locked task image identity is invalid"
             )
+    optional_architecture = labels.get("org.opencontainers.image.architecture") if isinstance(labels, dict) else None
+    if optional_architecture is not None and optional_architecture != "x86_64-linux":
+        raise StewardPreflightError("preflight failed: locked task image architecture is invalid")
 
 
 def _check_secret_file(path: Path | None, label: str) -> None:

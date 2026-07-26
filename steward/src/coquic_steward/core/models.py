@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,91 @@ class TaskStatus(StrEnum):
     @property
     def terminal(self) -> bool:
         return self in TERMINAL_STATUSES
+
+
+class CleanupStatus(StrEnum):
+    pending = "cleanup_pending"
+    complete = "cleanup_complete"
+    retryable = "cleanup_retryable"
+
+
+class ResourcePressureState(StrEnum):
+    normal = "normal"
+    pressure = "resource_pressure"
+
+
+@dataclass(frozen=True)
+class OwnedDockerUsage:
+    """Bounded accounting facts for exact Steward-owned Docker objects."""
+
+    container_bytes: int = 0
+    image_bytes: int = 0
+    scratch_bytes: int = 0
+    container_count: int = 0
+    image_count: int = 0
+    ambiguous: bool = False
+
+    @property
+    def bytes(self) -> int:
+        return self.container_bytes + self.image_bytes + self.scratch_bytes
+
+
+@dataclass(frozen=True)
+class ResourcePressure:
+    state: ResourcePressureState = ResourcePressureState.normal
+    home_free_bytes: int | None = None
+    owned: OwnedDockerUsage = field(default_factory=OwnedDockerUsage)
+    reason: str | None = None
+    admission_allowed: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state.value,
+            "homeFreeBytes": self.home_free_bytes,
+            "ownedBytes": self.owned.bytes,
+            "ownedContainers": self.owned.container_count,
+            "ownedImages": self.owned.image_count,
+            "ambiguous": self.owned.ambiguous,
+            "reason": self.reason,
+            "admissionAllowed": self.admission_allowed,
+        }
+
+
+def evaluate_resource_pressure(
+    *,
+    home_free_bytes: int | None,
+    owned: OwnedDockerUsage,
+    minimum_free_bytes: int,
+    maximum_owned_bytes: int,
+    recovery_free_bytes: int,
+    recovery_owned_bytes: int,
+    previous: ResourcePressureState = ResourcePressureState.normal,
+) -> ResourcePressure:
+    """Apply high/low hysteresis without treating unknown usage as safe."""
+
+    if owned.ambiguous or home_free_bytes is None:
+        return ResourcePressure(
+            ResourcePressureState.pressure,
+            home_free_bytes,
+            owned,
+            "usage_ambiguous",
+            False,
+        )
+    high = home_free_bytes < minimum_free_bytes or owned.bytes > maximum_owned_bytes
+    if previous is ResourcePressureState.pressure:
+        pressure = not (
+            home_free_bytes > recovery_free_bytes
+            and owned.bytes < recovery_owned_bytes
+        )
+    else:
+        pressure = high
+    return ResourcePressure(
+        ResourcePressureState.pressure if pressure else ResourcePressureState.normal,
+        home_free_bytes,
+        owned,
+        "threshold" if pressure else None,
+        not pressure,
+    )
 
 
 class WorkerKind(StrEnum):

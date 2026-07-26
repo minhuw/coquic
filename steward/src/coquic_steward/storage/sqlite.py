@@ -112,6 +112,7 @@ from .schema import (
     DatasetSyncHealthRow,
     DaemonStateRow,
     ValidationRow,
+    StewardImageReleaseRow,
 )
 from ..control_loop import (
     ControlLoopLedger,
@@ -2027,6 +2028,242 @@ class SQLiteTaskStore:
 
     enable_dataset_sync = set_dataset_sync_enabled
 
+    # ------------------------------------------------------------------
+    # Private Compose release/container/resource facts
+
+    def record_image_release(
+        self,
+        release_id: str,
+        *,
+        daemon_image_id: str,
+        task_image_id: str,
+        validation_image_id: str | None = None,
+        labels: dict[str, object] | None = None,
+        verified_at: datetime | None = None,
+        current: bool = False,
+        previous: bool = False,
+    ) -> None:
+        """Persist an immutable verified pair without secret or path data."""
+
+        if not release_id or not daemon_image_id.startswith("sha256:") or not task_image_id.startswith("sha256:"):
+            raise ValueError("release and image identities must be immutable")
+        if validation_image_id is not None and not validation_image_id.startswith("sha256:"):
+            raise ValueError("validation image identity must be immutable")
+        timestamp = (verified_at or utc_now()).isoformat()
+        payload = json.dumps(labels or {}, sort_keys=True, separators=(",", ":"))
+        with self.engine.begin() as connection:
+            if current:
+                connection.exec_driver_sql(
+                    "UPDATE steward_image_releases SET selected_current=0"
+                )
+            if previous:
+                connection.exec_driver_sql(
+                    "UPDATE steward_image_releases SET selected_previous=0"
+                )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO steward_image_releases
+                  (release_id,daemon_image_id,task_image_id,validation_image_id,labels_json,verified_at,selected_current,selected_previous)
+                VALUES (:release_id,:daemon_image_id,:task_image_id,:validation_image_id,:labels_json,:verified_at,:current,:previous)
+                ON CONFLICT(release_id) DO UPDATE SET
+                  daemon_image_id=excluded.daemon_image_id,
+                  task_image_id=excluded.task_image_id,
+                  validation_image_id=excluded.validation_image_id,
+                  labels_json=excluded.labels_json,
+                  verified_at=excluded.verified_at,
+                  selected_current=excluded.selected_current,
+                  selected_previous=excluded.selected_previous
+                """,
+                {
+                    "release_id": release_id,
+                    "daemon_image_id": daemon_image_id,
+                    "task_image_id": task_image_id,
+                    "validation_image_id": validation_image_id,
+                    "labels_json": payload,
+                    "verified_at": timestamp,
+                    "current": int(current),
+                    "previous": int(previous),
+                },
+            )
+        self._notify_change()
+
+    def list_image_releases(self) -> list[dict[str, object]]:
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT release_id,daemon_image_id,task_image_id,validation_image_id,labels_json,verified_at,selected_current,selected_previous FROM steward_image_releases ORDER BY verified_at"
+            ).fetchall()
+        return [
+            {
+                "release_id": row[0],
+                "daemon_image_id": row[1],
+                "task_image_id": row[2],
+                "validation_image_id": row[3],
+                "labels": json.loads(row[4] or "{}"),
+                "verified_at": row[5],
+                "current": bool(row[6]),
+                "previous": bool(row[7]),
+            }
+            for row in rows
+        ]
+
+    def replace_container_references(
+        self, references: list[dict[str, object]], *, updated_at: datetime | None = None
+    ) -> None:
+        """Replace the exact container view after one complete labeled scan."""
+
+        timestamp = (updated_at or utc_now()).isoformat()
+        normalized: list[dict[str, object]] = []
+        for reference in references:
+            container_id = str(reference.get("container_id", ""))
+            image_id = str(reference.get("image_id", ""))
+            epoch_id = str(reference.get("epoch_id", ""))
+            if (
+                not container_id
+                or "\n" in container_id
+                or not image_id.startswith("sha256:")
+                or not epoch_id
+                or "\n" in epoch_id
+            ):
+                raise ValueError("container reference identity is invalid")
+            size = reference.get("size_bytes")
+            if size is not None and (isinstance(size, bool) or int(size) < 0):
+                raise ValueError("container reference size is invalid")
+            normalized.append(
+                {
+                    "container_id": container_id,
+                    "task_id": reference.get("task_id"),
+                    "image_id": image_id,
+                    "epoch_id": epoch_id,
+                    "state": str(reference.get("state", "unknown"))[:64],
+                    "cleanup_status": str(reference.get("cleanup_status", "active"))[
+                        :64
+                    ],
+                    "size_bytes": int(size) if size is not None else None,
+                    "updated_at": timestamp,
+                }
+            )
+        with self.engine.begin() as connection:
+            observed = {item["container_id"] for item in normalized}
+            if observed:
+                placeholders = ",".join("?" for _ in observed)
+                connection.exec_driver_sql(
+                    f"DELETE FROM steward_container_references WHERE container_id NOT IN ({placeholders})",  # nosec B608 - placeholders only
+                    tuple(sorted(observed)),
+                )
+            else:
+                connection.exec_driver_sql("DELETE FROM steward_container_references")
+            for item in normalized:
+                connection.exec_driver_sql(
+                    """
+                    INSERT INTO steward_container_references
+                      (container_id,task_id,image_id,epoch_id,state,cleanup_status,size_bytes,updated_at)
+                    VALUES (:container_id,:task_id,:image_id,:epoch_id,:state,:cleanup_status,:size_bytes,:updated_at)
+                    ON CONFLICT(container_id) DO UPDATE SET
+                      task_id=excluded.task_id,image_id=excluded.image_id,
+                      epoch_id=excluded.epoch_id,state=excluded.state,
+                      cleanup_status=excluded.cleanup_status,
+                      size_bytes=excluded.size_bytes,updated_at=excluded.updated_at
+                    """,
+                    item,
+                )
+        self._notify_change()
+
+    def list_container_references(self) -> list[dict[str, object]]:
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT container_id,task_id,image_id,epoch_id,state,cleanup_status,size_bytes,updated_at FROM steward_container_references ORDER BY container_id"
+            ).fetchall()
+        return [
+            {
+                "container_id": row[0],
+                "task_id": row[1],
+                "image_id": row[2],
+                "epoch_id": row[3],
+                "state": row[4],
+                "cleanup_status": row[5],
+                "size_bytes": row[6],
+                "updated_at": row[7],
+            }
+            for row in rows
+        ]
+
+    def referenced_image_ids(self) -> frozenset[str]:
+        """Return exact images protected by deployment, ledger, or containers."""
+
+        with self.engine.begin() as connection:
+            releases = connection.exec_driver_sql(
+                "SELECT daemon_image_id,task_image_id,validation_image_id FROM steward_image_releases WHERE selected_current=1 OR selected_previous=1"
+            ).fetchall()
+            containers = connection.exec_driver_sql(
+                "SELECT DISTINCT image_id FROM steward_container_references"
+            ).fetchall()
+            sessions = connection.exec_driver_sql(
+                """
+                SELECT DISTINCT session.image_digest
+                FROM codex_sessions AS session
+                JOIN tasks AS task ON task.id=session.task_id
+                WHERE session.image_digest IS NOT NULL AND (
+                  task.status IN ('queued','running','reviewing','integrating')
+                  OR session.state IN ('active','interrupted')
+                  OR (
+                    EXISTS (SELECT 1 FROM events AS pending WHERE pending.task_id=task.id AND pending.kind='cleanup_pending')
+                    AND NOT EXISTS (SELECT 1 FROM events AS complete WHERE complete.task_id=task.id AND complete.kind='cleanup_complete')
+                  )
+                )
+                """
+            ).fetchall()
+        values = {str(row[0]) for row in containers if row[0]}
+        values.update(str(row[0]) for row in sessions if row[0])
+        for daemon_image_id, task_image_id, validation_image_id in releases:
+            values.update((str(daemon_image_id), str(task_image_id)))
+            if validation_image_id:
+                values.add(str(validation_image_id))
+        return frozenset(values)
+
+    def record_resource_pressure(
+        self,
+        *,
+        state: str,
+        home_free_bytes: int | None,
+        owned_docker_bytes: int | None,
+        cleanup_pending_count: int = 0,
+        reason: str | None = None,
+        updated_at: datetime | None = None,
+    ) -> None:
+        if state not in {"normal", "resource_pressure"}:
+            raise ValueError("invalid resource pressure state")
+        with self.engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                INSERT INTO steward_resource_pressure
+                  (id,state,home_free_bytes,owned_docker_bytes,cleanup_pending_count,reason,updated_at)
+                VALUES (1,:state,:home_free_bytes,:owned_docker_bytes,:cleanup_pending_count,:reason,:updated_at)
+                ON CONFLICT(id) DO UPDATE SET
+                  state=excluded.state,home_free_bytes=excluded.home_free_bytes,
+                  owned_docker_bytes=excluded.owned_docker_bytes,
+                  cleanup_pending_count=excluded.cleanup_pending_count,
+                  reason=excluded.reason,updated_at=excluded.updated_at
+                """,
+                {
+                    "state": state,
+                    "home_free_bytes": home_free_bytes,
+                    "owned_docker_bytes": owned_docker_bytes,
+                    "cleanup_pending_count": cleanup_pending_count,
+                    "reason": reason,
+                    "updated_at": (updated_at or utc_now()).isoformat(),
+                },
+            )
+        self._notify_change()
+
+    def get_resource_pressure(self) -> dict[str, object]:
+        with self.engine.begin() as connection:
+            row = connection.exec_driver_sql(
+                "SELECT state,home_free_bytes,owned_docker_bytes,cleanup_pending_count,reason,updated_at FROM steward_resource_pressure WHERE id=1"
+            ).fetchone()
+        if row is None:
+            return {"state": "normal", "home_free_bytes": None, "owned_docker_bytes": None, "cleanup_pending_count": 0, "reason": None, "updated_at": None}
+        return {"state": row[0], "home_free_bytes": row[1], "owned_docker_bytes": row[2], "cleanup_pending_count": row[3], "reason": row[4], "updated_at": row[5]}
+
     def claim_dataset_sync_cycle(
         self,
         cycle_id: str,
@@ -3065,6 +3302,15 @@ class SQLiteTaskStore:
             # This table is additive and independent of task, pipeline, run,
             # and sanitized public-mirror health state.
             DatasetSyncHealthRow.__table__.create(connection, checkfirst=True)
+            StewardImageReleaseRow.__table__.create(connection, checkfirst=True)
+            image_release_columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(steward_image_releases)")
+            }
+            if image_release_columns and "validation_image_id" not in image_release_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE steward_image_releases ADD COLUMN validation_image_id TEXT"
+                )
             session_columns = {
                 row[1]
                 for row in connection.exec_driver_sql("PRAGMA table_info(codex_sessions)")

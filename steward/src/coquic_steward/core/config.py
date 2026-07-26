@@ -61,6 +61,7 @@ VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
 _SAFE_SYNC_USER = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _SAFE_SYNC_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
+_SAFE_RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 def _bounded_token(value: object, label: str, *, allow_empty: bool = False) -> str:
@@ -238,6 +239,124 @@ DaemonContainerConfig = StewardContainerConfig
 DatasetSyncSettings = StewardDatasetSyncConfig
 
 
+@dataclass(frozen=True)
+class StewardDeploymentConfig:
+    """The host-side Docker Compose contract for the trusted daemon.
+
+    Values are deliberately boring primitives so this object can be populated
+    from TOML and inspected by the shell management boundary without exposing
+    credential contents.  ``enabled`` is false for the historical local test
+    configuration; production Compose sets every path and threshold
+    explicitly.
+    """
+
+    enabled: bool = False
+    home: Path | None = None
+    repository: Path | None = None
+    docker_socket: Path = Path("/var/run/docker.sock")
+    host_uid: int | None = None
+    host_gid: int | None = None
+    docker_gid: int | None = None
+    expected_remote: str = "origin"
+    expected_branch: str = "main"
+    compose_project: str = "coquic-steward"
+    codex_credential_path: Path | None = None
+    github_credential_path: Path | None = None
+    dataset_identity_path: Path | None = None
+    known_hosts_path: Path | None = None
+    release_id: str | None = None
+    daemon_image: str = "coquic-steward-daemon"
+    daemon_image_id: str | None = None
+    task_image: str = "coquic-steward-task"
+    task_image_id: str | None = None
+    validation_image: str = "coquic-steward-validation"
+    validation_image_id: str | None = None
+    validation_runtime: str = "validation-container-v1"
+    stop_grace_seconds: int = 45
+    max_active_tasks: int = 4
+    max_pids: int = 512
+    max_memory_bytes: int = 4 * 1024 * 1024 * 1024
+    max_log_bytes: int = 64 * 1024 * 1024
+    max_scratch_bytes: int = 8 * 1024 * 1024 * 1024
+    min_free_bytes: int | None = None
+    max_owned_docker_bytes: int | None = None
+    recovery_free_bytes: int | None = None
+    recovery_owned_docker_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("deployment.enabled must be a boolean")
+        for name in ("home", "repository", "codex_credential_path", "github_credential_path", "dataset_identity_path", "known_hosts_path"):
+            value = getattr(self, name)
+            if value is not None:
+                path = _absolute_path(value, f"deployment.{name}")
+                if path.is_symlink():
+                    raise ValueError(f"deployment.{name} must not be a symlink")
+                object.__setattr__(self, name, path)
+        socket = _absolute_path(self.docker_socket, "deployment.docker_socket")
+        object.__setattr__(self, "docker_socket", socket)
+        if self.enabled and (self.home is None or self.repository is None):
+            raise ValueError("deployment requires an absolute home and repository")
+        if self.repository is not None and self.home is not None:
+            expected = self.home / "repository"
+            if self.repository != expected:
+                raise ValueError("deployment.repository must be COQUIC_HOME/repository")
+        for name in ("host_uid", "host_gid", "docker_gid"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535):
+                raise ValueError(f"deployment.{name} must be a numeric UID/GID")
+        for name in ("stop_grace_seconds", "max_active_tasks", "max_pids", "max_memory_bytes", "max_log_bytes", "max_scratch_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"deployment.{name} must be a positive bounded integer")
+        if self.stop_grace_seconds < 31 or self.stop_grace_seconds > 3600:
+            raise ValueError("deployment.stop_grace_seconds must exceed daemon shutdown grace")
+        thresholds = ("min_free_bytes", "max_owned_docker_bytes", "recovery_free_bytes", "recovery_owned_docker_bytes")
+        for name in thresholds:
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+                raise ValueError(f"deployment.{name} must be a positive integer")
+        if self.enabled and any(getattr(self, name) is None for name in ("min_free_bytes", "max_owned_docker_bytes", "recovery_free_bytes", "recovery_owned_docker_bytes")):
+            raise ValueError("production deployment requires explicit resource thresholds")
+        if self.min_free_bytes is not None and self.recovery_free_bytes is not None and self.recovery_free_bytes <= self.min_free_bytes:
+            raise ValueError("deployment.recovery_free_bytes must be above min_free_bytes")
+        if self.max_owned_docker_bytes is not None and self.recovery_owned_docker_bytes is not None and self.recovery_owned_docker_bytes >= self.max_owned_docker_bytes:
+            raise ValueError("deployment.recovery_owned_docker_bytes must be below max_owned_docker_bytes")
+        for name in ("expected_remote", "expected_branch", "compose_project", "daemon_image", "task_image", "validation_image", "validation_runtime"):
+            value = _bounded_token(getattr(self, name), f"deployment.{name}")
+            object.__setattr__(self, name, value)
+        if self.release_id is not None:
+            release = _bounded_token(self.release_id, "deployment.release_id")
+            if _SAFE_RELEASE.fullmatch(release) is None:
+                raise ValueError("deployment.release_id is not a safe release identity")
+            object.__setattr__(self, "release_id", release)
+        for name in ("daemon_image_id", "task_image_id", "validation_image_id"):
+            value = getattr(self, name)
+            if value is not None and not _valid_sha256_digest(value):
+                raise ValueError(f"deployment.{name} must be a sha256 image ID")
+        if self.validation_runtime != "validation-container-v1":
+            raise ValueError("deployment.validation_runtime is unsupported")
+
+    @property
+    def credentials_dir(self) -> Path | None:
+        return self.home / "private" / "credentials" if self.home is not None else None
+
+    @property
+    def deployment_dir(self) -> Path | None:
+        return self.home / "private" / "deployment" if self.home is not None else None
+
+    @property
+    def current_release_path(self) -> Path | None:
+        return self.deployment_dir / "current" if self.deployment_dir is not None else None
+
+    @property
+    def previous_release_path(self) -> Path | None:
+        return self.deployment_dir / "previous" if self.deployment_dir is not None else None
+
+
+ContainerOperationsConfig = StewardDeploymentConfig
+
+
 def _valid_sha256_digest(value: str) -> bool:
     return isinstance(value, str) and len(value) == 71 and value.startswith("sha256:") and all(
         character in "0123456789abcdef" for character in value[7:]
@@ -316,6 +435,9 @@ class StewardConfig:
     task_image_digest: str | None = None
     daemon_image: str = "coquic-steward-daemon"
     daemon_image_digest: str | None = None
+    validation_image: str = "coquic-steward-validation"
+    validation_image_digest: str | None = None
+    validation_runtime: str = "validation-container-v1"
     runtime_protocol: str = "task-container-v1"
     local_codex_test_harness: bool = False
     integration_mode: str = IntegrationMode.local_only.value
@@ -331,10 +453,15 @@ class StewardConfig:
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
     container: StewardContainerConfig = field(default_factory=StewardContainerConfig)
     dataset_sync: StewardDatasetSyncConfig = field(default_factory=StewardDatasetSyncConfig)
+    deployment: StewardDeploymentConfig = field(default_factory=StewardDeploymentConfig)
     shutdown_grace_seconds: float = 30.0
     resume_attempt_limit: int = 2
 
     def __post_init__(self) -> None:
+        if self.deployment.enabled and self.deployment.stop_grace_seconds <= self.shutdown_grace_seconds:
+            raise ValueError(
+                "deployment.stop_grace_seconds must exceed shutdown_grace_seconds"
+            )
         if self.container.enabled:
             if (
                 self.task_image_digest is not None
@@ -377,8 +504,12 @@ class StewardConfig:
             raise ValueError("task_image_digest must be a sha256 digest")
         if self.daemon_image_digest is not None and not _valid_sha256_digest(self.daemon_image_digest):
             raise ValueError("daemon_image_digest must be a sha256 digest")
+        if self.validation_image_digest is not None and not _valid_sha256_digest(self.validation_image_digest):
+            raise ValueError("validation_image_digest must be a sha256 digest")
         if self.runtime_protocol != "task-container-v1":
             raise ValueError("unsupported task runtime protocol")
+        if self.validation_runtime != "validation-container-v1":
+            raise ValueError("unsupported validation runtime protocol")
         _validate_reasoning_effort(
             self.codex_reasoning_effort, "codex_reasoning_effort"
         )
@@ -440,16 +571,75 @@ class StewardConfig:
     def coquic_home(self) -> Path:
         # Keep the lexical path so migration can detect a symlinked root before
         # resolving it into an apparently safe directory.
+        configured = self.deployment.home
+        if configured is not None:
+            return configured
         return Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser()
 
     @property
+    def repository_path(self) -> Path:
+        """The only canonical clone accepted by the Compose deployment."""
+
+        return self.deployment.repository or (self.coquic_home / "repository")
+
+    @property
+    def docker_socket(self) -> Path:
+        return self.deployment.docker_socket
+
+    @property
+    def docker_socket_path(self) -> Path:
+        return self.docker_socket
+
+    @property
+    def repository_host_path(self) -> Path:
+        return self.repository_path
+
+    @property
+    def codex_credential_path(self) -> Path | None:
+        return self.deployment.codex_credential_path
+
+    @property
+    def github_credential_path(self) -> Path | None:
+        return self.deployment.github_credential_path
+
+    @property
+    def dataset_identity_path(self) -> Path | None:
+        return self.deployment.dataset_identity_path
+
+    @property
+    def known_hosts_path(self) -> Path | None:
+        return self.deployment.known_hosts_path
+
+    @property
+    def host_uid(self) -> int | None:
+        return self.deployment.host_uid
+
+    @property
+    def host_gid(self) -> int | None:
+        return self.deployment.host_gid
+
+    @property
+    def docker_gid(self) -> int | None:
+        return self.deployment.docker_gid
+
+    @property
+    def credentials_dir(self) -> Path:
+        return self.deployment.credentials_dir or (self.private_dir / "credentials")
+
+    @property
+    def deployment_dir(self) -> Path:
+        return self.deployment.deployment_dir or (self.private_dir / "deployment")
+
+    @property
     def steward_home(self) -> Path:
+        if self.deployment.enabled:
+            return self.private_dir / "runtime"
         return self.coquic_home / "steward"
 
     @property
     def legacy_steward_home(self) -> Path:
         """The pre-2.0 private root, retained for compatibility reads."""
-        return self.steward_home
+        return self.coquic_home / "steward"
 
     @property
     def state_dir(self) -> Path:
@@ -569,6 +759,15 @@ class StewardConfig:
             self.patches_dir,
             self.implementation_plans_dir,
         )
+        if self.deployment.enabled:
+            roots = tuple(
+                path
+                for path in roots
+                if path not in {
+                    self.legacy_steward_home,
+                    self.legacy_transcripts_dir,
+                }
+            ) + (self.credentials_dir, self.deployment_dir)
         _ensure_controlled_roots(roots)
 
     def ensure_epoch(self) -> dict[str, Any]:
@@ -692,7 +891,15 @@ class StewardConfig:
 def load_config(
     repo_root: Path | None = None, config_path: Path | None = None
 ) -> StewardConfig:
-    root = find_repo_root(repo_root or Path.cwd())
+    if config_path is None:
+        configured_path = os.getenv("COQUIC_STEWARD_CONFIG_PATH") or os.getenv("STEWARD_CONFIG_PATH")
+        if configured_path:
+            config_path = Path(configured_path)
+    configured_repository = os.getenv("COQUIC_REPOSITORY")
+    root = find_repo_root(
+        repo_root
+        or (Path(configured_repository) if configured_repository else Path.cwd())
+    )
     data = _read_config(root, config_path)
     steward = data.get("steward", data)
     if not isinstance(steward, dict):
@@ -704,6 +911,21 @@ def load_config(
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
     container_data = _section_alias(steward, "container", "containers", "task_container")
+    deployment_data = _section_alias(steward, "deployment", "container_operations")
+    deployment_config = _deployment_config(deployment_data, root)
+    selected_task_image = (
+        deployment_config.task_image_id if deployment_config.enabled else None
+    )
+    selected_daemon_image = (
+        deployment_config.daemon_image_id if deployment_config.enabled else None
+    )
+    selected_validation_image = (
+        deployment_config.validation_image_id if deployment_config.enabled else None
+    )
+    runtime_container_data = dict(container_data)
+    if selected_task_image is not None:
+        runtime_container_data["image"] = selected_task_image
+        runtime_container_data["image_digest"] = selected_task_image
     legacy_sync_sections = tuple(
         name
         for name in ("task_" + "sync", "task_" + "archive_" + "sync", "sync", "archive_" + "sync")
@@ -738,18 +960,31 @@ def load_config(
             if isinstance(codex_data, dict) and codex_data.get("identity") is not None
             else None
         ),
-        task_image=str(steward.get("task_image", "coquic-steward-task")),
+        task_image=selected_task_image
+        or str(steward.get("task_image", "coquic-steward-task")),
         task_image_digest=(
-            str(steward.get("task_image_digest"))
-            if steward.get("task_image_digest") is not None
+            selected_task_image or str(steward.get("task_image_digest"))
+            if selected_task_image is not None
+            or steward.get("task_image_digest") is not None
             else None
         ),
-        daemon_image=str(steward.get("daemon_image", "coquic-steward-daemon")),
+        daemon_image=selected_daemon_image
+        or str(steward.get("daemon_image", "coquic-steward-daemon")),
         daemon_image_digest=(
-            str(steward.get("daemon_image_digest"))
-            if steward.get("daemon_image_digest") is not None
+            selected_daemon_image or str(steward.get("daemon_image_digest"))
+            if selected_daemon_image is not None
+            or steward.get("daemon_image_digest") is not None
             else None
         ),
+        validation_image=selected_validation_image
+        or str(steward.get("validation_image", "coquic-steward-validation")),
+        validation_image_digest=(
+            selected_validation_image or str(steward.get("validation_image_digest"))
+            if selected_validation_image is not None
+            or steward.get("validation_image_digest") is not None
+            else None
+        ),
+        validation_runtime=str(steward.get("validation_runtime", "validation-container-v1")),
         runtime_protocol=str(steward.get("runtime_protocol", "task-container-v1")),
         local_codex_test_harness=bool(
             steward.get("local_codex_test_harness", False)
@@ -784,12 +1019,13 @@ def load_config(
         telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
         container=_container_config(
-            container_data,
+            runtime_container_data,
             root,
             fallback_image=steward.get("task_image"),
             fallback_digest=steward.get("task_image_digest"),
         ),
         dataset_sync=_dataset_sync_config(sync_data),
+        deployment=deployment_config,
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
         resume_attempt_limit=int(steward.get("resume_attempt_limit", 2)),
     )
@@ -894,6 +1130,79 @@ def _container_config(
         docker_bin=_resolve_executable(str(data.get("docker_bin", "docker"))),
         network=str(data.get("network", "bridge")),
         runtime_protocol=str(data.get("runtime_protocol", "task-container-v1")),
+    )
+
+
+def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
+    data = raw if isinstance(raw, dict) else {}
+    enabled = bool(data.get("enabled", False))
+    home_value = data.get("home", data.get("coquic_home"))
+    if home_value is None and enabled:
+        home_value = os.getenv("COQUIC_HOME")
+    home = Path(home_value).expanduser() if home_value is not None else None
+    repository_value = data.get("repository", data.get("repository_path"))
+    if repository_value is None and home is not None:
+        repository_value = home / "repository"
+    def _path(*names: str) -> Path | None:
+        value = next((data[name] for name in names if name in data), None)
+        return Path(value).expanduser() if value is not None else None
+    return StewardDeploymentConfig(
+        enabled=enabled,
+        home=home,
+        repository=Path(repository_value).expanduser() if repository_value is not None else None,
+        docker_socket=Path(data.get("docker_socket", data.get("socket", "/var/run/docker.sock"))).expanduser(),
+        host_uid=int(data["host_uid"]) if "host_uid" in data else None,
+        host_gid=int(data["host_gid"]) if "host_gid" in data else None,
+        docker_gid=int(data["docker_gid"]) if "docker_gid" in data else None,
+        expected_remote=str(data.get("expected_remote", data.get("git_remote", "origin"))),
+        expected_branch=str(data.get("expected_branch", data.get("main_branch", "main"))),
+        compose_project=str(data.get("compose_project", "coquic-steward")),
+        codex_credential_path=_path("codex_credential_path", "codex_api_key_path"),
+        github_credential_path=_path("github_credential_path", "github_identity_path"),
+        dataset_identity_path=_path("dataset_identity_path", "dataset_sync_key_path"),
+        known_hosts_path=_path("known_hosts_path"),
+        release_id=(
+            os.getenv("STEWARD_RELEASE_ID")
+            if enabled and os.getenv("STEWARD_RELEASE_ID")
+            else str(data["release_id"])
+            if data.get("release_id") is not None
+            else None
+        ),
+        daemon_image=str(data.get("daemon_image", "coquic-steward-daemon")),
+        daemon_image_id=(
+            os.getenv("STEWARD_DAEMON_IMAGE")
+            if enabled and os.getenv("STEWARD_DAEMON_IMAGE")
+            else str(data["daemon_image_id"])
+            if data.get("daemon_image_id") is not None
+            else None
+        ),
+        task_image=str(data.get("task_image", "coquic-steward-task")),
+        task_image_id=(
+            os.getenv("STEWARD_TASK_IMAGE")
+            if enabled and os.getenv("STEWARD_TASK_IMAGE")
+            else str(data["task_image_id"])
+            if data.get("task_image_id") is not None
+            else None
+        ),
+        validation_image=str(data.get("validation_image", "coquic-steward-validation")),
+        validation_image_id=(
+            os.getenv("STEWARD_VALIDATION_IMAGE")
+            if enabled and os.getenv("STEWARD_VALIDATION_IMAGE")
+            else str(data["validation_image_id"])
+            if data.get("validation_image_id") is not None
+            else None
+        ),
+        validation_runtime=str(data.get("validation_runtime", "validation-container-v1")),
+        stop_grace_seconds=int(data.get("stop_grace_seconds", 45)),
+        max_active_tasks=int(data.get("max_active_tasks", data.get("task_concurrency", 4))),
+        max_pids=int(data.get("max_pids", 512)),
+        max_memory_bytes=int(data.get("max_memory_bytes", 4 * 1024 * 1024 * 1024)),
+        max_log_bytes=int(data.get("max_log_bytes", 64 * 1024 * 1024)),
+        max_scratch_bytes=int(data.get("max_scratch_bytes", 8 * 1024 * 1024 * 1024)),
+        min_free_bytes=(int(data["min_free_bytes"]) if "min_free_bytes" in data else None),
+        max_owned_docker_bytes=(int(data["max_owned_docker_bytes"]) if "max_owned_docker_bytes" in data else None),
+        recovery_free_bytes=(int(data["recovery_free_bytes"]) if "recovery_free_bytes" in data else None),
+        recovery_owned_docker_bytes=(int(data["recovery_owned_docker_bytes"]) if "recovery_owned_docker_bytes" in data else None),
     )
 
 

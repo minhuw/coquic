@@ -70,6 +70,14 @@ quiescent; cancellation or deadline expiry remains an explicit incomplete
 health outcome. Synchronization never blocks heartbeat, planning, task workers,
 or archive writers.
 
+Compose mounts the dataset publication identity as one trusted-service secret.
+The dataset key and known-hosts material are absent from task/planner sibling
+mounts and environments. A Compose upgrade is quiescent while a sync cycle or
+archive writer is active; a forced upgrade preserves interrupted sync health
+and lets normal daemon reconciliation retry it. Resource pressure may pause
+new planner/task admission, but heartbeat, synchronization, writers, and
+cleanup continue.
+
 SQLite stores only one dataset health record: enabled state, active cycle ID,
 last start/finish/success timestamps, duration, exit code, bounded category and
 detail, and consecutive failure count. It stores no credential paths or

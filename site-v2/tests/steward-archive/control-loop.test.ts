@@ -335,18 +335,36 @@ test("F014 an end cursor resumes newly indexed signal evidence without duplicati
   assert.equal(new Set([...first.records, ...resumed.records].map((record) => record.eventId)).size, first.records.length + 1);
 });
 
-test("F014 stale refresh crosses an exact page boundary through the refreshed frontier", async () => {
+test("F014 append refresh crosses an exact page boundary without resetting loaded evidence", async () => {
   const loaded = Array.from({ length: 50 }, (_, index) => ({ eventId: `event-refresh-${index}`, sequence: index }));
   const requested: Array<string | null> = [];
   const refreshed = await refreshEvidenceFrontier(async (cursor) => {
     requested.push(cursor);
-    if (cursor === "stale") throw Object.assign(new Error("stale"), { status: 409 });
-    if (cursor === null) return { records: loaded, nextCursor: "next-page", resumeCursor: "first-page-end" };
-    return { records: [{ eventId: "event-refresh-50", sequence: 50 }], nextCursor: null, resumeCursor: "refreshed-frontier" };
-  }, "stale", (record) => String(record.eventId));
-  const visible = mergeEvidenceRecords(loaded, refreshed.records, (record) => String(record.eventId));
-  assert.deepEqual(requested, ["stale", null, "next-page"]);
+    if (cursor === "loaded-frontier") return { records: Array.from({ length: 50 }, (_, index) => ({ eventId: `event-refresh-${index + 50}`, sequence: index + 50 })), nextCursor: "next-page", resumeCursor: "second-page-end" };
+    return { records: [{ eventId: "event-refresh-100", sequence: 100 }], nextCursor: null, resumeCursor: "refreshed-frontier" };
+  }, "loaded-frontier", (record) => String(record.eventId));
+  const visible = refreshed.replace ? refreshed.records : mergeEvidenceRecords(loaded, refreshed.records, (record) => String(record.eventId));
+  assert.deepEqual(requested, ["loaded-frontier", "next-page"]);
+  assert.equal(refreshed.replace, false);
+  assert.equal(refreshed.records.length, 51);
   assert.equal(refreshed.resumeCursor, "refreshed-frontier");
-  assert.equal(visible.length, 51);
-  assert.equal(visible.at(-1)?.eventId, "event-refresh-50");
+  assert.equal(visible.length, 101);
+  assert.equal(visible.at(-1)?.eventId, "event-refresh-100");
+});
+
+test("F017 replacement refresh removes superseded evidence after a stale generation", async () => {
+  const loaded = [{ eventId: "superseded", sequence: 1 }, { eventId: "retained", sequence: 2 }];
+  const requested: Array<string | null> = [];
+  const refreshed = await refreshEvidenceFrontier(async (cursor) => {
+    requested.push(cursor);
+    if (cursor === "stale-generation") throw Object.assign(new Error("stale"), { status: 409 });
+    if (cursor === null) return { records: [{ eventId: "replacement", sequence: 1 }], nextCursor: "next-page", resumeCursor: "first-page-end" };
+    return { records: [{ eventId: "retained", sequence: 2 }], nextCursor: null, resumeCursor: "replacement-frontier" };
+  }, "stale-generation", (record) => String(record.eventId));
+  const visible = refreshed.replace ? refreshed.records : mergeEvidenceRecords(loaded, refreshed.records, (record) => String(record.eventId));
+  assert.deepEqual(requested, ["stale-generation", null, "next-page"]);
+  assert.equal(refreshed.replace, true);
+  assert.deepEqual(refreshed.records.map((record) => record.eventId), ["replacement", "retained"]);
+  assert.deepEqual(visible.map((record) => record.eventId), ["replacement", "retained"]);
+  assert.equal(refreshed.resumeCursor, "replacement-frontier");
 });

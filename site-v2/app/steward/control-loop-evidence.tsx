@@ -22,10 +22,10 @@ export async function loadEvidenceFrontier(request: (cursor: string | null) => P
 
 export async function refreshEvidenceFrontier(request: (cursor: string | null) => Promise<EvidencePage>, cursor: string | null, key: (record: EvidenceRecord) => string) {
   try {
-    return await loadEvidenceFrontier(request, cursor, key);
+    return { ...await loadEvidenceFrontier(request, cursor, key), replace: false };
   } catch (error) {
     if ((error as { status?: number }).status !== 409) throw error;
-    return loadEvidenceFrontier(request, null, key);
+    return { ...await loadEvidenceFrontier(request, null, key), replace: true };
   }
 }
 
@@ -55,7 +55,10 @@ export function SignalEvidence({ signalId }: { signalId: string }) {
   useEffect(() => {
     const refresh = async () => {
       setLoading(true); setError(false);
-      try { apply(await refreshEvidenceFrontier(request, resumeRef.current, (record) => String(record.eventId)), false); }
+      try {
+        const refreshed = await refreshEvidenceFrontier(request, resumeRef.current, (record) => String(record.eventId));
+        apply(refreshed, refreshed.replace);
+      }
       catch { setError(true); }
       finally { setLoading(false); }
     };

@@ -77,6 +77,32 @@ test("selected signal evidence appends on revision without resetting loaded reco
   expect(new Set(ids).size).toBe(12);
 });
 
+test("selected signal evidence replaces superseded records after a generation refresh", async ({ page }) => {
+  let replacement = false;
+  await page.route("**/api/steward/signals/signal-synthetic-consumed/events*", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor === "stale-generation") {
+      replacement = true;
+      await route.fulfill({ status: 409, contentType: "application/problem+json", body: JSON.stringify({ status: 409 }) });
+      return;
+    }
+    const records = replacement
+      ? [{ eventId: "replacement", sequence: 1, payload: { label: "replacement" } }, { eventId: "retained", sequence: 2, payload: { label: "retained" } }]
+      : [{ eventId: "superseded", sequence: 1, payload: { label: "superseded" } }, { eventId: "retained", sequence: 2, payload: { label: "retained" } }];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { records, nextCursor: null, resumeCursor: replacement ? "replacement-frontier" : "stale-generation" } }) });
+  });
+  await page.goto("/steward?view=signals&signal=signal-synthetic-consumed");
+  const evidence = page.getByLabel("Signal evidence");
+  await expect(evidence.locator("ol > li")).toHaveCount(2);
+  await expect(evidence.getByText("superseded")).toBeVisible();
+
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("steward-revision", { detail: 2 })));
+
+  await expect(evidence.getByText("replacement")).toBeVisible();
+  await expect(evidence.getByText("superseded")).toHaveCount(0);
+  await expect(evidence.locator("ol > li")).toHaveCount(2);
+});
+
 test("revision monitoring refreshes once per revision and pauses while hidden", async ({ page }) => {
   let revision = 1;
   let polls = 0;

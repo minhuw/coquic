@@ -68,12 +68,17 @@ def test_planner_container_mounts_only_sealed_history_and_private_io(
     mounts = [argv[index + 1] for index, value in enumerate(argv) if value == "--mount"]
 
     assert config.container_name == "coquic-steward-planner"
+    assert config.network == "none"
+    assert argv[argv.index("--network") + 1] == "none"
     assert len(mounts) == 3
     assert any(value.endswith("dst=/planner/history,readonly") for value in mounts)
     assert any(value.endswith("dst=/planner/session") for value in mounts)
     assert any(value.endswith("dst=/planner/output") for value in mounts)
     assert all("worktree" not in value and "/.git" not in value for value in mounts)
     assert all("steward.sqlite" not in value and "docker.sock" not in value for value in argv)
+
+    with pytest.raises(ValueError, match="must not have network access"):
+        replace(config, network="bridge")
 
 
 @pytest.fixture

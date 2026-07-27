@@ -227,7 +227,7 @@ with TemporaryDirectory() as value:
         private_root=private,
         output_root=output,
     )
-    assert config.network == "bridge"
+    assert config.network == "none"
     assert config.container_name == "coquic-steward-planner"
     assert [mount.target for mount in config.mounts] == [
         "/planner/history",

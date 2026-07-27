@@ -68,8 +68,11 @@ def test_planner_container_mounts_only_sealed_history_and_private_io(
     mounts = [argv[index + 1] for index, value in enumerate(argv) if value == "--mount"]
 
     assert config.container_name == "coquic-steward-planner"
-    assert config.network == "none"
-    assert argv[argv.index("--network") + 1] == "none"
+    assert config.network == "bridge"
+    assert argv[argv.index("--network") + 1] == "bridge"
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "--cap-add" not in argv
+    assert "--privileged" not in argv
     assert len(mounts) == 3
     assert any(value.endswith("dst=/planner/history,readonly") for value in mounts)
     assert any(value.endswith("dst=/planner/session") for value in mounts)
@@ -77,8 +80,9 @@ def test_planner_container_mounts_only_sealed_history_and_private_io(
     assert all("worktree" not in value and "/.git" not in value for value in mounts)
     assert all("steward.sqlite" not in value and "docker.sock" not in value for value in argv)
 
-    with pytest.raises(ValueError, match="must not have network access"):
-        replace(config, network="bridge")
+    for forbidden_network in ("none", "host"):
+        with pytest.raises(ValueError, match="locked provider-egress network"):
+            replace(config, network=forbidden_network)
 
 
 @pytest.fixture

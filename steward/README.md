@@ -122,11 +122,13 @@ a planner thread file, pass `--last`, or resume a provider session across
 cycles. The planner sees current normalized signal IDs, active-task summaries,
 the output schema, and read-only sealed prior run history.
 
-The planner has no repository, worktree, SQLite/WAL, Docker socket, daemon
-configuration, GitHub/SSH/sync credential, or network authority. Failed or
-invalid output seals a failed run, leaves inputs pending, and uses bounded
-persistent backoff. Accepted, duplicate, rejected, and capacity-skipped
-proposals remain ordinal evidence.
+The locked Docker bridge provides the outbound provider transport required by
+`codex exec`. The planner has no host networking, network-administration
+capability, repository, worktree, SQLite/WAL, Docker socket, daemon
+configuration, or GitHub/SSH/sync credential. Failed or invalid output seals a
+failed run, leaves inputs pending, and uses bounded persistent backoff.
+Accepted, duplicate, rejected, and capacity-skipped proposals remain ordinal
+evidence.
 
 ## Task execution
 

@@ -300,7 +300,7 @@ class PlannerContainerConfig:
     private_root: Path
     output_root: Path
     limits: ContainerLimits = field(default_factory=ContainerLimits)
-    network: str = "none"
+    network: str = "bridge"
     container_history: str = "/planner/history"
     container_session: str = "/planner/session"
     container_output: str = "/planner/output"
@@ -318,8 +318,8 @@ class PlannerContainerConfig:
             if not value.is_absolute() or value.is_symlink():
                 raise ValueError(f"planner {name} must be an absolute non-symlink path")
             object.__setattr__(self, name, value)
-        if self.network != "none":
-            raise ValueError("planner container must not have network access")
+        if self.network != "bridge":
+            raise ValueError("planner container must use the locked provider-egress network")
         for value in (self.container_history, self.container_session, self.container_output):
             if not value.startswith("/") or ".." in PurePosixPath(value).parts:
                 raise ValueError("invalid planner container mount path")

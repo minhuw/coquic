@@ -87,15 +87,18 @@ mounted with only:
 * a fresh private session home for the one planner process; and
 * a private output staging directory.
 
-It uses `network=none` and has no repository, worktree, SQLite/WAL, Docker
-socket, daemon configuration, GitHub/SSH/sync credential, or task image
+It uses the locked `network=bridge` transport required for `codex exec` provider
+calls. The read-only container drops all capabilities, forbids privilege
+escalation, and has no host networking, repository, worktree, SQLite/WAL,
+Docker socket, daemon configuration, GitHub/SSH/sync credential, or task image
 authority. Every attempt receives a new planner run and session identity. A
 planner failure is sealed and retried from the ledger; it does not resume a
 provider thread or use `--last`.
 
 The value-object boundary is `PlannerContainerConfig`; production runtime
-construction must reject repository or credential mounts. The image and mount
-contract can be exercised without network access by the planner smoke mode:
+construction must reject repository or credential mounts. The image, mount,
+egress, and network-control contract can be checked without making a provider
+call by the planner smoke mode:
 
 ```bash
 bash steward/containers/smoke-test.sh --planner

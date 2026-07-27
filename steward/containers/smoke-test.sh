@@ -211,6 +211,7 @@ if [[ "$mode" == planner ]]; then
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from coquic_steward.execution.container import PlannerContainerRuntime
 from coquic_steward.execution.container_config import PlannerContainerConfig
 
 with TemporaryDirectory() as value:
@@ -227,7 +228,13 @@ with TemporaryDirectory() as value:
         private_root=private,
         output_root=output,
     )
-    assert config.network == "none"
+    argv = PlannerContainerRuntime(config).create_argv()
+    assert config.network == "bridge"
+    assert argv[argv.index("--network") + 1] == "bridge"
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "--cap-add" not in argv
+    assert "--privileged" not in argv
+    assert all("docker.sock" not in value for value in argv)
     assert config.container_name == "coquic-steward-planner"
     assert [mount.target for mount in config.mounts] == [
         "/planner/history",

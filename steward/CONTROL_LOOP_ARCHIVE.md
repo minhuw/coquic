@@ -43,8 +43,10 @@ Every scheduler planner attempt receives a fresh run ID, private session home,
 and Codex process.  Steward never persists a planner thread handle, passes
 `--last`, or resumes a provider session between cycles.  The planner boundary
 has only read-only sealed `planner-runs/` history plus its own private output;
-it has no repository, worktree, SQLite database, Docker socket, daemon
-configuration, GitHub/SSH/sync credentials, or network authority.
+its locked Docker bridge supplies the outbound provider transport required by
+`codex exec`.  It has no host networking, network-administration capability,
+repository, worktree, SQLite database, Docker socket, daemon configuration, or
+GitHub/SSH/sync credentials.
 
 Planner output remains ordinal and records `accepted`, `invalid`,
 `policy_rejected`, `duplicate`, and `capacity_skipped` dispositions.  Rejected

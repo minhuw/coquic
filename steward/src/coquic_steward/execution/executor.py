@@ -2101,6 +2101,7 @@ class StewardExecutor:
             "release_id": str(release_id) if release_id else None,
             "deployment_id": deployment_id,
             "worktree_path": str(config.worktree),
+            "git_common_dir_path": str(config.git_common_dir),
             "root_path": str(root),
             "cleanup_ready": False,
         }
@@ -2195,6 +2196,12 @@ class StewardExecutor:
         if record.get("release_id"):
             labels["coquic.steward.release"] = str(record["release_id"])
         worktree = Path(str(record["worktree_path"]))
+        persisted_git_common_dir = record.get("git_common_dir_path")
+        git_common_dir = (
+            Path(str(persisted_git_common_dir))
+            if persisted_git_common_dir
+            else self._validation_git_common_dir(self.config.repo_root)
+        )
         deployment = self.config.deployment
         config = ValidationContainerConfig(
             run_id=str(record["run_id"]),
@@ -2203,7 +2210,7 @@ class StewardExecutor:
             worktree=worktree,
             output=root / "output",
             store=root / "store",
-            git_common_dir=self._validation_git_common_dir(worktree),
+            git_common_dir=git_common_dir,
             scratch=root / "scratch",
             limits=ContainerLimits(
                 memory_bytes=deployment.max_memory_bytes,

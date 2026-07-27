@@ -2200,6 +2200,7 @@ class SQLiteTaskStore:
         release_id: str | None,
         deployment_id: str,
         worktree_path: Path,
+        git_common_dir_path: Path,
         root_path: Path,
     ) -> None:
         """Persist cleanup authority before creating validation state."""
@@ -2225,7 +2226,7 @@ class SQLiteTaskStore:
             or any(value not in "0123456789abcdef" for value in image_id[7:])
         ):
             raise ValueError("validation cleanup image identity is invalid")
-        paths = (Path(worktree_path), Path(root_path))
+        paths = (Path(worktree_path), Path(git_common_dir_path), Path(root_path))
         if any(not path.is_absolute() or path.is_symlink() for path in paths):
             raise ValueError("validation cleanup paths must be absolute non-symlinks")
         timestamp = utc_now().isoformat()
@@ -2243,15 +2244,17 @@ class SQLiteTaskStore:
                 INSERT INTO steward_validation_cleanups
                   (run_id,task_id,pipeline_id,owner_instance_id,container_name,
                    image_id,epoch_id,release_id,deployment_id,worktree_path,
-                   root_path,cleanup_ready,cleanup_status,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,0,'cleanup_pending',?)
+                   git_common_dir_path,root_path,cleanup_ready,cleanup_status,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,'cleanup_pending',?)
                 ON CONFLICT(run_id) DO UPDATE SET
                   task_id=excluded.task_id,pipeline_id=excluded.pipeline_id,
                   owner_instance_id=excluded.owner_instance_id,
                   container_name=excluded.container_name,image_id=excluded.image_id,
                   epoch_id=excluded.epoch_id,release_id=excluded.release_id,
                   deployment_id=excluded.deployment_id,
-                  worktree_path=excluded.worktree_path,root_path=excluded.root_path,
+                  worktree_path=excluded.worktree_path,
+                  git_common_dir_path=excluded.git_common_dir_path,
+                  root_path=excluded.root_path,
                   cleanup_ready=0,cleanup_status='cleanup_pending',
                   updated_at=excluded.updated_at
                 """,
@@ -2267,6 +2270,7 @@ class SQLiteTaskStore:
                     deployment_id,
                     str(paths[0]),
                     str(paths[1]),
+                    str(paths[2]),
                     timestamp,
                 ),
             )
@@ -2307,7 +2311,7 @@ class SQLiteTaskStore:
                 """
                 SELECT run_id,task_id,pipeline_id,owner_instance_id,container_name,
                        image_id,epoch_id,release_id,deployment_id,worktree_path,
-                       root_path,cleanup_ready,updated_at
+                       git_common_dir_path,root_path,cleanup_ready,updated_at
                 FROM steward_validation_cleanups
                 WHERE cleanup_status='cleanup_pending'
                 ORDER BY updated_at,run_id
@@ -2324,6 +2328,7 @@ class SQLiteTaskStore:
             "release_id",
             "deployment_id",
             "worktree_path",
+            "git_common_dir_path",
             "root_path",
             "cleanup_ready",
             "updated_at",
@@ -3460,6 +3465,20 @@ class SQLiteTaskStore:
             if image_release_columns and "validation_image_id" not in image_release_columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE steward_image_releases ADD COLUMN validation_image_id TEXT"
+                )
+            validation_cleanup_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(steward_validation_cleanups)"
+                )
+            }
+            if (
+                validation_cleanup_columns
+                and "git_common_dir_path" not in validation_cleanup_columns
+            ):
+                connection.exec_driver_sql(
+                    "ALTER TABLE steward_validation_cleanups "
+                    "ADD COLUMN git_common_dir_path TEXT"
                 )
             session_columns = {
                 row[1]

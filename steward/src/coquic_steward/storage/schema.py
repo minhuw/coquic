@@ -544,6 +544,7 @@ class StewardValidationCleanupRow(Base):
     release_id: Mapped[str | None] = mapped_column(String, nullable=True)
     deployment_id: Mapped[str] = mapped_column(String, nullable=False)
     worktree_path: Mapped[str] = mapped_column(Text, nullable=False)
+    git_common_dir_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     root_path: Mapped[str] = mapped_column(Text, nullable=False)
     cleanup_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     cleanup_status: Mapped[str] = mapped_column(

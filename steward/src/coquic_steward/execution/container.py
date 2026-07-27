@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import subprocess  # nosec B404 - explicit argv, shell=False below
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -718,6 +719,7 @@ class ValidationContainerRuntime:
         *,
         timeout: float | None = None,
         allow_not_found: bool = False,
+        allow_failure: bool = False,
     ) -> subprocess.CompletedProcess[bytes]:
         try:
             result = self.client.run(argv, timeout=timeout)
@@ -730,7 +732,7 @@ class ValidationContainerRuntime:
             raise ContainerBoundaryError(
                 ContainerErrorCategory.timeout, "Docker command timed out"
             ) from exc
-        if result.returncode and not allow_not_found:
+        if result.returncode and not (allow_not_found or allow_failure):
             category = (
                 ContainerErrorCategory.not_found
                 if _not_found(result.stderr)
@@ -858,11 +860,43 @@ class ValidationContainerRuntime:
                 raise
             identity = self.create()
             self._run(["start", identity])
+            self._wait_ready(identity)
             return identity
         self._validate_inspection(inspection)
         if not inspection.running:
             self._run(["start", inspection.container_id])
+        self._wait_ready(inspection.container_id)
         return inspection.container_id
+
+    def _wait_ready(self, identifier: str) -> None:
+        deadline = time.monotonic() + self.config.limits.timeout_seconds
+        readiness = [
+            "exec",
+            "--user",
+            f"{self.config.uid}:{self.config.gid}",
+            identifier,
+            "/bootstrap/sh",
+            "-c",
+            "test -f /tmp/coquic-validation-ready",
+        ]
+        while True:
+            result = self._run(readiness, timeout=5, allow_failure=True)
+            if result.returncode == 0:
+                return
+            inspection = self.inspect()
+            self._validate_inspection(inspection)
+            if inspection.container_id != identifier or not inspection.running:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.runtime_unavailable,
+                    "validation container exited before becoming ready",
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ContainerBoundaryError(
+                    ContainerErrorCategory.timeout,
+                    "validation container readiness timed out",
+                )
+            time.sleep(min(0.1, remaining))
 
     def inspect(self) -> ContainerInspection:
         result = self._run(
@@ -1076,7 +1110,11 @@ class ValidationContainerRuntime:
         workdir: str = "/validation/worktree",
         timeout: float | None = None,
     ) -> ExecResult:
-        result = self._run(self.exec_argv(command, workdir=workdir), timeout=timeout)
+        result = self._run(
+            self.exec_argv(command, workdir=workdir),
+            timeout=timeout,
+            allow_failure=True,
+        )
         return ExecResult(
             ExecIdentity(
                 self.config.container_name,

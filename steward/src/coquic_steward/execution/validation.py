@@ -134,6 +134,11 @@ def _docker_validation_runner(
     output_root.mkdir(parents=True, exist_ok=True)
     store_root = config.private_dir / "validation-store" / task_id
     store_root.mkdir(parents=True, exist_ok=True)
+    git_common_dir = _validation_git_common_dir(cwd)
+    deployment = config.deployment
+    validation_uid = 10000 if deployment.host_uid is None else int(deployment.host_uid)
+    validation_gid = 10000 if deployment.host_gid is None else int(deployment.host_gid)
+    scratch_bytes = deployment.max_scratch_bytes
 
     def execute(command: list[str], workdir: Path, timeout: float) -> CommandResult:
         mapped = [
@@ -153,18 +158,47 @@ def _docker_validation_runner(
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
-            "128",
+            str(deployment.max_pids),
+            "--memory",
+            str(deployment.max_memory_bytes),
+            "--user",
+            f"{validation_uid}:{validation_gid}",
             "--mount",
             f"type=bind,src={workdir.resolve()},dst=/validation/worktree,readonly",
             "--mount",
+            f"type=bind,src={workdir.resolve()},dst={workdir.resolve()},readonly",
+            "--mount",
             f"type=bind,src={output_root},dst=/validation/output",
             "--mount",
-            f"type=bind,src={store_root},dst=/validation/store",
+            f"type=bind,src={store_root},dst=/nix/var/nix",
+            "--mount",
+            f"type=bind,src={git_common_dir},dst={git_common_dir},readonly",
+            "--mount",
+            f"type=bind,src={git_common_dir},dst=/validation/git-common-ro,readonly",
+            "--env",
+            f"VALIDATION_SOURCE_WORKTREE={workdir.resolve()}",
+            "--env",
+            f"VALIDATION_GIT_OBJECTS_DIR={git_common_dir / 'objects'}",
+            "--env",
+            "VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects",
             "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=64m",
-            "--user",
-            "10000:10000",
+            f"{git_common_dir / 'objects'}:rw,nosuid,nodev,size=256m,mode=0755,uid={validation_uid},gid={validation_gid}",
+            "--tmpfs",
+            f"/tmp:rw,noexec,nosuid,nodev,size={scratch_bytes},mode=1777",
+            "--tmpfs",
+            f"/validation/worktree/.zig-cache:rw,exec,nosuid,nodev,size={scratch_bytes},mode=0755,uid={validation_uid},gid={validation_gid}",
+            "--tmpfs",
+            f"/validation/worktree/site/next:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid={validation_uid},gid={validation_gid}",
+            "--tmpfs",
+            f"/validation/worktree/.duvet:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid={validation_uid},gid={validation_gid}",
+            "--tmpfs",
+            f"/nix/store:rw,nosuid,nodev,size={scratch_bytes},mode=0755,uid={validation_uid},gid={validation_gid}",
+            "--tmpfs",
+            f"/nix/var/log/nix:rw,noexec,nosuid,nodev,size=64m,mode=0755,uid={validation_uid},gid={validation_gid}",
+            "--tmpfs",
+            "/run:rw,noexec,nosuid,nodev,size=16m",
             digest,
+            "--exec",
             *mapped,
         ]
         try:
@@ -181,6 +215,25 @@ def _docker_validation_runner(
         return CommandResult(command, workdir, result.returncode, result.stdout, result.stderr)
 
     return execute
+
+
+def _validation_git_common_dir(worktree: Path) -> Path:
+    common = run_command(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=worktree,
+    )
+    git_dir = run_command(["git", "rev-parse", "--absolute-git-dir"], cwd=worktree)
+    if not common.ok or not git_dir.ok:
+        raise ValueError("validation worktree Git metadata is unavailable")
+    common_path = Path(common.stdout.strip()).resolve()
+    git_dir_path = Path(git_dir.stdout.strip()).resolve()
+    if (
+        not common_path.is_dir()
+        or common_path.is_symlink()
+        or not git_dir_path.is_relative_to(common_path)
+    ):
+        raise ValueError("validation worktree Git metadata is ambiguous")
+    return common_path
 
 
 def run_validation(

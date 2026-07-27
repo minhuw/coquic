@@ -141,3 +141,54 @@ def test_production_daemon_wires_label_filtered_owned_usage(
     assert report["state"] == "normal"
     assert report["ownedBytes"] == 2
     assert report["admissionAllowed"] is True
+
+
+def test_production_daemon_restores_pressure_hysteresis_after_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    repository = home / "repository"
+    repository.mkdir(parents=True)
+    deployment = StewardDeploymentConfig(
+        enabled=True,
+        home=home,
+        repository=repository,
+        min_free_bytes=100,
+        max_owned_docker_bytes=1000,
+        recovery_free_bytes=200,
+        recovery_owned_docker_bytes=500,
+    )
+    config = StewardConfig(
+        repo_root=repository,
+        deployment=deployment,
+        local_codex_test_harness=True,
+    )
+    config.ensure_dirs()
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.preflight_remote_push",
+        lambda _config: False,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_preflight",
+        lambda *_args, **_kwargs: PreflightReport(),
+    )
+    monkeypatch.setattr(
+        DockerResourceManager,
+        "owned_usage",
+        lambda _self: OwnedDockerUsage(container_bytes=800),
+    )
+    store = TaskStore(config.db_path)
+    store.record_resource_pressure(
+        state="resource_pressure",
+        home_free_bytes=1000,
+        owned_docker_bytes=800,
+        cleanup_pending_count=0,
+        reason="threshold",
+    )
+
+    daemon = StewardDaemon(config, store)
+    report = daemon.resource_pressure
+
+    assert report["state"] == "resource_pressure"
+    assert report["ownedBytes"] == 800
+    assert report["admissionAllowed"] is False

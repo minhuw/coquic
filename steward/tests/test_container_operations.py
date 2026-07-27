@@ -26,6 +26,7 @@ from coquic_steward.execution.container_config import (
 )
 from coquic_steward.execution.container_config import ValidationContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
+from coquic_steward.execution.validation import _docker_validation_runner
 from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.storage import TaskStore
 
@@ -217,6 +218,95 @@ def test_validation_container_refuses_same_image_with_foreign_runtime(
     assert error.value.category is ContainerErrorCategory.identity_mismatch
 
 
+def test_validation_exec_returns_the_canonical_gate_exit_code(tmp_path: Path) -> None:
+    paths = [tmp_path / name for name in ("worktree", "output", "store")]
+    for path in paths:
+        path.mkdir()
+    config = ValidationContainerConfig(
+        run_id="nonzero-gate",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "c" * 64,
+        worktree=paths[0],
+        output=paths[1],
+        store=paths[2],
+    )
+
+    class NonzeroGateDocker:
+        def run(self, argv: list[str], **_kwargs):
+            return subprocess.CompletedProcess(argv, 23, b"gate output", b"gate failed")
+
+    result = ValidationContainerRuntime(
+        config, client=NonzeroGateDocker()
+    ).exec(["false"])
+
+    assert result.exit_code == 23
+    assert result.stdout == b"gate output"
+    assert result.stderr == b"gate failed"
+
+
+def test_validation_container_waits_for_entrypoint_readiness(tmp_path: Path) -> None:
+    paths = [tmp_path / name for name in ("worktree", "output", "store")]
+    for path in paths:
+        path.mkdir()
+    config = ValidationContainerConfig(
+        run_id="startup-readiness",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "c" * 64,
+        worktree=paths[0],
+        output=paths[1],
+        store=paths[2],
+    )
+
+    class RecordingDocker:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv: list[str], **_kwargs):
+            self.calls.append(argv)
+            if argv[0] == "inspect":
+                return subprocess.CompletedProcess(argv, 1, b"", b"No such container")
+            if argv[0] == "create":
+                return subprocess.CompletedProcess(argv, 0, ("d" * 64).encode(), b"")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    docker = RecordingDocker()
+
+    assert ValidationContainerRuntime(config, client=docker).ensure_started() == "d" * 64
+    assert [call[0] for call in docker.calls] == ["inspect", "create", "start", "exec"]
+    assert docker.calls[-1][-3:] == [
+        "/bootstrap/sh",
+        "-c",
+        "test -f /tmp/coquic-validation-ready",
+    ]
+
+
+def test_direct_validation_runner_uses_bootstrap_and_writable_nix_boundary(
+    config: StewardConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = "sha256:" + "c" * 64
+    config = replace(
+        config,
+        validation_image="coquic-steward-validation",
+        validation_image_digest=digest,
+    )
+    argv_calls: list[list[str]] = []
+
+    def capture(argv, **_kwargs):
+        argv_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 17, "", "canonical gate failed")
+
+    monkeypatch.setattr(subprocess, "run", capture)
+    runner = _docker_validation_runner(config, "integration-task", config.repo_root)
+    result = runner(["nix", "flake", "check"], config.repo_root, 30)
+
+    assert result.returncode == 17
+    argv = argv_calls[0]
+    assert "--read-only" in argv
+    assert any("dst=/nix/var/nix" in value for value in argv)
+    assert any(value.startswith("/nix/store:rw,") for value in argv)
+    assert argv[argv.index(digest) + 1 :] == ["--exec", "nix", "flake", "check"]
+
+
 def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     config: StewardConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -245,6 +335,12 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     )
     pipeline = store.list_pipelines(task.id)[0]
     store.claim_daemon_instance("daemon-before-crash")
+    validation_worktree = config.private_dir / "disposable-worktree"
+    validation_worktree.mkdir()
+    git_common_dir = config.private_dir / "git-common"
+    git_common_dir.mkdir()
+    task.worktree_path = validation_worktree
+    store.save(task)
     observed_pending: list[dict[str, object]] = []
     cleaned: list[str] = []
     runtime_configs: list[ValidationContainerConfig] = []
@@ -266,6 +362,11 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
         RecordingValidationRuntime,
     )
     executor = StewardExecutor(config, store)
+    monkeypatch.setattr(
+        executor,
+        "_validation_git_common_dir",
+        lambda _worktree: git_common_dir,
+    )
     executor._isolated_validation_runner(task, pipeline, digest)
 
     assert len(observed_pending) == 1
@@ -274,6 +375,14 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     root = Path(str(observed_pending[0]["root_path"]))
     assert root.is_dir()
 
+    validation_worktree.rmdir()
+    monkeypatch.setattr(
+        executor,
+        "_validation_git_common_dir",
+        lambda _worktree: pytest.fail(
+            "cleanup reconstructed Git identity from the removed worktree"
+        ),
+    )
     store.claim_daemon_instance("daemon-after-crash")
     assert executor.retry_validation_cleanup_pending() == 1
     assert store.list_validation_cleanup_pending() == []
@@ -282,6 +391,7 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     assert cleaned == [str(observed_pending[0]["container_name"])]
     assert len(runtime_configs) == 2
     assert runtime_configs[0].limits == runtime_configs[1].limits
+    assert runtime_configs[1].git_common_dir == git_common_dir
     assert runtime_configs[1].limits == ContainerLimits(
         memory_bytes=deployment.max_memory_bytes,
         pids=deployment.max_pids,

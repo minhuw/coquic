@@ -32,11 +32,20 @@ class ResourcePressureController:
     No method scans Docker's data root or treats host-wide usage as owned.
     """
 
-    def __init__(self, config: object, *, usage_provider: object | None = None):
+    def __init__(
+        self,
+        config: object,
+        *,
+        usage_provider: object | None = None,
+        initial_state: ResourcePressureState = ResourcePressureState.normal,
+    ):
         self.config = config
         self.usage_provider = usage_provider
-        self.state = ResourcePressureState.normal
-        self.last = ResourcePressure()
+        self.state = initial_state
+        self.last = ResourcePressure(
+            state=initial_state,
+            admission_allowed=initial_state is ResourcePressureState.normal,
+        )
 
     def measure(self) -> ResourcePressure:
         deployment = getattr(self.config, "deployment", None)

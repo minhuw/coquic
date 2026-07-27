@@ -109,9 +109,16 @@ if [ -n "$source_worktree" ]; then
   cp -R "$source_worktree/.duvet/." "$worktree/.duvet/"
 fi
 
+: > /tmp/coquic-validation-ready
 if [ "${1:-}" = --idle ]; then
   trap 'exit 0' TERM INT
   while :; do sleep 3600; done
+fi
+[ "${1:-}" = --exec ] || [ "$#" -eq 0 ] || fail 'validation entrypoint argument is invalid'
+if [ "${1:-}" = --exec ]; then
+  shift
+  [ "$#" -gt 0 ] || fail 'validation exec command is empty'
+  exec "$@"
 fi
 [ "$#" -eq 0 ] || fail 'validation entrypoint argument is invalid'
 

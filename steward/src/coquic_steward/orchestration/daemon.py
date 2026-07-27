@@ -27,6 +27,7 @@ from ..core.models import (
     DaemonRuntime,
     DaemonRuntimeState,
     PipelineCursorPhase,
+    ResourcePressureState,
     SignalFetchStatus,
     SignalItem,
     TaskRecord,
@@ -161,8 +162,21 @@ class StewardDaemon:
                 assert self._docker_resources is not None
                 return self._docker_resources.owned_usage()
 
+        initial_pressure_state = ResourcePressureState.normal
+        pressure_provider = getattr(store, "get_resource_pressure", None)
+        if callable(pressure_provider):
+            try:
+                persisted_pressure = pressure_provider()
+                if persisted_pressure is not None:
+                    initial_pressure_state = ResourcePressureState(
+                        str(persisted_pressure.get("state"))
+                    )
+            except (OSError, TypeError, ValueError):
+                initial_pressure_state = ResourcePressureState.pressure
         self._resource_pressure = ResourcePressureController(
-            config, usage_provider=usage_provider
+            config,
+            usage_provider=usage_provider,
+            initial_state=initial_pressure_state,
         )
         with use_subprocess_owner(self._subprocess_owner):
             remote_push_ready = preflight_remote_push(config)

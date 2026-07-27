@@ -14,7 +14,8 @@ for argument in "$@"; do
 done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-tmp="$(mktemp -d)"
+mkdir -p "$root/.zig-cache"
+tmp="$(mktemp -d "$root/.zig-cache/steward-container-smoke.XXXXXX")"
 container_name=""
 loaded_image=""
 remove_loaded_image=0

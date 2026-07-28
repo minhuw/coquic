@@ -4,6 +4,7 @@ import {
   parseCloudResponse,
   serializeCloudProblem,
   serializeCloudResponse,
+  serializeCloudTrajectoryDescriptor,
   validateCloudArtifact,
   validateCloudProblem,
   validateCloudStatus,
@@ -58,6 +59,22 @@ test("serializes only validated closed envelopes and parses them back", () => {
   assert.deepEqual(parseCloudResponse(encoded), value);
   assert.throws(() => serializeCloudResponse({ ...value, data: { state: "empty", taskCount: 0, latestPublicationAt: null, credential: "do-not-echo" } }), /invalid Steward cloud response/);
   assert(!encoded.includes("credential"));
+});
+
+test("accepts only available standalone trajectory descriptors on every path", () => {
+  const value = response(detail().trajectory!);
+  assert.equal(validateCloudTrajectoryDescriptor(value).data.availability, "available");
+  assert.deepEqual(JSON.parse(serializeCloudTrajectoryDescriptor(value)), value);
+  assert.deepEqual(parseCloudResponse(JSON.stringify(value)), value);
+
+  const unavailable = copy(value) as { schemaVersion: "3.0"; generatedAt: string; data: Record<string, unknown> };
+  unavailable.data.availability = "unavailable";
+  const attempts = [
+    () => validateCloudTrajectoryDescriptor(unavailable),
+    () => serializeCloudTrajectoryDescriptor(unavailable),
+    () => parseCloudResponse(JSON.stringify(unavailable)),
+  ];
+  for (const attempt of attempts) assert.throws(attempt, (error) => error instanceof Error && error.message === "invalid Steward cloud response");
 });
 
 test("requires exact major and rejects private, legacy, and global-only fields", () => {

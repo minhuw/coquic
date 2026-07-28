@@ -14,7 +14,7 @@ export type CloudPipeline = { pipelineId: string; taskId: string; name: string; 
 export type CloudRun = { runId: string; taskId: string; pipelineId: string; role: string; runState: CloudRunState; startedAt: CloudTimestamp; completedAt: CloudTimestamp; durationMs: number; atifDigest: string; atifArtifactId?: string | null };
 export type CloudEvent = { taskId: string; sequence: number; eventType: string; occurredAt: CloudTimestamp; summary: string };
 export type CloudArtifact = { artifactId: string; taskId: string; runId: string; logicalPath: string; publicKey: string; mediaType: string; byteSize: number; sha256: string; availability: CloudAvailability; disclosure: CloudDisclosure };
-export type CloudTrajectoryDescriptor = { taskId: string; pipelineId: string; runId: string; role: string; runState: CloudRunState; startedAt: CloudTimestamp; completedAt: CloudTimestamp; durationMs: number; artifactId?: string | null; publicKey: string; mediaType: "application/json"; byteSize: number; sha256: string; availability: CloudAvailability; disclosure: CloudDisclosure };
+export type CloudTrajectoryDescriptor = { taskId: string; pipelineId: string; runId: string; role: string; runState: CloudRunState; startedAt: CloudTimestamp; completedAt: CloudTimestamp; durationMs: number; artifactId?: string | null; publicKey: string; mediaType: "application/json"; byteSize: number; sha256: string; availability: "available"; disclosure: CloudDisclosure };
 export type CloudTaskSummary = { taskId: string; title: string; lifecycleState: CloudLifecycleState; createdAt: CloudTimestamp; completedAt: CloudTimestamp | null; completeness: "complete"; pipelineId: string | null; completedRunId: string | null; eventCount: number; artifactCount: number; disclosure: CloudDisclosure };
 export type CloudPagination = { page: number; pageSize: number; total: number; hasNextPage: boolean };
 export type CloudTaskPage = { items: CloudTaskSummary[]; pagination: CloudPagination };
@@ -57,7 +57,7 @@ function unique(values: string[]) { if (new Set(values).size !== values.length) 
 
 function checkTask(value: CloudTaskSummary) { if ((value.lifecycleState === "active") !== (value.completedAt === null)) invalid(); if (value.completedAt !== null) ordered(value.createdAt, value.completedAt); }
 function checkArtifact(value: CloudArtifact) { publicKeyMatches(value.publicKey, value.taskId, value.sha256); }
-function checkDescriptor(value: CloudTrajectoryDescriptor) { publicKeyMatches(value.publicKey, value.taskId, value.sha256); ordered(value.startedAt, value.completedAt); exactDuration(value.startedAt, value.completedAt, value.durationMs); }
+function checkDescriptor(value: CloudTrajectoryDescriptor) { if (value.availability !== "available") invalid(); publicKeyMatches(value.publicKey, value.taskId, value.sha256); ordered(value.startedAt, value.completedAt); exactDuration(value.startedAt, value.completedAt, value.durationMs); }
 function checkRun(value: CloudRun) { ordered(value.startedAt, value.completedAt); exactDuration(value.startedAt, value.completedAt, value.durationMs); }
 
 function checkPage(value: CloudTaskPage) {

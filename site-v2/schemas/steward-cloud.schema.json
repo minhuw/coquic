@@ -99,7 +99,7 @@
         "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "$ref": "#/$defs/timestamp" }, "durationMs": { "$ref": "#/$defs/duration" },
         "artifactId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }, "publicKey": { "type": "string", "pattern": "^v1/tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/objects/sha256/[0-9a-f]{2}/[0-9a-f]{64}$" },
         "mediaType": { "type": "string", "const": "application/json" }, "byteSize": { "$ref": "#/$defs/size" }, "sha256": { "$ref": "#/$defs/digest" },
-        "availability": { "enum": ["available", "unavailable"] }, "disclosure": { "$ref": "#/$defs/disclosure" }
+        "availability": { "const": "available" }, "disclosure": { "$ref": "#/$defs/disclosure" }
       }
     },
     "taskSummary": {

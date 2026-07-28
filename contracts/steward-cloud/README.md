@@ -149,7 +149,11 @@ The envelope maps directly to the clean D1 tables:
 
 Artifacts carry only logical relative paths, content-addressed public keys,
 media types, sizes, lower-case digests, availability, and disclosure booleans.
-The schema rejects unknown fields and the validator rejects private locators,
-credentials, noncanonical keys, dangling references, partial runs, count or
-digest mismatches, and fabricated zero timestamps. A task may remain `active`
-when its completed planning run is published; no incomplete run is represented.
+Pipeline names are limited to 256 characters, run roles and event types to 128,
+and logical paths are unique within one publication to satisfy the D1 columns.
+When descriptors reuse one immutable public key, their digest and byte size must
+also agree; exact content reuse remains allowed. The schema rejects unknown
+fields and the validator rejects private locators, credentials, noncanonical
+keys, dangling references, partial runs, count or digest mismatches, conflicting
+artifact facts, and fabricated zero timestamps. A task may remain `active` when
+its completed planning run is published; no incomplete run is represented.

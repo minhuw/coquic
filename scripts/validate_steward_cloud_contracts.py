@@ -471,6 +471,8 @@ def validate_publication_document(document: Any, validator: Draft202012Validator
                 check_timestamp(event.get("occurredAt"), ("events", index, "occurredAt"))
 
     artifact_map: dict[str, dict[str, Any]] = {}
+    logical_paths: set[str] = set()
+    object_sizes: dict[tuple[str, str], int] = {}
     if isinstance(artifacts, list):
         for index, artifact in enumerate(artifacts):
             if not isinstance(artifact, dict):
@@ -483,8 +485,23 @@ def validate_publication_document(document: Any, validator: Draft202012Validator
             same(artifact, "taskId", task_id, "ownership", ("artifacts", index))
             if artifact.get("runId") not in run_map:
                 _add(issues, "ownership", ("artifacts", index, "runId"))
-            if not _valid_public_key(artifact.get("publicKey"), task_id, artifact.get("sha256")):
+            logical_path = artifact.get("logicalPath")
+            if isinstance(logical_path, str):
+                if logical_path in logical_paths:
+                    _add(issues, "artifact-logical-path-unique", ("artifacts", index, "logicalPath"))
+                else:
+                    logical_paths.add(logical_path)
+            public_key = artifact.get("publicKey")
+            digest = artifact.get("sha256")
+            if not _valid_public_key(public_key, task_id, digest):
                 _add(issues, "artifact-key", ("artifacts", index, "publicKey"))
+            elif isinstance(digest, str) and isinstance(artifact.get("byteSize"), int) and not isinstance(artifact.get("byteSize"), bool):
+                object_identity = (digest, public_key)
+                previous_size = object_sizes.get(object_identity)
+                if previous_size is not None and previous_size != artifact["byteSize"]:
+                    _add(issues, "artifact-object-size", ("artifacts", index, "byteSize"))
+                else:
+                    object_sizes[object_identity] = artifact["byteSize"]
 
     for index, run in enumerate(runs if isinstance(runs, list) else []):
         if not isinstance(run, dict):
@@ -566,7 +583,12 @@ def _run_publication_cases(validator: Draft202012Validator) -> tuple[int, int]:
     active["task"]["lifecycleState"] = "active"
     active["task"]["completedAt"] = None
     active["generation"]["metadataDigest"] = _publication_metadata_digest(active)
-    positives = {"clean": clean, "redacted": redacted, "active-after-planning": active}
+    reused = copy.deepcopy(clean)
+    reused["artifacts"][1]["sha256"] = reused["artifacts"][0]["sha256"]
+    reused["artifacts"][1]["publicKey"] = reused["artifacts"][0]["publicKey"]
+    reused["artifacts"][1]["byteSize"] = reused["artifacts"][0]["byteSize"]
+    reused["generation"]["metadataDigest"] = _publication_metadata_digest(reused)
+    positives = {"clean": clean, "redacted": redacted, "active-after-planning": active, "reused-object": reused}
     negatives: dict[str, tuple[dict[str, Any], str]] = {}
     mutated = copy.deepcopy(clean); mutated["unknown"] = True; negatives["unknown-field"] = (mutated, "schema-additionalProperties")
     mutated = copy.deepcopy(clean); mutated["publicationId"] = "bad id"; negatives["malformed-id"] = (mutated, "schema-pattern")
@@ -583,6 +605,11 @@ def _run_publication_cases(validator: Draft202012Validator) -> tuple[int, int]:
     mutated = copy.deepcopy(clean); mutated["artifacts"][0]["logicalPath"] = "/private/trajectory.json"; negatives["private-locator"] = (mutated, "private-locator")
     mutated = copy.deepcopy(clean); mutated["privateBucket"] = "not included"; negatives["private-field"] = (mutated, "private-field")
     mutated = copy.deepcopy(clean); mutated["artifacts"][1]["byteSize"] = -1; negatives["negative-size"] = (mutated, "schema-minimum")
+    mutated = copy.deepcopy(clean); mutated["pipelines"][0]["name"] = "p" * 257; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["pipeline-name-d1-limit"] = (mutated, "schema-maxLength")
+    mutated = copy.deepcopy(clean); mutated["runs"][0]["role"] = "r" * 129; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["run-role-d1-limit"] = (mutated, "schema-maxLength")
+    mutated = copy.deepcopy(clean); mutated["events"][0]["eventType"] = "e" * 129; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["event-type-d1-limit"] = (mutated, "schema-maxLength")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][1]["logicalPath"] = mutated["artifacts"][0]["logicalPath"]; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["duplicate-logical-path"] = (mutated, "artifact-logical-path-unique")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][1]["sha256"] = mutated["artifacts"][0]["sha256"]; mutated["artifacts"][1]["publicKey"] = mutated["artifacts"][0]["publicKey"]; mutated["artifacts"][1]["byteSize"] = mutated["artifacts"][0]["byteSize"] + 1; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["conflicting-object-size"] = (mutated, "artifact-object-size")
     passed = failed = 0
     accepted_names: list[str] = []
     rejected_names: list[str] = []

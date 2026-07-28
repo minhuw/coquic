@@ -577,9 +577,33 @@ def validate_publication_fixture(
     pipeline_id = pipelines[0].get("pipelineId") if isinstance(pipelines, list) and pipelines and isinstance(pipelines[0], dict) else None
     generation = publication.get("generation")
     run_id = generation.get("runId") if isinstance(generation, dict) else None
-    for field, expected in (("taskId", publication.get("taskId")), ("pipelineId", pipeline_id), ("runId", run_id)):
+    publication_runs = publication.get("runs")
+    referenced_run = None
+    referenced_run_index = None
+    if isinstance(coqui, dict) and isinstance(coqui.get("runId"), str) and isinstance(publication_runs, list):
+        for index, run in enumerate(publication_runs):
+            if isinstance(run, dict) and run.get("runId") == coqui["runId"]:
+                referenced_run = run
+                referenced_run_index = index
+                break
+        if referenced_run is None:
+            _add(issues, "atif-run-reference", ("atif", "extra", "coquic", "runId"))
+    expected_pipeline_id = referenced_run.get("pipelineId") if isinstance(referenced_run, dict) else pipeline_id
+    for field, expected in (("taskId", publication.get("taskId")), ("pipelineId", expected_pipeline_id), ("runId", run_id)):
         if isinstance(coqui, dict) and coqui.get(field) != expected:
             _add(issues, "atif-identity", ("atif", "extra", "coquic", field))
+    if isinstance(coqui, dict) and isinstance(referenced_run, dict):
+        for field in ("role", "startedAt", "completedAt", "durationMs"):
+            coqui_value = coqui.get(field)
+            run_value = referenced_run.get(field)
+            if field in {"startedAt", "completedAt"}:
+                coqui_time = _timestamp(coqui_value)
+                run_time = _timestamp(run_value)
+                mismatch = coqui_time is not None and run_time is not None and coqui_time != run_time
+            else:
+                mismatch = coqui_value != run_value
+            if mismatch:
+                _add(issues, "atif-provenance", ("atif", "extra", "coquic", field))
     if isinstance(coqui, dict) and coqui.get("disclosure") == expected_disclosure:
         if expected_lifecycle == "active":
             runs = publication.get("runs")
@@ -593,6 +617,16 @@ def validate_publication_fixture(
 
     artifacts = publication.get("artifacts")
     artifact_map = {item.get("artifactId"): item for item in artifacts if isinstance(item, dict)} if isinstance(artifacts, list) else {}
+    if isinstance(coqui, dict) and isinstance(referenced_run, dict) and isinstance(coqui.get("disclosure"), dict):
+        for index, artifact in enumerate(artifacts if isinstance(artifacts, list) else []):
+            if not isinstance(artifact, dict) or artifact.get("runId") != referenced_run.get("runId"):
+                continue
+            disclosure = artifact.get("disclosure")
+            if isinstance(disclosure, dict) and any(
+                disclosure.get(field) != coqui["disclosure"].get(field)
+                for field in ("redactionApplied", "originalRetained")
+            ):
+                _add(issues, "atif-disclosure", ("publication", "artifacts", index, "disclosure"))
     object_map: dict[str, dict[str, Any]] = {}
     for index, item in enumerate(objects):
         path = ("objects", index)
@@ -627,16 +661,16 @@ def validate_publication_fixture(
         if artifact.get("availability") == "available" and artifact_id not in object_map:
             _add(issues, "object-reference", ("publication", "artifacts", artifact_id))
 
-    runs = publication.get("runs")
-    if atif_raw is not None and isinstance(runs, list) and runs:
-        run = runs[0]
+    if atif_raw is not None and isinstance(referenced_run, dict):
+        run = referenced_run
         atif_digest = hashlib.sha256(atif_raw).hexdigest()
         atif_artifact = artifact_map.get(run.get("atifArtifactId"))
         atif_object = object_map.get(run.get("atifArtifactId"))
+        run_path = ("publication", "runs", referenced_run_index if referenced_run_index is not None else 0)
         if not isinstance(atif_artifact, dict) or atif_artifact.get("sha256") != atif_digest:
-            _add(issues, "atif-object-digest", ("publication", "runs", 0, "atifDigest"))
+            _add(issues, "atif-object-digest", run_path + ("atifDigest",))
         if not isinstance(atif_artifact, dict) or atif_artifact.get("byteSize") != len(atif_raw):
-            _add(issues, "atif-object-size", ("publication", "runs", 0, "atifArtifactId"))
+            _add(issues, "atif-object-size", run_path + ("atifArtifactId",))
         if not isinstance(atif_object, dict) or _fixture_content_bytes(atif_object.get("content")) != atif_raw:
             _add(issues, "atif-object-content", ("objects",))
     atif_artifacts = coqui.get("artifacts") if isinstance(coqui, dict) else None
@@ -761,24 +795,42 @@ def _run_publication_cases(validator: Draft202012Validator, atif_validator: Draf
     mutated = copy.deepcopy(clean); mutated["events"][0]["eventType"] = "e" * 129; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["event-type-d1-limit"] = (mutated, "schema-maxLength")
     mutated = copy.deepcopy(clean); mutated["artifacts"][1]["logicalPath"] = mutated["artifacts"][0]["logicalPath"]; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["duplicate-logical-path"] = (mutated, "artifact-logical-path-unique")
     mutated = copy.deepcopy(clean); mutated["artifacts"][1]["sha256"] = mutated["artifacts"][0]["sha256"]; mutated["artifacts"][1]["publicKey"] = mutated["artifacts"][0]["publicKey"]; mutated["artifacts"][1]["byteSize"] = mutated["artifacts"][0]["byteSize"] + 1; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["conflicting-object-size"] = (mutated, "artifact-object-size")
-    fixture_mutations: dict[str, tuple[dict[str, Any], str]] = {}
+    fixture_mutations: dict[str, tuple[dict[str, Any], str, bool, str]] = {}
     fixture = copy.deepcopy(fixtures["clean"])
     fixture["atif"]["extra"]["coquic"]["credentialPath"] = "redacted"
-    fixture_mutations["recursive-private-field"] = (fixture, "private-field")
+    fixture_mutations["recursive-private-field"] = (fixture, "private-field", False, "completed")
     fixture = copy.deepcopy(fixtures["clean"])
     fixture["objects"][1]["sha256"] = "0" * 64
-    fixture_mutations["object-digest"] = (fixture, "object-digest")
+    fixture_mutations["object-digest"] = (fixture, "object-digest", False, "completed")
     fixture = copy.deepcopy(fixtures["clean"])
     fixture["objects"][1]["byteSize"] += 1
-    fixture_mutations["object-size"] = (fixture, "object-size")
+    fixture_mutations["object-size"] = (fixture, "object-size", False, "completed")
     fixture = copy.deepcopy(fixtures["clean"])
     fixture["atif"]["extra"]["coquic"]["artifacts"][0]["artifactId"] = "missing"
-    fixture_mutations["dangling-atif-artifact"] = (fixture, "atif-artifact")
+    fixture_mutations["dangling-atif-artifact"] = (fixture, "atif-artifact", False, "completed")
     fixture = copy.deepcopy(fixtures["clean"])
     fixture["publication"]["generation"]["expectedCounts"]["artifacts"] = 4
-    fixture_mutations["fixture-count"] = (fixture, "row-count")
-    for name, (fixture, expected_rule) in fixture_mutations.items():
-        issues = validate_publication_fixture(fixture, validator, atif_validator, expected_redaction=False, expected_lifecycle="completed")
+    fixture_mutations["fixture-count"] = (fixture, "row-count", False, "completed")
+    fixture = copy.deepcopy(fixtures["redacted"])
+    for artifact in fixture["publication"]["artifacts"]:
+        artifact["disclosure"]["redactionApplied"] = False
+    fixture["publication"]["generation"]["metadataDigest"] = _publication_metadata_digest(fixture["publication"])
+    fixture_mutations["publication-artifact-disclosure"] = (fixture, "atif-disclosure", True, "completed")
+    fixture = copy.deepcopy(fixtures["active-after-planning"])
+    fixture["atif"]["extra"]["coquic"]["role"] = "implementation"
+    atif_raw = canonical_bytes(fixture["atif"])
+    atif_digest = hashlib.sha256(atif_raw).hexdigest()
+    atif_artifact_id = fixture["publication"]["runs"][0]["atifArtifactId"]
+    atif_key = f"v1/tasks/{fixture['publication']['taskId']}/objects/sha256/{atif_digest[:2]}/{atif_digest}"
+    atif_artifact = next(item for item in fixture["publication"]["artifacts"] if item["artifactId"] == atif_artifact_id)
+    atif_object = next(item for item in fixture["objects"] if item["artifactId"] == atif_artifact_id)
+    fixture["publication"]["runs"][0]["atifDigest"] = atif_digest
+    atif_artifact.update({"sha256": atif_digest, "byteSize": len(atif_raw), "publicKey": atif_key})
+    atif_object.update({"sha256": atif_digest, "byteSize": len(atif_raw), "publicKey": atif_key, "content": fixture["atif"]})
+    fixture["publication"]["generation"]["metadataDigest"] = _publication_metadata_digest(fixture["publication"])
+    fixture_mutations["atif-run-provenance"] = (fixture, "atif-provenance", False, "active")
+    for name, (fixture, expected_rule, redaction, lifecycle) in fixture_mutations.items():
+        issues = validate_publication_fixture(fixture, validator, atif_validator, expected_redaction=redaction, expected_lifecycle=lifecycle)
         if not any(issue.rule == expected_rule for issue in issues):
             print(f"FAIL rejected publication {name}: missing {expected_rule}", file=sys.stderr)
             failed += 1

@@ -101,13 +101,15 @@ Publication follows one crash-resumable order:
 
 The generation has a stable idempotency key, expected task/pipeline/run/event/
 artifact counts, and a metadata digest. Retries reuse those values and converge;
-no partial generation is exposed. Child rows are immutable after exposure.
+conflicting metadata, counts, or digests fail closed; no partial generation is
+exposed. Child rows are immutable after exposure.
 
 ## R2 keys and disclosure
 
 Public objects use the exact content-addressed key grammar
 `v1/tasks/<task-id>/objects/sha256/<first-two-hex>/<64-lower-hex-digest>`.
-The first two characters must equal the digest prefix. Logical artifact paths
+The first two characters must equal the digest prefix, and each row key must
+embed that row's task and digest exactly. Logical artifact paths
 remain in D1 and multiple paths or generations may reuse one public key. The
 configured anonymous public R2 domain is the only public origin; D1 stores no
 domain, URL, bucket, credential, or private locator.

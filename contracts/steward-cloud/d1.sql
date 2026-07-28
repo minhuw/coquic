@@ -18,7 +18,9 @@ CREATE TABLE publication_generations (
     created_at TEXT NOT NULL,
     exposed_at TEXT,
     UNIQUE (task_id, run_id),
-    UNIQUE (task_id, idempotency_key)
+    UNIQUE (task_id, idempotency_key),
+    UNIQUE (publication_id, task_id),
+    UNIQUE (publication_id, task_id, run_id)
 );
 
 CREATE TABLE task_heads (
@@ -27,7 +29,9 @@ CREATE TABLE task_heads (
     state TEXT NOT NULL CHECK (state IN ('visible', 'hidden')),
     updated_at TEXT NOT NULL,
     FOREIGN KEY (publication_id, task_id)
-        REFERENCES tasks (publication_id, task_id)
+        REFERENCES tasks (publication_id, task_id),
+    FOREIGN KEY (publication_id, task_id)
+        REFERENCES publication_generations (publication_id, task_id)
         DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -39,7 +43,9 @@ CREATE TABLE tasks (
         CHECK (lifecycle_state IN ('active', 'completed', 'failed', 'cancelled')),
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    PRIMARY KEY (publication_id, task_id)
+    PRIMARY KEY (publication_id, task_id),
+    FOREIGN KEY (publication_id, task_id)
+        REFERENCES publication_generations (publication_id, task_id)
 );
 
 CREATE TABLE pipelines (
@@ -70,7 +76,9 @@ CREATE TABLE runs (
     FOREIGN KEY (publication_id, task_id)
         REFERENCES tasks (publication_id, task_id),
     FOREIGN KEY (publication_id, pipeline_id)
-        REFERENCES pipelines (publication_id, pipeline_id)
+        REFERENCES pipelines (publication_id, pipeline_id),
+    FOREIGN KEY (publication_id, task_id, run_id)
+        REFERENCES publication_generations (publication_id, task_id, run_id)
 );
 
 CREATE TABLE task_events (
@@ -98,7 +106,9 @@ CREATE TABLE artifacts (
     public_key TEXT NOT NULL
         CHECK (length(public_key) BETWEEN 40 AND 256
             AND public_key LIKE 'v1/tasks/%/objects/sha256/%'
-            AND public_key NOT LIKE '%://%'),
+            AND public_key NOT LIKE '%://%'
+            AND public_key = 'v1/tasks/' || task_id || '/objects/sha256/'
+                || substr(sha256, 1, 2) || '/' || sha256),
     media_type TEXT NOT NULL CHECK (length(media_type) BETWEEN 1 AND 128 AND media_type NOT LIKE '% %'),
     byte_size INTEGER NOT NULL CHECK (typeof(byte_size) = 'integer' AND byte_size >= 0),
     sha256 TEXT NOT NULL

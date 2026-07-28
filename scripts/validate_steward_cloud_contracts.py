@@ -357,11 +357,13 @@ def _valid_digest(value: Any) -> bool:
     return isinstance(value, str) and bool(DIGEST_PATTERN.fullmatch(value))
 
 
-def _valid_public_key(value: Any) -> bool:
+def _valid_public_key(value: Any, task_id: str | None = None, digest: str | None = None) -> bool:
     if not isinstance(value, str):
         return False
     match = PUBLIC_KEY_PATTERN.fullmatch(value)
-    return bool(match and match.group(2) == match.group(3)[:2])
+    return bool(match and match.group(2) == match.group(3)[:2]
+        and (task_id is None or match.group(1) == task_id)
+        and (digest is None or match.group(3) == digest))
 
 
 def _valid_private_key(value: Any) -> bool:
@@ -414,6 +416,11 @@ def _d1_stage(
 ) -> None:
     key_digest = "0" * 64
     public_key = f"v1/tasks/{task_id}/objects/sha256/{key_digest[:2]}/{key_digest}"
+    expected_generation = (task_id, run_id, metadata_digest, f"retry-{publication_id}", "staged", 1, 1, 1, 1, expected_artifact_count, "2026-07-28T00:00:00Z")
+    generation_sql = "SELECT task_id, run_id, metadata_digest, idempotency_key, state, expected_task_count, expected_pipeline_count, expected_run_count, expected_event_count, expected_artifact_count, created_at FROM publication_generations WHERE publication_id = ?"
+    existing_generation = connection.execute(generation_sql, (publication_id,)).fetchone()
+    if existing_generation is not None and existing_generation != expected_generation:
+        raise ValueError("generation-conflict")
     statements = [
         (
             "INSERT INTO publication_generations "
@@ -442,16 +449,20 @@ def _d1_stage(
     ]
     for statement, parameters in statements:
         connection.execute("BEGIN")
-        connection.execute(statement, parameters)
+        connection.execute(statement.replace("INSERT INTO", "INSERT OR IGNORE INTO"), parameters)
         connection.commit()
     for index in range(artifact_rows):
         connection.execute("BEGIN")
         connection.execute(
-            "INSERT INTO artifacts (publication_id, artifact_id, task_id, run_id, logical_path, public_key, media_type, byte_size, sha256, availability, redaction_applied, original_retained) "
+            "INSERT OR IGNORE INTO artifacts (publication_id, artifact_id, task_id, run_id, logical_path, public_key, media_type, byte_size, sha256, availability, redaction_applied, original_retained) "
             "VALUES (?, ?, ?, ?, ?, ?, 'text/plain', ?, ?, 'available', 0, 1)",
             (publication_id, f"artifact-{publication_id}-{index}", task_id, run_id, f"steps/1/output-{index}.txt", public_key, 12 + index, key_digest),
         )
         connection.commit()
+    if connection.execute(generation_sql, (publication_id,)).fetchone() != expected_generation:
+        raise ValueError("generation-conflict")
+    if connection.execute("SELECT count(*) FROM artifacts WHERE publication_id = ? AND (task_id <> ? OR run_id <> ? OR public_key <> ? OR sha256 <> ?)", (publication_id, task_id, run_id, public_key, key_digest)).fetchone()[0] or connection.execute("SELECT count(*) FROM runs WHERE publication_id = ? AND (task_id <> ? OR run_id <> ? OR atif_digest <> ?)", (publication_id, task_id, run_id, "f" * 64)).fetchone()[0]:
+        raise ValueError("artifact-conflict")
 
 
 def _d1_expose(
@@ -514,6 +525,11 @@ def _d1_rejected(connection: sqlite3.Connection, statement: str, parameters: tup
     connection.rollback()
     return False
 
+def _d1_stage_rejected(connection: sqlite3.Connection, *arguments: Any) -> bool:
+    try: _d1_stage(connection, *arguments)
+    except ValueError: return True
+    return False
+
 
 def _run_d1_cases() -> tuple[int, int]:
     checks: list[tuple[str, bool]] = []
@@ -535,11 +551,11 @@ def _run_d1_cases() -> tuple[int, int]:
         record("private-locator-denial", not any(_private_d1_column(column) for column in columns))
         record(
             "key-grammar",
-            _valid_public_key("v1/tasks/task-1/objects/sha256/00/" + "0" * 64)
+            _valid_public_key("v1/tasks/task-1/objects/sha256/00/" + "0" * 64, "task-1", "0" * 64)
             and _valid_private_key("v1/originals/task-1/run-1/sha256/" + "a" * 64 + ".jsonl")
             and not _valid_public_key("v1/originals/task-1/run-1/sha256/" + "a" * 64 + ".jsonl")
             and not _valid_public_key("v1/tasks/task-1/objects/sha256/AA/" + "A" * 64)
-            and not _valid_public_key("v1/tasks/task-1/objects/sha256/01/" + "0" * 64)
+            and not _valid_public_key("v1/tasks/task-1/objects/sha256/01/" + "0" * 64) and not _valid_public_key("v1/tasks/other-task/objects/sha256/00/" + "0" * 64, "task-1", "0" * 64)
             and _valid_digest("0" * 64)
             and not _valid_digest("A" * 64),
         )
@@ -547,6 +563,7 @@ def _run_d1_cases() -> tuple[int, int]:
         record("staged-hidden", _d1_public_rows(connection) == [])
         _d1_expose(connection, "task-1", "pub-1")
         record("initial-expose", _d1_public_rows(connection) == [("task-1", "pub-1", "Example task", "run-1")])
+        _d1_stage(connection, "pub-2", "task-1", "run-2", "b" * 64, artifact_rows=1)
         _d1_stage(connection, "pub-2", "task-1", "run-2", "b" * 64)
         record("staging-isolation", _d1_public_rows(connection)[0][1] == "pub-1")
         record(
@@ -592,11 +609,11 @@ def _run_d1_cases() -> tuple[int, int]:
             record("row-count-denial", str(error) == "row-count")
         else:
             record("row-count-denial", False)
-        record("failed-generation-staged", connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-bad'").fetchone()[0] == "staged")
+        record("failed-generation-staged", connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-bad'").fetchone()[0] == "staged" and _d1_stage_rejected(connection, "pub-bad", "task-1", "run-bad", "d" * 64))
         record("invalid-state-denial", _d1_rejected(connection, "UPDATE publication_generations SET state = 'invalid' WHERE publication_id = ?", ("pub-2",)))
         record("invalid-digest-denial", _d1_rejected(connection, "UPDATE artifacts SET sha256 = ? WHERE publication_id = ?", ("A" * 64, "pub-2")))
-        record("invalid-key-denial", _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("private://object", "pub-2")))
-        record("private-name-denial", _private_d1_column("private_locator") and _private_d1_column("credential_url"))
+        record("invalid-key-denial", _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("private://object", "pub-2")) and _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("v1/tasks/not-task/objects/sha256/bb/" + "b" * 64, "pub-2")) and _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("v1/tasks/TASK-1/objects/sha256/00/" + "0" * 64, "pub-2")))
+        record("private-name-denial", _private_d1_column("private_locator") and _private_d1_column("credential_url") and _d1_rejected(connection, "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'visible', ?)", ("other-task", "pub-2", "2026-07-28T00:00:00Z")))
         connection.execute("BEGIN")
         connection.execute("UPDATE task_heads SET state = 'hidden' WHERE task_id = ?", ("task-1",))
         connection.commit()

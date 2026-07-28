@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coquic-cloudflare"
+version = "0.1.0"
+description = "Cloudflare infrastructure for CoQUIC publication"
+requires-python = ">=3.11"
+dependencies = [
+  "pulumi>=3.192.0,<4",
+  "pulumi-cloudflare==6.18.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+]
+
+[tool.uv]
+package = false

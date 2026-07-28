@@ -978,11 +978,17 @@ def _run_cases(validator: Draft202012Validator) -> tuple[int, int]:
     return passed, failed
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Steward cloud contracts")
-    modes = parser.add_mutually_exclusive_group(required=True)
+    modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--atif-only", action="store_true", help="run the ATIF contract checks")
     modes.add_argument("--d1-only", action="store_true", help="run the clean D1 contract checks")
     modes.add_argument("--publication-only", action="store_true", help="run the staged publication contract checks")
     args = parser.parse_args(argv)
+    if not any((args.atif_only, args.d1_only, args.publication_only)):
+        return max(
+            main(["--atif-only"]),
+            main(["--d1-only"]),
+            main(["--publication-only"]),
+        )
     if args.d1_only:
         try:
             _, failed = _run_d1_cases()

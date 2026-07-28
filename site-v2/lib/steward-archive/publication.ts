@@ -36,8 +36,9 @@ export class PublicationCursorError extends Error {
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/;
-const PRIVATE_NAME = /(?:private|secret|credential|password|authorization|presign|signed|scanner|filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token)/i;
-const LOCATOR = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:^|[\s"'([{<>=,:;])\/(?:[^\s/]|$)|(?:^|[\s"'([{<>=,:;])[A-Za-z]:[\\/])/i;
+const PRIVATE_NAME = /(?:private|secret|credential|password|authorization|apikey|presign|signed|scanner|filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token)/i;
+const LOCATOR = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:^|[\s"'([{<>=,:;])(?:~[\\/]|\/{2}|\\\\|[A-Za-z]:[\\/])|(?:^|[\s"'([{<>=,:;])\/(?:[^\s/]|$))/i;
+const PRIVATE_VALUE = /(?:https?|s3|gs|file|ssh|ftp|postgres|redis|wss?):\/\/|(?:^|[-_])(private|internal|secret)[-_](bucket|object(?:[-_]key)?|url|path)(?:$|[-_])/i;
 const KEY = /^v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/objects\/sha256\/([0-9a-f]{2})\/([0-9a-f]{64})$/;
 
 function fail(path: string, reason?: string): never { throw new PublicationValidationError(path, reason); }
@@ -54,7 +55,7 @@ function exact(value: unknown, keys: readonly string[], path: string): Record<st
   return row;
 }
 function privateScan(value: unknown, path: string): void {
-  if (typeof value === "string") { if (LOCATOR.test(value)) fail(path, "private locator"); return; }
+  if (typeof value === "string") { if (LOCATOR.test(value) || PRIVATE_VALUE.test(value)) fail(path, "private locator"); return; }
   if (Array.isArray(value)) { value.forEach((item, index) => privateScan(item, `${path}[${index}]`)); return; }
   if (!value || typeof value !== "object") return;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   decodePublicationCursor, encodePublicationCursor, resolvePublicObjectUrl, validatePublicArtifact,
-  validatePublicPublication, type PublicPublicationRows,
+  validatePublicPublication, validatePublicTask, type PublicPublicationRows,
 } from "@/lib/steward-archive/publication";
 
 const digest = "a".repeat(64);
@@ -46,6 +46,17 @@ test("rejects visibility, exact-key, relationship, private-shape, and duplicate-
   assert.throws(() => validatePublicArtifact(locator), /private locator|logical path/);
   const embeddedLocator = rows(); embeddedLocator.task.title = "Copy at https://private.example/object";
   assert.throws(() => validatePublicPublication(embeddedLocator), /private locator/);
+});
+
+test("rejects start and embedded private locator or marker values", () => {
+  for (const title of ["~/private", "//private.example/object", "\\\\server\\share", "internal-bucket", "private_object-key"]) {
+    const candidate = rows(); candidate.task.title = title;
+    assert.throws(() => validatePublicTask(candidate.task), /private locator/);
+  }
+  for (const title of ["See ~/private", "See //private.example/object", "See \\\\server\\share"]) {
+    const candidate = rows(); candidate.task.title = title;
+    assert.throws(() => validatePublicTask(candidate.task), /private locator/);
+  }
 });
 
 test("requires every run to belong to the generation tuple", () => {

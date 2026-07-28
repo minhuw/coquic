@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "atif-v1.7.schema.json"
 PUBLICATION_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "publication.schema.json"
 D1_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "d1.sql"
+FIXTURE_DIR = ROOT / "contracts" / "steward-cloud" / "fixtures"
 SUPPORTED_IMAGES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -524,6 +525,131 @@ def validate_publication_document(document: Any, validator: Draft202012Validator
     return sorted(issues, key=lambda issue: (issue.path, issue.rule))
 
 
+def _fixture_content_bytes(value: Any) -> bytes | None:
+    if isinstance(value, dict):
+        try:
+            return canonical_bytes(value)
+        except (TypeError, ValueError, UnicodeEncodeError):
+            return None
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    return None
+
+
+def _load_publication_fixture(path: Path) -> dict[str, Any]:
+    raw = path.read_bytes()
+    fixture = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    if not isinstance(fixture, dict) or raw != canonical_bytes(fixture):
+        raise ValueError("fixture-not-canonical")
+    return fixture
+
+
+def validate_publication_fixture(
+    fixture: Any,
+    publication_validator: Draft202012Validator,
+    atif_validator: Draft202012Validator,
+    *,
+    expected_redaction: bool,
+    expected_lifecycle: str,
+) -> list[Issue]:
+    issues: set[Issue] = set()
+    if not isinstance(fixture, dict) or set(fixture) != {"atif", "objects", "publication"}:
+        _add(issues, "fixture-shape")
+        return sorted(issues, key=lambda issue: (issue.path, issue.rule))
+    publication = fixture["publication"]
+    atif = fixture["atif"]
+    objects = fixture["objects"]
+    issues.update(validate_publication_document(publication, publication_validator))
+    atif_raw = _fixture_content_bytes(atif)
+    if atif_raw is None:
+        _add(issues, "atif-shape", ("atif",))
+    else:
+        _, atif_issues = validate_atif_bytes(atif_raw, atif_validator)
+        issues.update(Issue(issue.rule, ("atif",) + issue.path) for issue in atif_issues)
+    if not isinstance(publication, dict) or not isinstance(atif, dict) or not isinstance(objects, list):
+        return sorted(issues, key=lambda issue: (issue.path, issue.rule))
+
+    expected_disclosure = {"redactionApplied": expected_redaction, "originalRetained": True}
+    coqui = atif.get("extra", {}).get("coquic") if isinstance(atif.get("extra"), dict) else None
+    if not isinstance(coqui, dict) or coqui.get("disclosure") != expected_disclosure:
+        _add(issues, "disclosure", ("atif", "extra", "coquic", "disclosure"))
+    pipelines = publication.get("pipelines")
+    pipeline_id = pipelines[0].get("pipelineId") if isinstance(pipelines, list) and pipelines and isinstance(pipelines[0], dict) else None
+    generation = publication.get("generation")
+    run_id = generation.get("runId") if isinstance(generation, dict) else None
+    for field, expected in (("taskId", publication.get("taskId")), ("pipelineId", pipeline_id), ("runId", run_id)):
+        if isinstance(coqui, dict) and coqui.get(field) != expected:
+            _add(issues, "atif-identity", ("atif", "extra", "coquic", field))
+    if isinstance(coqui, dict) and coqui.get("disclosure") == expected_disclosure:
+        if expected_lifecycle == "active":
+            runs = publication.get("runs")
+            task = publication.get("task")
+            if not isinstance(task, dict) or task.get("lifecycleState") != "active" or task.get("completedAt") is not None:
+                _add(issues, "active-task", ("publication", "task"))
+            if not isinstance(runs, list) or len(runs) != 1 or runs[0].get("role") != "planning" or runs[0].get("runState") != "completed":
+                _add(issues, "planning-run", ("publication", "runs"))
+        elif not isinstance(publication.get("task"), dict) or publication["task"].get("lifecycleState") != expected_lifecycle:
+            _add(issues, "task-lifecycle", ("publication", "task", "lifecycleState"))
+
+    artifacts = publication.get("artifacts")
+    artifact_map = {item.get("artifactId"): item for item in artifacts if isinstance(item, dict)} if isinstance(artifacts, list) else {}
+    object_map: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(objects):
+        path = ("objects", index)
+        if not isinstance(item, dict) or set(item) != {"artifactId", "publicKey", "mediaType", "sha256", "byteSize", "content"}:
+            _add(issues, "object-shape", path)
+            continue
+        artifact_id = item["artifactId"]
+        if artifact_id in object_map:
+            _add(issues, "object-unique", path + ("artifactId",))
+        object_map[artifact_id] = item
+        artifact = artifact_map.get(artifact_id)
+        if not isinstance(artifact, dict):
+            _add(issues, "object-reference", path + ("artifactId",))
+            continue
+        body = _fixture_content_bytes(item["content"])
+        if body is None:
+            _add(issues, "object-content", path + ("content",))
+            continue
+        digest = hashlib.sha256(body).hexdigest()
+        if item["sha256"] != digest:
+            _add(issues, "object-digest", path + ("sha256",))
+        if item["byteSize"] != len(body):
+            _add(issues, "object-size", path + ("byteSize",))
+        if item["sha256"] != artifact.get("sha256") or item["byteSize"] != artifact.get("byteSize"):
+            _add(issues, "object-agreement", path)
+        if item["mediaType"] != artifact.get("mediaType"):
+            _add(issues, "object-media-type", path + ("mediaType",))
+        if item["publicKey"] != artifact.get("publicKey") or not _valid_public_key(item["publicKey"], publication.get("taskId"), item["sha256"]):
+            _add(issues, "object-key", path + ("publicKey",))
+        _private_scan(item, path, issues)
+    for artifact_id, artifact in artifact_map.items():
+        if artifact.get("availability") == "available" and artifact_id not in object_map:
+            _add(issues, "object-reference", ("publication", "artifacts", artifact_id))
+
+    runs = publication.get("runs")
+    if atif_raw is not None and isinstance(runs, list) and runs:
+        run = runs[0]
+        atif_digest = hashlib.sha256(atif_raw).hexdigest()
+        atif_artifact = artifact_map.get(run.get("atifArtifactId"))
+        atif_object = object_map.get(run.get("atifArtifactId"))
+        if not isinstance(atif_artifact, dict) or atif_artifact.get("sha256") != atif_digest:
+            _add(issues, "atif-object-digest", ("publication", "runs", 0, "atifDigest"))
+        if not isinstance(atif_artifact, dict) or atif_artifact.get("byteSize") != len(atif_raw):
+            _add(issues, "atif-object-size", ("publication", "runs", 0, "atifArtifactId"))
+        if not isinstance(atif_object, dict) or _fixture_content_bytes(atif_object.get("content")) != atif_raw:
+            _add(issues, "atif-object-content", ("objects",))
+    atif_artifacts = coqui.get("artifacts") if isinstance(coqui, dict) else None
+    if isinstance(atif_artifacts, list):
+        for index, descriptor in enumerate(atif_artifacts):
+            if not isinstance(descriptor, dict):
+                continue
+            artifact = artifact_map.get(descriptor.get("artifactId"))
+            if not isinstance(artifact, dict) or any(descriptor.get(field) != artifact.get(source) for field, source in (("mediaType", "mediaType"), ("sha256", "sha256"), ("byteSize", "byteSize"))):
+                _add(issues, "atif-artifact", ("atif", "extra", "coquic", "artifacts", index))
+    return sorted(issues, key=lambda issue: (issue.path, issue.rule))
+
+
 def _publication_example() -> dict[str, Any]:
     task_id = "task-example"
     run_id = "run-example"
@@ -573,32 +699,57 @@ def _publication_example() -> dict[str, Any]:
     return document
 
 
-def _run_publication_cases(validator: Draft202012Validator) -> tuple[int, int]:
-    clean = _publication_example()
-    redacted = copy.deepcopy(clean)
-    for artifact in redacted["artifacts"]:
-        artifact["disclosure"] = {"redactionApplied": True, "originalRetained": True}
-    redacted["generation"]["metadataDigest"] = _publication_metadata_digest(redacted)
-    active = copy.deepcopy(clean)
-    active["task"]["lifecycleState"] = "active"
-    active["task"]["completedAt"] = None
-    active["generation"]["metadataDigest"] = _publication_metadata_digest(active)
+def _run_publication_cases(validator: Draft202012Validator, atif_validator: Draft202012Validator) -> tuple[int, int]:
+    fixture_specs = (
+        ("clean", "clean-publication.json", False, "completed"),
+        ("redacted", "redacted-publication.json", True, "completed"),
+        ("active-after-planning", "active-after-planning.json", False, "active"),
+    )
+    passed = failed = 0
+    accepted_names: list[str] = []
+    rejected_names: list[str] = []
+    fixtures: dict[str, dict[str, Any]] = {}
+    for name, filename, redaction, lifecycle in fixture_specs:
+        try:
+            fixture = _load_publication_fixture(FIXTURE_DIR / filename)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, DuplicateKey, ValueError):
+            print(f"FAIL fixture {name}: could not load canonical envelope", file=sys.stderr)
+            failed += 1
+            continue
+        issues = validate_publication_fixture(fixture, validator, atif_validator, expected_redaction=redaction, expected_lifecycle=lifecycle)
+        if issues or not _fixture_d1_probe(fixture["publication"]):
+            detail = ", ".join(issue.rendered() for issue in issues) if issues else "d1-visibility"
+            print(f"FAIL accepted publication {name}: {detail}", file=sys.stderr)
+            failed += 1
+            continue
+        fixtures[name] = fixture
+        passed += 1
+        accepted_names.append(name)
+    if "clean" not in fixtures:
+        print("FAIL publication cases: clean fixture unavailable", file=sys.stderr)
+        return passed, failed + 1
+    clean = fixtures["clean"]["publication"]
     reused = copy.deepcopy(clean)
     reused["artifacts"][1]["sha256"] = reused["artifacts"][0]["sha256"]
     reused["artifacts"][1]["publicKey"] = reused["artifacts"][0]["publicKey"]
     reused["artifacts"][1]["byteSize"] = reused["artifacts"][0]["byteSize"]
     reused["generation"]["metadataDigest"] = _publication_metadata_digest(reused)
-    positives = {"clean": clean, "redacted": redacted, "active-after-planning": active, "reused-object": reused}
+    if not validate_publication_document(reused, validator):
+        passed += 1
+        accepted_names.append("reused-object")
+    else:
+        failed += 1
+
     negatives: dict[str, tuple[dict[str, Any], str]] = {}
     mutated = copy.deepcopy(clean); mutated["unknown"] = True; negatives["unknown-field"] = (mutated, "schema-additionalProperties")
     mutated = copy.deepcopy(clean); mutated["publicationId"] = "bad id"; negatives["malformed-id"] = (mutated, "schema-pattern")
     mutated = copy.deepcopy(clean); mutated["task"]["createdAt"] = "0000-01-01T00:00:00Z"; negatives["zero-timestamp"] = (mutated, "timestamp")
     mutated = copy.deepcopy(clean); mutated["runs"][0]["runState"] = "running"; negatives["partial-run"] = (mutated, "schema-enum")
-    mutated = copy.deepcopy(clean); mutated["generation"]["expectedCounts"]["artifacts"] = 3; negatives["bad-count"] = (mutated, "row-count")
+    mutated = copy.deepcopy(clean); mutated["generation"]["expectedCounts"]["artifacts"] = 4; negatives["bad-count"] = (mutated, "row-count")
     mutated = copy.deepcopy(clean); mutated["pipelines"][0]["taskId"] = "other-task"; negatives["ownership"] = (mutated, "ownership")
     mutated = copy.deepcopy(clean); mutated["events"][1]["sequence"] = 3; negatives["event-order"] = (mutated, "event-order")
     mutated = copy.deepcopy(clean); mutated["runs"][0]["atifArtifactId"] = "missing"; negatives["atif-link"] = (mutated, "atif-artifact")
-    mutated = copy.deepcopy(clean); mutated["artifacts"][0]["publicKey"] = "v1/tasks/task-example/objects/sha256/bb/" + "b" * 64; negatives["digest-key"] = (mutated, "artifact-key")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][0]["publicKey"] = f"v1/tasks/{clean['taskId']}/objects/sha256/bb/" + "b" * 64; negatives["digest-key"] = (mutated, "artifact-key")
     mutated = copy.deepcopy(clean); mutated["generation"]["metadataDigest"] = "c" * 64; negatives["metadata-digest"] = (mutated, "metadata-digest")
     mutated = copy.deepcopy(clean); mutated["runs"][0]["atifDigest"] = "c" * 64; negatives["atif-digest"] = (mutated, "atif-digest")
     mutated = copy.deepcopy(clean); mutated["artifacts"][0]["publicKey"] = "https://private.example/object"; negatives["noncanonical-key"] = (mutated, "artifact-key")
@@ -610,17 +761,30 @@ def _run_publication_cases(validator: Draft202012Validator) -> tuple[int, int]:
     mutated = copy.deepcopy(clean); mutated["events"][0]["eventType"] = "e" * 129; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["event-type-d1-limit"] = (mutated, "schema-maxLength")
     mutated = copy.deepcopy(clean); mutated["artifacts"][1]["logicalPath"] = mutated["artifacts"][0]["logicalPath"]; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["duplicate-logical-path"] = (mutated, "artifact-logical-path-unique")
     mutated = copy.deepcopy(clean); mutated["artifacts"][1]["sha256"] = mutated["artifacts"][0]["sha256"]; mutated["artifacts"][1]["publicKey"] = mutated["artifacts"][0]["publicKey"]; mutated["artifacts"][1]["byteSize"] = mutated["artifacts"][0]["byteSize"] + 1; mutated["generation"]["metadataDigest"] = _publication_metadata_digest(mutated); negatives["conflicting-object-size"] = (mutated, "artifact-object-size")
-    passed = failed = 0
-    accepted_names: list[str] = []
-    rejected_names: list[str] = []
-    for name, document in positives.items():
-        issues = validate_publication_document(document, validator)
-        if issues:
-            print(f"FAIL accepted publication {name}: {', '.join(issue.rendered() for issue in issues)}", file=sys.stderr)
+    fixture_mutations: dict[str, tuple[dict[str, Any], str]] = {}
+    fixture = copy.deepcopy(fixtures["clean"])
+    fixture["atif"]["extra"]["coquic"]["credentialPath"] = "redacted"
+    fixture_mutations["recursive-private-field"] = (fixture, "private-field")
+    fixture = copy.deepcopy(fixtures["clean"])
+    fixture["objects"][1]["sha256"] = "0" * 64
+    fixture_mutations["object-digest"] = (fixture, "object-digest")
+    fixture = copy.deepcopy(fixtures["clean"])
+    fixture["objects"][1]["byteSize"] += 1
+    fixture_mutations["object-size"] = (fixture, "object-size")
+    fixture = copy.deepcopy(fixtures["clean"])
+    fixture["atif"]["extra"]["coquic"]["artifacts"][0]["artifactId"] = "missing"
+    fixture_mutations["dangling-atif-artifact"] = (fixture, "atif-artifact")
+    fixture = copy.deepcopy(fixtures["clean"])
+    fixture["publication"]["generation"]["expectedCounts"]["artifacts"] = 4
+    fixture_mutations["fixture-count"] = (fixture, "row-count")
+    for name, (fixture, expected_rule) in fixture_mutations.items():
+        issues = validate_publication_fixture(fixture, validator, atif_validator, expected_redaction=False, expected_lifecycle="completed")
+        if not any(issue.rule == expected_rule for issue in issues):
+            print(f"FAIL rejected publication {name}: missing {expected_rule}", file=sys.stderr)
             failed += 1
         else:
             passed += 1
-            accepted_names.append(name)
+            rejected_names.append(name)
     for name, (document, expected_rule) in negatives.items():
         issues = validate_publication_document(document, validator)
         if not any(issue.rule == expected_rule for issue in issues):
@@ -744,6 +908,67 @@ def _d1_stage(
         connection.commit()
     if connection.execute(generation_sql, (publication_id,)).fetchone() != expected_generation:
         raise ValueError("generation-conflict")
+
+
+def _d1_stage_payload(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    generation = payload["generation"]
+    counts = generation["expectedCounts"]
+    task = payload["task"]
+    pipeline = payload["pipelines"][0]
+    run = payload["runs"][0]
+    publication_id = payload["publicationId"]
+    connection.execute("BEGIN")
+    try:
+        connection.execute(
+            "INSERT INTO publication_generations (publication_id, task_id, run_id, metadata_digest, idempotency_key, state, expected_task_count, expected_pipeline_count, expected_run_count, expected_event_count, expected_artifact_count, created_at) VALUES (?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?, ?)",
+            (publication_id, payload["taskId"], generation["runId"], generation["metadataDigest"], generation["idempotencyKey"], counts["tasks"], counts["pipelines"], counts["runs"], counts["events"], counts["artifacts"], generation["createdAt"]),
+        )
+        connection.execute(
+            "INSERT INTO tasks (publication_id, task_id, title, lifecycle_state, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (publication_id, task["taskId"], task["title"], task["lifecycleState"], task["createdAt"], task["completedAt"]),
+        )
+        connection.execute(
+            "INSERT INTO pipelines (publication_id, pipeline_id, task_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+            (publication_id, pipeline["pipelineId"], pipeline["taskId"], pipeline["name"], pipeline["createdAt"]),
+        )
+        connection.execute(
+            "INSERT INTO runs (publication_id, run_id, task_id, pipeline_id, role, run_state, started_at, completed_at, duration_ms, atif_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (publication_id, run["runId"], run["taskId"], run["pipelineId"], run["role"], run["runState"], run["startedAt"], run["completedAt"], run["durationMs"], run["atifDigest"]),
+        )
+        for event in payload["events"]:
+            connection.execute(
+                "INSERT INTO task_events (publication_id, task_id, sequence, event_type, occurred_at, summary) VALUES (?, ?, ?, ?, ?, ?)",
+                (publication_id, event["taskId"], event["sequence"], event["eventType"], event["occurredAt"], event["summary"]),
+            )
+        for artifact in payload["artifacts"]:
+            disclosure = artifact["disclosure"]
+            connection.execute(
+                "INSERT INTO artifacts (publication_id, artifact_id, task_id, run_id, logical_path, public_key, media_type, byte_size, sha256, availability, redaction_applied, original_retained) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (publication_id, artifact["artifactId"], artifact["taskId"], artifact["runId"], artifact["logicalPath"], artifact["publicKey"], artifact["mediaType"], artifact["byteSize"], artifact["sha256"], artifact["availability"], int(disclosure["redactionApplied"]), int(disclosure["originalRetained"])),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _fixture_d1_probe(payload: dict[str, Any]) -> bool:
+    connection = _d1_connection()
+    try:
+        _d1_stage_payload(connection, payload)
+        if _d1_public_rows(connection):
+            return False
+        _d1_expose(connection, payload["taskId"], payload["publicationId"])
+        visible = _d1_public_rows(connection)
+        expected = [(payload["taskId"], payload["publicationId"], payload["task"]["title"], payload["runs"][0]["runId"])]
+        if visible != expected:
+            return False
+        connection.execute("UPDATE task_heads SET state = 'hidden' WHERE task_id = ?", (payload["taskId"],))
+        connection.commit()
+        return _d1_public_rows(connection) == []
+    finally:
+        connection.close()
+
 
 def _d1_expose(
     connection: sqlite3.Connection,
@@ -1025,10 +1250,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if failed else 0
     if args.publication_only:
         try:
-            schema = json.loads(PUBLICATION_SCHEMA_PATH.read_text(encoding="utf-8"))
-            Draft202012Validator.check_schema(schema)
-            validator = Draft202012Validator(schema)
-            _, failed = _run_publication_cases(validator)
+            publication_schema = json.loads(PUBLICATION_SCHEMA_PATH.read_text(encoding="utf-8"))
+            atif_schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+            Draft202012Validator.check_schema(publication_schema)
+            Draft202012Validator.check_schema(atif_schema)
+            _, failed = _run_publication_cases(Draft202012Validator(publication_schema), Draft202012Validator(atif_schema))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             print("Publication validator could not load its staged schema", file=sys.stderr)
             return 1

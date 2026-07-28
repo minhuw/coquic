@@ -1,0 +1,8 @@
+config:
+  coquic-cloudflare:account_id: "00000000000000000000000000000000"
+  coquic-cloudflare:zone_id: "11111111111111111111111111111111"
+  coquic-cloudflare:database_name: "coquic-publication"
+  coquic-cloudflare:public_bucket_name: "coquic-public-artifacts"
+  coquic-cloudflare:private_bucket_name: "coquic-private-originals"
+  coquic-cloudflare:public_hostname: "artifacts.coquic.minhuw.dev"
+  coquic-cloudflare:private_retention_seconds: 2592000

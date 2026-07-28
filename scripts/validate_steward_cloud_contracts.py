@@ -75,6 +75,7 @@ def _private_scan(value: Any, path: tuple[Any, ...], issues: set[Issue], key: st
             _private_scan(child, path + (index,), issues, key)
         return
     if isinstance(value, str):
+        if value.startswith("/") or (key is not None and compact == "mediatype" and value.lower().startswith("image/") and value not in SUPPORTED_IMAGES): _add(issues, "private-locator" if value.startswith("/") else "media-type", path)
         if PRIVATE_VALUE.search(value):
             _add(issues, "private-locator", path)
         if key is not None and key.lower().endswith("path") and not value.startswith("artifact:"):
@@ -172,6 +173,7 @@ def _check_artifacts(
             continue
         step_id = step.get("step_id")
         step_extra = step.get("extra")
+        step_extra = step_extra if isinstance(step_extra, dict) and isinstance(step_extra.get("coquic"), dict) else {"coquic": {}}
         if not isinstance(step_extra, dict):
             continue
         step_coqui = step_extra.get("coquic")

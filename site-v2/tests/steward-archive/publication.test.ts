@@ -44,6 +44,33 @@ test("rejects visibility, exact-key, relationship, private-shape, and duplicate-
   assert.throws(() => validatePublicPublication(duplicate), /logical_path/);
   const locator = { ...rows().artifacts[0], logical_path: "https://private.example/object" };
   assert.throws(() => validatePublicArtifact(locator), /private locator|logical path/);
+  const embeddedLocator = rows(); embeddedLocator.task.title = "Copy at https://private.example/object";
+  assert.throws(() => validatePublicPublication(embeddedLocator), /private locator/);
+});
+
+test("requires every run to belong to the generation tuple", () => {
+  const extraRun = rows(); extraRun.generation.expected_run_count = 2;
+  extraRun.runs.push({ ...extraRun.runs[0], run_id: "run-extra" });
+  assert.throws(() => validatePublicPublication(extraRun), /generation.run_id|run.run_id/);
+});
+
+test("rejects malformed UTF-8 cursor bytes before JSON validation", () => {
+  const malformed = "eyJ2ZXJzaW9uIjoxLCJxdWVyeSI6InRhc2tzIiwicHVibGljYXRpb25JZCI6InB1YiIsInNvcnQiOlsigCJdfQ";
+  assert.throws(() => decodePublicationCursor(malformed, { query: "tasks", publicationId: "pub" }), /invalid cursor/);
+});
+
+test("counts Unicode code points for bounded public text", () => {
+  const unicode = rows(); unicode.task.title = String.fromCodePoint(0x1f600).repeat(300);
+  assert.equal(validatePublicPublication(unicode).task.title, unicode.task.title);
+});
+
+test("validates calendar dates and preserves fractional timestamp ordering", () => {
+  const impossible = rows(); impossible.generation.created_at = "2026-02-30T00:00:00Z";
+  assert.throws(() => validatePublicPublication(impossible), /invalid UTC timestamp/);
+  const precise = rows(); precise.runs[0].started_at = "2026-01-01T00:00:00.0009Z"; precise.runs[0].completed_at = "2026-01-01T00:00:00.0010Z"; precise.runs[0].duration_ms = 0;
+  assert.doesNotThrow(() => validatePublicPublication(precise));
+  const reversed = rows(); reversed.runs[0].started_at = "2026-01-01T00:00:00.0010Z"; reversed.runs[0].completed_at = "2026-01-01T00:00:00.0009Z"; reversed.runs[0].duration_ms = 0;
+  assert.throws(() => validatePublicPublication(reversed), /timestamp order/);
 });
 
 test("cursors are canonical, query/publication-bound structural values", () => {

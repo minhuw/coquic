@@ -35,12 +35,13 @@ export class PublicationCursorError extends Error {
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
-const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/;
 const PRIVATE_NAME = /(?:private|secret|credential|password|authorization|presign|signed|scanner|filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token)/i;
-const LOCATOR = /(?:^[a-z][a-z0-9+.-]*:\/\/|^\/(?:[^/]|$)|^[A-Za-z]:[\\/])/i;
+const LOCATOR = /(?:[a-z][a-z0-9+.-]*:\/\/|(?:^|[\s"'([{<>=,:;])\/(?:[^\s/]|$)|(?:^|[\s"'([{<>=,:;])[A-Za-z]:[\\/])/i;
 const KEY = /^v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/objects\/sha256\/([0-9a-f]{2})\/([0-9a-f]{64})$/;
 
 function fail(path: string, reason?: string): never { throw new PublicationValidationError(path, reason); }
+interface ParsedTimestamp { epochSecond: bigint; fraction: string; }
 function object(value: unknown, path: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail(path, "expected object");
   const proto = Object.getPrototypeOf(value);
@@ -62,22 +63,67 @@ function privateScan(value: unknown, path: string): void {
   }
 }
 function checked(value: unknown, path: string, max: number, min = 1): string {
-  if (typeof value !== "string" || value.length < min || value.length > max || value.includes("\0")) fail(path, "invalid text");
+  if (typeof value !== "string" || Array.from(value).length < min || Array.from(value).length > max || value.includes("\0")) fail(path, "invalid text");
   return value;
 }
 function id(value: unknown, path: string): string { if (typeof value !== "string" || !ID.test(value)) fail(path, "invalid id"); return value; }
 function digest(value: unknown, path: string): string { if (typeof value !== "string" || !DIGEST.test(value)) fail(path, "invalid digest"); return value; }
-function timestamp(value: unknown, path: string): string {
-  if (typeof value !== "string" || !TIMESTAMP.test(value) || !Number.isFinite(Date.parse(value))) fail(path, "invalid UTC timestamp");
-  return value;
+function parseTimestamp(value: unknown, path: string): ParsedTimestamp {
+  if (typeof value !== "string") fail(path, "invalid UTC timestamp");
+  const match = TIMESTAMP.exec(value);
+  if (!match) fail(path, "invalid UTC timestamp");
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+  const hour = Number(match[4]); const minute = Number(match[5]); const second = Number(match[6]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) fail(path, "invalid UTC timestamp");
+  const whole = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
+  const milliseconds = Date.parse(whole);
+  if (!Number.isSafeInteger(milliseconds)) fail(path, "invalid UTC timestamp");
+  return { epochSecond: BigInt(milliseconds) / 1000n, fraction: (match[7]?.slice(1).replace(/0+$/, "") || "0") };
 }
+function timestamp(value: unknown, path: string): string { parseTimestamp(value, path); return value as string; }
 function integer(value: unknown, path: string): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) fail(path, "invalid nonnegative integer"); return value; }
 function flag(value: unknown, path: string): DisclosureFlag {
   if (typeof value === "boolean" || value === 0 || value === 1) return value;
   fail(path, "invalid disclosure flag");
 }
 function same(left: string, right: string, path: string): void { if (left !== right) fail(path, "relationship mismatch"); }
-function timeOrder(start: string, end: string, path: string): void { if (Date.parse(end) < Date.parse(start)) fail(path, "timestamp order"); }
+function compareFraction(left: string, right: string): number {
+  const width = Math.max(left.length, right.length); const a = left.padEnd(width, "0"); const b = right.padEnd(width, "0");
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+function subtractDecimal(left: string, right: string): string {
+  const width = Math.max(left.length, right.length); const a = left.padEnd(width, "0"); const b = right.padEnd(width, "0");
+  const result = new Array<string>(width); let borrow = 0;
+  for (let index = width - 1; index >= 0; index -= 1) {
+    let digit = a.charCodeAt(index) - 48 - borrow - (b.charCodeAt(index) - 48);
+    if (digit < 0) { digit += 10; borrow = 1; } else borrow = 0;
+    result[index] = String(digit);
+  }
+  return result.join("");
+}
+function fractionMilliseconds(fraction: string): bigint { return BigInt((fraction.length < 3 ? fraction.padEnd(3, "0") : fraction.slice(0, 3))); }
+function compareTimestamp(left: ParsedTimestamp, right: ParsedTimestamp): number {
+  if (left.epochSecond < right.epochSecond) return -1;
+  if (left.epochSecond > right.epochSecond) return 1;
+  return compareFraction(left.fraction, right.fraction);
+}
+function timestampDeltaMilliseconds(start: string, end: string, path: string): bigint {
+  const left = parseTimestamp(start, path); const right = parseTimestamp(end, path);
+  let seconds = right.epochSecond - left.epochSecond; const order = compareFraction(right.fraction, left.fraction);
+  let fraction: string;
+  if (order >= 0) fraction = subtractDecimal(right.fraction, left.fraction);
+  else {
+    seconds -= 1n;
+    const difference = subtractDecimal(left.fraction, right.fraction);
+    fraction = subtractDecimal(`1${"0".repeat(difference.length)}`, `0${difference}`).slice(-difference.length);
+  }
+  return seconds * 1000n + fractionMilliseconds(fraction);
+}
+function timeOrder(start: string, end: string, path: string): void {
+  if (compareTimestamp(parseTimestamp(start, path), parseTimestamp(end, path)) > 0) fail(path, "timestamp order");
+}
 
 export function validatePublicGeneration(value: unknown): PublicGeneration {
   const row = exact(value, ["publication_id", "task_id", "run_id", "metadata_digest", "idempotency_key", "state", "expected_task_count", "expected_pipeline_count", "expected_run_count", "expected_event_count", "expected_artifact_count", "created_at", "exposed_at"], "generation");
@@ -123,7 +169,7 @@ export function validatePublicRun(value: unknown): PublicRun {
   if (runState !== "completed" && runState !== "failed" && runState !== "cancelled") fail("run.run_state", "invalid terminal state");
   const result = { publication_id: id(row.publication_id, "run.publication_id"), run_id: id(row.run_id, "run.run_id"), task_id: id(row.task_id, "run.task_id"), pipeline_id: id(row.pipeline_id, "run.pipeline_id"), role: checked(row.role, "run.role", 128), run_state: runState as RunState, started_at: timestamp(row.started_at, "run.started_at"), completed_at: timestamp(row.completed_at, "run.completed_at"), duration_ms: integer(row.duration_ms, "run.duration_ms"), atif_digest: digest(row.atif_digest, "run.atif_digest") };
   timeOrder(result.started_at, result.completed_at, "run.completed_at");
-  if (result.duration_ms !== Date.parse(result.completed_at) - Date.parse(result.started_at)) fail("run.duration_ms", "duration does not match timestamps");
+  if (BigInt(result.duration_ms) !== timestampDeltaMilliseconds(result.started_at, result.completed_at, "run.completed_at")) fail("run.duration_ms", "duration does not match timestamps");
   return result;
 }
 
@@ -158,11 +204,11 @@ export function validatePublicPublication(value: unknown): PublicPublicationRows
   const pipelines = root.pipelines.map((item) => validatePublicPipeline(item)); const runs = root.runs.map((item) => validatePublicRun(item)); const events = root.events.map((item) => validatePublicEvent(item)); const artifacts = root.artifacts.map((item) => validatePublicArtifact(item));
   for (const [name, actual, expected] of [["pipelines", pipelines.length, generation.expected_pipeline_count], ["runs", runs.length, generation.expected_run_count], ["events", events.length, generation.expected_event_count], ["artifacts", artifacts.length, generation.expected_artifact_count] ] as const) if (actual !== expected) fail(`generation.expected_${name.slice(0, -1)}_count`, "row count mismatch");
   same(head.task_id, generation.task_id, "head.task_id"); same(head.publication_id, generation.publication_id, "head.publication_id"); same(task.task_id, generation.task_id, "task.task_id"); same(task.publication_id, generation.publication_id, "task.publication_id");
-  if (!runs.some((row) => row.run_id === generation.run_id)) fail("generation.run_id", "dangling run");
+  if (runs.length === 0 || !runs.every((row) => row.run_id === generation.run_id)) fail("generation.run_id", "dangling run");
   unique(pipelines.map((row) => row.pipeline_id), "pipelines"); unique(runs.map((row) => row.run_id), "runs"); unique(events.map((row) => String(row.sequence)), "events"); unique(artifacts.map((row) => row.artifact_id), "artifacts"); unique(artifacts.map((row) => row.logical_path), "artifacts.logical_path");
   if (events.some((row, index) => row.sequence !== index + 1)) fail("events", "event sequences must be contiguous");
   const pipelineIds = new Set(pipelines.map((row) => { same(row.publication_id, generation.publication_id, "pipeline.publication_id"); same(row.task_id, generation.task_id, "pipeline.task_id"); return row.pipeline_id; }));
-  const runIds = new Set(runs.map((row) => { same(row.publication_id, generation.publication_id, "run.publication_id"); same(row.task_id, generation.task_id, "run.task_id"); if (!pipelineIds.has(row.pipeline_id)) fail("run.pipeline_id", "dangling pipeline"); return row.run_id; }));
+  const runIds = new Set(runs.map((row) => { same(row.publication_id, generation.publication_id, "run.publication_id"); same(row.task_id, generation.task_id, "run.task_id"); same(row.run_id, generation.run_id, "run.run_id"); if (!pipelineIds.has(row.pipeline_id)) fail("run.pipeline_id", "dangling pipeline"); return row.run_id; }));
   for (const row of events) { same(row.publication_id, generation.publication_id, "event.publication_id"); same(row.task_id, generation.task_id, "event.task_id"); }
   const objectSizes = new Map<string, number>();
   for (const row of artifacts) { same(row.publication_id, generation.publication_id, "artifact.publication_id"); same(row.task_id, generation.task_id, "artifact.task_id"); if (!runIds.has(row.run_id)) fail("artifact.run_id", "dangling run"); const prior = objectSizes.get(row.public_key); if (prior !== undefined && prior !== row.byte_size) fail("artifact.byte_size", "conflicting object size"); objectSizes.set(row.public_key, row.byte_size); }
@@ -192,7 +238,7 @@ export function decodePublicationCursor(value: unknown, expected: { query: strin
   const expectedQuery = typeof expected === "string" ? expected : expected.query; const expectedPublication = typeof expected === "string" ? publicationId : expected.publicationId;
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
   let payload: unknown;
-  try { const raw = Buffer.from(value, "base64url"); if (raw.length === 0 || raw.toString("base64url") !== value) throw new Error(); payload = JSON.parse(raw.toString("utf8")); } catch { throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor"); }
+  try { const raw = Buffer.from(value, "base64url"); if (raw.length === 0 || raw.toString("base64url") !== value) throw new Error(); payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)); } catch { throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor"); }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
   const row = payload as Record<string, unknown>; const keys = Object.keys(row);
   if (keys.length !== CURSOR_KEYS.length || keys.some((key) => !CURSOR_KEYS.includes(key as (typeof CURSOR_KEYS)[number]))) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");

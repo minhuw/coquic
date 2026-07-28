@@ -30,3 +30,51 @@ nix develop -c uv run --project "$harbor_dir" --frozen python -c 'import json; f
 
 The resulting file must match the recorded SHA-256 and compare byte-for-byte
 with this checked-in schema.
+
+## CoQUIC ATIF semantics
+
+Harbor owns the ATIF object shape: `agent`, `steps`, messages, multimodal
+content parts, tool calls, observations, and the other fields in the pinned
+schema. CoQUIC does not change those Harbor fields. The rules below are the
+public transcript contract layered on top of that upstream structure.
+
+- The root `schema_version` is exactly `ATIF-v1.7`. A public document is one
+  complete, terminal run; it has no continuation reference and its
+  `extra.coquic` object contains `taskId`, `pipelineId`, `runId`, `role`,
+  `startedAt`, `completedAt`, `durationMs`, `disclosure`, and `artifacts`.
+  IDs are non-empty logical IDs. Timestamps are timezone-aware RFC 3339
+  values, completion is not before start, and duration is a finite number at
+  least zero. Partial runs and raw JSONL are not ATIF publications.
+- `steps` start at 1 and contain every integer exactly once in order. Tool
+  calls have non-empty unique `tool_call_id` values within this trajectory.
+  An observation `source_call_id`, when present, resolves only to a call in
+  the same trajectory; it cannot point into a parent or embedded trajectory.
+  Embedded subagent references resolve by `trajectory_id` only and every
+  embedded trajectory has a unique ID. External trajectory paths are not
+  public locators.
+- Text content parts contain text. Image parts contain an
+  `artifact:<artifactId>` logical reference and their media type is one of
+  `image/jpeg`, `image/png`, `image/gif`, or `image/webp`. Other binary data is
+  represented only by a logical descriptor in `extra.coquic.artifacts`, never
+  by a path, URL, bucket, or object key.
+- Each artifact descriptor has `artifactId`, `mediaType`, `sha256`,
+  `byteSize`, and `ownerStepId`; IDs are unique, hashes are lower-case SHA-256
+  values, sizes are non-negative integers, and the owner is an existing step.
+  Every descriptor is referenced by its owning step's
+  `extra.coquic.artifactIds` or by an image part owned by that step. Image
+  descriptors use the supported image media types; non-image descriptors stay
+  logical references and are never embedded as binary content.
+- `extra.coquic.disclosure` has exactly two keys:
+  `redactionApplied` and `originalRetained`. Both values are booleans. No
+  private bucket name, object key, URL, credential path, token identifier, or
+  private-shaped extension name/value may occur anywhere in a public document.
+- Published bytes are UTF-8 JSON serialized with lexicographically sorted
+  object keys, compact separators, and exactly one trailing newline. Duplicate
+  object keys, alternate whitespace, missing/newline bytes, and non-UTF-8 input
+  are rejected. The validator reports only rule names and JSON paths, never
+  candidate secret values.
+
+The executable definition is `scripts/validate_steward_cloud_contracts.py`.
+Its `--atif-only` mode loads this pinned schema with
+`Draft202012Validator`, then applies these cross-field checks to deterministic
+in-memory clean, redacted, and malformed examples.

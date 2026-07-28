@@ -20,6 +20,7 @@ SCHEMA_DIR = ROOT / "schemas"
 EXAMPLE_DIR = ROOT / "examples"
 DATASET_DIR = EXAMPLE_DIR / "steward-dataset"
 CONTROL_LOOP_DIR = EXAMPLE_DIR / "steward-control-loop"
+CLOUD_EXAMPLE_DIR = EXAMPLE_DIR / "steward-cloud"
 
 EXAMPLE_TARGETS = {
     "coverage-snapshot.json": ("evidence.schema.json", "coverageSnapshot"),
@@ -36,6 +37,8 @@ EXAMPLE_TARGETS = {
     "steward-status.json": ("steward.schema.json", "monitor"),
     "transcript-search.json": ("transcript.schema.json", "searchResponse"),
     "workbench-command.json": ("workbench.schema.json", "command"),
+    "steward-cloud/redacted-publication.json": ("steward-cloud.schema.json", "taskDetailResponse"),
+    "steward-cloud/active-after-planning.json": ("steward-cloud.schema.json", "taskDetailResponse"),
 }
 
 
@@ -88,6 +91,84 @@ def validate_json_contracts() -> int:
             failures += 1
             print(f"example qa-stream.sse line {line_number}: {error.message}")
 
+    return failures
+
+
+_CLOUD_PRIVATE_KEY = re.compile(
+    r"(?:private|secret|credential|password|authorization|apikey|presign|signed|scanner|"
+    r"filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token|source)",
+    re.IGNORECASE,
+)
+_CLOUD_PRIVATE_VALUE = re.compile(
+    r"(?:https?|s3|gs|file|ssh|ftp|postgres|redis|wss?)://|"
+    r"(?:^|[-_])(private|internal|secret)[-_](bucket|object(?:[-_]?key)?|url|path)(?:$|[-_])",
+    re.IGNORECASE,
+)
+_CLOUD_LOCATOR = re.compile(r"(?:^|[\s\"'([{<>=,:;])/(?:[^\s/]|$)")
+
+
+def _cloud_public_scan(value: object, path: str = "") -> int:
+    failures = 0
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child_path = f"{path}.{key}" if path else key
+            if _CLOUD_PRIVATE_KEY.search(key) and key not in {"logicalPath", "publicKey"}:
+                print(f"cloud {child_path}: private field is not public")
+                failures += 1
+            failures += _cloud_public_scan(item, child_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            failures += _cloud_public_scan(item, f"{path}[{index}]")
+    elif isinstance(value, str):
+        if _CLOUD_LOCATOR.search(value) or _CLOUD_PRIVATE_VALUE.search(value):
+            print(f"cloud {path}: private locator value is not public")
+            failures += 1
+    return failures
+
+
+def validate_steward_cloud_examples() -> int:
+    failures = 0
+    for name in ("redacted-publication.json", "active-after-planning.json"):
+        response = read_json(CLOUD_EXAMPLE_DIR / name)
+        data = response.get("data", {})
+        task = data.get("task", {}) if isinstance(data, dict) else {}
+        runs = data.get("runs", []) if isinstance(data, dict) else []
+        artifacts = data.get("artifacts", []) if isinstance(data, dict) else []
+        if not isinstance(task, dict) or not isinstance(runs, list) or not isinstance(artifacts, list):
+            failures += 1
+            print(f"cloud {name}: task, runs, and artifacts must be objects/arrays")
+            continue
+        if task.get("completeness") != "complete":
+            failures += 1
+            print(f"cloud {name}: publication must be complete")
+        if task.get("eventCount") != len(data.get("events", [])) or task.get("artifactCount") != len(artifacts):
+            failures += 1
+            print(f"cloud {name}: task counts do not match response collections")
+        disclosure = task.get("disclosure")
+        if name == "redacted-publication.json":
+            if task.get("lifecycleState") != "completed" or disclosure != {"redactionApplied": True, "originalRetained": True}:
+                failures += 1
+                print(f"cloud {name}: completed redaction disclosure is inconsistent")
+        else:
+            completed = [run for run in runs if isinstance(run, dict) and run.get("runState") == "completed"]
+            if task.get("lifecycleState") != "active" or task.get("completedAt") is not None:
+                failures += 1
+                print(f"cloud {name}: task must remain active after planning")
+            if len(completed) != 1 or completed[0].get("role") != "planning" or task.get("completedRunId") != completed[0].get("runId"):
+                failures += 1
+                print(f"cloud {name}: active task must expose one completed planning run")
+            if disclosure != {"redactionApplied": False, "originalRetained": True}:
+                failures += 1
+                print(f"cloud {name}: active disclosure is inconsistent")
+        for artifact in artifacts:
+            if isinstance(artifact, dict) and artifact.get("disclosure") != disclosure:
+                failures += 1
+                print(f"cloud {name}: artifact disclosure does not match task disclosure")
+        trajectory = data.get("trajectory") if isinstance(data, dict) else None
+        if not isinstance(trajectory, dict) or trajectory.get("disclosure") != disclosure:
+            failures += 1
+            print(f"cloud {name}: trajectory disclosure does not match task disclosure")
+        failures += _cloud_public_scan(response, name)
     return failures
 
 
@@ -1477,6 +1558,7 @@ def _control_loop_validate_value(value: object, definition: str, label: object) 
 def main() -> int:
     failures = (
         validate_json_contracts()
+        + validate_steward_cloud_examples()
         + validate_markdown_links()
         + validate_steward_dashboard()
         + validate_steward_observability()

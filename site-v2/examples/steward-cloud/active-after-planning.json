@@ -1,0 +1,127 @@
+{
+  "schemaVersion": "3.0",
+  "generatedAt": "2026-07-28T00:00:02Z",
+  "data": {
+    "task": {
+      "taskId": "task-active",
+      "title": "Active publication fixture",
+      "lifecycleState": "active",
+      "createdAt": "2026-07-28T00:00:00Z",
+      "completedAt": null,
+      "completeness": "complete",
+      "pipelineId": "pipeline-active",
+      "completedRunId": "run-active",
+      "eventCount": 2,
+      "artifactCount": 3,
+      "disclosure": {
+        "redactionApplied": false,
+        "originalRetained": true
+      }
+    },
+    "pipelines": [
+      {
+        "pipelineId": "pipeline-active",
+        "taskId": "task-active",
+        "name": "Planning pipeline",
+        "createdAt": "2026-07-28T00:00:00Z"
+      }
+    ],
+    "runs": [
+      {
+        "runId": "run-active",
+        "taskId": "task-active",
+        "pipelineId": "pipeline-active",
+        "role": "planning",
+        "runState": "completed",
+        "startedAt": "2026-07-28T00:00:00Z",
+        "completedAt": "2026-07-28T00:00:01Z",
+        "durationMs": 1000,
+        "atifDigest": "e6d1ceaaffca0df2a1cc0a5e090cbca530f7b73d13c135b8f801b1cfe874bb8a",
+        "atifArtifactId": "artifact-atif"
+      }
+    ],
+    "events": [
+      {
+        "taskId": "task-active",
+        "sequence": 1,
+        "eventType": "started",
+        "occurredAt": "2026-07-28T00:00:00Z",
+        "summary": "Planning started"
+      },
+      {
+        "taskId": "task-active",
+        "sequence": 2,
+        "eventType": "completed",
+        "occurredAt": "2026-07-28T00:00:01Z",
+        "summary": "Planning completed"
+      }
+    ],
+    "artifacts": [
+      {
+        "artifactId": "artifact-atif",
+        "taskId": "task-active",
+        "runId": "run-active",
+        "logicalPath": "runs/run-active/trajectory.json",
+        "publicKey": "v1/tasks/task-active/objects/sha256/e6/e6d1ceaaffca0df2a1cc0a5e090cbca530f7b73d13c135b8f801b1cfe874bb8a",
+        "mediaType": "application/json",
+        "byteSize": 1156,
+        "sha256": "e6d1ceaaffca0df2a1cc0a5e090cbca530f7b73d13c135b8f801b1cfe874bb8a",
+        "availability": "available",
+        "disclosure": {
+          "redactionApplied": false,
+          "originalRetained": true
+        }
+      },
+      {
+        "artifactId": "artifact-plot",
+        "taskId": "task-active",
+        "runId": "run-active",
+        "logicalPath": "steps/2/plot.png",
+        "publicKey": "v1/tasks/task-active/objects/sha256/77/77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+        "mediaType": "image/png",
+        "byteSize": 12,
+        "sha256": "77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+        "availability": "available",
+        "disclosure": {
+          "redactionApplied": false,
+          "originalRetained": true
+        }
+      },
+      {
+        "artifactId": "artifact-log",
+        "taskId": "task-active",
+        "runId": "run-active",
+        "logicalPath": "steps/2/output.log",
+        "publicKey": "v1/tasks/task-active/objects/sha256/32/32a997e9fad0c2d0f2b7a0885d232524e0c34a0e9525551c361307fb36562462",
+        "mediaType": "text/plain",
+        "byteSize": 8,
+        "sha256": "32a997e9fad0c2d0f2b7a0885d232524e0c34a0e9525551c361307fb36562462",
+        "availability": "available",
+        "disclosure": {
+          "redactionApplied": false,
+          "originalRetained": true
+        }
+      }
+    ],
+    "trajectory": {
+      "taskId": "task-active",
+      "pipelineId": "pipeline-active",
+      "runId": "run-active",
+      "role": "planning",
+      "runState": "completed",
+      "startedAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "durationMs": 1000,
+      "artifactId": "artifact-atif",
+      "publicKey": "v1/tasks/task-active/objects/sha256/e6/e6d1ceaaffca0df2a1cc0a5e090cbca530f7b73d13c135b8f801b1cfe874bb8a",
+      "mediaType": "application/json",
+      "byteSize": 1156,
+      "sha256": "e6d1ceaaffca0df2a1cc0a5e090cbca530f7b73d13c135b8f801b1cfe874bb8a",
+      "availability": "available",
+      "disclosure": {
+        "redactionApplied": false,
+        "originalRetained": true
+      }
+    }
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "schemaVersion": "3.0",
+  "generatedAt": "2026-07-28T00:00:02Z",
+  "data": {
+    "task": {
+      "taskId": "task-redacted",
+      "title": "Redacted publication fixture",
+      "lifecycleState": "completed",
+      "createdAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "completeness": "complete",
+      "pipelineId": "pipeline-redacted",
+      "completedRunId": "run-redacted",
+      "eventCount": 2,
+      "artifactCount": 3,
+      "disclosure": {
+        "redactionApplied": true,
+        "originalRetained": true
+      }
+    },
+    "pipelines": [
+      {
+        "pipelineId": "pipeline-redacted",
+        "taskId": "task-redacted",
+        "name": "Planning pipeline",
+        "createdAt": "2026-07-28T00:00:00Z"
+      }
+    ],
+    "runs": [
+      {
+        "runId": "run-redacted",
+        "taskId": "task-redacted",
+        "pipelineId": "pipeline-redacted",
+        "role": "planning",
+        "runState": "completed",
+        "startedAt": "2026-07-28T00:00:00Z",
+        "completedAt": "2026-07-28T00:00:01Z",
+        "durationMs": 1000,
+        "atifDigest": "f1a504eb5a13455dfb1127f7d097e540662a511d4c60016a8673589600d599ef",
+        "atifArtifactId": "artifact-atif"
+      }
+    ],
+    "events": [
+      {
+        "taskId": "task-redacted",
+        "sequence": 1,
+        "eventType": "started",
+        "occurredAt": "2026-07-28T00:00:00Z",
+        "summary": "Planning started"
+      },
+      {
+        "taskId": "task-redacted",
+        "sequence": 2,
+        "eventType": "completed",
+        "occurredAt": "2026-07-28T00:00:01Z",
+        "summary": "Planning completed"
+      }
+    ],
+    "artifacts": [
+      {
+        "artifactId": "artifact-atif",
+        "taskId": "task-redacted",
+        "runId": "run-redacted",
+        "logicalPath": "runs/run-redacted/trajectory.json",
+        "publicKey": "v1/tasks/task-redacted/objects/sha256/f1/f1a504eb5a13455dfb1127f7d097e540662a511d4c60016a8673589600d599ef",
+        "mediaType": "application/json",
+        "byteSize": 1161,
+        "sha256": "f1a504eb5a13455dfb1127f7d097e540662a511d4c60016a8673589600d599ef",
+        "availability": "available",
+        "disclosure": {
+          "redactionApplied": true,
+          "originalRetained": true
+        }
+      },
+      {
+        "artifactId": "artifact-plot",
+        "taskId": "task-redacted",
+        "runId": "run-redacted",
+        "logicalPath": "steps/2/plot.png",
+        "publicKey": "v1/tasks/task-redacted/objects/sha256/77/77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+        "mediaType": "image/png",
+        "byteSize": 12,
+        "sha256": "77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+        "availability": "available",
+        "disclosure": {
+          "redactionApplied": true,
+          "originalRetained": true
+        }
+      },
+      {
+        "artifactId": "artifact-log",
+        "taskId": "task-redacted",
+        "runId": "run-redacted",
+        "logicalPath": "steps/2/output.log",
+        "publicKey": "v1/tasks/task-redacted/objects/sha256/32/32a997e9fad0c2d0f2b7a0885d232524e0c34a0e9525551c361307fb36562462",
+        "mediaType": "text/plain",
+        "byteSize": 8,
+        "sha256": "32a997e9fad0c2d0f2b7a0885d232524e0c34a0e9525551c361307fb36562462",
+        "availability": "available",
+        "disclosure": {
+          "redactionApplied": true,
+          "originalRetained": true
+        }
+      }
+    ],
+    "trajectory": {
+      "taskId": "task-redacted",
+      "pipelineId": "pipeline-redacted",
+      "runId": "run-redacted",
+      "role": "planning",
+      "runState": "completed",
+      "startedAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "durationMs": 1000,
+      "artifactId": "artifact-atif",
+      "publicKey": "v1/tasks/task-redacted/objects/sha256/f1/f1a504eb5a13455dfb1127f7d097e540662a511d4c60016a8673589600d599ef",
+      "mediaType": "application/json",
+      "byteSize": 1161,
+      "sha256": "f1a504eb5a13455dfb1127f7d097e540662a511d4c60016a8673589600d599ef",
+      "availability": "available",
+      "disclosure": {
+        "redactionApplied": true,
+        "originalRetained": true
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import copy
+import hashlib
 import json
 import math
 import re
@@ -14,6 +15,7 @@ from typing import Any, Iterable
 from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "atif-v1.7.schema.json"
+PUBLICATION_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "publication.schema.json"
 D1_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "d1.sql"
 SUPPORTED_IMAGES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -90,7 +92,7 @@ def _private_scan(value: Any, path: tuple[Any, ...], issues: set[Issue], key: st
         if value.startswith("/") or (key is not None and compact == "mediatype" and value.lower().startswith("image/") and value not in SUPPORTED_IMAGES): _add(issues, "private-locator" if value.startswith("/") else "media-type", path)
         if PRIVATE_VALUE.search(value):
             _add(issues, "private-locator", path)
-        if key is not None and key.lower().endswith("path") and not value.startswith("artifact:"):
+        if key is not None and key.lower().endswith("path") and compact != "logicalpath" and not value.startswith("artifact:"):
             _add(issues, "private-locator", path)
 def _schema_issues(document: Any, validator: Draft202012Validator) -> set[Issue]:
     issues: set[Issue] = set()
@@ -351,6 +353,257 @@ def validate_atif_bytes(raw: bytes, validator: Draft202012Validator) -> tuple[An
         return None, [Issue("canonicalization")]
     issues = validate_atif_document(document, validator, raw)
     return document, issues
+
+
+def _publication_metadata(document: dict[str, Any]) -> dict[str, Any]:
+    return {key: document[key] for key in ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")}
+
+
+def _publication_metadata_digest(document: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_bytes(_publication_metadata(document))).hexdigest()
+
+
+def validate_publication_document(document: Any, validator: Draft202012Validator) -> list[Issue]:
+    issues = _schema_issues(document, validator)
+    _private_scan(document, (), issues)
+    if not isinstance(document, dict):
+        return sorted(issues, key=lambda issue: (issue.path, issue.rule))
+
+    publication_id = document.get("publicationId")
+    task_id = document.get("taskId")
+    generation = document.get("generation")
+    head = document.get("headIntent")
+    task = document.get("task")
+    pipelines = document.get("pipelines")
+    runs = document.get("runs")
+    events = document.get("events")
+    artifacts = document.get("artifacts")
+
+    def same(item: Any, field: str, expected: Any, rule: str, path: tuple[Any, ...]) -> None:
+        if isinstance(item, dict) and field in item and item[field] != expected:
+            _add(issues, rule, path + (field,))
+
+    same(generation, "publicationId", publication_id, "identity", ("generation",))
+    same(generation, "taskId", task_id, "identity", ("generation",))
+    same(head, "publicationId", publication_id, "identity", ("headIntent",))
+    same(head, "taskId", task_id, "identity", ("headIntent",))
+    same(task, "taskId", task_id, "ownership", ("task",))
+
+    counts = generation.get("expectedCounts") if isinstance(generation, dict) else None
+    collections = {"tasks": 1, "pipelines": pipelines, "runs": runs, "events": events, "artifacts": artifacts}
+    if isinstance(counts, dict):
+        for name, value in collections.items():
+            if isinstance(counts.get(name), int) and not isinstance(counts.get(name), bool):
+                actual = value if isinstance(value, int) else len(value) if isinstance(value, list) else None
+                if actual is not None and counts[name] != actual:
+                    _add(issues, "row-count", ("generation", "expectedCounts", name))
+
+    def check_timestamp(value: Any, path: tuple[Any, ...], *, nullable: bool = False) -> datetime | None:
+        if value is None and nullable:
+            return None
+        parsed = _timestamp(value)
+        if parsed is None:
+            _add(issues, "timestamp", path)
+        return parsed
+
+    if isinstance(generation, dict):
+        check_timestamp(generation.get("createdAt"), ("generation", "createdAt"))
+    if isinstance(head, dict):
+        check_timestamp(head.get("updatedAt"), ("headIntent", "updatedAt"))
+    task_created = task_completed = None
+    if isinstance(task, dict):
+        task_created = check_timestamp(task.get("createdAt"), ("task", "createdAt"))
+        task_completed = check_timestamp(task.get("completedAt"), ("task", "completedAt"), nullable=True)
+        lifecycle = task.get("lifecycleState")
+        if lifecycle == "active" and task_completed is not None:
+            _add(issues, "task-completion", ("task", "completedAt"))
+        if lifecycle in {"completed", "failed", "cancelled"} and task_completed is None:
+            _add(issues, "task-completion", ("task", "completedAt"))
+        if task_created is not None and task_completed is not None and task_completed < task_created:
+            _add(issues, "timing-order", ("task", "completedAt"))
+
+    pipeline_ids: set[str] = set()
+    if isinstance(pipelines, list):
+        for index, pipeline in enumerate(pipelines):
+            if not isinstance(pipeline, dict):
+                continue
+            pipeline_id = pipeline.get("pipelineId")
+            if isinstance(pipeline_id, str) and pipeline_id in pipeline_ids:
+                _add(issues, "pipeline-unique", ("pipelines", index, "pipelineId"))
+            elif isinstance(pipeline_id, str):
+                pipeline_ids.add(pipeline_id)
+            same(pipeline, "taskId", task_id, "ownership", ("pipelines", index))
+            check_timestamp(pipeline.get("createdAt"), ("pipelines", index, "createdAt"))
+
+    run_map: dict[str, dict[str, Any]] = {}
+    if isinstance(runs, list):
+        for index, run in enumerate(runs):
+            if not isinstance(run, dict):
+                continue
+            run_id = run.get("runId")
+            if isinstance(run_id, str) and run_id in run_map:
+                _add(issues, "run-unique", ("runs", index, "runId"))
+            elif isinstance(run_id, str):
+                run_map[run_id] = run
+            same(run, "taskId", task_id, "ownership", ("runs", index))
+            if run.get("pipelineId") not in pipeline_ids:
+                _add(issues, "ownership", ("runs", index, "pipelineId"))
+            started = check_timestamp(run.get("startedAt"), ("runs", index, "startedAt"))
+            completed = check_timestamp(run.get("completedAt"), ("runs", index, "completedAt"))
+            if started is not None and completed is not None:
+                if completed < started:
+                    _add(issues, "timing-order", ("runs", index, "completedAt"))
+                duration = run.get("durationMs")
+                if isinstance(duration, int) and not isinstance(duration, bool) and duration != int((completed - started).total_seconds() * 1000):
+                    _add(issues, "run-duration", ("runs", index, "durationMs"))
+
+    generation_run = generation.get("runId") if isinstance(generation, dict) else None
+    if generation_run is not None and generation_run not in run_map:
+        _add(issues, "ownership", ("generation", "runId"))
+
+    if isinstance(events, list):
+        sequences = [event.get("sequence") for event in events if isinstance(event, dict)]
+        if sequences != list(range(1, len(events) + 1)):
+            _add(issues, "event-order", ("events",))
+        for index, event in enumerate(events):
+            if isinstance(event, dict):
+                same(event, "taskId", task_id, "ownership", ("events", index))
+                check_timestamp(event.get("occurredAt"), ("events", index, "occurredAt"))
+
+    artifact_map: dict[str, dict[str, Any]] = {}
+    if isinstance(artifacts, list):
+        for index, artifact in enumerate(artifacts):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = artifact.get("artifactId")
+            if isinstance(artifact_id, str) and artifact_id in artifact_map:
+                _add(issues, "artifact-unique", ("artifacts", index, "artifactId"))
+            elif isinstance(artifact_id, str):
+                artifact_map[artifact_id] = artifact
+            same(artifact, "taskId", task_id, "ownership", ("artifacts", index))
+            if artifact.get("runId") not in run_map:
+                _add(issues, "ownership", ("artifacts", index, "runId"))
+            if not _valid_public_key(artifact.get("publicKey"), task_id, artifact.get("sha256")):
+                _add(issues, "artifact-key", ("artifacts", index, "publicKey"))
+
+    for index, run in enumerate(runs if isinstance(runs, list) else []):
+        if not isinstance(run, dict):
+            continue
+        artifact = artifact_map.get(run.get("atifArtifactId"))
+        if artifact is None:
+            _add(issues, "atif-artifact", ("runs", index, "atifArtifactId"))
+            continue
+        if artifact.get("taskId") != task_id or artifact.get("runId") != run.get("runId"):
+            _add(issues, "atif-artifact", ("runs", index, "atifArtifactId"))
+        if artifact.get("sha256") != run.get("atifDigest"):
+            _add(issues, "atif-digest", ("runs", index, "atifDigest"))
+        if artifact.get("availability") != "available":
+            _add(issues, "atif-availability", ("runs", index, "atifArtifactId"))
+
+    metadata_fields = ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")
+    if isinstance(generation, dict) and _valid_digest(generation.get("metadataDigest")) and all(field in document for field in metadata_fields):
+        if generation["metadataDigest"] != _publication_metadata_digest(document):
+            _add(issues, "metadata-digest", ("generation", "metadataDigest"))
+    return sorted(issues, key=lambda issue: (issue.path, issue.rule))
+
+
+def _publication_example() -> dict[str, Any]:
+    task_id = "task-example"
+    run_id = "run-example"
+    atif_digest = "a" * 64
+    output_digest = "b" * 64
+    def artifact(artifact_id: str, digest: str, path: str, media_type: str, size: int) -> dict[str, Any]:
+        return {
+            "artifactId": artifact_id,
+            "taskId": task_id,
+            "runId": run_id,
+            "logicalPath": path,
+            "publicKey": f"v1/tasks/{task_id}/objects/sha256/{digest[:2]}/{digest}",
+            "mediaType": media_type,
+            "byteSize": size,
+            "sha256": digest,
+            "availability": "available",
+            "disclosure": {"redactionApplied": False, "originalRetained": True},
+        }
+    document: dict[str, Any] = {
+        "schemaVersion": "1.0",
+        "publicationId": "publication-example",
+        "taskId": task_id,
+        "generation": {
+            "publicationId": "publication-example",
+            "taskId": task_id,
+            "runId": run_id,
+            "metadataDigest": "0" * 64,
+            "idempotencyKey": "retry-publication-example",
+            "state": "staged",
+            "expectedCounts": {"tasks": 1, "pipelines": 1, "runs": 1, "events": 2, "artifacts": 2},
+            "createdAt": "2026-07-28T00:00:00Z",
+        },
+        "headIntent": {"publicationId": "publication-example", "taskId": task_id, "state": "visible", "updatedAt": "2026-07-28T00:00:02Z"},
+        "task": {"taskId": task_id, "title": "Example task", "lifecycleState": "completed", "createdAt": "2026-07-28T00:00:00Z", "completedAt": "2026-07-28T00:00:01Z"},
+        "pipelines": [{"pipelineId": "pipeline-example", "taskId": task_id, "name": "Example pipeline", "createdAt": "2026-07-28T00:00:00Z"}],
+        "runs": [{"runId": run_id, "taskId": task_id, "pipelineId": "pipeline-example", "role": "planning", "runState": "completed", "startedAt": "2026-07-28T00:00:00Z", "completedAt": "2026-07-28T00:00:01Z", "durationMs": 1000, "atifDigest": atif_digest, "atifArtifactId": "artifact-atif"}],
+        "events": [
+            {"taskId": task_id, "sequence": 1, "eventType": "started", "occurredAt": "2026-07-28T00:00:00Z", "summary": "Planning started"},
+            {"taskId": task_id, "sequence": 2, "eventType": "completed", "occurredAt": "2026-07-28T00:00:01Z", "summary": "Planning completed"},
+        ],
+        "artifacts": [
+            artifact("artifact-atif", atif_digest, "runs/run-example/trajectory.json", "application/json", 1024),
+            artifact("artifact-output", output_digest, "steps/1/output.txt", "text/plain", 42),
+        ],
+    }
+    document["generation"]["metadataDigest"] = _publication_metadata_digest(document)
+    return document
+
+
+def _run_publication_cases(validator: Draft202012Validator) -> tuple[int, int]:
+    clean = _publication_example()
+    redacted = copy.deepcopy(clean)
+    for artifact in redacted["artifacts"]:
+        artifact["disclosure"] = {"redactionApplied": True, "originalRetained": True}
+    redacted["generation"]["metadataDigest"] = _publication_metadata_digest(redacted)
+    active = copy.deepcopy(clean)
+    active["task"]["lifecycleState"] = "active"
+    active["task"]["completedAt"] = None
+    active["generation"]["metadataDigest"] = _publication_metadata_digest(active)
+    positives = {"clean": clean, "redacted": redacted, "active-after-planning": active}
+    negatives: dict[str, tuple[dict[str, Any], str]] = {}
+    mutated = copy.deepcopy(clean); mutated["unknown"] = True; negatives["unknown-field"] = (mutated, "schema-additionalProperties")
+    mutated = copy.deepcopy(clean); mutated["publicationId"] = "bad id"; negatives["malformed-id"] = (mutated, "schema-pattern")
+    mutated = copy.deepcopy(clean); mutated["task"]["createdAt"] = "0000-01-01T00:00:00Z"; negatives["zero-timestamp"] = (mutated, "timestamp")
+    mutated = copy.deepcopy(clean); mutated["runs"][0]["runState"] = "running"; negatives["partial-run"] = (mutated, "schema-enum")
+    mutated = copy.deepcopy(clean); mutated["generation"]["expectedCounts"]["artifacts"] = 3; negatives["bad-count"] = (mutated, "row-count")
+    mutated = copy.deepcopy(clean); mutated["pipelines"][0]["taskId"] = "other-task"; negatives["ownership"] = (mutated, "ownership")
+    mutated = copy.deepcopy(clean); mutated["events"][1]["sequence"] = 3; negatives["event-order"] = (mutated, "event-order")
+    mutated = copy.deepcopy(clean); mutated["runs"][0]["atifArtifactId"] = "missing"; negatives["atif-link"] = (mutated, "atif-artifact")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][0]["publicKey"] = "v1/tasks/task-example/objects/sha256/bb/" + "b" * 64; negatives["digest-key"] = (mutated, "artifact-key")
+    mutated = copy.deepcopy(clean); mutated["generation"]["metadataDigest"] = "c" * 64; negatives["metadata-digest"] = (mutated, "metadata-digest")
+    mutated = copy.deepcopy(clean); mutated["runs"][0]["atifDigest"] = "c" * 64; negatives["atif-digest"] = (mutated, "atif-digest")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][0]["publicKey"] = "https://private.example/object"; negatives["noncanonical-key"] = (mutated, "artifact-key")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][0]["logicalPath"] = "/private/trajectory.json"; negatives["private-locator"] = (mutated, "private-locator")
+    mutated = copy.deepcopy(clean); mutated["privateBucket"] = "not included"; negatives["private-field"] = (mutated, "private-field")
+    mutated = copy.deepcopy(clean); mutated["artifacts"][1]["byteSize"] = -1; negatives["negative-size"] = (mutated, "schema-minimum")
+    passed = failed = 0
+    accepted_names: list[str] = []
+    rejected_names: list[str] = []
+    for name, document in positives.items():
+        issues = validate_publication_document(document, validator)
+        if issues:
+            print(f"FAIL accepted publication {name}: {', '.join(issue.rendered() for issue in issues)}", file=sys.stderr)
+            failed += 1
+        else:
+            passed += 1
+            accepted_names.append(name)
+    for name, (document, expected_rule) in negatives.items():
+        issues = validate_publication_document(document, validator)
+        if not any(issue.rule == expected_rule for issue in issues):
+            print(f"FAIL rejected publication {name}: missing {expected_rule}", file=sys.stderr)
+            failed += 1
+        else:
+            passed += 1
+            rejected_names.append(name)
+    print(f"Publication checks: accepted={','.join(accepted_names)} rejected={','.join(rejected_names)} failed={failed}")
+    return passed, failed
 
 
 def _valid_digest(value: Any) -> bool:
@@ -728,12 +981,23 @@ def main(argv: list[str] | None = None) -> int:
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--atif-only", action="store_true", help="run the ATIF contract checks")
     modes.add_argument("--d1-only", action="store_true", help="run the clean D1 contract checks")
+    modes.add_argument("--publication-only", action="store_true", help="run the staged publication contract checks")
     args = parser.parse_args(argv)
     if args.d1_only:
         try:
             _, failed = _run_d1_cases()
         except (OSError, sqlite3.Error, RuntimeError, ValueError):
             print("D1 validator could not load its clean schema", file=sys.stderr)
+            return 1
+        return 1 if failed else 0
+    if args.publication_only:
+        try:
+            schema = json.loads(PUBLICATION_SCHEMA_PATH.read_text(encoding="utf-8"))
+            Draft202012Validator.check_schema(schema)
+            validator = Draft202012Validator(schema)
+            _, failed = _run_publication_cases(validator)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            print("Publication validator could not load its staged schema", file=sys.stderr)
             return 1
         return 1 if failed else 0
     try:

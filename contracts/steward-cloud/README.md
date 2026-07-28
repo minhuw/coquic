@@ -125,3 +125,31 @@ Each statement and staging batch is bounded below 100 parameters and 100 KB.
 `--d1-only` loads the schema with SQLite foreign keys enabled, exercises staged
 isolation, atomic expose/supersede/repoint/hide, injected-swap rollback, row
 counts, key and digest checks, object-key reuse, and private-locator denial.
+
+## Staged publication payload
+
+`publication.schema.json` is the producer-side Draft 2020-12 envelope. It is
+staging input, not a public response: `generation.state` is always `staged`,
+and `headIntent` records the desired task-head action without asserting that
+any row is visible. The final D1 transaction verifies all rows and performs the
+visible-generation/task-head swap atomically.
+
+The envelope maps directly to the clean D1 tables:
+
+- `generation` supplies `publication_generations`, including the stable
+  publication/task/run identity, idempotency key, canonical `metadataDigest`,
+  creation time, and expected task/pipeline/run/event/artifact counts.
+- `headIntent` supplies the eventual `task_heads` identity and desired state;
+  it is not exposed until the generation is verified.
+- `task`, `pipelines`, `runs`, `events`, and `artifacts` supply the rows for
+  `tasks`, `pipelines`, `runs`, `task_events`, and `artifacts` respectively.
+  Every relationship is within the one publication and task, and every run is
+  terminal and immutable. `runs.atifArtifactId` binds each run's ATIF digest to
+  its public artifact.
+
+Artifacts carry only logical relative paths, content-addressed public keys,
+media types, sizes, lower-case digests, availability, and disclosure booleans.
+The schema rejects unknown fields and the validator rejects private locators,
+credentials, noncanonical keys, dangling references, partial runs, count or
+digest mismatches, and fabricated zero timestamps. A task may remain `active`
+when its completed planning run is published; no incomplete run is represented.

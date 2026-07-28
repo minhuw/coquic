@@ -51,6 +51,10 @@
       };
       projectSrc = lib.cleanSource ./.;
       stewardPython = pkgs.python3.withPackages (ps: [
+        ps.boto3
+        ps.httpx
+        ps.jsonschema
+        ps.pillow
         ps.pydantic
         ps.pytest
         ps.sqlalchemy
@@ -135,6 +139,8 @@
           pkgs.gh
           pkgs.openssh
           pkgs.rsync
+          pkgs.tesseract
+          pkgs.trufflehog
           stewardPython
           stewardSource
           stewardLauncher
@@ -2161,7 +2167,11 @@ EOF
         extraPackages = [
           llvmPkgs.clang-tools
           pkgs.pre-commit
-          pkgs.python3
+          pkgs.trufflehog
+          pkgs.tesseract
+          pkgs.pulumi
+          pkgs.wrangler
+          stewardPython
           pkgs.uv
           duvetTool
           nodejs

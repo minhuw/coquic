@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import re
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,12 +14,23 @@ from typing import Any, Iterable
 from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "atif-v1.7.schema.json"
+D1_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "d1.sql"
 SUPPORTED_IMAGES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PUBLIC_KEY_PATTERN = re.compile(
+    r"^v1/tasks/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/objects/sha256/([0-9a-f]{2})/([0-9a-f]{64})$"
+)
+PRIVATE_KEY_PATTERN = re.compile(
+    r"^v1/originals/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/sha256/([0-9a-f]{64})\.jsonl$"
+)
 PRIVATE_NAME = re.compile(
     r"(?:bucket|objectkey|credential|secret|password|token|authorization|apikey|private)",
     re.IGNORECASE,
 )
+EXPECTED_D1_TABLES = {
+    "publication_generations", "task_heads", "tasks", "pipelines", "runs", "task_events", "artifacts",
+}
 PRIVATE_VALUE = re.compile(
     r"(?:https?|s3|gs|file|ssh|ftp|postgres|redis|wss?)://|"
     r"^(?:~[/\\]|[A-Za-z]:[/\\]|\\\\)|"
@@ -339,6 +351,267 @@ def validate_atif_bytes(raw: bytes, validator: Draft202012Validator) -> tuple[An
         return None, [Issue("canonicalization")]
     issues = validate_atif_document(document, validator, raw)
     return document, issues
+
+
+def _valid_digest(value: Any) -> bool:
+    return isinstance(value, str) and bool(DIGEST_PATTERN.fullmatch(value))
+
+
+def _valid_public_key(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = PUBLIC_KEY_PATTERN.fullmatch(value)
+    return bool(match and match.group(2) == match.group(3)[:2])
+
+
+def _valid_private_key(value: Any) -> bool:
+    return isinstance(value, str) and bool(PRIVATE_KEY_PATTERN.fullmatch(value))
+
+
+def _private_d1_column(name: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]", "", name.lower())
+    return compact not in {"publickey", "logicalpath"} and (
+        bool(PRIVATE_NAME.search(compact))
+        or compact in {"url", "uri", "endpoint", "baseurl", "baseuri", "filepath", "credentialpath", "privatepath"}
+    )
+
+
+def _d1_connection() -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:")
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(D1_SCHEMA_PATH.read_text(encoding="utf-8"))
+    if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise RuntimeError("foreign keys are disabled")
+    return connection
+
+
+def _d1_public_rows(connection: sqlite3.Connection) -> list[tuple[Any, ...]]:
+    return connection.execute(
+        """
+        SELECT h.task_id, p.publication_id, t.title, r.run_id
+          FROM task_heads AS h
+          JOIN publication_generations AS p
+            ON p.publication_id = h.publication_id AND p.state = 'visible'
+          JOIN tasks AS t
+            ON t.publication_id = p.publication_id AND t.task_id = h.task_id
+          JOIN runs AS r
+            ON r.publication_id = p.publication_id AND r.task_id = h.task_id
+         WHERE h.state = 'visible'
+         ORDER BY h.task_id
+        """
+    ).fetchall()
+
+
+def _d1_stage(
+    connection: sqlite3.Connection,
+    publication_id: str,
+    task_id: str,
+    run_id: str,
+    metadata_digest: str,
+    *,
+    artifact_rows: int = 2,
+    expected_artifact_count: int = 2,
+) -> None:
+    key_digest = "0" * 64
+    public_key = f"v1/tasks/{task_id}/objects/sha256/{key_digest[:2]}/{key_digest}"
+    statements = [
+        (
+            "INSERT INTO publication_generations "
+            "(publication_id, task_id, run_id, metadata_digest, idempotency_key, state, "
+            "expected_task_count, expected_pipeline_count, expected_run_count, expected_event_count, "
+            "expected_artifact_count, created_at) VALUES (?, ?, ?, ?, ?, 'staged', 1, 1, 1, 1, ?, ?)",
+            (publication_id, task_id, run_id, metadata_digest, f"retry-{publication_id}", expected_artifact_count, "2026-07-28T00:00:00Z"),
+        ),
+        (
+            "INSERT INTO tasks (publication_id, task_id, title, lifecycle_state, created_at) VALUES (?, ?, ?, 'completed', ?)",
+            (publication_id, task_id, "Example task", "2026-07-28T00:00:00Z"),
+        ),
+        (
+            "INSERT INTO pipelines (publication_id, pipeline_id, task_id, name, created_at) VALUES (?, ?, ?, ?, ?)",
+            (publication_id, f"pipeline-{publication_id}", task_id, "Example pipeline", "2026-07-28T00:00:00Z"),
+        ),
+        (
+            "INSERT INTO runs (publication_id, run_id, task_id, pipeline_id, role, run_state, started_at, completed_at, duration_ms, atif_digest) "
+            "VALUES (?, ?, ?, ?, 'implementation', 'completed', ?, ?, 1000, ?)",
+            (publication_id, run_id, task_id, f"pipeline-{publication_id}", "2026-07-28T00:00:00Z", "2026-07-28T00:00:01Z", "f" * 64),
+        ),
+        (
+            "INSERT INTO task_events (publication_id, task_id, sequence, event_type, occurred_at, summary) VALUES (?, ?, 1, 'completed', ?, ?)",
+            (publication_id, task_id, "2026-07-28T00:00:01Z", "Run completed"),
+        ),
+    ]
+    for statement, parameters in statements:
+        connection.execute("BEGIN")
+        connection.execute(statement, parameters)
+        connection.commit()
+    for index in range(artifact_rows):
+        connection.execute("BEGIN")
+        connection.execute(
+            "INSERT INTO artifacts (publication_id, artifact_id, task_id, run_id, logical_path, public_key, media_type, byte_size, sha256, availability, redaction_applied, original_retained) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'text/plain', ?, ?, 'available', 0, 1)",
+            (publication_id, f"artifact-{publication_id}-{index}", task_id, run_id, f"steps/1/output-{index}.txt", public_key, 12 + index, key_digest),
+        )
+        connection.commit()
+
+
+def _d1_expose(
+    connection: sqlite3.Connection,
+    task_id: str,
+    publication_id: str,
+    *,
+    inject_failure: bool = False,
+) -> None:
+    expected_tables = (
+        ("tasks", "expected_task_count"),
+        ("pipelines", "expected_pipeline_count"),
+        ("runs", "expected_run_count"),
+        ("task_events", "expected_event_count"),
+        ("artifacts", "expected_artifact_count"),
+    )
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT state, expected_task_count, expected_pipeline_count, expected_run_count, expected_event_count, expected_artifact_count "
+            "FROM publication_generations WHERE publication_id = ? AND task_id = ?",
+            (publication_id, task_id),
+        ).fetchone()
+        if row is None or row[0] != "staged":
+            raise ValueError("generation-state")
+        for (table, _), expected in zip(expected_tables, row[1:]):
+            actual = connection.execute(f"SELECT count(*) FROM {table} WHERE publication_id = ?", (publication_id,)).fetchone()[0]
+            if actual != expected:
+                raise ValueError("row-count")
+        connection.execute(
+            "UPDATE publication_generations SET state = 'superseded' WHERE task_id = ? AND state = 'visible' AND publication_id <> ?",
+            (task_id, publication_id),
+        )
+        changed = connection.execute(
+            "UPDATE publication_generations SET state = 'visible', exposed_at = ? WHERE publication_id = ? AND state = 'staged'",
+            ("2026-07-28T00:00:02Z", publication_id),
+        ).rowcount
+        if changed != 1:
+            raise ValueError("generation-state")
+        if inject_failure:
+            raise RuntimeError("injected-swap-failure")
+        connection.execute(
+            "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'visible', ?) "
+            "ON CONFLICT(task_id) DO UPDATE SET publication_id = excluded.publication_id, state = 'visible', updated_at = excluded.updated_at",
+            (task_id, publication_id, "2026-07-28T00:00:02Z"),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _d1_rejected(connection: sqlite3.Connection, statement: str, parameters: tuple[Any, ...]) -> bool:
+    connection.execute("BEGIN")
+    try:
+        connection.execute(statement, parameters)
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        return True
+    connection.rollback()
+    return False
+
+
+def _run_d1_cases() -> tuple[int, int]:
+    checks: list[tuple[str, bool]] = []
+    connection: sqlite3.Connection | None = None
+
+    def record(name: str, result: bool) -> None:
+        checks.append((name, result))
+
+    try:
+        connection = _d1_connection()
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        record("schema-load", EXPECTED_D1_TABLES <= tables)
+        record("foreign-keys", connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1)
+        columns = [
+            column[1]
+            for table in sorted(EXPECTED_D1_TABLES)
+            for column in connection.execute(f"PRAGMA table_info({table})")
+        ]
+        record("private-locator-denial", not any(_private_d1_column(column) for column in columns))
+        record(
+            "key-grammar",
+            _valid_public_key("v1/tasks/task-1/objects/sha256/00/" + "0" * 64)
+            and _valid_private_key("v1/originals/task-1/run-1/sha256/" + "a" * 64 + ".jsonl")
+            and not _valid_public_key("v1/originals/task-1/run-1/sha256/" + "a" * 64 + ".jsonl")
+            and not _valid_public_key("v1/tasks/task-1/objects/sha256/AA/" + "A" * 64)
+            and not _valid_public_key("v1/tasks/task-1/objects/sha256/01/" + "0" * 64)
+            and _valid_digest("0" * 64)
+            and not _valid_digest("A" * 64),
+        )
+        _d1_stage(connection, "pub-1", "task-1", "run-1", "a" * 64)
+        record("staged-hidden", _d1_public_rows(connection) == [])
+        _d1_expose(connection, "task-1", "pub-1")
+        record("initial-expose", _d1_public_rows(connection) == [("task-1", "pub-1", "Example task", "run-1")])
+        _d1_stage(connection, "pub-2", "task-1", "run-2", "b" * 64)
+        record("staging-isolation", _d1_public_rows(connection)[0][1] == "pub-1")
+        record(
+            "object-key-reuse",
+            connection.execute(
+                "SELECT count(DISTINCT public_key), count(DISTINCT logical_path) FROM artifacts WHERE publication_id = 'pub-2'"
+            ).fetchone() == (1, 2)
+            and connection.execute(
+                "SELECT a.public_key = b.public_key FROM artifacts AS a JOIN artifacts AS b ON a.artifact_id <> b.artifact_id "
+                "WHERE a.publication_id = 'pub-1' AND b.publication_id = 'pub-2' LIMIT 1"
+            ).fetchone()[0] == 1,
+        )
+        record(
+            "idempotency-denial",
+            _d1_rejected(
+                connection,
+                "INSERT INTO publication_generations "
+                "(publication_id, task_id, run_id, metadata_digest, idempotency_key, state, expected_task_count, expected_pipeline_count, expected_run_count, expected_event_count, expected_artifact_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'staged', 1, 1, 1, 1, 0, ?)",
+                ("pub-duplicate", "task-1", "run-duplicate", "d" * 64, "retry-pub-2", "2026-07-28T00:00:00Z"),
+            ),
+        )
+        try:
+            _d1_expose(connection, "task-1", "pub-2", inject_failure=True)
+        except RuntimeError:
+            pass
+        record(
+            "swap-rollback",
+            _d1_public_rows(connection)[0][1] == "pub-1"
+            and connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-1'").fetchone()[0] == "visible"
+            and connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-2'").fetchone()[0] == "staged",
+        )
+        _d1_expose(connection, "task-1", "pub-2")
+        record(
+            "supersede-and-repoint",
+            _d1_public_rows(connection)[0][1] == "pub-2"
+            and connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-1'").fetchone()[0] == "superseded",
+        )
+        _d1_stage(connection, "pub-bad", "task-1", "run-bad", "c" * 64, artifact_rows=1)
+        try:
+            _d1_expose(connection, "task-1", "pub-bad")
+        except ValueError as error:
+            record("row-count-denial", str(error) == "row-count")
+        else:
+            record("row-count-denial", False)
+        record("failed-generation-staged", connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-bad'").fetchone()[0] == "staged")
+        record("invalid-state-denial", _d1_rejected(connection, "UPDATE publication_generations SET state = 'invalid' WHERE publication_id = ?", ("pub-2",)))
+        record("invalid-digest-denial", _d1_rejected(connection, "UPDATE artifacts SET sha256 = ? WHERE publication_id = ?", ("A" * 64, "pub-2")))
+        record("invalid-key-denial", _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("private://object", "pub-2")))
+        record("private-name-denial", _private_d1_column("private_locator") and _private_d1_column("credential_url"))
+        connection.execute("BEGIN")
+        connection.execute("UPDATE task_heads SET state = 'hidden' WHERE task_id = ?", ("task-1",))
+        connection.commit()
+        record("hide-task", _d1_public_rows(connection) == [])
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
+        record("d1-execution", False)
+        print(f"FAIL d1 execution: {type(error).__name__}", file=sys.stderr)
+    finally:
+        if connection is not None:
+            connection.close()
+    passed = sum(result for _, result in checks)
+    failed = len(checks) - passed
+    summary = ", ".join(f"{name}={'ok' if result else 'FAIL'}" for name, result in checks)
+    print(f"D1 checks: {summary}")
+    return passed, failed
 def _example() -> dict[str, Any]:
     return {
         "schema_version": "ATIF-v1.7",
@@ -433,10 +706,17 @@ def _run_cases(validator: Draft202012Validator) -> tuple[int, int]:
     return passed, failed
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Steward cloud contracts")
-    parser.add_argument("--atif-only", action="store_true", help="run the ATIF contract checks")
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--atif-only", action="store_true", help="run the ATIF contract checks")
+    modes.add_argument("--d1-only", action="store_true", help="run the clean D1 contract checks")
     args = parser.parse_args(argv)
-    if not args.atif_only:
-        parser.error("one validation mode is required: --atif-only")
+    if args.d1_only:
+        try:
+            _, failed = _run_d1_cases()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            print("D1 validator could not load its clean schema", file=sys.stderr)
+            return 1
+        return 1 if failed else 0
     try:
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
         Draft202012Validator.check_schema(schema)

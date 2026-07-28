@@ -78,3 +78,48 @@ The executable definition is `scripts/validate_steward_cloud_contracts.py`.
 Its `--atif-only` mode loads this pinned schema with
 `Draft202012Validator`, then applies these cross-field checks to deterministic
 in-memory clean, redacted, and malformed examples.
+
+## D1 public metadata
+
+`d1.sql` is a clean-launch, public-safe schema. It is intentionally not a copy
+of Steward's private SQLite database and has no history migration or compatibility
+read path. The seven concepts are `publication_generations`, `task_heads`,
+`tasks`, `pipelines`, `runs`, `task_events`, and `artifacts`. Every generation
+child has a `publication_id` foreign key. A task head is the only pointer used
+by public reads; its `visible` state must join a `visible` generation. Staged,
+superseded, hidden, dangling, or malformed rows are therefore absent from the
+public query.
+
+Publication follows one crash-resumable order:
+
+1. Build and validate one complete terminal run and canonical metadata digest.
+2. Upload and verify immutable public objects, then optionally upload and verify
+   the private original.
+3. Insert bounded, parameterized D1 batches and verify every expected row count.
+4. In one transaction, supersede the prior generation, mark the new generation
+   `visible`, and upsert the task head. A failure rolls back the whole swap.
+
+The generation has a stable idempotency key, expected task/pipeline/run/event/
+artifact counts, and a metadata digest. Retries reuse those values and converge;
+no partial generation is exposed. Child rows are immutable after exposure.
+
+## R2 keys and disclosure
+
+Public objects use the exact content-addressed key grammar
+`v1/tasks/<task-id>/objects/sha256/<first-two-hex>/<64-lower-hex-digest>`.
+The first two characters must equal the digest prefix. Logical artifact paths
+remain in D1 and multiple paths or generations may reuse one public key. The
+configured anonymous public R2 domain is the only public origin; D1 stores no
+domain, URL, bucket, credential, or private locator.
+
+An optional private original uses
+`v1/originals/<task-id>/<run-id>/sha256/<64-lower-hex-digest>.jsonl`.
+It is conditional and immutable, has no public or custom-domain URL, is never
+written to D1 or ATIF, and expires after 2,592,000 seconds (provider deletion
+may lag by about 24 hours). `redaction_applied` and `original_retained` are
+bounded disclosure facts on artifact rows; they do not disclose the original.
+
+Each statement and staging batch is bounded below 100 parameters and 100 KB.
+`--d1-only` loads the schema with SQLite foreign keys enabled, exercises staged
+isolation, atomic expose/supersede/repoint/hide, injected-swap rollback, row
+counts, key and digest checks, object-key reuse, and private-locator denial.

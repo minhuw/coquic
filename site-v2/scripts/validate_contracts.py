@@ -168,6 +168,19 @@ def validate_steward_cloud_examples() -> int:
         if not isinstance(trajectory, dict) or trajectory.get("disclosure") != disclosure:
             failures += 1
             print(f"cloud {name}: trajectory disclosure does not match task disclosure")
+        task_id = task.get("taskId"); pipelines = {p.get("pipelineId"): p for p in data["pipelines"] if isinstance(p, dict)}
+        run_by_id = {r.get("runId"): r for r in runs if isinstance(r, dict)}; artifact_by_id = {a.get("artifactId"): a for a in artifacts if isinstance(a, dict)}
+        relations = [task.get("pipelineId") in pipelines and pipelines.get(task.get("pipelineId"), {}).get("taskId") == task_id and task.get("completedRunId") in run_by_id and run_by_id.get(task.get("completedRunId"), {}).get("taskId") == task_id]; trajectory_run = run_by_id.get(trajectory.get("runId")) if isinstance(trajectory, dict) else None
+        relations += [p.get("taskId") == task_id for p in pipelines.values()]
+        relations += [r.get("taskId") == task_id and r.get("pipelineId") in pipelines for r in run_by_id.values()]
+        relations += [e.get("taskId") == task_id for e in data["events"]]
+        relations += [a.get("taskId") == task_id and a.get("runId") in run_by_id for a in artifacts]
+        relations += [isinstance(a.get("sha256"), str) and a.get("publicKey") == f"v1/tasks/{task_id}/objects/sha256/{a['sha256'][:2]}/{a['sha256']}" for a in artifacts]
+        relations += [(a := artifact_by_id.get(r.get("atifArtifactId"))) is not None and a.get("sha256") == r.get("atifDigest") for r in run_by_id.values()]
+        relations += [isinstance(trajectory, dict) and trajectory.get("taskId") == task_id and trajectory.get("runId") == task.get("completedRunId") and trajectory_run is not None and trajectory.get("pipelineId") == trajectory_run.get("pipelineId")]
+        relations += [isinstance(trajectory, dict) and trajectory_run is not None and (a := artifact_by_id.get(trajectory.get("artifactId"))) is not None and a.get("artifactId") == trajectory_run.get("atifArtifactId") and all(trajectory.get(k) == a.get(k) for k in ("sha256", "publicKey", "byteSize"))]
+        failures += sum(not relation for relation in relations)
+        if not all(relations): print(f"cloud {name}: ownership or integrity relation is inconsistent")
         failures += _cloud_public_scan(response, name)
     return failures
 

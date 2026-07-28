@@ -1,10 +1,34 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import Module, { createRequire } from "node:module";
 import { test } from "node:test";
-import {
-  CloudReaderConfigError,
-  getCloudReaderConfig,
-  parseCloudReaderConfig,
-} from "@/lib/steward-archive/cloud-config";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+
+type CloudConfigModule = typeof import("@/lib/steward-archive/cloud-config");
+type CloudReaderConfigError = InstanceType<CloudConfigModule["CloudReaderConfigError"]>;
+
+const requireForTest = createRequire(resolve(process.cwd(), "tests/steward-archive/cloud-config.test.ts"));
+const runtimeModule = Module as unknown as {
+  _resolveFilename: (request: string, parent?: unknown, isMain?: boolean, options?: unknown) => string;
+};
+
+function loadCloudConfig(): CloudConfigModule {
+  const serverOnlyEmpty = join(dirname(requireForTest.resolve("next/package.json")), "dist/compiled/server-only/empty.js");
+  const previousResolveFilename = runtimeModule._resolveFilename;
+  runtimeModule._resolveFilename = function (request, parent, isMain, options) {
+    if (request === "server-only") return serverOnlyEmpty;
+    return previousResolveFilename.call(this, request, parent, isMain, options);
+  };
+  try {
+    return requireForTest(resolve(process.cwd(), "lib/steward-archive/cloud-config.ts")) as CloudConfigModule;
+  } finally {
+    runtimeModule._resolveFilename = previousResolveFilename;
+  }
+}
+
+const { CloudReaderConfigError, getCloudReaderConfig, parseCloudReaderConfig } = loadCloudConfig();
 
 const ACCOUNT_ID = "ABCDEF0123456789ABCDEF0123456789";
 const DATABASE_ID = "12345678-1234-4abc-8def-1234567890AB";
@@ -85,4 +109,34 @@ test("public R2 bases require safe HTTPS origins and contained paths", () => {
     "https://cdn.example.test/nested/base/",
   );
   assert.equal(parseCloudReaderConfig(environment({ COQUIC_STEWARD_PUBLIC_R2_BASE_URL: "https://objects.example.test" })).publicR2BaseUrl, "https://objects.example.test/");
+});
+
+test("Next rejects a client graph that imports cloud configuration", async () => {
+  const project = await mkdtemp(join(tmpdir(), "coquic-site-v2-cloud-config-"));
+  try {
+    const source = await readFile(resolve(process.cwd(), "lib/steward-archive/cloud-config.ts"), "utf8");
+    await mkdir(join(project, "app"));
+    await symlink(resolve(process.cwd(), "node_modules"), join(project, "node_modules"), "dir");
+    await writeFile(join(project, "cloud-config.ts"), source);
+    await writeFile(
+      join(project, "app/layout.tsx"),
+      "export default function Layout({ children }: Readonly<{ children: React.ReactNode }>) { return <html><body>{children}</body></html>; }\n",
+    );
+    await writeFile(
+      join(project, "app/page.tsx"),
+      "\"use client\";\nimport { parseCloudReaderConfig } from \"../cloud-config\";\nexport default function Page() { return <main>{typeof parseCloudReaderConfig}</main>; }\n",
+    );
+
+    const result = spawnSync(process.execPath, [resolve(process.cwd(), "node_modules/next/dist/bin/next"), "build", "--webpack"], {
+      cwd: project,
+      encoding: "utf8",
+      env: { ...process.env, NEXT_TELEMETRY_DISABLED: "1" },
+    });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.equal(result.error, undefined, String(result.error));
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /server-only[\s\S]*(?:cannot be imported from a Client Component module|only available in Server Components)/);
+  } finally {
+    await rm(project, { force: true, recursive: true });
+  }
 });

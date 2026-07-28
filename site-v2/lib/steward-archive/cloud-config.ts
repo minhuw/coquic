@@ -1,3 +1,5 @@
+import "server-only";
+
 // Server-only configuration. Keep this module out of client components and
 // never mirror its values into a public environment variable.
 

@@ -421,6 +421,9 @@ def _d1_stage(
     existing_generation = connection.execute(generation_sql, (publication_id,)).fetchone()
     if existing_generation is not None and existing_generation != expected_generation:
         raise ValueError("generation-conflict")
+    expected_children = (("tasks", "task_id,title,lifecycle_state,created_at,completed_at", ((task_id, "Example task", "completed", "2026-07-28T00:00:00Z", None),)), ("pipelines", "pipeline_id,task_id,name,created_at", ((f"pipeline-{publication_id}", task_id, "Example pipeline", "2026-07-28T00:00:00Z"),)), ("runs", "run_id,task_id,pipeline_id,role,run_state,started_at,completed_at,duration_ms,atif_digest", ((run_id, task_id, f"pipeline-{publication_id}", "implementation", "completed", "2026-07-28T00:00:00Z", "2026-07-28T00:00:01Z", 1000, "f" * 64),)), ("task_events", "task_id,sequence,event_type,occurred_at,summary", ((task_id, 1, "completed", "2026-07-28T00:00:01Z", "Run completed"),)), ("artifacts", "artifact_id,task_id,run_id,logical_path,public_key,media_type,byte_size,sha256,availability,redaction_applied,original_retained", tuple((f"artifact-{publication_id}-{index}", task_id, run_id, f"steps/1/output-{index}.txt", public_key, "text/plain", 12 + index, key_digest, "available", 0, 1) for index in range(expected_artifact_count))))
+    if any(any(row not in expected for row in connection.execute(f"SELECT {columns} FROM {table} WHERE publication_id = ?", (publication_id,)).fetchall()) for table, columns, expected in expected_children):
+        raise ValueError("child-conflict")
     statements = [
         (
             "INSERT INTO publication_generations "
@@ -461,9 +464,6 @@ def _d1_stage(
         connection.commit()
     if connection.execute(generation_sql, (publication_id,)).fetchone() != expected_generation:
         raise ValueError("generation-conflict")
-    if connection.execute("SELECT count(*) FROM artifacts WHERE publication_id = ? AND (task_id <> ? OR run_id <> ? OR public_key <> ? OR sha256 <> ?)", (publication_id, task_id, run_id, public_key, key_digest)).fetchone()[0] or connection.execute("SELECT count(*) FROM runs WHERE publication_id = ? AND (task_id <> ? OR run_id <> ? OR atif_digest <> ?)", (publication_id, task_id, run_id, "f" * 64)).fetchone()[0]:
-        raise ValueError("artifact-conflict")
-
 
 def _d1_expose(
     connection: sqlite3.Connection,
@@ -609,7 +609,9 @@ def _run_d1_cases() -> tuple[int, int]:
             record("row-count-denial", str(error) == "row-count")
         else:
             record("row-count-denial", False)
-        record("failed-generation-staged", connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-bad'").fetchone()[0] == "staged" and _d1_stage_rejected(connection, "pub-bad", "task-1", "run-bad", "d" * 64))
+        connection.execute("UPDATE tasks SET title = 'CONFLICTING TITLE' WHERE publication_id = 'pub-bad'")
+        connection.commit()
+        record("child-conflict-denial", connection.execute("SELECT state FROM publication_generations WHERE publication_id = 'pub-bad'").fetchone()[0] == "staged" and _d1_stage_rejected(connection, "pub-bad", "task-1", "run-bad", "d" * 64) and _d1_stage_rejected(connection, "pub-bad", "task-1", "run-bad", "c" * 64) and _d1_public_rows(connection)[0][1] == "pub-2")
         record("invalid-state-denial", _d1_rejected(connection, "UPDATE publication_generations SET state = 'invalid' WHERE publication_id = ?", ("pub-2",)))
         record("invalid-digest-denial", _d1_rejected(connection, "UPDATE artifacts SET sha256 = ? WHERE publication_id = ?", ("A" * 64, "pub-2")))
         record("invalid-key-denial", _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("private://object", "pub-2")) and _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("v1/tasks/not-task/objects/sha256/bb/" + "b" * 64, "pub-2")) and _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("v1/tasks/TASK-1/objects/sha256/00/" + "0" * 64, "pub-2")))

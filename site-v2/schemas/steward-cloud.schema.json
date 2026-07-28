@@ -13,7 +13,7 @@
   ],
   "$defs": {
     "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$" },
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
     "size": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
@@ -59,14 +59,14 @@
     },
     "run": {
       "type": "object", "additionalProperties": false,
-      "required": ["runId", "taskId", "pipelineId", "role", "runState", "startedAt", "completedAt", "durationMs", "atifDigest", "atifArtifactId"],
+      "required": ["runId", "taskId", "pipelineId", "role", "runState", "startedAt", "completedAt", "durationMs", "atifDigest"],
       "properties": {
         "runId": { "$ref": "#/$defs/id" }, "taskId": { "$ref": "#/$defs/id" }, "pipelineId": { "$ref": "#/$defs/id" },
         "role": { "type": "string", "minLength": 1, "maxLength": 128 },
         "runState": { "enum": ["completed", "failed", "cancelled"] },
         "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "$ref": "#/$defs/timestamp" },
         "durationMs": { "$ref": "#/$defs/duration" }, "atifDigest": { "$ref": "#/$defs/digest" },
-        "atifArtifactId": { "$ref": "#/$defs/id" }
+        "atifArtifactId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }
       }
     },
     "event": {
@@ -92,12 +92,12 @@
     },
     "trajectoryDescriptor": {
       "type": "object", "additionalProperties": false,
-      "required": ["taskId", "pipelineId", "runId", "role", "runState", "startedAt", "completedAt", "durationMs", "artifactId", "publicKey", "mediaType", "byteSize", "sha256", "availability", "disclosure"],
+      "required": ["taskId", "pipelineId", "runId", "role", "runState", "startedAt", "completedAt", "durationMs", "publicKey", "mediaType", "byteSize", "sha256", "availability", "disclosure"],
       "properties": {
         "taskId": { "$ref": "#/$defs/id" }, "pipelineId": { "$ref": "#/$defs/id" }, "runId": { "$ref": "#/$defs/id" },
         "role": { "type": "string", "minLength": 1, "maxLength": 128 }, "runState": { "enum": ["completed", "failed", "cancelled"] },
         "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "$ref": "#/$defs/timestamp" }, "durationMs": { "$ref": "#/$defs/duration" },
-        "artifactId": { "$ref": "#/$defs/id" }, "publicKey": { "type": "string", "pattern": "^v1/tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/objects/sha256/[0-9a-f]{2}/[0-9a-f]{64}$" },
+        "artifactId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }, "publicKey": { "type": "string", "pattern": "^v1/tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/objects/sha256/[0-9a-f]{2}/[0-9a-f]{64}$" },
         "mediaType": { "type": "string", "const": "application/json" }, "byteSize": { "$ref": "#/$defs/size" }, "sha256": { "$ref": "#/$defs/digest" },
         "availability": { "enum": ["available", "unavailable"] }, "disclosure": { "$ref": "#/$defs/disclosure" }
       }

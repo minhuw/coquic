@@ -399,6 +399,7 @@ async function main() {
   const { GET: getArtifact } = await import("../app/api/steward/tasks/[taskId]/artifact/route");
   const { GET: getTranscript } = await import("../app/api/steward/tasks/[taskId]/transcript/route");
   const { default: renderStewardPage } = await import("../app/steward/page");
+  const { default: renderTaskPage } = await import("../app/steward/tasks/[taskId]/page");
   const nextPackageRoot = dirname(requireForTest.resolve("next/package.json"));
   const { PathnameContext } = requireForTest(resolve(nextPackageRoot, "dist/shared/lib/hooks-client-context.shared-runtime")) as { PathnameContext: Context<string | null> };
   const originalFetch = globalThis.fetch;
@@ -431,6 +432,11 @@ async function main() {
   async function renderOverview(searchParams: Record<string, string | undefined> = {}) {
     const page = await renderStewardPage({ searchParams: Promise.resolve(searchParams) });
     return renderToStaticMarkup(createElement(PathnameContext.Provider, { value: "/steward" }, page));
+  }
+
+  async function renderTask(taskId = DETAIL_TASK_ID, searchParams: Record<string, string | undefined> = {}) {
+    const page = await renderTaskPage({ params: Promise.resolve({ taskId }), searchParams: Promise.resolve(searchParams) });
+    return renderToStaticMarkup(createElement(PathnameContext.Provider, { value: `/steward/tasks/${taskId}` }, page));
   }
 
   function assertOverviewHasNoLegacyOutput(html: string) {
@@ -491,6 +497,55 @@ async function main() {
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
     assertOverviewHasNoLegacyOutput(html);
+  });
+
+  function assertTaskHasNoLegacyOutput(html: string) {
+    const output = html.toLowerCase();
+    for (const forbidden of ["load more", "revision", "raw archive", "lazytranscript", "filesystem fallback"]) assert(!output.includes(forbidden), forbidden);
+  }
+
+  await runCase("clean cloud task render", scenario([], [], undefined, [], detailScenario()), async () => {
+    const html = await renderTask();
+    assert.match(html, /Detail task/);
+    assert.match(html, /Pipelines/);
+    assert.match(html, /Runs/);
+    assert.match(html, /Complete trajectory/);
+    assert.match(html, /Download trajectory artifact/);
+    assert.match(html, /Timeline/);
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  await runCase("redacted cloud task render", scenario([], [], undefined, [], detailScenario({ redactionApplied: true, originalRetained: false })), async () => {
+    const html = await renderTask();
+    assert.match(html, /Public values redacted/);
+    assert.match(html, /Original unavailable/);
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  await runCase("active cloud task render", scenario([], [], undefined, [], detailScenario({ lifecycleState: "active" })), async () => {
+    const html = await renderTask();
+    assert.match(html, /Active/);
+    assert.match(html, /Complete trajectory rendering is pending/);
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  await runCase("missing trajectory descriptor render", scenario([], [], undefined, [], detailScenario({ availability: "unavailable" })), async () => {
+    const html = await renderTask();
+    assert.match(html, /Complete trajectory/);
+    assert.match(html, /artifact is unavailable/i);
+    assert(!html.includes("Download trajectory artifact"));
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  await runCase("hidden task returns not found", scenario([], [], undefined, candidateRows), async () => {
+    await assert.rejects(() => renderTask("task-hidden"));
+  });
+
+  await runCase("task detail outage render", { ...scenario([], []), mode: "outage" }, async () => {
+    const html = await renderTask();
+    assert.match(html, /Task detail unavailable/);
+    assert.match(html, /Retry task detail/);
+    assertTaskHasNoLegacyOutput(html);
   });
 
   await runCase("empty status", scenario([], [], undefined, candidateRows), async () => {

@@ -357,6 +357,18 @@ const DETAIL_VISIBLE_FROM = `
    AND t.task_id = p.task_id
 `;
 
+const DETAIL_TASK_VISIBLE_FROM = `
+  FROM task_heads AS h
+  JOIN publication_generations AS p
+    ON p.publication_id = h.publication_id
+   AND p.task_id = h.task_id
+   AND p.state = 'visible'
+   AND p.exposed_at IS NOT NULL
+  LEFT JOIN tasks AS t
+    ON t.publication_id = p.publication_id
+   AND t.task_id = p.task_id
+`;
+
 export const TASK_DETAIL_STATEMENT = `
 SELECT
   h.updated_at AS head_updated_at,
@@ -379,9 +391,9 @@ SELECT
   t.lifecycle_state AS lifecycle_state,
   t.created_at AS created_at,
   t.completed_at AS completed_at
-${DETAIL_VISIBLE_FROM}
+${DETAIL_TASK_VISIBLE_FROM}
  WHERE h.state = 'visible'
-   AND t.task_id = ?
+   AND p.task_id = ?
  LIMIT 1
 `;
 

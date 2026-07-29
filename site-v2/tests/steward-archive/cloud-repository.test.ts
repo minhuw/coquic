@@ -419,6 +419,24 @@ test("returns no detail for an absent or hidden publication but rejects dangling
   );
 });
 
+test("rejects a visible head and generation when the required task row is missing", async () => {
+  const danglingTask = detailTaskRow();
+  danglingTask.task_id = null;
+  danglingTask.title = null;
+  danglingTask.lifecycle_state = null;
+  danglingTask.created_at = null;
+  danglingTask.completed_at = null;
+  const client = new FakeClient(response([danglingTask]));
+
+  await assert.rejects(
+    () => new CloudRepository({ client }).getTaskDetail(detailTaskId),
+    CloudRepositoryDataError,
+  );
+  assert.equal(client.calls.length, 1);
+  assert.match(client.calls[0]!.statement, /LEFT JOIN tasks AS t/);
+  assert.match(client.calls[0]!.statement, /p\.task_id = \?/);
+});
+
 test("selects only visible logical artifacts and resolves a validated anonymous URL", async () => {
   const config = {
     accountId: "a".repeat(32),

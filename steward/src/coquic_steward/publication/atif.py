@@ -9,6 +9,7 @@ service.  Redaction and publication are owned by later stages.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import math
@@ -58,6 +59,10 @@ _PRIVATE_VALUE_RE = re.compile(
 _SOURCE_BASENAMES = frozenset(
     {"codex.jsonl", "activities.jsonl", "telemetry.json", "run.json"}
 )
+_ACTIVITY_VALUES = frozenset(
+    {"orient", "investigate", "edit", "self_validate", "self_review", "report"}
+)
+_ACTIVITY_MARKER = "STEWARD_ACTIVITY "
 _MISSING = object()
 
 
@@ -93,8 +98,9 @@ class _ArtifactState:
     media_type: str
     sha256: str
     byte_size: int
-    owner_step_id: int
+    owner_step_id: int | str | None
     referenced: bool = False
+    backing: bytes | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -230,8 +236,10 @@ def _document_content(value: Any) -> bytes:
         return bytes(value)
     if isinstance(value, str):
         return value.encode("utf-8")
-    if isinstance(value, Mapping) and "content" in value:
-        return _document_content(value["content"])
+    if isinstance(value, Mapping):
+        if "content" in value:
+            return _document_content(value["content"])
+        return _canonical_json(_copy_json(value))
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         # A sequence of decoded JSONL records is accepted at this private
         # boundary, then canonicalized exactly like a stable file read.
@@ -265,10 +273,15 @@ def _documents_from(value: Any) -> dict[str, Any]:
 
 
 def _pick_document(documents: Mapping[str, Any], basename: str) -> Any:
+    matches: list[Any] = []
     for name, value in documents.items():
         stem = _document_name(name)
         if stem == basename or stem == basename.removesuffix(".jsonl").removesuffix(".json"):
-            return value
+            matches.append(value)
+    if len(matches) > 1:
+        _fail(ReasonCode.invalid_metadata)
+    if matches:
+        return matches[0]
     return _MISSING
 
 
@@ -284,30 +297,142 @@ def _parse_document_jsonl(value: Any, *, label: str) -> tuple[dict[str, Any], ..
     return _parse_jsonl_bytes(_document_content(value), label=label)
 
 
-def _validate_activity_records(records: Sequence[Mapping[str, Any]]) -> None:
+def _activity_marker(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not value.startswith(_ACTIVITY_MARKER):
+        return None
+    try:
+        marker = json.loads(
+            value[len(_ACTIVITY_MARKER) :].splitlines()[0],
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (json.JSONDecodeError, IndexError, TypeError, ValueError):
+        return None
+    if not isinstance(marker, Mapping) or set(marker) != {"activity", "summary"}:
+        return None
+    activity = marker.get("activity")
+    summary = marker.get("summary")
+    if (
+        not isinstance(activity, str)
+        or activity not in _ACTIVITY_VALUES
+        or not isinstance(summary, str)
+        or not summary
+        or len(summary.encode("utf-8")) > 240
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in summary)
+    ):
+        return None
+    return activity, summary
+
+
+def _validate_raw_activity_records(records: Sequence[Mapping[str, Any]]) -> None:
     if not records:
-        return
-    if records[0].get("record_type") != "header" or records[-1].get("record_type") != "summary":
         _fail(ReasonCode.partial)
-    if records[0].get("schema_version") != 1 or records[-1].get("schema_version") != 1:
-        _fail(ReasonCode.invalid_metadata)
-    expected_sequence = 1
-    for record in records[1:-1]:
-        if record.get("record_type") != "event" or record.get("schema_version") != 1:
+    seen: set[str] = set()
+    for record in records:
+        if record.get("type") != "item.completed":
+            _fail(ReasonCode.partial)
+        item = record.get("item")
+        if not isinstance(item, Mapping) or item.get("type") != "agent_message":
             _fail(ReasonCode.invalid_metadata)
-        sequence = record.get("sequence")
-        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence != expected_sequence:
+        source_id = item.get("id")
+        if not isinstance(source_id, str) or not _ID_RE.fullmatch(source_id):
+            _fail(ReasonCode.invalid_identifier)
+        if source_id in seen:
             _fail(ReasonCode.invalid_metadata)
-        expected_sequence += 1
-    summary = records[-1]
-    if summary.get("capture_state") not in {"complete", "partial"}:
-        _fail(ReasonCode.invalid_metadata)
-    for key in ("recorded", "invalid", "duplicate", "omitted"):
-        value = summary.get(key)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        seen.add(source_id)
+        text = item.get("text")
+        if not isinstance(text, str) or not text:
             _fail(ReasonCode.invalid_metadata)
-    if not isinstance(summary.get("truncated"), bool):
-        _fail(ReasonCode.invalid_metadata)
+        # A marker is optional for a raw session envelope, but a malformed
+        # marker is never silently published as an activity fact.
+        if text.startswith(_ACTIVITY_MARKER) and _activity_marker(text) is None:
+            _fail(ReasonCode.invalid_metadata)
+
+
+def _validate_activity_records(records: Sequence[Mapping[str, Any]]) -> str:
+    """Validate one of the two producer activity envelopes.
+
+    The recorder sidecar has a header/event/summary envelope.  Recovery and
+    older session paths can hand the mapper the newline-terminated completed
+    agent events directly; those events are validated without inventing a
+    header or summary.
+    """
+
+    if not records:
+        _fail(ReasonCode.partial)
+    if records[0].get("record_type") == "header" or records[-1].get("record_type") == "summary":
+        if records[0].get("record_type") != "header" or records[-1].get("record_type") != "summary":
+            _fail(ReasonCode.partial)
+        if records[0].get("schema_version") != 1 or records[-1].get("schema_version") != 1:
+            _fail(ReasonCode.invalid_metadata)
+        expected_sequence = 1
+        for record in records[1:-1]:
+            if record.get("record_type") != "event" or record.get("schema_version") != 1:
+                _fail(ReasonCode.invalid_metadata)
+            sequence = record.get("sequence")
+            if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence != expected_sequence:
+                _fail(ReasonCode.invalid_metadata)
+            source_id = record.get("source_event_id")
+            if not isinstance(source_id, str) or not _ID_RE.fullmatch(source_id):
+                _fail(ReasonCode.invalid_identifier)
+            if "recorded_at" in record:
+                _timestamp(record["recorded_at"])
+            if "activity" in record and record["activity"] not in _ACTIVITY_VALUES:
+                _fail(ReasonCode.invalid_metadata)
+            if "summary" in record and (
+                not isinstance(record["summary"], str)
+                or not record["summary"]
+                or len(record["summary"].encode("utf-8")) > 240
+            ):
+                _fail(ReasonCode.invalid_metadata)
+            expected_sequence += 1
+        summary = records[-1]
+        if summary.get("capture_state") != "complete":
+            _fail(ReasonCode.partial)
+        for key in ("recorded", "invalid", "duplicate", "omitted"):
+            value = summary.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                _fail(ReasonCode.invalid_metadata)
+        if not isinstance(summary.get("truncated"), bool):
+            _fail(ReasonCode.invalid_metadata)
+        if summary["recorded"] != len(records) - 2:
+            _fail(ReasonCode.partial)
+        if summary["omitted"] or summary["truncated"]:
+            _fail(ReasonCode.partial)
+        return "sidecar"
+    _validate_raw_activity_records(records)
+    return "raw"
+
+
+def _parse_activity_document(
+    value: Any, *, expected_transcript_sha256: str | None = None
+) -> tuple[tuple[dict[str, Any], ...], str]:
+    if value is _MISSING:
+        _fail(ReasonCode.partial)
+    content = _document_content(value)
+    try:
+        parsed = _parse_json_bytes(content)
+    except AtifConversionError:
+        parsed = _MISSING
+    if isinstance(parsed, Mapping) and parsed.get("availability") == "unavailable":
+        if set(parsed) - {"availability", "reason"}:
+            _fail(ReasonCode.invalid_metadata)
+        reason = parsed.get("reason")
+        if reason is not None and (not isinstance(reason, str) or not reason or len(reason) > 256):
+            _fail(ReasonCode.invalid_metadata)
+        return (), "unavailable"
+    records = _parse_jsonl_bytes(content, label="activities.jsonl")
+    envelope = _validate_activity_records(records)
+    if envelope == "sidecar" and "transcript_sha256" in records[-1]:
+        digest = records[-1]["transcript_sha256"]
+        if (
+            not isinstance(digest, str)
+            or not _DIGEST_RE.fullmatch(digest)
+            or expected_transcript_sha256 is None
+            or digest != expected_transcript_sha256
+        ):
+            _fail(ReasonCode.invalid_metadata)
+    return records, envelope
 
 
 def _parse_document_json(value: Any, *, label: str) -> dict[str, Any] | None:
@@ -379,11 +504,51 @@ def _private_value(value: object, *, key: str | None = None) -> bool:
     return False
 
 
+def _known_logical_path_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    compact = re.sub(r"[^a-z0-9]", "", key.lower())
+    return compact in {
+        "path",
+        "filepath",
+        "filename",
+        "logicalpath",
+        "logicalfilepath",
+    }
+
+
+def _logical_source_path(value: object) -> str:
+    """Validate a producer path and keep only a logical relative reference."""
+
+    if not isinstance(value, str) or not value or len(value) > 1024:
+        _fail(ReasonCode.unsafe_content)
+    if (
+        value.startswith("/")
+        or value.startswith("\\")
+        or "\\" in value
+        or "://" in value
+        or "\x00" in value
+    ):
+        _fail(ReasonCode.unsafe_content)
+    parts = value.split("/")
+    if any(
+        not part
+        or part in {".", ".."}
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", part)
+        for part in parts
+    ):
+        _fail(ReasonCode.unsafe_content)
+    return value
+
+
 def _safe_source(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
     """Keep only bounded, public-safe producer facts under ``extra.coquic``."""
 
     if depth > 8:
         _fail(ReasonCode.oversized)
+    if _known_logical_path_key(key):
+        value = _logical_source_path(value)
+        key = "logicalPath"
     if key is not None and _private_key(key):
         _fail(ReasonCode.unsafe_content)
     if _private_value(value, key=key):
@@ -391,7 +556,14 @@ def _safe_source(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
     if isinstance(value, Mapping):
         if len(value) > _MAX_SOURCE_FACTS:
             _fail(ReasonCode.oversized)
-        return {str(child_key): _safe_source(child, key=str(child_key), depth=depth + 1) for child_key, child in value.items()}
+        result: dict[str, Any] = {}
+        for raw_key, child in value.items():
+            child_key = str(raw_key)
+            output_key = "logicalPath" if _known_logical_path_key(child_key) else child_key
+            if output_key in result:
+                _fail(ReasonCode.invalid_metadata)
+            result[output_key] = _safe_source(child, key=output_key, depth=depth + 1)
+        return result
     if isinstance(value, (list, tuple)):
         if len(value) > _MAX_SOURCE_FACTS:
             _fail(ReasonCode.oversized)
@@ -603,19 +775,33 @@ def _function_name(record: Mapping[str, Any], item: Mapping[str, Any] | None, re
 
 def _decode_inline_image(value: Any) -> tuple[bytes, str] | None:
     if isinstance(value, bytes):
+        if not value or len(value) > 64 * 1024 * 1024:
+            return None
         return value, ""
     if not isinstance(value, str):
         return None
     encoded = value
-    if encoded.startswith("data:") and "," in encoded:
+    media = ""
+    if encoded.startswith("data:"):
+        if "," not in encoded:
+            return None
         header, encoded = encoded.split(",", 1)
-        media = header[5:].split(";", 1)[0]
+        parameters = header[5:].split(";")
+        media = parameters[0].lower()
+        if not media or "base64" not in parameters[1:]:
+            return None
     else:
-        media = ""
+        # Bare base64 is accepted for the older producer shape.  Its media
+        # type must come from the surrounding image descriptor.
+        if len(encoded) > (64 * 1024 * 1024) * 2:
+            return None
     try:
-        return base64.b64decode(encoded, validate=True), media
-    except (ValueError, base64.binascii.Error):
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
         return None
+    if not content or len(content) > 64 * 1024 * 1024:
+        return None
+    return content, media
 
 
 def _image_part(
@@ -626,7 +812,19 @@ def _image_part(
 ) -> dict[str, Any]:
     source = value.get("source") if isinstance(value.get("source"), Mapping) else value
     if isinstance(source, Mapping) and isinstance(source.get("image_url"), Mapping):
-        source = {**source, **source["image_url"]}
+        nested = source["image_url"]
+        source = {**source, **nested}
+        if "data" not in source:
+            nested_url = nested.get("url")
+            if nested_url is not None:
+                source = {**source, "data": nested_url}
+    if isinstance(source, Mapping) and isinstance(source.get("imageUrl"), Mapping):
+        nested = source["imageUrl"]
+        source = {**source, **nested}
+        if "data" not in source:
+            nested_url = nested.get("url")
+            if nested_url is not None:
+                source = {**source, "data": nested_url}
     media = None
     for key in ("media_type", "mediaType", "mime_type", "mimeType", "type"):
         candidate = source.get(key) if isinstance(source, Mapping) else None
@@ -647,16 +845,50 @@ def _image_part(
         if isinstance(source, Mapping) and key in source:
             inline = _decode_inline_image(source[key])
             break
+    if inline is None and isinstance(source, Mapping):
+        for key in ("image_url", "imageUrl", "url"):
+            candidate = source.get(key)
+            if isinstance(candidate, str) and candidate.startswith("data:"):
+                inline = _decode_inline_image(candidate)
+                if inline is None:
+                    _fail(ReasonCode.invalid_media_type)
+                break
     if artifact_id is None and inline is not None:
         content, inline_media = inline
         if inline_media:
             media = inline_media
+        if media not in SUPPORTED_IMAGE_MEDIA_TYPES:
+            _fail(ReasonCode.invalid_media_type)
         digest = hashlib.sha256(content).hexdigest()
         artifact_id = f"image-{digest[:24]}"
-        artifacts.setdefault(
-            artifact_id,
-            _ArtifactState(artifact_id, media, digest, len(content), owner_step_id),
-        )
+        existing = artifacts.get(artifact_id)
+        if existing is None:
+            artifacts[artifact_id] = _ArtifactState(
+                artifact_id, media, digest, len(content), owner_step_id, backing=content
+            )
+        elif (
+            existing.media_type != media
+            or existing.sha256 != digest
+            or existing.byte_size != len(content)
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        else:
+            existing.backing = content
+    elif inline is not None:
+        content, inline_media = inline
+        if inline_media:
+            if media is not None and media != inline_media:
+                _fail(ReasonCode.invalid_media_type)
+            media = inline_media
+        if media not in SUPPORTED_IMAGE_MEDIA_TYPES:
+            _fail(ReasonCode.invalid_media_type)
+        digest = hashlib.sha256(content).hexdigest()
+        descriptor = artifacts.get(artifact_id or "")
+        if descriptor is None:
+            _fail(ReasonCode.invalid_path)
+        if descriptor.sha256 != digest or descriptor.byte_size != len(content) or descriptor.media_type != media:
+            _fail(ReasonCode.invalid_metadata)
+        descriptor.backing = content
     if media not in SUPPORTED_IMAGE_MEDIA_TYPES:
         _fail(ReasonCode.invalid_media_type)
     if artifact_id is None or not _ID_RE.fullmatch(artifact_id):
@@ -668,7 +900,7 @@ def _image_part(
         descriptor.owner_step_id = owner_step_id
     if descriptor.media_type != media:
         _fail(ReasonCode.invalid_media_type)
-    if descriptor.owner_step_id != owner_step_id:
+    if isinstance(descriptor.owner_step_id, int) and descriptor.owner_step_id != owner_step_id:
         _fail(ReasonCode.invalid_metadata)
     descriptor.referenced = True
     return {"type": "image", "source": {"media_type": media, "path": f"artifact:{artifact_id}"}}
@@ -879,7 +1111,7 @@ def _map_steps(
     records: Sequence[Mapping[str, Any]],
     *,
     artifacts: dict[str, _ArtifactState],
-) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, list[dict[str, Any]]]]:
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, list[dict[str, Any]]], tuple[_MappedStep, ...]]:
     calls: dict[str, str] = {}
     used_call_ids: set[str] = set()
     pending_calls: list[str] = []
@@ -993,7 +1225,7 @@ def _map_steps(
         mapped.append(_MappedStep(step, index, _source_identity(item or record)))
     if not mapped:
         _fail(ReasonCode.partial)
-    return [item.value for item in mapped], calls, unpaired
+    return [item.value for item in mapped], calls, unpaired, tuple(mapped)
 
 
 def _artifact_refs_for_step(artifacts: Mapping[str, _ArtifactState], step_id: int) -> list[str]:
@@ -1135,7 +1367,7 @@ def _coerce_source(
     if documents is not None:
         selected_documents = _documents_from(documents)
     for name, value in (("codex.jsonl", codex), ("activities.jsonl", activities), ("telemetry.json", telemetry), ("run.json", run_document)):
-        if value is not _MISSING:
+        if value is not _MISSING and value is not None:
             selected_documents[name] = value
     if artifacts is not None:
         source_artifacts = tuple(artifacts)
@@ -1170,9 +1402,9 @@ def _artifact_states(
             continue
         if artifact.artifact_id in states:
             _fail(ReasonCode.invalid_metadata)
-        owner = artifact.owner_step_id if isinstance(artifact.owner_step_id, int) else 0
-        if owner < 0:
-            owner = 0
+        owner = artifact.owner_step_id
+        if isinstance(owner, int) and owner < 0:
+            _fail(ReasonCode.invalid_metadata)
         states[artifact.artifact_id] = _ArtifactState(
             artifact.artifact_id,
             artifact.media_type,
@@ -1183,53 +1415,85 @@ def _artifact_states(
     return states
 
 
+def _resolve_artifact_owners(
+    artifacts: Mapping[str, _ArtifactState], mapped: Sequence[_MappedStep]
+) -> None:
+    """Resolve logical source identities only when they name one step."""
+
+    identities: dict[str, list[int]] = {}
+    for step_id, step in enumerate(mapped, start=1):
+        if step.source_identity is not None:
+            identities.setdefault(step.source_identity, []).append(step_id)
+    for artifact in artifacts.values():
+        owner = artifact.owner_step_id
+        if isinstance(owner, str):
+            candidates = identities.get(owner, [])
+            if len(candidates) != 1:
+                _fail(ReasonCode.invalid_metadata)
+            artifact.owner_step_id = candidates[0]
+        elif isinstance(owner, int):
+            if owner < 1 or owner > len(mapped):
+                _fail(ReasonCode.invalid_metadata)
+        else:
+            _fail(ReasonCode.invalid_metadata)
+
+
+def _attach_referenced_artifacts(
+    steps: Sequence[dict[str, Any]], artifacts: Mapping[str, _ArtifactState]
+) -> None:
+    for artifact in artifacts.values():
+        if not artifact.referenced or not isinstance(artifact.owner_step_id, int):
+            continue
+        owner = steps[artifact.owner_step_id - 1]
+        coqui = owner.setdefault("extra", {}).setdefault("coquic", {})
+        references = coqui.setdefault("artifactIds", [])
+        if artifact.artifact_id not in references:
+            references.append(artifact.artifact_id)
+
+
 def _source_facts(
     records: Sequence[Mapping[str, Any]],
     activities: Sequence[Mapping[str, Any]],
     telemetry: Mapping[str, Any] | None,
     run_document: Mapping[str, Any] | None,
+    *,
+    activity_state: str = "available",
 ) -> dict[str, Any]:
     facts: dict[str, Any] = {
         "codex": {"recordCount": len(records), "recordTypes": sorted({_record_type(item, _item(item)) for item in records})},
     }
-    if activities:
+    if activity_state == "unavailable":
+        facts["activities"] = {"availability": "unavailable"}
+    elif activities:
         events = []
-        for index, record in enumerate(activities):
-            record_type = record.get("record_type", record.get("type"))
-            if record_type == "event":
-                event: dict[str, Any] = {"recordIndex": index}
-                for key in ("sequence", "source_event_id", "stage", "activity", "summary", "recorded_at"):
-                    if key in record:
-                        event[{"source_event_id": "sourceEventId", "recorded_at": "recordedAt"}.get(key, key)] = record[key]
-                events.append(_safe_source(event))
-        facts["activities"] = {"recordCount": len(activities), "events": events}
-    if telemetry is None:
-        facts["telemetry"] = {"availability": "unavailable"}
-    else:
-        selected: dict[str, Any] = {"availability": "available"}
-        for key in ("schema_version", "provenance", "completeness", "duration_ms", "first_agent_message_completed_ms", "process_outcome"):
-            if key in telemetry:
-                selected[key] = telemetry[key]
-        aggregate = telemetry.get("aggregate")
-        if isinstance(aggregate, Mapping):
-            selected["aggregate"] = {
-                "usage": {
-                    output_key: aggregate[input_key]
-                    for input_key, output_key in (
-                        ("input_tokens", "prompt"),
-                        ("cached_input_tokens", "cached"),
-                        ("output_tokens", "completion"),
-                        ("reasoning_output_tokens", "reasoning"),
-                        ("total_tokens", "total"),
-                        ("completed_turns", "turns"),
-                    )
-                    if input_key in aggregate
+        raw_envelope = activities[0].get("type") == "item.completed"
+        if raw_envelope:
+            for index, record in enumerate(activities):
+                item = record.get("item")
+                if not isinstance(item, Mapping):
+                    _fail(ReasonCode.invalid_metadata)
+                event: dict[str, Any] = {
+                    "recordIndex": index,
+                    "recordType": "item.completed",
+                    "sourceId": item["id"],
                 }
-            }
-        cost = telemetry.get("cost")
-        if isinstance(cost, Mapping) and cost.get("status") in {"estimated", "unavailable"}:
-            selected["cost"] = {key: cost[key] for key in ("status", "micro_usd", "reason") if key in cost}
-        facts["telemetry"] = _safe_source(selected)
+                marker = _activity_marker(item.get("text"))
+                if marker is not None:
+                    event["activity"], event["summary"] = marker
+                events.append(_safe_source(event))
+        else:
+            for index, record in enumerate(activities):
+                record_type = record.get("record_type", record.get("type"))
+                if record_type == "event":
+                    event = {"recordIndex": index}
+                    for key in ("sequence", "source_event_id", "stage", "activity", "summary", "recorded_at"):
+                        if key in record:
+                            event[{"source_event_id": "sourceEventId", "recorded_at": "recordedAt"}.get(key, key)] = record[key]
+                    events.append(_safe_source(event))
+        facts["activities"] = {"recordCount": len(activities), "events": events}
+    else:
+        facts["activities"] = {"availability": "available", "recordCount": 0, "events": []}
+    facts["telemetry"] = _telemetry_public(telemetry)
     if run_document is not None:
         selected = {key: run_document[key] for key in ("role", "state", "roleOrdinal", "result", "exit") if key in run_document}
         # Exit reasons and result summaries are evidence, but not private paths.
@@ -1239,6 +1503,278 @@ def _source_facts(
             selected["exit"] = {key: selected["exit"][key] for key in ("code", "signal") if key in selected["exit"]}
         facts["run"] = _safe_source(selected)
     return facts
+
+
+def _metric(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        _fail(ReasonCode.invalid_metadata)
+    return value
+
+
+def _validate_telemetry_aggregate(value: object, *, turns_present: bool) -> dict[str, int | None]:
+    if not isinstance(value, Mapping):
+        _fail(ReasonCode.invalid_metadata)
+    allowed = {
+        "completed_turns",
+        "input_tokens",
+        "cached_input_tokens",
+        "uncached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    }
+    if set(value) - allowed:
+        _fail(ReasonCode.invalid_metadata)
+    aggregate = {key: _metric(value.get(key)) for key in allowed if key in value}
+    input_tokens = aggregate.get("input_tokens")
+    cached = aggregate.get("cached_input_tokens")
+    uncached = aggregate.get("uncached_input_tokens")
+    output_tokens = aggregate.get("output_tokens")
+    reasoning = aggregate.get("reasoning_output_tokens")
+    total = aggregate.get("total_tokens")
+    if input_tokens is not None and cached is not None and cached > input_tokens:
+        _fail(ReasonCode.invalid_metadata)
+    if input_tokens is not None and cached is not None and uncached is not None and uncached != input_tokens - cached:
+        _fail(ReasonCode.invalid_metadata)
+    if output_tokens is not None and reasoning is not None and reasoning > output_tokens:
+        _fail(ReasonCode.invalid_metadata)
+    if input_tokens is not None and output_tokens is not None and total is not None and total != input_tokens + output_tokens:
+        _fail(ReasonCode.invalid_metadata)
+    if turns_present and set(value) != allowed:
+        _fail(ReasonCode.invalid_metadata)
+    return aggregate
+
+
+def _validate_telemetry(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate the documented telemetry sidecar without importing its writer."""
+
+    availability = value.get("availability")
+    if availability == "unavailable":
+        if set(value) - {"availability", "reason"}:
+            _fail(ReasonCode.invalid_metadata)
+        reason = value.get("reason")
+        if reason is not None and (not isinstance(reason, str) or not reason or len(reason) > 256):
+            _fail(ReasonCode.invalid_metadata)
+        return value
+    if availability is not None and availability != "available":
+        _fail(ReasonCode.invalid_metadata)
+    if value.get("schema_version") != 1:
+        _fail(ReasonCode.invalid_metadata)
+    provenance = value.get("provenance")
+    if not isinstance(provenance, str) or not provenance or len(provenance) > 128:
+        _fail(ReasonCode.invalid_metadata)
+    completeness = value.get("completeness")
+    if completeness != "complete":
+        _fail(ReasonCode.partial if completeness == "partial" else ReasonCode.invalid_metadata)
+
+    full_sidecar = any(
+        key in value
+        for key in (
+            "invocation_id",
+            "started_at",
+            "completed_at",
+            "duration_ms",
+            "process_outcome",
+            "billing_mode",
+            "issues",
+        )
+    )
+    if full_sidecar and "turns" not in value:
+        _fail(ReasonCode.invalid_metadata)
+    for key in ("invocation_id", "task_id", "run_name", "stage", "process_outcome"):
+        if key in value and (not isinstance(value[key], str) or not value[key] or len(value[key]) > 256):
+            _fail(ReasonCode.invalid_metadata)
+    if "retry_ordinal" in value and _metric(value["retry_ordinal"]) is None:
+        _fail(ReasonCode.invalid_metadata)
+    for key in ("configured_model", "reasoning_effort"):
+        if key in value and value[key] is not None and not isinstance(value[key], str):
+            _fail(ReasonCode.invalid_metadata)
+    if "billing_mode" in value and value["billing_mode"] not in {"unknown", "chatgpt", "api"}:
+        _fail(ReasonCode.invalid_metadata)
+
+    timing_keys = {"started_at", "completed_at", "duration_ms", "first_agent_message_completed_ms"}
+    if timing_keys.intersection(value):
+        if not timing_keys.issubset(value):
+            _fail(ReasonCode.invalid_metadata)
+        started = _timestamp(value["started_at"])
+        completed = _timestamp(value["completed_at"])
+        if started is None or completed is None:
+            _fail(ReasonCode.invalid_metadata)
+        duration = _metric(value["duration_ms"])
+        first = _metric(value["first_agent_message_completed_ms"])
+        if duration is None or completed < started:
+            _fail(ReasonCode.invalid_metadata)
+        if first is not None and first > duration:
+            _fail(ReasonCode.invalid_metadata)
+
+    turns_present = "turns" in value
+    if turns_present:
+        turns = value.get("turns")
+        if not isinstance(turns, list) or len(turns) > _MAX_RECORDS:
+            _fail(ReasonCode.invalid_metadata)
+        for ordinal, turn in enumerate(turns, start=1):
+            if not isinstance(turn, Mapping):
+                _fail(ReasonCode.invalid_metadata)
+            required = {
+                "ordinal",
+                "input_tokens",
+                "cached_input_tokens",
+                "uncached_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "total_tokens",
+            }
+            if set(turn) != required or turn.get("ordinal") != ordinal:
+                _fail(ReasonCode.invalid_metadata)
+            input_tokens = _metric(turn.get("input_tokens"))
+            cached = _metric(turn.get("cached_input_tokens"))
+            uncached = _metric(turn.get("uncached_input_tokens"))
+            output_tokens = _metric(turn.get("output_tokens"))
+            reasoning = _metric(turn.get("reasoning_output_tokens"))
+            total = _metric(turn.get("total_tokens"))
+            if input_tokens is None or cached is None or uncached is None or output_tokens is None or reasoning is None or total is None:
+                _fail(ReasonCode.invalid_metadata)
+            if cached > input_tokens or uncached != input_tokens - cached or reasoning > output_tokens or total != input_tokens + output_tokens:
+                _fail(ReasonCode.invalid_metadata)
+    if "aggregate" not in value:
+        _fail(ReasonCode.invalid_metadata)
+    aggregate = _validate_telemetry_aggregate(value["aggregate"], turns_present=turns_present)
+    if turns_present:
+        expected = {
+            "completed_turns": len(value["turns"]),
+            "input_tokens": sum(int(turn["input_tokens"]) for turn in value["turns"]),
+            "cached_input_tokens": sum(int(turn["cached_input_tokens"]) for turn in value["turns"]),
+            "uncached_input_tokens": sum(int(turn["uncached_input_tokens"]) for turn in value["turns"]),
+            "output_tokens": sum(int(turn["output_tokens"]) for turn in value["turns"]),
+            "reasoning_output_tokens": sum(int(turn["reasoning_output_tokens"]) for turn in value["turns"]),
+            "total_tokens": sum(int(turn["total_tokens"]) for turn in value["turns"]),
+        }
+        if aggregate != expected:
+            _fail(ReasonCode.invalid_metadata)
+
+    cost = value.get("cost")
+    if not isinstance(cost, Mapping) or cost.get("status") not in {"estimated", "unavailable"}:
+        _fail(ReasonCode.invalid_metadata)
+    if cost["status"] == "estimated":
+        micro_usd = _metric(cost.get("micro_usd"))
+        if micro_usd is None:
+            _fail(ReasonCode.invalid_metadata)
+    elif "micro_usd" in cost and cost.get("micro_usd") is not None:
+        _fail(ReasonCode.invalid_metadata)
+    if "reason" in cost and (not isinstance(cost["reason"], str) or not cost["reason"] or len(cost["reason"]) > 256):
+        _fail(ReasonCode.invalid_metadata)
+    if "issues" in value:
+        issues = value["issues"]
+        if not isinstance(issues, list) or len(issues) > 32:
+            _fail(ReasonCode.invalid_metadata)
+        for issue in issues:
+            if (
+                not isinstance(issue, Mapping)
+                or set(issue) != {"category", "count"}
+                or not isinstance(issue.get("category"), str)
+                or not issue["category"]
+                or len(issue["category"]) > 80
+                or _metric(issue.get("count")) is None
+            ):
+                _fail(ReasonCode.invalid_metadata)
+    return value
+
+
+def _telemetry_public(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if value is None or value.get("availability") == "unavailable":
+        result: dict[str, Any] = {"availability": "unavailable"}
+        if isinstance(value, Mapping) and isinstance(value.get("reason"), str):
+            result["reason"] = value["reason"]
+        return result
+    result = {
+        "availability": "available",
+        "provenance": value["provenance"],
+        "completeness": value["completeness"],
+    }
+    for source_key in ("started_at", "completed_at", "duration_ms", "first_agent_message_completed_ms", "process_outcome", "configured_model", "reasoning_effort", "billing_mode"):
+        if source_key in value and value[source_key] is not None:
+            result[source_key] = value[source_key]
+    aggregate = value.get("aggregate")
+    if isinstance(aggregate, Mapping):
+        usage = {
+            output_key: aggregate[input_key]
+            for input_key, output_key in (
+                ("input_tokens", "prompt"),
+                ("cached_input_tokens", "cached"),
+                ("uncached_input_tokens", "uncached"),
+                ("output_tokens", "completion"),
+                ("reasoning_output_tokens", "reasoning"),
+                ("total_tokens", "total"),
+                ("completed_turns", "turns"),
+            )
+            if input_key in aggregate and aggregate[input_key] is not None
+        }
+        result["aggregate"] = {"usage": usage}
+    turns = value.get("turns")
+    if isinstance(turns, list):
+        result["turns"] = [
+            {
+                "ordinal": turn["ordinal"],
+                "input": turn["input_tokens"],
+                "cached": turn["cached_input_tokens"],
+                "uncached": turn["uncached_input_tokens"],
+                "output": turn["output_tokens"],
+                "reasoning": turn["reasoning_output_tokens"],
+                "total": turn["total_tokens"],
+            }
+            for turn in turns
+        ]
+    cost = value.get("cost")
+    if isinstance(cost, Mapping):
+        public_cost = {
+            key: cost[key]
+            for key in ("status", "micro_usd", "reason")
+            if key in cost and cost[key] is not None
+        }
+        price_entry = cost.get("price_entry")
+        if isinstance(price_entry, Mapping):
+            public_entry = {
+                key: price_entry[key]
+                for key in ("entry_id", "model", "effective_from", "effective_until")
+                if key in price_entry and price_entry[key] is not None
+            }
+            source = price_entry.get("source")
+            if isinstance(source, Mapping) and isinstance(source.get("label"), str):
+                public_entry["source"] = {"label": source["label"]}
+            if public_entry:
+                public_cost["price_entry"] = public_entry
+        result["cost"] = public_cost
+    issues = value.get("issues")
+    if isinstance(issues, list):
+        result["issues"] = [
+            {"category": item["category"], "count": item["count"]}
+            for item in issues
+            if isinstance(item, Mapping) and isinstance(item.get("category"), str) and isinstance(item.get("count"), int)
+        ]
+    return _safe_source(result)
+
+
+def _validate_telemetry_against_run(metadata: RunMetadata, telemetry: Mapping[str, Any]) -> None:
+    if telemetry.get("availability") == "unavailable":
+        return
+    aggregate = telemetry.get("aggregate")
+    if not isinstance(aggregate, Mapping) or metadata.usage is None:
+        return
+    for name, keys in (
+        ("prompt_tokens", ("input_tokens", "prompt_tokens")),
+        ("completion_tokens", ("output_tokens", "completion_tokens")),
+        ("cached_input_tokens", ("cached_input_tokens", "cached_tokens")),
+        ("reasoning_output_tokens", ("reasoning_output_tokens",)),
+        ("total_tokens", ("total_tokens",)),
+    ):
+        expected = getattr(metadata.usage, name)
+        for key in keys:
+            if key in aggregate and aggregate[key] is not None:
+                if expected is not None and aggregate[key] != expected:
+                    _fail(ReasonCode.invalid_metadata)
+                break
 
 
 def _final_metrics(metadata: RunMetadata, telemetry: Mapping[str, Any] | None, step_count: int) -> dict[str, Any] | None:
@@ -1402,18 +1938,33 @@ def _semantic_issues(document: Mapping[str, Any]) -> list[str]:
                         issues.append("artifact-reference")
                     else:
                         referenced.add(ref)
-                _collect_image_refs(step.get("message"), artifact_map, referenced, issues)
+                        if artifact_map[ref].get("ownerStepId") != step.get("step_id"):
+                            issues.append("artifact-owner")
+                _collect_image_refs(step.get("message"), artifact_map, referenced, issues, step_id=step.get("step_id"))
                 observation = step.get("observation")
                 if isinstance(observation, Mapping):
                     for result in observation.get("results", ()) if isinstance(observation.get("results"), list) else ():
                         if isinstance(result, Mapping):
-                            _collect_image_refs(result.get("content"), artifact_map, referenced, issues)
+                            _collect_image_refs(
+                                result.get("content"),
+                                artifact_map,
+                                referenced,
+                                issues,
+                                step_id=step.get("step_id"),
+                            )
         issues.extend("artifact-unreferenced" for artifact_id in artifact_map if artifact_id not in referenced)
     _semantic_private_scan(document, issues)
     return issues
 
 
-def _collect_image_refs(value: Any, artifacts: Mapping[str, Mapping[str, Any]], referenced: set[str], issues: list[str]) -> None:
+def _collect_image_refs(
+    value: Any,
+    artifacts: Mapping[str, Mapping[str, Any]],
+    referenced: set[str],
+    issues: list[str],
+    *,
+    step_id: Any,
+) -> None:
     if not isinstance(value, list):
         return
     for part in value:
@@ -1431,6 +1982,8 @@ def _collect_image_refs(value: Any, artifacts: Mapping[str, Mapping[str, Any]], 
             issues.append("artifact-reference")
         else:
             referenced.add(artifact_id)
+            if artifacts[artifact_id].get("ownerStepId") != step_id:
+                issues.append("artifact-owner")
 
 
 def _semantic_private_scan(value: Any, issues: list[str], key: str | None = None) -> None:
@@ -1490,14 +2043,37 @@ def convert_completed_run(
         run_document=run_document,
         artifacts=artifacts,
     )
-    codex_value = _pick_document(source_documents, "codex.jsonl")
+    required_documents = ("codex.jsonl", "activities.jsonl", "telemetry.json", "run.json")
+    selected_values = {name: _pick_document(source_documents, name) for name in required_documents}
+    codex_value = selected_values["codex.jsonl"]
     if codex_value is _MISSING:
         _fail(ReasonCode.partial)
     records = _parse_document_jsonl(codex_value, label="codex.jsonl")
-    activity_records = _parse_document_jsonl(_pick_document(source_documents, "activities.jsonl"), label="activities.jsonl")
-    _validate_activity_records(activity_records)
-    telemetry_value = _parse_document_json(_pick_document(source_documents, "telemetry.json"), label="telemetry.json")
-    run_doc = _parse_document_json(_pick_document(source_documents, "run.json"), label="run.json")
+    activity_value = selected_values["activities.jsonl"]
+    activity_records, activity_state = (
+        _parse_activity_document(
+            activity_value,
+            expected_transcript_sha256=hashlib.sha256(_document_content(codex_value)).hexdigest(),
+        )
+        if activity_value is not _MISSING
+        else ((), "unavailable")
+    )
+    telemetry_document = selected_values["telemetry.json"]
+    telemetry_value = (
+        _parse_document_json(telemetry_document, label="telemetry.json")
+        if telemetry_document is not _MISSING
+        else None
+    )
+    if telemetry_value is not None:
+        telemetry_value = dict(_validate_telemetry(telemetry_value))
+    run_document = selected_values["run.json"]
+    run_doc = (
+        _parse_document_json(run_document, label="run.json")
+        if run_document is not _MISSING
+        else None
+    )
+    if any(value is _MISSING for value in selected_values.values()) or telemetry_value is None or run_doc is None:
+        _fail(ReasonCode.partial)
     # A supplied run.json is a second immutable identity witness.  It may add
     # evidence, but cannot turn a partial/running source into a completed one.
     if run_doc is not None:
@@ -1523,18 +2099,25 @@ def convert_completed_run(
             _fail(ReasonCode.invalid_metadata)
         if "durationMs" in run_doc and run_doc["durationMs"] != metadata.duration_ms:
             _fail(ReasonCode.invalid_metadata)
+    _validate_telemetry_against_run(metadata, telemetry_value)
     states = _artifact_states(source_artifacts, step_count=1)
-    steps, _calls, _unpaired = _map_steps(records, artifacts=states)
-    # Owners are assigned after the complete step sequence is known.
-    for item in states.values():
-        if item.owner_step_id < 1 or item.owner_step_id > len(steps):
-            item.owner_step_id = 1
+    steps, _calls, _unpaired, mapped_steps = _map_steps(records, artifacts=states)
+    # Resolve source identities after mapping, when contiguous step IDs are final.
+    # ``_map_steps`` retains source identities internally for this purpose.
+    _resolve_artifact_owners(states, mapped_steps)
+    _attach_referenced_artifacts(steps, states)
     for step in steps:
         coqui = step.get("extra", {}).get("coquic") if isinstance(step.get("extra"), Mapping) else None
         if isinstance(coqui, Mapping):
             refs = [ref for ref in coqui.get("artifactIds", []) if ref in states]
             coqui["artifactIds"] = refs
-    source_facts = _source_facts(records, activity_records, telemetry_value, run_doc)
+    source_facts = _source_facts(
+        records,
+        activity_records,
+        telemetry_value,
+        run_doc,
+        activity_state=activity_state,
+    )
     document = _root_document(metadata, steps, states, source_facts, telemetry_value)
     validate_atif_document(document)
     content = canonical_atif_bytes(document)

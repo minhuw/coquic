@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from coquic_steward.publication import (
     RunMetadata,
     UsageSummary,
     convert_completed_run,
+    validate_atif_document,
 )
 
 
@@ -202,3 +204,179 @@ def test_private_source_facts_are_not_exposed() -> None:
     with pytest.raises(AtifConversionError) as error:
         convert_completed_run(run=_run(), documents=documents)
     assert error.value.code == ReasonCode.unsafe_content
+
+
+def test_completed_run_requires_all_evidence_and_rejects_partial_or_contradictory_sources() -> None:
+    documents = _documents([{"type": "agent_message", "text": "complete"}])
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(run=_run(), documents={key: value for key, value in documents.items() if key != "activities.jsonl"})
+    assert error.value.code == ReasonCode.partial
+
+    partial_activity = documents | {
+        "activities.jsonl": (
+            b'{"record_type":"header","schema_version":1}\n'
+            b'{"record_type":"summary","schema_version":1,"capture_state":"partial",'
+            b'"recorded":0,"invalid":1,"duplicate":0,"omitted":0,"truncated":false}\n'
+        )
+    }
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(run=_run(), documents=partial_activity)
+    assert error.value.code == ReasonCode.partial
+
+    contradictory = documents | {
+        "telemetry.json": json.dumps(
+            {
+                "schema_version": 1,
+                "provenance": "codex_exec_jsonl",
+                "completeness": "complete",
+                "aggregate": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 999},
+                "cost": {"status": "unavailable"},
+            },
+            separators=(",", ":"),
+        ).encode()
+    }
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(run=_run(), documents=contradictory)
+    assert error.value.code == ReasonCode.invalid_metadata
+
+
+def test_raw_activity_envelope_preserves_order_without_synthetic_records() -> None:
+    activities = (
+        b'{"type":"item.completed","item":{"id":"activity-one","type":"agent_message",'
+        b'"text":"STEWARD_ACTIVITY {\\"activity\\":\\"investigate\\",\\"summary\\":\\"one\\"}"}}\n'
+        b'{"type":"item.completed","item":{"id":"activity-two","type":"agent_message",'
+        b'"text":"STEWARD_ACTIVITY {\\"activity\\":\\"edit\\",\\"summary\\":\\"two\\"}"}}\n'
+    )
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}]) | {"activities.jsonl": activities},
+    ).as_dict()
+    events = document["extra"]["coquic"]["source"]["activities"]["events"]
+    assert [item["sourceId"] for item in events] == ["activity-one", "activity-two"]
+    assert all(item["recordType"] == "item.completed" for item in events)
+
+
+def test_telemetry_availability_and_full_sidecar_evidence_are_preserved() -> None:
+    documents = _documents([{"type": "agent_message", "text": "complete"}])
+    unavailable = convert_completed_run(
+        run=_run(), documents=documents | {"telemetry.json": b'{"availability":"unavailable"}'}
+    ).as_dict()
+    assert unavailable["extra"]["coquic"]["source"]["telemetry"] == {"availability": "unavailable"}
+
+    turn = {
+        "ordinal": 1,
+        "input_tokens": 11,
+        "cached_input_tokens": 2,
+        "uncached_input_tokens": 9,
+        "output_tokens": 7,
+        "reasoning_output_tokens": 3,
+        "total_tokens": 18,
+    }
+    sidecar = {
+        "schema_version": 1,
+        "provenance": "codex_exec_jsonl",
+        "invocation_id": "private-invocation",
+        "task_id": "private-task",
+        "run_name": "private-run",
+        "stage": "code",
+        "retry_ordinal": 0,
+        "configured_model": "gpt-test",
+        "reasoning_effort": "medium",
+        "billing_mode": "unknown",
+        "started_at": "2026-07-28T12:00:00.123Z",
+        "completed_at": "2026-07-28T12:00:01.123Z",
+        "duration_ms": 1000,
+        "first_agent_message_completed_ms": 400,
+        "process_outcome": "success",
+        "turns": [turn],
+        "aggregate": {
+            "completed_turns": 1,
+            "input_tokens": 11,
+            "cached_input_tokens": 2,
+            "uncached_input_tokens": 9,
+            "output_tokens": 7,
+            "reasoning_output_tokens": 3,
+            "total_tokens": 18,
+        },
+        "cost": {"status": "unavailable", "reason": "no price"},
+        "completeness": "complete",
+        "issues": [],
+    }
+    result = convert_completed_run(
+        run=_run(), documents=documents | {"telemetry.json": json.dumps(sidecar).encode()}
+    )
+    telemetry = result.as_dict()["extra"]["coquic"]["source"]["telemetry"]
+    assert telemetry["provenance"] == "codex_exec_jsonl"
+    assert telemetry["turns"] == [{"ordinal": 1, "input": 11, "cached": 2, "uncached": 9, "output": 7, "reasoning": 3, "total": 18}]
+    assert telemetry["duration_ms"] == 1000
+    assert telemetry["cost"] == {"status": "unavailable", "reason": "no price"}
+    assert "private-invocation" not in result.content.decode()
+
+
+def test_runtime_semantics_reject_artifact_reference_in_wrong_step() -> None:
+    image = b"image"
+    artifact = LogicalArtifact("plot", "evidence/plot.png", "image/png", len(image), hashlib.sha256(image).hexdigest(), owner_step_id=2)
+    result = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "user_message", "text": "one"}, {"type": "agent_message", "text": "two"}]),
+        artifacts=(artifact,),
+    )
+    mutated = result.as_dict()
+    mutated["steps"][0]["extra"]["coquic"]["artifactIds"].append("plot")
+    with pytest.raises(AtifConversionError) as error:
+        validate_atif_document(mutated)
+    assert error.value.code == ReasonCode.invalid_metadata
+
+
+def test_file_change_paths_are_logical_and_private_paths_fail_closed() -> None:
+    safe = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "item.completed", "item": {"id": "change", "type": "file_change", "changes": [{"path": "src/main.zig", "kind": "edit"}]}}]),
+    ).as_dict()
+    source = safe["steps"][0]["extra"]["coquic"]["source"]
+    assert source["recordType"] == "file_change"
+    assert source["facts"]["changes"][0]["logicalPath"] == "src/main.zig"
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents([{"type": "item.completed", "item": {"id": "change", "type": "file_change", "changes": [{"path": "/private/main.zig"}]}}]),
+        )
+    assert error.value.code == ReasonCode.unsafe_content
+
+
+def test_inline_input_image_is_retained_as_a_deterministic_artifact() -> None:
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "user_message", "content": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}]}]),
+    ).as_dict()
+    image = document["steps"][0]["message"][0]
+    artifact = document["extra"]["coquic"]["artifacts"][0]
+    assert image["source"]["media_type"] == "image/png"
+    assert image["source"]["path"] == f"artifact:{artifact['artifactId']}"
+    assert artifact["byteSize"] == 5
+    assert artifact["sha256"] == hashlib.sha256(b"hello").hexdigest()
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents([{"type": "user_message", "content": [{"type": "input_image", "image_url": "data:image/svg+xml;base64,aGVsbG8="}]}]),
+        )
+    assert error.value.code == ReasonCode.invalid_media_type
+
+
+def test_string_artifact_owner_resolves_unique_source_identity() -> None:
+    artifact = LogicalArtifact("output", "evidence/output.log", "text/plain", 1, "0" * 64, owner_step_id="message-two")
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([
+            {"type": "item.completed", "item": {"id": "message-one", "type": "user_message", "text": "one"}},
+            {"type": "item.completed", "item": {"id": "message-two", "type": "agent_message", "text": "two"}},
+        ]),
+        artifacts=(artifact,),
+    ).as_dict()
+    assert document["extra"]["coquic"]["artifacts"][0]["ownerStepId"] == 2
+    assert document["steps"][1]["extra"]["coquic"]["artifactIds"] == ["output"]
+
+    missing = LogicalArtifact("missing", "evidence/missing.log", "text/plain", 1, "0" * 64, owner_step_id="not-a-step")
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(run=_run(), documents=_documents([{"type": "agent_message", "text": "one"}]), artifacts=(missing,))
+    assert error.value.code == ReasonCode.invalid_metadata

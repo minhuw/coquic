@@ -42,12 +42,20 @@ type Fixture = {
 };
 
 type TaskRow = Record<string, unknown>;
+type DetailScenario = {
+  readonly task: TaskRow | null;
+  readonly pipelines: readonly TaskRow[];
+  readonly runs: readonly TaskRow[];
+  readonly events: readonly TaskRow[];
+  readonly artifacts: readonly TaskRow[];
+};
 type Scenario = {
   readonly rows: readonly TaskRow[];
   readonly statusRows: readonly TaskRow[];
   readonly activeRows: readonly TaskRow[];
   readonly historyRows: readonly TaskRow[];
   readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error";
+  readonly detail?: DetailScenario;
 };
 
 const ENV_KEYS = [
@@ -64,6 +72,12 @@ const VALID_ENV: Record<(typeof ENV_KEYS)[number], string> = {
 };
 const PUBLICATION_ID = "publication-harness";
 const EXPOSED_AT = "2026-07-28T00:00:02Z";
+const DETAIL_TASK_ID = "task-detail";
+const DETAIL_PUBLICATION_ID = "publication-detail";
+const DETAIL_RUN_ID = "run-detail";
+const DETAIL_PIPELINE_ID = "pipeline-detail";
+const DETAIL_DIGEST = "b".repeat(64);
+const DETAIL_PUBLIC_KEY = `v1/tasks/${DETAIL_TASK_ID}/objects/sha256/bb/${DETAIL_DIGEST}`;
 
 function d1Envelope(rows: readonly TaskRow[]): Response {
   return new Response(JSON.stringify({
@@ -137,6 +151,78 @@ function statusRow(row: TaskRow): TaskRow {
   return Object.fromEntries(keys.map((key) => [key, row[key]]));
 }
 
+function detailScenario(options: {
+  lifecycleState?: "active" | "completed";
+  availability?: "available" | "unavailable";
+  redactionApplied?: boolean;
+  originalRetained?: boolean;
+} = {}): DetailScenario {
+  const lifecycleState = options.lifecycleState ?? "completed";
+  const completedAt = lifecycleState === "active" ? null : "2026-07-28T00:00:03Z";
+  const task: TaskRow = {
+    head_updated_at: "2026-07-28T00:00:04Z",
+    head_state: "visible",
+    publication_id: DETAIL_PUBLICATION_ID,
+    generation_task_id: DETAIL_TASK_ID,
+    generation_run_id: DETAIL_RUN_ID,
+    generation_metadata_digest: "a".repeat(64),
+    generation_idempotency_key: "harness-detail",
+    generation_state: "visible",
+    generation_expected_task_count: 1,
+    generation_expected_pipeline_count: 1,
+    generation_expected_run_count: 1,
+    generation_expected_event_count: 2,
+    generation_expected_artifact_count: 1,
+    generation_created_at: "2026-07-28T00:00:00Z",
+    generation_exposed_at: EXPOSED_AT,
+    task_id: DETAIL_TASK_ID,
+    title: "Detail task",
+    lifecycle_state: lifecycleState,
+    created_at: "2026-07-28T00:00:00Z",
+    completed_at: completedAt,
+  };
+  return {
+    task,
+    pipelines: [{
+      publication_id: DETAIL_PUBLICATION_ID,
+      pipeline_id: DETAIL_PIPELINE_ID,
+      task_id: DETAIL_TASK_ID,
+      name: "Detail pipeline",
+      created_at: "2026-07-28T00:00:00Z",
+    }],
+    runs: [{
+      publication_id: DETAIL_PUBLICATION_ID,
+      run_id: DETAIL_RUN_ID,
+      task_id: DETAIL_TASK_ID,
+      pipeline_id: DETAIL_PIPELINE_ID,
+      role: "planning",
+      run_state: "completed",
+      started_at: "2026-07-28T00:00:00Z",
+      completed_at: "2026-07-28T00:00:01Z",
+      duration_ms: 1_000,
+      atif_digest: DETAIL_DIGEST,
+    }],
+    events: [
+      { publication_id: DETAIL_PUBLICATION_ID, task_id: DETAIL_TASK_ID, sequence: 1, event_type: "started", occurred_at: "2026-07-28T00:00:00Z", summary: "Started" },
+      { publication_id: DETAIL_PUBLICATION_ID, task_id: DETAIL_TASK_ID, sequence: 2, event_type: "completed", occurred_at: "2026-07-28T00:00:01Z", summary: "Completed" },
+    ],
+    artifacts: [{
+      publication_id: DETAIL_PUBLICATION_ID,
+      artifact_id: "artifact-atif",
+      task_id: DETAIL_TASK_ID,
+      run_id: DETAIL_RUN_ID,
+      logical_path: "runs/run-detail/trajectory.json",
+      public_key: DETAIL_PUBLIC_KEY,
+      media_type: "application/json",
+      byte_size: 128,
+      sha256: DETAIL_DIGEST,
+      availability: options.availability ?? "available",
+      redaction_applied: options.redactionApplied ? 1 : 0,
+      original_retained: options.originalRetained === false ? 0 : 1,
+    }],
+  };
+}
+
 function compareRows(left: TaskRow, right: TaskRow): number {
   const leftTime = String(left.head_updated_at);
   const rightTime = String(right.head_updated_at);
@@ -155,6 +241,7 @@ function scenario(
   historyRows: readonly TaskRow[],
   mode?: Scenario["mode"],
   candidates: readonly TaskRow[] = [],
+  detail?: DetailScenario,
 ): Scenario {
   const rows = [...activeRows, ...historyRows, ...candidates];
   const allActiveRows = [...activeRows, ...candidates.filter((row) => row.lifecycle_state === "active")];
@@ -170,6 +257,7 @@ function scenario(
     activeRows: allActiveRows.sort(compareRows),
     historyRows: allHistoryRows.sort(compareRows),
     mode,
+    detail,
   };
 }
 
@@ -215,6 +303,19 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     }
     if (statement === cloudRepository.STATUS_VALIDATION_STATEMENT) return d1Envelope(scenarioValue.statusRows.slice(0, Number(params[0])));
     if (statement === cloudRepository.STATUS_VALIDATION_NEXT_STATEMENT) return d1Envelope([]);
+    if (statement === cloudRepository.TASK_DETAIL_STATEMENT) {
+      const taskId = String(params[0]);
+      return d1Envelope(scenarioValue.detail?.task?.task_id === taskId ? [scenarioValue.detail.task] : []);
+    }
+    if (statement === cloudRepository.TASK_DETAIL_PIPELINES_STATEMENT) return d1Envelope(scenarioValue.detail?.pipelines ?? []);
+    if (statement === cloudRepository.TASK_DETAIL_RUNS_STATEMENT) return d1Envelope(scenarioValue.detail?.runs ?? []);
+    if (statement === cloudRepository.TASK_DETAIL_EVENTS_STATEMENT) return d1Envelope(scenarioValue.detail?.events ?? []);
+    if (statement === cloudRepository.TASK_DETAIL_ARTIFACTS_STATEMENT) return d1Envelope(scenarioValue.detail?.artifacts ?? []);
+    if (statement === cloudRepository.ARTIFACT_DESCRIPTOR_STATEMENT) {
+      const taskId = String(params[0]);
+      const logicalPath = String(params[1]);
+      return d1Envelope((scenarioValue.detail?.artifacts ?? []).filter((row) => row.task_id === taskId && row.logical_path === logicalPath));
+    }
     const rows = statement.includes("lifecycle_state = 'active'") || statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.ACTIVE_CURSOR_STATEMENT
       ? scenarioValue.activeRows
       : scenarioValue.historyRows;
@@ -262,6 +363,9 @@ async function main() {
   const candidateRows = [hiddenCandidate, stagedCandidate];
   const { GET: getStatus } = await import("../app/api/steward/status/route");
   const { GET: getTasks } = await import("../app/api/steward/tasks/route");
+  const { GET: getTaskDetail } = await import("../app/api/steward/tasks/[taskId]/route");
+  const { GET: getArtifact } = await import("../app/api/steward/tasks/[taskId]/artifact/route");
+  const { GET: getTranscript } = await import("../app/api/steward/tasks/[taskId]/transcript/route");
   const originalFetch = globalThis.fetch;
   const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   const outputs: string[] = [];
@@ -385,6 +489,131 @@ async function main() {
     assert.deepEqual(payload.data.items.map((item) => item.taskId), ["task-redacted"]);
     assert.equal(payload.data.pagination.pageSize, 50);
     for (const excluded of ["task-hidden", "task-staged"]) assert(!JSON.stringify(payload).includes(excluded));
+  });
+
+  const taskContext = (taskId: string) => ({ params: Promise.resolve({ taskId }) });
+
+  await runCase("clean cloud detail", scenario([], [], undefined, [], detailScenario()), async () => {
+    const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.schemaVersion, "3.0");
+    if (!("pipelines" in payload.data)) throw new Error("expected task detail");
+    assert.equal(payload.data.task.taskId, DETAIL_TASK_ID);
+    assert.equal(payload.data.trajectory?.runId, DETAIL_RUN_ID);
+    assert.equal(payload.data.trajectory?.artifactId, "artifact-atif");
+    assert(!JSON.stringify(payload).includes("private"));
+  });
+
+  await runCase("redacted cloud detail", scenario([], [], undefined, [], detailScenario({ redactionApplied: true, originalRetained: false })), async () => {
+    const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    if (!("pipelines" in payload.data)) throw new Error("expected task detail");
+    assert.equal(payload.data.task.disclosure.redactionApplied, true);
+    assert.equal(payload.data.task.disclosure.originalRetained, false);
+  });
+
+  await runCase("active-after-planning cloud detail", scenario([], [], undefined, [], detailScenario({ lifecycleState: "active" })), async () => {
+    const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    if (!("pipelines" in payload.data)) throw new Error("expected task detail");
+    assert.equal(payload.data.task.lifecycleState, "active");
+    assert.equal(payload.data.task.completedAt, null);
+    assert.equal(payload.data.trajectory?.runId, DETAIL_RUN_ID);
+  });
+
+  await runCase("hidden and staged detail exclusion", scenario([], [], undefined, candidateRows), async () => {
+    for (const taskId of ["task-hidden", "task-staged"]) {
+      const response = await getTaskDetail(new Request(`https://site.test/api/steward/tasks/${taskId}`), taskContext(taskId));
+      assert.equal(response.status, 404);
+      const payload = problemResponse(parseCloudResponse(await response.text()));
+      assert.equal(payload.problem.code, "NOT_FOUND");
+      assert(!JSON.stringify(payload).includes(taskId));
+    }
+  });
+
+  const malformedDetail = detailScenario();
+  malformedDetail.task!.credential_path = "route-harness-secret";
+  await runCase("malformed detail data", scenario([], [], undefined, [], malformedDetail), async () => {
+    const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "INTEGRITY_FAILURE");
+    assert(!JSON.stringify(payload).includes("route-harness-secret"));
+  });
+
+  const danglingDetail = detailScenario();
+  danglingDetail.runs[0]!.pipeline_id = "pipeline-missing";
+  await runCase("dangling detail data", scenario([], [], undefined, [], danglingDetail), async () => {
+    const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "INTEGRITY_FAILURE");
+  });
+
+  await runCase("validated artifact redirect", scenario([], [], undefined, [], detailScenario()), async () => {
+    const path = encodeURIComponent("runs/run-detail/trajectory.json");
+    const response = await getArtifact(new Request(`https://site.test/api/steward/tasks/task-detail/artifact?path=${path}&url=${encodeURIComponent("https://attacker.example/override")}`), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 307);
+    assert.equal(response.headers.get("Location"), `https://objects.example.test/public/${DETAIL_PUBLIC_KEY}`);
+    assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
+    assert.equal(response.headers.get("Content-Type"), "application/octet-stream");
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.equal(await response.text(), "");
+  });
+
+  await runCase("artifact validation and availability", scenario([], [], undefined, [], detailScenario({ availability: "unavailable" })), async () => {
+    const unavailable = await getArtifact(new Request("https://site.test/api/steward/tasks/task-detail/artifact?path=runs%2Frun-detail%2Ftrajectory.json"), taskContext(DETAIL_TASK_ID));
+    assert.equal(unavailable.status, 404);
+    const missing = await getArtifact(new Request("https://site.test/api/steward/tasks/task-detail/artifact?path=runs%2Frun-detail%2Fmissing.txt"), taskContext(DETAIL_TASK_ID));
+    assert.equal(missing.status, 404);
+    const unsafe = await getArtifact(new Request("https://site.test/api/steward/tasks/task-detail/artifact?path=..%2Fprivate.txt"), taskContext(DETAIL_TASK_ID));
+    assert.equal(unsafe.status, 400);
+  });
+
+  const unsafeArtifactDetail = detailScenario();
+  unsafeArtifactDetail.artifacts[0]!.public_key = "private://object";
+  await runCase("unsafe artifact key", scenario([], [], undefined, [], unsafeArtifactDetail), async () => {
+    const response = await getArtifact(new Request("https://site.test/api/steward/tasks/task-detail/artifact?path=runs%2Frun-detail%2Ftrajectory.json"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "INTEGRITY_FAILURE");
+    assert(!JSON.stringify(payload).includes("private://object"));
+  });
+
+  await runCase("immutable trajectory descriptor", scenario([], [], undefined, [], detailScenario()), async () => {
+    const response = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=run-detail&path=ignored.json&cursor=ignored&limit=1"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.schemaVersion, "3.0");
+    if (!("runId" in payload.data) || !("publicKey" in payload.data)) throw new Error("expected trajectory descriptor");
+    assert.equal(payload.data.taskId, DETAIL_TASK_ID);
+    assert.equal(payload.data.pipelineId, DETAIL_PIPELINE_ID);
+    assert.equal(payload.data.runId, DETAIL_RUN_ID);
+    assert.equal(payload.data.artifactId, "artifact-atif");
+    for (const partialField of ["records", "cursor", "prefix", "partial"]) assert(!(partialField in payload.data));
+  });
+
+  await runCase("unknown task path and run", scenario([], [], undefined, [], detailScenario()), async () => {
+    const unknownTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/missing"), taskContext("missing"));
+    assert.equal(unknownTask.status, 404);
+    const unknownRun = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=missing-run"), taskContext(DETAIL_TASK_ID));
+    assert.equal(unknownRun.status, 404);
+    const invalidRun = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=../private"), taskContext(DETAIL_TASK_ID));
+    assert.equal(invalidRun.status, 400);
+    const invalidTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/../private"), taskContext("../private"));
+    assert.equal(invalidTask.status, 400);
+  });
+
+  await runCase("detail D1 outage", { ...scenario([], []), mode: "outage" }, async () => {
+    const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, true);
+    assert(!JSON.stringify(payload).includes("route-harness-secret"));
   });
 
   await runCase("invalid input", scenario(activeRows, historyRows), async () => {

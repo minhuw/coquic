@@ -186,6 +186,38 @@ def test_private_error_formatting_redacts_path(tmp_path: Path) -> None:
     assert error.value.__suppress_context__ is True
 
 
+def test_caught_parser_and_filesystem_errors_have_no_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    marker = "PRIVATE_TIMESTAMP_MARKER"
+    with pytest.raises(PublicationError) as error:
+        RunMetadata(
+            RunIdentity("task", "pipeline", "run"),
+            "planning",
+            "completed",
+            marker,
+            datetime.now(timezone.utc),
+            0,
+        )
+    assert error.value.code == ReasonCode.invalid_metadata
+    assert marker not in repr(error.value)
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"safe")
+    marker = "PRIVATE_OS_MARKER"
+
+    def injected_stat(*args, **kwargs):
+        raise OSError(marker)
+
+    monkeypatch.setattr(publication_models.os, "stat", injected_stat)
+    with pytest.raises(PublicationError) as error:
+        read_stable_file(payload)
+    assert error.value.code in {ReasonCode.missing, ReasonCode.non_regular}
+    assert marker not in repr(error.value)
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+
+
 def test_default_reprs_redact_protected_bytes() -> None:
     marker = b"UNIQUE_REPR_MARKER_987"
     document = SourceDocument("marker.txt", marker, "text/plain")
@@ -257,10 +289,17 @@ def test_stable_read_rejects_unsafe_files_and_evidence(tmp_path: Path) -> None:
 def test_private_staging_is_contained_and_mode_0700(tmp_path: Path) -> None:
     os.chmod(tmp_path, 0o700)
     with private_staging(tmp_path) as staging:
-        assert staging.parent == tmp_path
-        assert stat.S_IMODE(staging.lstat().st_mode) == 0o700
-        (staging / "work.txt").write_text("temporary", encoding="utf-8")
-    assert not staging.exists()
+        assert repr(staging) == "PrivateStaging()"
+        staging.write_bytes("work.txt", b"temporary")
+        child_dirs = list(tmp_path.iterdir())
+        assert len(child_dirs) == 1
+        assert stat.S_IMODE(child_dirs[0].lstat().st_mode) == 0o700
+        with staging.open("work.txt", "rb") as handle:
+            assert handle.read() == b"temporary"
+    assert not list(tmp_path.iterdir())
+    with pytest.raises(PublicationError) as error:
+        staging.write_bytes("after-close.txt", b"closed")
+    assert error.value.code == ReasonCode.staging_unsafe
 
     unsafe = tmp_path / "unsafe"
     unsafe.mkdir()
@@ -269,6 +308,24 @@ def test_private_staging_is_contained_and_mode_0700(tmp_path: Path) -> None:
         with private_staging(unsafe):
             pass
     assert error.value.code == ReasonCode.staging_unsafe
+
+
+def test_private_staging_writes_remain_anchored_after_parent_swap(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    os.chmod(root, 0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    moved = tmp_path / "root-original"
+    with pytest.raises(PublicationError) as error:
+        with private_staging(root) as staging:
+            root.rename(moved)
+            child_name = next(moved.iterdir()).name
+            root.symlink_to(outside, target_is_directory=True)
+            (outside / child_name).mkdir(mode=0o700)
+            staging.write_bytes("escaped.txt", b"must stay private")
+            assert not (outside / child_name / "escaped.txt").exists()
+    assert error.value.code in {ReasonCode.symlink, ReasonCode.changing, ReasonCode.staging_unsafe}
 
 
 def test_snapshot_rejects_duplicate_paths_and_oversized_artifact() -> None:

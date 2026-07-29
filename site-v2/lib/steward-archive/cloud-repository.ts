@@ -12,6 +12,8 @@ import {
   decodePublicationCursor,
   encodePublicationCursor,
   PublicationCursorError,
+  validatePublicGeneration,
+  validatePublicHead,
   type PublicationCursor,
 } from "./publication";
 import {
@@ -63,23 +65,27 @@ const TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0
 /** The latest visible generation is the publication snapshot used by cursors. */
 export const STATUS_STATEMENT = `
 SELECT
-  COUNT(*) AS task_count,
-  MAX(p.exposed_at) AS latest_publication_at,
-  (
-    SELECT p2.publication_id
-      FROM task_heads AS h2
-      JOIN publication_generations AS p2
-        ON p2.publication_id = h2.publication_id
-       AND p2.task_id = h2.task_id
-       AND p2.state = 'visible'
-       AND p2.exposed_at IS NOT NULL
-      JOIN tasks AS t2
-        ON t2.publication_id = p2.publication_id
-       AND t2.task_id = h2.task_id
-     WHERE h2.state = 'visible'
-     ORDER BY p2.exposed_at DESC, p2.publication_id DESC
-     LIMIT 1
-  ) AS latest_publication_id
+  COUNT(*) OVER () AS task_count,
+  MAX(p.exposed_at) OVER () AS latest_publication_at,
+  FIRST_VALUE(p.publication_id) OVER (
+    ORDER BY p.exposed_at DESC, p.publication_id DESC
+  ) AS latest_publication_id,
+  h.updated_at AS head_updated_at,
+  h.state AS head_state,
+  p.publication_id AS publication_id,
+  p.task_id AS generation_task_id,
+  p.run_id AS generation_run_id,
+  p.metadata_digest AS generation_metadata_digest,
+  p.idempotency_key AS generation_idempotency_key,
+  p.state AS generation_state,
+  p.expected_task_count AS generation_expected_task_count,
+  p.expected_pipeline_count AS generation_expected_pipeline_count,
+  p.expected_run_count AS generation_expected_run_count,
+  p.expected_event_count AS generation_expected_event_count,
+  p.expected_artifact_count AS generation_expected_artifact_count,
+  p.created_at AS generation_created_at,
+  p.exposed_at AS generation_exposed_at,
+  t.task_id AS task_id
   FROM task_heads AS h
   JOIN publication_generations AS p
     ON p.publication_id = h.publication_id
@@ -90,11 +96,26 @@ SELECT
     ON t.publication_id = p.publication_id
    AND t.task_id = h.task_id
  WHERE h.state = 'visible'
+ ORDER BY p.exposed_at DESC, p.publication_id DESC
+ LIMIT ?
 `;
 
 const TASK_COLUMNS = `
   h.updated_at AS head_updated_at,
+  h.state AS head_state,
   p.publication_id AS publication_id,
+  p.task_id AS generation_task_id,
+  p.run_id AS generation_run_id,
+  p.metadata_digest AS generation_metadata_digest,
+  p.idempotency_key AS generation_idempotency_key,
+  p.state AS generation_state,
+  p.expected_task_count AS generation_expected_task_count,
+  p.expected_pipeline_count AS generation_expected_pipeline_count,
+  p.expected_run_count AS generation_expected_run_count,
+  p.expected_event_count AS generation_expected_event_count,
+  p.expected_artifact_count AS generation_expected_artifact_count,
+  p.created_at AS generation_created_at,
+  p.exposed_at AS generation_exposed_at,
   t.task_id AS task_id,
   t.title AS title,
   t.lifecycle_state AS lifecycle_state,
@@ -142,7 +163,12 @@ const TASK_FROM = `
 `;
 
 const TASK_GROUP = `
- GROUP BY h.updated_at, p.publication_id, t.task_id, t.title,
+ GROUP BY h.updated_at, h.state, p.publication_id, p.task_id, p.run_id,
+          p.metadata_digest, p.idempotency_key, p.state,
+          p.expected_task_count, p.expected_pipeline_count,
+          p.expected_run_count, p.expected_event_count,
+          p.expected_artifact_count, p.created_at, p.exposed_at,
+          t.task_id, t.title,
           t.lifecycle_state, t.created_at, t.completed_at,
           p.expected_event_count, p.expected_artifact_count,
           r.pipeline_id, r.run_id, r.run_state
@@ -213,7 +239,23 @@ ${TASK_FROM}
 `;
 
 export const ACTIVE_CURSOR_STATEMENT = `
-SELECT h.updated_at AS head_updated_at, t.task_id AS task_id
+SELECT
+  h.updated_at AS head_updated_at,
+  h.state AS head_state,
+  p.publication_id AS publication_id,
+  p.task_id AS generation_task_id,
+  p.run_id AS generation_run_id,
+  p.metadata_digest AS generation_metadata_digest,
+  p.idempotency_key AS generation_idempotency_key,
+  p.state AS generation_state,
+  p.expected_task_count AS generation_expected_task_count,
+  p.expected_pipeline_count AS generation_expected_pipeline_count,
+  p.expected_run_count AS generation_expected_run_count,
+  p.expected_event_count AS generation_expected_event_count,
+  p.expected_artifact_count AS generation_expected_artifact_count,
+  p.created_at AS generation_created_at,
+  p.exposed_at AS generation_exposed_at,
+  t.task_id AS task_id
 ${TASK_FROM}
   AND t.lifecycle_state = 'active'
   AND h.updated_at = ?
@@ -222,7 +264,23 @@ ${TASK_FROM}
 `;
 
 export const HISTORY_CURSOR_STATEMENT = `
-SELECT h.updated_at AS head_updated_at, t.task_id AS task_id
+SELECT
+  h.updated_at AS head_updated_at,
+  h.state AS head_state,
+  p.publication_id AS publication_id,
+  p.task_id AS generation_task_id,
+  p.run_id AS generation_run_id,
+  p.metadata_digest AS generation_metadata_digest,
+  p.idempotency_key AS generation_idempotency_key,
+  p.state AS generation_state,
+  p.expected_task_count AS generation_expected_task_count,
+  p.expected_pipeline_count AS generation_expected_pipeline_count,
+  p.expected_run_count AS generation_expected_run_count,
+  p.expected_event_count AS generation_expected_event_count,
+  p.expected_artifact_count AS generation_expected_artifact_count,
+  p.created_at AS generation_created_at,
+  p.exposed_at AS generation_exposed_at,
+  t.task_id AS task_id
 ${TASK_FROM}
   AND t.lifecycle_state IN ('completed', 'failed', 'cancelled')
   AND h.updated_at = ?
@@ -246,14 +304,27 @@ const CURSOR_STATEMENTS: Record<CloudTaskScope, string> = { active: ACTIVE_CURSO
 type CursorDirection = "next" | "previous";
 type DecodedTaskCursor = { direction: CursorDirection; updatedAt: string; taskId: string };
 
-const STATUS_KEYS = ["task_count", "latest_publication_at", "latest_publication_id"] as const;
+const STATUS_KEYS = [
+  "task_count", "latest_publication_at", "latest_publication_id", "head_updated_at", "head_state", "publication_id",
+  "generation_task_id", "generation_run_id", "generation_metadata_digest", "generation_idempotency_key", "generation_state",
+  "generation_expected_task_count", "generation_expected_pipeline_count", "generation_expected_run_count",
+  "generation_expected_event_count", "generation_expected_artifact_count", "generation_created_at", "generation_exposed_at", "task_id",
+] as const;
 const TASK_KEYS = [
-  "head_updated_at", "publication_id", "task_id", "title", "lifecycle_state", "created_at", "completed_at",
+  "head_updated_at", "head_state", "publication_id", "generation_task_id", "generation_run_id", "generation_metadata_digest",
+  "generation_idempotency_key", "generation_state", "generation_expected_task_count", "generation_expected_pipeline_count",
+  "generation_expected_run_count", "generation_expected_event_count", "generation_expected_artifact_count", "generation_created_at",
+  "generation_exposed_at", "task_id", "title", "lifecycle_state", "created_at", "completed_at",
   "expected_event_count", "expected_artifact_count", "event_count", "artifact_count", "pipeline_id", "run_id", "run_state",
   "redaction_applied_min", "redaction_applied_max", "original_retained_min", "original_retained_max",
 ] as const;
 const COUNT_KEYS = ["task_count"] as const;
-const CURSOR_KEYS = ["head_updated_at", "task_id"] as const;
+const CURSOR_KEYS = [
+  "head_updated_at", "head_state", "publication_id", "generation_task_id", "generation_run_id", "generation_metadata_digest",
+  "generation_idempotency_key", "generation_state", "generation_expected_task_count", "generation_expected_pipeline_count",
+  "generation_expected_run_count", "generation_expected_event_count", "generation_expected_artifact_count", "generation_created_at",
+  "generation_exposed_at", "task_id",
+] as const;
 
 function invalidData(): never {
   throw new CloudRepositoryDataError();
@@ -314,8 +385,36 @@ function timestamp(value: unknown): string {
   return value;
 }
 
-function nullableTimestamp(value: unknown): string | null {
-  return value === null ? null : timestamp(value);
+function validatePublicContract(row: Record<string, unknown>, expectedRunId?: string) {
+  try {
+    const generation = validatePublicGeneration({
+      publication_id: row.publication_id,
+      task_id: row.generation_task_id,
+      run_id: row.generation_run_id,
+      metadata_digest: row.generation_metadata_digest,
+      idempotency_key: row.generation_idempotency_key,
+      state: row.generation_state,
+      expected_task_count: row.generation_expected_task_count,
+      expected_pipeline_count: row.generation_expected_pipeline_count,
+      expected_run_count: row.generation_expected_run_count,
+      expected_event_count: row.generation_expected_event_count,
+      expected_artifact_count: row.generation_expected_artifact_count,
+      created_at: row.generation_created_at,
+      exposed_at: row.generation_exposed_at,
+    });
+    const head = validatePublicHead({
+      task_id: row.task_id,
+      publication_id: row.publication_id,
+      state: row.head_state,
+      updated_at: row.head_updated_at,
+    });
+    if (generation.task_id !== row.task_id || generation.publication_id !== row.publication_id) invalidData();
+    if (head.task_id !== row.task_id || head.publication_id !== row.publication_id) invalidData();
+    if (expectedRunId !== undefined && generation.run_id !== expectedRunId) invalidData();
+    return { generation, head };
+  } catch {
+    invalidData();
+  }
 }
 
 function disclosure(value: unknown): boolean {
@@ -324,18 +423,25 @@ function disclosure(value: unknown): boolean {
   invalidData();
 }
 
-function parseStatus(rowValue: unknown): { status: CloudStatus; publicationId: string | null } {
-  const row = exactRow(rowValue, STATUS_KEYS);
-  const taskCount = boundedInteger(row.task_count, MAX_COUNT);
-  const latestPublicationAt = nullableTimestamp(row.latest_publication_at);
-  const publicationId = row.latest_publication_id === null ? null : id(row.latest_publication_id);
-  if (taskCount === 0 && (latestPublicationAt !== null || publicationId !== null)) invalidData();
-  if (taskCount > 0 && (latestPublicationAt === null || publicationId === null)) invalidData();
-  const status = validateCloudStatusData({
-    state: taskCount === 0 ? "empty" : "available",
-    taskCount,
-    latestPublicationAt,
-  });
+function parseStatus(rowsValue: readonly Record<string, unknown>[]): { status: CloudStatus; publicationId: string | null } {
+  if (rowsValue.length === 0) {
+    return {
+      status: validateCloudStatusData({ state: "empty", taskCount: 0, latestPublicationAt: null }),
+      publicationId: null,
+    };
+  }
+  if (rowsValue.length > MAX_COUNT) invalidData();
+  const rows = rowsValue.map((rowValue) => exactRow(rowValue, STATUS_KEYS));
+  const taskCount = boundedInteger(rows[0]!.task_count, MAX_COUNT);
+  if (taskCount !== rows.length || taskCount === 0) invalidData();
+  const latestPublicationAt = timestamp(rows[0]!.latest_publication_at);
+  const publicationId = id(rows[0]!.latest_publication_id);
+  for (const row of rows) {
+    if (boundedInteger(row.task_count, MAX_COUNT) !== taskCount) invalidData();
+    if (timestamp(row.latest_publication_at) !== latestPublicationAt || id(row.latest_publication_id) !== publicationId) invalidData();
+    validatePublicContract(row);
+  }
+  const status = validateCloudStatusData({ state: "available", taskCount, latestPublicationAt });
   return { status, publicationId };
 }
 
@@ -346,6 +452,8 @@ function parseTask(rowValue: unknown): { task: CloudTaskSummary; updatedAt: stri
   const taskId = id(row.task_id);
   const pipelineId = id(row.pipeline_id);
   const runId = id(row.run_id);
+  const { generation } = validatePublicContract(row, runId);
+  if (generation.task_id !== taskId || generation.publication_id !== publicationId) invalidData();
   const runState = row.run_state;
   if (runState !== "completed" && runState !== "failed" && runState !== "cancelled") invalidData();
   const completedRunId = runState === "completed" ? runId : null;
@@ -353,6 +461,7 @@ function parseTask(rowValue: unknown): { task: CloudTaskSummary; updatedAt: stri
   const expectedArtifactCount = boundedInteger(row.expected_artifact_count, MAX_COUNT);
   const eventCount = boundedInteger(row.event_count, MAX_COUNT);
   const artifactCount = boundedInteger(row.artifact_count, MAX_COUNT);
+  if (generation.expected_event_count !== expectedEventCount || generation.expected_artifact_count !== expectedArtifactCount) invalidData();
   if (expectedEventCount !== eventCount || expectedArtifactCount !== artifactCount || expectedArtifactCount === 0) invalidData();
   const redactionMin = disclosure(row.redaction_applied_min);
   const redactionMax = disclosure(row.redaction_applied_max);
@@ -383,6 +492,7 @@ function parseCount(rowValue: unknown): number {
 
 function parseCursorBoundary(rowValue: unknown, expected: DecodedTaskCursor): void {
   const row = exactRow(rowValue, CURSOR_KEYS);
+  validatePublicContract(row);
   if (timestamp(row.head_updated_at) !== expected.updatedAt || id(row.task_id) !== expected.taskId) invalidData();
 }
 
@@ -459,10 +569,9 @@ export class CloudRepository {
   }
 
   private async readStatus(): Promise<{ status: CloudStatus; publicationId: string | null }> {
-    const response = await this.client().query(STATUS_STATEMENT, []);
+    const response = await this.client().query(STATUS_STATEMENT, [MAX_COUNT + 1]);
     const rows = rowsFromResponse(response);
-    if (rows.length !== 1) invalidData();
-    return parseStatus(rows[0]);
+    return parseStatus(rows);
   }
 
   async getStatus(): Promise<CloudStatus> {

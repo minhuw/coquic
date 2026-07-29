@@ -30,12 +30,38 @@ function response(rows: readonly RawRow[]) {
   return { result: [{ results: rows, meta: {} }] };
 }
 
-function statusRow(count = 1, publicationId: string | null = latestPublication): RawRow {
+function publicContract(taskId: string, publicationId: string, runId: string, updatedAt = "2026-07-28T00:00:03Z"): RawRow {
   return {
+    head_updated_at: updatedAt,
+    head_state: "visible",
+    publication_id: publicationId,
+    generation_task_id: taskId,
+    generation_run_id: runId,
+    generation_metadata_digest: "a".repeat(64),
+    generation_idempotency_key: `retry-${taskId}`,
+    generation_state: "visible",
+    generation_expected_task_count: 1,
+    generation_expected_pipeline_count: 1,
+    generation_expected_run_count: 1,
+    generation_expected_event_count: 2,
+    generation_expected_artifact_count: 1,
+    generation_created_at: "2026-07-28T00:00:00Z",
+    generation_exposed_at: "2026-07-28T00:00:02Z",
+    task_id: taskId,
+  };
+}
+
+function statusRow(taskId = "status-task", count = 1, publicationId: string = latestPublication): RawRow {
+  return {
+    ...publicContract(taskId, publicationId, `run-${taskId}`),
     task_count: count,
-    latest_publication_at: count === 0 ? null : "2026-07-28T00:00:02Z",
+    latest_publication_at: "2026-07-28T00:00:02Z",
     latest_publication_id: publicationId,
   };
+}
+
+function statusRows(count: number, publicationId = latestPublication): RawRow[] {
+  return Array.from({ length: count }, (_, index) => statusRow(`status-task-${index}`, count, publicationId));
 }
 
 function taskRow(
@@ -45,9 +71,7 @@ function taskRow(
 ): RawRow {
   const completedAt = lifecycleState === "active" ? null : "2026-07-28T00:00:01Z";
   return {
-    head_updated_at: updatedAt,
-    publication_id: `publication-${taskId}`,
-    task_id: taskId,
+    ...publicContract(taskId, `publication-${taskId}`, `run-${taskId}`, updatedAt),
     title: `${taskId} title`,
     lifecycle_state: lifecycleState,
     created_at: "2026-07-28T00:00:00Z",
@@ -84,7 +108,7 @@ class FakeClient {
 }
 
 test("reports empty and ready status from the visible publication join", async () => {
-  const empty = new CloudRepository({ client: new FakeClient(response([statusRow(0, null)])) });
+  const empty = new CloudRepository({ client: new FakeClient(response([])) });
   assert.deepEqual(await empty.getStatus(), { state: "empty", taskCount: 0, latestPublicationAt: null });
 
   const readyClient = new FakeClient(response([statusRow()]));
@@ -94,10 +118,26 @@ test("reports empty and ready status from the visible publication join", async (
   assert.equal(readyClient.calls[0]!.statement, STATUS_STATEMENT);
 });
 
+test("fails closed before status or task pagination on malformed generation and head rows", async () => {
+  const malformedStatus = statusRow();
+  malformedStatus.generation_expected_task_count = 0;
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(response([malformedStatus])) }).getStatus(),
+    CloudRepositoryDataError,
+  );
+
+  const privatePublication = { ...taskRow("task-one", "2026-07-28T00:00:03Z"), publication_id: "private-bucket" };
+  const client = new FakeClient(
+    response(statusRows(2)),
+    response([privatePublication, taskRow("task-two", "2026-07-28T00:00:02Z")]),
+  );
+  await assert.rejects(() => new CloudRepository({ client }).listTasks("active", null, 1), CloudRepositoryDataError);
+});
+
 test("lists active tasks with equal timestamps, bounded limits, and separate completeness", async () => {
   const first = taskRow("task-b", "2026-07-28T00:00:03Z");
   const second = taskRow("task-a", "2026-07-28T00:00:03Z");
-  const client = new FakeClient(response([statusRow(2)]), response([first, second]), response([{ task_count: 2 }]));
+  const client = new FakeClient(response(statusRows(2)), response([first, second]), response([{ task_count: 2 }]));
   const page = await new CloudRepository({ client }).listTasks({ scope: "active", limit: 0 });
   assert.equal(page.tasks.length, 1);
   assert.equal(page.tasks[0]!.taskId, "task-b");
@@ -115,15 +155,15 @@ test("supports forward and backward cursors without losing a tied timestamp", as
   const firstRow = taskRow("task-b", "2026-07-28T00:00:03Z");
   const secondRow = taskRow("task-a", "2026-07-28T00:00:03Z");
   const newerRow = taskRow("task-c", "2026-07-28T00:00:03Z");
-  const firstClient = new FakeClient(response([statusRow(3)]), response([firstRow, secondRow]), response([{ task_count: 3 }]));
+  const firstClient = new FakeClient(response(statusRows(3)), response([firstRow, secondRow]), response([{ task_count: 3 }]));
   const first = await new CloudRepository({ client: firstClient }).listTasks("active", { limit: 1 });
   assert(first.nextCursor);
   const decoded = decodePublicationCursor(first.nextCursor, { query: "tasks-active", publicationId: latestPublication });
   assert.deepEqual(decoded.sort, ["2026-07-28T00:00:03Z", "task-b", "next"]);
 
   const nextClient = new FakeClient(
-    response([statusRow(3)]),
-    response([{ head_updated_at: "2026-07-28T00:00:03Z", task_id: "task-b" }]),
+    response(statusRows(3)),
+    response([publicContract("task-b", "publication-task-b", "run-task-b")]),
     response([secondRow]),
     response([{ task_count: 3 }]),
   );
@@ -133,8 +173,8 @@ test("supports forward and backward cursors without losing a tied timestamp", as
   assert.equal(next.nextCursor, null);
 
   const previousClient = new FakeClient(
-    response([statusRow(3)]),
-    response([{ head_updated_at: "2026-07-28T00:00:03Z", task_id: "task-a" }]),
+    response(statusRows(3)),
+    response([publicContract("task-a", "publication-task-a", "run-task-a")]),
     response([firstRow, newerRow]),
     response([{ task_count: 3 }]),
   );
@@ -146,13 +186,13 @@ test("supports forward and backward cursors without losing a tied timestamp", as
 
 test("keeps active-after-planning separate from terminal history", async () => {
   const active = taskRow("task-planning", "2026-07-28T00:00:04Z", "active");
-  const activeClient = new FakeClient(response([statusRow()]), response([active]), response([{ task_count: 1 }]));
+  const activeClient = new FakeClient(response(statusRows(1)), response([active]), response([{ task_count: 1 }]));
   const activePage = await new CloudRepository({ client: activeClient }).listActiveTasks({ limit: 10 });
   assert.equal(activePage.tasks[0]!.lifecycleState, "active");
   assert.equal(activePage.tasks[0]!.completedRunId, "run-task-planning");
 
   const history = taskRow("task-terminal", "2026-07-28T00:00:05Z", "completed");
-  const historyClient = new FakeClient(response([statusRow()]), response([history]), response([{ task_count: 1 }]));
+  const historyClient = new FakeClient(response(statusRows(1)), response([history]), response([{ task_count: 1 }]));
   const historyPage = await new CloudRepository({ client: historyClient }).listHistoryTasks({ limit: 10 });
   assert.equal(historyPage.tasks[0]!.lifecycleState, "completed");
   assert.equal(historyPage.tasks[0]!.completedAt, "2026-07-28T00:00:01Z");
@@ -160,16 +200,16 @@ test("keeps active-after-planning separate from terminal history", async () => {
 
 test("rejects stale, malformed, private-shaped, and inconsistent remote rows", async () => {
   const cursor = repositoryModule.encodePublicationCursor({ query: "tasks-active", publicationId: "publication-old", sort: ["2026-07-28T00:00:03Z", "task-old", "next"] });
-  const staleClient = new FakeClient(response([statusRow(1, latestPublication)]));
+  const staleClient = new FakeClient(response(statusRows(1, latestPublication)));
   await assert.rejects(() => new CloudRepository({ client: staleClient }).listTasks("active", cursor), (error: unknown) => error instanceof repositoryModule.PublicationCursorError && error.code === "STALE_CURSOR");
 
   const privateRow = { ...taskRow("task-private", "2026-07-28T00:00:03Z"), credential_path: "/private/secret" };
-  const privateClient = new FakeClient(response([statusRow()]), response([privateRow]));
+  const privateClient = new FakeClient(response(statusRows(1)), response([privateRow]));
   await assert.rejects(() => new CloudRepository({ client: privateClient }).listTasks("active"), CloudRepositoryDataError);
 
   const inconsistent = taskRow("task-bad", "2026-07-28T00:00:03Z");
   inconsistent.event_count = 1;
-  const inconsistentClient = new FakeClient(response([statusRow()]), response([inconsistent]));
+  const inconsistentClient = new FakeClient(response(statusRows(1)), response([inconsistent]));
   await assert.rejects(() => new CloudRepository({ client: inconsistentClient }).listTasks("active"), CloudRepositoryDataError);
 });
 

@@ -732,6 +732,110 @@ class AtifDocument:
         return value if isinstance(value, dict) else {}
 
 
+@dataclass(frozen=True, slots=True)
+class SanitizationResult:
+    """Bounded result from the public-text sanitization stage.
+
+    The cleaned document is intentionally optional.  A document is exposed
+    only for a clean result; repair and fail-closed outcomes carry categories
+    and counts, never scanner records, paths, or matched values.
+    """
+
+    status: str
+    document: AtifDocument | None = field(default=None, repr=False)
+    reason_codes: tuple[ReasonCode, ...] = ()
+    findings: tuple[FindingSummary, ...] = ()
+    replacement_count: int = 0
+    redaction_applied: bool = False
+
+    def __post_init__(self) -> None:
+        if self.status not in {"clean", "repair_required", "fail_closed"}:
+            _fail(ReasonCode.invalid_metadata)
+        reasons = _tuple(self.reason_codes, code=ReasonCode.invalid_metadata)
+        if any(not isinstance(item, ReasonCode) for item in reasons):
+            _fail(ReasonCode.invalid_metadata)
+        if len(reasons) > MAX_FINDINGS or len(set(reasons)) != len(reasons):
+            _fail(ReasonCode.invalid_metadata)
+        findings = _tuple(self.findings, code=ReasonCode.invalid_metadata)
+        if len(findings) > MAX_FINDINGS or any(not isinstance(item, FindingSummary) for item in findings):
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "clean":
+            if self.document is None or reasons or findings:
+                _fail(ReasonCode.invalid_metadata)
+        elif self.document is not None:
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "repair_required":
+            if not reasons or any(item not in _REPAIRABLE_REASONS for item in reasons):
+                _fail(ReasonCode.invalid_metadata)
+            if any(item.code not in _REPAIRABLE_REASONS for item in findings):
+                _fail(ReasonCode.invalid_metadata)
+        elif self.status == "fail_closed":
+            if not reasons or any(item in _REPAIRABLE_REASONS for item in reasons):
+                _fail(ReasonCode.invalid_metadata)
+            if any(item.code in _REPAIRABLE_REASONS for item in findings):
+                _fail(ReasonCode.invalid_metadata)
+        else:
+            if self.replacement_count < 0 or self.redaction_applied != (self.replacement_count > 0):
+                _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "reason_codes", tuple(reasons))
+        object.__setattr__(self, "findings", tuple(findings))
+        object.__setattr__(self, "replacement_count", _bounded_int(self.replacement_count, code=ReasonCode.invalid_metadata, maximum=MAX_COUNTER))
+        if self.status != "clean" and (self.replacement_count != 0 or self.redaction_applied):
+            _fail(ReasonCode.invalid_metadata)
+
+    @classmethod
+    def clean(cls, document: AtifDocument, *, replacement_count: int = 0) -> "SanitizationResult":
+        if not isinstance(document, AtifDocument):
+            _fail(ReasonCode.invalid_metadata)
+        count = _bounded_int(replacement_count, code=ReasonCode.invalid_metadata, maximum=MAX_COUNTER)
+        return cls("clean", document=document, replacement_count=count, redaction_applied=count > 0)
+
+    @classmethod
+    def repair(cls, reason: ReasonCode, *, count: int = 1) -> "SanitizationResult":
+        if reason not in _REPAIRABLE_REASONS:
+            _fail(ReasonCode.invalid_metadata)
+        finding = FindingSummary(reason, _bounded_int(count, code=ReasonCode.invalid_metadata, maximum=MAX_FINDINGS))
+        return cls("repair_required", reason_codes=(reason,), findings=(finding,))
+
+    @classmethod
+    def failed(cls, reason: ReasonCode, *, count: int = 1) -> "SanitizationResult":
+        if reason in _REPAIRABLE_REASONS:
+            _fail(ReasonCode.invalid_metadata)
+        finding = FindingSummary(reason, _bounded_int(count, code=ReasonCode.invalid_metadata, maximum=MAX_FINDINGS))
+        return cls("fail_closed", reason_codes=(reason,), findings=(finding,))
+
+    def as_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "status": self.status,
+            "reasonCodes": [item.value for item in self.reason_codes],
+            "findings": [item.as_dict() for item in self.findings],
+        }
+        if self.status == "clean":
+            value.update(
+                {
+                    "redactionApplied": self.redaction_applied,
+                    "replacementCount": self.replacement_count,
+                }
+            )
+        return value
+
+    @property
+    def content(self) -> bytes | None:
+        """Return clean canonical bytes without exposing them in reports."""
+
+        return self.document.content if self.document is not None else None
+
+    @property
+    def atif(self) -> AtifDocument | None:
+        return self.document
+
+
+# Descriptive aliases for callers that name this stage redaction rather than
+# sanitization; all aliases retain the same bounded result contract.
+RedactionResult = SanitizationResult
+SanitizerResult = SanitizationResult
+
+
 # ``AtifTrajectory`` is a descriptive compatibility name used by callers that
 # model the structured Harbor object rather than its canonical byte envelope.
 AtifTrajectory = AtifDocument
@@ -1649,9 +1753,12 @@ __all__ = [
     "Publishable",
     "ReasonCode",
     "RepairRequired",
+    "RedactionResult",
     "RunIdentity",
     "RunLineage",
     "RunMetadata",
+    "SanitizationResult",
+    "SanitizerResult",
     "SourceDocument",
     "StableRead",
     "UsageSummary",

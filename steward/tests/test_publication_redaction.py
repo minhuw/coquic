@@ -248,6 +248,21 @@ def test_trufflehog_malformed_structured_media_fails_closed() -> None:
     assert "declared-secret" not in repr(result)
 
 
+def test_trufflehog_parameterized_structured_media_fails_closed() -> None:
+    raw = b'{"api_key":"declared-secret"'
+    document = _with_artifact(
+        _document(),
+        raw,
+        media_type="application/json;charset=utf-8",
+        logical_path="evidence/item",
+    )
+    result = redact_atif_document(document, secrets=("declared-secret",))
+    assert result.status == "fail_closed"
+    assert result.document is None
+    assert result.reason_codes == (ReasonCode.unsafe_content,)
+    assert "declared-secret" not in repr(result)
+
+
 def test_trufflehog_mime_diff_without_suffix_requires_repair() -> None:
     raw = "patch-secret"
     document = _with_artifact(
@@ -269,6 +284,32 @@ def test_trufflehog_mime_diff_without_suffix_requires_repair() -> None:
 
     result = sanitize_publication(document, scanner_runner=runner)
     assert result.status == "repair_required"
+    assert result.reason_codes == (ReasonCode.patch_finding,)
+    assert raw not in repr(result)
+
+
+def test_trufflehog_parameterized_diff_mime_without_suffix_requires_repair() -> None:
+    raw = "patch-secret"
+    document = _with_artifact(
+        _document(),
+        f"diff --git a/item b/item\n+{raw}\n".encode(),
+        media_type="application/x-diff;charset=utf-8",
+        logical_path="evidence/item",
+        artifact_id="artifact-diff-parameterized",
+    )
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        output = json.dumps(
+            {
+                "SourceMetadata": {"Data": {"Filesystem": {"file": "entry-0001.txt"}}},
+                "Raw": raw,
+            }
+        ).encode() + b"\n"
+        return subprocess.CompletedProcess(argv, 0, output, b"")
+
+    result = sanitize_publication(document, scanner_runner=runner)
+    assert result.status == "repair_required"
+    assert result.document is None
     assert result.reason_codes == (ReasonCode.patch_finding,)
     assert raw not in repr(result)
 

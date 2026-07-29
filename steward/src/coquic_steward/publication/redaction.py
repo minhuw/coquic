@@ -341,8 +341,14 @@ def _replace_value(value: Any, secrets: Sequence[str], *, protected: bool = Fals
     return value, 0, False
 
 
+def _base_media_type(media_type: str) -> str:
+    """Return the case-folded MIME type without optional parameters."""
+
+    return media_type.partition(";")[0].strip().casefold()
+
+
 def _text_media(media_type: str) -> bool:
-    lowered = media_type.casefold()
+    lowered = _base_media_type(media_type)
     return lowered.startswith("text/") or lowered in {
         "application/json",
         "application/jsonl",
@@ -360,7 +366,7 @@ def _replace_artifact(content: bytes, media_type: str, secrets: Sequence[str]) -
         text = content.decode("utf-8")
     except UnicodeDecodeError:
         return content, 0, True
-    lowered = media_type.casefold()
+    lowered = _base_media_type(media_type)
     structured_media = lowered in {"application/json", "application/ld+json", "application/jsonl", "application/xml"} or lowered.endswith("+json")
     if structured_media:
         try:
@@ -530,7 +536,7 @@ def _classify(logical_path: str, media_type: str = "") -> str:
     lowered = logical_path.casefold()
     name = lowered.rsplit("/", 1)[-1]
     suffix = Path(name).suffix
-    media = media_type.casefold()
+    media = _base_media_type(media_type)
     if (
         suffix in _PATCH_SUFFIXES
         or any(part in {"patch", "diff", "changes"} for part in lowered.split("/"))

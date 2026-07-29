@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import Module, { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+import { createElement, type Context } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { parseCloudResponse, type CloudResponse } from "../lib/steward-archive/cloud-schema";
 
@@ -302,6 +304,9 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     calls.count += 1;
     const url = String(input);
     calls.urls.push(url);
+    if (url === "https://api.github.com/repos/minhuw/coquic") {
+      return new Response(JSON.stringify({ stargazers_count: 0 }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     assert.match(url, /^https:\/\/api\.cloudflare\.com\/client\/v4\//);
     if (scenarioValue.mode === "rate-limited") return new Response("rate limited", { status: 429 });
     if (scenarioValue.mode === "outage") throw new Error("route-harness-secret outage");
@@ -393,6 +398,9 @@ async function main() {
   const { GET: getTaskDetail } = await import("../app/api/steward/tasks/[taskId]/route");
   const { GET: getArtifact } = await import("../app/api/steward/tasks/[taskId]/artifact/route");
   const { GET: getTranscript } = await import("../app/api/steward/tasks/[taskId]/transcript/route");
+  const { default: renderStewardPage } = await import("../app/steward/page");
+  const nextPackageRoot = dirname(requireForTest.resolve("next/package.json"));
+  const { PathnameContext } = requireForTest(resolve(nextPackageRoot, "dist/shared/lib/hooks-client-context.shared-runtime")) as { PathnameContext: Context<string | null> };
   const originalFetch = globalThis.fetch;
   const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   const outputs: string[] = [];
@@ -419,6 +427,67 @@ async function main() {
       }
     }
   }
+
+  async function renderOverview(searchParams: Record<string, string | undefined> = {}) {
+    const page = await renderStewardPage({ searchParams: Promise.resolve(searchParams) });
+    return renderToStaticMarkup(createElement(PathnameContext.Provider, { value: "/steward" }, page));
+  }
+
+  function assertOverviewHasNoLegacyOutput(html: string) {
+    assert(!html.includes("Revision"));
+    assert(!html.includes("revision"));
+    assert(!html.includes("Signal evidence"));
+    assert(!html.includes("Planner transcript"));
+    assert(!html.includes("archiveState"));
+  }
+
+  await runCase("overview empty render", scenario([], []), async () => {
+    const html = await renderOverview();
+    assert.match(html, /No visible tasks are published yet/);
+    assert.match(html, /href="\/steward\?view=signals"/);
+    assert.match(html, /href="\/steward\?view=planning"/);
+    assert.match(html, /Signals unavailable/);
+    assert.match(html, /Planning unavailable/);
+    assertOverviewHasNoLegacyOutput(html);
+  });
+
+  await runCase("overview active after planning render", scenario(activeRows, historyRows), async () => {
+    const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /Active publication fixture/);
+    assert.match(html, /Redacted publication fixture/);
+    assert.match(html, /href="\/steward\/tasks\/task-active"/);
+    assert.match(html, /Publication complete/);
+    assert.match(html, /Active tasks/);
+    assert.match(html, /Task history/);
+    assertOverviewHasNoLegacyOutput(html);
+  });
+
+  const historyRowsForPagination = [
+    ...historyRows,
+    taskRow({ ...historyFixture.data.task, taskId: "task-history-second", title: "Second history publication" }, "2026-07-28T00:00:00Z"),
+  ];
+  const historyCursor = cloudRepository.encodePublicationCursor({
+    query: "tasks-history",
+    publicationId: PUBLICATION_ID,
+    sort: [String(historyRowsForPagination[0]!.head_updated_at), String(historyRowsForPagination[0]!.task_id), "next"],
+  });
+
+  await runCase("overview history pagination render", scenario([], historyRowsForPagination), async () => {
+    const html = await renderOverview({ view: "tasks", cursor: historyCursor });
+    assert.match(html, /Second history publication/);
+    assert.match(html, /Previous page/);
+    assert(!html.includes("Redacted publication fixture"));
+    assert.match(html, /href="\/steward\/tasks\/task-history-second"/);
+    assertOverviewHasNoLegacyOutput(html);
+  });
+
+  await runCase("overview outage render", { ...scenario([], []), mode: "outage" }, async () => {
+    const html = await renderOverview();
+    assert.match(html, /Cloud task overview unavailable/);
+    assert.match(html, /href="\/steward\?view=signals"/);
+    assert.match(html, /href="\/steward\?view=planning"/);
+    assertOverviewHasNoLegacyOutput(html);
+  });
 
   await runCase("empty status", scenario([], [], undefined, candidateRows), async () => {
     const response = await getStatus();

@@ -1,62 +1,212 @@
 import type { Metadata } from "next";
-import { ArrowRight, ExternalLink, GitBranch, Radio, Route } from "lucide-react";
+import { ArrowRight, ExternalLink, GitBranch, Radio, Route, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { SiteHeader } from "@/components/site-header";
 import { getGitHubStars } from "@/lib/github";
-import { getArchiveRepository, type ControlPage, type PlannerRunRow, type SignalRow, type TaskDashboard, type TaskPage, type TaskRow } from "@/lib/steward-archive/repository";
-import { RevisionMonitor } from "./revision-monitor";
-import { PlannerTranscript, SignalEvidence } from "./control-loop-evidence";
-import { resolveArchiveSelection } from "./archive-selection";
+import {
+  getCloudRepository,
+  type CloudTaskPage,
+} from "@/lib/steward-archive/cloud-repository";
+import type {
+  CloudStatus,
+  CloudTaskSummary,
+} from "@/lib/steward-archive/cloud-schema";
 
-export const metadata: Metadata = { title: "Steward", description: "Inspect the public evidence behind CoQUIC repository automation." };
+export const metadata: Metadata = {
+  title: "Steward",
+  description: "Inspect the public evidence behind CoQUIC repository automation.",
+};
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const views = ["signals", "planning", "tasks"] as const;
 type View = (typeof views)[number];
 
-function titleCase(value: string) { return value.replace(/([A-Z])/g, " $1").replace(/[._-]/g, " ").replace(/^./, (letter) => letter.toUpperCase()); }
-function formatDateTime(value: string | null) { if (!value) return "Unavailable"; return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "UTC", timeZoneName: "short" }).format(new Date(value)); }
-function formatInteger(value: number | null) { return value === null ? "Unavailable" : value.toLocaleString("en-US"); }
-function formatCost(value: number | null) { return value === null ? "Unavailable" : `$${(value / 1_000_000).toFixed(6)}`; }
-function statusTone(value: string) { return value === "running" || value === "active" ? "text-accent" : value === "pushed" || value === "succeeded" ? "text-positive" : value === "blocked" || value === "failed" ? "text-negative" : value === "queued" || value === "reviewing" ? "text-warning" : "text-muted"; }
-function Status({ value }: { value: string }) { return <span className={`font-medium ${statusTone(value)}`}>{titleCase(value)}</span>; }
+function titleCase(value: string) {
+  return value
+    .replace(/([A-Z])/g, " $1")
+    .replace(/[._-]/g, " ")
+    .replace(/^./, (letter) => letter.toUpperCase());
+}
 
-function ControlLoop({ activeView, dashboard, control }: { activeView: View; dashboard: TaskDashboard | null; control: ReturnType<ReturnType<typeof getArchiveRepository>["getControlLoopStatus"]> | null }) {
-  const counts = dashboard?.counts;
-  const steps = [
-    { id: "signals" as const, label: "Signals", value: control?.state === "ready" || control?.state === "degraded" ? String(control.counts.signals) : "Unavailable", detail: control?.state === "ready" || control?.state === "degraded" ? "indexed signals" : "not connected", icon: Radio },
-    { id: "planning" as const, label: "Planning", value: control?.state === "ready" || control?.state === "degraded" ? String(control.counts.plannerRuns) : "Unavailable", detail: control?.state === "ready" || control?.state === "degraded" ? "planner runs" : "not connected", icon: Route },
-    { id: "tasks" as const, label: "Tasks", value: counts ? String((counts.running ?? 0) + (counts.queued ?? 0)) : "Indexing", detail: counts ? `${counts.running ?? 0} active · ${counts.queued ?? 0} queued` : "archive status pending", icon: GitBranch },
-    { id: "tasks" as const, label: "Integration", value: counts ? String((counts.blocked ?? 0) + (counts.failed ?? 0)) : "Unavailable", detail: counts ? "need attention" : "archive status pending", icon: ArrowRight },
+function formatDateTime(value: string | null) {
+  if (!value) return "Unavailable";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short",
+  }).format(new Date(value));
+}
+
+function statusTone(value: string) {
+  return value === "active" || value === "available"
+    ? "text-accent"
+    : value === "completed"
+      ? "text-positive"
+      : value === "failed" || value === "cancelled"
+        ? "text-negative"
+        : "text-muted";
+}
+
+function Status({ value }: { value: string }) {
+  return <span className={`font-medium ${statusTone(value)}`}>{titleCase(value)}</span>;
+}
+
+function ControlLoop({
+  activeView,
+  status,
+  activePage,
+  historyPage,
+}: {
+  activeView: View;
+  status: CloudStatus | null;
+  activePage: CloudTaskPage | null;
+  historyPage: CloudTaskPage | null;
+}) {
+  const taskDetail = status
+    ? `${activePage?.total ?? "Unavailable"} active / ${historyPage?.total ?? "Unavailable"} history`
+    : "not connected";
+  const steps: readonly {
+    id: View | null;
+    label: string;
+    value: string;
+    detail: string;
+    href: string;
+    icon: LucideIcon;
+  }[] = [
+    {
+      id: "signals",
+      label: "Signals",
+      value: "Unavailable",
+      detail: "not published",
+      href: "/steward?view=signals",
+      icon: Radio,
+    },
+    {
+      id: "planning",
+      label: "Planning",
+      value: "Unavailable",
+      detail: "not published",
+      href: "/steward?view=planning",
+      icon: Route,
+    },
+    {
+      id: "tasks",
+      label: "Tasks",
+      value: status ? String(status.taskCount) : "Unavailable",
+      detail: taskDetail,
+      href: "/steward?view=tasks",
+      icon: GitBranch,
+    },
+    {
+      id: null,
+      label: "Integration",
+      value: "Unavailable",
+      detail: "not published",
+      href: "/steward?view=tasks",
+      icon: ArrowRight,
+    },
   ];
-  return <section aria-label="Steward control loop" className="mt-9 border-y border-line bg-contrast-field text-contrast-ink"><div className="grid sm:grid-cols-2 lg:grid-cols-4">{steps.map((step, index) => { const Icon = step.icon; const selected = index < 3 && step.id === activeView; return <Link key={`${step.label}-${index}`} href={`/steward?view=${step.id}`} aria-current={selected ? "page" : undefined} className={`group relative min-w-0 border-contrast-line px-5 py-6 text-contrast-ink no-underline sm:px-6 ${index < 3 ? "border-b lg:border-b-0 lg:border-r" : ""} ${index === 0 ? "sm:border-r" : ""} ${index === 1 ? "lg:border-r" : ""}`}><div className="flex items-center justify-between gap-4"><span className="flex items-center gap-2 text-sm font-medium text-contrast-muted"><Icon aria-hidden="true" size={15} strokeWidth={1.7} />{step.label}</span>{index < 3 ? <ArrowRight aria-hidden="true" size={14} className="text-contrast-muted" /> : null}</div><p className="mt-5 flex flex-wrap items-baseline gap-2"><span className="text-2xl font-medium data-text">{step.value}</span><span className="text-xs text-contrast-muted">{step.detail}</span></p>{selected ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-accent" /> : null}</Link>; })}</div></section>;
+
+  return (
+    <section
+      aria-label="Steward task channels"
+      className="mt-9 border-y border-line bg-contrast-field text-contrast-ink"
+    >
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4">
+        {steps.map((step, index) => {
+          const Icon = step.icon;
+          const selected = step.id === activeView;
+          return (
+            <Link
+              key={`${step.label}-${index}`}
+              href={step.href}
+              aria-current={selected ? "page" : undefined}
+              className={`group relative min-w-0 border-contrast-line px-5 py-6 text-contrast-ink no-underline sm:px-6 ${index < 3 ? "border-b lg:border-b-0 lg:border-r" : ""} ${index === 0 ? "sm:border-r" : ""} ${index === 1 ? "lg:border-r" : ""}`}
+            >
+              <div className="flex items-center justify-between gap-4">
+                <span className="flex items-center gap-2 text-sm font-medium text-contrast-muted">
+                  <Icon aria-hidden="true" size={15} strokeWidth={1.7} />
+                  {step.label}
+                </span>
+                {index < 3 ? <ArrowRight aria-hidden="true" size={14} className="text-contrast-muted" /> : null}
+              </div>
+              <p className="mt-5 flex flex-wrap items-baseline gap-2">
+                <span className="text-2xl font-medium data-text">{step.value}</span>
+                <span className="text-xs text-contrast-muted">{step.detail}</span>
+              </p>
+              {selected ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-accent" /> : null}
+            </Link>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
-function SectionOpening({ label, title, description }: { label: string; title: string; description: string }) { return <div className="grid gap-4 border-b border-line pb-7 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-10"><p className="text-sm font-medium text-muted">{label}</p><div><h2 className="text-2xl font-semibold leading-tight text-ink">{title}</h2><p className="mt-3 max-w-3xl text-base leading-7 text-muted">{description}</p></div></div>; }
-
-function UnavailableView({ title, description }: { title: string; description: string }) { return <div className="py-10 sm:py-12"><SectionOpening label="Archive channel" title={title} description={description} /><p className="mt-8 border-y border-line py-8 text-sm text-muted">Not connected in this archive consumer. No checked-in fixture records are displayed.</p></div>; }
-
-function TaskPipeline({ task }: { task: TaskRow }) { const stages = ["plan", "implementation", "validation", "review", "integration"]; return <ol aria-label="Task pipeline" className="flex min-w-0 gap-1">{stages.map((stage, index) => <li key={stage} className="flex min-w-0 flex-1 items-center gap-1"><span className={`size-2 shrink-0 ${index === 1 && task.status === "running" ? "bg-accent" : index < 2 || task.status === "succeeded" || task.status === "pushed" ? "bg-positive" : "border border-line-strong"}`} /><span className="hidden truncate text-[11px] text-muted sm:block">{titleCase(stage)}</span>{index < stages.length - 1 ? <span className="h-px min-w-1 flex-1 bg-line" /> : null}</li>)}</ol>; }
-
-function TaskRowView({ task, selected }: { task: TaskRow; selected: boolean }) { return <li className={`border-b border-line py-4 ${selected ? "border-l-2 border-l-accent pl-4" : ""}`}><div className="flex items-baseline justify-between gap-3 text-xs"><Status value={task.status} /><span className="text-muted">{task.archiveState}</span></div><Link href={`/steward/tasks/${encodeURIComponent(task.taskId)}`} className="mt-2 block break-words text-sm font-semibold leading-5 text-ink no-underline hover:text-accent">{task.title}</Link><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{task.summary}</p><div className="mt-3"><TaskPipeline task={task} /></div></li>; }
-
-function signalHref(signalId: string, cursor: string | null) {
-  const params = new URLSearchParams({ view: "signals", signal: signalId }); if (cursor) params.set("signalCursor", cursor); return `/steward?${params.toString()}`;
+function SectionOpening({
+  label,
+  title,
+  description,
+}: {
+  label: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="grid gap-4 border-b border-line pb-7 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-10">
+      <p className="text-sm font-medium text-muted">{label}</p>
+      <div>
+        <h2 className="text-2xl font-semibold leading-tight text-ink">{title}</h2>
+        <p className="mt-3 max-w-3xl text-base leading-7 text-muted">{description}</p>
+      </div>
+    </div>
+  );
 }
 
-function plannerHref(plannerRunId: string, cursor: string | null, proposal?: string | null) {
-  const params = new URLSearchParams({ view: "planning", run: plannerRunId }); if (cursor) params.set("runCursor", cursor); if (proposal) params.set("proposal", proposal); return `/steward?${params.toString()}`;
+function UnavailableView({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="py-10 sm:py-12">
+      <SectionOpening label="Cloud channel" title={title} description={description} />
+      <p className="mt-8 border-y border-line py-8 text-sm text-muted">
+        No local fallback or fixture records are displayed.
+      </p>
+    </div>
+  );
 }
 
-function SignalsView({ page, selectedId, detail, cursor, state }: { page: ControlPage<SignalRow> | null; selectedId: string | null; detail: ReturnType<ReturnType<typeof getArchiveRepository>["getSignalDetail"]>; cursor: string | null; state: string }) {
-  if (!page || !detail) return <UnavailableView title="Signals not connected" description={state === "unavailable" ? "The public control-loop root is not configured or has not arrived yet." : "The signal index is still waiting for a compatible archive generation."} />;
-  return <div className="py-10 sm:py-12"><SectionOpening label="Signal archive" title="Signals, observations, and their decisions" description="Every canonical signal remains reachable by stable ID. Raw event evidence loads only after a signal is selected." /><div className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">{[["Signals", page.total], ["Selected observations", detail.observations.length], ["Planner references", detail.plannerRuns.length], ["Archive state", titleCase(state)]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}><dt className="text-xs text-muted">{label}</dt><dd className="mt-1 text-lg font-medium text-ink data-text">{value}</dd></div>)}</div><section className="mt-8 border-y border-line xl:grid xl:grid-cols-[18rem_minmax(0,1fr)_18rem]" aria-label="Signals master detail"><div className="py-6 xl:border-r xl:border-line xl:pr-6"><div className="flex items-baseline justify-between gap-4"><h3 className="text-lg font-semibold text-ink">Signal history</h3><span className="text-xs text-muted data-text">{page.total}</span></div><ul className="mt-4 border-t border-line">{page.items.map((signal) => <li key={signal.signalId} className={`border-b border-line py-4 ${signal.signalId === selectedId ? "border-l-2 border-l-accent pl-4" : ""}`}><Link href={signalHref(signal.signalId, cursor)} aria-current={signal.signalId === selectedId ? "page" : undefined} className="block break-words text-sm font-semibold text-ink no-underline hover:text-accent">{signal.fingerprint}</Link><p className="mt-1 text-xs text-muted">{signal.provider} · <Status value={signal.status} /></p><p className="mt-2 text-xs text-muted data-text">{signal.observationCount} observations · {signal.plannerRunCount} planner runs</p></li>)}</ul><nav aria-label="Signal pages" className="mt-5 flex justify-between text-xs">{page.previousCursor ? <Link href={signalHref(selectedId ?? page.items[0]?.signalId ?? "", page.previousCursor)} className="text-accent">Previous signals</Link> : <span className="text-faint">First signals</span>}{page.nextCursor ? <Link href={signalHref(selectedId ?? page.items[0]?.signalId ?? "", page.nextCursor)} className="text-accent">Next signals</Link> : <span className="text-faint">End of signals</span>}</nav></div><div className="min-w-0 py-6 xl:px-7"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-medium text-accent">Selected canonical signal</p><h3 className="mt-2 break-words text-xl font-semibold text-ink">{detail.fingerprint}</h3><p className="mt-2 text-sm text-muted">{detail.provider} · <Status value={detail.status} /></p></div><span className="text-xs text-muted data-text">{detail.signalId}</span></div><dl className="mt-6 border-y border-line text-xs"><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Created</dt><dd className="text-ink data-text">{formatDateTime(detail.createdAt)}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Updated</dt><dd className="text-ink data-text">{formatDateTime(detail.updatedAt)}</dd></div><div className="flex justify-between py-3"><dt className="text-muted">Evidence records</dt><dd className="text-ink data-text">{detail.eventCount}</dd></div></dl><section className="mt-6 border-t border-line pt-5"><h3 className="text-sm font-semibold text-ink">Observations</h3><ul className="mt-3 border-t border-line">{detail.observations.map((observation) => <li key={observation.observationId} className="border-b border-line py-3"><p className="text-sm font-medium text-ink">{observation.title}</p><p className="mt-1 text-sm leading-6 text-muted">{observation.summary}</p><p className="mt-1 text-xs text-muted">{observation.dedupeResult} · {observation.kind}</p></li>)}</ul></section><section className="mt-6 border-t border-line pt-5"><h3 className="text-sm font-semibold text-ink">Planner references</h3><ul className="mt-3 border-t border-line">{detail.plannerRuns.map((run) => <li key={run.plannerRunId} className="border-b border-line py-3"><Link href={plannerHref(run.plannerRunId, null)} className="text-sm font-medium text-accent">{run.plannerRunId}</Link><span className="ml-3 text-xs text-muted"><Status value={run.state} /></span></li>)}</ul></section><SignalEvidence signalId={detail.signalId} /></div><aside className="py-6 xl:border-l xl:border-line xl:pl-6"><h3 className="text-lg font-semibold text-ink">Signal links</h3><dl className="mt-4 border-t border-line text-xs"><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Transitions</dt><dd className="text-ink data-text">{detail.transitions.length}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Graph edges</dt><dd className="text-ink data-text">{detail.edges.length}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Proposal links</dt><dd className="text-ink data-text">{detail.proposals.length}</dd></div></dl><ul className="mt-5 border-t border-line">{detail.proposals.map((proposal) => <li key={proposal.proposalId} className="border-b border-line py-3"><Link href={plannerHref(proposal.plannerRunId, null, proposal.proposalId)} className="text-xs font-medium text-accent">Proposal {proposal.ordinal}</Link><p className="mt-1 text-xs text-muted"><Status value={proposal.outcome} /> · {proposal.reasonCode}</p>{proposal.taskId && proposal.taskAvailable ? <Link href={`/steward/tasks/${encodeURIComponent(proposal.taskId)}`} className="mt-1 block text-xs text-accent">Task {proposal.taskId}</Link> : proposal.taskId ? <p className="mt-1 text-xs text-muted">Task {proposal.taskId} pending archive arrival</p> : <p className="mt-1 text-xs text-muted">No task linked</p>}</li>)}</ul></aside></section></div>;
+function TaskCompleteness({ task }: { task: CloudTaskSummary }) {
+  const complete = task.completeness === "complete";
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted">
+      <span className={`size-2 shrink-0 ${complete ? "bg-positive" : "border border-line-strong"}`} />
+      <span>{complete ? "Publication complete" : "Publication incomplete"}</span>
+    </div>
+  );
 }
 
-function PlanningView({ page, selectedId, detail, cursor, state, proposalId }: { page: ControlPage<PlannerRunRow> | null; selectedId: string | null; detail: ReturnType<ReturnType<typeof getArchiveRepository>["getPlannerRunDetail"]>; cursor: string | null; state: string; proposalId: string | null }) {
-  if (!page || !detail) return <UnavailableView title="Planning not connected" description={state === "unavailable" ? "The public control-loop root is not configured or has not arrived yet." : "The planner index is still waiting for a compatible archive generation."} />;
-  return <div className="py-10 sm:py-12"><SectionOpening label="Planner archive" title="Every planner run and proposal disposition" description="Planner runs are global scheduler processes. Failed runs, rejected proposals, and proposals without tasks remain visible." /><div className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">{[["Planner runs", page.total], ["Proposals", detail.proposals.length], ["Input signals", detail.inputSignalIds.length], ["Archive state", titleCase(state)]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}><dt className="text-xs text-muted">{label}</dt><dd className="mt-1 text-lg font-medium text-ink data-text">{value}</dd></div>)}</div><section className="mt-8 border-y border-line xl:grid xl:grid-cols-[18rem_minmax(0,1fr)_18rem]" aria-label="Planning master detail"><div className="py-6 xl:border-r xl:border-line xl:pr-6"><div className="flex items-baseline justify-between gap-4"><h3 className="text-lg font-semibold text-ink">Planner history</h3><span className="text-xs text-muted data-text">{page.total}</span></div><ul className="mt-4 border-t border-line">{page.items.map((run) => <li key={run.plannerRunId} className={`border-b border-line py-4 ${run.plannerRunId === selectedId ? "border-l-2 border-l-accent pl-4" : ""}`}><Link href={plannerHref(run.plannerRunId, cursor)} aria-current={run.plannerRunId === selectedId ? "page" : undefined} className="block break-words text-sm font-semibold text-ink no-underline hover:text-accent">{run.plannerRunId}</Link><p className="mt-1 text-xs text-muted"><Status value={run.state} /> · {formatDateTime(run.startedAt)}</p><p className="mt-2 text-xs text-muted data-text">{run.proposalCount} proposals · {run.taskCount} tasks</p></li>)}</ul><nav aria-label="Planner run pages" className="mt-5 flex justify-between text-xs">{page.previousCursor ? <Link href={plannerHref(selectedId ?? page.items[0]?.plannerRunId ?? "", page.previousCursor)} className="text-accent">Previous planner runs</Link> : <span className="text-faint">First planner runs</span>}{page.nextCursor ? <Link href={plannerHref(selectedId ?? page.items[0]?.plannerRunId ?? "", page.nextCursor)} className="text-accent">Next planner runs</Link> : <span className="text-faint">End of planner runs</span>}</nav></div><div className="min-w-0 py-6 xl:px-7"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><p className="text-xs font-medium text-accent">Selected planner run</p><h3 className="mt-2 break-words text-xl font-semibold text-ink">{detail.plannerRunId}</h3><p className="mt-2 text-sm text-muted"><Status value={detail.state} /> · {formatDateTime(detail.startedAt)}</p></div><span className="text-xs text-muted data-text">{detail.epochId}</span></div><div className="mt-6 border-y border-line py-4"><h3 className="text-sm font-semibold text-ink">Input signals</h3><div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">{detail.inputSignalIds.length ? detail.inputSignalIds.map((id) => <Link key={id} href={signalHref(id, null)} className="text-sm text-accent">{id}</Link>) : <span className="text-sm text-muted">No input signals recorded.</span>}</div></div><section className="mt-6 border-t border-line pt-5"><h3 className="text-sm font-semibold text-ink">Proposal outcomes</h3><ol className="mt-3 border-t border-line">{detail.proposals.map((item) => <li key={item.proposalId} className={`border-b border-line py-3 ${item.proposalId === proposalId ? "border-l-2 border-l-accent pl-4" : ""}`}><div className="flex flex-wrap items-baseline justify-between gap-3"><Link href={plannerHref(detail.plannerRunId, cursor, item.proposalId)} className="text-sm font-medium text-ink">Proposal {item.ordinal}</Link><Status value={item.outcome} /></div><p className="mt-1 text-xs text-muted">{item.reasonCode}</p>{item.taskId && item.taskAvailable ? <Link href={`/steward/tasks/${encodeURIComponent(item.taskId)}`} className="mt-2 block text-xs text-accent">Task {item.taskId}</Link> : item.taskId ? <p className="mt-2 text-xs text-muted">Task {item.taskId} pending archive arrival; disposition remains {item.outcome}.</p> : <p className="mt-2 text-xs text-muted">No task linked; disposition remains {item.outcome}.</p>}</li>)}</ol></section><PlannerTranscript plannerRunId={detail.plannerRunId} /></div><aside className="py-6 xl:border-l xl:border-line xl:pl-6"><h3 className="text-lg font-semibold text-ink">Run evidence</h3><dl className="mt-4 border-t border-line text-xs"><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Completed</dt><dd className="text-right text-ink data-text">{formatDateTime(detail.completedAt)}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Artifacts</dt><dd className="text-ink data-text">{detail.artifacts.length}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Graph edges</dt><dd className="text-ink data-text">{detail.edges.length}</dd></div></dl><section className="mt-6 border-t border-line pt-5"><h3 className="text-sm font-semibold text-ink">Scheduler wakeups</h3>{detail.current ? <p className="mt-2 text-xs text-muted">Current projection {detail.current.status} · {detail.current.pendingSignalCount ?? "Unavailable"} pending signals</p> : <p className="mt-2 text-xs text-muted">Current projection pending arrival.</p>}<ul className="mt-3 border-t border-line">{detail.wakeups.map((wakeup) => <li key={wakeup.wakeupId} className="border-b border-line py-3"><p className="text-xs font-medium text-ink">{wakeup.reason}</p><p className="mt-1 text-xs text-muted"><Status value={wakeup.status} /> · {formatDateTime(wakeup.createdAt)}</p><p className="mt-1 break-words text-xs text-muted data-text">{wakeup.inputSignalIds.join(", ") || "No input signals"}</p></li>)}</ul></section><ul className="mt-5 border-t border-line">{detail.artifacts.map((artifact) => <li key={artifact.path} className="border-b border-line py-3"><a href={`/api/steward/planner-runs/${encodeURIComponent(detail.plannerRunId)}/artifacts/${encodeURIComponent(artifact.path)}`} className="text-xs text-accent">Download {artifact.path}</a><p className="mt-1 text-xs text-muted">{artifact.status} · {artifact.availability}</p></li>)}</ul></aside></section></div>;
+function TaskRowView({ task, selected }: { task: CloudTaskSummary; selected: boolean }) {
+  return (
+    <li className={`border-b border-line py-4 ${selected ? "border-l-2 border-l-accent pl-4" : ""}`}>
+      <div className="flex items-baseline justify-between gap-3 text-xs">
+        <Status value={task.lifecycleState} />
+        <span className="text-muted">{titleCase(task.completeness)}</span>
+      </div>
+      <Link
+        href={`/steward/tasks/${encodeURIComponent(task.taskId)}`}
+        className="mt-2 block break-words text-sm font-semibold leading-5 text-ink no-underline hover:text-accent"
+      >
+        {task.title}
+      </Link>
+      <p className="mt-1 break-words text-xs leading-5 text-muted data-text">{task.taskId}</p>
+      <div className="mt-3">
+        <TaskCompleteness task={task} />
+      </div>
+    </li>
+  );
 }
 
 function tasksHref(cursor: string | null, activeCursor: string | null) {
@@ -66,40 +216,181 @@ function tasksHref(cursor: string | null, activeCursor: string | null) {
   return `/steward?${params.toString()}`;
 }
 
-function TasksView({ dashboard, page, activePage, cursor, activeCursor }: { dashboard: TaskDashboard | null; page: TaskPage | null; activePage: TaskPage | null; cursor: string | null; activeCursor: string | null }) {
-  if (!dashboard) return <UnavailableView title="Task archive unavailable" description="The raw Steward archive has not been indexed. The page will remain honest while the importer recovers." />;
-  const activeRows = activePage?.tasks ?? dashboard.active;
-  const historyRows = page?.tasks ?? dashboard.recent;
-  const activeTask = activeRows[0] ?? historyRows[0] ?? null;
-  const stateCounts = ["queued", "running", "reviewing", "integrating", "succeeded", "pushed", "no_changes", "blocked", "failed", "cancelled"];
-  return <div className="py-10 sm:py-12"><SectionOpening label="Live task archive" title="Every task, from plan to integration" description="Cross-task counts and history come from the disposable SQLite index; selected evidence remains in its one raw task directory." /><div className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">{[["Indexed tasks", dashboard.counts.indexed], ["Verified archives", dashboard.counts.verified], ["Running", dashboard.counts.running], ["Import state", titleCase(dashboard.state)]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}><dt className="text-xs text-muted">{label}</dt><dd className="mt-1 text-lg font-medium text-ink data-text">{value}</dd></div>)}</div><section aria-labelledby="state-counts-title" className="border-b border-line py-5"><h3 id="state-counts-title" className="text-sm font-semibold text-ink">All canonical states</h3><dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-5">{stateCounts.map((state) => <div key={state} className="flex justify-between gap-3 border-b border-line py-2"><dt className="text-muted">{titleCase(state)}</dt><dd className="text-ink data-text">{dashboard.counts[state]}</dd></div>)}</dl></section><section className="mt-8 border-y border-line xl:grid xl:grid-cols-[17rem_minmax(0,1fr)_19rem]" aria-labelledby="task-list-title"><div className="py-6 xl:border-r xl:border-line xl:pr-6"><div className="flex items-baseline justify-between gap-4"><h3 id="task-list-title" className="text-lg font-semibold text-ink">Active tasks</h3><span className="text-xs text-muted data-text">{activePage?.total ?? activeRows.length}</span></div><ul className="mt-4 border-t border-line">{activeRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === activeTask?.taskId} />)}</ul>{activePage?.total ? <nav aria-label="Active task pages" className="mt-5 flex justify-between text-xs">{activePage.previousCursor ? <Link href={tasksHref(cursor, activePage.previousCursor)} className="text-accent">Previous active tasks</Link> : <span className="text-faint">First active page</span>}{activePage.nextCursor ? <Link href={tasksHref(cursor, activePage.nextCursor)} className="text-accent">Next active tasks</Link> : <span className="text-faint">End of active tasks</span>}</nav> : null}<div className="mt-8 flex items-baseline justify-between gap-4"><h3 className="text-sm font-semibold text-ink">Task history</h3><span className="text-xs text-muted data-text">{page?.total ?? historyRows.length}</span></div><ul className="mt-4 border-t border-line">{historyRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === activeTask?.taskId} />)}</ul><nav aria-label="Task history pages" className="mt-5 flex justify-between text-xs">{page?.previousCursor ? <Link href={tasksHref(page.previousCursor, activeCursor)} className="text-accent">Previous page</Link> : <span className="text-faint">First page</span>}{page?.nextCursor ? <Link href={tasksHref(page.nextCursor, activeCursor)} className="text-accent">Next page</Link> : <span className="text-faint">End of history</span>}</nav></div><div className="min-w-0 py-6 xl:px-7">{activeTask ? <><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><p className="text-xs font-medium text-accent">Selected execution · {titleCase(activeTask.status)}</p><h3 className="mt-2 break-words text-xl font-semibold leading-tight text-ink">{activeTask.title}</h3><p className="mt-2 text-sm leading-6 text-muted">{activeTask.summary}</p></div><Link href={`/steward/tasks/${encodeURIComponent(activeTask.taskId)}`} className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-accent no-underline">Full evidence <ArrowRight aria-hidden="true" size={14} /></Link></div><div className="mt-6 bg-contrast-field px-5 py-5 text-contrast-ink"><TaskPipeline task={activeTask} /></div><div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_12rem]"><div><h4 className="text-sm font-semibold text-ink">Latest indexed activity</h4><p className="mt-3 border-t border-line py-4 text-sm leading-6 text-muted">Task metadata updated {formatDateTime(activeTask.updatedAt)}.</p></div><dl className="border-t border-line text-xs"><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Archive</dt><dd className="text-ink">{titleCase(activeTask.archiveState)}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Imported</dt><dd className="text-right text-ink data-text">{formatDateTime(activeTask.lastImportAt)}</dd></div></dl></div></> : <p className="py-8 text-sm text-muted">No active task is indexed. Completed work remains in paginated history.</p>}</div><aside className="py-6 xl:border-l xl:border-line xl:pl-6" aria-label="Current task evidence"><div className="flex items-baseline justify-between gap-4"><h3 className="text-lg font-semibold text-ink">Archive health</h3><Status value={dashboard.state} /></div><dl className="mt-4 border-t border-line text-xs"><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Last import</dt><dd className="text-right text-ink data-text">{formatDateTime(dashboard.freshness.lastSuccessAt)}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Lag</dt><dd className="text-ink data-text">{dashboard.freshness.lagSeconds === null ? "Unavailable" : `${dashboard.freshness.lagSeconds}s`}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Tokens total</dt><dd className="text-ink data-text">{formatInteger(dashboard.usage.tokens.total)}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Token coverage</dt><dd className="text-ink data-text">{dashboard.usage.tokens.availableRuns}/{dashboard.usage.tokens.totalRuns} runs</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Estimated cost</dt><dd className="text-ink data-text">{formatCost(dashboard.usage.cost.microUsd)}</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Cost coverage</dt><dd className="text-ink data-text">{dashboard.usage.cost.availableRuns}/{dashboard.usage.cost.totalRuns} runs</dd></div><div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Recoverable errors</dt><dd className="text-ink data-text">{dashboard.freshness.errors}</dd></div></dl></aside></section></div>;
+function TasksView({
+  status,
+  activePage,
+  historyPage,
+  cursor,
+  activeCursor,
+}: {
+  status: CloudStatus | null;
+  activePage: CloudTaskPage | null;
+  historyPage: CloudTaskPage | null;
+  cursor: string | null;
+  activeCursor: string | null;
+}) {
+  if (!status || !activePage || !historyPage) {
+    return (
+      <UnavailableView
+        title="Cloud task overview unavailable"
+        description="The public task status or collection is temporarily unavailable."
+      />
+    );
+  }
+
+  const activeRows = activePage.tasks;
+  const historyRows = historyPage.tasks;
+  const selectedTask = activeRows[0] ?? historyRows[0] ?? null;
+  return (
+    <div className="py-10 sm:py-12">
+      <SectionOpening
+        label="Cloud task archive"
+        title="Every visible task publication"
+        description="Active work and completed history come from the public cloud collections. Each task links to its validated detail view."
+      />
+      <div className="mt-8 grid grid-cols-2 border-y border-line sm:grid-cols-4">
+        {[
+          ["Visible tasks", status.taskCount],
+          ["Active", activePage.total],
+          ["History", historyPage.total],
+          ["Latest publication", formatDateTime(status.latestPublicationAt)],
+        ].map(([label, value], index) => (
+          <div key={String(label)} className={`px-4 py-4 ${index < 3 ? "border-r border-line" : ""}`}>
+            <dt className="text-xs text-muted">{label}</dt>
+            <dd className="mt-1 text-lg font-medium text-ink data-text">{value}</dd>
+          </div>
+        ))}
+      </div>
+      <section className="mt-8 border-y border-line xl:grid xl:grid-cols-[17rem_minmax(0,1fr)_19rem]" aria-labelledby="task-list-title">
+        <div className="py-6 xl:border-r xl:border-line xl:pr-6">
+          <div className="flex items-baseline justify-between gap-4">
+            <h3 id="task-list-title" className="text-lg font-semibold text-ink">Active tasks</h3>
+            <span className="text-xs text-muted data-text">{activePage.total}</span>
+          </div>
+          <ul className="mt-4 border-t border-line">
+            {activeRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === selectedTask?.taskId} />)}
+          </ul>
+          {activePage.total ? (
+            <nav aria-label="Active task pages" className="mt-5 flex justify-between text-xs">
+              {activePage.previousCursor ? <Link href={tasksHref(cursor, activePage.previousCursor)} className="text-accent">Previous active tasks</Link> : <span className="text-faint">First active page</span>}
+              {activePage.nextCursor ? <Link href={tasksHref(cursor, activePage.nextCursor)} className="text-accent">Next active tasks</Link> : <span className="text-faint">End of active tasks</span>}
+            </nav>
+          ) : null}
+          <div className="mt-8 flex items-baseline justify-between gap-4">
+            <h3 className="text-sm font-semibold text-ink">Task history</h3>
+            <span className="text-xs text-muted data-text">{historyPage.total}</span>
+          </div>
+          <ul className="mt-4 border-t border-line">
+            {historyRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === selectedTask?.taskId} />)}
+          </ul>
+          <nav aria-label="Task history pages" className="mt-5 flex justify-between text-xs">
+            {historyPage.previousCursor ? <Link href={tasksHref(historyPage.previousCursor, activeCursor)} className="text-accent">Previous page</Link> : <span className="text-faint">First page</span>}
+            {historyPage.nextCursor ? <Link href={tasksHref(historyPage.nextCursor, activeCursor)} className="text-accent">Next page</Link> : <span className="text-faint">End of history</span>}
+          </nav>
+        </div>
+        <div className="min-w-0 py-6 xl:px-7">
+          {selectedTask ? (
+            <>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-accent">Selected task - {titleCase(selectedTask.lifecycleState)}</p>
+                  <h3 className="mt-2 break-words text-xl font-semibold leading-tight text-ink">{selectedTask.title}</h3>
+                  <p className="mt-2 text-sm leading-6 text-muted">{selectedTask.taskId}</p>
+                </div>
+                <Link href={`/steward/tasks/${encodeURIComponent(selectedTask.taskId)}`} className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-accent no-underline">
+                  Full task detail <ArrowRight aria-hidden="true" size={14} />
+                </Link>
+              </div>
+              <div className="mt-6 bg-contrast-field px-5 py-5 text-contrast-ink">
+                <TaskCompleteness task={selectedTask} />
+              </div>
+              <dl className="mt-6 border-y border-line text-xs">
+                <div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Created</dt><dd className="text-right text-ink data-text">{formatDateTime(selectedTask.createdAt)}</dd></div>
+                <div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Completed</dt><dd className="text-right text-ink data-text">{formatDateTime(selectedTask.completedAt)}</dd></div>
+                <div className="flex justify-between border-b border-line py-3"><dt className="text-muted">Events</dt><dd className="text-ink data-text">{selectedTask.eventCount}</dd></div>
+                <div className="flex justify-between py-3"><dt className="text-muted">Artifacts</dt><dd className="text-ink data-text">{selectedTask.artifactCount}</dd></div>
+              </dl>
+            </>
+          ) : (
+            <p className="py-8 text-sm text-muted">No visible tasks are published yet.</p>
+          )}
+        </div>
+        <aside className="py-6 xl:border-l xl:border-line xl:pl-6" aria-label="Cloud publication status">
+          <div className="flex items-baseline justify-between gap-4">
+            <h3 className="text-lg font-semibold text-ink">Publication status</h3>
+            <Status value={status.state} />
+          </div>
+          <p className="mt-4 border-t border-line pt-4 text-sm leading-6 text-muted">
+            {status.state === "empty" ? "No visible task publication has arrived." : "Visible task publications are available."}
+          </p>
+        </aside>
+      </section>
+    </div>
+  );
 }
 
-export default async function StewardPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+export default async function StewardPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const params = await searchParams;
   const requested = typeof params.view === "string" ? params.view : "tasks";
   const activeView: View = views.includes(requested as View) ? requested as View : "tasks";
   const cursor = typeof params.cursor === "string" ? params.cursor : null;
   const activeCursor = typeof params.activeCursor === "string" ? params.activeCursor : null;
-  const signalCursor = typeof params.signalCursor === "string" ? params.signalCursor : null;
-  const runCursor = typeof params.runCursor === "string" ? params.runCursor : null;
-  const requestedSignal = typeof params.signal === "string" ? params.signal : null;
-  const requestedRun = typeof params.run === "string" ? params.run : null;
-  const requestedProposal = typeof params.proposal === "string" ? params.proposal : null;
-  let dashboard: TaskDashboard | null = null;
-  let page: TaskPage | null = null;
-  let activePage: TaskPage | null = null;
-  let control: ReturnType<ReturnType<typeof getArchiveRepository>["getControlLoopStatus"]> | null = null;
-  let signals: ControlPage<SignalRow> | null = null;
-  let selectedSignal: ReturnType<ReturnType<typeof getArchiveRepository>["getSignalDetail"]> = null;
-  let planning: ControlPage<PlannerRunRow> | null = null;
-  let selectedRun: ReturnType<ReturnType<typeof getArchiveRepository>["getPlannerRunDetail"]> = null;
+  let status: CloudStatus | null = null;
+  let activePage: CloudTaskPage | null = null;
+  let historyPage: CloudTaskPage | null = null;
+
   try {
-    const repository = getArchiveRepository(); dashboard = repository.getTaskDashboard(); control = repository.getControlLoopStatus();
-    if (activeView === "tasks") { page = repository.listTasksPage(cursor); activePage = repository.listActiveTasksPage(activeCursor); }
-    if (activeView === "signals" && ["ready", "degraded", "archive-corrupt"].includes(control.state)) { signals = repository.listSignalsPage(signalCursor); selectedSignal = resolveArchiveSelection(requestedSignal, signals.items[0]?.signalId, (id) => repository.getSignalDetail(id)); }
-    if (activeView === "planning" && ["ready", "degraded", "archive-corrupt"].includes(control.state)) { planning = repository.listPlannerRunsPage(runCursor); selectedRun = resolveArchiveSelection(requestedRun, planning.items[0]?.plannerRunId, (id) => repository.getPlannerRunDetail(id)); }
-  } catch { dashboard = null; }
+    const repository = getCloudRepository();
+    [status, activePage, historyPage] = await Promise.all([
+      repository.getStatus(),
+      repository.listActiveTasks({ cursor: activeCursor }),
+      repository.listHistoryTasks({ cursor }),
+    ]);
+  } catch {
+    status = null;
+    activePage = null;
+    historyPage = null;
+  }
+
   const githubStars = await getGitHubStars();
-  return <><SiteHeader githubStars={githubStars} /><RevisionMonitor /><main id="content"><div className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12"><header className="pt-10 sm:pt-12"><div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"><div><p className="text-sm font-medium text-muted">Repository automation</p><h1 className="mt-2 text-3xl font-medium leading-tight text-ink sm:text-4xl">Steward</h1><p className="mt-3 max-w-3xl text-base leading-7 text-muted">Follow the public evidence behind every archived task without hiding partial work.</p></div><p className="text-xs text-muted lg:text-right"><span className="font-medium text-accent">Live archive</span><span className="mt-1 block data-text">{dashboard?.epochId ?? control?.epochId ?? "No epoch"}</span></p></div><ControlLoop activeView={activeView} dashboard={dashboard} control={control} /></header>{activeView === "signals" ? <SignalsView page={signals} selectedId={selectedSignal?.signalId ?? null} detail={selectedSignal} cursor={signalCursor} state={control?.state ?? "unavailable"} /> : null}{activeView === "planning" ? <PlanningView page={planning} selectedId={selectedRun?.plannerRunId ?? null} detail={selectedRun} cursor={runCursor} state={control?.state ?? "unavailable"} proposalId={requestedProposal} /> : null}{activeView === "tasks" ? <TasksView dashboard={dashboard} page={page} activePage={activePage} cursor={cursor} activeCursor={activeCursor} /> : null}</div></main><footer className="border-t border-line"><div className="mx-auto flex max-w-shell flex-col gap-3 px-4 py-8 text-xs text-muted sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-12"><p>Read-only archive evidence. Missing values remain missing.</p><a href="https://github.com/minhuw/coquic" className="inline-flex items-center gap-1.5 text-inherit hover:text-ink">minhuw/coquic<ExternalLink aria-hidden="true" size={13} /></a></div></footer></>;
+  return (
+    <>
+      <SiteHeader githubStars={githubStars} />
+      <main id="content">
+        <div className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12">
+          <header className="pt-10 sm:pt-12">
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <div>
+                <p className="text-sm font-medium text-muted">Repository automation</p>
+                <h1 className="mt-2 text-3xl font-medium leading-tight text-ink sm:text-4xl">Steward</h1>
+                <p className="mt-3 max-w-3xl text-base leading-7 text-muted">Follow the public task publications without hiding partial work.</p>
+              </div>
+              <p className="text-xs text-muted lg:text-right">
+                <span className="font-medium text-accent">Cloud archive</span>
+                <span className="mt-1 block data-text">{formatDateTime(status?.latestPublicationAt ?? null)}</span>
+              </p>
+            </div>
+            <ControlLoop activeView={activeView} status={status} activePage={activePage} historyPage={historyPage} />
+          </header>
+          {activeView === "signals" ? (
+            <UnavailableView title="Signals unavailable" description="The initial public cloud contract does not publish a global signal domain." />
+          ) : null}
+          {activeView === "planning" ? (
+            <UnavailableView title="Planning unavailable" description="The initial public cloud contract does not publish global planning evidence." />
+          ) : null}
+          {activeView === "tasks" ? <TasksView status={status} activePage={activePage} historyPage={historyPage} cursor={cursor} activeCursor={activeCursor} /> : null}
+        </div>
+      </main>
+      <footer className="border-t border-line">
+        <div className="mx-auto flex max-w-shell flex-col gap-3 px-4 py-8 text-xs text-muted sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-12">
+          <p>Read-only task publications. Missing values remain missing.</p>
+          <a href="https://github.com/minhuw/coquic" className="inline-flex items-center gap-1.5 text-inherit hover:text-ink">minhuw/coquic<ExternalLink aria-hidden="true" size={13} /></a>
+        </div>
+      </footer>
+    </>
+  );
 }

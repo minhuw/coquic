@@ -134,6 +134,36 @@ def test_json_artifact_replaces_values_but_not_keys(tmp_path: Path) -> None:
     assert REDACTION_MARKER in artifact_content
 
 
+def test_jsonl_redaction_preserves_record_boundaries_and_shapes() -> None:
+    secret = "jsonl-secret-value"
+    payload = (
+        json.dumps({"token": secret, "record": 1}, separators=(",", ":"))
+        + "\n"
+        + json.dumps(["safe", secret, {"nested": True}], separators=(",", ":"))
+        + "\n"
+    ).encode()
+    document = _with_artifact(
+        _document(),
+        payload,
+        media_type="application/jsonl;charset=utf-8",
+        logical_path="evidence/records",
+        artifact_id="artifact-jsonl",
+    )
+
+    result = redact_atif_document(document, secrets=(secret,))
+
+    assert result.status == "clean"
+    assert result.document is not None
+    redacted = result.document.artifact_contents["artifact-jsonl"]
+    records = [json.loads(line) for line in redacted.decode().splitlines()]
+    assert len(records) == 2
+    assert isinstance(records[0], dict)
+    assert isinstance(records[1], list)
+    assert records[0]["token"] == REDACTION_MARKER
+    assert records[1][1] == REDACTION_MARKER
+    assert secret.encode() not in redacted
+
+
 def test_unsafe_credential_source_fails_closed(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.write_text("unsafe-secret-value", encoding="utf-8")
@@ -334,6 +364,32 @@ def test_trufflehog_source_media_requires_repair() -> None:
         return subprocess.CompletedProcess(argv, 0, output, b"")
 
     result = sanitize_publication(document, scanner_runner=runner)
+    assert result.status == "repair_required"
+    assert result.reason_codes == (ReasonCode.source_finding,)
+    assert raw not in repr(result)
+
+
+def test_trufflehog_parameterized_source_mime_without_suffix_requires_repair() -> None:
+    raw = "source-mime-secret"
+    document = _with_artifact(
+        _document(),
+        f"print({raw!r})\n".encode(),
+        media_type="application/x-python;charset=utf-8",
+        logical_path="evidence/item",
+        artifact_id="artifact-source-mime",
+    )
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        output = json.dumps(
+            {
+                "SourceMetadata": {"Data": {"Filesystem": {"file": "entry-0001.txt"}}},
+                "Raw": raw,
+            }
+        ).encode() + b"\n"
+        return subprocess.CompletedProcess(argv, 0, output, b"")
+
+    result = sanitize_publication(document, scanner_runner=runner)
+
     assert result.status == "repair_required"
     assert result.reason_codes == (ReasonCode.source_finding,)
     assert raw not in repr(result)

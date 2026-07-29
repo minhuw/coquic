@@ -110,6 +110,22 @@ _SOURCE_SUFFIXES = frozenset(
     }
 )
 _PATCH_SUFFIXES = frozenset({".diff", ".patch", ".rej"})
+_SOURCE_MEDIA_TYPES = frozenset(
+    {
+        "application/javascript",
+        "application/typescript",
+        "application/x-c",
+        "application/x-c++",
+        "application/x-go",
+        "application/x-java",
+        "application/x-python",
+        "application/x-rust",
+        "application/x-sh",
+        "application/x-zig",
+        "text/javascript",
+        "text/typescript",
+    }
+)
 
 
 class RedactionError(PublicationError):
@@ -356,7 +372,7 @@ def _text_media(media_type: str) -> bool:
         "application/xml",
         "application/x-diff",
         "application/x-patch",
-    } or lowered.endswith("+json")
+    } or lowered in _SOURCE_MEDIA_TYPES or lowered.endswith("+json")
 
 
 def _replace_artifact(content: bytes, media_type: str, secrets: Sequence[str]) -> tuple[bytes, int, bool]:
@@ -371,12 +387,38 @@ def _replace_artifact(content: bytes, media_type: str, secrets: Sequence[str]) -
     if structured_media:
         try:
             if lowered == "application/jsonl":
-                parsed: Any = [
+                parsed_records = [
                     json.loads(line, object_pairs_hook=_json_pairs, parse_constant=_json_constant)
                     for line in text.splitlines()
                 ]
-                if not parsed:
+                if not parsed_records:
                     return content, 0, True
+                replaced_records: list[Any] = []
+                count = 0
+                protected_hit = False
+                for record in parsed_records:
+                    replaced_record, changed, record_protected = _replace_value(record, secrets)
+                    replaced_records.append(replaced_record)
+                    count += changed
+                    protected_hit = protected_hit or record_protected
+                if protected_hit:
+                    return content, count, True
+                if count:
+                    encoded_records = [
+                        json.dumps(
+                            record,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        for record in replaced_records
+                    ]
+                    encoded = "\n".join(encoded_records)
+                    if text.endswith(("\n", "\r")):
+                        encoded += "\n"
+                    return encoded.encode("utf-8"), count, False
+                return content, 0, False
             else:
                 parsed = json.loads(text, object_pairs_hook=_json_pairs, parse_constant=_json_constant)
         except RedactionError:
@@ -547,20 +589,7 @@ def _classify(logical_path: str, media_type: str = "") -> str:
     if (
         any(part in {"source", "src"} for part in lowered.split("/"))
         or suffix in _SOURCE_SUFFIXES
-        or media in {
-            "application/javascript",
-            "application/typescript",
-            "application/x-c",
-            "application/x-c++",
-            "application/x-go",
-            "application/x-java",
-            "application/x-python",
-            "application/x-rust",
-            "application/x-sh",
-            "application/x-zig",
-            "text/javascript",
-            "text/typescript",
-        }
+        or media in _SOURCE_MEDIA_TYPES
         or media.startswith("text/x-")
     ):
         return "source"

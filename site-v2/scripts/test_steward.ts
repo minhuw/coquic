@@ -446,9 +446,13 @@ async function main() {
     assert.match(html, /No visible tasks are published yet/);
     assert.match(html, /href="\/steward\?view=signals"/);
     assert.match(html, /href="\/steward\?view=planning"/);
-    assert.match(html, /Signals unavailable/);
-    assert.match(html, /Planning unavailable/);
+    const signalsHtml = await renderOverview({ view: "signals" });
+    assert.match(signalsHtml, /Signals unavailable/);
+    const planningHtml = await renderOverview({ view: "planning" });
+    assert.match(planningHtml, /Planning unavailable/);
     assertOverviewHasNoLegacyOutput(html);
+    assertOverviewHasNoLegacyOutput(signalsHtml);
+    assertOverviewHasNoLegacyOutput(planningHtml);
   });
 
   await runCase("overview active after planning render", scenario(activeRows, historyRows), async () => {

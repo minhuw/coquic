@@ -47,7 +47,7 @@ type Scenario = {
   readonly statusRows: readonly TaskRow[];
   readonly activeRows: readonly TaskRow[];
   readonly historyRows: readonly TaskRow[];
-  readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity";
+  readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error";
 };
 
 const ENV_KEYS = [
@@ -146,25 +146,43 @@ function compareRows(left: TaskRow, right: TaskRow): number {
   return leftId === rightId ? 0 : leftId > rightId ? -1 : 1;
 }
 
-function scenario(activeRows: readonly TaskRow[], historyRows: readonly TaskRow[], mode?: Scenario["mode"]): Scenario {
-  const rows = [...activeRows, ...historyRows];
-  const status = [...rows].sort((left, right) => {
+function visibleRow(row: TaskRow): boolean {
+  return row.head_state === "visible" && row.generation_state === "visible";
+}
+
+function scenario(
+  activeRows: readonly TaskRow[],
+  historyRows: readonly TaskRow[],
+  mode?: Scenario["mode"],
+  candidates: readonly TaskRow[] = [],
+): Scenario {
+  const rows = [...activeRows, ...historyRows, ...candidates];
+  const allActiveRows = [...activeRows, ...candidates.filter((row) => row.lifecycle_state === "active")];
+  const allHistoryRows = [...historyRows, ...candidates.filter((row) => row.lifecycle_state !== "active")];
+  const status = rows.filter(visibleRow).sort((left, right) => {
     const leftId = String(left.task_id);
     const rightId = String(right.task_id);
     return leftId === rightId ? 0 : leftId > rightId ? -1 : 1;
   });
-  return { rows, statusRows: status.map(statusRow), activeRows: [...activeRows].sort(compareRows), historyRows: [...historyRows].sort(compareRows), mode };
+  return {
+    rows,
+    statusRows: status.map(statusRow),
+    activeRows: allActiveRows.sort(compareRows),
+    historyRows: allHistoryRows.sort(compareRows),
+    mode,
+  };
 }
 
 function pageRows(rows: readonly TaskRow[], statement: string, params: readonly unknown[]): readonly TaskRow[] {
+  const visibleRows = rows.filter(visibleRow);
   const limit = Number(params.at(-1));
-  if (statement === cloudRepository.ACTIVE_PAGE_FIRST_STATEMENT || statement === cloudRepository.HISTORY_PAGE_FIRST_STATEMENT) return rows.slice(0, limit);
+  if (statement === cloudRepository.ACTIVE_PAGE_FIRST_STATEMENT || statement === cloudRepository.HISTORY_PAGE_FIRST_STATEMENT) return visibleRows.slice(0, limit);
   const updatedAt = String(params[0]);
   const taskId = String(params[2]);
   if (statement.includes("h.updated_at < ?")) {
-    return rows.filter((row) => String(row.head_updated_at) < updatedAt || (String(row.head_updated_at) === updatedAt && String(row.task_id) < taskId)).slice(0, limit);
+    return visibleRows.filter((row) => String(row.head_updated_at) < updatedAt || (String(row.head_updated_at) === updatedAt && String(row.task_id) < taskId)).slice(0, limit);
   }
-  return [...rows]
+  return [...visibleRows]
     .filter((row) => String(row.head_updated_at) > updatedAt || (String(row.head_updated_at) === updatedAt && String(row.task_id) > taskId))
     .sort((left, right) => {
       const compared = compareRows(left, right);
@@ -181,10 +199,12 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     assert.match(url, /^https:\/\/api\.cloudflare\.com\/client\/v4\//);
     if (scenarioValue.mode === "rate-limited") return new Response("rate limited", { status: 429 });
     if (scenarioValue.mode === "outage") throw new Error("route-harness-secret outage");
+    if (scenarioValue.mode === "unauthorized") return new Response("unauthorized", { status: 401 });
+    if (scenarioValue.mode === "server-error") return new Response("server error", { status: 503 });
     const body = JSON.parse(String(init?.body)) as { readonly sql: string; readonly params: readonly unknown[] };
     const statement = body.sql;
     const params = body.params;
-    if (scenarioValue.mode === "malformed") return new Response(JSON.stringify({ success: true, errors: [], result: "malformed" }), { status: 200, headers: { "content-type": "application/json" } });
+    if (scenarioValue.mode === "malformed") return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
     if (scenarioValue.mode === "integrity" && statement === cloudRepository.STATUS_VALIDATION_STATEMENT) {
       const malformed = { ...scenarioValue.statusRows[0], credential_path: "route-harness-secret" };
       return d1Envelope([malformed]);
@@ -198,9 +218,10 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     const rows = statement.includes("lifecycle_state = 'active'") || statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.ACTIVE_CURSOR_STATEMENT
       ? scenarioValue.activeRows
       : scenarioValue.historyRows;
-    if (statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.HISTORY_COUNT_STATEMENT) return d1Envelope([{ task_count: rows.length }]);
+    const visibleRows = rows.filter(visibleRow);
+    if (statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.HISTORY_COUNT_STATEMENT) return d1Envelope([{ task_count: visibleRows.length }]);
     if (statement === cloudRepository.ACTIVE_CURSOR_STATEMENT || statement === cloudRepository.HISTORY_CURSOR_STATEMENT) {
-      const found = rows.find((row) => row.head_updated_at === params[0] && row.task_id === params[1]);
+      const found = visibleRows.find((row) => row.head_updated_at === params[0] && row.task_id === params[1]);
       return d1Envelope(found ? [statusRow(found)] : []);
     }
     if (statement === cloudRepository.ACTIVE_PAGE_FIRST_STATEMENT || statement === cloudRepository.HISTORY_PAGE_FIRST_STATEMENT) return d1Envelope(pageRows(rows, statement, params));
@@ -224,6 +245,21 @@ async function main() {
     taskRow(activeSecond, "2026-07-28T00:00:02Z"),
   ];
   const historyRows = [taskRow(historyFixture.data.task, "2026-07-28T00:00:01Z")];
+  const hiddenCandidate = {
+    ...taskRow(activeFixture.data.task, "2026-07-28T00:00:04Z"),
+    task_id: "task-hidden",
+    generation_task_id: "task-hidden",
+    generation_idempotency_key: "harness-task-hidden",
+    head_state: "hidden",
+  };
+  const stagedCandidate = {
+    ...taskRow(historyFixture.data.task, "2026-07-28T00:00:05Z"),
+    task_id: "task-staged",
+    generation_task_id: "task-staged",
+    generation_idempotency_key: "harness-task-staged",
+    generation_state: "staged",
+  };
+  const candidateRows = [hiddenCandidate, stagedCandidate];
   const { GET: getStatus } = await import("../app/api/steward/status/route");
   const { GET: getTasks } = await import("../app/api/steward/tasks/route");
   const originalFetch = globalThis.fetch;
@@ -253,7 +289,7 @@ async function main() {
     }
   }
 
-  await runCase("empty status", scenario([], []), async () => {
+  await runCase("empty status", scenario([], [], undefined, candidateRows), async () => {
     const response = await getStatus();
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
@@ -262,7 +298,7 @@ async function main() {
     assert.equal(payload.data.state, "empty");
   });
 
-  await runCase("ready status", scenario(activeRows, historyRows), async () => {
+  await runCase("ready status", scenario(activeRows, historyRows, undefined, candidateRows), async () => {
     const response = await getStatus();
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
@@ -272,7 +308,7 @@ async function main() {
     assert.equal(payload.data.latestPublicationAt, EXPOSED_AT);
   });
 
-  await runCase("active page", scenario(activeRows, historyRows), async () => {
+  await runCase("active page", scenario(activeRows, historyRows, undefined, candidateRows), async () => {
     const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=1"));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
@@ -286,9 +322,33 @@ async function main() {
     assert(!JSON.stringify(payload).includes("private"));
   });
 
+  await runCase("empty active page", scenario([], historyRows, undefined, [hiddenCandidate]), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=10"));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.schemaVersion, "3.0");
+    if (!("items" in payload.data)) throw new Error("expected task page");
+    assert.deepEqual(payload.data.items, []);
+    assert.deepEqual(payload.data.pagination, { page: 1, pageSize: 10, total: 0, hasNextPage: false });
+    assert(!JSON.stringify(payload).includes("task-hidden"));
+    assert(!response.headers.get("X-Steward-Next-Cursor"));
+  });
+
+  await runCase("empty history page", scenario(activeRows, [], undefined, [stagedCandidate]), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=history&limit=10"));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.schemaVersion, "3.0");
+    if (!("items" in payload.data)) throw new Error("expected task page");
+    assert.deepEqual(payload.data.items, []);
+    assert.deepEqual(payload.data.pagination, { page: 1, pageSize: 10, total: 0, hasNextPage: false });
+    assert(!JSON.stringify(payload).includes("task-staged"));
+    assert(!response.headers.get("X-Steward-Next-Cursor"));
+  });
+
   const first = await (async () => {
     const calls = { count: 0, urls: [] as string[] };
-    globalThis.fetch = fakeFetch(scenario(activeRows, historyRows), calls) as typeof fetch;
+    globalThis.fetch = fakeFetch(scenario(activeRows, historyRows, undefined, candidateRows), calls) as typeof fetch;
     for (const key of ENV_KEYS) process.env[key] = VALID_ENV[key];
     cloudRepository.resetCloudRepository();
     try { return await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=1")); }
@@ -297,7 +357,7 @@ async function main() {
   const nextCursor = first.headers.get("X-Steward-Next-Cursor");
   assert(nextCursor);
 
-  await runCase("forward cursor", scenario(activeRows, historyRows), async () => {
+  await runCase("forward cursor", scenario(activeRows, historyRows, undefined, candidateRows), async () => {
     const response = await getTasks(new Request(`https://site.test/api/steward/tasks?scope=active&limit=1&cursor=${encodeURIComponent(nextCursor)}`));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
@@ -306,7 +366,7 @@ async function main() {
     assert(response.headers.get("X-Steward-Previous-Cursor"));
   });
 
-  await runCase("backward cursor", scenario(activeRows, historyRows), async () => {
+  await runCase("backward cursor", scenario(activeRows, historyRows, undefined, candidateRows), async () => {
     const response = await getTasks(new Request(`https://site.test/api/steward/tasks?scope=active&limit=1&cursor=${encodeURIComponent(nextCursor)}`));
     const previous = response.headers.get("X-Steward-Previous-Cursor");
     assert(previous);
@@ -317,13 +377,14 @@ async function main() {
     assert.deepEqual(payload.data.items.map((item) => item.taskId), ["task-active"]);
   });
 
-  await runCase("history page and clamped limit", scenario(activeRows, historyRows), async () => {
+  await runCase("history page and clamped limit", scenario(activeRows, historyRows, undefined, candidateRows), async () => {
     const response = await getTasks(new Request("https://site.test/api/steward/tasks?limit=999"));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
     if (!("items" in payload.data)) throw new Error("expected task page");
     assert.deepEqual(payload.data.items.map((item) => item.taskId), ["task-redacted"]);
     assert.equal(payload.data.pagination.pageSize, 50);
+    for (const excluded of ["task-hidden", "task-staged"]) assert(!JSON.stringify(payload).includes(excluded));
   });
 
   await runCase("invalid input", scenario(activeRows, historyRows), async () => {
@@ -341,11 +402,44 @@ async function main() {
     assert.equal(payload.problem.code, "STALE_CURSOR");
   });
 
+  await runCase("status unauthorized", scenario([], [], "unauthorized"), async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, false);
+  });
+
+  await runCase("tasks unauthorized", scenario([], [], "unauthorized"), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=history"));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, false);
+  });
+
+  await runCase("status malformed JSON", scenario([], [], "malformed"), async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, false);
+  });
+
+  await runCase("tasks malformed JSON", scenario([], [], "malformed"), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=active"));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, false);
+  });
+
   await runCase("rate limited", { ...scenario([], []), mode: "rate-limited" }, async () => {
     const response = await getStatus();
     assert.equal(response.status, 429);
     const payload = problemResponse(parseCloudResponse(await response.text()));
     assert.equal(payload.problem.code, "RATE_LIMITED");
+    assert.equal(payload.problem.retryable, true);
     assert(!JSON.stringify(payload).includes("route-harness-secret"));
   });
 
@@ -354,7 +448,16 @@ async function main() {
     assert.equal(response.status, 503);
     const payload = problemResponse(parseCloudResponse(await response.text()));
     assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, true);
     assert(!JSON.stringify(payload).includes("route-harness-secret"));
+  });
+
+  await runCase("server error", { ...scenario([], []), mode: "server-error" }, async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=history"));
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, true);
   });
 
   await runCase("malformed D1", { ...scenario([], []), mode: "malformed" }, async () => {
@@ -362,6 +465,7 @@ async function main() {
     assert.equal(response.status, 503);
     const payload = problemResponse(parseCloudResponse(await response.text()));
     assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert.equal(payload.problem.retryable, false);
   });
 
   await runCase("integrity failure", { ...scenario(activeRows, historyRows), mode: "integrity" }, async () => {

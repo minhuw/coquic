@@ -66,9 +66,14 @@ function mapError(error: unknown): Problem {
   if (error instanceof CloudflareD1Error) {
     return error.code === "rate-limited"
       ? { code: "RATE_LIMITED", status: 429, message: "Steward cloud access is rate limited.", retryable: true }
-      : { code: "UNAVAILABLE", status: 503, message: "Steward cloud data is temporarily unavailable.", retryable: true };
+      : {
+        code: "UNAVAILABLE",
+        status: 503,
+        message: "Steward cloud data is temporarily unavailable.",
+        retryable: error.code === "network-error" || error.code === "timeout" || error.code === "server-error",
+      };
   }
-  return { code: "UNAVAILABLE", status: 503, message: "Steward cloud data is temporarily unavailable.", retryable: true };
+  return { code: "UNAVAILABLE", status: 503, message: "Steward cloud data is temporarily unavailable.", retryable: false };
 }
 
 function parseScope(value: string | null): CloudTaskScope {

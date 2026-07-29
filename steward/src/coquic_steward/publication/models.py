@@ -677,11 +677,23 @@ class AtifDocument:
 
     document: Mapping[str, Any] = field(repr=False)
     content: bytes = field(repr=False)
+    # Image payloads decoded by the mapper are carried alongside their
+    # descriptors for the later transport stage.  They are deliberately kept
+    # out of the canonical ATIF JSON envelope.
+    artifacts: tuple[PublicBundleComponent, ...] = field(default_factory=tuple, repr=False)
     sha256: str = field(init=False)
     byte_size: int = field(init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.document, Mapping) or not isinstance(self.content, bytes):
+            _fail(ReasonCode.invalid_metadata)
+        artifacts = _tuple(self.artifacts, code=ReasonCode.invalid_metadata)
+        if (
+            len(artifacts) > MAX_ARTIFACTS
+            or any(not isinstance(item, PublicBundleComponent) for item in artifacts)
+            or len({item.artifact.artifact_id for item in artifacts}) != len(artifacts)
+            or sum(item.artifact.byte_size for item in artifacts) > MAX_PUBLICATION_BYTES
+        ):
             _fail(ReasonCode.invalid_metadata)
         if (
             len(self.content) > MAX_PUBLICATION_BYTES
@@ -690,6 +702,7 @@ class AtifDocument:
         ):
             _fail(ReasonCode.invalid_metadata)
         object.__setattr__(self, "document", _freeze(dict(self.document)))
+        object.__setattr__(self, "artifacts", artifacts)
         object.__setattr__(self, "byte_size", len(self.content))
         object.__setattr__(self, "sha256", hashlib.sha256(self.content).hexdigest())
 
@@ -700,6 +713,12 @@ class AtifDocument:
     @property
     def data(self) -> bytes:
         return self.content
+
+    @property
+    def artifact_contents(self) -> Mapping[str, bytes]:
+        """Return retained payloads keyed by their logical artifact IDs."""
+
+        return MappingProxyType({item.artifact.artifact_id: item.content for item in self.artifacts})
 
     def as_dict(self) -> dict[str, Any]:
         def thaw(value: Any) -> Any:

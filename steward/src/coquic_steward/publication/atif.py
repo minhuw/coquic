@@ -27,6 +27,7 @@ from .models import (
     LogicalArtifact,
     PublicationError,
     PublicationSnapshot,
+    PublicBundleComponent,
     ReasonCode,
     RunIdentity,
     RunLineage,
@@ -63,6 +64,28 @@ _ACTIVITY_VALUES = frozenset(
     {"orient", "investigate", "edit", "self_validate", "self_review", "report"}
 )
 _ACTIVITY_MARKER = "STEWARD_ACTIVITY "
+_RAW_ACTIVITY_TYPES = frozenset(
+    {
+        "error",
+        "item.completed",
+        "item.created",
+        "item.delta",
+        "item.failed",
+        "item.started",
+        "item.updated",
+        "keep_alive",
+        "response.completed",
+        "response.created",
+        "response.output_text.delta",
+        "session.completed",
+        "session.started",
+        "stderr",
+        "thread.completed",
+        "thread.started",
+        "turn.completed",
+        "turn.started",
+    }
+)
 _MISSING = object()
 
 
@@ -101,6 +124,7 @@ class _ArtifactState:
     owner_step_id: int | str | None
     referenced: bool = False
     backing: bytes | None = field(default=None, repr=False)
+    logical_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -327,26 +351,40 @@ def _activity_marker(value: object) -> tuple[str, str] | None:
 def _validate_raw_activity_records(records: Sequence[Mapping[str, Any]]) -> None:
     if not records:
         _fail(ReasonCode.partial)
-    seen: set[str] = set()
+    completed_agent_message = False
     for record in records:
-        if record.get("type") != "item.completed":
+        record_type = record.get("type")
+        if not isinstance(record_type, str) or not record_type or len(record_type) > 128:
+            _fail(ReasonCode.partial)
+        lowered = record_type.lower()
+        if lowered not in _RAW_ACTIVITY_TYPES:
             _fail(ReasonCode.partial)
         item = record.get("item")
-        if not isinstance(item, Mapping) or item.get("type") != "agent_message":
+        if lowered.startswith("item."):
+            if not isinstance(item, Mapping):
+                _fail(ReasonCode.invalid_metadata)
+            item_type = item.get("type")
+            if not isinstance(item_type, str) or not item_type or len(item_type) > 128:
+                _fail(ReasonCode.invalid_metadata)
+            source_id = item.get("id")
+            if not isinstance(source_id, str) or not _ID_RE.fullmatch(source_id):
+                _fail(ReasonCode.invalid_identifier)
+            if lowered == "item.completed" and item_type == "agent_message":
+                text = item.get("text")
+                if not isinstance(text, str) or not text:
+                    _fail(ReasonCode.invalid_metadata)
+                completed_agent_message = True
+                # A marker is optional for a raw session envelope, but a
+                # malformed marker is never silently published as an
+                # activity fact.
+                if text.startswith(_ACTIVITY_MARKER) and _activity_marker(text) is None:
+                    _fail(ReasonCode.invalid_metadata)
+        elif item is not None and not isinstance(item, Mapping):
             _fail(ReasonCode.invalid_metadata)
-        source_id = item.get("id")
-        if not isinstance(source_id, str) or not _ID_RE.fullmatch(source_id):
-            _fail(ReasonCode.invalid_identifier)
-        if source_id in seen:
-            _fail(ReasonCode.invalid_metadata)
-        seen.add(source_id)
-        text = item.get("text")
-        if not isinstance(text, str) or not text:
-            _fail(ReasonCode.invalid_metadata)
-        # A marker is optional for a raw session envelope, but a malformed
-        # marker is never silently published as an activity fact.
-        if text.startswith(_ACTIVITY_MARKER) and _activity_marker(text) is None:
-            _fail(ReasonCode.invalid_metadata)
+        _event_timestamp(record, item if isinstance(item, Mapping) else None)
+        _event_duration(record, item if isinstance(item, Mapping) else None)
+    if not completed_agent_message:
+        _fail(ReasonCode.partial)
 
 
 def _validate_activity_records(records: Sequence[Mapping[str, Any]]) -> str:
@@ -804,6 +842,21 @@ def _decode_inline_image(value: Any) -> tuple[bytes, str] | None:
     return content, media
 
 
+_IMAGE_SUFFIXES: Final[dict[str, str]] = {
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+}
+
+
+def _inline_image_path(artifact_id: str, media_type: str) -> str:
+    suffix = _IMAGE_SUFFIXES.get(media_type)
+    if suffix is None:
+        _fail(ReasonCode.invalid_media_type)
+    return f"artifacts/{artifact_id}.{suffix}"
+
+
 def _image_part(
     value: Mapping[str, Any],
     *,
@@ -864,7 +917,13 @@ def _image_part(
         existing = artifacts.get(artifact_id)
         if existing is None:
             artifacts[artifact_id] = _ArtifactState(
-                artifact_id, media, digest, len(content), owner_step_id, backing=content
+                artifact_id,
+                media,
+                digest,
+                len(content),
+                owner_step_id,
+                backing=content,
+                logical_path=_inline_image_path(artifact_id, media),
             )
         elif (
             existing.media_type != media
@@ -979,6 +1038,11 @@ def _collapse_events(records: Sequence[Mapping[str, Any]]) -> tuple[tuple[int, M
         elif completed and not selected[item_id][2]:
             first_index = selected[item_id][0]
             selected[item_id] = (first_index, record, True)
+        elif completed and selected[item_id][2]:
+            # A second completed record with the same source identity is a
+            # distinct observation.  Keeping it lets owner resolution reject
+            # an ambiguous descriptor instead of silently choosing the first.
+            result.append((index, record))
     result.extend((selected[item_id][0], selected[item_id][1]) for item_id in order)
     return tuple(sorted(result, key=lambda item: item[0]))
 
@@ -1411,6 +1475,7 @@ def _artifact_states(
             artifact.sha256,
             artifact.byte_size,
             owner,
+            logical_path=artifact.logical_path,
         )
     return states
 
@@ -1451,6 +1516,30 @@ def _attach_referenced_artifacts(
             references.append(artifact.artifact_id)
 
 
+def _retained_artifact_components(
+    artifacts: Mapping[str, _ArtifactState],
+) -> tuple[PublicBundleComponent, ...]:
+    """Pair decoded payloads with their resolved logical descriptors."""
+
+    components: list[PublicBundleComponent] = []
+    for item in sorted(artifacts.values(), key=lambda value: value.artifact_id):
+        if item.backing is None:
+            continue
+        if not item.referenced or not isinstance(item.owner_step_id, int):
+            _fail(ReasonCode.invalid_metadata)
+        logical_path = item.logical_path or _inline_image_path(item.artifact_id, item.media_type)
+        descriptor = LogicalArtifact(
+            item.artifact_id,
+            logical_path,
+            item.media_type,
+            item.byte_size,
+            item.sha256,
+            owner_step_id=item.owner_step_id,
+        )
+        components.append(PublicBundleComponent(descriptor, item.backing))
+    return tuple(components)
+
+
 def _source_facts(
     records: Sequence[Mapping[str, Any]],
     activities: Sequence[Mapping[str, Any]],
@@ -1466,18 +1555,13 @@ def _source_facts(
         facts["activities"] = {"availability": "unavailable"}
     elif activities:
         events = []
-        raw_envelope = activities[0].get("type") == "item.completed"
+        raw_envelope = activities[0].get("record_type") != "header"
         if raw_envelope:
             for index, record in enumerate(activities):
                 item = record.get("item")
-                if not isinstance(item, Mapping):
-                    _fail(ReasonCode.invalid_metadata)
-                event: dict[str, Any] = {
-                    "recordIndex": index,
-                    "recordType": "item.completed",
-                    "sourceId": item["id"],
-                }
-                marker = _activity_marker(item.get("text"))
+                event = _record_provenance(index, record, item)
+                event["recordType"] = record["type"]
+                marker = _activity_marker(item.get("text")) if isinstance(item, Mapping) else None
                 if marker is not None:
                     event["activity"], event["summary"] = marker
                 events.append(_safe_source(event))
@@ -2126,7 +2210,7 @@ def convert_completed_run(
     parsed = _parse_json_bytes(content)
     if parsed != document:
         _fail(ReasonCode.invalid_metadata)
-    return AtifDocument(document, content)
+    return AtifDocument(document, content, artifacts=_retained_artifact_components(states))
 
 
 def convert_run(*args: Any, **kwargs: Any) -> AtifDocument:

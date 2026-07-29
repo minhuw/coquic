@@ -256,6 +256,25 @@ def test_raw_activity_envelope_preserves_order_without_synthetic_records() -> No
     assert all(item["recordType"] == "item.completed" for item in events)
 
 
+def test_raw_session_activity_envelope_keeps_lifecycle_order() -> None:
+    activities = (
+        b'{"type":"thread.started"}\n'
+        b'{"type":"item.completed","item":{"id":"activity-one","type":"agent_message",'
+        b'"text":"STEWARD_ACTIVITY {\\"activity\\":\\"investigate\\",\\"summary\\":\\"one\\"}"}}\n'
+    )
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}])
+        | {"activities.jsonl": activities},
+    ).as_dict()
+    events = document["extra"]["coquic"]["source"]["activities"]["events"]
+    assert [event["recordType"] for event in events] == ["thread.started", "item.completed"]
+    assert events[1]["sourceId"] == "activity-one"
+    assert events[1]["activity"] == "investigate"
+    assert "header" not in {event["recordType"] for event in events}
+    assert "summary" not in {event["recordType"] for event in events}
+
+
 def test_telemetry_availability_and_full_sidecar_evidence_are_preserved() -> None:
     documents = _documents([{"type": "agent_message", "text": "complete"}])
     unavailable = convert_completed_run(
@@ -345,16 +364,21 @@ def test_file_change_paths_are_logical_and_private_paths_fail_closed() -> None:
 
 
 def test_inline_input_image_is_retained_as_a_deterministic_artifact() -> None:
-    document = convert_completed_run(
+    result = convert_completed_run(
         run=_run(),
         documents=_documents([{"type": "user_message", "content": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}]}]),
-    ).as_dict()
+    )
+    document = result.as_dict()
     image = document["steps"][0]["message"][0]
     artifact = document["extra"]["coquic"]["artifacts"][0]
     assert image["source"]["media_type"] == "image/png"
     assert image["source"]["path"] == f"artifact:{artifact['artifactId']}"
     assert artifact["byteSize"] == 5
     assert artifact["sha256"] == hashlib.sha256(b"hello").hexdigest()
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].artifact.artifact_id == artifact["artifactId"]
+    assert result.artifacts[0].content == b"hello"
+    assert result.artifact_contents[artifact["artifactId"]] == b"hello"
     with pytest.raises(AtifConversionError) as error:
         convert_completed_run(
             run=_run(),
@@ -379,4 +403,20 @@ def test_string_artifact_owner_resolves_unique_source_identity() -> None:
     missing = LogicalArtifact("missing", "evidence/missing.log", "text/plain", 1, "0" * 64, owner_step_id="not-a-step")
     with pytest.raises(AtifConversionError) as error:
         convert_completed_run(run=_run(), documents=_documents([{"type": "agent_message", "text": "one"}]), artifacts=(missing,))
+    assert error.value.code == ReasonCode.invalid_metadata
+
+
+def test_duplicate_completed_source_identity_fails_artifact_owner_closed() -> None:
+    artifact = LogicalArtifact("output", "evidence/output.log", "text/plain", 1, "0" * 64, owner_step_id="same-id")
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents(
+                [
+                    {"type": "item.completed", "item": {"id": "same-id", "type": "agent_message", "text": "one"}},
+                    {"type": "item.completed", "item": {"id": "same-id", "type": "agent_message", "text": "two"}},
+                ]
+            ),
+            artifacts=(artifact,),
+        )
     assert error.value.code == ReasonCode.invalid_metadata

@@ -1,118 +1,393 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { appendFile, cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFile } from "node:fs/promises";
+import Module, { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 
-async function availablePort() {
-  const server = createServer();
-  await new Promise<void>((resolveReady, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolveReady));
-  const address = server.address();
-  assert(address && typeof address === "object");
-  const port = address.port;
-  await new Promise<void>((resolveClosed) => server.close(() => resolveClosed()));
-  return port;
-}
+import { parseCloudResponse, type CloudResponse } from "../lib/steward-archive/cloud-schema";
 
-async function waitForStatus(baseUrl: string, child: ChildProcess) {
-  let lastStatus = "no response";
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`Next server exited before archive readiness (${child.exitCode})`);
-    try {
-      const response = await fetch(`${baseUrl}/api/steward/status`, { cache: "no-store" });
-      if (response.ok) {
-        const payload = await response.json() as { data?: { state?: string; taskCount?: number } };
-        lastStatus = JSON.stringify(payload.data);
-        if (payload.data?.state === "ready" && payload.data.taskCount === 102) return;
-      }
-    } catch { /* server is still starting */ }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
-  }
-  throw new Error(`temporary Steward archive did not become ready: ${lastStatus}`);
-}
+type CloudRepositoryModule = typeof import("../lib/steward-archive/cloud-repository");
+const requireForTest = createRequire(import.meta.url);
+const runtimeModule = Module as unknown as { _resolveFilename: (request: string, parent?: unknown, isMain?: boolean, options?: unknown) => string };
+let cloudRepository: CloudRepositoryModule;
 
-async function rewriteTaskIdentity(root: string, oldId: string, newId: string) {
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) await rewriteTaskIdentity(path, oldId, newId);
-    else if (entry.isFile() && entry.name.endsWith(".json")) await writeFile(path, (await readFile(path, "utf8")).replaceAll(oldId, newId));
-  }
-}
-
-async function stop(child: ChildProcess) {
-  if (child.exitCode !== null) return;
-  child.kill("SIGTERM");
-  await Promise.race([
-    new Promise<void>((resolveExit) => child.once("exit", () => resolveExit())),
-    new Promise<void>((resolveTimeout) => setTimeout(() => { child.kill("SIGKILL"); resolveTimeout(); }, 5_000)),
-  ]);
-}
-
-void (async () => {
-  const siteRoot = fileURLToPath(new URL("..", import.meta.url));
-  const root = await mkdtemp(join(tmpdir(), "coquic-steward-browser-"));
-  const tasksRoot = join(root, "tasks");
-  const controlLoopRoot = join(root, "control-loop");
-  const cachePath = join(root, "cache", "site-v2.sqlite");
-  const serverRoot = join(root, "standalone");
-  const port = await availablePort();
-  const baseUrl = `http://127.0.0.1:${port}`;
-  await cp(new URL("../examples/steward-dataset", import.meta.url), tasksRoot, { recursive: true });
-  await cp(new URL("../examples/steward-control-loop", import.meta.url), controlLoopRoot, { recursive: true });
-  const runningTemplate = join(tasksRoot, "task-running");
-  for (let index = 0; index < 50; index += 1) {
-    const taskId = `task-browser-active-${String(index).padStart(3, "0")}`;
-    const destination = join(tasksRoot, taskId); await cp(runningTemplate, destination, { recursive: true }); await rewriteTaskIdentity(destination, "task-running-synthetic", taskId);
-    const taskPath = join(destination, "task.json"); const task = JSON.parse(await readFile(taskPath, "utf8")) as Record<string, unknown>;
-    task.summary = { title: index === 0 ? "Active task 51" : `Active task ${String(50 - index).padStart(2, "0")}`, text: "Paginated active archive fixture." }; task.updatedAt = "2026-07-22T08:00:00Z"; await writeFile(taskPath, `${JSON.stringify(task, null, 2)}\n`);
-  }
-  for (let index = 0; index < 50; index += 1) {
-    const taskId = `task-browser-history-${String(index).padStart(3, "0")}`;
-    const destination = join(tasksRoot, taskId); await cp(runningTemplate, destination, { recursive: true }); await rewriteTaskIdentity(destination, "task-running-synthetic", taskId);
-    const taskPath = join(destination, "task.json"); const task = JSON.parse(await readFile(taskPath, "utf8")) as Record<string, unknown>;
-    task.status = "succeeded"; task.summary = { title: `Browser history ${String(index).padStart(2, "0")}`, text: "Paginated terminal archive fixture." }; task.updatedAt = `2026-07-21T08:00:${String(index).padStart(2, "0")}Z`; await writeFile(taskPath, `${JSON.stringify(task, null, 2)}\n`);
-  }
-  await cp(join(siteRoot, ".next", "standalone"), serverRoot, { recursive: true });
-  await cp(join(siteRoot, ".next", "static"), join(serverRoot, ".next", "static"), { recursive: true });
-  if (existsSync(join(siteRoot, "public"))) await cp(join(siteRoot, "public"), join(serverRoot, "public"), { recursive: true });
-  const activeTranscript = join(tasksRoot, "task-running", "pipelines", "pipeline-initial", "runs", "run-implementation-recovery", "codex.jsonl");
-  for (let ordinal = 0; ordinal < 75; ordinal += 1) await appendFile(activeTranscript, `${JSON.stringify({ record_type: "assistant.message", timestamp: `2026-07-22T09:${String(ordinal % 60).padStart(2, "0")}:00Z`, text: `Lazy archive record ${ordinal + 1}` })}\n`);
-  const plannerTranscript = join(controlLoopRoot, "planner-runs", "planner-synthetic-success", "codex.jsonl");
-  for (let ordinal = 0; ordinal < 75; ordinal += 1) await appendFile(plannerTranscript, `${JSON.stringify({ record_type: "assistant.message", text: `Progressive planner record ${ordinal + 1}`, compatible: { ordinal } })}\n`);
-  const plannerManifestPath = join(controlLoopRoot, "planner-runs", "planner-synthetic-success", "manifest.json");
-  const plannerManifest = JSON.parse(await readFile(plannerManifestPath, "utf8")) as { files: Array<{ path: string; byteSize: number; sha256: string }> };
-  const plannerBytes = await readFile(plannerTranscript);
-  const plannerDescriptor = plannerManifest.files.find((file) => file.path === "codex.jsonl");
-  assert(plannerDescriptor); plannerDescriptor.byteSize = plannerBytes.length; plannerDescriptor.sha256 = createHash("sha256").update(plannerBytes).digest("hex");
-  await writeFile(plannerManifestPath, `${JSON.stringify(plannerManifest, null, 2)}\n`);
-
-  const server = spawn(process.execPath, [join(serverRoot, "server.js")], {
-    cwd: serverRoot,
-    env: { ...process.env, HOSTNAME: "127.0.0.1", PORT: String(port), NODE_ENV: "production", COQUIC_STEWARD_TASKS_ROOT: tasksRoot, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoopRoot, COQUIC_STEWARD_CACHE_PATH: cachePath, COQUIC_STEWARD_RECONCILE_MS: "60000", COQUIC_STEWARD_BATCH_SIZE: "1" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let serverOutput = "";
-  server.stdout?.on("data", (chunk) => { serverOutput = `${serverOutput}${String(chunk)}`.slice(-8_000); });
-  server.stderr?.on("data", (chunk) => { serverOutput = `${serverOutput}${String(chunk)}`.slice(-8_000); });
+function loadCloudRepository(): CloudRepositoryModule {
+  const empty = resolve(dirname(requireForTest.resolve("next/package.json")), "dist/compiled/server-only/empty.js");
+  const previous = runtimeModule._resolveFilename;
+  runtimeModule._resolveFilename = function (request, parent, isMain, options) {
+    if (request === "server-only") return empty;
+    return previous.call(this, request, parent, isMain, options);
+  };
   try {
-    await waitForStatus(baseUrl, server);
-    const playwright = spawn(process.execPath, [resolve(siteRoot, "node_modules/@playwright/test/cli.js"), "test", "tests/steward.spec.ts", "--config", "playwright.config.ts", "--workers=1"], {
-      cwd: siteRoot,
-      env: { ...process.env, PLAYWRIGHT_BASE_URL: baseUrl, STEWARD_TEST_TASKS_ROOT: tasksRoot, STEWARD_TEST_CONTROL_LOOP_ROOT: controlLoopRoot },
-      stdio: "inherit",
-    });
-    const code = await new Promise<number>((resolveExit) => playwright.once("exit", (value) => resolveExit(value ?? 1)));
-    if (code !== 0) throw new Error(`Steward Playwright suite failed with exit ${code}`);
-    process.stdout.write("Steward Playwright archive suite passed\n");
-  } catch (error) {
-    if (serverOutput) process.stderr.write(serverOutput);
-    throw error;
+    return requireForTest(resolve(process.cwd(), "lib/steward-archive/cloud-repository.ts")) as CloudRepositoryModule;
   } finally {
-    await stop(server);
-    await rm(root, { recursive: true, force: true });
+    runtimeModule._resolveFilename = previous;
   }
-})();
+}
+
+type Fixture = {
+  readonly data: {
+    readonly task: {
+      readonly taskId: string;
+      readonly title: string;
+      readonly lifecycleState: "active" | "completed" | "failed" | "cancelled";
+      readonly createdAt: string;
+      readonly completedAt: string | null;
+      readonly pipelineId: string | null;
+      readonly completedRunId: string | null;
+      readonly eventCount: number;
+      readonly artifactCount: number;
+      readonly disclosure: { readonly redactionApplied: boolean; readonly originalRetained: boolean };
+    };
+  };
+};
+
+type TaskRow = Record<string, unknown>;
+type Scenario = {
+  readonly rows: readonly TaskRow[];
+  readonly statusRows: readonly TaskRow[];
+  readonly activeRows: readonly TaskRow[];
+  readonly historyRows: readonly TaskRow[];
+  readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity";
+};
+
+const ENV_KEYS = [
+  "CLOUDFLARE_ACCOUNT_ID",
+  "COQUIC_STEWARD_D1_DATABASE_ID",
+  "COQUIC_STEWARD_D1_READ_TOKEN",
+  "COQUIC_STEWARD_PUBLIC_R2_BASE_URL",
+] as const;
+const VALID_ENV: Record<(typeof ENV_KEYS)[number], string> = {
+  CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+  COQUIC_STEWARD_D1_DATABASE_ID: "12345678-1234-4abc-8def-1234567890ab",
+  COQUIC_STEWARD_D1_READ_TOKEN: "route-harness-token",
+  COQUIC_STEWARD_PUBLIC_R2_BASE_URL: "https://objects.example.test/public/",
+};
+const PUBLICATION_ID = "publication-harness";
+const EXPOSED_AT = "2026-07-28T00:00:02Z";
+
+function d1Envelope(rows: readonly TaskRow[]): Response {
+  return new Response(JSON.stringify({
+    success: true,
+    errors: [],
+    result: [{ success: true, results: rows, meta: {} }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function dataResponse(payload: CloudResponse): Extract<CloudResponse, { data: unknown }> {
+  assert("data" in payload);
+  return payload;
+}
+
+function problemResponse(payload: CloudResponse): Extract<CloudResponse, { problem: unknown }> {
+  assert("problem" in payload);
+  return payload;
+}
+
+function publicContract(taskId: string, runId: string, updatedAt: string): TaskRow {
+  return {
+    head_updated_at: updatedAt,
+    head_state: "visible",
+    publication_id: PUBLICATION_ID,
+    generation_task_id: taskId,
+    generation_run_id: runId,
+    generation_metadata_digest: "a".repeat(64),
+    generation_idempotency_key: `harness-${taskId}`,
+    generation_state: "visible",
+    generation_expected_task_count: 1,
+    generation_expected_pipeline_count: 1,
+    generation_expected_run_count: 1,
+    generation_expected_event_count: 2,
+    generation_expected_artifact_count: 3,
+    generation_created_at: "2026-07-28T00:00:00Z",
+    generation_exposed_at: EXPOSED_AT,
+    task_id: taskId,
+  };
+}
+
+function taskRow(fixture: Fixture["data"]["task"], updatedAt: string): TaskRow {
+  const runId = fixture.completedRunId ?? `${fixture.taskId}-run`;
+  const pipelineId = fixture.pipelineId ?? `${fixture.taskId}-pipeline`;
+  return {
+    ...publicContract(fixture.taskId, runId, updatedAt),
+    title: fixture.title,
+    lifecycle_state: fixture.lifecycleState,
+    created_at: fixture.createdAt,
+    completed_at: fixture.completedAt,
+    expected_event_count: fixture.eventCount,
+    expected_artifact_count: fixture.artifactCount,
+    event_count: fixture.eventCount,
+    artifact_count: fixture.artifactCount,
+    pipeline_id: pipelineId,
+    run_id: runId,
+    run_state: "completed",
+    redaction_applied_min: fixture.disclosure.redactionApplied ? 1 : 0,
+    redaction_applied_max: fixture.disclosure.redactionApplied ? 1 : 0,
+    original_retained_min: fixture.disclosure.originalRetained ? 1 : 0,
+    original_retained_max: fixture.disclosure.originalRetained ? 1 : 0,
+  };
+}
+
+function statusRow(row: TaskRow): TaskRow {
+  const keys = [
+    "head_updated_at", "head_state", "publication_id", "generation_task_id", "generation_run_id",
+    "generation_metadata_digest", "generation_idempotency_key", "generation_state", "generation_expected_task_count",
+    "generation_expected_pipeline_count", "generation_expected_run_count", "generation_expected_event_count",
+    "generation_expected_artifact_count", "generation_created_at", "generation_exposed_at", "task_id",
+  ];
+  return Object.fromEntries(keys.map((key) => [key, row[key]]));
+}
+
+function compareRows(left: TaskRow, right: TaskRow): number {
+  const leftTime = String(left.head_updated_at);
+  const rightTime = String(right.head_updated_at);
+  if (leftTime !== rightTime) return leftTime > rightTime ? -1 : 1;
+  const leftId = String(left.task_id);
+  const rightId = String(right.task_id);
+  return leftId === rightId ? 0 : leftId > rightId ? -1 : 1;
+}
+
+function scenario(activeRows: readonly TaskRow[], historyRows: readonly TaskRow[], mode?: Scenario["mode"]): Scenario {
+  const rows = [...activeRows, ...historyRows];
+  const status = [...rows].sort((left, right) => {
+    const leftId = String(left.task_id);
+    const rightId = String(right.task_id);
+    return leftId === rightId ? 0 : leftId > rightId ? -1 : 1;
+  });
+  return { rows, statusRows: status.map(statusRow), activeRows: [...activeRows].sort(compareRows), historyRows: [...historyRows].sort(compareRows), mode };
+}
+
+function pageRows(rows: readonly TaskRow[], statement: string, params: readonly unknown[]): readonly TaskRow[] {
+  const limit = Number(params.at(-1));
+  if (statement === cloudRepository.ACTIVE_PAGE_FIRST_STATEMENT || statement === cloudRepository.HISTORY_PAGE_FIRST_STATEMENT) return rows.slice(0, limit);
+  const updatedAt = String(params[0]);
+  const taskId = String(params[2]);
+  if (statement.includes("h.updated_at < ?")) {
+    return rows.filter((row) => String(row.head_updated_at) < updatedAt || (String(row.head_updated_at) === updatedAt && String(row.task_id) < taskId)).slice(0, limit);
+  }
+  return [...rows]
+    .filter((row) => String(row.head_updated_at) > updatedAt || (String(row.head_updated_at) === updatedAt && String(row.task_id) > taskId))
+    .sort((left, right) => {
+      const compared = compareRows(left, right);
+      return compared === 0 ? 0 : -compared;
+    })
+    .slice(0, limit);
+}
+
+function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string[] }) {
+  return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls.count += 1;
+    const url = String(input);
+    calls.urls.push(url);
+    assert.match(url, /^https:\/\/api\.cloudflare\.com\/client\/v4\//);
+    if (scenarioValue.mode === "rate-limited") return new Response("rate limited", { status: 429 });
+    if (scenarioValue.mode === "outage") throw new Error("route-harness-secret outage");
+    const body = JSON.parse(String(init?.body)) as { readonly sql: string; readonly params: readonly unknown[] };
+    const statement = body.sql;
+    const params = body.params;
+    if (scenarioValue.mode === "malformed") return new Response(JSON.stringify({ success: true, errors: [], result: "malformed" }), { status: 200, headers: { "content-type": "application/json" } });
+    if (scenarioValue.mode === "integrity" && statement === cloudRepository.STATUS_VALIDATION_STATEMENT) {
+      const malformed = { ...scenarioValue.statusRows[0], credential_path: "route-harness-secret" };
+      return d1Envelope([malformed]);
+    }
+    if (statement === cloudRepository.STATUS_STATEMENT) {
+      if (scenarioValue.statusRows.length === 0) return d1Envelope([]);
+      return d1Envelope([{ task_count: scenarioValue.statusRows.length, latest_publication_at: EXPOSED_AT, latest_publication_id: PUBLICATION_ID }]);
+    }
+    if (statement === cloudRepository.STATUS_VALIDATION_STATEMENT) return d1Envelope(scenarioValue.statusRows.slice(0, Number(params[0])));
+    if (statement === cloudRepository.STATUS_VALIDATION_NEXT_STATEMENT) return d1Envelope([]);
+    const rows = statement.includes("lifecycle_state = 'active'") || statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.ACTIVE_CURSOR_STATEMENT
+      ? scenarioValue.activeRows
+      : scenarioValue.historyRows;
+    if (statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.HISTORY_COUNT_STATEMENT) return d1Envelope([{ task_count: rows.length }]);
+    if (statement === cloudRepository.ACTIVE_CURSOR_STATEMENT || statement === cloudRepository.HISTORY_CURSOR_STATEMENT) {
+      const found = rows.find((row) => row.head_updated_at === params[0] && row.task_id === params[1]);
+      return d1Envelope(found ? [statusRow(found)] : []);
+    }
+    if (statement === cloudRepository.ACTIVE_PAGE_FIRST_STATEMENT || statement === cloudRepository.HISTORY_PAGE_FIRST_STATEMENT) return d1Envelope(pageRows(rows, statement, params));
+    if (statement === cloudRepository.ACTIVE_PAGE_NEXT_STATEMENT || statement === cloudRepository.HISTORY_PAGE_NEXT_STATEMENT) return d1Envelope(pageRows(rows, statement, params));
+    if (statement === cloudRepository.ACTIVE_PAGE_PREVIOUS_STATEMENT || statement === cloudRepository.HISTORY_PAGE_PREVIOUS_STATEMENT) return d1Envelope(pageRows(rows, statement, params));
+    throw new Error("unexpected route harness query");
+  };
+}
+
+async function fixture(path: string): Promise<Fixture> {
+  return JSON.parse(await readFile(new URL(path, import.meta.url), "utf8")) as Fixture;
+}
+
+async function main() {
+  cloudRepository = loadCloudRepository();
+  const activeFixture = await fixture("../examples/steward-cloud/active-after-planning.json");
+  const historyFixture = await fixture("../examples/steward-cloud/redacted-publication.json");
+  const activeSecond = { ...activeFixture.data.task, taskId: "task-active-second", title: "Second active publication" };
+  const activeRows = [
+    taskRow(activeFixture.data.task, "2026-07-28T00:00:03Z"),
+    taskRow(activeSecond, "2026-07-28T00:00:02Z"),
+  ];
+  const historyRows = [taskRow(historyFixture.data.task, "2026-07-28T00:00:01Z")];
+  const { GET: getStatus } = await import("../app/api/steward/status/route");
+  const { GET: getTasks } = await import("../app/api/steward/tasks/route");
+  const originalFetch = globalThis.fetch;
+  const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const outputs: string[] = [];
+
+  async function runCase(name: string, value: Scenario, action: () => Promise<void>, environment: Record<string, string | undefined> = VALID_ENV) {
+    const calls = { count: 0, urls: [] as string[] };
+    try {
+      for (const key of ENV_KEYS) {
+        const next = environment[key];
+        if (next === undefined) delete process.env[key];
+        else process.env[key] = next;
+      }
+      globalThis.fetch = fakeFetch(value, calls) as typeof fetch;
+      cloudRepository.resetCloudRepository();
+      await action();
+      outputs.push(`${name}: pass (${calls.count} mocked requests)`);
+    } finally {
+      cloudRepository.resetCloudRepository();
+      globalThis.fetch = originalFetch;
+      for (const key of ENV_KEYS) {
+        const previous = originalEnvironment[key];
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    }
+  }
+
+  await runCase("empty status", scenario([], []), async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.schemaVersion, "3.0");
+    assert("state" in payload.data);
+    assert.equal(payload.data.state, "empty");
+  });
+
+  await runCase("ready status", scenario(activeRows, historyRows), async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert("state" in payload.data);
+    assert.equal(payload.data.state, "available");
+    assert.equal(payload.data.taskCount, 3);
+    assert.equal(payload.data.latestPublicationAt, EXPOSED_AT);
+  });
+
+  await runCase("active page", scenario(activeRows, historyRows), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=1"));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.schemaVersion, "3.0");
+    if (!("items" in payload.data)) throw new Error("expected task page");
+    assert.equal(payload.data.items.length, 1);
+    assert.equal(payload.data.items[0]?.taskId, "task-active");
+    assert.equal(payload.data.pagination.pageSize, 1);
+    assert(response.headers.get("X-Steward-Next-Cursor"));
+    for (const excluded of ["task-hidden", "task-staged"]) assert(!JSON.stringify(payload).includes(excluded));
+    assert(!JSON.stringify(payload).includes("private"));
+  });
+
+  const first = await (async () => {
+    const calls = { count: 0, urls: [] as string[] };
+    globalThis.fetch = fakeFetch(scenario(activeRows, historyRows), calls) as typeof fetch;
+    for (const key of ENV_KEYS) process.env[key] = VALID_ENV[key];
+    cloudRepository.resetCloudRepository();
+    try { return await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=1")); }
+    finally { cloudRepository.resetCloudRepository(); globalThis.fetch = originalFetch; for (const key of ENV_KEYS) { const previous = originalEnvironment[key]; if (previous === undefined) delete process.env[key]; else process.env[key] = previous; } }
+  })();
+  const nextCursor = first.headers.get("X-Steward-Next-Cursor");
+  assert(nextCursor);
+
+  await runCase("forward cursor", scenario(activeRows, historyRows), async () => {
+    const response = await getTasks(new Request(`https://site.test/api/steward/tasks?scope=active&limit=1&cursor=${encodeURIComponent(nextCursor)}`));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    if (!("items" in payload.data)) throw new Error("expected task page");
+    assert.deepEqual(payload.data.items.map((item) => item.taskId), ["task-active-second"]);
+    assert(response.headers.get("X-Steward-Previous-Cursor"));
+  });
+
+  await runCase("backward cursor", scenario(activeRows, historyRows), async () => {
+    const response = await getTasks(new Request(`https://site.test/api/steward/tasks?scope=active&limit=1&cursor=${encodeURIComponent(nextCursor)}`));
+    const previous = response.headers.get("X-Steward-Previous-Cursor");
+    assert(previous);
+    const back = await getTasks(new Request(`https://site.test/api/steward/tasks?scope=active&limit=1&cursor=${encodeURIComponent(previous)}`));
+    assert.equal(back.status, 200);
+    const payload = dataResponse(parseCloudResponse(await back.text()));
+    if (!("items" in payload.data)) throw new Error("expected task page");
+    assert.deepEqual(payload.data.items.map((item) => item.taskId), ["task-active"]);
+  });
+
+  await runCase("history page and clamped limit", scenario(activeRows, historyRows), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?limit=999"));
+    assert.equal(response.status, 200);
+    const payload = dataResponse(parseCloudResponse(await response.text()));
+    if (!("items" in payload.data)) throw new Error("expected task page");
+    assert.deepEqual(payload.data.items.map((item) => item.taskId), ["task-redacted"]);
+    assert.equal(payload.data.pagination.pageSize, 50);
+  });
+
+  await runCase("invalid input", scenario(activeRows, historyRows), async () => {
+    const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=unknown&limit=bad"));
+    assert.equal(response.status, 400);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "INVALID_REQUEST");
+  });
+
+  await runCase("stale cursor", scenario(activeRows, historyRows), async () => {
+    const cursor = cloudRepository.encodePublicationCursor({ query: "tasks-active", publicationId: "publication-old", sort: ["2026-07-28T00:00:03Z", "task-active", "next"] });
+    const response = await getTasks(new Request(`https://site.test/api/steward/tasks?scope=active&cursor=${encodeURIComponent(cursor)}`));
+    assert.equal(response.status, 409);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "STALE_CURSOR");
+  });
+
+  await runCase("rate limited", { ...scenario([], []), mode: "rate-limited" }, async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 429);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "RATE_LIMITED");
+    assert(!JSON.stringify(payload).includes("route-harness-secret"));
+  });
+
+  await runCase("outage", { ...scenario([], []), mode: "outage" }, async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+    assert(!JSON.stringify(payload).includes("route-harness-secret"));
+  });
+
+  await runCase("malformed D1", { ...scenario([], []), mode: "malformed" }, async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "UNAVAILABLE");
+  });
+
+  await runCase("integrity failure", { ...scenario(activeRows, historyRows), mode: "integrity" }, async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "INTEGRITY_FAILURE");
+    assert(!JSON.stringify(payload).includes("route-harness-secret"));
+  });
+
+  await runCase("missing configuration", scenario([], []), async () => {
+    const response = await getStatus();
+    assert.equal(response.status, 503);
+    const payload = problemResponse(parseCloudResponse(await response.text()));
+    assert.equal(payload.problem.code, "MISCONFIGURED");
+  }, {
+    CLOUDFLARE_ACCOUNT_ID: undefined,
+    COQUIC_STEWARD_D1_DATABASE_ID: undefined,
+    COQUIC_STEWARD_D1_READ_TOKEN: undefined,
+    COQUIC_STEWARD_PUBLIC_R2_BASE_URL: undefined,
+  });
+
+  process.stdout.write(`${outputs.join("\n")}\nSteward cloud route harness passed with no external requests\n`);
+}
+
+void main().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

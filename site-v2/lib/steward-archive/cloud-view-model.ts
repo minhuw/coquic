@@ -131,12 +131,26 @@ export interface CloudTaskViewModel {
   readonly completeness: CloudTaskCompleteness;
 }
 
+const RFC3339_TIMESTAMP = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]{1,9})?Z$/;
+const NANOS_PER_MILLISECOND = 1_000_000n;
+
+function timestampNanoseconds(value: string): bigint | null {
+  const match = RFC3339_TIMESTAMP.exec(value);
+  if (!match) return null;
+  const milliseconds = Date.parse(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`);
+  if (!Number.isSafeInteger(milliseconds)) return null;
+  const fraction = `${match[7]?.slice(1) ?? ""}000000000`.slice(0, 9);
+  return BigInt(milliseconds) * NANOS_PER_MILLISECOND + BigInt(fraction);
+}
+
 function durationFromTimestamps(startedAt: string, completedAt: string): number | null {
-  const start = Date.parse(startedAt);
-  const end = Date.parse(completedAt);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
-  const duration = end - start;
-  return Number.isSafeInteger(duration) ? duration : null;
+  const start = timestampNanoseconds(startedAt);
+  const end = timestampNanoseconds(completedAt);
+  if (start === null || end === null) return null;
+  const delta = end - start;
+  if (delta < 0n || delta % NANOS_PER_MILLISECOND !== 0n) return null;
+  const durationMs = delta / NANOS_PER_MILLISECOND;
+  return durationMs <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(durationMs) : null;
 }
 
 function runTiming(run: CloudRun): CloudRunTiming | null {
@@ -209,18 +223,20 @@ function mapEvent(event: CloudEvent): CloudEventView {
   };
 }
 
-function pipelineStatus(runs: readonly CloudRunView[]): CloudAttemptView["status"] {
-  if (!runs.length) return "unavailable";
-  if (runs.some((run) => run.status === "failed")) return "failed";
-  if (runs.some((run) => run.status === "cancelled")) return "cancelled";
-  return "completed";
-}
-
 function pipelineTiming(runs: readonly CloudRunView[]): Pick<CloudAttemptView, "startedAt" | "completedAt" | "durationMs" | "durationSeconds"> {
   const timed = runs.map((run) => run.timing).filter((timing): timing is CloudRunTiming => timing !== null);
   if (!timed.length) return { startedAt: null, completedAt: null, durationMs: null, durationSeconds: null };
-  const startedAt = timed.reduce((earliest, timing) => timing.startedAt < earliest ? timing.startedAt : earliest, timed[0]!.startedAt);
-  const completedAt = timed.reduce((latest, timing) => timing.completedAt > latest ? timing.completedAt : latest, timed[0]!.completedAt);
+  const starts = timed
+    .map((timing) => ({ timing, instant: timestampNanoseconds(timing.startedAt) }))
+    .filter((entry): entry is { timing: CloudRunTiming; instant: bigint } => entry.instant !== null);
+  const completions = timed
+    .map((timing) => ({ timing, instant: timestampNanoseconds(timing.completedAt) }))
+    .filter((entry): entry is { timing: CloudRunTiming; instant: bigint } => entry.instant !== null);
+  if (!starts.length || !completions.length) return { startedAt: null, completedAt: null, durationMs: null, durationSeconds: null };
+  const earliest = starts.reduce((chosen, entry) => entry.instant < chosen.instant ? entry : chosen, starts[0]!);
+  const latest = completions.reduce((chosen, entry) => entry.instant > chosen.instant ? entry : chosen, completions[0]!);
+  const startedAt = earliest.timing.startedAt;
+  const completedAt = latest.timing.completedAt;
   const durationMs = durationFromTimestamps(startedAt, completedAt);
   return { startedAt, completedAt, durationMs, durationSeconds: durationMs === null ? null : Math.floor(durationMs / 1_000) };
 }
@@ -231,7 +247,9 @@ function mapAttempt(number: number, pipeline: CloudPipeline, runs: readonly Clou
     number,
     pipelineId: pipeline.pipelineId,
     label: pipeline.name,
-    status: pipelineStatus(runs),
+    // CloudPipeline has no validated lifecycle field; run states cannot be
+    // collapsed into one attempt status without inventing global state.
+    status: "unavailable",
     ...timing,
     runIds: runs.map((run) => run.runId),
     runs,

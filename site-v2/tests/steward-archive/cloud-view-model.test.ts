@@ -118,6 +118,13 @@ test("projects clean cloud evidence with stable source ordering and descriptor a
   assert.deepEqual(model.completeness, { state: "complete", trajectory: "available", warnings: [] });
 });
 
+test("does not synthesize attempt lifecycle status from mixed run states", () => {
+  const mixed = clone(detail());
+  mixed.runs[2] = { ...mixed.runs[2]!, pipelineId };
+  const model = buildCloudTaskViewModel(mixed);
+  assert.deepEqual(model.attempts.map((attempt) => attempt.status), ["unavailable", "unavailable"]);
+});
+
 test("preserves redaction disclosure and keeps unavailable usage explicit", () => {
   const model = buildCloudTaskViewModel(redact(detail()));
   assert.deepEqual(model.task.disclosure, { redactionApplied: true, originalRetained: false });
@@ -157,6 +164,35 @@ test("derives run duration only from valid timestamps and leaves invalid timing 
   (invalidTiming.runs[0] as unknown as { startedAt: string; completedAt: string; durationMs?: number }).completedAt = "also-not-a-timestamp";
   (invalidTiming.runs[0] as unknown as { startedAt: string; completedAt: string; durationMs?: number }).durationMs = undefined;
   assert.equal(buildCloudTaskViewModel(invalidTiming).runs[0]!.timing, null);
+});
+
+test("uses chronological extrema for fractional RFC3339 timestamps", () => {
+  const fractional = clone(detail());
+  fractional.runs[0] = {
+    ...fractional.runs[0]!,
+    startedAt: "2026-07-28T00:00:00Z",
+    completedAt: "2026-07-28T00:00:00.900Z",
+    durationMs: 900,
+  };
+  fractional.runs[1] = {
+    ...fractional.runs[1]!,
+    startedAt: "2026-07-28T00:00:00.500Z",
+    completedAt: "2026-07-28T00:00:00.600Z",
+    durationMs: 100,
+  };
+  if (fractional.trajectory !== null) {
+    fractional.trajectory = {
+      ...fractional.trajectory,
+      startedAt: "2026-07-28T00:00:00.500Z",
+      completedAt: "2026-07-28T00:00:00.600Z",
+      durationMs: 100,
+    };
+  }
+  const attempt = buildCloudTaskViewModel(fractional).attempts[0]!;
+  assert.equal(attempt.startedAt, "2026-07-28T00:00:00Z");
+  assert.equal(attempt.completedAt, "2026-07-28T00:00:00.900Z");
+  assert.equal(attempt.durationMs, 900);
+  assert.equal(attempt.durationSeconds, 0);
 });
 
 test("does not expose archive cursors, records, revisions, or direct URLs", () => {

@@ -63,6 +63,7 @@ class ReasonCode(StrEnum):
     invalid_identifier = "invalid_identifier"
     invalid_path = "invalid_path"
     invalid_media_type = "invalid_media_type"
+    uninspectable_binary = "uninspectable_binary"
     invalid_digest = "invalid_digest"
     invalid_metadata = "invalid_metadata"
     symlink = "symlink"

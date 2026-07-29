@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Local autonomous maintenance manager for CoQUIC"
 requires-python = ">=3.11"
 dependencies = [
+  "boto3",
+  "httpx",
   "jsonschema>=4.25,<5",
   "Pillow",
   "pydantic>=2",

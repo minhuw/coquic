@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -11,6 +12,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .models import CodexStage, IntegrationMode
 
@@ -62,6 +64,14 @@ VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
 _SAFE_SYNC_USER = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _SAFE_SYNC_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 _SAFE_RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_CLOUDFLARE_ACCOUNT_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+_CLOUDFLARE_DATABASE_ID = re.compile(
+    r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"
+)
+_R2_BUCKET_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])$")
+_MAX_PUBLICATION_URL_LENGTH = 2048
+_MAX_PUBLICATION_TIMEOUT_SECONDS = 86400.0
+_MAX_PUBLICATION_RETRIES = 20
 
 
 def _bounded_token(value: object, label: str, *, allow_empty: bool = False) -> str:
@@ -234,9 +244,422 @@ class StewardDatasetSyncConfig:
         )
 
 
+def _publication_value(
+    primary: object,
+    aliases: tuple[object, ...],
+    *,
+    default: object,
+    label: str,
+) -> object:
+    """Select one spelling of a publication setting without hiding conflicts."""
+
+    selected = primary
+    for alias in aliases:
+        if alias is None:
+            continue
+        if selected != default and selected != alias:
+            raise ValueError(f"conflicting publication settings for {label}")
+        selected = alias
+    return selected
+
+
+def _publication_optional_path(value: object, label: str) -> Path | None:
+    if value in (None, ""):
+        return None
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"publication.{label} must be an absolute path")
+    if ".." in path.parts:
+        raise ValueError(f"publication.{label} must not contain parent traversal")
+    return path
+
+
+def _publication_credential_path(value: object, label: str) -> Path:
+    path = _publication_optional_path(value, label)
+    if path is None:
+        raise ValueError(f"publication.{label} is required")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(
+            f"publication.{label} must reference a regular non-symlink file"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(
+            f"publication.{label} must reference a regular non-symlink file"
+        )
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ValueError(f"publication.{label} must use a private file mode")
+    return path
+
+
+def _publication_staging_root(value: object) -> Path:
+    path = _publication_optional_path(value, "staging_root")
+    if path is None:
+        raise ValueError("publication.staging_root is required")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(
+            "publication.staging_root must reference a private directory"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("publication.staging_root must reference a private directory")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ValueError("publication.staging_root must use a private directory mode")
+    return path
+
+
+def _publication_url(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"publication.{label} must be a string")
+    normalized = value.strip()
+    if not normalized or len(normalized) > _MAX_PUBLICATION_URL_LENGTH:
+        raise ValueError(f"publication.{label} must be a bounded HTTPS URL")
+    if any(character.isspace() or ord(character) < 0x20 for character in normalized):
+        raise ValueError(f"publication.{label} must be a bounded HTTPS URL")
+    try:
+        parsed = urlsplit(normalized)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"publication.{label} must be a bounded HTTPS URL") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"publication.{label} must be a bounded HTTPS URL")
+    if any(part in {".", ".."} for part in parsed.path.split("/")):
+        raise ValueError(f"publication.{label} contains an unsafe path")
+    return normalized
+
+
+def _publication_bucket(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"publication.{label} must be a string")
+    normalized = value.strip()
+    if _R2_BUCKET_NAME.fullmatch(normalized) is None:
+        raise ValueError(f"publication.{label} is not a valid R2 bucket name")
+    return normalized
+
+
+def _publication_float(value: object, label: str, *, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"publication.{label} must be a finite positive number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or not 0 < normalized <= maximum:
+        raise ValueError(
+            f"publication.{label} must be greater than zero and at most {maximum:g}"
+        )
+    return normalized
+
+
+def _publication_int(value: object, label: str, *, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"publication.{label} must be an integer")
+    if not 0 <= value <= maximum:
+        raise ValueError(
+            f"publication.{label} must be between zero and {maximum}"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class StewardPublicationConfig:
+    """Strict, daemon-only Cloudflare D1/R2 publication settings.
+
+    The object stores credential *paths* only.  Validation uses ``lstat`` for
+    metadata and never reads credential bytes; transport workers own that
+    boundary once a trusted daemon explicitly starts publication.
+    """
+
+    enabled: bool = False
+    account_id: str = ""
+    d1_database_id: str = ""
+    d1_token_path: Path | None = None
+    r2_endpoint: str = ""
+    r2_access_key_id_path: Path | None = None
+    r2_secret_access_key_path: Path | None = None
+    public_bucket: str = ""
+    private_bucket: str = ""
+    public_base_url: str = ""
+    staging_root: Path | None = None
+    build_timeout_seconds: float = 300.0
+    network_timeout_seconds: float = 30.0
+    lease_duration_seconds: float = 300.0
+    max_retries: int = 3
+    retry_backoff_seconds: float = 5.0
+
+    # Accepted Python spellings for callers that use the service-prefixed
+    # vocabulary.  The parser accepts the same aliases in TOML.
+    cloudflare_account_id: str | None = None
+    cloudflare_database_id: str | None = None
+    database_id: str | None = None
+    d1_read_token_path: Path | None = None
+    d1_api_token_path: Path | None = None
+    d1_token_file: Path | None = None
+    d1_read_token_file: Path | None = None
+    r2_endpoint_url: str | None = None
+    access_key_id_path: Path | None = None
+    secret_access_key_path: Path | None = None
+    access_key_file: Path | None = None
+    secret_key_file: Path | None = None
+    r2_access_key_path: Path | None = None
+    r2_secret_key_path: Path | None = None
+    r2_access_key_file: Path | None = None
+    r2_secret_key_file: Path | None = None
+    public_r2_bucket: str | None = None
+    private_r2_bucket: str | None = None
+    public_bucket_name: str | None = None
+    private_bucket_name: str | None = None
+    public_r2_base_url: str | None = None
+    staging_dir: Path | None = None
+    staging_path: Path | None = None
+    trusted_staging_root: Path | None = None
+    lease_seconds: float | None = None
+    lease_duration: float | None = None
+    retry_limit: int | None = None
+    max_retry_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("publication.enabled must be a boolean")
+
+        account = _publication_value(
+            self.account_id,
+            (self.cloudflare_account_id,),
+            default="",
+            label="account_id",
+        )
+        database = _publication_value(
+            self.d1_database_id,
+            (self.cloudflare_database_id, self.database_id),
+            default="",
+            label="d1_database_id",
+        )
+        token_path = _publication_value(
+            self.d1_token_path,
+            (
+                self.d1_read_token_path,
+                self.d1_api_token_path,
+                self.d1_token_file,
+                self.d1_read_token_file,
+            ),
+            default=None,
+            label="d1_token_path",
+        )
+        endpoint = _publication_value(
+            self.r2_endpoint,
+            (self.r2_endpoint_url,),
+            default="",
+            label="r2_endpoint",
+        )
+        access_path = _publication_value(
+            self.r2_access_key_id_path,
+            (
+                self.access_key_id_path,
+                self.access_key_file,
+                self.r2_access_key_path,
+                self.r2_access_key_file,
+            ),
+            default=None,
+            label="r2_access_key_id_path",
+        )
+        secret_path = _publication_value(
+            self.r2_secret_access_key_path,
+            (
+                self.secret_access_key_path,
+                self.secret_key_file,
+                self.r2_secret_key_path,
+                self.r2_secret_key_file,
+            ),
+            default=None,
+            label="r2_secret_access_key_path",
+        )
+        public_bucket = _publication_value(
+            self.public_bucket,
+            (self.public_r2_bucket, self.public_bucket_name),
+            default="",
+            label="public_bucket",
+        )
+        private_bucket = _publication_value(
+            self.private_bucket,
+            (self.private_r2_bucket, self.private_bucket_name),
+            default="",
+            label="private_bucket",
+        )
+        public_url = _publication_value(
+            self.public_base_url,
+            (self.public_r2_base_url,),
+            default="",
+            label="public_base_url",
+        )
+        staging = _publication_value(
+            self.staging_root,
+            (self.staging_dir, self.staging_path, self.trusted_staging_root),
+            default=None,
+            label="staging_root",
+        )
+        lease = _publication_value(
+            self.lease_duration_seconds,
+            (self.lease_seconds, self.lease_duration),
+            default=300.0,
+            label="lease_duration_seconds",
+        )
+        retries = _publication_value(
+            self.max_retries,
+            (self.retry_limit, self.max_retry_count),
+            default=3,
+            label="max_retries",
+        )
+
+        for value, label in (
+            (account, "account_id"),
+            (database, "d1_database_id"),
+            (endpoint, "r2_endpoint"),
+            (public_bucket, "public_bucket"),
+            (private_bucket, "private_bucket"),
+            (public_url, "public_base_url"),
+        ):
+            if value not in (None, "") and not isinstance(value, str):
+                raise ValueError(f"publication.{label} must be a string")
+        account = account.strip() if isinstance(account, str) else ""
+        database = database.strip() if isinstance(database, str) else ""
+        endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
+        public_bucket = public_bucket.strip() if isinstance(public_bucket, str) else ""
+        private_bucket = private_bucket.strip() if isinstance(private_bucket, str) else ""
+        public_url = public_url.strip() if isinstance(public_url, str) else ""
+        token_path = _publication_optional_path(token_path, "d1_token_path")
+        access_path = _publication_optional_path(
+            access_path, "r2_access_key_id_path"
+        )
+        secret_path = _publication_optional_path(
+            secret_path, "r2_secret_access_key_path"
+        )
+        staging = _publication_optional_path(staging, "staging_root")
+
+        if account:
+            if _CLOUDFLARE_ACCOUNT_ID.fullmatch(account) is None:
+                raise ValueError("publication.account_id must be a 32-character hexadecimal ID")
+            account = account.lower()
+        if database:
+            if _CLOUDFLARE_DATABASE_ID.fullmatch(database) is None:
+                raise ValueError("publication.d1_database_id must be a UUID")
+            database = database.lower()
+        if endpoint:
+            endpoint = _publication_url(endpoint, "r2_endpoint")
+        if public_url:
+            public_url = _publication_url(public_url, "public_base_url")
+        if public_bucket:
+            public_bucket = _publication_bucket(public_bucket, "public_bucket")
+        if private_bucket:
+            private_bucket = _publication_bucket(private_bucket, "private_bucket")
+        if public_bucket and private_bucket and public_bucket == private_bucket:
+            raise ValueError("publication.public_bucket and private_bucket must differ")
+
+        build_timeout = _publication_float(
+            self.build_timeout_seconds,
+            "build_timeout_seconds",
+            maximum=_MAX_PUBLICATION_TIMEOUT_SECONDS,
+        )
+        network_timeout = _publication_float(
+            self.network_timeout_seconds,
+            "network_timeout_seconds",
+            maximum=_MAX_PUBLICATION_TIMEOUT_SECONDS,
+        )
+        lease_seconds = _publication_float(
+            lease,
+            "lease_duration_seconds",
+            maximum=_MAX_PUBLICATION_TIMEOUT_SECONDS,
+        )
+        retry_count = _publication_int(retries, "max_retries", maximum=_MAX_PUBLICATION_RETRIES)
+        retry_backoff = _publication_float(
+            self.retry_backoff_seconds,
+            "retry_backoff_seconds",
+            maximum=_MAX_PUBLICATION_TIMEOUT_SECONDS,
+        )
+
+        if self.enabled:
+            required = (
+                (account, "account_id"),
+                (database, "d1_database_id"),
+                (endpoint, "r2_endpoint"),
+                (public_bucket, "public_bucket"),
+                (private_bucket, "private_bucket"),
+                (public_url, "public_base_url"),
+            )
+            missing = [label for value, label in required if not value]
+            if missing:
+                raise ValueError(
+                    "enabled publication requires " + ", ".join(missing)
+                )
+            token_path = _publication_credential_path(token_path, "d1_token_path")
+            access_path = _publication_credential_path(
+                access_path, "r2_access_key_id_path"
+            )
+            secret_path = _publication_credential_path(
+                secret_path, "r2_secret_access_key_path"
+            )
+            staging = _publication_staging_root(staging)
+            credential_paths = {token_path, access_path, secret_path}
+            if len(credential_paths) != 3:
+                raise ValueError("publication credential paths must be separate files")
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "d1_database_id", database)
+        object.__setattr__(self, "d1_token_path", token_path)
+        object.__setattr__(self, "r2_endpoint", endpoint)
+        object.__setattr__(self, "r2_access_key_id_path", access_path)
+        object.__setattr__(self, "r2_secret_access_key_path", secret_path)
+        object.__setattr__(self, "public_bucket", public_bucket)
+        object.__setattr__(self, "private_bucket", private_bucket)
+        object.__setattr__(self, "public_base_url", public_url)
+        object.__setattr__(self, "staging_root", staging)
+        object.__setattr__(self, "build_timeout_seconds", build_timeout)
+        object.__setattr__(self, "network_timeout_seconds", network_timeout)
+        object.__setattr__(self, "lease_duration_seconds", lease_seconds)
+        object.__setattr__(self, "max_retries", retry_count)
+        object.__setattr__(self, "retry_backoff_seconds", retry_backoff)
+
+        # Keep aliases normalized so callers using either vocabulary observe
+        # identical values without ever receiving credential contents.
+        object.__setattr__(self, "cloudflare_account_id", account or None)
+        object.__setattr__(self, "cloudflare_database_id", database or None)
+        object.__setattr__(self, "database_id", database or None)
+        object.__setattr__(self, "d1_read_token_path", token_path)
+        object.__setattr__(self, "d1_api_token_path", token_path)
+        object.__setattr__(self, "d1_token_file", token_path)
+        object.__setattr__(self, "d1_read_token_file", token_path)
+        object.__setattr__(self, "r2_endpoint_url", endpoint or None)
+        object.__setattr__(self, "access_key_id_path", access_path)
+        object.__setattr__(self, "secret_access_key_path", secret_path)
+        object.__setattr__(self, "access_key_file", access_path)
+        object.__setattr__(self, "secret_key_file", secret_path)
+        object.__setattr__(self, "r2_access_key_path", access_path)
+        object.__setattr__(self, "r2_secret_key_path", secret_path)
+        object.__setattr__(self, "r2_access_key_file", access_path)
+        object.__setattr__(self, "r2_secret_key_file", secret_path)
+        object.__setattr__(self, "public_r2_bucket", public_bucket or None)
+        object.__setattr__(self, "private_r2_bucket", private_bucket or None)
+        object.__setattr__(self, "public_bucket_name", public_bucket or None)
+        object.__setattr__(self, "private_bucket_name", private_bucket or None)
+        object.__setattr__(self, "public_r2_base_url", public_url or None)
+        object.__setattr__(self, "staging_dir", staging)
+        object.__setattr__(self, "staging_path", staging)
+        object.__setattr__(self, "trusted_staging_root", staging)
+        object.__setattr__(self, "lease_seconds", lease_seconds)
+        object.__setattr__(self, "lease_duration", lease_seconds)
+        object.__setattr__(self, "retry_limit", retry_count)
+        object.__setattr__(self, "max_retry_count", retry_count)
+
+
 # Descriptive aliases used by callers that refer to the host-side boundary.
 DaemonContainerConfig = StewardContainerConfig
 DatasetSyncSettings = StewardDatasetSyncConfig
+PublicationSettings = StewardPublicationConfig
 
 
 @dataclass(frozen=True)
@@ -452,12 +875,17 @@ class StewardConfig:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
     container: StewardContainerConfig = field(default_factory=StewardContainerConfig)
+    publication: StewardPublicationConfig = field(default_factory=StewardPublicationConfig)
     dataset_sync: StewardDatasetSyncConfig = field(default_factory=StewardDatasetSyncConfig)
     deployment: StewardDeploymentConfig = field(default_factory=StewardDeploymentConfig)
     shutdown_grace_seconds: float = 30.0
     resume_attempt_limit: int = 2
 
     def __post_init__(self) -> None:
+        if self.publication.enabled and self.dataset_sync.enabled:
+            raise ValueError(
+                "publication and dataset_sync transports cannot both be enabled"
+            )
         if self.deployment.enabled and self.deployment.stop_grace_seconds <= self.shutdown_grace_seconds:
             raise ValueError(
                 "deployment.stop_grace_seconds must exceed shutdown_grace_seconds"
@@ -911,6 +1339,7 @@ def load_config(
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
     container_data = _section_alias(steward, "container", "containers", "task_container")
+    publication_data = _section_alias(steward, "publication", "cloud_publication")
     deployment_data = _section_alias(steward, "deployment", "container_operations")
     deployment_config = _deployment_config(deployment_data, root)
     selected_task_image = (
@@ -1024,6 +1453,7 @@ def load_config(
             fallback_image=steward.get("task_image"),
             fallback_digest=steward.get("task_image_digest"),
         ),
+        publication=_publication_config(publication_data),
         dataset_sync=_dataset_sync_config(sync_data),
         deployment=deployment_config,
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
@@ -1203,6 +1633,111 @@ def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
         max_owned_docker_bytes=(int(data["max_owned_docker_bytes"]) if "max_owned_docker_bytes" in data else None),
         recovery_free_bytes=(int(data["recovery_free_bytes"]) if "recovery_free_bytes" in data else None),
         recovery_owned_docker_bytes=(int(data["recovery_owned_docker_bytes"]) if "recovery_owned_docker_bytes" in data else None),
+    )
+
+
+def _publication_config(raw: object) -> StewardPublicationConfig:
+    data = raw if isinstance(raw, dict) else {}
+    allowed = {
+        "enabled",
+        "account_id",
+        "cloudflare_account_id",
+        "cloudflare_database_id",
+        "d1_database_id",
+        "database_id",
+        "d1_token_path",
+        "d1_read_token_path",
+        "d1_api_token_path",
+        "d1_token_file",
+        "d1_read_token_file",
+        "r2_endpoint",
+        "r2_endpoint_url",
+        "r2_access_key_id_path",
+        "access_key_id_path",
+        "access_key_file",
+        "r2_access_key_path",
+        "r2_access_key_file",
+        "r2_secret_access_key_path",
+        "secret_access_key_path",
+        "secret_key_file",
+        "r2_secret_key_path",
+        "r2_secret_key_file",
+        "public_bucket",
+        "public_r2_bucket",
+        "public_bucket_name",
+        "private_bucket",
+        "private_r2_bucket",
+        "private_bucket_name",
+        "public_base_url",
+        "public_r2_base_url",
+        "staging_root",
+        "staging_dir",
+        "staging_path",
+        "trusted_staging_root",
+        "build_timeout_seconds",
+        "network_timeout_seconds",
+        "lease_duration_seconds",
+        "lease_seconds",
+        "lease_duration",
+        "max_retries",
+        "retry_limit",
+        "max_retry_count",
+        "retry_backoff_seconds",
+    }
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(
+            "publication accepts only fixed cloud transport settings; unsupported keys: "
+            + ", ".join(str(value) for value in unknown)
+        )
+    enabled = data.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("publication.enabled must be a boolean")
+    return StewardPublicationConfig(
+        enabled=enabled,
+        account_id=data.get("account_id", ""),
+        cloudflare_account_id=data.get("cloudflare_account_id"),
+        cloudflare_database_id=data.get("cloudflare_database_id"),
+        d1_database_id=data.get("d1_database_id", ""),
+        database_id=data.get("database_id"),
+        d1_token_path=data.get("d1_token_path"),
+        d1_read_token_path=data.get("d1_read_token_path"),
+        d1_api_token_path=data.get("d1_api_token_path"),
+        d1_token_file=data.get("d1_token_file"),
+        d1_read_token_file=data.get("d1_read_token_file"),
+        r2_endpoint=data.get("r2_endpoint", ""),
+        r2_endpoint_url=data.get("r2_endpoint_url"),
+        r2_access_key_id_path=data.get("r2_access_key_id_path"),
+        access_key_id_path=data.get("access_key_id_path"),
+        access_key_file=data.get("access_key_file"),
+        r2_access_key_path=data.get("r2_access_key_path"),
+        r2_access_key_file=data.get("r2_access_key_file"),
+        r2_secret_access_key_path=data.get("r2_secret_access_key_path"),
+        secret_access_key_path=data.get("secret_access_key_path"),
+        secret_key_file=data.get("secret_key_file"),
+        r2_secret_key_path=data.get("r2_secret_key_path"),
+        r2_secret_key_file=data.get("r2_secret_key_file"),
+        public_bucket=data.get("public_bucket", ""),
+        public_r2_bucket=data.get("public_r2_bucket"),
+        public_bucket_name=data.get("public_bucket_name"),
+        private_bucket=data.get("private_bucket", ""),
+        private_r2_bucket=data.get("private_r2_bucket"),
+        private_bucket_name=data.get("private_bucket_name"),
+        public_base_url=data.get("public_base_url", ""),
+        public_r2_base_url=data.get("public_r2_base_url"),
+        staging_root=data.get("staging_root"),
+        staging_dir=data.get("staging_dir"),
+        staging_path=data.get("staging_path"),
+        trusted_staging_root=data.get("trusted_staging_root"),
+        build_timeout_seconds=data.get("build_timeout_seconds", 300.0),
+        network_timeout_seconds=data.get("network_timeout_seconds", 30.0),
+        lease_duration_seconds=data.get("lease_duration_seconds", 300.0),
+        lease_seconds=data.get("lease_seconds"),
+        lease_duration=data.get("lease_duration"),
+        max_retries=data.get("max_retries", 3),
+        retry_limit=data.get("retry_limit"),
+        max_retry_count=data.get("max_retry_count"),
+        retry_backoff_seconds=data.get("retry_backoff_seconds", 5.0),
     )
 
 

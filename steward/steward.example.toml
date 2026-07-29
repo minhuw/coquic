@@ -37,6 +37,27 @@ image = "coquic-steward-task"
 docker_bin = "docker"
 network = "bridge"
 
+# Cloud publication is daemon-only and disabled for local fixtures. The
+# identifiers, bucket names, URL, and paths below are fake non-secret examples;
+# enabling publication requires existing private credential files and staging.
+[steward.publication]
+enabled = false
+account_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+d1_database_id = "12345678-1234-4abc-8def-1234567890ab"
+d1_token_path = "/tmp/fake-coquic-home/private/credentials/d1-read-token"
+r2_endpoint = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.r2.cloudflarestorage.com"
+r2_access_key_id_path = "/tmp/fake-coquic-home/private/credentials/r2-access-key-id"
+r2_secret_access_key_path = "/tmp/fake-coquic-home/private/credentials/r2-secret-access-key"
+public_bucket = "coquic-public-example"
+private_bucket = "coquic-private-example"
+public_base_url = "https://objects.example.test/coquic/"
+staging_root = "/tmp/fake-coquic-home/private/publication-staging"
+build_timeout_seconds = 300
+network_timeout_seconds = 30
+lease_duration_seconds = 300
+max_retries = 3
+retry_backoff_seconds = 5
+
 # Production Compose values are explicit and private. These fake examples are
 # intentionally disabled; no machine-independent resource threshold is used.
 # [steward.deployment]

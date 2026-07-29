@@ -398,6 +398,10 @@ async function main() {
   const { GET: getTaskDetail } = await import("../app/api/steward/tasks/[taskId]/route");
   const { GET: getArtifact } = await import("../app/api/steward/tasks/[taskId]/artifact/route");
   const { GET: getTranscript } = await import("../app/api/steward/tasks/[taskId]/transcript/route");
+  const { GET: getArchiveRevision } = await import("../app/api/steward/revision/route");
+  const { GET: getArchiveSignalEvents } = await import("../app/api/steward/signals/[signalId]/events/route");
+  const { GET: getArchiveTranscript } = await import("../app/api/steward/planner-runs/[plannerRunId]/transcript/route");
+  const { GET: getArchiveArtifact } = await import("../app/api/steward/planner-runs/[plannerRunId]/artifacts/[artifact]/route");
   const { default: renderStewardPage } = await import("../app/steward/page");
   const { default: renderTaskPage } = await import("../app/steward/tasks/[taskId]/page");
   const nextPackageRoot = dirname(requireForTest.resolve("next/package.json"));
@@ -406,7 +410,7 @@ async function main() {
   const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   const outputs: string[] = [];
 
-  async function runCase(name: string, value: Scenario, action: () => Promise<void>, environment: Record<string, string | undefined> = VALID_ENV) {
+  async function runCase(name: string, value: Scenario, action: () => Promise<void>, environment: Record<string, string | undefined> = VALID_ENV, expectedCalls?: number) {
     const calls = { count: 0, urls: [] as string[] };
     try {
       for (const key of ENV_KEYS) {
@@ -417,6 +421,7 @@ async function main() {
       globalThis.fetch = fakeFetch(value, calls) as typeof fetch;
       cloudRepository.resetCloudRepository();
       await action();
+      if (expectedCalls !== undefined) assert.equal(calls.count, expectedCalls);
       outputs.push(`${name}: pass (${calls.count} mocked requests)`);
     } finally {
       cloudRepository.resetCloudRepository();
@@ -428,6 +433,70 @@ async function main() {
       }
     }
   }
+
+  const legacyRouteSources = await Promise.all([
+    "../app/api/steward/revision/route.ts",
+    "../app/api/steward/signals/[signalId]/events/route.ts",
+    "../app/api/steward/planner-runs/[plannerRunId]/transcript/route.ts",
+    "../app/api/steward/planner-runs/[plannerRunId]/artifacts/[artifact]/route.ts",
+  ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+  for (const source of legacyRouteSources) {
+    assert(!source.includes("getArchiveRepository"));
+    assert(!source.includes("steward-archive/repository"));
+    assert(!/\bfetch\s*\(/.test(source));
+    assert(!/\b(readFile|createReadStream|Readable|cursor|redirect)\b/i.test(source));
+  }
+
+  const globalArchiveInputs = [
+    { label: "normal", signalId: "signal-harness", plannerRunId: "run-harness", artifact: "trajectory.json" },
+    { label: "malformed", signalId: "../private", plannerRunId: "../private", artifact: "../private" },
+    { label: "encoded", signalId: "%2e%2e%2fprivate", plannerRunId: "%2e%2e%2fprivate", artifact: "%2e%2e%2fprivate" },
+    { label: "credential-like", signalId: "token=route-harness-secret", plannerRunId: "token=route-harness-secret", artifact: "token=route-harness-secret" },
+  ] as const;
+  const globalArchiveMessage = "The global archive domain is unavailable in the cloud contract.";
+
+  async function assertGlobalArchiveUnavailable(response: Response, input: typeof globalArchiveInputs[number]) {
+    assert.equal(response.status, 410);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.equal(response.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
+    assert.equal(response.headers.get("Location"), null);
+    assert.equal(response.headers.get("Content-Disposition"), null);
+    const body = await response.text();
+    const payload = problemResponse(parseCloudResponse(body));
+    assert.equal(payload.schemaVersion, "3.0");
+    assert.deepEqual(payload.problem, {
+      code: "UNAVAILABLE",
+      message: globalArchiveMessage,
+      retryable: false,
+      status: 410,
+      type: null,
+    });
+    for (const value of [input.signalId, input.plannerRunId, input.artifact, "route-harness-secret", "private"]) {
+      assert(!body.includes(value), `response reflected ${value}`);
+    }
+    return JSON.stringify({ schemaVersion: payload.schemaVersion, problem: payload.problem });
+  }
+
+  await runCase("global archive routes unavailable uniformly", scenario([], []), async () => {
+    let expected: string | undefined;
+    for (const input of globalArchiveInputs) {
+      const signalRequest = new Request(`https://site.test/api/steward/signals/${encodeURIComponent(input.signalId)}/events?cursor=${encodeURIComponent(input.artifact)}&token=${encodeURIComponent("route-harness-secret")}`);
+      const transcriptRequest = new Request(`https://site.test/api/steward/planner-runs/${encodeURIComponent(input.plannerRunId)}/transcript?artifact=${encodeURIComponent(input.artifact)}&cursor=${encodeURIComponent(input.signalId)}`);
+      const artifactRequest = new Request(`https://site.test/api/steward/planner-runs/${encodeURIComponent(input.plannerRunId)}/artifacts/${encodeURIComponent(input.artifact)}?token=${encodeURIComponent("route-harness-secret")}`);
+      const responses = [
+        await getArchiveRevision(),
+        await getArchiveSignalEvents(signalRequest, { params: Promise.resolve({ signalId: input.signalId }) }),
+        await getArchiveTranscript(transcriptRequest, { params: Promise.resolve({ plannerRunId: input.plannerRunId }) }),
+        await getArchiveArtifact(artifactRequest, { params: Promise.resolve({ plannerRunId: input.plannerRunId, artifact: input.artifact }) }),
+      ];
+      for (const response of responses) {
+        const normalized = await assertGlobalArchiveUnavailable(response, input);
+        if (expected === undefined) expected = normalized;
+        else assert.equal(normalized, expected);
+      }
+    }
+  }, VALID_ENV, 0);
 
   async function renderOverview(searchParams: Record<string, string | undefined> = {}) {
     const page = await renderStewardPage({ searchParams: Promise.resolve(searchParams) });

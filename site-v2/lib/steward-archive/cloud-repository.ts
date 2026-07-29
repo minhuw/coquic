@@ -59,17 +59,11 @@ export class CloudRepositoryDataError extends Error {
 
 const MAX_PAGE_SIZE = 50;
 const MAX_COUNT = 1_000_000;
+const STATUS_VALIDATION_PAGE_SIZE = 128;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/;
 
-/** The latest visible generation is the publication snapshot used by cursors. */
-export const STATUS_STATEMENT = `
-SELECT
-  COUNT(*) OVER () AS task_count,
-  MAX(p.exposed_at) OVER () AS latest_publication_at,
-  FIRST_VALUE(p.publication_id) OVER (
-    ORDER BY p.exposed_at DESC, p.publication_id DESC
-  ) AS latest_publication_id,
+const STATUS_COLUMNS = `
   h.updated_at AS head_updated_at,
   h.state AS head_state,
   p.publication_id AS publication_id,
@@ -86,6 +80,9 @@ SELECT
   p.created_at AS generation_created_at,
   p.exposed_at AS generation_exposed_at,
   t.task_id AS task_id
+`;
+
+const STATUS_FROM = `
   FROM task_heads AS h
   JOIN publication_generations AS p
     ON p.publication_id = h.publication_id
@@ -96,7 +93,45 @@ SELECT
     ON t.publication_id = p.publication_id
    AND t.task_id = h.task_id
  WHERE h.state = 'visible'
- ORDER BY p.exposed_at DESC, p.publication_id DESC
+`;
+
+/** The latest visible generation is the publication snapshot used by cursors. */
+export const STATUS_STATEMENT = `
+SELECT
+  COUNT(*) AS task_count,
+  MAX(p.exposed_at) AS latest_publication_at,
+  (
+    SELECT p2.publication_id
+      FROM task_heads AS h2
+      JOIN publication_generations AS p2
+        ON p2.publication_id = h2.publication_id
+       AND p2.task_id = h2.task_id
+       AND p2.state = 'visible'
+       AND p2.exposed_at IS NOT NULL
+      JOIN tasks AS t2
+        ON t2.publication_id = p2.publication_id
+       AND t2.task_id = h2.task_id
+     WHERE h2.state = 'visible'
+     ORDER BY p2.exposed_at DESC, p2.publication_id DESC, p2.task_id DESC
+     LIMIT 1
+  ) AS latest_publication_id
+${STATUS_FROM}
+`;
+
+export const STATUS_VALIDATION_STATEMENT = `
+SELECT${STATUS_COLUMNS}${STATUS_FROM}
+ ORDER BY p.exposed_at DESC, p.publication_id DESC, p.task_id DESC
+ LIMIT ?
+`;
+
+export const STATUS_VALIDATION_NEXT_STATEMENT = `
+SELECT${STATUS_COLUMNS}${STATUS_FROM}
+  AND (
+    p.exposed_at < ?
+    OR (p.exposed_at = ? AND p.publication_id < ?)
+    OR (p.exposed_at = ? AND p.publication_id = ? AND p.task_id < ?)
+  )
+ ORDER BY p.exposed_at DESC, p.publication_id DESC, p.task_id DESC
  LIMIT ?
 `;
 
@@ -304,8 +339,9 @@ const CURSOR_STATEMENTS: Record<CloudTaskScope, string> = { active: ACTIVE_CURSO
 type CursorDirection = "next" | "previous";
 type DecodedTaskCursor = { direction: CursorDirection; updatedAt: string; taskId: string };
 
-const STATUS_KEYS = [
-  "task_count", "latest_publication_at", "latest_publication_id", "head_updated_at", "head_state", "publication_id",
+const STATUS_SUMMARY_KEYS = ["task_count", "latest_publication_at", "latest_publication_id"] as const;
+const STATUS_VALIDATION_KEYS = [
+  "head_updated_at", "head_state", "publication_id",
   "generation_task_id", "generation_run_id", "generation_metadata_digest", "generation_idempotency_key", "generation_state",
   "generation_expected_task_count", "generation_expected_pipeline_count", "generation_expected_run_count",
   "generation_expected_event_count", "generation_expected_artifact_count", "generation_created_at", "generation_exposed_at", "task_id",
@@ -423,26 +459,55 @@ function disclosure(value: unknown): boolean {
   invalidData();
 }
 
-function parseStatus(rowsValue: readonly Record<string, unknown>[]): { status: CloudStatus; publicationId: string | null } {
+type StatusSnapshot = {
+  status: CloudStatus;
+  publicationId: string | null;
+  latestPublicationAt: string | null;
+};
+
+function parseStatusSummary(rowsValue: readonly Record<string, unknown>[]): StatusSnapshot {
   if (rowsValue.length === 0) {
     return {
       status: validateCloudStatusData({ state: "empty", taskCount: 0, latestPublicationAt: null }),
       publicationId: null,
+      latestPublicationAt: null,
     };
   }
-  if (rowsValue.length > MAX_COUNT) invalidData();
-  const rows = rowsValue.map((rowValue) => exactRow(rowValue, STATUS_KEYS));
-  const taskCount = boundedInteger(rows[0]!.task_count, MAX_COUNT);
-  if (taskCount !== rows.length || taskCount === 0) invalidData();
-  const latestPublicationAt = timestamp(rows[0]!.latest_publication_at);
-  const publicationId = id(rows[0]!.latest_publication_id);
-  for (const row of rows) {
-    if (boundedInteger(row.task_count, MAX_COUNT) !== taskCount) invalidData();
-    if (timestamp(row.latest_publication_at) !== latestPublicationAt || id(row.latest_publication_id) !== publicationId) invalidData();
-    validatePublicContract(row);
-  }
-  const status = validateCloudStatusData({ state: "available", taskCount, latestPublicationAt });
-  return { status, publicationId };
+  if (rowsValue.length !== 1) invalidData();
+  const row = exactRow(rowsValue[0], STATUS_SUMMARY_KEYS);
+  const taskCount = boundedInteger(row.task_count, MAX_COUNT);
+  const latestPublicationAt = row.latest_publication_at === null ? null : timestamp(row.latest_publication_at);
+  const publicationId = row.latest_publication_id === null ? null : id(row.latest_publication_id);
+  if (taskCount === 0 && (latestPublicationAt !== null || publicationId !== null)) invalidData();
+  if (taskCount > 0 && (latestPublicationAt === null || publicationId === null)) invalidData();
+  const status = validateCloudStatusData({
+    state: taskCount === 0 ? "empty" : "available",
+    taskCount,
+    latestPublicationAt,
+  });
+  return { status, publicationId, latestPublicationAt };
+}
+
+type StatusValidationRow = {
+  exposedAt: string;
+  publicationId: string;
+  taskId: string;
+};
+
+function parseStatusValidation(rowValue: unknown): StatusValidationRow {
+  const row = exactRow(rowValue, STATUS_VALIDATION_KEYS);
+  const exposedAt = timestamp(row.generation_exposed_at);
+  const publicationId = id(row.publication_id);
+  const taskId = id(row.task_id);
+  validatePublicContract(row);
+  return { exposedAt, publicationId, taskId };
+}
+
+function compareStatusKey(left: StatusValidationRow, right: StatusValidationRow): number {
+  if (left.exposedAt !== right.exposedAt) return left.exposedAt < right.exposedAt ? -1 : 1;
+  if (left.publicationId !== right.publicationId) return left.publicationId < right.publicationId ? -1 : 1;
+  if (left.taskId !== right.taskId) return left.taskId < right.taskId ? -1 : 1;
+  return 0;
 }
 
 function parseTask(rowValue: unknown): { task: CloudTaskSummary; updatedAt: string } {
@@ -568,10 +633,48 @@ export class CloudRepository {
     return this.runtimeClient;
   }
 
-  private async readStatus(): Promise<{ status: CloudStatus; publicationId: string | null }> {
-    const response = await this.client().query(STATUS_STATEMENT, [MAX_COUNT + 1]);
-    const rows = rowsFromResponse(response);
-    return parseStatus(rows);
+  private statusValidationLimit(): number {
+    const configuredRows = this.d1Options.maxRows;
+    if (configuredRows === undefined) return STATUS_VALIDATION_PAGE_SIZE;
+    if (!Number.isSafeInteger(configuredRows) || configuredRows < 0) return 0;
+    return Math.min(STATUS_VALIDATION_PAGE_SIZE, configuredRows);
+  }
+
+  private async readStatus(): Promise<StatusSnapshot> {
+    const summaryResponse = await this.client().query(STATUS_STATEMENT, []);
+    const summary = parseStatusSummary(rowsFromResponse(summaryResponse));
+    if (summary.status.taskCount === 0) return summary;
+
+    const validationLimit = this.statusValidationLimit();
+    let response = await this.client().query(STATUS_VALIDATION_STATEMENT, [validationLimit]);
+    let previous: StatusValidationRow | null = null;
+    let validatedCount = 0;
+
+    while (validatedCount < summary.status.taskCount) {
+      const rows = rowsFromResponse(response);
+      if (rows.length === 0 || rows.length > validationLimit) invalidData();
+      const parsedRows = rows.map(parseStatusValidation);
+      for (const row of parsedRows) {
+        if (previous && compareStatusKey(row, previous) >= 0) invalidData();
+        if (!previous && (row.exposedAt !== summary.latestPublicationAt || row.publicationId !== summary.publicationId)) invalidData();
+        previous = row;
+      }
+      validatedCount += parsedRows.length;
+      if (validatedCount > summary.status.taskCount) invalidData();
+      if (validatedCount === summary.status.taskCount) break;
+      if (!previous) invalidData();
+      response = await this.client().query(STATUS_VALIDATION_NEXT_STATEMENT, [
+        previous.exposedAt,
+        previous.exposedAt,
+        previous.publicationId,
+        previous.exposedAt,
+        previous.publicationId,
+        previous.taskId,
+        validationLimit,
+      ]);
+    }
+    if (validatedCount !== summary.status.taskCount) invalidData();
+    return summary;
   }
 
   async getStatus(): Promise<CloudStatus> {

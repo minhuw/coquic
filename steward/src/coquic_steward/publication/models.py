@@ -11,11 +11,11 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import re
-import shutil
+import secrets
 import stat
-import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -74,6 +74,8 @@ class ReasonCode(StrEnum):
     changing = "changing"
     invalid_utf8 = "invalid_utf8"
     invalid_jsonl = "invalid_jsonl"
+    source_finding = "source_finding"
+    patch_finding = "patch_finding"
     staging_unsafe = "staging_unsafe"
     scanner_failure = "scanner_failure"
     ocr_failure = "ocr_failure"
@@ -94,7 +96,8 @@ class PublicationError(ValueError):
 
 
 def _fail(code: ReasonCode) -> None:
-    raise PublicationError(code)
+    # Keep OS/parser details out of normal exception formatting.
+    raise PublicationError(code) from None
 
 
 def _bounded_int(value: object, *, code: ReasonCode, maximum: int = MAX_COUNTER) -> int:
@@ -202,11 +205,11 @@ class FileIdentity:
 class StableRead:
     """Bytes and immutable evidence returned by a stable read."""
 
-    content: bytes
+    content: bytes = field(repr=False)
     identity: FileIdentity
     byte_size: int
     sha256: str
-    records: tuple[Any, ...] = ()
+    records: tuple[Any, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.content, bytes):
@@ -354,7 +357,7 @@ class SourceDocument:
     """A bounded logical document; no host filesystem path is retained."""
 
     logical_path: str
-    content: bytes
+    content: bytes = field(repr=False)
     media_type: str = "application/octet-stream"
     byte_size: int = field(init=False)
     sha256: str = field(init=False)
@@ -422,7 +425,7 @@ class LogicalArtifact:
 @dataclass(frozen=True, slots=True)
 class PublicBundleComponent:
     artifact: LogicalArtifact
-    content: bytes
+    content: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.artifact, LogicalArtifact) or not isinstance(self.content, bytes):
@@ -460,7 +463,7 @@ class PublicBundle:
 class PrivateOriginal:
     """The optional original bytes; no private path or locator is stored."""
 
-    content: bytes
+    content: bytes = field(repr=False)
     byte_size: int = field(init=False)
     sha256: str = field(init=False)
 
@@ -558,6 +561,23 @@ def _reasons(value: Sequence[ReasonCode | str]) -> tuple[ReasonCode, ...]:
     return tuple(values)
 
 
+_REPAIRABLE_REASONS = frozenset(
+    {
+        ReasonCode.source_finding,
+        ReasonCode.patch_finding,
+    }
+)
+_FAIL_CLOSED_REASONS = frozenset(
+    {
+        ReasonCode.unsafe_content,
+        ReasonCode.invalid_metadata,
+        ReasonCode.scanner_failure,
+        ReasonCode.ocr_failure,
+        ReasonCode.irreparable,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Publishable:
     snapshot: PublicationSnapshot
@@ -565,6 +585,8 @@ class Publishable:
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, PublicationSnapshot):
+            _fail(ReasonCode.invalid_metadata)
+        if self.snapshot.findings:
             _fail(ReasonCode.invalid_metadata)
 
     def as_dict(self) -> dict[str, Any]:
@@ -578,9 +600,14 @@ class RepairRequired:
     status: str = field(init=False, default="repair_required")
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "reason_codes", _reasons(self.reason_codes))
+        reasons = _reasons(self.reason_codes)
+        if any(reason in _FAIL_CLOSED_REASONS or reason not in _REPAIRABLE_REASONS for reason in reasons):
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "reason_codes", reasons)
         findings = _tuple(self.findings, code=ReasonCode.invalid_metadata)
         if len(findings) > MAX_FINDINGS or any(not isinstance(item, FindingSummary) for item in findings):
+            _fail(ReasonCode.invalid_metadata)
+        if any(item.code in _FAIL_CLOSED_REASONS or item.code not in _REPAIRABLE_REASONS for item in findings):
             _fail(ReasonCode.invalid_metadata)
         object.__setattr__(self, "findings", findings)
 
@@ -599,9 +626,14 @@ class FailClosed:
     status: str = field(init=False, default="fail_closed")
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "reason_codes", _reasons(self.reason_codes))
+        reasons = _reasons(self.reason_codes)
+        if any(reason in _REPAIRABLE_REASONS for reason in reasons):
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "reason_codes", reasons)
         findings = _tuple(self.findings, code=ReasonCode.invalid_metadata)
         if len(findings) > MAX_FINDINGS or any(not isinstance(item, FindingSummary) for item in findings):
+            _fail(ReasonCode.invalid_metadata)
+        if any(item.code in _REPAIRABLE_REASONS for item in findings):
             _fail(ReasonCode.invalid_metadata)
         object.__setattr__(self, "findings", findings)
 
@@ -616,48 +648,181 @@ class FailClosed:
 PublicationOutcome = Publishable | RepairRequired | FailClosed
 
 
-def _validate_path_components(path: Path) -> None:
-    """Reject symlink traversal before opening a caller-supplied path."""
+@dataclass(frozen=True, slots=True)
+class _DirectoryLink:
+    parent_fd: int
+    name: str
+    identity: FileIdentity
 
+
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _close_fds(descriptors: Sequence[int]) -> None:
+    for descriptor in reversed(tuple(descriptors)):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _path_parts(path: Path) -> tuple[str, tuple[str, ...]]:
     try:
-        absolute = path.absolute()
-        current = Path(absolute.anchor)
-        for component in absolute.parts[1:]:
-            current /= component
+        value = Path(path)
+        parts = value.parts
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _fail(ReasonCode.invalid_path)
+    if value.is_absolute():
+        anchor = value.anchor or os.sep
+        components = parts[1:]
+    else:
+        anchor = "."
+        components = parts
+    if any(component in {"", ".", ".."} or "\x00" in component for component in components):
+        _fail(ReasonCode.invalid_path)
+    return anchor, tuple(components)
+
+
+def _coerce_path(value: object, code: ReasonCode) -> Path:
+    try:
+        return value if isinstance(value, Path) else Path(value)  # type: ignore[arg-type]
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _fail(code)
+    raise AssertionError("unreachable")
+
+
+def _validate_path_components(path: Path) -> None:
+    """Validate path syntax before opening its descriptor-relative chain."""
+
+    _path_parts(path)
+
+
+def _open_directory_chain(
+    anchor: str,
+    components: Sequence[str],
+    *,
+    failure_code: ReasonCode,
+    symlink_code: ReasonCode,
+) -> tuple[int, list[_DirectoryLink], list[int]]:
+    descriptors: list[int] = []
+    links: list[_DirectoryLink] = []
+    try:
+        anchor_error: ReasonCode | None = None
+        try:
+            current_fd = os.open(anchor, _DIRECTORY_FLAGS)
+        except OSError as exc:
+            anchor_error = symlink_code if exc.errno == errno.ELOOP else failure_code
+        if anchor_error is not None:
+            _fail(anchor_error)
+        descriptors.append(current_fd)
+        for name in components:
+            stat_error: ReasonCode | None = None
             try:
-                info = current.lstat()
-            except FileNotFoundError:
-                break
-            if stat.S_ISLNK(info.st_mode):
-                _fail(ReasonCode.symlink)
-    except (OSError, RuntimeError):
-        _fail(ReasonCode.missing)
+                before = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except OSError as exc:
+                stat_error = symlink_code if exc.errno == errno.ELOOP else failure_code
+            if stat_error is not None:
+                _fail(stat_error)
+            if stat.S_ISLNK(before.st_mode):
+                _fail(symlink_code)
+            if not stat.S_ISDIR(before.st_mode):
+                _fail(failure_code)
+            open_error: ReasonCode | None = None
+            try:
+                child_fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=current_fd)
+            except OSError as exc:
+                open_error = symlink_code if exc.errno == errno.ELOOP else failure_code
+            if open_error is not None:
+                _fail(open_error)
+            descriptors.append(child_fd)
+            try:
+                opened = os.fstat(child_fd)
+            except OSError:
+                _fail(ReasonCode.changing)
+            identity = FileIdentity.from_stat(opened)
+            if identity != FileIdentity.from_stat(before) or not stat.S_ISDIR(opened.st_mode):
+                _fail(ReasonCode.changing)
+            links.append(_DirectoryLink(current_fd, name, identity))
+            current_fd = child_fd
+        return current_fd, links, descriptors
+    except BaseException:
+        _close_fds(descriptors)
+        raise
+
+
+def _verify_directory_chain(links: Sequence[_DirectoryLink]) -> None:
+    for link in links:
+        try:
+            current = os.stat(link.name, dir_fd=link.parent_fd, follow_symlinks=False)
+        except OSError:
+            _fail(ReasonCode.changing)
+        if stat.S_ISLNK(current.st_mode):
+            _fail(ReasonCode.symlink)
+        if (
+            current.st_dev != link.identity.device
+            or current.st_ino != link.identity.inode
+            or not stat.S_ISDIR(current.st_mode)
+        ):
+            _fail(ReasonCode.changing)
+
+
+def _file_failure(exc: OSError) -> ReasonCode:
+    if exc.errno == errno.ELOOP:
+        return ReasonCode.symlink
+    if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+        return ReasonCode.missing
+    return ReasonCode.non_regular
 
 
 def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expected_sha256: str | None) -> StableRead:
-    if not isinstance(path, Path):
-        path = Path(path)
+    path = _coerce_path(path, ReasonCode.invalid_path)
     _validate_path_components(path)
-    try:
-        before_path = os.lstat(path)
-    except OSError as exc:
-        _fail(ReasonCode.missing if exc.errno in {errno.ENOENT, errno.ENOTDIR} else ReasonCode.non_regular)
-    if stat.S_ISLNK(before_path.st_mode):
-        _fail(ReasonCode.symlink)
-    if not stat.S_ISREG(before_path.st_mode):
+    anchor, components = _path_parts(path)
+    if not components:
         _fail(ReasonCode.non_regular)
-    if before_path.st_nlink != 1:
-        _fail(ReasonCode.hardlink)
     limit = _bounded_int(max_bytes, code=ReasonCode.oversized, maximum=MAX_RUN_BYTES)
-    if before_path.st_size > limit:
-        _fail(ReasonCode.oversized)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd, links, descriptors = _open_directory_chain(
+        anchor,
+        components[:-1],
+        failure_code=ReasonCode.missing,
+        symlink_code=ReasonCode.symlink,
+    )
+    final_name = components[-1]
+    descriptor: int | None = None
     try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        _fail(ReasonCode.symlink if exc.errno == errno.ELOOP else ReasonCode.missing)
-    try:
-        opened = os.fstat(descriptor)
+        stat_error: ReasonCode | None = None
+        try:
+            _verify_directory_chain(links)
+            before_path = os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            stat_error = _file_failure(exc)
+        if stat_error is not None:
+            _fail(stat_error)
+        if stat.S_ISLNK(before_path.st_mode):
+            _fail(ReasonCode.symlink)
+        if not stat.S_ISREG(before_path.st_mode):
+            _fail(ReasonCode.non_regular)
+        if before_path.st_nlink != 1:
+            _fail(ReasonCode.hardlink)
+        if before_path.st_size > limit:
+            _fail(ReasonCode.oversized)
+        open_error: ReasonCode | None = None
+        try:
+            descriptor = os.open(final_name, _FILE_FLAGS, dir_fd=parent_fd)
+        except OSError as exc:
+            open_error = _file_failure(exc)
+        if open_error is not None:
+            _fail(open_error)
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail(ReasonCode.changing)
         first = FileIdentity.from_stat(opened)
         if first != FileIdentity.from_stat(before_path) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             _fail(ReasonCode.changing)
@@ -675,11 +840,19 @@ def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expec
         except OSError:
             _fail(ReasonCode.changing)
         content = b"".join(chunks)
-        after = os.fstat(descriptor)
         try:
-            after_path = os.lstat(path)
+            after = os.fstat(descriptor)
         except OSError:
             _fail(ReasonCode.changing)
+        after_error = False
+        try:
+            after_path = os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            after_error = True
+        if after_error:
+            _fail(ReasonCode.changing)
+        if stat.S_ISLNK(after_path.st_mode):
+            _fail(ReasonCode.symlink)
         if (
             FileIdentity.from_stat(after) != first
             or FileIdentity.from_stat(after_path) != first
@@ -688,8 +861,14 @@ def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expec
             or after_path.st_nlink != 1
         ):
             _fail(ReasonCode.changing)
+        _verify_directory_chain(links)
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _close_fds(descriptors)
     digest = hashlib.sha256(content).hexdigest()
     if expected_size is not None:
         if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
@@ -719,18 +898,36 @@ def _json_records(content: bytes) -> tuple[Any, ...]:
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
+        text = None
+    if text is None:
         _fail(ReasonCode.invalid_utf8)
     records: list[Any] = []
     for line in text.splitlines(keepends=False):
         if not line.strip():
             _fail(ReasonCode.invalid_jsonl)
+        parse_error = False
         try:
-            value = json.loads(line, object_pairs_hook=_reject_duplicate_keys)
-        except (TypeError, ValueError, json.JSONDecodeError):
+            value = json.loads(
+                line,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_json_constant,
+                parse_float=_parse_json_float,
+            )
+        except PublicationError:
+            raise
+        except (MemoryError, OverflowError, RecursionError, TypeError, ValueError):
+            parse_error = True
+        if parse_error:
             _fail(ReasonCode.invalid_jsonl)
         if not isinstance(value, Mapping):
             _fail(ReasonCode.invalid_jsonl)
-        records.append(_freeze(value))
+        freeze_error = False
+        try:
+            records.append(_freeze(value))
+        except (MemoryError, RecursionError, TypeError, ValueError):
+            freeze_error = True
+        if freeze_error:
+            _fail(ReasonCode.invalid_jsonl)
         if len(records) > MAX_JSONL_RECORDS:
             _fail(ReasonCode.oversized)
     if not records:
@@ -747,6 +944,18 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _reject_json_constant(value: str) -> float:
+    del value
+    raise ValueError
+
+
+def _parse_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError
+    return parsed
+
+
 def read_stable_jsonl(
     path: Path,
     *,
@@ -761,26 +970,167 @@ def read_stable_jsonl(
     return value
 
 
-def _validate_private_directory(path: Path) -> None:
-    _validate_path_components(path)
+def _verify_directory_entry(parent_fd: int, name: str, expected: FileIdentity, *, directory: bool | None = None) -> os.stat_result:
     try:
-        info = path.lstat()
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except OSError:
         _fail(ReasonCode.staging_unsafe)
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    if stat.S_ISLNK(info.st_mode):
         _fail(ReasonCode.staging_unsafe)
-    if stat.S_IMODE(info.st_mode) != 0o700:
+    if directory is True and not stat.S_ISDIR(info.st_mode):
         _fail(ReasonCode.staging_unsafe)
+    if directory is False and not stat.S_ISREG(info.st_mode):
+        _fail(ReasonCode.staging_unsafe)
+    current_identity = FileIdentity.from_stat(info)
+    if directory is True:
+        same_identity = current_identity.device == expected.device and current_identity.inode == expected.inode
+    else:
+        same_identity = current_identity == expected
+    if not same_identity:
+        _fail(ReasonCode.staging_unsafe)
+    return info
 
 
-def _validate_private_tree(path: Path) -> None:
+def _validate_private_tree_fd(root_fd: int) -> None:
+    pending = [root_fd]
+    opened: list[int] = []
     try:
-        for child in path.rglob("*"):
-            info = child.lstat()
-            if stat.S_ISLNK(info.st_mode) or (not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode)):
+        while pending:
+            current_fd = pending.pop()
+            try:
+                names = os.listdir(current_fd)
+            except OSError:
                 _fail(ReasonCode.staging_unsafe)
-    except OSError:
-        _fail(ReasonCode.staging_unsafe)
+            for name in names:
+                try:
+                    info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                except OSError:
+                    _fail(ReasonCode.staging_unsafe)
+                if stat.S_ISLNK(info.st_mode) or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    _fail(ReasonCode.staging_unsafe)
+                if stat.S_ISDIR(info.st_mode):
+                    try:
+                        child_fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=current_fd)
+                    except OSError:
+                        _fail(ReasonCode.staging_unsafe)
+                    opened.append(child_fd)
+                    try:
+                        child_info = os.fstat(child_fd)
+                    except OSError:
+                        _fail(ReasonCode.staging_unsafe)
+                    if FileIdentity.from_stat(child_info) != FileIdentity.from_stat(info):
+                        _fail(ReasonCode.staging_unsafe)
+                    pending.append(child_fd)
+    finally:
+        _close_fds(opened)
+
+
+def _remove_private_tree_fd(root_fd: int) -> None:
+    directories: list[tuple[int, int | None, str | None, FileIdentity | None]] = [(root_fd, None, None, None)]
+    pending = [root_fd]
+    opened: list[int] = []
+    try:
+        while pending:
+            current_fd = pending.pop()
+            try:
+                names = os.listdir(current_fd)
+            except OSError:
+                _fail(ReasonCode.staging_unsafe)
+            for name in names:
+                try:
+                    info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                except OSError:
+                    _fail(ReasonCode.staging_unsafe)
+                identity = FileIdentity.from_stat(info)
+                if stat.S_ISLNK(info.st_mode):
+                    try:
+                        os.unlink(name, dir_fd=current_fd)
+                    except OSError:
+                        _fail(ReasonCode.staging_unsafe)
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    _verify_directory_entry(current_fd, name, identity, directory=False)
+                    try:
+                        os.unlink(name, dir_fd=current_fd)
+                    except OSError:
+                        _fail(ReasonCode.staging_unsafe)
+                    continue
+                if not stat.S_ISDIR(info.st_mode):
+                    _fail(ReasonCode.staging_unsafe)
+                try:
+                    child_fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=current_fd)
+                except OSError:
+                    _fail(ReasonCode.staging_unsafe)
+                opened.append(child_fd)
+                try:
+                    child_info = os.fstat(child_fd)
+                except OSError:
+                    _fail(ReasonCode.staging_unsafe)
+                if FileIdentity.from_stat(child_info) != identity:
+                    _fail(ReasonCode.staging_unsafe)
+                directories.append((child_fd, current_fd, name, identity))
+                pending.append(child_fd)
+        for child_fd, parent_fd, name, identity in reversed(directories[1:]):
+            assert parent_fd is not None and name is not None and identity is not None
+            _verify_directory_entry(parent_fd, name, identity, directory=True)
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                _fail(ReasonCode.staging_unsafe)
+    finally:
+        _close_fds(opened)
+
+
+def _create_private_child(root_fd: int) -> tuple[str, FileIdentity, int]:
+    for _ in range(32):
+        name = f".publication-{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            continue
+        except OSError:
+            _fail(ReasonCode.staging_unsafe)
+        try:
+            os.chmod(name, 0o700, dir_fd=root_fd, follow_symlinks=False)
+        except OSError:
+            _fail(ReasonCode.staging_unsafe)
+        try:
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            child_fd = os.open(name, _DIRECTORY_FLAGS, dir_fd=root_fd)
+        except OSError:
+            _fail(ReasonCode.staging_unsafe)
+        try:
+            os.fchmod(child_fd, 0o700)
+        except OSError:
+            try:
+                os.close(child_fd)
+            except OSError:
+                pass
+            _fail(ReasonCode.staging_unsafe)
+        created_identity = FileIdentity.from_stat(info)
+        try:
+            opened = os.fstat(child_fd)
+        except OSError:
+            try:
+                os.close(child_fd)
+            except OSError:
+                pass
+            _fail(ReasonCode.staging_unsafe)
+        identity = FileIdentity.from_stat(opened)
+        if (
+            stat.S_IMODE(opened.st_mode) != 0o700
+            or not stat.S_ISDIR(opened.st_mode)
+            or identity.device != created_identity.device
+            or identity.inode != created_identity.inode
+        ):
+            try:
+                os.close(child_fd)
+            except OSError:
+                pass
+            _fail(ReasonCode.staging_unsafe)
+        return name, identity, child_fd
+    _fail(ReasonCode.staging_unsafe)
+    raise AssertionError("unreachable")
 
 
 @contextmanager
@@ -788,27 +1138,70 @@ def private_staging(root: Path) -> Iterator[Path]:
     """Yield a mode-0700 temporary directory contained by ``root``."""
 
     if not isinstance(root, Path):
-        root = Path(root)
-    _validate_private_directory(root)
+        root = _coerce_path(root, ReasonCode.staging_unsafe)
+    _validate_path_components(root)
+    anchor, components = _path_parts(root)
+    root_fd, links, descriptors = _open_directory_chain(
+        anchor,
+        components,
+        failure_code=ReasonCode.staging_unsafe,
+        symlink_code=ReasonCode.staging_unsafe,
+    )
+    child_name: str | None = None
+    child_identity: FileIdentity | None = None
+    child_fd: int | None = None
     try:
-        child = Path(tempfile.mkdtemp(prefix=".publication-", dir=root))
-    except OSError:
-        _fail(ReasonCode.staging_unsafe)
-    try:
-        if child.parent != root or child.is_symlink() or stat.S_IMODE(child.lstat().st_mode) != 0o700:
-            _fail(ReasonCode.staging_unsafe)
-        yield child
-        _validate_private_tree(child)
-    finally:
         try:
-            if child.is_symlink():
-                child.unlink()
-            elif child.exists():
-                shutil.rmtree(child)
+            root_info = os.fstat(root_fd)
         except OSError:
-            # Cleanup failure is not allowed to turn into an unsafe public
-            # result, but it remains a caller-visible bounded staging error.
-            raise PublicationError(ReasonCode.staging_unsafe)
+            _fail(ReasonCode.staging_unsafe)
+        if not stat.S_ISDIR(root_info.st_mode) or stat.S_IMODE(root_info.st_mode) != 0o700:
+            _fail(ReasonCode.staging_unsafe)
+        _verify_directory_chain(links)
+        child_name, child_identity, child_fd = _create_private_child(root_fd)
+        child = root / child_name
+        body_error: BaseException | None = None
+        body_traceback = None
+        try:
+            yield child
+        except BaseException as exc:
+            body_error = exc
+            body_traceback = exc.__traceback__
+        validation_error: PublicationError | None = None
+        try:
+            _verify_directory_chain(links)
+            try:
+                current_root = os.fstat(root_fd)
+            except OSError:
+                _fail(ReasonCode.staging_unsafe)
+            if (
+                current_root.st_dev != root_info.st_dev
+                or current_root.st_ino != root_info.st_ino
+                or stat.S_IMODE(current_root.st_mode) != 0o700
+            ):
+                _fail(ReasonCode.staging_unsafe)
+            _verify_directory_entry(root_fd, child_name, child_identity, directory=True)
+            _validate_private_tree_fd(child_fd)
+        except PublicationError as exc:
+            validation_error = exc
+        cleanup_error: PublicationError | None = None
+        try:
+            _remove_private_tree_fd(child_fd)
+            _verify_directory_entry(root_fd, child_name, child_identity, directory=True)
+            os.rmdir(child_name, dir_fd=root_fd)
+        except OSError:
+            cleanup_error = PublicationError(ReasonCode.staging_unsafe)
+        except PublicationError as exc:
+            cleanup_error = exc
+        if body_error is not None:
+            raise body_error.with_traceback(body_traceback)
+        if validation_error is not None:
+            raise validation_error
+        if cleanup_error is not None:
+            raise cleanup_error
+    finally:
+        _close_fds([child_fd] if child_fd is not None else [])
+        _close_fds(descriptors)
 
 
 __all__ = [

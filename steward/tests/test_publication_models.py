@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from coquic_steward.publication import (
     read_stable_file,
     read_stable_jsonl,
 )
+from coquic_steward.publication import models as publication_models
 
 
 def _run(state: str = "completed") -> RunMetadata:
@@ -55,7 +57,6 @@ def test_models_round_trip_as_bounded_dicts() -> None:
         artifacts=(artifact,),
         public_bundle=PublicBundle((component,)),
         private_original=PrivateOriginal(b"private original\n"),
-        findings=(FindingSummary(ReasonCode.unsafe_content, 1),),
     )
 
     assert Publishable(snapshot).as_dict()["status"] == "publishable"
@@ -89,16 +90,117 @@ def test_unsafe_values_fail_without_echoing_input(factory) -> None:
 
 
 def test_outcomes_have_only_enumerated_reasons_and_counts() -> None:
-    repair = RepairRequired((ReasonCode.scanner_failure,), (FindingSummary(ReasonCode.unsafe_content, 2),))
+    repair = RepairRequired((ReasonCode.source_finding,), (FindingSummary(ReasonCode.source_finding, 2),))
     failed = FailClosed((ReasonCode.partial,), (FindingSummary(ReasonCode.partial, 1),))
     assert repair.as_dict() == {
         "status": "repair_required",
-        "reasonCodes": ["scanner_failure"],
-        "findings": [{"code": "unsafe_content", "count": 2}],
+        "reasonCodes": ["source_finding"],
+        "findings": [{"code": "source_finding", "count": 2}],
     }
     assert failed.as_dict()["reasonCodes"] == ["partial"]
     with pytest.raises(PublicationError):
         RepairRequired(("scanner leaked a credential",))  # type: ignore[arg-type]
+
+
+def _snapshot(*, findings: tuple[FindingSummary, ...] = ()) -> PublicationSnapshot:
+    document = SourceDocument("runs/run-clean/trajectory.json", b'{"ok":true}\n', "application/json")
+    artifact = LogicalArtifact.from_document("artifact-trajectory", document)
+    component = PublicBundleComponent(artifact, document.content)
+    return PublicationSnapshot(
+        _run(),
+        documents=(document,),
+        artifacts=(artifact,),
+        public_bundle=PublicBundle((component,)),
+        findings=findings,
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        ReasonCode.unsafe_content,
+        ReasonCode.invalid_metadata,
+        ReasonCode.scanner_failure,
+        ReasonCode.ocr_failure,
+        ReasonCode.irreparable,
+    ],
+)
+def test_outcome_categories_fail_closed(code: ReasonCode) -> None:
+    finding = FindingSummary(code, 1)
+    with pytest.raises(PublicationError):
+        Publishable(_snapshot(findings=(finding,)))
+    with pytest.raises(PublicationError):
+        RepairRequired((code,), (finding,))
+    failed = FailClosed((code,), (finding,))
+    assert failed.as_dict()["status"] == "fail_closed"
+
+
+def test_jsonl_rejects_constants_and_deep_nesting(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(b'{"value":NaN}\n')
+    with pytest.raises(PublicationError) as error:
+        read_stable_jsonl(path)
+    assert error.value.code == ReasonCode.invalid_jsonl
+    nested = '{"value":' + ("{" * 2_000) + '"ok":true' + ("}" * 2_000) + "}\n"
+    path.write_text(nested, encoding="utf-8")
+    with pytest.raises(PublicationError) as error:
+        read_stable_jsonl(path)
+    assert error.value.code == ReasonCode.invalid_jsonl
+    assert not isinstance(error.value, RecursionError)
+
+
+def test_stable_read_rejects_parent_symlink_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (parent / "payload").write_bytes(b"inside")
+    original_open = publication_models.os.open
+    moved = tmp_path / "parent-original"
+    swapped = False
+
+    def race_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == "payload" and dir_fd is not None and not swapped:
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(publication_models.os, "open", race_open)
+    with pytest.raises(PublicationError) as error:
+        read_stable_file(parent / "payload")
+    assert error.value.code in {ReasonCode.symlink, ReasonCode.changing}
+    assert not (outside / "payload").exists()
+
+
+def test_private_error_formatting_redacts_path(tmp_path: Path) -> None:
+    marker = "PRIVATE_PATH_MARKER_123"
+    with pytest.raises(PublicationError) as error:
+        read_stable_file(tmp_path / f"missing-{marker}")
+    rendered = "".join(traceback.format_exception(error.value))
+    assert marker not in rendered
+    assert str(error.value) == ReasonCode.missing.value
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert error.value.__suppress_context__ is True
+
+
+def test_default_reprs_redact_protected_bytes() -> None:
+    marker = b"UNIQUE_REPR_MARKER_987"
+    document = SourceDocument("marker.txt", marker, "text/plain")
+    artifact = LogicalArtifact.from_document("artifact-marker", document)
+    component = PublicBundleComponent(artifact, marker)
+    snapshot = PublicationSnapshot(
+        _run(),
+        documents=(document,),
+        artifacts=(artifact,),
+        public_bundle=PublicBundle((component,)),
+        private_original=PrivateOriginal(marker),
+    )
+    values = (PrivateOriginal(marker), document, component, snapshot, Publishable(snapshot))
+    for value in values:
+        assert marker.decode() not in repr(value)
 
 
 def test_stable_file_and_jsonl_reads(tmp_path: Path) -> None:

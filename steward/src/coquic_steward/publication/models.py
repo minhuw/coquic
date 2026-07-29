@@ -378,6 +378,14 @@ class SourceDocument:
     def data(self) -> bytes:
         return self.content
 
+    @property
+    def canonical_bytes(self) -> bytes:
+        return self.content
+
+    @property
+    def trajectory(self) -> Mapping[str, Any]:
+        return self.document
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "logicalPath": self.logical_path,
@@ -655,6 +663,60 @@ class FailClosed:
 
 
 PublicationOutcome = Publishable | RepairRequired | FailClosed
+
+
+@dataclass(frozen=True, slots=True)
+class AtifDocument:
+    """Canonical ATIF bytes and their detached structured representation.
+
+    The mapper owns schema and semantic validation.  This value is deliberately
+    transport-free: it contains no filesystem path, bucket, URL, or uploader
+    handle and is safe to pass to a later publication stage only after the
+    mapper has completed validation.
+    """
+
+    document: Mapping[str, Any] = field(repr=False)
+    content: bytes = field(repr=False)
+    sha256: str = field(init=False)
+    byte_size: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.document, Mapping) or not isinstance(self.content, bytes):
+            _fail(ReasonCode.invalid_metadata)
+        if (
+            len(self.content) > MAX_PUBLICATION_BYTES
+            or not self.content.endswith(b"\n")
+            or self.content[:-1].endswith(b"\n")
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "document", _freeze(dict(self.document)))
+        object.__setattr__(self, "byte_size", len(self.content))
+        object.__setattr__(self, "sha256", hashlib.sha256(self.content).hexdigest())
+
+    @property
+    def bytes(self) -> bytes:
+        return self.content
+
+    @property
+    def data(self) -> bytes:
+        return self.content
+
+    def as_dict(self) -> dict[str, Any]:
+        def thaw(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                return {str(key): thaw(item) for key, item in value.items()}
+            if isinstance(value, tuple):
+                return [thaw(item) for item in value]
+            return value
+
+        value = thaw(self.document)
+        return value if isinstance(value, dict) else {}
+
+
+# ``AtifTrajectory`` is a descriptive compatibility name used by callers that
+# model the structured Harbor object rather than its canonical byte envelope.
+AtifTrajectory = AtifDocument
+AtifResult = AtifDocument
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,26 @@
 """Pure publication models and stable input boundaries."""
 
+from .atif import (
+    ATIF_SCHEMA_VERSION,
+    SUPPORTED_IMAGE_MEDIA_TYPES,
+    AtifConversionError,
+    AtifSource,
+    CompletedRun,
+    CompletedRunSnapshot,
+    canonical_atif_bytes,
+    build_atif,
+    convert_completed_run,
+    convert_run,
+    convert_snapshot,
+    map_completed_run,
+    to_atif,
+    validate_atif_document,
+)
+
 from .models import (
+    AtifDocument,
+    AtifResult,
+    AtifTrajectory,
     FailClosed,
     FileIdentity,
     FindingSummary,
@@ -34,6 +54,23 @@ from .models import (
 )
 
 __all__ = [
+    "AtifDocument",
+    "AtifResult",
+    "AtifTrajectory",
+    "ATIF_SCHEMA_VERSION",
+    "SUPPORTED_IMAGE_MEDIA_TYPES",
+    "AtifConversionError",
+    "AtifSource",
+    "CompletedRun",
+    "CompletedRunSnapshot",
+    "canonical_atif_bytes",
+    "build_atif",
+    "convert_completed_run",
+    "convert_run",
+    "convert_snapshot",
+    "map_completed_run",
+    "to_atif",
+    "validate_atif_document",
     "FailClosed",
     "FileIdentity",
     "FindingSummary",

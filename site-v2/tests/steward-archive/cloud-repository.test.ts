@@ -22,9 +22,15 @@ const repositoryModule = loadRepository();
 const {
   CloudRepository,
   CloudRepositoryDataError,
+  ARTIFACT_DESCRIPTOR_STATEMENT,
   STATUS_STATEMENT,
   STATUS_VALIDATION_NEXT_STATEMENT,
   STATUS_VALIDATION_STATEMENT,
+  TASK_DETAIL_ARTIFACTS_STATEMENT,
+  TASK_DETAIL_EVENTS_STATEMENT,
+  TASK_DETAIL_PIPELINES_STATEMENT,
+  TASK_DETAIL_RUNS_STATEMENT,
+  TASK_DETAIL_STATEMENT,
 } = repositoryModule;
 const { decodePublicationCursor } = requireForTest(resolve(process.cwd(), "lib/steward-archive/publication.ts")) as typeof import("../../lib/steward-archive/publication");
 
@@ -97,6 +103,80 @@ function taskRow(
     original_retained_min: 1,
     original_retained_max: 1,
   };
+}
+
+const detailTaskId = "task-detail";
+const detailPublicationId = "publication-detail";
+const detailRunId = "run-detail";
+const detailPipelineId = "pipeline-detail";
+const detailDigest = "b".repeat(64);
+const detailPublicKey = `v1/tasks/${detailTaskId}/objects/sha256/bb/${detailDigest}`;
+
+function detailTaskRow(lifecycleState: "active" | "completed" = "completed"): RawRow {
+  return {
+    ...publicContract(detailTaskId, detailPublicationId, detailRunId),
+    generation_expected_pipeline_count: 1,
+    generation_expected_run_count: 1,
+    generation_expected_event_count: 2,
+    generation_expected_artifact_count: 1,
+    title: "Detail task",
+    lifecycle_state: lifecycleState,
+    created_at: "2026-07-28T00:00:00Z",
+    completed_at: lifecycleState === "active" ? null : "2026-07-28T00:00:03Z",
+  };
+}
+
+function detailPipelineRow(): RawRow {
+  return { publication_id: detailPublicationId, pipeline_id: detailPipelineId, task_id: detailTaskId, name: "Detail pipeline", created_at: "2026-07-28T00:00:00Z" };
+}
+
+function detailRunRow(runState: "completed" | "failed" | "cancelled" = "completed"): RawRow {
+  return {
+    publication_id: detailPublicationId,
+    run_id: detailRunId,
+    task_id: detailTaskId,
+    pipeline_id: detailPipelineId,
+    role: "planning",
+    run_state: runState,
+    started_at: "2026-07-28T00:00:00Z",
+    completed_at: "2026-07-28T00:00:01Z",
+    duration_ms: 1_000,
+    atif_digest: detailDigest,
+  };
+}
+
+function detailEventRows(): RawRow[] {
+  return [
+    { publication_id: detailPublicationId, task_id: detailTaskId, sequence: 1, event_type: "started", occurred_at: "2026-07-28T00:00:00Z", summary: "Started" },
+    { publication_id: detailPublicationId, task_id: detailTaskId, sequence: 2, event_type: "completed", occurred_at: "2026-07-28T00:00:01Z", summary: "Completed" },
+  ];
+}
+
+function detailArtifactRow(availability: "available" | "unavailable" = "available"): RawRow {
+  return {
+    publication_id: detailPublicationId,
+    artifact_id: "artifact-atif",
+    task_id: detailTaskId,
+    run_id: detailRunId,
+    logical_path: "runs/run-detail/trajectory.json",
+    public_key: detailPublicKey,
+    media_type: "application/json",
+    byte_size: 128,
+    sha256: detailDigest,
+    availability,
+    redaction_applied: 0,
+    original_retained: 1,
+  };
+}
+
+function detailResponses(options: { lifecycleState?: "active" | "completed"; availability?: "available" | "unavailable" } = {}) {
+  return [
+    response([detailTaskRow(options.lifecycleState)]),
+    response([detailPipelineRow()]),
+    response([detailRunRow()]),
+    response(detailEventRows()),
+    response([detailArtifactRow(options.availability)]),
+  ];
 }
 
 class FakeClient {
@@ -282,4 +362,94 @@ test("rejects stale, malformed, private-shaped, and inconsistent remote rows", a
 test("surfaces a remote outage without inventing local readiness", async () => {
   const outage = new Error("D1 unavailable");
   await assert.rejects(() => new CloudRepository({ client: new FakeClient(outage) }).getStatus(), outage);
+});
+
+test("assembles one visible task publication as an all-or-nothing detail graph", async () => {
+  const client = new FakeClient(...detailResponses());
+  const detail = await new CloudRepository({ client }).getTaskDetail(detailTaskId);
+  assert(detail);
+  assert.equal(detail.task.taskId, detailTaskId);
+  assert.equal(detail.task.pipelineId, detailPipelineId);
+  assert.equal(detail.task.completedRunId, detailRunId);
+  assert.deepEqual(detail.pipelines.map((pipeline) => pipeline.pipelineId), [detailPipelineId]);
+  assert.deepEqual(detail.runs.map((run) => run.runId), [detailRunId]);
+  assert.deepEqual(detail.events.map((event) => event.sequence), [1, 2]);
+  assert.equal(detail.artifacts[0]!.logicalPath, "runs/run-detail/trajectory.json");
+  assert.equal(detail.trajectory?.artifactId, "artifact-atif");
+  assert.deepEqual(client.calls.map((call) => call.statement), [
+    TASK_DETAIL_STATEMENT,
+    TASK_DETAIL_PIPELINES_STATEMENT,
+    TASK_DETAIL_RUNS_STATEMENT,
+    TASK_DETAIL_EVENTS_STATEMENT,
+    TASK_DETAIL_ARTIFACTS_STATEMENT,
+  ]);
+  assert.equal(client.calls[1]!.params.at(-1), 2);
+  assert.equal(client.calls[2]!.params.at(-1), 2);
+  assert.equal(client.calls[3]!.params.at(-1), 3);
+  assert.equal(client.calls[4]!.params.at(-1), 2);
+});
+
+test("keeps an active-after-planning task complete while exposing its completed trajectory", async () => {
+  const detail = await new CloudRepository({ client: new FakeClient(...detailResponses({ lifecycleState: "active" })) }).loadTaskDetail(detailTaskId);
+  assert(detail);
+  assert.equal(detail.task.lifecycleState, "active");
+  assert.equal(detail.task.completedAt, null);
+  assert.equal(detail.task.completedRunId, detailRunId);
+  assert(detail.trajectory);
+  const descriptor = await new CloudRepository({ client: new FakeClient(...detailResponses({ lifecycleState: "active" })) }).getTrajectoryDescriptor(detailTaskId, detailRunId);
+  assert.equal(descriptor?.runId, detailRunId);
+});
+
+test("returns no detail for an absent or hidden publication but rejects dangling and excessive graphs", async () => {
+  const absent = await new CloudRepository({ client: new FakeClient(response([])) }).getTaskDetail(detailTaskId);
+  assert.equal(absent, null);
+
+  const excessivePipelines = detailResponses();
+  excessivePipelines[1] = response([detailPipelineRow(), { ...detailPipelineRow(), pipeline_id: "pipeline-extra" }]);
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(...excessivePipelines) }).getTaskDetail(detailTaskId),
+    CloudRepositoryDataError,
+  );
+
+  const dangling = detailResponses();
+  dangling[2] = response([{ ...detailRunRow(), pipeline_id: "pipeline-missing" }]);
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(...dangling) }).getTaskDetail(detailTaskId),
+    CloudRepositoryDataError,
+  );
+});
+
+test("selects only visible logical artifacts and resolves a validated anonymous URL", async () => {
+  const config = {
+    accountId: "a".repeat(32),
+    databaseId: "00000000-0000-0000-0000-000000000001",
+    d1ReadToken: "read-token",
+    publicR2BaseUrl: "https://objects.example.test/public/",
+  };
+  const client = new FakeClient(response([detailArtifactRow()]));
+  const descriptor = await new CloudRepository({ client, config }).getArtifactDescriptor(detailTaskId, "runs/run-detail/trajectory.json");
+  assert(descriptor);
+  assert.equal(descriptor.mediaType, "application/json");
+  assert.equal(descriptor.publicUrl, `https://objects.example.test/public/${detailPublicKey}`);
+  assert.equal(client.calls[0]!.statement, ARTIFACT_DESCRIPTOR_STATEMENT);
+
+  const unknown = await new CloudRepository({ client: new FakeClient(response([])), config }).getArtifactDescriptor(detailTaskId, "runs/run-detail/missing.txt");
+  assert.equal(unknown, null);
+  const unsafePath = await new CloudRepository({ client: new FakeClient(response([])), config }).getArtifactDescriptor(detailTaskId, "../private.txt");
+  assert.equal(unsafePath, null);
+
+  const unsafeKey = detailArtifactRow();
+  unsafeKey.public_key = "private://object";
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(response([unsafeKey])), config }).getArtifactDescriptor(detailTaskId, "runs/run-detail/trajectory.json"),
+    CloudRepositoryDataError,
+  );
+});
+
+test("does not expose a trajectory when the canonical ATIF artifact is unavailable", async () => {
+  const detail = await new CloudRepository({ client: new FakeClient(...detailResponses({ availability: "unavailable" })) }).getTaskDetail(detailTaskId);
+  assert(detail);
+  assert.equal(detail.trajectory, null);
+  const descriptor = await new CloudRepository({ client: new FakeClient(...detailResponses({ availability: "unavailable" })) }).getTrajectoryDescriptor(detailTaskId);
+  assert.equal(descriptor, null);
 });

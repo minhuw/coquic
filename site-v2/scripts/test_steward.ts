@@ -236,6 +236,24 @@ function visibleRow(row: TaskRow): boolean {
   return row.head_state === "visible" && row.generation_state === "visible";
 }
 
+const DETAIL_TASK_COLUMNS = [
+  "head_updated_at", "head_state", "publication_id", "generation_task_id", "generation_run_id", "generation_metadata_digest",
+  "generation_idempotency_key", "generation_state", "generation_expected_task_count", "generation_expected_pipeline_count",
+  "generation_expected_run_count", "generation_expected_event_count", "generation_expected_artifact_count", "generation_created_at",
+  "generation_exposed_at", "task_id", "title", "lifecycle_state", "created_at", "completed_at",
+] as const;
+
+function detailTaskRow(row: TaskRow): TaskRow {
+  return Object.fromEntries(DETAIL_TASK_COLUMNS.map((column) => [column, row[column]]));
+}
+
+function detailQueryVisibility(statement: string): { readonly head: boolean; readonly generation: boolean } {
+  return {
+    head: /h\.state\s*=\s*'visible'/.test(statement),
+    generation: /p\.state\s*=\s*'visible'/.test(statement) && /p\.exposed_at\s+IS\s+NOT\s+NULL/.test(statement),
+  };
+}
+
 function scenario(
   activeRows: readonly TaskRow[],
   historyRows: readonly TaskRow[],
@@ -305,6 +323,15 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     if (statement === cloudRepository.STATUS_VALIDATION_NEXT_STATEMENT) return d1Envelope([]);
     if (statement === cloudRepository.TASK_DETAIL_STATEMENT) {
       const taskId = String(params[0]);
+      const candidate = scenarioValue.rows.find((row) => String(row.task_id) === taskId);
+      if (candidate && !visibleRow(candidate)) {
+        const visibility = detailQueryVisibility(statement);
+        return d1Envelope(
+          (candidate.head_state === "hidden" && !visibility.head) || (candidate.generation_state === "staged" && !visibility.generation)
+            ? [detailTaskRow(candidate)]
+            : [],
+        );
+      }
       return d1Envelope(scenarioValue.detail?.task?.task_id === taskId ? [scenarioValue.detail.task] : []);
     }
     if (statement === cloudRepository.TASK_DETAIL_PIPELINES_STATEMENT) return d1Envelope(scenarioValue.detail?.pipelines ?? []);

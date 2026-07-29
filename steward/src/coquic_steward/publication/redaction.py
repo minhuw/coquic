@@ -143,7 +143,7 @@ def _is_protected_key(value: object) -> bool:
 def _valid_secret(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    if value == REDACTION_MARKER or value in REDACTION_MARKER:
+    if value == REDACTION_MARKER:
         return False
     try:
         encoded = value.encode("utf-8")
@@ -256,7 +256,7 @@ def discover_secrets(sources: object) -> tuple[str, ...]:
     values: set[str] = set()
     for path in _source_paths(sources):
         try:
-            stable = read_stable_file(path, max_bytes=MAX_CREDENTIAL_SOURCE_BYTES)
+            stable = read_stable_file(path, max_bytes=MAX_CREDENTIAL_SOURCE_BYTES, require_private=True)
         except PublicationError:
             _fail(ReasonCode.unsafe_content)
         content = stable.content
@@ -297,10 +297,15 @@ def _replace_string(value: str, secrets: Sequence[str]) -> tuple[str, int]:
     for secret in secrets:
         if not secret or secret == REDACTION_MARKER:
             continue
-        occurrences = result.count(secret)
-        if occurrences:
-            result = result.replace(secret, REDACTION_MARKER)
-            count += occurrences
+        # Preserve existing markers while replacing secrets that happen to be
+        # substrings of the marker itself.
+        segments = result.split(REDACTION_MARKER)
+        for index, segment in enumerate(segments):
+            occurrences = segment.count(secret)
+            if occurrences:
+                segments[index] = segment.replace(secret, REDACTION_MARKER)
+                count += occurrences
+        result = REDACTION_MARKER.join(segments)
     return result, count
 
 
@@ -354,39 +359,39 @@ def _replace_artifact(content: bytes, media_type: str, secrets: Sequence[str]) -
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        return content, 0, False
+        return content, 0, True
     lowered = media_type.casefold()
-    if lowered in {"application/json", "application/ld+json", "application/jsonl"} or lowered.endswith("+json"):
+    structured_media = lowered in {"application/json", "application/ld+json", "application/jsonl", "application/xml"} or lowered.endswith("+json")
+    if structured_media:
         try:
             if lowered == "application/jsonl":
                 parsed: Any = [
                     json.loads(line, object_pairs_hook=_json_pairs, parse_constant=_json_constant)
                     for line in text.splitlines()
-                    if line.strip()
                 ]
                 if not parsed:
-                    return content, 0, False
+                    return content, 0, True
             else:
                 parsed = json.loads(text, object_pairs_hook=_json_pairs, parse_constant=_json_constant)
         except RedactionError:
             return content, 0, True
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError, UnicodeError):
-            parsed = None
-        if parsed is not None:
-            replaced_value, count, protected_hit = _replace_value(parsed, secrets)
-            if protected_hit:
-                return content, count, True
-            if count:
-                encoded = json.dumps(
-                    replaced_value,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                if text.endswith(("\n", "\r")):
-                    encoded += "\n"
-                return encoded.encode("utf-8"), count, False
+            return content, 0, True
+        replaced_value, count, protected_hit = _replace_value(parsed, secrets)
+        if protected_hit:
+            return content, count, True
+        if count:
+            encoded = json.dumps(
+                replaced_value,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if text.endswith(("\n", "\r")):
+                encoded += "\n"
+            return encoded.encode("utf-8"), count, False
+        return content, 0, False
     replaced, count = _replace_string(text, secrets)
     return replaced.encode("utf-8"), count, False
 
@@ -456,6 +461,12 @@ def _literal_rebuild(document: AtifDocument, secrets: Sequence[str]) -> tuple[At
         _fail(ReasonCode.invalid_metadata)
     ordered = tuple(sorted({secret for secret in secrets if _valid_secret(secret)}, key=lambda item: (-len(item.encode("utf-8")), item)))
     if not ordered:
+        # Even without declared values, declared structured/text media must be
+        # decodable and parseable before it can be considered public.
+        for component in document.artifacts:
+            _, _, unsafe = _replace_artifact(component.content, component.artifact.media_type, ())
+            if unsafe:
+                _fail(ReasonCode.unsafe_content)
         return document, 0
     mapping = _thaw(document.document)
     replaced_mapping, count, protected_hit = _replace_value(mapping, ordered)
@@ -515,13 +526,37 @@ def redact_atif_document(
         return SanitizationResult.failed(ReasonCode.unsafe_content)
 
 
-def _classify(logical_path: str) -> str:
+def _classify(logical_path: str, media_type: str = "") -> str:
     lowered = logical_path.casefold()
     name = lowered.rsplit("/", 1)[-1]
     suffix = Path(name).suffix
-    if suffix in _PATCH_SUFFIXES or any(part in {"patch", "diff", "changes"} for part in lowered.split("/")):
+    media = media_type.casefold()
+    if (
+        suffix in _PATCH_SUFFIXES
+        or any(part in {"patch", "diff", "changes"} for part in lowered.split("/"))
+        or "diff" in media
+        or "patch" in media
+    ):
         return "patch"
-    if any(part in {"source", "src"} for part in lowered.split("/")) or suffix in _SOURCE_SUFFIXES:
+    if (
+        any(part in {"source", "src"} for part in lowered.split("/"))
+        or suffix in _SOURCE_SUFFIXES
+        or media in {
+            "application/javascript",
+            "application/typescript",
+            "application/x-c",
+            "application/x-c++",
+            "application/x-go",
+            "application/x-java",
+            "application/x-python",
+            "application/x-rust",
+            "application/x-sh",
+            "application/x-zig",
+            "text/javascript",
+            "text/typescript",
+        }
+        or media.startswith("text/x-")
+    ):
         return "source"
     return "text"
 
@@ -533,8 +568,14 @@ def _corpus_entries(document: AtifDocument) -> tuple[CorpusEntry, ...]:
             try:
                 component.content.decode("utf-8")
             except UnicodeDecodeError:
-                continue
-            entries.append(CorpusEntry(component.artifact.logical_path, component.content, _classify(component.artifact.logical_path)))
+                _fail(ReasonCode.unsafe_content)
+            entries.append(
+                CorpusEntry(
+                    component.artifact.logical_path,
+                    component.content,
+                    _classify(component.artifact.logical_path, component.artifact.media_type),
+                )
+            )
     return tuple(entries)
 
 
@@ -587,11 +628,15 @@ def sanitize_publication(
     current = literal.document
     total_replacements = literal.replacement_count
     for pass_index in range(max_repair_passes):
-        report: ScannerReport = run_trufflehog(
-            _corpus_entries(current),
-            timeout=scanner_timeout,
-            runner=scanner_runner,
-        )
+        try:
+            report: ScannerReport = run_trufflehog(
+                _corpus_entries(current),
+                timeout=scanner_timeout,
+                runner=scanner_runner,
+            )
+        except PublicationError as exc:
+            code = exc.code if exc.code in {ReasonCode.unsafe_content, ReasonCode.scanner_failure} else ReasonCode.scanner_failure
+            return SanitizationResult.failed(code)
         if report.failure is not None or report.returncode != 0:
             return SanitizationResult.failed(ReasonCode.scanner_failure)
         findings = tuple(report.findings)

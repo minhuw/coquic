@@ -18,6 +18,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Final
 
 from .models import (
+    MAX_ARTIFACTS,
     MAX_FINDINGS,
     MAX_LOGICAL_PATH_LENGTH,
     MAX_RUN_BYTES,
@@ -31,7 +32,8 @@ REDACTION_MARKER: Final[str] = "[REDACTED_SECRET]"
 MAX_SCANNER_OUTPUT_BYTES: Final[int] = 8 * 1024 * 1024
 MAX_SCANNER_RAW_BYTES: Final[int] = 256 * 1024
 MAX_SCANNER_TIMEOUT_SECONDS: Final[float] = 120.0
-MAX_CORPUS_ENTRIES: Final[int] = 4_096
+# The trajectory is scanned alongside every bounded artifact.
+MAX_CORPUS_ENTRIES: Final[int] = MAX_ARTIFACTS + 1
 _REAL_SUBPROCESS_RUN = subprocess.run
 
 
@@ -337,11 +339,14 @@ def run_trufflehog(
 ) -> ScannerReport:
     """Scan entries from a descriptor-anchored private staging directory."""
 
-    values = tuple(entries)
+    try:
+        values = tuple(entries)
+    except (TypeError, ValueError, RecursionError):
+        return ScannerReport(failure=ReasonCode.scanner_failure)
     if len(values) > MAX_CORPUS_ENTRIES or any(not isinstance(item, CorpusEntry) for item in values):
-        _protocol_fail()
+        return ScannerReport(failure=ReasonCode.scanner_failure)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0 or timeout > MAX_SCANNER_TIMEOUT_SECONDS:
-        _protocol_fail()
+        return ScannerReport(failure=ReasonCode.scanner_failure)
     names: dict[str, CorpusEntry] = {}
     for index, entry in enumerate(values):
         name = f"entry-{index:04d}.txt"

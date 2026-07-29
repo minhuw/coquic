@@ -999,7 +999,14 @@ def _file_failure(exc: OSError) -> ReasonCode:
     return ReasonCode.non_regular
 
 
-def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expected_sha256: str | None) -> StableRead:
+def _open_stable(
+    path: Path,
+    *,
+    max_bytes: int,
+    expected_size: int | None,
+    expected_sha256: str | None,
+    require_private: bool = False,
+) -> StableRead:
     path = _coerce_path(path, ReasonCode.invalid_path)
     _validate_path_components(path)
     anchor, components = _path_parts(path)
@@ -1034,6 +1041,8 @@ def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expec
             _fail(ReasonCode.non_regular)
         if before_path.st_nlink != 1:
             _fail(ReasonCode.hardlink)
+        if require_private and stat.S_IMODE(before_path.st_mode) & 0o077:
+            _fail(ReasonCode.unsafe_content)
         if before_path.st_size > limit:
             _fail(ReasonCode.oversized)
         open_error: ReasonCode | None = None
@@ -1053,7 +1062,12 @@ def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expec
             _fail(stat_error)
         assert opened is not None
         first = FileIdentity.from_stat(opened)
-        if first != FileIdentity.from_stat(before_path) or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        if (
+            first != FileIdentity.from_stat(before_path)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (require_private and stat.S_IMODE(opened.st_mode) & 0o077)
+        ):
             _fail(ReasonCode.changing)
         chunks: list[bytes] = []
         total = 0
@@ -1098,6 +1112,7 @@ def _open_stable(path: Path, *, max_bytes: int, expected_size: int | None, expec
             or after.st_size != len(content)
             or after.st_nlink != 1
             or after_path.st_nlink != 1
+            or (require_private and (stat.S_IMODE(after.st_mode) & 0o077 or stat.S_IMODE(after_path.st_mode) & 0o077))
         ):
             _fail(ReasonCode.changing)
         chain_error = _verify_directory_chain(links)
@@ -1127,10 +1142,17 @@ def read_stable_file(
     max_bytes: int = MAX_RUN_BYTES,
     expected_size: int | None = None,
     expected_sha256: str | None = None,
+    require_private: bool = False,
 ) -> StableRead:
     """Read one regular file while proving identity, size, and mtime stability."""
 
-    return _open_stable(path, max_bytes=max_bytes, expected_size=expected_size, expected_sha256=expected_sha256)
+    return _open_stable(
+        path,
+        max_bytes=max_bytes,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+        require_private=require_private,
+    )
 
 
 def _json_records(content: bytes) -> tuple[Any, ...]:

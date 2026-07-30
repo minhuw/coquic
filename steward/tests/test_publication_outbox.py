@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from itertools import product
 
@@ -9,15 +11,19 @@ from sqlalchemy.exc import IntegrityError
 
 from coquic_steward.publication.outbox import (
     CleanupIntent,
+    CleanupState,
     GenerationIdentity,
+    MAX_LEASE_SECONDS,
     OutboxValidationError,
     PublicationGeneration,
+    PublicationOperationStatus,
     PublicationReceipt,
     PublicationState,
     ReceiptClass,
     allowed_transition,
     deterministic_publication_id,
 )
+from coquic_steward.storage import TaskStore
 from coquic_steward.storage.schema import Base
 
 
@@ -703,3 +709,226 @@ def test_schema_rejects_broad_or_unverified_cleanup_authority() -> None:
             ),
             {"digest": DIGEST, "publication_id": cleanup_identity.publication_id},
         )
+
+
+def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None:
+    path = tmp_path / "steward.sqlite"
+    store = TaskStore(path)
+    observed: list[PublicationState | None] = []
+    store.on_change = lambda: observed.append(
+        store.get_publication_generation(_generation().publication_id).state
+    )
+
+    created = store.enqueue_publication(_generation())
+    assert created.status is PublicationOperationStatus.enqueued
+    assert observed == [PublicationState.queued]
+
+    replay = store.enqueue_publication(
+        _generation(
+            created_at=NOW + timedelta(seconds=1),
+            updated_at=NOW + timedelta(seconds=1),
+        )
+    )
+    assert replay.status is PublicationOperationStatus.existing
+    assert observed == [PublicationState.queued]
+
+    with pytest.raises(OutboxValidationError):
+        store.enqueue_publication(_generation(objects=1))
+
+
+def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda worker: store.claim_publication(worker, now=NOW),
+                ("worker-1", "worker-2"),
+            )
+        )
+    assert sorted(result.status.value for result in results) == ["claimed", "empty"]
+    claimed = next(result for result in results if result.status is PublicationOperationStatus.claimed)
+    assert claimed.generation is not None
+    assert claimed.generation.attempt == 1
+    assert claimed.generation.lease_owner in {"worker-1", "worker-2"}
+
+    wrong_owner = store.renew_publication_lease(
+        "other-worker",
+        publication_id=generation.publication_id,
+        now=NOW + timedelta(seconds=1),
+    )
+    assert wrong_owner.status is PublicationOperationStatus.lost_claim
+    renewed = store.renew_publication_lease(
+        claimed.generation.lease_owner,
+        publication_id=generation.publication_id,
+        now=NOW + timedelta(seconds=1),
+    )
+    assert renewed.status is PublicationOperationStatus.renewed
+
+    building = store.advance_publication(
+        generation.publication_id,
+        PublicationState.claimed,
+        PublicationState.building,
+        lease_owner=claimed.generation.lease_owner,
+        now=NOW + timedelta(seconds=2),
+    )
+    assert building.status is PublicationOperationStatus.advanced
+    illegal = store.advance_publication(
+        generation.publication_id,
+        PublicationState.claimed,
+        PublicationState.exposed,
+        lease_owner=claimed.generation.lease_owner,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert illegal.status is PublicationOperationStatus.illegal_transition
+
+
+def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
+    path = tmp_path / "steward.sqlite"
+    store = TaskStore(path)
+    generation = _generation()
+    store.enqueue_publication(generation)
+    first = store.claim_publication("worker-1", now=NOW)
+    assert first.status is PublicationOperationStatus.claimed
+
+    expired = store.expire_publication_leases(
+        now=NOW + timedelta(seconds=MAX_LEASE_SECONDS)
+    )
+    assert store.get_publication_generation(generation.publication_id).state is PublicationState.retry_wait
+    assert any(item.publication_id == generation.publication_id for item in expired)
+    resumed = store.claim_publication(
+        "worker-2", publication_id=generation.publication_id, now=NOW + timedelta(seconds=MAX_LEASE_SECONDS)
+    )
+    assert resumed.status is PublicationOperationStatus.claimed
+    assert resumed.generation.attempt == 2
+
+    retry_at = NOW + timedelta(seconds=MAX_LEASE_SECONDS + 10)
+    retry = store.schedule_publication_retry(
+        generation.publication_id,
+        expected_state=PublicationState.building,
+        lease_owner="worker-2",
+        retry_at=retry_at,
+        reason="network",
+        now=NOW + timedelta(seconds=MAX_LEASE_SECONDS + 1),
+    )
+    assert retry.status is PublicationOperationStatus.retry_wait
+    assert (
+        store.claim_publication(
+            "worker-3", publication_id=generation.publication_id, now=retry_at - timedelta(seconds=1)
+        ).status
+        is PublicationOperationStatus.empty
+    )
+    resumed_again = store.claim_publication(
+        "worker-3", publication_id=generation.publication_id, now=retry_at
+    )
+    assert resumed_again.status is PublicationOperationStatus.claimed
+
+    blocked = store.block_publication(
+        generation.publication_id,
+        expected_state=PublicationState.building,
+        lease_owner="worker-3",
+        reason="scanner_failure",
+        now=retry_at + timedelta(seconds=1),
+    )
+    assert blocked.status is PublicationOperationStatus.blocked
+    assert blocked.generation.reason == "scanner_failure"
+
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_generations SET state='queued',attempt=:attempt,"
+            "reason=NULL,updated_at=:updated_at WHERE publication_id=:publication_id",
+            {
+                "attempt": 32,
+                "updated_at": "2026-07-28T12:00:00.000Z",
+                "publication_id": generation.publication_id,
+            },
+        )
+    exhausted = store.claim_publication(
+        "worker-4", publication_id=generation.publication_id, now=NOW
+    )
+    assert exhausted.status is PublicationOperationStatus.retry_exhausted
+    assert store.get_publication_generation(generation.publication_id).state is PublicationState.blocked
+
+    store.engine.dispose()
+    restarted = TaskStore(path)
+    assert restarted.get_publication_generation(generation.publication_id).state is PublicationState.blocked
+
+
+def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    owner = "worker-1"
+    store.claim_publication(owner, now=NOW)
+    for offset, expected, target in (
+        (1, PublicationState.claimed, PublicationState.building),
+        (2, PublicationState.building, PublicationState.uploading),
+        (3, PublicationState.uploading, PublicationState.d1_staged),
+        (4, PublicationState.d1_staged, PublicationState.exposed),
+    ):
+        result = store.advance_publication(
+            generation.publication_id,
+            expected,
+            target,
+            lease_owner=owner if expected in {PublicationState.claimed, PublicationState.building} else None,
+            now=NOW + timedelta(seconds=offset),
+        )
+        assert result.status is PublicationOperationStatus.advanced
+
+    receipt = PublicationReceipt.public_receipt(
+        DIGEST,
+        17,
+        PUBLIC_KEY,
+        NOW + timedelta(seconds=2),
+        "runs/run-1/trajectory.json",
+    )
+    recorded = store.record_publication_receipt(generation.publication_id, receipt)
+    assert recorded.status is PublicationOperationStatus.recorded
+    replayed = store.record_publication_receipt(
+        generation.publication_id,
+        replace(receipt, verified_at=NOW + timedelta(seconds=3)),
+    )
+    assert replayed.status is PublicationOperationStatus.existing
+
+    intent = CleanupIntent(
+        "task-1",
+        generation.publication_id,
+        DIGEST,
+        "/var/lib/coquic/tasks/task-1",
+        NOW + timedelta(seconds=4),
+    )
+    created = store.create_cleanup_intent(intent)
+    assert created.status is PublicationOperationStatus.enqueued
+    health = store.get_publication_health()
+    assert health.cleanup_pending_count == 1
+    assert health.cleanup_pending_bytes == 17
+
+    verified = store.verify_cleanup_intent(
+        intent.intent_id,
+        manifest_digest=DIGEST,
+        verified_at=NOW + timedelta(seconds=5),
+    )
+    assert verified.status is PublicationOperationStatus.verified
+    assert store.verify_cleanup_intent(
+        intent.intent_id,
+        manifest_digest=DIGEST,
+        verified_at=NOW + timedelta(seconds=6),
+    ).status is PublicationOperationStatus.existing
+
+    completed = store.complete_cleanup_intent(
+        intent.intent_id,
+        manifest_digest=DIGEST,
+        completed_at=NOW + timedelta(seconds=7),
+    )
+    assert completed.status is PublicationOperationStatus.completed
+    assert completed.cleanup is not None
+    assert completed.cleanup.state is CleanupState.completed
+    assert (
+        store.get_publication_generation(generation.publication_id).state
+        is PublicationState.terminal_cleaned
+    )
+    health = store.get_publication_health()
+    assert health.cleanup_pending_count == 0
+    assert health.cleanup_pending_bytes == 0

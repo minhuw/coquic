@@ -99,6 +99,33 @@ class CleanupState(StrEnum):
     blocked = "blocked"
 
 
+class PublicationOperationStatus(StrEnum):
+    """Bounded outcomes returned by local outbox mutations.
+
+    A failed compare-and-set is a normal recovery outcome, rather than an
+    exception.  Keeping it in a closed vocabulary prevents callers from
+    accidentally persisting SQL/provider detail in health or public payloads.
+    """
+
+    enqueued = "enqueued"
+    existing = "existing"
+    claimed = "claimed"
+    empty = "empty"
+    renewed = "renewed"
+    advanced = "advanced"
+    recorded = "recorded"
+    verified = "verified"
+    completed = "completed"
+    blocked = "blocked"
+    retry_wait = "retry_wait"
+    missing = "missing"
+    lost_claim = "lost_claim"
+    illegal_transition = "illegal_transition"
+    conflict = "conflict"
+    retry_exhausted = "retry_exhausted"
+    precondition = "precondition"
+
+
 _SAFE_REASON_VALUES: Final[frozenset[str]] = frozenset(
     {item.value for item in ReasonCode}
     | {
@@ -673,16 +700,34 @@ class PublicationHealth:
     cleanup_pending_bytes: int = 0
     updated_at: datetime = field(default_factory=_now)
     reason: str | None = None
+    oldest_queued_at: datetime | None = None
+    last_category: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("queued_count", "blocked_count", "cleanup_pending_count", "cleanup_pending_bytes"):
             object.__setattr__(self, name, _count(getattr(self, name)))
         object.__setattr__(self, "updated_at", _timestamp(self.updated_at))
         object.__setattr__(self, "reason", _reason(self.reason))
+        oldest = None if self.oldest_queued_at is None else _timestamp(self.oldest_queued_at)
+        if oldest is not None and oldest > self.updated_at:
+            _fail()
+        object.__setattr__(self, "oldest_queued_at", oldest)
+        category = _reason(self.last_category)
+        object.__setattr__(self, "last_category", category)
 
     @property
     def cleanup_bytes(self) -> int:
         return self.cleanup_pending_bytes
+
+    @property
+    def queue_count(self) -> int:
+        return self.queued_count
+
+    @property
+    def oldest_queued_age_seconds(self) -> int:
+        if self.oldest_queued_at is None:
+            return 0
+        return max(0, int((self.updated_at - self.oldest_queued_at).total_seconds()))
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -692,6 +737,9 @@ class PublicationHealth:
             "cleanupPendingBytes": self.cleanup_pending_bytes,
             "updatedAt": _timestamp_text(self.updated_at),
             "reason": self.reason,
+            "oldestQueuedAt": _timestamp_text(self.oldest_queued_at) if self.oldest_queued_at else None,
+            "oldestQueuedAgeSeconds": self.oldest_queued_age_seconds,
+            "lastCategory": self.last_category or self.reason,
         }
 
 
@@ -811,6 +859,126 @@ OutboxCleanupIntent = CleanupIntent
 CleanupIntentValue = CleanupIntent
 
 
+@dataclass(frozen=True, slots=True)
+class PublicationOperationResult:
+    """A bounded result for one transactional outbox operation."""
+
+    status: PublicationOperationStatus | str
+    generation: PublicationGeneration | None = None
+    receipt: PublicationReceipt | None = None
+    cleanup: CleanupIntent | None = None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            status = PublicationOperationStatus(self.status)
+        except (TypeError, ValueError):
+            _fail()
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "reason", _reason(self.reason))
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {
+            PublicationOperationStatus.enqueued,
+            PublicationOperationStatus.existing,
+            PublicationOperationStatus.claimed,
+            PublicationOperationStatus.renewed,
+            PublicationOperationStatus.advanced,
+            PublicationOperationStatus.recorded,
+            PublicationOperationStatus.verified,
+            PublicationOperationStatus.completed,
+            PublicationOperationStatus.blocked,
+            PublicationOperationStatus.retry_wait,
+        }
+
+    @property
+    def applied(self) -> bool:
+        return self.status in {
+            PublicationOperationStatus.enqueued,
+            PublicationOperationStatus.claimed,
+            PublicationOperationStatus.renewed,
+            PublicationOperationStatus.advanced,
+            PublicationOperationStatus.recorded,
+            PublicationOperationStatus.verified,
+            PublicationOperationStatus.completed,
+            PublicationOperationStatus.blocked,
+            PublicationOperationStatus.retry_wait,
+        }
+
+    @property
+    def created(self) -> bool:
+        return self.status is PublicationOperationStatus.enqueued
+
+    @property
+    def replayed(self) -> bool:
+        return self.status is PublicationOperationStatus.existing
+
+    @property
+    def lost(self) -> bool:
+        return self.status is PublicationOperationStatus.lost_claim
+
+    @property
+    def lost_claim(self) -> bool:
+        return self.lost
+
+    @property
+    def illegal(self) -> bool:
+        return self.status is PublicationOperationStatus.illegal_transition
+
+    @property
+    def illegal_transition(self) -> bool:
+        return self.illegal
+
+    @property
+    def exhausted(self) -> bool:
+        return self.status is PublicationOperationStatus.retry_exhausted
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    def with_status(self, status: PublicationOperationStatus | str) -> "PublicationOperationResult":
+        return replace(self, status=status)
+
+    def __getattr__(self, name: str) -> object:
+        # Successful claim/transition callers often need the immutable value
+        # directly.  Delegation keeps the result typed while preserving that
+        # ergonomic access without duplicating the generation fields.
+        generation = object.__getattribute__(self, "generation")
+        if generation is not None and hasattr(generation, name):
+            return getattr(generation, name)
+        receipt = object.__getattribute__(self, "receipt")
+        if receipt is not None and hasattr(receipt, name):
+            return getattr(receipt, name)
+        cleanup = object.__getattribute__(self, "cleanup")
+        if cleanup is not None and hasattr(cleanup, name):
+            return getattr(cleanup, name)
+        raise AttributeError(name)
+
+    def as_dict(self) -> dict[str, object]:
+        value: dict[str, object] = {"status": self.status.value, "reason": self.reason}
+        if self.generation is not None:
+            value["generation"] = self.generation.as_dict()
+        if self.receipt is not None:
+            value["receipt"] = self.receipt.as_public_dict()
+        if self.cleanup is not None:
+            value["cleanup"] = self.cleanup.as_public_dict()
+        return value
+
+
+# Descriptive aliases keep the result discoverable for callers that name the
+# operation rather than the shared mutation boundary.
+PublicationMutationStatus = PublicationOperationStatus
+PublicationResultStatus = PublicationOperationStatus
+PublicationMutationResult = PublicationOperationResult
+PublicationTransitionResult = PublicationOperationResult
+PublicationClaimResult = PublicationOperationResult
+PublicationLeaseResult = PublicationOperationResult
+PublicationReceiptResult = PublicationOperationResult
+PublicationCleanupResult = PublicationOperationResult
+OutboxOperationResult = PublicationOperationResult
+
+
 __all__ = [
     "CleanupIntent",
     "CleanupState",
@@ -840,6 +1008,17 @@ __all__ = [
     "PublicationCounts",
     "PublicationGeneration",
     "PublicationHealth",
+    "PublicationOperationResult",
+    "PublicationOperationStatus",
+    "PublicationMutationResult",
+    "PublicationMutationStatus",
+    "PublicationResultStatus",
+    "PublicationTransitionResult",
+    "PublicationClaimResult",
+    "PublicationLeaseResult",
+    "PublicationReceiptResult",
+    "PublicationCleanupResult",
+    "OutboxOperationResult",
     "PublicationReceipt",
     "PublicationReceiptClass",
     "PublicationReceiptValue",

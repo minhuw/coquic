@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import time
-from collections.abc import Callable
-from datetime import datetime, timedelta
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import Connection, Select, create_engine, event, func, select, text
@@ -113,10 +115,32 @@ from .schema import (
     DaemonStateRow,
     ValidationRow,
     StewardImageReleaseRow,
+    PublicationGenerationRow,
+    PublicationReceiptRow,
+    PublicationHealthRow,
+    PublicationCleanupIntentRow,
 )
 from ..control_loop import (
     ControlLoopLedger,
     ProposalDisposition as ControlProposalDisposition,
+)
+from ..publication.outbox import (
+    CleanupIntent,
+    CleanupState,
+    GenerationIdentity,
+    MAX_ATTEMPTS,
+    MAX_LEASE_SECONDS,
+    MAX_RETRY_DELAY_SECONDS,
+    OutboxValidationError,
+    PublicationGeneration,
+    PublicationHealth,
+    PublicationOperationResult,
+    PublicationOperationStatus,
+    PublicationReceipt,
+    PublicationState,
+    ReceiptClass,
+    allowed_transition,
+    transition_state,
 )
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
@@ -133,6 +157,65 @@ REVIEW_FINISHED_EVENTS = {
     "review.finished",
     "review.invalid_output",
 }
+
+_PUBLICATION_ID_RE = re.compile(r"^pub-[0-9a-f]{64}$")
+_PUBLICATION_KEY_TASK_RE = re.compile(
+    r"^v1/(?:tasks|originals)/(?P<task>[A-Za-z0-9][A-Za-z0-9._-]{0,127})/"
+)
+_PUBLICATION_REASON_VALUES = frozenset(
+    {
+        "missing",
+        "running",
+        "partial",
+        "invalid_identifier",
+        "invalid_path",
+        "invalid_media_type",
+        "uninspectable_binary",
+        "invalid_digest",
+        "invalid_metadata",
+        "symlink",
+        "non_regular",
+        "hardlink",
+        "oversized",
+        "size_mismatch",
+        "digest_mismatch",
+        "changing",
+        "invalid_utf8",
+        "invalid_jsonl",
+        "source_finding",
+        "patch_finding",
+        "staging_unsafe",
+        "scanner_failure",
+        "ocr_failure",
+        "unsafe_content",
+        "irreparable",
+        "network",
+        "quota",
+        "authentication",
+        "permission",
+        "timeout",
+        "provider",
+        "integrity",
+        "lease_expired",
+        "retry_exhausted",
+        "cleanup_failed",
+        "operator_blocked",
+    }
+)
+_PUBLICATION_GENERATION_COLUMNS = (
+    "publication_id,task_id,run_id,generation_boundary,metadata_digest,idempotency_key,"
+    "state,attempt,lease_owner,lease_expires_at,retry_at,reason,"
+    "expected_row_count,expected_object_count,expected_task_count,expected_pipeline_count,"
+    "expected_run_count,expected_event_count,expected_artifact_count,created_at,updated_at,exposed_at"
+)
+_PUBLICATION_RECEIPT_COLUMNS = (
+    "receipt_id,publication_id,task_id,receipt_class,sha256,byte_size,content_key,"
+    "logical_path,verified_at"
+)
+_PUBLICATION_CLEANUP_COLUMNS = (
+    "intent_id,publication_id,task_id,manifest_digest,exact_path,state,requested_at,"
+    "verified_at,completed_at,reason"
+)
 
 
 class SQLiteTaskStore:
@@ -173,6 +256,7 @@ class SQLiteTaskStore:
                 epoch_id = None
             self.control_loop = ControlLoopLedger(self.path, epoch_id=epoch_id)
         self._ensure_dataset_sync_health()
+        self._ensure_publication_health()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
 
@@ -1906,6 +1990,1286 @@ class SQLiteTaskStore:
             session.add(scheduler_wakeup_to_row(wakeup, path_codec=self.path_codec))
         self._notify_change()
         return wakeup
+
+    # ------------------------------------------------------------------
+    # Durable publication outbox
+
+    def enqueue_publication(
+        self,
+        generation: PublicationGeneration | None = None,
+        *,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        generation_boundary: str | None = None,
+        metadata_digest: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+        counts: object | None = None,
+        rows: int = 0,
+        objects: int = 0,
+        tasks: int = 1,
+        pipelines: int = 0,
+        runs: int = 0,
+        events: int = 0,
+        artifacts: int = 0,
+        created_at: datetime | None = None,
+        updated_at: datetime | None = None,
+    ) -> PublicationOperationResult:
+        """Insert one queued generation, coalescing an exact replay.
+
+        The identity and all immutable expected counts are checked before the
+        transaction.  A duplicate notification therefore has no write and no
+        scheduler wakeup, while a conflicting replay fails with a bounded
+        validation category.
+        """
+
+        value = _coerce_publication_generation(
+            generation,
+            task_id=task_id,
+            run_id=run_id,
+            generation_boundary=generation_boundary,
+            metadata_digest=metadata_digest,
+            publication_id=publication_id,
+            idempotency_key=idempotency_key,
+            counts=counts,
+            rows=rows,
+            objects=objects,
+            tasks=tasks,
+            pipelines=pipelines,
+            runs=runs,
+            events=events,
+            artifacts=artifacts,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        if (
+            value.state is not PublicationState.queued
+            or value.attempt != 0
+            or value.reason is not None
+        ):
+            raise OutboxValidationError("invalid_metadata")
+
+        connection = self.engine.connect()
+        inserted = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            existing_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": value.publication_id},
+            ).mappings().first()
+            if existing_row is not None:
+                existing = _publication_generation_from_row(existing_row)
+                if not _same_generation_input(existing, value):
+                    raise OutboxValidationError("invalid_metadata")
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    generation=existing,
+                )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO publication_generations
+                  (publication_id,task_id,run_id,generation_boundary,metadata_digest,
+                   idempotency_key,state,attempt,lease_owner,lease_expires_at,retry_at,
+                   reason,expected_row_count,expected_object_count,expected_task_count,
+                   expected_pipeline_count,expected_run_count,expected_event_count,
+                   expected_artifact_count,created_at,updated_at,exposed_at)
+                VALUES
+                  (:publication_id,:task_id,:run_id,:generation_boundary,:metadata_digest,
+                   :idempotency_key,'queued',0,NULL,NULL,NULL,NULL,
+                   :expected_row_count,:expected_object_count,:expected_task_count,
+                   :expected_pipeline_count,:expected_run_count,:expected_event_count,
+                   :expected_artifact_count,:created_at,:updated_at,NULL)
+                """,
+                _generation_parameters(value),
+            )
+            self._refresh_publication_health(connection, updated_at=value.updated_at)
+            connection.commit()
+            inserted = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if inserted:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.enqueued,
+            generation=value,
+        )
+
+    enqueue_generation = enqueue_publication
+    enqueue_outbox = enqueue_publication
+    queue_publication = enqueue_publication
+    enqueue_publication_generation = enqueue_publication
+
+    def get_publication_generation(
+        self, publication_id: str
+    ) -> PublicationGeneration | None:
+        with self.engine.begin() as connection:
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": publication_id},
+            ).mappings().first()
+        return None if row is None else _publication_generation_from_row(row)
+
+    publication_generation = get_publication_generation
+    get_generation = get_publication_generation
+
+    def list_publication_generations(
+        self,
+        *,
+        task_id: str | None = None,
+        states: set[PublicationState | str] | None = None,
+        limit: int | None = None,
+    ) -> list[PublicationGeneration]:
+        parameters: dict[str, object] = {}
+        clauses: list[str] = []
+        if task_id is not None:
+            clauses.append("task_id=:task_id")
+            parameters["task_id"] = task_id
+        if states:
+            normalized = [PublicationState(item).value for item in states]
+            placeholders = ",".join(f":state_{index}" for index in range(len(normalized)))
+            clauses.append(f"state IN ({placeholders})")
+            parameters.update(
+                {f"state_{index}": value for index, value in enumerate(normalized)}
+            )
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        limit_clause = " LIMIT :limit" if limit is not None else ""
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+                raise ValueError("limit must be non-negative")
+            parameters["limit"] = limit
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations"
+                f"{where} ORDER BY created_at,publication_id{limit_clause}",
+                parameters,
+            ).mappings().all()
+        return [_publication_generation_from_row(row) for row in rows]
+
+    generations = list_publication_generations
+
+    def claim_publication(
+        self,
+        worker_id: str,
+        *,
+        publication_id: str | None = None,
+        now: datetime | None = None,
+        lease_seconds: int = MAX_LEASE_SECONDS,
+    ) -> PublicationOperationResult:
+        """Atomically claim the oldest eligible generation.
+
+        Queued generations enter ``claimed``.  A due retry resumes directly in
+        ``building`` so the persisted receipt boundary remains the first work
+        still requiring an external side effect.
+        """
+
+        worker = _publication_identifier(worker_id)
+        timestamp = _publication_now(now)
+        lease_seconds = _bounded_publication_seconds(
+            lease_seconds, MAX_LEASE_SECONDS, minimum=1
+        )
+        now_text = _publication_timestamp(timestamp)
+        lease_text = _publication_timestamp(timestamp + timedelta(seconds=lease_seconds))
+        connection = self.engine.connect()
+        changed = False
+        result: PublicationOperationResult
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            expired = self._expire_publication_leases_in_connection(connection, timestamp)
+            changed = expired
+            parameters: dict[str, object] = {"now": now_text}
+            selector = (
+                "(state='queued' OR (state='retry_wait' AND retry_at<=:now)) "
+                "AND attempt < :max_attempts"
+            )
+            parameters["max_attempts"] = MAX_ATTEMPTS
+            if publication_id is not None:
+                selector += " AND publication_id=:publication_id"
+                parameters["publication_id"] = publication_id
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                f"WHERE {selector} ORDER BY CASE WHEN state='queued' THEN 0 ELSE 1 END,"
+                "COALESCE(retry_at,created_at),created_at,publication_id LIMIT 1",
+                parameters,
+            ).mappings().first()
+            if row is None:
+                # A row which has reached the attempt ceiling is made
+                # fail-closed rather than left permanently claimable-looking.
+                exhausted_parameters: dict[str, object] = {}
+                exhausted_selector = (
+                    "state IN ('queued','retry_wait') AND attempt >= :max_attempts"
+                )
+                exhausted_parameters["max_attempts"] = MAX_ATTEMPTS
+                if publication_id is not None:
+                    exhausted_selector += " AND publication_id=:publication_id"
+                    exhausted_parameters["publication_id"] = publication_id
+                exhausted = connection.exec_driver_sql(
+                    f"SELECT publication_id FROM publication_generations WHERE {exhausted_selector} "
+                    "ORDER BY created_at,publication_id LIMIT 1",
+                    exhausted_parameters,
+                ).fetchone()
+                if exhausted is not None:
+                    connection.exec_driver_sql(
+                        "UPDATE publication_generations SET state='blocked',reason='retry_exhausted',"
+                        "retry_at=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=:updated_at "
+                        "WHERE publication_id=:publication_id AND state IN ('queued','retry_wait') "
+                        "AND attempt>=:max_attempts",
+                        {
+                            "updated_at": now_text,
+                            "publication_id": exhausted[0],
+                            "max_attempts": MAX_ATTEMPTS,
+                        },
+                    )
+                    self._refresh_publication_health(
+                        connection, updated_at=timestamp, reason="retry_exhausted"
+                    )
+                    changed = True
+                    connection.commit()
+                    result = PublicationOperationResult(
+                        PublicationOperationStatus.retry_exhausted,
+                        reason="retry_exhausted",
+                    )
+                else:
+                    if expired:
+                        self._refresh_publication_health(connection, updated_at=timestamp)
+                    connection.commit()
+                    status = (
+                        PublicationOperationStatus.missing
+                        if publication_id is not None
+                        and self._publication_exists(connection, publication_id) is False
+                        else PublicationOperationStatus.empty
+                    )
+                    result = PublicationOperationResult(status)
+            else:
+                current = _publication_generation_from_row(row)
+                if timestamp < current.updated_at:
+                    raise OutboxValidationError("invalid_metadata")
+                target = (
+                    PublicationState.claimed
+                    if current.state is PublicationState.queued
+                    else PublicationState.building
+                )
+                connection.exec_driver_sql(
+                    "UPDATE publication_generations SET state=:state,attempt=attempt+1,"
+                    "lease_owner=:lease_owner,lease_expires_at=:lease_expires_at,retry_at=NULL,"
+                    "reason=NULL,updated_at=:updated_at WHERE publication_id=:publication_id "
+                    "AND state=:expected_state AND attempt < :max_attempts",
+                    {
+                        "state": target.value,
+                        "lease_owner": worker,
+                        "lease_expires_at": lease_text,
+                        "updated_at": now_text,
+                        "publication_id": current.publication_id,
+                        "expected_state": current.state.value,
+                        "max_attempts": MAX_ATTEMPTS,
+                    },
+                )
+                updated_row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                    "WHERE publication_id=:publication_id",
+                    {"publication_id": current.publication_id},
+                ).mappings().first()
+                assert updated_row is not None
+                updated = _publication_generation_from_row(updated_row)
+                self._refresh_publication_health(connection, updated_at=timestamp)
+                connection.commit()
+                changed = True
+                result = PublicationOperationResult(
+                    PublicationOperationStatus.claimed,
+                    generation=updated,
+                )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return result
+
+    claim_generation = claim_publication
+    claim_outbox = claim_publication
+    claim_publication_generation = claim_publication
+
+    def expire_publication_leases(
+        self, *, now: datetime | None = None
+    ) -> list[PublicationGeneration]:
+        """Move abandoned leases to an immediately eligible retry boundary."""
+
+        timestamp = _publication_now(now)
+        connection = self.engine.connect()
+        changed = False
+        expired_ids: list[str] = []
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            expired_ids = [
+                str(row[0])
+                for row in connection.exec_driver_sql(
+                    "SELECT publication_id FROM publication_generations "
+                    "WHERE state IN ('claimed','building') AND lease_expires_at<=:now",
+                    {"now": _publication_timestamp(timestamp)},
+                ).fetchall()
+            ]
+            changed = self._expire_publication_leases_in_connection(connection, timestamp)
+            if changed:
+                self._refresh_publication_health(
+                    connection, updated_at=timestamp, reason="lease_expired"
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return [
+            generation
+            for publication_id in expired_ids
+            if (generation := self.get_publication_generation(publication_id)) is not None
+        ]
+
+    expire_generation_leases = expire_publication_leases
+    reconcile_publication_leases = expire_publication_leases
+    expire_leases = expire_publication_leases
+
+    def renew_publication_lease(
+        self,
+        worker_id: str | None = None,
+        *,
+        lease_owner: str | None = None,
+        publication_id: str,
+        now: datetime | None = None,
+        lease_seconds: int = MAX_LEASE_SECONDS,
+    ) -> PublicationOperationResult:
+        """Extend one live lease using owner/state compare-and-set."""
+
+        owner = _publication_identifier(lease_owner or worker_id)
+        timestamp = _publication_now(now)
+        lease_seconds = _bounded_publication_seconds(
+            lease_seconds, MAX_LEASE_SECONDS, minimum=1
+        )
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": publication_id},
+            ).mappings().first()
+            if row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            current = _publication_generation_from_row(row)
+            if current.state not in {PublicationState.claimed, PublicationState.building}:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired",
+                )
+            if current.lease_owner != owner or current.lease_expires_at is None:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired",
+                )
+            if current.lease_expires_at <= timestamp:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired",
+                )
+            if timestamp < current.updated_at:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=current,
+                    reason="invalid_metadata",
+                )
+            now_text = _publication_timestamp(timestamp)
+            update = connection.exec_driver_sql(
+                "UPDATE publication_generations SET lease_expires_at=:lease_expires_at,"
+                "updated_at=:updated_at WHERE publication_id=:publication_id "
+                "AND state=:state AND lease_owner=:lease_owner AND lease_expires_at>:now",
+                {
+                    "lease_expires_at": _publication_timestamp(
+                        timestamp + timedelta(seconds=lease_seconds)
+                    ),
+                    "updated_at": now_text,
+                    "publication_id": publication_id,
+                    "state": current.state.value,
+                    "lease_owner": owner,
+                    "now": now_text,
+                },
+            )
+            if update.rowcount != 1:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired",
+                )
+            updated_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": publication_id},
+            ).mappings().first()
+            assert updated_row is not None
+            updated = _publication_generation_from_row(updated_row)
+            self._refresh_publication_health(connection, updated_at=timestamp)
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.renewed,
+            generation=updated,
+        )
+
+    renew_generation_lease = renew_publication_lease
+    renew_lease = renew_publication_lease
+    renew_publication = renew_publication_lease
+
+    def advance_publication(
+        self,
+        publication_id: str,
+        expected_state: PublicationState | str,
+        target_state: PublicationState | str,
+        *,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        now: datetime | None = None,
+        lease_expires_at: datetime | None = None,
+        retry_at: datetime | None = None,
+        reason: str | None = None,
+    ) -> PublicationOperationResult:
+        """Compare-and-set one legal generation edge."""
+
+        owner = lease_owner or worker_id
+        if owner is not None:
+            owner = _publication_identifier(owner)
+        timestamp = _publication_now(now)
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": publication_id},
+            ).mappings().first()
+            if row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            current = _publication_generation_from_row(row)
+            try:
+                expected = PublicationState(expected_state)
+                target = transition_state(expected, target_state)
+            except (TypeError, ValueError, OutboxValidationError):
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.illegal_transition,
+                    generation=current,
+                    reason="invalid_metadata",
+                )
+            if current.state is not expected:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired" if current.lease_owner else None,
+                )
+            if (
+                current.lease_expires_at is not None
+                and current.lease_expires_at <= timestamp
+            ):
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired",
+                )
+            if current.lease_owner is not None and current.lease_owner != owner:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired",
+                )
+            now_text = _publication_timestamp(timestamp)
+            update_values = _publication_transition_values(
+                current,
+                target,
+                timestamp=timestamp,
+                lease_owner=owner,
+                lease_expires_at=lease_expires_at,
+                retry_at=retry_at,
+                reason=reason,
+            )
+            if current.lease_owner is not None:
+                update_values["expected_lease_owner"] = current.lease_owner
+                owner_clause = " AND lease_owner=:expected_lease_owner"
+            else:
+                owner_clause = " AND lease_owner IS NULL"
+            update = connection.exec_driver_sql(
+                "UPDATE publication_generations SET state=:state,lease_owner=:lease_owner,"
+                "lease_expires_at=:lease_expires_at,retry_at=:retry_at,reason=:reason,"
+                "updated_at=:updated_at,exposed_at=:exposed_at WHERE publication_id=:publication_id "
+                "AND state=:expected_state" + owner_clause,
+                {
+                    **update_values,
+                    "publication_id": publication_id,
+                    "expected_state": expected.value,
+                },
+            )
+            if update.rowcount != 1:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=current,
+                    reason="lease_expired" if current.lease_owner else None,
+                )
+            updated_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": publication_id},
+            ).mappings().first()
+            assert updated_row is not None
+            updated = _publication_generation_from_row(updated_row)
+            self._refresh_publication_health(
+                connection, updated_at=timestamp, reason=updated.reason
+            )
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.advanced,
+            generation=updated,
+        )
+
+    transition_publication = advance_publication
+    transition_generation = advance_publication
+    advance_generation = advance_publication
+    transition_publication_state = advance_publication
+    advance_publication_generation = advance_publication
+
+    def record_publication_receipt(
+        self,
+        publication_id: str,
+        receipt: PublicationReceipt,
+        *,
+        receipt_id: str | None = None,
+    ) -> PublicationOperationResult:
+        """Persist one verified object receipt idempotently."""
+
+        if not isinstance(receipt, PublicationReceipt):
+            raise OutboxValidationError("invalid_metadata")
+        identifier = receipt_id or _publication_receipt_id(publication_id, receipt)
+        _publication_identifier(identifier, prefix="receipt-")
+        connection = self.engine.connect()
+        inserted = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            generation_row = connection.exec_driver_sql(
+                "SELECT publication_id,task_id FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": publication_id},
+            ).mappings().first()
+            if generation_row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            task_id = str(generation_row["task_id"])
+            match = _PUBLICATION_KEY_TASK_RE.match(receipt.content_key)
+            if match is None or match.group("task") != task_id:
+                raise OutboxValidationError("invalid_path")
+            existing_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
+                "WHERE receipt_id=:receipt_id",
+                {"receipt_id": identifier},
+            ).mappings().first()
+            if existing_row is None:
+                existing_row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
+                    "WHERE publication_id=:publication_id AND receipt_class=:receipt_class "
+                    "AND sha256=:sha256 AND content_key=:content_key",
+                    {
+                        "publication_id": publication_id,
+                        "receipt_class": receipt.receipt_class.value,
+                        "sha256": receipt.sha256,
+                        "content_key": receipt.content_key,
+                    },
+                ).mappings().first()
+            if existing_row is not None:
+                existing = _publication_receipt_from_row(existing_row)
+                if not _same_receipt(existing, receipt):
+                    raise OutboxValidationError("integrity")
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    receipt=existing,
+                )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO publication_receipts
+                  (receipt_id,publication_id,task_id,receipt_class,sha256,byte_size,
+                   content_key,logical_path,verified_at)
+                VALUES
+                  (:receipt_id,:publication_id,:task_id,:receipt_class,:sha256,:byte_size,
+                   :content_key,:logical_path,:verified_at)
+                """,
+                {
+                    "receipt_id": identifier,
+                    "publication_id": publication_id,
+                    "task_id": task_id,
+                    "receipt_class": receipt.receipt_class.value,
+                    "sha256": receipt.sha256,
+                    "byte_size": receipt.byte_size,
+                    "content_key": receipt.content_key,
+                    "logical_path": receipt.logical_path,
+                    "verified_at": _publication_timestamp(receipt.verified_at),
+                },
+            )
+            self._refresh_publication_health(connection, updated_at=receipt.verified_at)
+            connection.commit()
+            inserted = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if inserted:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.recorded,
+            receipt=receipt,
+        )
+
+    record_receipt = record_publication_receipt
+    save_publication_receipt = record_publication_receipt
+
+    def list_publication_receipts(
+        self,
+        publication_id: str,
+        *,
+        receipt_class: ReceiptClass | str | None = None,
+    ) -> list[PublicationReceipt]:
+        parameters: dict[str, object] = {"publication_id": publication_id}
+        clause = ""
+        if receipt_class is not None:
+            try:
+                normalized_class = ReceiptClass(receipt_class)
+            except (TypeError, ValueError):
+                raise OutboxValidationError("invalid_metadata") from None
+            clause = " AND receipt_class=:receipt_class"
+            parameters["receipt_class"] = normalized_class.value
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
+                "WHERE publication_id=:publication_id" + clause + " ORDER BY verified_at,receipt_id",
+                parameters,
+            ).mappings().all()
+        return [_publication_receipt_from_row(row) for row in rows]
+
+    publication_receipts = list_publication_receipts
+    get_publication_receipts = list_publication_receipts
+    list_receipts = list_publication_receipts
+
+    def schedule_publication_retry(
+        self,
+        publication_id: str,
+        *,
+        expected_state: PublicationState | str | None = None,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        retry_at: datetime | None = None,
+        backoff_seconds: int | None = None,
+        reason: str = "network",
+        now: datetime | None = None,
+    ) -> PublicationOperationResult:
+        """Schedule a bounded retry from the current claimed boundary."""
+
+        safe_reason = _publication_reason(reason)
+        assert safe_reason is not None
+        timestamp = _publication_now(now)
+        current = self.get_publication_generation(publication_id)
+        if current is None:
+            return PublicationOperationResult(PublicationOperationStatus.missing)
+        try:
+            expected = (
+                current.state
+                if expected_state is None
+                else PublicationState(expected_state)
+            )
+        except (TypeError, ValueError):
+            raise OutboxValidationError("invalid_metadata") from None
+        if current.attempt >= MAX_ATTEMPTS:
+            if current.state not in {
+                PublicationState.queued,
+                PublicationState.claimed,
+                PublicationState.building,
+                PublicationState.retry_wait,
+            }:
+                result = self.advance_publication(
+                    publication_id,
+                    expected,
+                    PublicationState.retry_wait,
+                    lease_owner=lease_owner or worker_id,
+                    now=timestamp,
+                    retry_at=timestamp,
+                    reason=safe_reason,
+                )
+                return (
+                    result.with_status(PublicationOperationStatus.retry_wait)
+                    if result.status is PublicationOperationStatus.advanced
+                    else result
+                )
+            blocked = self.block_publication(
+                publication_id,
+                expected_state=expected,
+                lease_owner=lease_owner or worker_id,
+                reason="retry_exhausted",
+                now=timestamp,
+            )
+            return (
+                blocked.with_status(PublicationOperationStatus.retry_exhausted)
+                if blocked.status is PublicationOperationStatus.blocked
+                else blocked
+            )
+        if retry_at is None:
+            delay = 1 if backoff_seconds is None else _bounded_publication_seconds(
+                backoff_seconds, MAX_RETRY_DELAY_SECONDS
+            )
+            retry_at = timestamp + timedelta(seconds=delay)
+        else:
+            retry_at = _publication_datetime(retry_at)
+            if retry_at < timestamp or retry_at > timestamp + timedelta(seconds=MAX_RETRY_DELAY_SECONDS):
+                raise OutboxValidationError("invalid_metadata")
+        result = self.advance_publication(
+            publication_id,
+            expected,
+            PublicationState.retry_wait,
+            lease_owner=lease_owner or worker_id,
+            now=timestamp,
+            retry_at=retry_at,
+            reason=safe_reason,
+        )
+        return (
+            result.with_status(PublicationOperationStatus.retry_wait)
+            if result.status is PublicationOperationStatus.advanced
+            else result
+        )
+
+    schedule_retry = schedule_publication_retry
+    retry_publication = schedule_publication_retry
+    schedule_publication_retry_wait = schedule_publication_retry
+
+    def block_publication(
+        self,
+        publication_id: str,
+        *,
+        expected_state: PublicationState | str | None = None,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        reason: str = "operator_blocked",
+        now: datetime | None = None,
+    ) -> PublicationOperationResult:
+        """Fail closed with one safe reason and release any lease."""
+
+        safe_reason = _publication_reason(reason)
+        assert safe_reason is not None
+        current = self.get_publication_generation(publication_id)
+        if current is None:
+            return PublicationOperationResult(PublicationOperationStatus.missing)
+        if current.state is PublicationState.blocked:
+            return PublicationOperationResult(
+                PublicationOperationStatus.existing,
+                generation=current,
+                reason=current.reason,
+            )
+        try:
+            expected = (
+                current.state
+                if expected_state is None
+                else PublicationState(expected_state)
+            )
+        except (TypeError, ValueError):
+            raise OutboxValidationError("invalid_metadata") from None
+        result = self.advance_publication(
+            publication_id,
+            expected,
+            PublicationState.blocked,
+            lease_owner=lease_owner or worker_id,
+            now=now,
+            reason=safe_reason,
+        )
+        return (
+            result.with_status(PublicationOperationStatus.blocked)
+            if result.status is PublicationOperationStatus.advanced
+            else result
+        )
+
+    block_generation = block_publication
+    block_outbox = block_publication
+
+    def create_cleanup_intent(
+        self, intent: CleanupIntent
+    ) -> PublicationOperationResult:
+        """Persist exact deletion authority only after remote exposure."""
+
+        if not isinstance(intent, CleanupIntent):
+            raise OutboxValidationError("invalid_metadata")
+        if intent.state is not CleanupState.pending:
+            raise OutboxValidationError("invalid_metadata")
+        connection = self.engine.connect()
+        inserted = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            generation = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id AND task_id=:task_id",
+                {"publication_id": intent.publication_id, "task_id": intent.task_id},
+            ).mappings().first()
+            if generation is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            state = PublicationState(generation["state"])
+            if state not in {PublicationState.exposed, PublicationState.terminal_cleaned}:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=_publication_generation_from_row(generation),
+                    reason="running",
+                )
+            existing_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent.intent_id},
+            ).mappings().first()
+            if existing_row is None:
+                existing_row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                    "WHERE publication_id=:publication_id AND task_id=:task_id",
+                    {
+                        "publication_id": intent.publication_id,
+                        "task_id": intent.task_id,
+                    },
+                ).mappings().first()
+            if existing_row is not None:
+                existing = _publication_cleanup_from_row(existing_row)
+                if not _same_cleanup_input(existing, intent):
+                    raise OutboxValidationError("integrity")
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    cleanup=existing,
+                )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO publication_cleanup_intents
+                  (intent_id,publication_id,task_id,manifest_digest,exact_path,state,
+                   requested_at,verified_at,completed_at,reason)
+                VALUES
+                  (:intent_id,:publication_id,:task_id,:manifest_digest,:exact_path,
+                   'pending',:requested_at,NULL,NULL,NULL)
+                """,
+                {
+                    "intent_id": intent.intent_id,
+                    "publication_id": intent.publication_id,
+                    "task_id": intent.task_id,
+                    "manifest_digest": intent.manifest_digest,
+                    "exact_path": intent.exact_path,
+                    "requested_at": _publication_timestamp(intent.requested_at),
+                },
+            )
+            self._refresh_publication_health(connection, updated_at=intent.requested_at)
+            connection.commit()
+            inserted = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if inserted:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.enqueued,
+            cleanup=intent,
+        )
+
+    enqueue_cleanup_intent = create_cleanup_intent
+    record_cleanup_intent = create_cleanup_intent
+
+    def get_cleanup_intent(self, intent_id: str) -> CleanupIntent | None:
+        with self.engine.begin() as connection:
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+        return None if row is None else _publication_cleanup_from_row(row)
+
+    cleanup_intent = get_cleanup_intent
+
+    def list_cleanup_intents(
+        self,
+        *,
+        task_id: str | None = None,
+        states: set[CleanupState | str] | None = None,
+    ) -> list[CleanupIntent]:
+        parameters: dict[str, object] = {}
+        clauses: list[str] = []
+        if task_id is not None:
+            clauses.append("task_id=:task_id")
+            parameters["task_id"] = task_id
+        if states:
+            normalized = [CleanupState(item).value for item in states]
+            placeholders = ",".join(f":cleanup_state_{index}" for index in range(len(normalized)))
+            clauses.append(f"state IN ({placeholders})")
+            parameters.update(
+                {f"cleanup_state_{index}": value for index, value in enumerate(normalized)}
+            )
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents"
+                f"{where} ORDER BY requested_at,intent_id",
+                parameters,
+            ).mappings().all()
+        return [_publication_cleanup_from_row(row) for row in rows]
+
+    cleanup_intents = list_cleanup_intents
+
+    def verify_cleanup_intent(
+        self,
+        intent_id: str,
+        *,
+        manifest_digest: str,
+        verified_at: datetime | None = None,
+    ) -> PublicationOperationResult:
+        """Record manifest verification before a deletion side effect."""
+
+        timestamp = _publication_now(verified_at)
+        current = self.get_cleanup_intent(intent_id)
+        if current is None:
+            return PublicationOperationResult(PublicationOperationStatus.missing)
+        if current.manifest_digest != manifest_digest:
+            raise OutboxValidationError("digest_mismatch")
+        if timestamp < current.requested_at:
+            raise OutboxValidationError("invalid_metadata")
+        if current.state is CleanupState.completed:
+            return PublicationOperationResult(
+                PublicationOperationStatus.existing,
+                cleanup=current,
+            )
+        if current.state is CleanupState.blocked:
+            return PublicationOperationResult(
+                PublicationOperationStatus.lost_claim,
+                cleanup=current,
+                reason=current.reason,
+            )
+        if current.verified_at is not None:
+            return PublicationOperationResult(
+                PublicationOperationStatus.existing,
+                cleanup=current,
+            )
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            update = connection.exec_driver_sql(
+                "UPDATE publication_cleanup_intents SET verified_at=:verified_at "
+                "WHERE intent_id=:intent_id AND state='pending' AND verified_at IS NULL",
+                {"verified_at": _publication_timestamp(timestamp), "intent_id": intent_id},
+            )
+            if update.rowcount != 1:
+                row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                    "WHERE intent_id=:intent_id",
+                    {"intent_id": intent_id},
+                ).mappings().first()
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    cleanup=None if row is None else _publication_cleanup_from_row(row),
+                    reason="integrity",
+                )
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+            assert row is not None
+            updated = _publication_cleanup_from_row(row)
+            self._refresh_publication_health(connection, updated_at=timestamp)
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.verified,
+            cleanup=updated,
+        )
+
+    verify_cleanup = verify_cleanup_intent
+
+    def complete_cleanup_intent(
+        self,
+        intent_id: str,
+        *,
+        manifest_digest: str | None = None,
+        completed_at: datetime | None = None,
+    ) -> PublicationOperationResult:
+        """Finish one verified exact-path deletion and seal its generation."""
+
+        timestamp = _publication_now(completed_at)
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+            if row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            current = _publication_cleanup_from_row(row)
+            if manifest_digest is not None and current.manifest_digest != manifest_digest:
+                raise OutboxValidationError("digest_mismatch")
+            if timestamp < (current.verified_at or current.requested_at):
+                raise OutboxValidationError("invalid_metadata")
+            if current.state is CleanupState.completed:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    cleanup=current,
+                )
+            if current.state is not CleanupState.pending or current.verified_at is None:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    cleanup=current,
+                    reason="integrity",
+                )
+            completion_text = _publication_timestamp(timestamp)
+            update = connection.exec_driver_sql(
+                "UPDATE publication_cleanup_intents SET state='completed',completed_at=:completed_at "
+                "WHERE intent_id=:intent_id AND state='pending' AND verified_at IS NOT NULL",
+                {"completed_at": completion_text, "intent_id": intent_id},
+            )
+            if update.rowcount != 1:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    cleanup=current,
+                    reason="integrity",
+                )
+            generation_update = connection.exec_driver_sql(
+                "UPDATE publication_generations SET state='terminal_cleaned',updated_at=:updated_at "
+                "WHERE publication_id=:publication_id AND task_id=:task_id AND state='exposed'",
+                {
+                    "updated_at": completion_text,
+                    "publication_id": current.publication_id,
+                    "task_id": current.task_id,
+                },
+            )
+            if generation_update.rowcount != 1:
+                connection.rollback()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    cleanup=current,
+                    reason="integrity",
+                )
+            updated_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+            assert updated_row is not None
+            updated = _publication_cleanup_from_row(updated_row)
+            self._refresh_publication_health(connection, updated_at=timestamp)
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.completed,
+            cleanup=updated,
+        )
+
+    finish_cleanup_intent = complete_cleanup_intent
+    finish_cleanup = complete_cleanup_intent
+
+    def block_cleanup_intent(
+        self,
+        intent_id: str,
+        *,
+        reason: str = "cleanup_failed",
+        now: datetime | None = None,
+    ) -> PublicationOperationResult:
+        reason = _publication_reason(reason)
+        assert reason is not None
+        timestamp = _publication_now(now)
+        current = self.get_cleanup_intent(intent_id)
+        if current is None:
+            return PublicationOperationResult(PublicationOperationStatus.missing)
+        if current.state is CleanupState.completed:
+            return PublicationOperationResult(PublicationOperationStatus.existing, cleanup=current)
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            update = connection.exec_driver_sql(
+                "UPDATE publication_cleanup_intents SET state='blocked',reason=:reason "
+                "WHERE intent_id=:intent_id AND state='pending'",
+                {"reason": reason, "intent_id": intent_id},
+            )
+            if update.rowcount != 1:
+                row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                    "WHERE intent_id=:intent_id",
+                    {"intent_id": intent_id},
+                ).mappings().first()
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    cleanup=None if row is None else _publication_cleanup_from_row(row),
+                    reason="cleanup_failed",
+                )
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+            assert row is not None
+            updated = _publication_cleanup_from_row(row)
+            self._refresh_publication_health(
+                connection, updated_at=timestamp, reason=updated.reason
+            )
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.blocked,
+            cleanup=updated,
+            reason=updated.reason,
+        )
+
+    block_cleanup = block_cleanup_intent
+
+    def _expire_publication_leases_in_connection(
+        self, connection: Connection, timestamp: datetime
+    ) -> bool:
+        return _expire_publication_leases_in_connection(self, connection, timestamp)
+
+    def _refresh_publication_health(
+        self,
+        connection: Connection,
+        *,
+        updated_at: datetime,
+        reason: str | None = None,
+    ) -> None:
+        _refresh_publication_health(
+            self, connection, updated_at=updated_at, reason=reason
+        )
+
+    def _publication_exists(self, connection: Connection, publication_id: str) -> bool:
+        return _publication_exists(connection, publication_id)
+
+    def _ensure_publication_health(self) -> None:
+        """Create the singleton health row and reconcile it on restart."""
+
+        timestamp = _publication_now(None)
+        with self.engine.begin() as connection:
+            expired = self._expire_publication_leases_in_connection(
+                connection, timestamp
+            )
+            self._refresh_publication_health(
+                connection,
+                updated_at=timestamp,
+                reason="lease_expired" if expired else None,
+            )
+
+    def get_publication_health(self) -> PublicationHealth:
+        """Return bounded queue, block, and cleanup pressure facts."""
+
+        with self.engine.begin() as connection:
+            row = connection.exec_driver_sql(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM publication_generations
+                    WHERE state IN ('queued','retry_wait')) AS queued_count,
+                  (SELECT COUNT(*) FROM publication_generations WHERE state='blocked') AS blocked_count,
+                  (SELECT COUNT(*) FROM publication_cleanup_intents WHERE state='pending') AS cleanup_count,
+                  (SELECT COALESCE(SUM(receipt.byte_size),0)
+                     FROM publication_cleanup_intents AS intent
+                     LEFT JOIN publication_receipts AS receipt
+                       ON receipt.publication_id=intent.publication_id
+                    WHERE intent.state='pending') AS cleanup_bytes,
+                  (SELECT MIN(created_at) FROM publication_generations
+                    WHERE state IN ('queued','retry_wait')) AS oldest_queued_at,
+                  (SELECT reason FROM publication_health WHERE id=1) AS reason,
+                  (SELECT updated_at FROM publication_health WHERE id=1) AS updated_at
+                """
+            ).mappings().first()
+        assert row is not None
+        timestamp = _publication_datetime(row["updated_at"]) if row["updated_at"] else _publication_now(None)
+        oldest = (
+            None
+            if row["oldest_queued_at"] is None
+            else _publication_datetime(row["oldest_queued_at"])
+        )
+        return PublicationHealth(
+            queued_count=_bounded_health_count(row["queued_count"]),
+            blocked_count=_bounded_health_count(row["blocked_count"]),
+            cleanup_pending_count=_bounded_health_count(row["cleanup_count"]),
+            cleanup_pending_bytes=_bounded_health_count(row["cleanup_bytes"]),
+            updated_at=timestamp,
+            reason=row["reason"],
+            oldest_queued_at=oldest,
+            last_category=row["reason"],
+        )
+
+    publication_health = get_publication_health
+    health_snapshot = get_publication_health
+    get_publication_health_snapshot = get_publication_health
 
     # ------------------------------------------------------------------
     # Standalone raw dataset synchronizer health
@@ -3999,6 +5363,434 @@ def _event_phase(event: EventRow) -> str | None:
         return None
     phase = data.get("phase")
     return phase if isinstance(phase, str) else None
+
+
+# Publication values are serialized at the store boundary instead of relying
+# on SQLAlchemy's datetime adapters.  The schema intentionally accepts only
+# UTC millisecond timestamps, so every read/write uses these bounded helpers.
+def _publication_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(
+                value[:-1] + "+00:00" if value.endswith("Z") else value
+            )
+        except ValueError:
+            raise OutboxValidationError("invalid_metadata") from None
+    else:
+        raise OutboxValidationError("invalid_metadata")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise OutboxValidationError("invalid_metadata")
+    return parsed.astimezone(timezone.utc)
+
+
+def _publication_timestamp(value: object) -> str:
+    return (
+        _publication_datetime(value)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _publication_now(value: datetime | None) -> datetime:
+    return _publication_datetime(value or datetime.now(timezone.utc))
+
+
+def _publication_identifier(value: object, *, prefix: str | None = None) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 128:
+        raise OutboxValidationError("invalid_identifier")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is None:
+        raise OutboxValidationError("invalid_identifier")
+    if prefix is not None and not value.startswith(prefix):
+        raise OutboxValidationError("invalid_identifier")
+    return value
+
+
+def _publication_reason(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise OutboxValidationError("invalid_metadata")
+    reason = value
+    if reason not in _PUBLICATION_REASON_VALUES:
+        raise OutboxValidationError("invalid_metadata")
+    return reason
+
+
+def _bounded_publication_seconds(
+    value: object, maximum: int, *, minimum: int = 0
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OutboxValidationError("invalid_metadata")
+    if value < minimum or value > maximum:
+        raise OutboxValidationError("invalid_metadata")
+    return value
+
+
+def _bounded_health_count(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(count, 2**31 - 1))
+
+
+def _publication_generation_from_row(row: Mapping[str, object]) -> PublicationGeneration:
+    return PublicationGeneration(
+        publication_id=str(row["publication_id"]),
+        task_id=str(row["task_id"]),
+        run_id=str(row["run_id"]),
+        generation_boundary=str(row["generation_boundary"]),
+        metadata_digest=str(row["metadata_digest"]),
+        idempotency_key=str(row["idempotency_key"]),
+        state=str(row["state"]),
+        attempt=int(row["attempt"]),
+        lease_owner=None if row["lease_owner"] is None else str(row["lease_owner"]),
+        lease_expires_at=row["lease_expires_at"],
+        retry_at=row["retry_at"],
+        reason=None if row["reason"] is None else str(row["reason"]),
+        rows=int(row["expected_row_count"]),
+        objects=int(row["expected_object_count"]),
+        tasks=int(row["expected_task_count"]),
+        pipelines=int(row["expected_pipeline_count"]),
+        runs=int(row["expected_run_count"]),
+        events=int(row["expected_event_count"]),
+        artifacts=int(row["expected_artifact_count"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        exposed_at=row["exposed_at"],
+    )
+
+
+def _publication_receipt_from_row(row: Mapping[str, object]) -> PublicationReceipt:
+    return PublicationReceipt(
+        receipt_class=str(row["receipt_class"]),
+        sha256=str(row["sha256"]),
+        byte_size=int(row["byte_size"]),
+        content_key=str(row["content_key"]),
+        logical_path=None if row["logical_path"] is None else str(row["logical_path"]),
+        verified_at=row["verified_at"],
+    )
+
+
+def _publication_cleanup_from_row(row: Mapping[str, object]) -> CleanupIntent:
+    value = CleanupIntent(
+        task_id=str(row["task_id"]),
+        publication_id=str(row["publication_id"]),
+        manifest_digest=str(row["manifest_digest"]),
+        exact_path=str(row["exact_path"]),
+        state=str(row["state"]),
+        requested_at=row["requested_at"],
+        verified_at=row["verified_at"],
+        completed_at=row["completed_at"],
+        reason=None if row["reason"] is None else str(row["reason"]),
+    )
+    if str(row["intent_id"]) != value.intent_id:
+        raise OutboxValidationError("integrity")
+    return value
+
+
+def _publication_counts_values(
+    counts: object | None,
+    *,
+    rows: int,
+    objects: int,
+    tasks: int,
+    pipelines: int,
+    runs: int,
+    events: int,
+    artifacts: int,
+) -> dict[str, int]:
+    values: dict[str, object] = {
+        "rows": rows,
+        "objects": objects,
+        "tasks": tasks,
+        "pipelines": pipelines,
+        "runs": runs,
+        "events": events,
+        "artifacts": artifacts,
+    }
+    if counts is not None:
+        if isinstance(counts, Mapping):
+            source = counts
+        elif hasattr(counts, "as_dict"):
+            source = counts.as_dict()  # type: ignore[union-attr]
+        else:
+            source = {
+                name: getattr(counts, name, values[name])
+                for name in values
+            }
+        for name in values:
+            if name in source:
+                values[name] = source[name]
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise OutboxValidationError("invalid_metadata")
+    return values  # type: ignore[return-value]
+
+
+def _coerce_publication_generation(
+    generation: PublicationGeneration | None,
+    *,
+    task_id: str | None,
+    run_id: str | None,
+    generation_boundary: str | None,
+    metadata_digest: str | None,
+    publication_id: str | None,
+    idempotency_key: str | None,
+    counts: object | None,
+    rows: int,
+    objects: int,
+    tasks: int,
+    pipelines: int,
+    runs: int,
+    events: int,
+    artifacts: int,
+    created_at: datetime | None,
+    updated_at: datetime | None,
+) -> PublicationGeneration:
+    if generation is not None:
+        if not isinstance(generation, PublicationGeneration):
+            raise OutboxValidationError("invalid_metadata")
+        return generation
+    if task_id is None or run_id is None or generation_boundary is None or metadata_digest is None:
+        raise OutboxValidationError("invalid_metadata")
+    identity = GenerationIdentity(task_id, generation_boundary)
+    count_values = _publication_counts_values(
+        counts,
+        rows=rows,
+        objects=objects,
+        tasks=tasks,
+        pipelines=pipelines,
+        runs=runs,
+        events=events,
+        artifacts=artifacts,
+    )
+    created = _publication_now(created_at)
+    return PublicationGeneration(
+        publication_id=publication_id or identity.publication_id,
+        task_id=identity.task_id,
+        run_id=run_id,
+        generation_boundary=identity.stable_boundary,
+        metadata_digest=metadata_digest,
+        idempotency_key=idempotency_key or identity.idempotency_key,
+        rows=count_values["rows"],
+        objects=count_values["objects"],
+        tasks=count_values["tasks"],
+        pipelines=count_values["pipelines"],
+        runs=count_values["runs"],
+        events=count_values["events"],
+        artifacts=count_values["artifacts"],
+        created_at=created,
+        updated_at=created if updated_at is None else updated_at,
+    )
+
+
+def _generation_parameters(value: PublicationGeneration) -> dict[str, object]:
+    return {
+        "publication_id": value.publication_id,
+        "task_id": value.task_id,
+        "run_id": value.run_id,
+        "generation_boundary": value.generation_boundary,
+        "metadata_digest": value.metadata_digest,
+        "idempotency_key": value.idempotency_key,
+        "expected_row_count": value.rows,
+        "expected_object_count": value.objects,
+        "expected_task_count": value.tasks,
+        "expected_pipeline_count": value.pipelines,
+        "expected_run_count": value.runs,
+        "expected_event_count": value.events,
+        "expected_artifact_count": value.artifacts,
+        "created_at": _publication_timestamp(value.created_at),
+        "updated_at": _publication_timestamp(value.updated_at),
+    }
+
+
+def _same_generation_input(
+    existing: PublicationGeneration, candidate: PublicationGeneration
+) -> bool:
+    return (
+        existing.publication_id == candidate.publication_id
+        and existing.task_id == candidate.task_id
+        and existing.run_id == candidate.run_id
+        and existing.generation_boundary == candidate.generation_boundary
+        and existing.metadata_digest == candidate.metadata_digest
+        and existing.idempotency_key == candidate.idempotency_key
+        and existing.counts() == candidate.counts()
+    )
+
+
+def _publication_transition_values(
+    current: PublicationGeneration,
+    target: PublicationState,
+    *,
+    timestamp: datetime,
+    lease_owner: str | None,
+    lease_expires_at: datetime | None,
+    retry_at: datetime | None,
+    reason: str | None,
+) -> dict[str, object]:
+    updated = _publication_now(timestamp)
+    if updated < current.updated_at:
+        raise OutboxValidationError("invalid_metadata")
+    owner = lease_owner
+    expires = lease_expires_at
+    retry = retry_at
+    safe_reason = _publication_reason(reason)
+    if target in {PublicationState.claimed, PublicationState.building}:
+        owner = owner or current.lease_owner
+        if owner is None:
+            raise OutboxValidationError("invalid_metadata")
+        owner = _publication_identifier(owner)
+        expires = (
+            current.lease_expires_at
+            if expires is None
+            else _publication_datetime(expires)
+        )
+        if expires is None:
+            expires = updated + timedelta(seconds=MAX_LEASE_SECONDS)
+        if expires < updated or expires > updated + timedelta(seconds=MAX_LEASE_SECONDS):
+            raise OutboxValidationError("invalid_metadata")
+        retry = None
+        safe_reason = None
+    elif target is PublicationState.retry_wait:
+        owner = None
+        expires = None
+        retry = updated + timedelta(seconds=1) if retry is None else _publication_datetime(retry)
+        if retry < updated or retry > updated + timedelta(seconds=MAX_RETRY_DELAY_SECONDS):
+            raise OutboxValidationError("invalid_metadata")
+        safe_reason = safe_reason or "network"
+    elif target is PublicationState.blocked:
+        owner = None
+        expires = None
+        retry = None
+        if safe_reason is None:
+            raise OutboxValidationError("invalid_metadata")
+    else:
+        owner = None
+        expires = None
+        retry = None
+        safe_reason = None
+    exposed_at = current.exposed_at
+    if target is PublicationState.exposed:
+        exposed_at = updated
+    return {
+        "state": target.value,
+        "lease_owner": owner,
+        "lease_expires_at": None if expires is None else _publication_timestamp(expires),
+        "retry_at": None if retry is None else _publication_timestamp(retry),
+        "reason": safe_reason,
+        "updated_at": _publication_timestamp(updated),
+        "exposed_at": None if exposed_at is None else _publication_timestamp(exposed_at),
+    }
+
+
+def _publication_receipt_id(publication_id: str, receipt: PublicationReceipt) -> str:
+    seed = (
+        f"receipt-v1\0{publication_id}\0{receipt.receipt_class.value}\0"
+        f"{receipt.sha256}\0{receipt.content_key}"
+    ).encode()
+    return f"receipt-{hashlib.sha256(seed).hexdigest()}"
+
+
+def _same_receipt(existing: PublicationReceipt, candidate: PublicationReceipt) -> bool:
+    return (
+        existing.receipt_class is candidate.receipt_class
+        and existing.sha256 == candidate.sha256
+        and existing.byte_size == candidate.byte_size
+        and existing.content_key == candidate.content_key
+        and existing.logical_path == candidate.logical_path
+    )
+
+
+def _same_cleanup_input(existing: CleanupIntent, candidate: CleanupIntent) -> bool:
+    return (
+        existing.intent_id == candidate.intent_id
+        and existing.task_id == candidate.task_id
+        and existing.publication_id == candidate.publication_id
+        and existing.manifest_digest == candidate.manifest_digest
+        and existing.exact_path == candidate.exact_path
+    )
+
+
+def _publication_exists(connection: Connection, publication_id: str) -> bool:
+    row = connection.exec_driver_sql(
+        "SELECT 1 FROM publication_generations WHERE publication_id=:publication_id",
+        {"publication_id": publication_id},
+    ).first()
+    return row is not None
+
+
+def _expire_publication_leases_in_connection(
+    store: SQLiteTaskStore, connection: Connection, timestamp: datetime
+) -> bool:
+    now_text = _publication_timestamp(timestamp)
+    result = connection.exec_driver_sql(
+        "UPDATE publication_generations "
+        "SET state='retry_wait',lease_owner=NULL,lease_expires_at=NULL,retry_at=:retry_at,"
+        "reason='lease_expired',updated_at=:updated_at "
+        "WHERE state IN ('claimed','building') AND lease_expires_at<=:now",
+        {"retry_at": now_text, "updated_at": now_text, "now": now_text},
+    )
+    return result.rowcount > 0
+
+
+def _refresh_publication_health(
+    store: SQLiteTaskStore,
+    connection: Connection,
+    *,
+    updated_at: datetime,
+    reason: str | None = None,
+) -> None:
+    safe_reason = _publication_reason(reason)
+    counts = connection.exec_driver_sql(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM publication_generations WHERE state IN ('queued','retry_wait')) AS queued_count,
+          (SELECT COUNT(*) FROM publication_generations WHERE state='blocked') AS blocked_count,
+          (SELECT COUNT(*) FROM publication_cleanup_intents WHERE state='pending') AS cleanup_count,
+          (SELECT COALESCE(SUM(receipt.byte_size),0)
+             FROM publication_cleanup_intents AS intent
+             LEFT JOIN publication_receipts AS receipt
+               ON receipt.publication_id=intent.publication_id
+            WHERE intent.state='pending') AS cleanup_bytes
+        """
+    ).mappings().first()
+    assert counts is not None
+    existing = connection.exec_driver_sql(
+        "SELECT reason,updated_at FROM publication_health WHERE id=1"
+    ).mappings().first()
+    timestamp = _publication_now(updated_at)
+    if existing is not None and existing["updated_at"]:
+        timestamp = max(timestamp, _publication_datetime(existing["updated_at"]))
+    if safe_reason is None and existing is not None:
+        safe_reason = _publication_reason(existing["reason"])
+    parameters = {
+        "queued_count": _bounded_health_count(counts["queued_count"]),
+        "blocked_count": _bounded_health_count(counts["blocked_count"]),
+        "cleanup_pending_count": _bounded_health_count(counts["cleanup_count"]),
+        "cleanup_pending_bytes": _bounded_health_count(counts["cleanup_bytes"]),
+        "reason": safe_reason,
+        "updated_at": _publication_timestamp(timestamp),
+    }
+    connection.exec_driver_sql(
+        """
+        INSERT INTO publication_health
+          (id,queued_count,blocked_count,cleanup_pending_count,cleanup_pending_bytes,reason,updated_at)
+        VALUES (1,:queued_count,:blocked_count,:cleanup_pending_count,:cleanup_pending_bytes,:reason,:updated_at)
+        ON CONFLICT(id) DO UPDATE SET
+          queued_count=excluded.queued_count,
+          blocked_count=excluded.blocked_count,
+          cleanup_pending_count=excluded.cleanup_pending_count,
+          cleanup_pending_bytes=excluded.cleanup_pending_bytes,
+          reason=excluded.reason,
+          updated_at=excluded.updated_at
+        """,
+        parameters,
+    )
 
 
 def _latest_review_start_id(events: list[EventRow]) -> int | None:

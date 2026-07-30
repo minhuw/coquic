@@ -352,6 +352,12 @@ def test_schema_rejects_malformed_receipts_and_cross_task_ownership() -> None:
                 "publication_id": identity.publication_id,
             },
         )
+        assert connection.execute(
+            text(
+                "SELECT logical_path FROM publication_receipts "
+                "WHERE receipt_id = 'receipt-public'"
+            )
+        ).scalar_one() == "runs/run-1/trajectory.json"
         invalid_receipts = (
             {
                 "receipt_id": "receipt-public-key",
@@ -427,6 +433,54 @@ def test_schema_rejects_malformed_receipts_and_cross_task_ownership() -> None:
                         "VALUES (:receipt_id,:publication_id,:task_id,:receipt_class,:digest,4,:content_key,:logical_path,:verified_at)"
                     ),
                     {"digest": DIGEST, "publication_id": identity.publication_id, **receipt},
+                )
+
+        private_locator_paths = (
+            "runs/PRIVATE/trajectory.json",
+            "runs/PrIvAtE/trajectory.json",
+            "runs/Credential/trajectory.json",
+            "runs/CREDENTIAL/trajectory.json",
+            "runs/CREDENTIALS/trajectory.json",
+            "runs/CrEdEnTiAlS/trajectory.json",
+            "runs/SeCrEt/trajectory.json",
+            "runs/SECRET/trajectory.json",
+            "runs/ToKeN/trajectory.json",
+            "runs/TOKEN/trajectory.json",
+            "PRIVATE-BUCKET",
+            "pRiVaTe_Object",
+            "PRIVATE-OBJECT-KEY",
+            "PrIvAtE_object_key",
+            "PRIVATE-URL",
+            "pRiVaTe_PaTh",
+            "INTERNAL-BUCKET",
+            "iNtErNaL_Object",
+            "INTERNAL-OBJECT-KEY",
+            "InTeRnAl_object_key",
+            "INTERNAL-URL",
+            "iNtErNaL_PaTh",
+            "SECRET-BUCKET",
+            "sEcReT_Object",
+            "SECRET-OBJECT-KEY",
+            "SeCrEt_object_key",
+            "SECRET-URL",
+            "sEcReT_PaTh",
+        )
+        for index, logical_path in enumerate(private_locator_paths):
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    text(
+                        "INSERT INTO publication_receipts "
+                        "(receipt_id,publication_id,task_id,receipt_class,sha256,byte_size,content_key,logical_path,verified_at) "
+                        "VALUES (:receipt_id,:publication_id,'task-1','public',:digest,4,:public_key,:logical_path,:verified_at)"
+                    ),
+                    {
+                        "digest": DIGEST,
+                        "public_key": PUBLIC_KEY,
+                        "publication_id": identity.publication_id,
+                        "receipt_id": f"receipt-private-locator-case-{index}",
+                        "logical_path": logical_path,
+                        "verified_at": "2026-07-28T12:00:00.000Z",
+                    },
                 )
 
 

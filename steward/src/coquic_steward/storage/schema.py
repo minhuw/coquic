@@ -867,17 +867,17 @@ class PublicationReceiptRow(Base):
             "substr(logical_path, -1, 1) <> '/' AND "
             "instr(logical_path, '//') = 0 AND instr(logical_path, '://') = 0 AND "
             "logical_path NOT GLOB '*[/][^A-Za-z0-9]*' AND "
-            "instr('/' || logical_path || '/', '/private/') = 0 AND "
-            "instr('/' || logical_path || '/', '/credential/') = 0 AND "
-            "instr('/' || logical_path || '/', '/credentials/') = 0 AND "
-            "instr('/' || logical_path || '/', '/secret/') = 0 AND "
-            "instr('/' || logical_path || '/', '/token/') = 0 AND "
-            "logical_path NOT GLOB 'private[-_]*' AND "
-            "logical_path NOT GLOB '*[-_]private[-_]*' AND "
-            "logical_path NOT GLOB 'internal[-_]*' AND "
-            "logical_path NOT GLOB '*[-_]internal[-_]*' AND "
-            "logical_path NOT GLOB 'secret[-_]*' AND "
-            "logical_path NOT GLOB '*[-_]secret[-_]*')",
+            "instr('/' || lower(logical_path) || '/', '/private/') = 0 AND "
+            "instr('/' || lower(logical_path) || '/', '/credential/') = 0 AND "
+            "instr('/' || lower(logical_path) || '/', '/credentials/') = 0 AND "
+            "instr('/' || lower(logical_path) || '/', '/secret/') = 0 AND "
+            "instr('/' || lower(logical_path) || '/', '/token/') = 0 AND "
+            "lower(logical_path) NOT GLOB 'private[-_]*' AND "
+            "lower(logical_path) NOT GLOB '*[-_]private[-_]*' AND "
+            "lower(logical_path) NOT GLOB 'internal[-_]*' AND "
+            "lower(logical_path) NOT GLOB '*[-_]internal[-_]*' AND "
+            "lower(logical_path) NOT GLOB 'secret[-_]*' AND "
+            "lower(logical_path) NOT GLOB '*[-_]secret[-_]*')",
             name="ck_publication_receipt_logical_path",
         ),
         CheckConstraint(

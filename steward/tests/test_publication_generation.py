@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -115,6 +116,34 @@ def _graph(source: AtifSource, *, lifecycle: str = "active") -> dict:
 
 def _compose(graph: dict):
     return compose_publication_generation(graph, scanner_runner=_scanner)
+
+
+class _ThirdTraversalMapping(Mapping[str, object]):
+    def __init__(self, values: dict[str, object], *, field: str, transient: object, stable: object) -> None:
+        self._values = dict(values)
+        self._field = field
+        self._transient = transient
+        self._stable = stable
+        self._items_calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def items(self):
+        self._items_calls += 1
+        if self._items_calls == 3:
+            self._values[self._field] = self._transient
+            try:
+                return list(self._values.items())
+            finally:
+                self._values[self._field] = self._stable
+        return self._values.items()
 
 
 def test_generation_is_deterministic_and_detached() -> None:
@@ -248,6 +277,63 @@ def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
         return outcome
 
     result = compose_publication_generation(graph, run_builder=builder, scanner_runner=_scanner)
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.changing,)
+    assert not hasattr(result, "payload")
+
+
+def test_aba_mutation_during_detached_capture_is_fail_closed() -> None:
+    source = _source()
+    graph = _graph(source)
+    graph["task"] = _ThirdTraversalMapping(
+        graph["task"],
+        field="title",
+        transient="transient ABA title",
+        stable="Generation fixture",
+    )
+
+    result = _compose(graph)
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.changing,)
+    assert not hasattr(result, "payload")
+
+
+@pytest.mark.parametrize("section", ["task", "pipeline", "run", "event"])
+def test_nested_aba_mutation_during_capture_is_fail_closed(section: str) -> None:
+    source = _source()
+    graph = _graph(source)
+    if section == "task":
+        graph["task"] = _ThirdTraversalMapping(
+            graph["task"],
+            field="title",
+            transient="nested transient task title",
+            stable="Generation fixture",
+        )
+    elif section == "pipeline":
+        graph["pipelines"][0] = _ThirdTraversalMapping(
+            graph["pipelines"][0],
+            field="name",
+            transient="nested transient pipeline name",
+            stable="Planning pipeline",
+        )
+    elif section == "run":
+        graph["runs"][0] = _ThirdTraversalMapping(
+            {"source": graph["runs"][0], "state": "succeeded"},
+            field="state",
+            transient="running",
+            stable="succeeded",
+        )
+    else:
+        graph["events"][0] = _ThirdTraversalMapping(
+            graph["events"][0],
+            field="summary",
+            transient="nested transient event summary",
+            stable="Planning started",
+        )
+
+    result = _compose(graph)
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.changing,)

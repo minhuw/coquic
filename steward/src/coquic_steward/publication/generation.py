@@ -48,6 +48,7 @@ MAX_GENERATION_ARTIFACTS: Final[int] = 16_384
 MAX_GENERATION_OBJECTS: Final[int] = 16_384
 MAX_GENERATION_GRAPH_NODES: Final[int] = 131_072
 MAX_GENERATION_STRINGS: Final[int] = 65_536
+MAX_GRAPH_CAPTURE_PASSES: Final[int] = 3
 
 _ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(
@@ -139,6 +140,20 @@ def _graph_serial(value: Any, budget: list[int]) -> Any:
 
 def _graph_fingerprint(value: Any) -> str:
     return hashlib.sha256(_canonical(_graph_serial(value, [0]))).hexdigest()
+
+
+def _capture_stable_graph(value: object) -> tuple[Any, str]:
+    """Capture and authenticate a bounded number of detached graph views."""
+
+    captures: list[Any] = []
+    fingerprints: list[str] = []
+    for _ in range(MAX_GRAPH_CAPTURE_PASSES):
+        detached = _freeze_graph(value)
+        captures.append(detached)
+        fingerprints.append(_graph_fingerprint(detached))
+    if len(set(fingerprints)) != 1:
+        raise PublicationError(ReasonCode.changing)
+    return captures[0], fingerprints[0]
 
 
 def _failure(code: ReasonCode) -> FailClosed:
@@ -949,17 +964,28 @@ def _build_generation(
     builder: Callable[..., PublicationOutcome],
     builder_kwargs: Mapping[str, Any],
     mutation_watch: object,
-    graph_fingerprint: str,
+    source_fingerprint: str,
+    detached_view: object,
+    detached_fingerprint: str,
     credential_sources: object,
     known_secrets: Sequence[str] | str | None,
     scanner_runner: Any,
     scanner_timeout: float,
 ) -> GenerationOutcome:
-    def changed() -> bool:
+    def source_changed() -> bool:
         try:
-            return _graph_fingerprint(mutation_watch) != graph_fingerprint
+            return _graph_fingerprint(mutation_watch) != source_fingerprint
         except (PublicationError, MemoryError, OSError, TypeError, ValueError, RecursionError):
             return True
+
+    def detached_changed() -> bool:
+        try:
+            return _graph_fingerprint(detached_view) != detached_fingerprint
+        except (PublicationError, MemoryError, OSError, TypeError, ValueError, RecursionError):
+            return True
+
+    def changed() -> bool:
+        return source_changed() or detached_changed()
 
     if changed():
         return _failure(ReasonCode.changing)
@@ -1244,22 +1270,35 @@ def compose_publication_generation(
         else:
             selected_secrets = tuple(known_secrets)
         mutation_watch = (graph, task, pipelines, runs, events, completed_runs)
-        graph_fingerprint = _graph_fingerprint(mutation_watch)
-        selected_task, pipeline_values, run_entries, event_values = _graph_parts(
-            graph,
-            task=task,
-            pipelines=pipelines,
-            runs=runs,
-            events=events,
-            completed_runs=completed_runs,
-        )
-        if _graph_fingerprint(mutation_watch) != graph_fingerprint:
+        source_fingerprint = _graph_fingerprint(mutation_watch)
+        detached_watch, _ = _capture_stable_graph(mutation_watch)
+        if _graph_fingerprint(mutation_watch) != source_fingerprint:
             return _failure(ReasonCode.changing)
+        (
+            detached_graph,
+            detached_task,
+            detached_pipelines,
+            detached_runs,
+            detached_events,
+            detached_completed_runs,
+        ) = detached_watch
+        selected_task, pipeline_values, run_entries, event_values = _graph_parts(
+            detached_graph,
+            task=detached_task,
+            pipelines=detached_pipelines,
+            runs=detached_runs,
+            events=detached_events,
+            completed_runs=detached_completed_runs,
+        )
         frozen_task = _freeze_graph(selected_task)
         frozen_pipelines = tuple(_freeze_graph(value) for value in pipeline_values)
         frozen_runs = tuple(_freeze_graph(value) for value in run_entries)
         frozen_events = tuple(_freeze_graph(value) for value in event_values)
-    except (PublicationError, MemoryError, OSError, TypeError, ValueError, RecursionError):
+        detached_view = (frozen_task, frozen_pipelines, frozen_runs, frozen_events)
+        detached_fingerprint = _graph_fingerprint(detached_view)
+    except PublicationError as error:
+        return _failure(error.code)
+    except (MemoryError, OSError, TypeError, ValueError, RecursionError):
         return _failure(ReasonCode.invalid_metadata)
     selected_builder = run_builder or builder or build_publication_bundle
     kwargs = _builder_kwargs(
@@ -1282,7 +1321,9 @@ def compose_publication_generation(
             builder=selected_builder,
             builder_kwargs=kwargs,
             mutation_watch=mutation_watch,
-            graph_fingerprint=graph_fingerprint,
+            source_fingerprint=source_fingerprint,
+            detached_view=detached_view,
+            detached_fingerprint=detached_fingerprint,
             credential_sources=credential_sources,
             known_secrets=selected_secrets,
             scanner_runner=scanner_runner,
@@ -1312,6 +1353,7 @@ __all__ = [
     "MAX_GENERATION_EVENTS",
     "MAX_GENERATION_ARTIFACTS",
     "MAX_GENERATION_OBJECTS",
+    "MAX_GRAPH_CAPTURE_PASSES",
     "GenerationObject",
     "GenerationObjectDescriptor",
     "GenerationOriginal",

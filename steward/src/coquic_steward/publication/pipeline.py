@@ -216,6 +216,40 @@ def _changed_artifact_ids(before: AtifDocument, after: AtifDocument) -> frozense
     )
 
 
+def _validate_declared_artifacts(document: AtifDocument) -> None:
+    """Require one exact retained component for every ATIF artifact descriptor."""
+
+    try:
+        provenance = document.as_dict()["extra"]["coquic"]
+        descriptors = provenance["artifacts"]
+    except (KeyError, TypeError):
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    if not isinstance(descriptors, list):
+        raise PublicationError(ReasonCode.invalid_metadata)
+
+    declared: dict[str, Mapping[str, Any]] = {}
+    for descriptor in descriptors:
+        if not isinstance(descriptor, Mapping):
+            raise PublicationError(ReasonCode.invalid_metadata)
+        artifact_id = descriptor.get("artifactId")
+        if not isinstance(artifact_id, str) or artifact_id in declared:
+            raise PublicationError(ReasonCode.invalid_metadata)
+        declared[artifact_id] = descriptor
+
+    retained = {item.artifact.artifact_id: item for item in document.artifacts}
+    if set(declared) != set(retained):
+        raise PublicationError(ReasonCode.partial)
+    for artifact_id, descriptor in declared.items():
+        component = retained[artifact_id].artifact
+        if (
+            descriptor.get("mediaType") != component.media_type
+            or descriptor.get("sha256") != component.sha256
+            or descriptor.get("byteSize") != component.byte_size
+            or descriptor.get("ownerStepId") != component.owner_step_id
+        ):
+            raise PublicationError(ReasonCode.invalid_metadata)
+
+
 def _inspect_component(
     component: PublicBundleComponent,
     *,
@@ -373,11 +407,15 @@ def build_publication_bundle(
         original_codex = None if original_codex_value is _MISSING else _content(original_codex_value)
 
         converted = convert_completed_run(source, **converter_kwargs)
+        # ``run_scanner`` is retained as an inert compatibility keyword.  The
+        # final builder always performs the network-disabled scanner pass;
+        # tests and trusted callers may inject only the runner implementation.
+        _ = run_scanner
         sanitization = sanitize_publication(
             converted,
             selected_credentials,
             secrets=selected_secrets,
-            run_scanner=run_scanner,
+            run_scanner=True,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
             max_repair_passes=max_repair_passes,
@@ -392,6 +430,7 @@ def build_publication_bundle(
         if atif_changed and original_codex is None:
             return _failure(ReasonCode.partial)
         finalized = _disclosure_document(sanitization.document, atif_changed=atif_changed)
+        _validate_declared_artifacts(finalized)
 
         trajectory = LogicalArtifact(
             _TRAJECTORY_ARTIFACT_ID,

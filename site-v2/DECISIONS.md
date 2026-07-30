@@ -199,7 +199,10 @@ The gate is deliberately described as a convenience notice, not authentication
 or a security boundary. It is enabled only by deployment configuration, stores
 no account data, and remains disabled in ordinary local development.
 
-## D-020: Raw Steward archive is a placement-public, eventually consistent tree
+## D-020: Raw Steward archive is a placement-public, eventually consistent tree (historical)
+
+This is a historical, non-normative record. The cloud publication and reader
+contract in D-023 supersedes its raw-tree, placement, and convergence choices.
 
 The post-Steward-2.0 raw research archive is a distinct channel from the
 sanitized Steward mirror. `$COQUIC_HOME/tasks/` is the canonical task directory;
@@ -231,7 +234,10 @@ provenance, while the task-list and grouped task-detail APIs have their own V2
 envelopes because cached summaries and expanded pipeline/verification state are
 not on-disk `task.json` documents.
 
-## D-021: Site V2 consumes the archive in-process through a rebuildable index
+## D-021: Site V2 consumes the archive in-process through a rebuildable index (historical)
+
+This is a historical, non-normative record. The cloud publication and reader
+contract in D-023 supersedes its importer, SQLite, and local-cache choices.
 
 The raw task archive consumer is an asynchronous in-process Next.js service.
 `instrumentation.ts` starts one idempotent background importer for the Node
@@ -283,7 +289,10 @@ task root.  Existing legacy mirror bytes are inert and are not automatically
 deleted.  Plan 009 owns transfer of both roots and Plan 010 owns Site V2
 import/index/UI; this decision adds neither.
 
-## D-022: One cache indexes both public archive peers
+## D-022: One cache indexes both public archive peers (historical)
+
+This is a historical, non-normative record. The cloud publication and reader
+contract in D-023 supersedes its cache, raw-peer, and control-loop choices.
 
 Site V2 consumes the task and raw control-loop peers through one asynchronous
 in-process importer, one SQLite cache, one cache revision, and one lifecycle.
@@ -300,3 +309,64 @@ protocol, raw-body cache, inferred edges, a second timer/process/database,
 retention or sanitization, and a Steward command channel. Signals and Planning
 therefore replace the earlier not-connected placeholder without changing the
 Steward visual system or task-detail composition.
+
+## D-023: Standalone Site V2 reads the public cloud publication
+
+On 2026-07-29, this decision records the clean replacement for the raw archive
+reader. It explicitly supersedes D-011, D-029, and D-032 for Steward data-source,
+publication, and route behavior. Those decisions remain readable as historical,
+non-normative records; none is erased or silently rewritten.
+
+### Context
+
+Steward now publishes validated public metadata in Cloudflare D1 and immutable,
+sanitized objects in public R2. Site V2 is a standalone Next.js Node deployment,
+so acquisition, validation/normalization, domain state, and rendering remain
+separate. The reader uses server-side native `fetch` to the Cloudflare D1 REST
+API and resolves anonymous public R2 objects only from validated artifact
+identity. Local filesystem archives are not a reader input.
+
+### Choice
+
+- The reader uses four server-only values: Cloudflare account ID, D1 database
+  ID, an account-scoped D1 Read token, and an anonymous public R2 base URL.
+- Cloudflare cannot scope a D1 Read token to one database. The token therefore
+  stays server-only, and every queried row must be public-safe. D1 reads join a
+  `visible` task head to its referenced `visible` publication; staged,
+  superseded, hidden, malformed, dangling, or private-shaped data fails closed.
+- Cloud responses use `schemaVersion: "3.0"` for status, task pages, task
+  detail, complete trajectory descriptors, and problems. A trajectory response
+  is a complete descriptor for one immutable sanitized JSON artifact, not a
+  partial transcript or an unvalidated content fallback.
+- Artifact actions accept a validated logical path, derive the content-addressed
+  public key, and return exactly one same-origin `307 Temporary Redirect` to the
+  anonymous R2 object. Site never proxies bytes or accepts a caller-supplied URL.
+- This is a clean rollout: there is no Worker move, D1 write, local SQLite or
+  cache, sidecar, compatibility reader, or historical archive migration.
+
+### Consequences and ownership
+
+Cloud publication identity is visible through task, pipeline, run, event, and
+artifact relationships. Public artifact descriptors carry their logical path,
+content-addressed `publicKey`, media type, byte size, SHA-256, availability, and
+disclosure flags. The reader can expose an active task after a completed planning
+run while retaining a complete descriptor; it never invents a partial result.
+
+Plans 048, 049, and 051-056 own complete ATIF validation, cloud acquisition,
+normalization, API contracts, rendering, activation, and proof. This decision
+does not duplicate or invent those behaviors. Deployment Plan 060 owns removal
+of old launch wiring; deployment, credential installation, and rollout remain
+operator-owned work outside this reader contract.
+
+### Security and non-goals
+
+D1 and R2 values that reach Site are public-safe: they contain no credentials,
+private bucket/key/URL, matched secret, scanner record, or private filesystem
+path. The account-scoped token is never serialized to a response or client
+bundle. R2 objects are immutable and addressed only by validated task identity
+and SHA-256. There is no D1 mutation path, local persistence, sidecar process,
+raw or compatibility fallback, prefix/revision polling, or history migration.
+
+Unpublished revision, global signal, and planner domains are intentionally
+retired. Their routes return one non-retryable `410` problem envelope rather
+than attempting a legacy read.

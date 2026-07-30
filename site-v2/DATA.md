@@ -1,29 +1,34 @@
 # Canonical Data Contract
 
-The live dashboard and task summaries are not the source of control-loop
-history.  Steward's durable raw control-loop peer is specified in
-[STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md); it retains normalized
-fetches, repeated observations, canonical signal transitions, planner
-dispositions, and explicit graph edges.  The compact dashboard remains a
-consumer-facing view and must not be treated as a sanitized producer or a
-control plane.  Raw archive disclosure is by placement and is intentionally
-not redacted.
+Site V2 is a standalone Next.js Node reader for Steward's public cloud
+publication. Cloudflare D1 contains validated public metadata and Cloudflare R2
+contains immutable sanitized objects. Acquisition, validation/normalization,
+domain state, and rendering remain separate. The former filesystem archive,
+rsync convergence, in-process importer, local cache, and raw control-loop peer
+are historical producer/reader designs, not inputs to this contract.
+
+The D1 reader uses native server-side `fetch` against the Cloudflare REST API.
+It reads only visible publication relationships and never mutates D1. R2 URLs
+are anonymous and are derived from validated content-addressed artifact identity;
+Site does not accept or proxy a caller-supplied object URL.
 
 ## Envelope
 
-Every first-party JSON response and static JSON artifact MUST use:
+Unrelated first-party resources retain their existing major versions. Steward
+cloud status, task page, task detail, trajectory descriptor, and problem
+responses use `schemaVersion: "3.0"`:
 
 ```json
 {
-  "schemaVersion": "2.0",
+  "schemaVersion": "3.0",
   "generatedAt": "2026-07-19T12:00:00Z",
   "data": {}
 }
 ```
 
-Collection responses MAY add `page`; generated evidence SHOULD add `provenance`.
-HTTP errors use the problem object in `schemas/common.schema.json` and do not use
-the success envelope.
+Collection responses MAY add pagination data; generated evidence SHOULD add
+`provenance`. Cloud problems use the `problem` member in
+`schemas/steward-cloud.schema.json` and do not use the success `data` member.
 
 ## Naming and scalar rules
 
@@ -88,58 +93,70 @@ include `warnings` identifying omissions.
 | Performance snapshot   | `/api/v2/evidence/performance/snapshots/{id}` | performance snapshot                              |
 | Interop snapshot       | `/api/v2/evidence/interop/current`            | `evidence.schema.json#/$defs/interopSnapshot`     |
 | Coverage snapshot      | `/api/v2/evidence/coverage/current`           | `evidence.schema.json#/$defs/coverageSnapshot`    |
-| Steward dashboard      | `/api/v2/steward/dashboard`                   | `steward-dashboard.schema.json#/$defs/snapshot`   |
-| Steward control loop   | `/api/v2/steward/control-loop`                | `steward-observability.schema.json#/$defs/controlLoop` |
-| Steward monitor        | `/api/v2/steward/status`                      | `steward.schema.json#/$defs/monitor`              |
-| Steward daily summary  | `/api/v2/steward/daily/{date}`                | `steward.schema.json#/$defs/dailySummary`         |
-| Steward growth summary | `/api/v2/steward/growth/current`              | `steward.schema.json#/$defs/growthSummary`        |
-| Steward task           | `/api/v2/steward/tasks/{id}`                  | `steward-observability.schema.json#/$defs/taskDetail` |
-| Raw archive task list   | `/api/v2/steward/archive/tasks`              | `steward-dataset.schema.json#/$defs/taskListResponse` |
-| Raw archive task detail | `/api/v2/steward/archive/tasks/{id}`         | `steward-dataset.schema.json#/$defs/taskDetailResponse` |
-| Raw archive run         | `/api/v2/steward/archive/tasks/{id}/pipelines/{pipelineId}/runs/{runId}` | `steward-dataset.schema.json#/$defs/run` |
-| Raw archive freshness   | `/api/v2/steward/archive/tasks/{id}/freshness` | importer status object                           |
+| Steward cloud status    | `/api/steward/status`                         | `steward-cloud.schema.json#/$defs/statusResponse` |
+| Steward cloud task page | `/api/steward/tasks`                          | `steward-cloud.schema.json#/$defs/taskPageResponse` |
+| Steward cloud task      | `/api/steward/tasks/{taskId}`                 | `steward-cloud.schema.json#/$defs/taskDetailResponse` |
+| Steward trajectory descriptor | `/api/steward/tasks/{taskId}/transcript?run={runId}` | `steward-cloud.schema.json#/$defs/trajectoryDescriptorResponse` |
+| Steward logical artifact | `/api/steward/tasks/{taskId}/artifact?path={logicalPath}` | one validated `307` redirect |
+| Retired revision domain | `/api/steward/revision`                       | `steward-cloud.schema.json#/$defs/problemResponse` (`410`) |
 
 The browser-local Workbench command/event protocol is defined by
 `workbench.schema.json` and [WORKBENCH.md](WORKBENCH.md); it is not an HTTP API.
 
-Stable legacy artifact and download paths MUST remain available during migration.
-The V2 application SHOULD consume canonical endpoints so legacy transformation is
-isolated in server adapters.
+Stable unrelated evidence, QA, transcript, and dataset paths retain their
+documented contracts. Steward's raw archive and control-loop compatibility paths
+are not reader inputs; retired global domains return the cloud `410` problem
+instead of a compatibility read.
 
-## Raw Steward task archive
+## Steward cloud publication
 
-The raw archive is an independent resource family, not another representation of
-the sanitized Steward task. Its canonical source is the direct task tree defined
-in [STEWARD_DATASET.md](STEWARD_DATASET.md), with epoch, task, pipeline, run,
-validation, review, integration, and terminal-manifest metadata validated by
-`schemas/steward-dataset.schema.json`. The archive is public by placement and
-preserves raw bytes. It does not reuse the sanitized task schema or cache table.
+The public source is the visible D1 publication graph, not a filesystem tree.
+Every cloud query joins a `visible` `task_heads` row to its referenced `visible`
+`publication_generations` row and the same-publication task data. Staged,
+superseded, hidden, malformed, dangling, or private-shaped rows fail closed.
+The account-scoped D1 Read token is server-only because Cloudflare cannot scope it
+to one database; all rows reachable through it must therefore be public-safe.
 
-The importer publishes execution state and archive state separately. A task may
-be `succeeded` while `archiveState` is `live`, `incomplete`, or `corrupt`; only a
-verified terminal manifest yields `archiveState: "verified"`. `lastSyncAt`,
-`lastSuccessfulImportAt`, accepted byte offsets/prefix identities, and a stable
-retry category describe freshness. Missing or partial usage and estimated cost
-remain explicit objects with nullable values and reasons; zero is never a
-placeholder for unavailable evidence.
+The four server values are Cloudflare account ID, D1 database ID, D1 Read token,
+and anonymous public R2 base URL. The reader has no Worker, D1 write, local
+SQLite/cache, sidecar, compatibility reader, raw fallback, or history migration.
+Builds and tests do not require live cloud credentials.
 
-Raw JSONL records are retained in source order and remain opaque. A progressive
-consumer exposes only complete newline-terminated records. An incomplete live
-tail is available as raw bytes but is not returned as a parsed record. Metadata
-before an artifact, an artifact before metadata, a replacement, truncation, or a
-missed watcher event is a recoverable import condition; the cache retries and
-retains its last valid JSON view. Terminal hash or path mismatch after manifest
-verification is corruption, not a partial success.
+### Public identity and relationships
 
-Site V2 keeps acquisition, normalization, domain state, and rendering separate.
-The importer is a single asynchronous in-process Next.js owner. SQLite stores
-only rebuildable cross-task metadata, aggregate facts, safe file descriptors,
-accepted JSONL offsets, prefix identities, and bounded retry state; it never
-stores transcript, prompt, patch, review, validation, or tool-output bodies.
-Dashboard, history, aggregate usage/cost, freshness, and revision requests are
-SQLite-only. A detail request may resolve one indexed task root and read one
-selected file on demand. Missing and partial token/cost values remain distinct
-from zero and every aggregate reports available-run coverage.
+Cloud task pages expose complete summaries ordered within either `active` or
+terminal `history` scope. A summary carries `taskId`, title, lifecycle state,
+creation/completion timestamps, `completeness: "complete"`, the owning
+`pipelineId`, the completed `runId` when present, event/artifact counts, and
+disclosure flags. Cursors are opaque, scope-bound to the latest visible
+publication, and stale cursors are terminal errors.
+
+Task detail is an all-or-nothing graph containing `task`, `pipelines`, `runs`,
+ordered `events`, `artifacts`, and an optional `trajectory` descriptor. Every
+relationship is checked: pipelines and runs own the task, events are contiguous
+from sequence 1, artifact counts match the publication, and an artifact's
+`sha256` matches its content-addressed key:
+
+```text
+v1/tasks/{taskId}/objects/sha256/{sha256[0:2]}/{sha256}
+```
+
+Each artifact descriptor contains its stable `artifactId`, owning `taskId` and
+`runId`, producer `logicalPath`, public key, media type, byte size, SHA-256,
+availability, and disclosure flags. Public keys are derived from these validated
+fields; they are not caller-provided URLs.
+
+### Complete trajectory descriptor
+
+The trajectory endpoint returns a complete descriptor for the selected completed
+run's immutable sanitized JSON artifact. It includes task, pipeline, run role and
+state, start/end timestamps, exact duration, optional artifact ID, public key,
+`mediaType: "application/json"`, byte size, SHA-256, `availability: "available"`,
+and disclosure flags. It never returns partial records, cursors, prefixes, raw
+ATIF, or a lossy transcript fallback. A task that is still active may expose its
+completed planning trajectory while its lifecycle remains `active`; an
+unavailable trajectory is represented by `null` in detail or a terminal `404`
+from the descriptor route.
 
 ## Normalization from legacy data
 
@@ -177,37 +194,27 @@ from zero and every aggregate reports available-run coverage.
 
 ### Steward
 
-- Derive the dashboard snapshot from the sanitized monitor and retained task
-  publications. It is a compact archive index, not a replacement for raw task
-  evidence.
-- Normalize the public control loop into three linked domains: signal evidence,
-  planner decisions, and task execution. Preserve the IDs connecting each
-  signal to its planner run and resulting task.
-- Preserve planner output proposals separately from canonical accepted/proposed
-  counters. When a run output contains tasks but the producer has no completion
-  event, publish both values and a diagnostic; never silently reconcile them.
-- Normalize task detail into five ordered stages: plan, implementation,
-  validation, review, and integration. Every observed state transition carries
-  a count, the contributing attempt IDs, and evidence-derived causes. Validation,
-  review, or integration may return work to implementation.
-- Task detail schema version 2.2 adds optional `planRuns` evidence with retry
-  order, lifecycle timestamps, model settings, diagnostics, and transcript
-  state. The structured `plan` remains the accepted output; planning runs do
-  not imply one plan per implementation attempt.
-- Preserve attempt-scoped worker and reviewer runs, parsed transcript records,
-  patch statistics/content, validation commands/results/log availability,
-  structured review findings/gaps, and the complete ordered event timeline.
-- Every artifact declares availability, size, redaction, and truncation at its
-  own boundary. A running task uses empty arrays or `null` for stages that have
-  not produced evidence; it never synthesizes pending evidence as success.
-- Exclude daemon and operator configuration, including integration policy,
-  mutation limits, and timeouts. Observed queue occupancy and available source
-  capacity remain working-state evidence rather than configuration disclosure.
-- Preserve archive-wide task outcomes and artifact counts even when embedded
-  recent task, signal, or wakeup lists are truncated. Published counts describe
-  the embedded lists; totals describe the complete retained archive.
-- Adapt public Steward schema v3 into the V2 envelope without reading private
-  daemon state. Preserve the source compatibility state and truncation flags.
+- Cloud task status is `available`, `empty`, or `unavailable`; a valid empty
+  publication is not an error or synthesized zero evidence.
+- Visible D1 relationships are validated before normalization. A task page is
+  complete within its bounded page; task detail validates exact expected counts,
+  ownership, event sequence, run duration, artifact identity, and disclosure
+  consistency before returning any field.
+- Cloud envelopes use version `3.0`. The detail `trajectory` is either a complete
+  validated descriptor for an available immutable JSON artifact or `null`; the
+  reader does not expose partial ATIF/JSONL records, offsets, cursors, or raw
+  transcript fallback.
+- Artifact identity remains public and deterministic: `logicalPath` identifies
+  the producer-declared artifact, while `publicKey` is the validated
+  content-addressed R2 key. Both are returned with media type, byte size, digest,
+  availability, and disclosure flags.
+- D1 rows and R2 descriptors exclude credentials, private locators, scanner
+  details, and private filesystem paths. The account-scoped D1 token never
+  reaches a response or browser bundle.
+- Complete ATIF validation, acquisition, normalization, API, rendering,
+  activation, and proof remain owned by Plans 048, 049, and 051-056. Deployment
+  Plan 060 owns old launch-wiring removal; this contract does not define those
+  implementation or deployment steps.
 - Convert loose external links and commit records to typed link/commit objects.
 - Generate daily summaries in UTC from sanitized aggregate model-usage records
   and Git history. Never publish prompts, transcript content, or private paths.
@@ -238,34 +245,19 @@ from zero and every aggregate reports available-run coverage.
   when any family begins after the selected boundary, and consumers MUST disclose
   that mismatch rather than extrapolate missing history.
 
-## Raw control-loop consumer
+## Cloud reader failure states and non-goals
 
-The raw control-loop peer is configured by
-`COQUIC_STEWARD_CONTROL_LOOP_ROOT` and defaults to
-`/opt/coquic-demo/steward/control-loop` only in production. It shares the task
-epoch but has its own event-file generations and health. The disposable SQLite
-cache stores normalized IDs, statuses, counts, graph edges, safe relative
-locators, accepted complete-line byte ranges, manifest hashes, and bounded
-retry state. It never stores event bodies, arbitrary normalized observation
-objects, prompts, transcript records, planner output, diagnostics, or artifact
-bytes.
+The reader fails closed on invalid configuration, D1 transport/provider errors,
+oversized or malformed responses, invalid public rows, dangling relationships,
+unsafe object keys, and unavailable artifacts. It never returns a partial graph
+or repairs publication data in the presentation layer. There is no local
+SQLite/cache, sidecar, Worker, D1 mutation, raw filesystem scan, compatibility
+reader, prefix/revision polling, or history migration.
 
-Events are accepted only after newline termination and schema validation. An
-append continues from its accepted prefix; truncation, replacement, duplicate
-sequence, or malformed complete lines stage a replacement and retain the last
-valid generation until the new file is valid. `current.json` is a freshness
-hint and cannot erase event history. Planner-run directories are indexed only
-after a schema-valid manifest covers every other regular file with exact size
-and SHA-256. A later byte conflict is `archive-corrupt`.
-
-Signals, observations, planner runs, proposals, and tasks join only through
-producer IDs in explicit graph edges. Missing peers and dangling links remain
-pending; an epoch mismatch is `incompatible` and does not merge or delete the
-last compatible rows. Aggregate and pagination requests query SQLite only.
-Selected signal events and planner transcripts/artifacts may read one
-manifest- or cursor-verified raw file on demand. Every response preserves
-missing, partial, pending, unavailable, incompatible, and corrupt states rather
-than converting them to zero or empty success.
+Retired revision, global signal, and planner domains are unpublished by design.
+Their cloud problem envelope is `schemaVersion: "3.0"`, `code: "UNAVAILABLE"`,
+`status: 410`, and `retryable: false`. The response does not reflect route
+parameters or private values.
 
 ## Content catalogs
 

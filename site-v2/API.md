@@ -9,7 +9,9 @@
 - Immutable snapshot URLs MAY use long-lived public caching and immutable ETags.
 - Dataset and raw transcript downloads include safe `Content-Disposition`.
 - `HEAD` on dataset archives returns the same metadata headers as `GET` without a body.
-- Successful responses include `X-Schema-Version: 2.0`.
+- Unrelated V2 responses retain their documented schema headers and versions.
+  Steward cloud JSON bodies use `schemaVersion: "3.0"`; cloud routes do not
+  expose a live credential or a private locator.
 
 ## Status codes
 
@@ -17,12 +19,13 @@
 | ------ | ---------------------------------------------------------------------- |
 | 200    | Valid complete, partial, or empty resource. Inspect envelope metadata. |
 | 400    | Invalid query/body syntax.                                             |
-| 404    | Unknown safe resource identifier or unpublished artifact.              |
+| 404    | Unknown safe resource identifier or unavailable artifact.              |
 | 409    | Resource exists but cannot satisfy the requested state transition.     |
 | 422    | Well-formed input that violates domain constraints.                    |
 | 429    | Rate limited; include `Retry-After` when known.                        |
 | 500    | Producer or transformation failure.                                    |
 | 503    | Required backend/publication unavailable.                              |
+| 410    | A retired or unpublished cloud domain is intentionally unavailable.     |
 
 ## QA
 
@@ -80,144 +83,123 @@ snapshots and preserve index order.
 Performance measurements are immutable within a snapshot. Interop result order
 comes from `testcaseOrder`. Coverage collection order comes from the producer.
 
-## Steward
+## Steward cloud reader
 
-Steward endpoints are read-only. `GET /api/v2/steward/status` returns the latest
-sanitized monitor publication. `GET /api/v2/steward/tasks/{id}` returns retained
-task evidence. Artifact URLs are explicit and MAY return 404 when the publication
-declares `notProduced` or `unavailable`; redacted artifacts have no URL.
-Daemon and operator configuration is excluded from every public Steward payload.
+Steward cloud endpoints are read-only. Site V2 is a standalone Next.js Node
+reader using server-side native `fetch` to Cloudflare D1 REST and anonymous
+public R2. D1 reads join only `visible` task heads and visible publications;
+staged, superseded, hidden, malformed, dangling, or private-shaped data fails
+closed. The account-scoped D1 Read token is server-only because Cloudflare cannot
+scope it to one database. No endpoint writes D1, runs a Worker/sidecar, opens a
+local SQLite/cache, scans a filesystem archive, or serves a compatibility/history
+fallback.
 
-`GET /api/v2/steward/control-loop` returns the linked public index used by the
-Signals, Planning, and Tasks views. Signal records retain source context and link
-to planner runs and tasks where those relationships exist. Planner runs retain
-both canonical counters and parsed output proposals so incomplete producer state
-is observable. Task summaries include the five pipeline stage states and declare
-whether detail is published.
+### Status and task pages
 
-`GET /api/v2/steward/dashboard` returns a compact index derived from the monitor
-and retained task publications. Archive totals cover the declared complete
-archive even when recent task, signal, or wakeup lists are truncated. Raw task
-publications remain authoritative for attempts, patches, transcripts,
-validations, reviews, and event timelines.
+`GET /api/steward/status` returns a no-store `statusResponse` envelope:
 
-`GET /api/v2/steward/daily/{date}` returns the UTC daily aggregate used by the
-Home report. The date uses `YYYY-MM-DD`. Usage and repository groups declare
-availability independently so a missing model-usage source never becomes zero.
+```json
+{
+  "schemaVersion": "3.0",
+  "generatedAt": "2026-07-28T00:00:02Z",
+  "data": {
+    "state": "available",
+    "taskCount": 1,
+    "latestPublicationAt": "2026-07-28T00:00:01Z"
+  }
+}
+```
 
-## Raw Steward archive
+`state` is `available`, `empty`, or `unavailable`; an empty visible publication
+is a valid response and is not fake success. `GET /api/steward/tasks` accepts
+`scope=active|history` (default `history`), `limit` (default 50, bounded to
+1-50), and an opaque scope/publication-bound `cursor`. It returns a `3.0`
+`taskPageResponse` whose `data.items` are complete task summaries and whose
+`data.pagination` has `page`, `pageSize`, `total`, and `hasNextPage`. Cursor
+continuations are also exposed in `X-Steward-Next-Cursor` and
+`X-Steward-Previous-Cursor`; a stale cursor is a terminal `409`.
 
-The raw archive endpoints are read-only and independent of the sanitized Steward
-surface. An asynchronous in-process Next.js importer maintains a rebuildable
-SQLite metadata index. Aggregate/list requests use SQLite only and never scan
-multiple task directories; one detail request may read only its resolved task.
-The importer reports `indexing`, `ready`, `degraded`, `unavailable`,
-`incompatible`, and `archive-corrupt` without absolute paths or exception text.
+Each summary contains `taskId`, title, lifecycle state (`active`, `completed`,
+`failed`, or `cancelled`), timestamps, `completeness: "complete"`, owning
+pipeline and completed-run IDs when present, event/artifact counts, and public
+disclosure flags. Active tasks remain separate from terminal history, including
+an active task that already has a completed planning run.
 
-`GET /api/steward/status` returns `{schemaVersion, generatedAt, data}` with
-`state`, `schemaVersion`, `epochId`, monotonic `revision`, bounded task and
-verification counts, timestamps, lag, watcher state, and error count. `GET
-/api/steward/revision` returns the same envelope with only the opaque revision
-and state. Both are `Cache-Control: no-store`.
+### Task detail and trajectory
 
-`GET /api/steward/tasks?cursor={opaque}` returns terminal history newest-first in
-stable pages of 50. `scope=active` selects the independently paginated active
-set, ordered by active-state prominence and stable update/task identity. Active
-and history cursors are opaque, scope-bound, SQLite-only, and never hide rows
-beyond the first page.
+`GET /api/steward/tasks/{taskId}` returns a no-store `3.0` `taskDetailResponse`.
+Its `data` is an all-or-nothing graph of `task`, `pipelines`, `runs`, ordered
+`events`, `artifacts`, and nullable `trajectory`. The reader validates exact
+publication counts, ownership, contiguous event sequence, run duration, artifact
+SHA-256/public-key identity, and disclosure consistency before serializing the
+graph. Unknown or hidden tasks return `404`; malformed IDs return `400`.
 
-`GET /api/v2/steward/archive/tasks` returns a V2 envelope whose `data` contains
-the epoch identity, ordered task summaries, and importer freshness. Each summary
-includes `taskId`, exact execution `status`, `archiveState` (`live`, `incomplete`,
-`verified`, or `corrupt`), current pipeline ID, `updatedAt`,
-`lastSuccessfulImportAt`, and a recoverable `importLag` object when bytes or
-references are still converging. A task list does not imply terminal archive
-verification.
+`GET /api/steward/tasks/{taskId}/transcript?run={runId}` is a descriptor route,
+not a transcript stream. It returns a complete `3.0`
+`trajectoryDescriptorResponse` for the selected completed run's immutable
+sanitized JSON artifact. The descriptor includes task/pipeline/run identity,
+role/state, start/end timestamps, exact duration, optional `artifactId`,
+`publicKey`, `mediaType: "application/json"`, byte size, SHA-256,
+`availability: "available"`, and disclosure flags. It never returns raw ATIF,
+partial records, prefixes, cursors, or a lossy fallback. A missing or
+unavailable descriptor returns terminal `404`; an invalid task/run ID returns
+`400`.
 
-`GET /api/v2/steward/archive/tasks/{taskId}` returns task detail grouped by
-ordered pipeline in a V2 `taskDetailResponse` envelope. Its `data` contains the
-on-disk task metadata, expanded `pipelineDetail` groups, `archiveState`, the
-separate terminal-manifest `archiveVerification`, importer `freshness`, and any
-recoverable `importLag`. Each pipeline group includes full pipeline metadata,
-validation and review records, and ordered runs. Run detail exposes role, role
-ordinal, stable archive session ID, `resumeOfRunId`, parent/retry relations,
-model/reasoning, lifecycle/exit, usage/cost availability, and artifact
-descriptors. A terminal task status does not imply a verified archive.
+### Artifact action
 
-`GET /api/v2/steward/archive/tasks/{taskId}/pipelines/{pipelineId}/runs/{runId}`
-returns the run metadata and artifact descriptors. Planning, implementation,
-review, formality, commit-message, recovery, and other Steward-launched
-`codex exec` processes are runs; deterministic validation and daemon Git/SSH
-actions remain pipeline evidence. A resumed session is a new run and carries
-`resumeOfRunId`.
+`GET /api/steward/tasks/{taskId}/artifact?path={logicalPath}` validates the task
+ID and relative logical path, resolves the D1 artifact descriptor, derives the
+content-addressed public R2 URL below the configured anonymous base, and returns
+one empty `307 Temporary Redirect`:
 
-`GET /api/v2/steward/archive/tasks/{taskId}/artifacts/{path}` returns the
-synchronized raw bytes with the declared media type and safe content
-disposition. It performs no normalization, redaction, or transcript
-reconstruction. A live JSONL download may contain an incomplete tail, but parsed
-record APIs exclude that tail and expose only the accepted complete-line prefix.
+```text
+v1/tasks/{taskId}/objects/sha256/{sha256[0:2]}/{sha256}
+```
 
-`GET /api/steward/tasks/{taskId}/transcript?run={runId}&path={relativePath}`
-returns a bounded `{taskId, pipelineId, runId, file, records, nextCursor,
-previousCursor, hasMore}` envelope. Cursors are opaque and bound to the accepted
-file identity/revision; a replacement or truncation returns `409` and no stale
-records. Each record has its ordinal and parsed value only after a complete
-newline. The default page is 50 records and an explicit Load more action can
-continue until `hasMore` is false.
+The same-origin Site action sets `Location`, `Cache-Control: no-store`,
+`Content-Type: application/octet-stream`, and `X-Content-Type-Options: nosniff`.
+It never proxies bytes and ignores caller-supplied URL parameters. Invalid paths
+return `400`; missing or unavailable artifacts return `404`; unsafe public data
+or cloud failures return a problem response without reflecting private values.
 
-The task-detail `run` query selects one transcript-bearing run owned by the
-selected pipeline. Run controls preserve that selection in the URL; an unknown
-or cross-pipeline run ID cannot select evidence.
+## Retired cloud domains and errors
 
-`GET /api/steward/tasks/{taskId}/artifact?path={relativePath}` streams one
-SQLite-declared regular file below that task root with `Content-Disposition`,
-`nosniff`, and `Cache-Control: no-store`. Arbitrary paths, symlinks, non-regular
-files, and absolute path disclosure are rejected.
+The revision and global signal/planner archive domains are unpublished in the
+cloud contract. Each of these routes returns the same no-store `410` problem and
+never reads D1 or R2:
 
-`GET /api/v2/steward/archive/tasks/{taskId}/freshness` returns `lastSyncAt`,
-`lastSuccessfulImportAt`, watcher/reconciliation timestamps, accepted file
-identity/prefix/size, retry category, and whether the terminal manifest is
-observed, converged, verified, or corrupt. `GET /api/v2/steward/archive/tasks/{taskId}/import-status`
-returns the same import state grouped by pending metadata, missing artifacts,
-parse retries, and terminal verification. These are eventual-consistency
-diagnostics, not a claim that transport is realtime.
+- `GET /api/steward/revision`
+- `GET /api/steward/signals/{signalId}/events`
+- `GET /api/steward/planner-runs/{plannerRunId}/transcript`
+- `GET /api/steward/planner-runs/{plannerRunId}/artifacts/{artifact}`
 
-## Raw control-loop archive
+The body is a `schemaVersion: "3.0"` `problemResponse` with
+`code: "UNAVAILABLE"`, message `The global archive domain is unavailable in the
+cloud contract.`, `retryable: false`, `status: 410`, and `type: null`. Route
+parameters, query strings, credentials, and private values are never reflected.
 
-`COQUIC_STEWARD_CONTROL_LOOP_ROOT` defaults to
-`/opt/coquic-demo/steward/control-loop` in production. The task and
-control-loop roots are indexed by the same asynchronous importer and SQLite
-cache. `GET /api/steward/status` reports separate `domains` health plus
-control-loop counts, epoch compatibility, pending links, and current-projection
-freshness. A missing peer is `unavailable`; an epoch conflict is
-`incompatible`; malformed replacement files retain their last valid generation.
+Cloud route problem categories are closed and non-diagnostic:
 
-`GET /api/steward/signals?cursor={opaque}` and
-`GET /api/steward/planner-runs?cursor={opaque}` return complete compatible
-history in newest-activity-first pages of 50. Cursors bind to the selected
-collection and cache revision. `GET /api/steward/signals/{signalId}` and
-`GET /api/steward/planner-runs/{plannerRunId}` return bounded normalized
-metadata, explicit graph IDs, proposal dispositions, and safe artifact
-locators; they never expose raw bodies or filesystem paths.
+| Code | Status | Retryable | Meaning |
+| ---- | ------ | --------- | ------- |
+| `INVALID_REQUEST` | 400 | no | Invalid identifier, logical path, scope, or limit. |
+| `INVALID_CURSOR` | 400 | no | Cursor encoding or scope is invalid. |
+| `STALE_CURSOR` | 409 | no | Cursor no longer names the visible publication. |
+| `NOT_FOUND` | 404 | no | Task, run, or artifact is not published/available. |
+| `MISCONFIGURED` | 503 | no | Required server cloud value is missing or unsafe. |
+| `INTEGRITY_FAILURE` | 503 | no | Visible D1/R2 data fails public validation. |
+| `RATE_LIMITED` | 429 | yes | Cloudflare rate-limited the read. |
+| `UNAVAILABLE` | 503 | conditional | D1 network/timeout/server failures may retry; provider, authorization, malformed, HTTP, or limit failures are terminal. |
 
-`GET /api/steward/signals/{signalId}/events?cursor={opaque}` returns complete
-validated event records in archive sequence order. `GET
-/api/steward/planner-runs/{plannerRunId}/transcript?artifact=codex.jsonl&cursor={opaque}`
-returns complete transcript records in file order and reports an incomplete
-terminal tail only as metadata. Both cursors bind to the selected ID, accepted
-file identity, generation, and cache revision; stale cursors return `409`.
-
-`GET /api/steward/planner-runs/{plannerRunId}/artifacts/{artifact}` streams one
-manifest-verified public file with declared safe content type,
-`Content-Disposition`, `nosniff`, and `no-store`. The caller cannot provide an
-absolute path or select an unindexed file. Lists and aggregates remain
-SQLite-only; only selected signal ranges and selected verified planner-run
-artifacts perform raw reads.
+Only transient `RATE_LIMITED` and retryable `UNAVAILABLE` responses offer a
+manual Retry action. No cloud route automatically polls, retries, falls back to
+partial data, or repairs a publication in the UI.
 
 ## Legacy compatibility
 
-During migration, these paths remain stable: `/perf-results.json`,
+Unrelated legacy artifact paths remain stable during migration: `/perf-results.json`,
 `/perf-history/index.json`, `/interop-results.json`, `/coverage-results.json`,
 `/coverage/index.html`, `/duvet/report.html`, `/duvet/report.json`,
-`/duvet/snapshot.txt`, `/steward/status`, `/steward/status.json`, transcript raw
-downloads, and published dataset archive URLs.
+`/duvet/snapshot.txt`, transcript raw downloads, and published dataset archive
+URLs. Steward cloud routes above are the sole task reader; there is no raw
+archive compatibility reader or historical migration.

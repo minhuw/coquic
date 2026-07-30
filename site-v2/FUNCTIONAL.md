@@ -189,23 +189,17 @@ announced without replacing retained valid evidence with an error message.
 
 - This surface is a read-only sanitized publication; it MUST NOT expose mutation
   controls or secrets.
-- Lead with the public control loop `Signals → Planning → Tasks → Integration`.
-  The control loop is an instrument and navigation device, not an aggregate
-  health score.
+- Keep the public control-loop navigation `Signals → Planning → Tasks →
+  Integration`, but treat Signals and Planning as explicitly unavailable global
+  domains until they are published. The control loop is an instrument and
+  navigation device, not an aggregate health score.
 - Views are exactly Signals, Planning, and Tasks. Tasks is the default because
-  execution evidence is the primary public value.
+  execution evidence is the primary public value; Signals and Planning remain
+  discoverable and show the documented unavailable state without legacy data.
 - At wide desktop widths, Tasks uses parallel queue, selected execution, and
-  current-evidence panes; Signals uses provider, pending, and scheduled panes;
-  Planning uses wakeup, selected-run, and diagnostics panes. These panes return
-  to source order as one readable column on compact screens.
-- Signals separate pending evidence from scheduled evidence. Every signal keeps
-  source/provider, severity, timestamps, external links, contextual facts, and
-  related planner/task IDs. Provider fetch errors, due state, and truncation are
-  explicit.
-- Planning shows pending wakeups and planner runs with input signals, parsed
-  task proposals, accepted results, diagnostics, transcript completeness, and
-  links to resulting tasks. Mismatches between output proposals and canonical
-  counters are shown as incomplete producer state.
+  current-evidence panes; Signals and Planning retain their named panes while
+  unavailable. These panes return to source order as one readable column on
+  compact screens.
 - Tasks separate active, queued, attention, and retained counts. Every row shows
   the five-stage pipeline and links to detail only when detail is published.
 - Archive inventory and aggregate outcomes may remain supporting evidence, but
@@ -215,17 +209,19 @@ announced without replacing retained valid evidence with an error message.
 
 ## Steward planning `/steward?view=planning`
 
-- Show retained planner runs newest first with an explicit published-window
-  count and truncation state.
-- Expose run ID, status, start/completion, accepted/proposed counts, consumed
-  signal IDs, output proposals, diagnostics, transcript, and final-message
-  artifact.
-- Declare whether the published window is complete or truncated.
-- Distinguish loading, empty, unavailable, running, succeeded, failed, and invalid.
+- Keep the global Planning destination discoverable, but render its documented
+  unavailable state because the global planner archive is not published by the
+  cloud reader. Do not synthesize planner runs, read a legacy archive, or expose
+  a partial fallback. Planning evidence attached to a published task remains
+  available in that task's relational detail.
+- Distinguish loading, empty, unavailable, running, succeeded, failed, and invalid
+  states wherever a state is meaningful; the retired global route is terminal and
+  unavailable.
 
 ## Steward task `/steward/tasks/[taskId]`
 
-- Validate task IDs before reading public artifacts; invalid/unknown IDs return 404.
+- Validate task IDs before reading public artifacts; invalid IDs return 400 and
+  unknown or hidden IDs return 404.
 - Show title, state, current conclusion, source, priority/risk, creation/update,
   structured implementation plan, attempts, ordered pipeline, and event timeline.
 - Show implementation-planning runs before attempts, including retry order,
@@ -248,54 +244,31 @@ announced without replacing retained valid evidence with an error message.
 - Artifact states distinguish available, not produced, unavailable, redacted,
   and truncated.
 
-## Raw Steward archive (independent from `/steward`)
+## Steward cloud reader
 
-- Preserve the sanitized `/steward` channel and its disclosure boundary. The raw
-  archive is an explicitly separate research surface and is never silently
-  substituted for sanitized task detail.
-- Task lists and detail show exact running or terminal execution status beside a
-  distinct archive verification state. A terminal task status is not presented
-  as a verified archive until every terminal manifest descriptor exists and its
-  byte size and SHA-256 match.
-- Detail groups evidence by ordered pipeline, then shows each run's role,
-  session, interrupted/resumed relationship, retry/parent relationship, raw and
-  effective review, validation output, patches, integration evidence, and
-  artifact availability. Open role strings remain visible rather than being
-  collapsed into a fixed role list.
-- Usage and cost cards distinguish available, partial, and unavailable values;
-  they show reasons and pricing/model provenance and never render unavailable
-  evidence as zero.
-- Freshness shows last successful sync/import time, watcher versus periodic
-  reconciliation state, accepted JSONL prefix, retry category, and recoverable
-  import lag. It distinguishes a manifest observed from an archive verified.
-- Newly imported real Codex and observation records MAY appear progressively in
-  source order. A minute-sized watcher batch MAY be paced visually, but the UI
-  MUST NOT fabricate records, role output, completion, token usage, cost, or
-  realtime transport claims. Incomplete live tails are not rendered as parsed
-  records.
-- Raw artifact download returns synchronized bytes without normalization. Safe
-  task, pipeline, run, and artifact paths are validated before lookup. Aggregate
-  requests use SQLite only and never scan multiple raw task directories; one
-  detail request may read the selected indexed task root.
-- The in-process importer starts once from `instrumentation.ts`, returns without
-  awaiting a scan, watches as a latency hint, and reconciles every 60 seconds.
-  It exposes `indexing`, `ready`, `degraded`, `unavailable`, `incompatible`, and
-  `archive-corrupt` states with no path or exception leakage.
-- Task history is newest-first with an opaque stable cursor and 50 rows per
-  page. Active work has an independent bounded opaque cursor so every indexed
-  active task remains reachable without displacing terminal history. Transcript
-  chunks start at a complete-line cursor and explicit `Load
-  more` controls continue until every accepted record is visible; a changed
-  prefix returns a stale-cursor response.
-- Every transcript-bearing run owned by a pipeline has an accessible selector;
-  the validated pipeline/run selection is shareable through URL state.
-- Signals and Planning consume the compatible raw control-loop archive through
-  the same SQLite index as Tasks. Their 50-row master lists are newest-activity
-  first and keep selected IDs in URL state (`signal`, `run`, and `proposal`). A
-  selected signal exposes observations, transitions, explicit planner/task
-  edges, and every indexed event through accessible load-more chunks. A selected
-  planner run exposes wakeup/input IDs, every proposal disposition (including
-  invalid, duplicate, policy-rejected, and capacity-skipped outcomes), linked
-  tasks, and manifest-verified prompt/transcript/output/diagnostic artifacts.
-  Missing, pending, delayed, incompatible, and corrupt domains remain explicit;
-  checked-in fixtures are never a production fallback.
+- Read only the validated public publication: visible task heads and visible
+  generations in Cloudflare D1, plus immutable sanitized objects in public R2.
+  Local filesystem archives, SQLite, rsync, Workers, sidecars, compatibility
+  readers, and historical migration are not inputs to this surface.
+- Active and history task views show only visible, complete summaries. An active
+  task remains reachable after a completed planning publication; staged,
+  superseded, hidden, malformed, dangling, or private-shaped rows fail closed.
+- Task detail is one relational graph of the published task, pipelines, runs,
+  ordered events, artifacts, and optional trajectory. Validate ownership,
+  counts, sequence, timing, hashes, public keys, and disclosure before display;
+  do not substitute partial or stale data. See [the cloud reader API](API.md#steward-cloud-reader)
+  for the version-3 envelope and route contracts.
+- The trajectory route returns one complete `schemaVersion: "3.0"` descriptor
+  for an immutable sanitized JSON artifact. It never returns raw ATIF, partial
+  records, prefixes, cursors, or an unvalidated fallback.
+- Artifact actions validate task identity and logical paths, derive a
+  content-addressed public R2 key below the configured base, and return exactly
+  one same-origin `307 Temporary Redirect`. Site never proxies bytes or accepts
+  a caller-supplied URL; unavailable artifacts remain unavailable.
+- Global Signals, Planning, and revision destinations remain discoverable but
+  return the documented terminal unavailable response. They never read a legacy
+  archive or fabricate data from fixtures.
+- Cloud states distinguish available, valid empty, transient unavailable,
+  terminal unavailable, malformed, and integrity failure. Only transient
+  network, timeout, rate-limit, or server failures offer a manual retry; no route
+  polls, retries automatically, caches, or falls back to partial data.

@@ -8,6 +8,7 @@ single final batch is the only operation that can change a public head.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -39,9 +40,17 @@ _PATH = re.compile(r"^(?!/)(?!.*://)(?!.*\.\.)[^\x00-\x1f]{1,1024}$")
 _PUBLIC_KEY = re.compile(r"^v1/tasks/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/objects/sha256/([0-9a-f]{2})/([0-9a-f]{64})$")
 _REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PRIVATE_LOCATOR = re.compile(
-    r"(?:[a-z][a-z0-9+.-]*://|(?:^|[\\/])(?:private|credential|credentials|secret|token)(?:[\\/]|$)|(?:^|[A-Za-z]:)[\\/])",
+    r"(?:"
+    r"[a-z][a-z0-9+.-]*://|"
+    r"(?:^|[\\/])(?:private|credential|credentials|secret|token)(?:[\\/]|$)|"
+    r"(?:^|[A-Za-z]:)[\\/]|"
+    r"^(?:~[/\\]|\\\\)|"
+    r"(?:^|[-_])(?:private|internal|secret)[-_](?:bucket|object(?:[-_]key)?|url|path)(?:$|[-_])"
+    r")",
     re.IGNORECASE,
 )
+
+_METADATA_FIELDS = ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")
 
 
 class D1ErrorCode(StrEnum):
@@ -266,6 +275,14 @@ def _safe_value(value: object, *, key: str = "") -> None:
             _safe_value(child, key=key)
 
 
+def _metadata_digest(payload: Mapping[str, Any]) -> str:
+    metadata = {key: payload[key] for key in _METADATA_FIELDS}
+    canonical = (
+        json.dumps(metadata, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _validate_payload(source: Mapping[str, Any]) -> dict[str, Any]:
     payload = _mapping(source)
     _keys(payload, _TOP_LEVEL)
@@ -408,6 +425,8 @@ def _validate_payload(source: Mapping[str, Any]) -> dict[str, Any]:
         _invalid(D1ErrorCode.generation_conflict)
     if generation_run_id not in run_ids:
         _invalid(D1ErrorCode.generation_conflict)
+    if generation["metadataDigest"] != _metadata_digest(payload):
+        _invalid(D1ErrorCode.digest_mismatch)
     # Keep the returned object detached from mutable caller containers.
     return json.loads(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
 
@@ -698,7 +717,7 @@ class D1PublicationClient:
             generation["createdAt"],
         )
 
-    def _verify_generation(self, payload: Mapping[str, Any]) -> None:
+    def _verify_generation(self, payload: Mapping[str, Any]) -> str:
         rows = self._query(_statement(_GENERATION_SELECT, payload["publicationId"], payload["taskId"]))
         if not rows:
             _invalid(D1ErrorCode.generation_state)
@@ -707,6 +726,9 @@ class D1PublicationClient:
         expected = self._generation_expected(payload)
         if actual != expected and not (actual[:4] == expected[:4] and actual[5:] == expected[5:] and actual[4] == "visible"):
             _invalid(D1ErrorCode.generation_conflict)
+        if actual[4] not in {"staged", "visible"}:
+            _invalid(D1ErrorCode.generation_state)
+        return actual[4]
 
     def _stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
         publication_id = payload["publicationId"]
@@ -767,9 +789,13 @@ class D1PublicationClient:
             ("events", _statement(_EVENT_SELECT, publication_id), tuple((item["taskId"], item["sequence"], item["eventType"], item["occurredAt"], item["summary"]) for item in payload["events"])),
             ("artifacts", _statement(_ARTIFACT_SELECT, publication_id), tuple((item["artifactId"], item["taskId"], item["runId"], item["logicalPath"], item["publicKey"], item["mediaType"], item["byteSize"], item["sha256"], item["availability"], int(item["disclosure"]["redactionApplied"]), int(item["disclosure"]["originalRetained"])) for item in payload["artifacts"])),
         )
-        for _, statement, expected_rows in checks:
+        for name, statement, expected_rows in checks:
             actual_rows = self._query(statement)
             actual = tuple(tuple(item.get(column) for column in self._columns(statement[0])) for item in actual_rows)
+            if name == "events":
+                expected_rows = tuple(sorted(expected_rows, key=lambda row: (row[0], row[1])))
+            else:
+                expected_rows = tuple(sorted(expected_rows, key=lambda row: row[0]))
             if actual != expected_rows:
                 _invalid(D1ErrorCode.generation_conflict)
 
@@ -820,11 +846,17 @@ class D1PublicationClient:
         payload = _validate_payload(source)
         if payload["headIntent"]["state"] != "visible":
             _invalid(D1ErrorCode.generation_state)
-        self._verify_generation(payload)
+        generation_state = self._verify_generation(payload)
         self._verify_rows(payload)
         current = self._query(_statement(_VISIBLE_HEAD_SELECT, payload["taskId"]))
-        if current and current[0].get("publication_id") == payload["publicationId"] and current[0].get("state") == "visible":
-            return ExposureReceipt(payload["publicationId"], payload["taskId"])
+        if current and current[0].get("publication_id") == payload["publicationId"]:
+            if current[0].get("state") == "visible":
+                return ExposureReceipt(payload["publicationId"], payload["taskId"])
+            if current[0].get("state") == "hidden":
+                return ExposureReceipt(payload["publicationId"], payload["taskId"], state="hidden")
+            _invalid(D1ErrorCode.generation_state)
+        if generation_state != "staged":
+            _invalid(D1ErrorCode.generation_state)
         updated_at = payload["headIntent"]["updatedAt"]
         self._batch(
             (

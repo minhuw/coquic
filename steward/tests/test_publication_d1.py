@@ -24,6 +24,15 @@ ACCOUNT = "a" * 32
 DATABASE = "12345678-1234-4abc-8def-1234567890ab"
 TOKEN = "test-token"
 TS = "2026-07-28T00:00:00Z"
+METADATA_FIELDS = ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")
+
+
+def refresh_metadata_digest(payload: dict[str, Any]) -> None:
+    metadata = {key: payload[key] for key in METADATA_FIELDS}
+    canonical = (
+        json.dumps(metadata, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    payload["generation"]["metadataDigest"] = hashlib.sha256(canonical).hexdigest()
 
 
 class ScriptedD1:
@@ -89,7 +98,7 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
                 "disclosure": {"redactionApplied": False, "originalRetained": True},
             }
         )
-    return {
+    payload = {
         "schemaVersion": "1.0",
         "publicationId": publication_id,
         "taskId": task_id,
@@ -97,7 +106,7 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
             "publicationId": publication_id,
             "taskId": task_id,
             "runId": run_id,
-            "metadataDigest": hashlib.sha256(publication_id.encode()).hexdigest(),
+            "metadataDigest": "0" * 64,
             "idempotencyKey": f"retry-{publication_id}",
             "state": "staged",
             "expectedCounts": {"tasks": 1, "pipelines": 1, "runs": 1, "events": 1, "artifacts": artifact_count},
@@ -110,6 +119,8 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
         "events": [{"taskId": task_id, "sequence": 1, "eventType": "completed", "occurredAt": "2026-07-28T00:00:01Z", "summary": "Run completed"}],
         "artifacts": artifacts,
     }
+    refresh_metadata_digest(payload)
+    return payload
 
 
 def test_stage_is_hidden_until_verified_exposure_and_replays() -> None:
@@ -166,6 +177,7 @@ def test_conflict_private_locator_and_bounds_fail_closed() -> None:
     payload = publication()
     conflicting = copy.deepcopy(payload)
     conflicting["task"]["title"] = "changed"
+    refresh_metadata_digest(conflicting)
     d1.stage(payload)
     with pytest.raises(D1Error) as error:
         d1.stage(conflicting)
@@ -173,6 +185,7 @@ def test_conflict_private_locator_and_bounds_fail_closed() -> None:
 
     private = publication()
     private["task"]["title"] = "private://bucket/object"
+    refresh_metadata_digest(private)
     with pytest.raises(D1Error) as error:
         d1.stage(private)
     assert error.value.code == D1ErrorCode.private_value
@@ -182,6 +195,61 @@ def test_conflict_private_locator_and_bounds_fail_closed() -> None:
     staged_batches = [item for item in server.requests if "batch" in item and any("INSERT INTO artifacts" in statement["sql"] for statement in item["batch"])]
     assert len(staged_batches) >= 2
     assert all(sum(len(statement["params"]) for statement in item["batch"]) <= MAX_BATCH_PARAMETERS for item in staged_batches)
+
+
+def test_row_verification_normalizes_fixed_query_order() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-order", artifact_count=2)
+    payload["artifacts"].reverse()
+    refresh_metadata_digest(payload)
+
+    d1.stage(payload)
+
+
+def test_false_metadata_digest_is_rejected_before_staging() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-digest")
+    payload["generation"]["metadataDigest"] = "0" * 64
+
+    with pytest.raises(D1Error) as error:
+        d1.stage(payload)
+
+    assert error.value.code == D1ErrorCode.digest_mismatch
+    assert server.requests == []
+    assert server.connection.execute("SELECT count(*) FROM publication_generations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("locator", ["~/work/coquic", r"~\work\coquic", r"\\server\share", "internal_object_key"])
+def test_shared_private_locators_are_rejected_before_transport(locator: str) -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-locator")
+    payload["task"]["title"] = locator
+    refresh_metadata_digest(payload)
+
+    with pytest.raises(D1Error) as error:
+        d1.stage(payload)
+
+    assert error.value.code == D1ErrorCode.private_value
+    assert server.requests == []
+
+
+def test_hidden_head_replay_does_not_reopen_generation() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-hidden", run_id="run-hidden")
+    d1.publish(first)
+    d1.hide_task(first["taskId"], "unsafe_content")
+
+    replay = d1.publish(copy.deepcopy(first))
+    assert replay.state == "hidden"
+    assert server.connection.execute("SELECT state FROM task_heads WHERE task_id = ?", (first["taskId"],)).fetchone()[0] == "hidden"
+
+    second = publication("publication-after-hidden", run_id="run-after-hidden")
+    d1.publish(second)
+    assert server.connection.execute("SELECT state FROM task_heads WHERE task_id = ?", (first["taskId"],)).fetchone()[0] == "visible"
 
 
 @pytest.mark.parametrize(

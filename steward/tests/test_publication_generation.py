@@ -18,6 +18,7 @@ from coquic_steward.publication.generation import (
     PublicationGeneration,
     compose_publication_generation,
 )
+from coquic_steward.publication.pipeline import build_publication_bundle
 
 
 def _scanner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -198,6 +199,59 @@ def test_running_run_is_rejected_before_builder() -> None:
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.running,)
+
+
+@pytest.mark.parametrize(
+    ("section", "index", "field"),
+    [
+        ("task", None, "title"),
+        ("pipeline", 0, "name"),
+        ("event", 0, "eventType"),
+        ("event", 1, "summary"),
+    ],
+)
+def test_public_graph_strings_are_credential_inspected(section: str, index: int | None, field: str) -> None:
+    secret = "generation-graph-secret"
+    graph = _graph(_source())
+    graph_key = {"pipeline": "pipelines", "event": "events"}.get(section, section)
+    target = graph[graph_key] if index is None else graph[graph_key][index]
+    target[field] = secret
+
+    result = compose_publication_generation(
+        graph,
+        known_secrets=(secret,),
+        scanner_runner=_scanner,
+    )
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.unsafe_content,)
+    assert not hasattr(result, "payload")
+
+
+@pytest.mark.parametrize("section", ["task", "pipeline", "run", "event"])
+def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
+    graph = _graph(_source())
+
+    def mutate() -> None:
+        if section == "task":
+            graph["task"]["title"] = "changed after build"
+        elif section == "pipeline":
+            graph["pipelines"][0]["name"] = "changed after build"
+        elif section == "run":
+            graph["runs"][0].documents["codex.jsonl"] = graph["runs"][0].documents["codex.jsonl"].replace(b"safe", b"changed")
+        else:
+            graph["events"][1]["summary"] = "changed after build"
+
+    def builder(source: object, **kwargs: object):
+        outcome = build_publication_bundle(source, **kwargs)
+        mutate()
+        return outcome
+
+    result = compose_publication_generation(graph, run_builder=builder, scanner_runner=_scanner)
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.changing,)
+    assert not hasattr(result, "payload")
 
 
 def test_repair_and_fail_closed_outcomes_never_emit_generation(monkeypatch) -> None:

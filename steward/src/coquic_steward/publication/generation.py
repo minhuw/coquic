@@ -23,9 +23,11 @@ from typing import Any, Final, TypeAlias
 
 from .d1 import D1Error, _validate_payload
 from .atif import AtifSource
+from .media import inspect_media
 from .models import (
     FailClosed,
     FindingSummary,
+    LogicalArtifact,
     PublicationError,
     PublicationOutcome,
     PublicationSnapshot,
@@ -35,6 +37,8 @@ from .models import (
     RunMetadata,
 )
 from .pipeline import build_publication_bundle
+from .redaction import discover_secrets
+from .scanner import CorpusEntry, run_trufflehog
 
 
 PUBLICATION_SCHEMA_VERSION: Final[str] = "1.0"
@@ -42,12 +46,99 @@ MAX_GENERATION_RUNS: Final[int] = 4_096
 MAX_GENERATION_EVENTS: Final[int] = 4_096
 MAX_GENERATION_ARTIFACTS: Final[int] = 16_384
 MAX_GENERATION_OBJECTS: Final[int] = 16_384
+MAX_GENERATION_GRAPH_NODES: Final[int] = 131_072
+MAX_GENERATION_STRINGS: Final[int] = 65_536
 
 _ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
 _MISSING: Final = object()
+
+
+def _freeze_graph(value: Any) -> Any:
+    """Detach graph inputs before any builder or row composition runs."""
+
+    if isinstance(value, AtifSource):
+        try:
+            return AtifSource(
+                run=_freeze_graph(value.run),
+                documents=_freeze_graph(value.documents),
+                artifacts=tuple(_freeze_graph(item) for item in value.artifacts),
+            )
+        except (TypeError, ValueError, RecursionError):
+            raise PublicationError(ReasonCode.invalid_metadata) from None
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_graph(item) for key, item in value.items()})
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, list):
+        return tuple(_freeze_graph(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_graph(item) for item in value)
+    if isinstance(getattr(value, "content", _MISSING), (bytes, bytearray)):
+        return value
+    as_dict = getattr(value, "as_dict", None)
+    if callable(as_dict) and not isinstance(value, (LogicalArtifact, PublicationSnapshot, RunMetadata, Publishable, RepairRequired, FailClosed)):
+        try:
+            candidate = as_dict()
+        except Exception:
+            raise PublicationError(ReasonCode.invalid_metadata) from None
+        if isinstance(candidate, Mapping):
+            return MappingProxyType({str(key): _freeze_graph(item) for key, item in candidate.items()})
+    return value
+
+
+def _graph_serial(value: Any, budget: list[int]) -> Any:
+    """Create a bounded canonical representation for mutation authentication."""
+
+    budget[0] += 1
+    if budget[0] > MAX_GENERATION_GRAPH_NODES:
+        raise PublicationError(ReasonCode.oversized)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        content = bytes(value)
+        return {"__bytes__": hashlib.sha256(content).hexdigest(), "byteSize": len(content)}
+    if isinstance(value, AtifSource):
+        return {
+            "__type__": "atif-source",
+            "run": _graph_serial(value.run, budget),
+            "documents": _graph_serial(value.documents, budget),
+            "artifacts": _graph_serial(value.artifacts, budget),
+        }
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise PublicationError(ReasonCode.invalid_metadata)
+            if key in result:
+                raise PublicationError(ReasonCode.invalid_metadata)
+            result[key] = _graph_serial(child, budget)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_graph_serial(item, budget) for item in value]
+    as_dict = getattr(value, "as_dict", None)
+    if callable(as_dict):
+        try:
+            candidate = as_dict()
+        except Exception:
+            raise PublicationError(ReasonCode.invalid_metadata) from None
+        return {"__type__": type(value).__name__, "value": _graph_serial(candidate, budget)}
+    content = getattr(value, "content", _MISSING)
+    if isinstance(content, (bytes, bytearray)):
+        return {
+            "__type__": type(value).__name__,
+            "content": _graph_serial(content, budget),
+            "byteSize": len(content),
+        }
+    raise PublicationError(ReasonCode.invalid_metadata)
+
+
+def _graph_fingerprint(value: Any) -> str:
+    return hashlib.sha256(_canonical(_graph_serial(value, [0]))).hexdigest()
 
 
 def _failure(code: ReasonCode) -> FailClosed:
@@ -760,6 +851,81 @@ def _event_rows(value: Sequence[object], *, task_id: str, run_rows: Sequence[Map
     return rows
 
 
+def _public_strings(value: object, result: list[str]) -> None:
+    if isinstance(value, str):
+        result.append(value)
+        if len(result) > MAX_GENERATION_STRINGS:
+            raise PublicationError(ReasonCode.oversized)
+        return
+    if isinstance(value, Mapping):
+        for child in value.values():
+            _public_strings(child, result)
+        return
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            _public_strings(child, result)
+
+
+def _inspect_public_strings(
+    payload: Mapping[str, Any],
+    *,
+    credential_sources: object,
+    known_secrets: Sequence[str] | str | None,
+    scanner_runner: Any,
+    scanner_timeout: float,
+) -> ReasonCode | None:
+    """Apply the run builder's credential and scanner policy to D1 strings."""
+
+    try:
+        if isinstance(known_secrets, str):
+            supplied = (known_secrets,)
+        elif known_secrets is None:
+            supplied = ()
+        else:
+            supplied = tuple(known_secrets)
+        if any(not isinstance(value, str) for value in supplied):
+            return ReasonCode.invalid_metadata
+        discovered = discover_secrets(credential_sources) if credential_sources is not None else ()
+        secrets = tuple(sorted(set((*discovered, *supplied)), key=lambda item: (-len(item.encode("utf-8")), item)))
+    except (PublicationError, MemoryError, OSError, TypeError, ValueError, UnicodeError, RecursionError) as error:
+        return error.code if isinstance(error, PublicationError) else ReasonCode.unsafe_content
+
+    values: list[str] = []
+    try:
+        _public_strings(payload, values)
+    except PublicationError as error:
+        return error.code
+    encoded_values = tuple(value.encode("utf-8") for value in values)
+    if any(any(secret.encode("utf-8") in content for secret in secrets) for content in encoded_values):
+        return ReasonCode.unsafe_content
+
+    # ``inspect_media`` proves UTF-8/text identity and validates the same
+    # credential inputs as Plan 026.  Text inspection intentionally does not
+    # retain bytes or scanner records, so a separate bounded corpus scan below
+    # supplies the scanner evidence for every public string.
+    for content in encoded_values:
+        inspection = inspect_media(
+            content,
+            "text/plain",
+            known_secrets=secrets,
+            scanner_runner=scanner_runner,
+            scanner_timeout=scanner_timeout,
+        )
+        if not inspection.approved:
+            return inspection.reason or ReasonCode.unsafe_content
+
+    entries = tuple(
+        CorpusEntry(f"generation-string-{index:05d}.txt", content, "text")
+        for index, content in enumerate(encoded_values)
+    )
+    report = run_trufflehog(entries, timeout=scanner_timeout, runner=scanner_runner)
+    if report.failure is not None or report.returncode != 0:
+        return ReasonCode.scanner_failure
+    if report.findings:
+        return ReasonCode.unsafe_content
+    return None
+
+
 def _component_items(snapshot: PublicationSnapshot, *, task_id: str, run_id: str) -> list[tuple[Any, bytes]]:
     if not snapshot.public_bundle.inspected:
         raise PublicationError(ReasonCode.unsafe_content)
@@ -782,7 +948,21 @@ def _build_generation(
     explicit_task_id: str | None,
     builder: Callable[..., PublicationOutcome],
     builder_kwargs: Mapping[str, Any],
+    mutation_watch: object,
+    graph_fingerprint: str,
+    credential_sources: object,
+    known_secrets: Sequence[str] | str | None,
+    scanner_runner: Any,
+    scanner_timeout: float,
 ) -> GenerationOutcome:
+    def changed() -> bool:
+        try:
+            return _graph_fingerprint(mutation_watch) != graph_fingerprint
+        except (PublicationError, MemoryError, OSError, TypeError, ValueError, RecursionError):
+            return True
+
+    if changed():
+        return _failure(ReasonCode.changing)
     if not run_entries or len(run_entries) > MAX_GENERATION_RUNS:
         return _failure(ReasonCode.partial)
 
@@ -794,6 +974,8 @@ def _build_generation(
             preflight.append(reason)
             continue
         outcomes.append(_invoke_builder(entry, builder=builder, kwargs=builder_kwargs))
+    if changed():
+        return _failure(ReasonCode.changing)
     combined = _combine_outcomes(outcomes, preflight)
     if combined is not None:
         return combined
@@ -996,6 +1178,17 @@ def _build_generation(
     }
     metadata = {key: payload[key] for key in ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")}
     payload["generation"]["metadataDigest"] = hashlib.sha256(_canonical(metadata)).hexdigest()
+    string_failure = _inspect_public_strings(
+        payload,
+        credential_sources=credential_sources,
+        known_secrets=known_secrets,
+        scanner_runner=scanner_runner,
+        scanner_timeout=scanner_timeout,
+    )
+    if changed():
+        return _failure(ReasonCode.changing)
+    if string_failure is not None:
+        return _failure(string_failure)
     try:
         validated = _validate_payload(payload)
         # Validate detached rows against exact bytes too; this catches any
@@ -1004,6 +1197,8 @@ def _build_generation(
             payload = validated
     except (D1Error, PublicationError, TypeError, ValueError, KeyError, RecursionError):
         return _failure(ReasonCode.invalid_metadata)
+    if changed():
+        return _failure(ReasonCode.changing)
     try:
         return PublicationGeneration(payload, tuple(sorted(objects, key=lambda item: (item.run_id, item.logical_path, item.artifact_id))), tuple(sorted(originals, key=lambda item: (item.run_id, item.sha256))))
     except PublicationError as error:
@@ -1043,18 +1238,33 @@ def compose_publication_generation(
             task_id = _id(task_id)
         except PublicationError as error:
             return _failure(error.code)
-    selected_task, pipeline_values, run_entries, event_values = _graph_parts(
-        graph,
-        task=task,
-        pipelines=pipelines,
-        runs=runs,
-        events=events,
-        completed_runs=completed_runs,
-    )
+    try:
+        if isinstance(known_secrets, str) or known_secrets is None:
+            selected_secrets = known_secrets
+        else:
+            selected_secrets = tuple(known_secrets)
+        mutation_watch = (graph, task, pipelines, runs, events, completed_runs)
+        graph_fingerprint = _graph_fingerprint(mutation_watch)
+        selected_task, pipeline_values, run_entries, event_values = _graph_parts(
+            graph,
+            task=task,
+            pipelines=pipelines,
+            runs=runs,
+            events=events,
+            completed_runs=completed_runs,
+        )
+        if _graph_fingerprint(mutation_watch) != graph_fingerprint:
+            return _failure(ReasonCode.changing)
+        frozen_task = _freeze_graph(selected_task)
+        frozen_pipelines = tuple(_freeze_graph(value) for value in pipeline_values)
+        frozen_runs = tuple(_freeze_graph(value) for value in run_entries)
+        frozen_events = tuple(_freeze_graph(value) for value in event_values)
+    except (PublicationError, MemoryError, OSError, TypeError, ValueError, RecursionError):
+        return _failure(ReasonCode.invalid_metadata)
     selected_builder = run_builder or builder or build_publication_bundle
     kwargs = _builder_kwargs(
         credential_sources=credential_sources,
-        known_secrets=known_secrets,
+        known_secrets=selected_secrets,
         scanner_runner=scanner_runner,
         scanner_timeout=scanner_timeout,
         max_repair_passes=max_repair_passes,
@@ -1064,13 +1274,19 @@ def compose_publication_generation(
     )
     try:
         return _build_generation(
-            task_value=selected_task,
-            pipeline_values=pipeline_values,
-            event_values=event_values,
-            run_entries=run_entries,
+            task_value=frozen_task,
+            pipeline_values=frozen_pipelines,
+            event_values=frozen_events,
+            run_entries=frozen_runs,
             explicit_task_id=task_id,
             builder=selected_builder,
             builder_kwargs=kwargs,
+            mutation_watch=mutation_watch,
+            graph_fingerprint=graph_fingerprint,
+            credential_sources=credential_sources,
+            known_secrets=selected_secrets,
+            scanner_runner=scanner_runner,
+            scanner_timeout=scanner_timeout,
         )
     except PublicationError as error:
         return _failure(error.code)

@@ -313,9 +313,10 @@ Steward visual system or task-detail composition.
 ## D-023: Standalone Site V2 reads the public cloud publication
 
 On 2026-07-29, this decision records the clean replacement for the raw archive
-reader. It explicitly supersedes D-011, D-029, and D-032 for Steward data-source,
-publication, and route behavior. Those decisions remain readable as historical,
-non-normative records; none is erased or silently rewritten.
+reader. It explicitly supersedes D-020, D-021, and D-022 for Steward data-source,
+publication, reader lifecycle, and route behavior. Those decisions remain
+readable as historical, non-normative records; none is erased or silently
+rewritten.
 
 ### Context
 

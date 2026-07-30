@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -78,6 +79,10 @@ from .session import (
     worktree_checkpoint,
 )
 from .container_config import TaskRole
+from ..publication.atif import AtifSource
+from ..publication.generation import PublicationGeneration, compose_publication_generation
+from ..publication.models import FailClosed, ReasonCode, RepairRequired
+from ..publication.scanner import CorpusEntry, ScannerReport, run_trufflehog
 from ..core.lifecycle import (
     AdvanceResult,
     PhaseInput,
@@ -92,6 +97,7 @@ MAX_TASK_REVISIONS = 100
 MAX_REVIEW_RUN_ATTEMPTS = 2
 WORKER_HEARTBEAT_SECONDS = 30
 PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
+PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _GTEST_DURATION_RE = re.compile(
@@ -3499,8 +3505,19 @@ class StewardExecutor:
 
         validated_tree = self.worktrees.stage_tree(worktree)
         transcript.write("validation", f"validated tree: {validated_tree}")
+        accepted_patch_text = self.worktrees.diff(worktree)
+        publication_result = self._integration_publication_preflight(
+            task,
+            source,
+            worktree,
+            accepted_patch_text,
+            validated_tree,
+            transcript,
+        )
+        if publication_result is not None:
+            return publication_result
         commit_message = self._integration_commit_message(
-            task, source, patch_text, validations, transcript
+            task, source, accepted_patch_text, validations, transcript
         )
         if commit_message is None:
             return False
@@ -3847,6 +3864,405 @@ class StewardExecutor:
         )
         return self._repair_integration_validation_failure(
             source.id, failed_validations, rebased_patch, task.id
+        )
+
+    def _integration_publication_preflight(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        worktree: Path,
+        patch_text: str,
+        validated_tree: str,
+        transcript: "IntegrationTranscript",
+    ) -> bool | None:
+        """Inspect the accepted integration tree before commit or push.
+
+        Publication is intentionally opt-in.  When enabled, this boundary is
+        transport-free: it reads only the detached local archive graph and the
+        exact validated worktree, then routes bounded source findings through
+        the existing validation-revision loop.
+        """
+
+        publication = getattr(self.config, "publication", None)
+        if publication is None or not getattr(publication, "enabled", False):
+            return None
+
+        try:
+            outcome, counts, fingerprint = self._build_integration_publication_outcome(
+                source,
+                worktree,
+                patch_text,
+            )
+            if self.worktrees.tree(worktree) != validated_tree:
+                outcome = FailClosed((ReasonCode.changing,))
+                counts = {"source": 0, "patch": 0}
+                fingerprint = _publication_preflight_fingerprint(
+                    patch_text, outcome, counts
+                )
+        except Exception:
+            # A publication preflight error is fail-closed and deliberately
+            # records no exception text, source bytes, or scanner evidence.
+            outcome = FailClosed((ReasonCode.invalid_metadata,))
+            counts = {"source": 0, "patch": 0}
+            fingerprint = _publication_preflight_fingerprint(
+                patch_text, outcome, counts
+            )
+
+        status, reasons, finding_count = _publication_outcome_summary(outcome)
+        evidence = {
+            "status": status,
+            "reason_codes": reasons,
+            "finding_count": finding_count,
+            "source_finding_count": counts.get("source", 0),
+            "patch_finding_count": counts.get("patch", 0),
+            "fingerprint": fingerprint,
+        }
+        self.store.add_event(
+            source.id,
+            "integration.publication_preflight",
+            f"publication preflight {status}",
+            evidence,
+        )
+        self.store.add_event(
+            task.id,
+            "integration.publication_preflight",
+            f"publication preflight {status}",
+            {**evidence, "source_task_id": source.id},
+        )
+        transcript.write(
+            "publication",
+            "preflight "
+            + status
+            + (f" ({','.join(reasons)})" if reasons else ""),
+        )
+
+        if isinstance(outcome, PublicationGeneration):
+            return None
+
+        if isinstance(outcome, RepairRequired):
+            previous = sum(
+                1
+                for event in self.store.events(source.id)
+                if event.kind == "integration.publication_preflight"
+                and event.data.get("status") == "repair_required"
+                and event.data.get("fingerprint") == fingerprint
+            ) > 1
+            if previous:
+                message = "publication source finding repeated"
+                transcript.write("publication_blocked", message)
+                self._finish_task(task.id, TaskStatus.blocked, message)
+                self._finish_task(source.id, TaskStatus.blocked, message)
+                self.store.add_event(
+                    source.id,
+                    "integration.publication_blocked",
+                    message,
+                    {
+                        "status": "blocked",
+                        "reason_codes": reasons,
+                        "finding_count": finding_count,
+                        "fingerprint": fingerprint,
+                    },
+                )
+                return False
+
+            message = "publication source safety requires revision"
+            try:
+                # Capture the accepted patch before finishing the integration
+                # task; finishing removes its owned worktree.
+                rebased_patch = self.worktrees.diff(worktree)
+            except Exception:
+                self._finish_task(task.id, TaskStatus.blocked, message)
+                self._finish_task(source.id, TaskStatus.blocked, message)
+                transcript.write("publication_blocked", "accepted patch unavailable")
+                self.store.add_event(
+                    source.id,
+                    "integration.publication_blocked",
+                    "accepted patch unavailable",
+                    {
+                        "status": "blocked",
+                        "reason_codes": reasons,
+                        "finding_count": finding_count,
+                        "fingerprint": fingerprint,
+                    },
+                )
+                return False
+            self._finish_task(task.id, TaskStatus.blocked, message)
+            transcript.write("publication_repair", "requesting bounded source revision")
+            failed = self._publication_validation_result(
+                source,
+                worktree,
+                reasons,
+            )
+            try:
+                return self._repair_integration_validation_failure(
+                    source.id,
+                    [failed],
+                    rebased_patch,
+                    task.id,
+                )
+            except Exception:
+                self._finish_task(source.id, TaskStatus.blocked, "publication source repair failed")
+                self.store.add_event(
+                    source.id,
+                    "integration.publication_blocked",
+                    "publication source repair failed",
+                    {
+                        "status": "blocked",
+                        "reason_codes": reasons,
+                        "finding_count": finding_count,
+                        "fingerprint": fingerprint,
+                    },
+                )
+                return False
+
+        message = "publication preflight blocked integration"
+        transcript.write("publication_blocked", message)
+        self._finish_task(task.id, TaskStatus.blocked, message)
+        self._finish_task(source.id, TaskStatus.blocked, message)
+        self.store.add_event(
+            source.id,
+            "integration.publication_blocked",
+            message,
+            {
+                "status": "blocked",
+                "reason_codes": reasons,
+                "finding_count": finding_count,
+                "fingerprint": fingerprint,
+            },
+        )
+        return False
+
+    def _build_integration_publication_outcome(
+        self,
+        source: TaskRecord,
+        worktree: Path,
+        patch_text: str,
+    ) -> tuple[PublicationGeneration | RepairRequired | FailClosed, dict[str, int], str]:
+        graph = self._integration_publication_graph(source)
+        scanner_runner = getattr(self, "_publication_scanner_runner", None)
+        generation = compose_publication_generation(
+            graph,
+            task_id=source.id,
+            known_secrets=(),
+            scanner_runner=scanner_runner,
+            scanner_timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+        if isinstance(generation, FailClosed):
+            counts = {"source": 0, "patch": 0}
+            return generation, counts, _publication_preflight_fingerprint(
+                patch_text, generation, counts
+            )
+
+        report = self._scan_integration_source(worktree, patch_text)
+        if report.failure is not None or report.returncode != 0:
+            outcome = FailClosed((ReasonCode.scanner_failure,))
+            counts = {"source": 0, "patch": 0}
+            return outcome, counts, _publication_preflight_fingerprint(
+                patch_text, outcome, counts
+            )
+        counts = {
+            "source": sum(1 for finding in report.findings if finding.category == "source"),
+            "patch": sum(1 for finding in report.findings if finding.category == "patch"),
+        }
+        reasons: list[ReasonCode] = []
+        if counts["source"]:
+            reasons.append(ReasonCode.source_finding)
+        if counts["patch"]:
+            reasons.append(ReasonCode.patch_finding)
+        if reasons:
+            outcome = RepairRequired(tuple(reasons))
+            return outcome, counts, _publication_preflight_fingerprint(
+                patch_text, outcome, counts
+            )
+        if isinstance(generation, RepairRequired):
+            return generation, counts, _publication_preflight_fingerprint(
+                patch_text, generation, counts
+            )
+        if not isinstance(generation, PublicationGeneration):
+            outcome = FailClosed((ReasonCode.invalid_metadata,))
+            return outcome, counts, _publication_preflight_fingerprint(
+                patch_text, outcome, counts
+            )
+        return generation, counts, _publication_preflight_fingerprint(
+            patch_text, generation, counts
+        )
+
+    def _integration_publication_graph(self, source: TaskRecord) -> dict[str, object]:
+        """Read the stable, private archive view used by the pure builder."""
+
+        from .task_archive import TaskArchive
+
+        def timestamp(value: Any) -> str:
+            return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            )
+
+        def run_mapping(run: Any) -> dict[str, object]:
+            started = run.started_at
+            completed = run.completed_at
+            duration = (
+                max(0, int((completed - started).total_seconds() * 1000))
+                if completed is not None
+                else 0
+            )
+            return {
+                "taskId": run.task_id,
+                "pipelineId": run.pipeline_id,
+                "runId": run.id,
+                "role": str(run.role),
+                "state": str(run.state),
+                "startedAt": timestamp(started),
+                "completedAt": timestamp(completed) if completed is not None else None,
+                "durationMs": duration,
+                "model": run.model,
+                "reasoning": run.reasoning,
+                "parentRunId": run.parent_run_id,
+                "retryOfRunId": run.retry_of_run_id,
+                "resumeOfRunId": run.resume_of_run_id,
+            }
+
+        archive = TaskArchive(self.config)
+        pipelines: list[dict[str, object]] = []
+        runs: list[dict[str, object]] = []
+        for pipeline in self.store.list_pipelines(source.id):
+            pipeline_value = {
+                "pipelineId": pipeline.id,
+                "taskId": pipeline.task_id,
+                "name": f"pipeline-{pipeline.ordinal}",
+                "createdAt": timestamp(pipeline.started_at),
+            }
+            pipelines.append(pipeline_value)
+            for run in self.store.list_runs(source.id, pipeline_id=pipeline.id):
+                if run.completed_at is None or str(run.state) == "running":
+                    continue
+                documents: dict[str, bytes] = {}
+                for name in (
+                    "codex.jsonl",
+                    "activities.jsonl",
+                    "telemetry.json",
+                    "run.json",
+                ):
+                    path = archive.task_path(
+                        source.id,
+                        f"pipelines/{pipeline.id}/runs/{run.id}/{name}",
+                    )
+                    data = _read_publication_file(path, archive.root)
+                    if data is None:
+                        continue
+                    documents[name] = data
+                runs.append(
+                    {
+                        "source": AtifSource(
+                            run=run_mapping(run),
+                            documents=documents,
+                        ),
+                        "pipeline": pipeline_value,
+                    }
+                )
+
+        status = TaskStatus(source.status)
+        lifecycle = (
+            "active"
+            if status in {TaskStatus.queued, TaskStatus.running, TaskStatus.reviewing, TaskStatus.integrating}
+            else "cancelled"
+            if status is TaskStatus.cancelled
+            else "failed"
+            if status in {TaskStatus.failed, TaskStatus.blocked}
+            else "completed"
+        )
+        task_value = {
+            "taskId": source.id,
+            "title": source.spec.title,
+            "lifecycleState": lifecycle,
+            "createdAt": timestamp(source.created_at),
+            "completedAt": None if lifecycle == "active" else timestamp(source.updated_at),
+        }
+        events = [
+            {
+                "taskId": source.id,
+                "sequence": index,
+                "eventType": event.kind,
+                "occurredAt": timestamp(event.created_at),
+                "summary": event.message,
+            }
+            for index, event in enumerate(self.store.events(source.id), start=1)
+        ]
+        return {
+            "task": task_value,
+            "pipelines": pipelines,
+            "runs": runs,
+            "events": events,
+        }
+
+    def _scan_integration_source(self, worktree: Path, patch_text: str) -> ScannerReport:
+        entries: list[CorpusEntry] = []
+        if patch_text:
+            entries.append(
+                CorpusEntry(
+                    "integration.patch",
+                    patch_text.encode("utf-8", errors="surrogateescape"),
+                    "patch",
+                )
+            )
+        tracked = run_command(
+            ["git", "ls-files", "-z", "--cached", "--"],
+            cwd=worktree,
+            check=True,
+        ).stdout
+        untracked = run_command(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--"],
+            cwd=worktree,
+            check=True,
+        ).stdout
+        names = sorted(
+            {
+                value
+                for value in (*tracked.split("\0"), *untracked.split("\0"))
+                if value
+            }
+        )
+        try:
+            root_metadata = worktree.lstat()
+        except OSError:
+            raise ValueError("publication source root is unavailable") from None
+        if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+            raise ValueError("publication source root is not a directory")
+        root = worktree.resolve()
+        for name in names:
+            candidate = worktree / name
+            data = _read_publication_file(candidate, root)
+            if data is None:
+                continue
+            entries.append(CorpusEntry(name.replace("\\", "/"), data, "source"))
+        if not entries:
+            return ScannerReport()
+        return run_trufflehog(
+            entries,
+            timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
+            runner=getattr(self, "_publication_scanner_runner", None),
+        )
+
+    def _publication_validation_result(
+        self,
+        source: TaskRecord,
+        worktree: Path,
+        reasons: list[str],
+    ) -> ValidationResult:
+        path = self.config.logs_dir / source.id / "publication-source-preflight.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "publication source safety requires revision"
+            + (f": {','.join(reasons)}" if reasons else "")
+            + "\n",
+            encoding="utf-8",
+        )
+        return ValidationResult(
+            command=["publication", "source-safety"],
+            cwd=worktree,
+            passed=False,
+            exit_code=1,
+            output_path=path,
+            summary="publication source safety requires bounded source revision",
         )
 
     def _integration_commit_message(
@@ -4263,6 +4679,60 @@ def _next_revision(store: TaskStore, task_id: str) -> int:
     if not iterations:
         return 1
     return max(item.iteration for item in iterations) + 1
+
+
+def _publication_outcome_summary(
+    outcome: PublicationGeneration | RepairRequired | FailClosed,
+) -> tuple[str, list[str], int]:
+    if isinstance(outcome, PublicationGeneration):
+        return "clean", [], 0
+    reasons = [reason.value for reason in outcome.reason_codes]
+    finding_count = sum(item.count for item in outcome.findings)
+    return outcome.status, reasons, finding_count
+
+
+def _publication_preflight_fingerprint(
+    patch_text: str,
+    outcome: PublicationGeneration | RepairRequired | FailClosed,
+    counts: dict[str, int],
+) -> str:
+    payload = {
+        "patch": sha256(
+            patch_text.encode("utf-8", errors="surrogateescape")
+        ).hexdigest(),
+        "status": outcome.status,
+        "reasons": [reason.value for reason in getattr(outcome, "reason_codes", ())],
+        "source": counts.get("source", 0),
+        "patch_findings": counts.get("patch", 0),
+    }
+    return sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _read_publication_file(path: Path, root: Path) -> bytes | None:
+    """Read one regular file without following archive/tree symlinks."""
+
+    root = root.resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise ValueError("publication path escaped its root") from None
+    if not relative.parts:
+        raise ValueError("publication path is a root directory")
+    current = root
+    for index, component in enumerate(relative.parts):
+        current = current / component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError("publication path is a symlink")
+        if index == len(relative.parts) - 1:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("publication path is not a private regular file")
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("publication path parent is not a directory")
+    return current.read_bytes()
 
 
 def render_integration_revision_prompt(

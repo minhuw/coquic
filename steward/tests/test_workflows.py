@@ -18,6 +18,8 @@ from coquic_steward.core.models import (
     WorkerKind,
 )
 from coquic_steward.execution import StewardExecutor
+from coquic_steward.execution.executor import _publication_preflight_fingerprint
+from coquic_steward.publication.models import FailClosed, ReasonCode
 from coquic_steward.execution.implementation_plan import parse_implementation_plan
 from coquic_steward.storage import TaskStore
 
@@ -36,6 +38,18 @@ VALID_PLAN = {
     "risks": ["Behavioral regression"],
     "non_goals": ["Unrelated refactoring"],
 }
+
+
+def test_publication_preflight_fingerprint_is_value_free() -> None:
+    outcome = FailClosed((ReasonCode.scanner_failure,))
+    fingerprint = _publication_preflight_fingerprint(
+        "patch contains a private value",
+        outcome,
+        {"source": 0, "patch": 1},
+    )
+
+    assert len(fingerprint) == 64
+    assert "private value" not in fingerprint
 
 
 def test_task_workflow_defaults_from_kind() -> None:

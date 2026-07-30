@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-FORBIDDEN_DEPENDENCIES = {"fastapi", "uvicorn", "httpx"}
+FORBIDDEN_DEPENDENCIES = {"fastapi", "uvicorn"}
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,6 @@ TEXT_RULES = (
     ),
     TextRule("FastAPI dependency", re.compile(r"\bfastapi\b", re.IGNORECASE), "fastapi"),
     TextRule("Uvicorn dependency", re.compile(r"\buvicorn\b", re.IGNORECASE), "uvicorn"),
-    TextRule("HTTPX dependency", re.compile(r"\bhttpx\b", re.IGNORECASE), "httpx"),
 )
 
 

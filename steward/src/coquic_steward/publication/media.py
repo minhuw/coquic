@@ -779,8 +779,65 @@ def _gif_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
     return ReasonCode.unsafe_content
 
 
+def _webp_anmf_channels(
+    payload: bytes,
+    channels: list[bytes],
+    total: list[int],
+) -> tuple[int, int, int, int, bool] | ReasonCode:
+    """Validate one animation frame and retain its non-pixel control bytes."""
+
+    if len(payload) < 16:
+        return ReasonCode.unsafe_content
+    frame_header = payload[:16]
+    offset_x = int.from_bytes(frame_header[0:3], "little") * 2
+    offset_y = int.from_bytes(frame_header[3:6], "little") * 2
+    width = int.from_bytes(frame_header[6:9], "little") + 1
+    height = int.from_bytes(frame_header[9:12], "little") + 1
+    flags = frame_header[15]
+    if (
+        width > MAX_IMAGE_DIMENSION
+        or height > MAX_IMAGE_DIMENSION
+        or width * height > MAX_IMAGE_PIXELS
+        or flags & 0xFC
+    ):
+        if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
+            return ReasonCode.oversized
+        return ReasonCode.unsafe_content
+    failure = _append_format_channel(channels, frame_header, total)
+    if failure is not None:
+        return failure
+
+    position = 16
+    saw_alpha = False
+    saw_pixel = False
+    while position < len(payload):
+        if position + 8 > len(payload):
+            return ReasonCode.unsafe_content
+        chunk = payload[position : position + 4]
+        if chunk not in {b"ALPH", b"VP8 ", b"VP8L"}:
+            return ReasonCode.unsafe_content
+        length = int.from_bytes(payload[position + 4 : position + 8], "little")
+        payload_start = position + 8
+        payload_end = payload_start + length
+        end = payload_end + (length & 1)
+        if payload_end > len(payload) or end > len(payload) or length == 0:
+            return ReasonCode.unsafe_content
+        if chunk == b"ALPH":
+            if saw_alpha or saw_pixel:
+                return ReasonCode.unsafe_content
+            saw_alpha = True
+        else:
+            if saw_pixel or (chunk == b"VP8L" and saw_alpha):
+                return ReasonCode.unsafe_content
+            saw_pixel = True
+        position = end
+    if position != len(payload) or not saw_pixel:
+        return ReasonCode.unsafe_content
+    return offset_x, offset_y, width, height, saw_alpha
+
+
 def _webp_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
-    """Validate RIFF framing and retain bounded non-image WebP chunks."""
+    """Validate WebP RIFF framing and inspect non-pixel channels."""
 
     if len(content) < 12 or content[:4] != b"RIFF" or content[8:12] != b"WEBP":
         return ReasonCode.unsafe_content
@@ -789,8 +846,16 @@ def _webp_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
     position = 12
     channels: list[bytes] = []
     total = [0]
-    image_chunks = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF"}
-    saw_image = False
+    metadata_chunks = {b"ICCP", b"EXIF", b"XMP "}
+    seen_metadata: set[bytes] = set()
+    seen_vp8x = False
+    vp8x_flags: int | None = None
+    canvas: tuple[int, int] | None = None
+    saw_anim = False
+    saw_alpha = False
+    top_pixel: bytes | None = None
+    frames: list[tuple[int, int, int, int, bool]] = []
+    first_chunk = True
     while position < len(content):
         if position + 8 > len(content):
             return ReasonCode.unsafe_content
@@ -804,14 +869,101 @@ def _webp_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
         if end > len(content):
             return ReasonCode.unsafe_content
         payload = content[payload_start:payload_end]
-        if chunk in image_chunks:
-            saw_image = True
-        else:
+        if first_chunk and chunk != b"VP8X" and chunk not in {b"VP8 ", b"VP8L"}:
+            return ReasonCode.unsafe_content
+        if chunk == b"VP8X" and not first_chunk:
+            return ReasonCode.unsafe_content
+        first_chunk = False
+        if chunk == b"VP8X":
+            if (
+                seen_vp8x
+                or len(payload) != 10
+                or payload[0] & 0xC0
+                or payload[1:4] != b"\x00\x00\x00"
+            ):
+                return ReasonCode.unsafe_content
+            canvas_width = int.from_bytes(payload[4:7], "little") + 1
+            canvas_height = int.from_bytes(payload[7:10], "little") + 1
+            if (
+                canvas_width > MAX_IMAGE_DIMENSION
+                or canvas_height > MAX_IMAGE_DIMENSION
+                or canvas_width * canvas_height > MAX_IMAGE_PIXELS
+            ):
+                return ReasonCode.oversized
             failure = _append_format_channel(channels, payload, total)
             if failure is not None:
                 return failure
+            seen_vp8x = True
+            vp8x_flags = payload[0]
+            canvas = (canvas_width, canvas_height)
+        elif chunk in {b"VP8 ", b"VP8L"}:
+            if top_pixel is not None or frames or not payload or (chunk == b"VP8L" and saw_alpha):
+                return ReasonCode.unsafe_content
+            top_pixel = chunk
+        elif chunk == b"ALPH":
+            if top_pixel == b"VP8L" or saw_alpha or not payload:
+                return ReasonCode.unsafe_content
+            saw_alpha = True
+        elif chunk == b"ANIM":
+            if saw_anim or frames or top_pixel is not None or len(payload) != 6:
+                return ReasonCode.unsafe_content
+            failure = _append_format_channel(channels, payload, total)
+            if failure is not None:
+                return failure
+            saw_anim = True
+        elif chunk == b"ANMF":
+            if top_pixel is not None or not saw_anim:
+                return ReasonCode.unsafe_content
+            frame = _webp_anmf_channels(payload, channels, total)
+            if isinstance(frame, ReasonCode):
+                return frame
+            frames.append(frame)
+            saw_alpha = saw_alpha or frame[4]
+        elif chunk in metadata_chunks:
+            if chunk in seen_metadata:
+                return ReasonCode.unsafe_content
+            failure = _append_format_channel(channels, payload, total)
+            if failure is not None:
+                return failure
+            seen_metadata.add(chunk)
+        else:
+            return ReasonCode.unsafe_content
         position = end
-    return tuple(channels) if saw_image and position == len(content) else ReasonCode.unsafe_content
+    if position != len(content):
+        return ReasonCode.unsafe_content
+    if frames:
+        if (
+            top_pixel is not None
+            or not saw_anim
+            or not seen_vp8x
+            or vp8x_flags is None
+            or not vp8x_flags & 0x02
+        ):
+            return ReasonCode.unsafe_content
+        if canvas is None:
+            return ReasonCode.unsafe_content
+        canvas_width, canvas_height = canvas
+        for offset_x, offset_y, width, height, _ in frames:
+            if offset_x + width > canvas_width or offset_y + height > canvas_height:
+                return ReasonCode.unsafe_content
+    elif saw_anim or top_pixel is None:
+        return ReasonCode.unsafe_content
+    if seen_vp8x:
+        if vp8x_flags is None or (bool(vp8x_flags & 0x02) != bool(frames)):
+            return ReasonCode.unsafe_content
+        feature_chunks = {
+            b"ICCP": 0x20,
+            b"ALPH": 0x10,
+            b"EXIF": 0x08,
+            b"XMP ": 0x04,
+        }
+        for chunk, feature in feature_chunks.items():
+            present = chunk in seen_metadata or (chunk == b"ALPH" and saw_alpha)
+            if present != bool(vp8x_flags & feature):
+                return ReasonCode.unsafe_content
+    elif seen_metadata or frames or saw_anim:
+        return ReasonCode.unsafe_content
+    return tuple(channels)
 
 
 def _format_channels(content: bytes, media_type: str) -> tuple[bytes, ...] | ReasonCode:

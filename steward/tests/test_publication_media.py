@@ -70,6 +70,43 @@ def _inspect(payload: bytes, media_type: str, **kwargs: object):
     return inspect_media(payload, media_type, ocr_runner=_runner, scanner_runner=_runner, **kwargs)
 
 
+def _webp_chunks(payload: bytes) -> list[tuple[bytes, bytes]]:
+    chunks: list[tuple[bytes, bytes]] = []
+    position = 12
+    while position < len(payload):
+        length = int.from_bytes(payload[position + 4 : position + 8], "little")
+        end = position + 8 + length + (length & 1)
+        chunks.append((payload[position : position + 4], payload[position + 8 : position + 8 + length]))
+        position = end
+    assert position == len(payload)
+    return chunks
+
+
+def _replace_webp_chunk(payload: bytes, target: bytes, replacement: bytes, occurrence: int = 0) -> bytes:
+    output = bytearray(payload[:12])
+    seen = 0
+    position = 12
+    while position < len(payload):
+        chunk = payload[position : position + 4]
+        length = int.from_bytes(payload[position + 4 : position + 8], "little")
+        end = position + 8 + length + (length & 1)
+        value = payload[position + 8 : position + 8 + length]
+        if chunk == target and seen == occurrence:
+            value = replacement
+            seen += 1
+        elif chunk == target:
+            seen += 1
+        output.extend(chunk)
+        output.extend(len(value).to_bytes(4, "little"))
+        output.extend(value)
+        if len(value) & 1:
+            output.append(0)
+        position = end
+    assert seen > occurrence
+    output[4:8] = (len(output) - 8).to_bytes(4, "little")
+    return bytes(output)
+
+
 @pytest.mark.parametrize("media_type", sorted(SUPPORTED_IMAGE_MEDIA_TYPES))
 def test_format_clean_images_are_byte_identical(media_type: str) -> None:
     payload = _image(media_type)
@@ -87,6 +124,37 @@ def test_format_multiframe_images_inspect_every_frame() -> None:
         assert result.approved
         assert result.frame_count == 3
         assert result.ocr_frame_count == 3
+
+
+def test_webp_animation_control_payload_is_scanned() -> None:
+    payload = _image("image/webp", frames=2)
+    mutated = _replace_webp_chunk(payload, b"ANIM", b"ABCDEF")
+    result = _inspect(mutated, "image/webp", secrets=("ABCDEF",))
+    assert not result.approved
+    assert result.reason == ReasonCode.unsafe_content
+    assert result.bytes is None
+
+
+def test_webp_animation_frame_control_payload_is_scanned() -> None:
+    payload = _image("image/webp", frames=2)
+    frame = next(value for chunk, value in _webp_chunks(payload) if chunk == b"ANMF")
+    mutated_frame = frame[:12] + b"ABC" + frame[15:]
+    mutated = _replace_webp_chunk(payload, b"ANMF", mutated_frame)
+    result = _inspect(mutated, "image/webp", secrets=("ABC",))
+    assert not result.approved
+    assert result.reason == ReasonCode.unsafe_content
+    assert result.bytes is None
+
+
+def test_webp_unknown_nested_animation_channel_fails_closed() -> None:
+    payload = _image("image/webp", frames=2)
+    frame = next(value for chunk, value in _webp_chunks(payload) if chunk == b"ANMF")
+    nested = frame + b"JUNK" + (4).to_bytes(4, "little") + b"safe"
+    mutated = _replace_webp_chunk(payload, b"ANMF", nested)
+    result = _inspect(mutated, "image/webp")
+    assert not result.approved
+    assert result.reason == ReasonCode.unsafe_content
+    assert result.bytes is None
 
 
 def test_progressive_jpeg_is_completely_inspected() -> None:

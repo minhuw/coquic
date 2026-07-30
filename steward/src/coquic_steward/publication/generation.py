@@ -1270,9 +1270,13 @@ def compose_publication_generation(
         else:
             selected_secrets = tuple(known_secrets)
         mutation_watch = (graph, task, pipelines, runs, events, completed_runs)
-        source_fingerprint = _graph_fingerprint(mutation_watch)
-        detached_watch, _ = _capture_stable_graph(mutation_watch)
-        if _graph_fingerprint(mutation_watch) != source_fingerprint:
+        source_fingerprint_before = _graph_fingerprint(mutation_watch)
+        detached_watch, detached_fingerprint = _capture_stable_graph(mutation_watch)
+        source_fingerprint_after = _graph_fingerprint(mutation_watch)
+        if (
+            detached_fingerprint != source_fingerprint_before
+            or detached_fingerprint != source_fingerprint_after
+        ):
             return _failure(ReasonCode.changing)
         (
             detached_graph,
@@ -1321,7 +1325,7 @@ def compose_publication_generation(
             builder=selected_builder,
             builder_kwargs=kwargs,
             mutation_watch=mutation_watch,
-            source_fingerprint=source_fingerprint,
+            source_fingerprint=source_fingerprint_after,
             detached_view=detached_view,
             detached_fingerprint=detached_fingerprint,
             credential_sources=credential_sources,

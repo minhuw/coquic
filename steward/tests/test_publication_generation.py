@@ -146,6 +146,34 @@ class _ThirdTraversalMapping(Mapping[str, object]):
         return self._values.items()
 
 
+class _CaptureWindowMapping(Mapping[str, object]):
+    def __init__(self, values: dict[str, object], *, field: str, transient: object, stable: object) -> None:
+        self._values = dict(values)
+        self._field = field
+        self._transient = transient
+        self._stable = stable
+        self._items_calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def items(self):
+        self._items_calls += 1
+        if 2 <= self._items_calls <= 4:
+            self._values[self._field] = self._transient
+            try:
+                return list(self._values.items())
+            finally:
+                self._values[self._field] = self._stable
+        return self._values.items()
+
+
 def test_generation_is_deterministic_and_detached() -> None:
     graph = _graph(_source())
     first = _compose(graph)
@@ -330,6 +358,46 @@ def test_nested_aba_mutation_during_capture_is_fail_closed(section: str) -> None
             graph["events"][0],
             field="summary",
             transient="nested transient event summary",
+            stable="Planning started",
+        )
+
+    result = _compose(graph)
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.changing,)
+    assert not hasattr(result, "payload")
+
+
+@pytest.mark.parametrize("section", ["task", "pipeline", "run", "event"])
+def test_detached_capture_must_match_source_bookends(section: str) -> None:
+    source = _source()
+    graph = _graph(source)
+    if section == "task":
+        graph["task"] = _CaptureWindowMapping(
+            graph["task"],
+            field="title",
+            transient="transient task title",
+            stable="Generation fixture",
+        )
+    elif section == "pipeline":
+        graph["pipelines"][0] = _CaptureWindowMapping(
+            graph["pipelines"][0],
+            field="name",
+            transient="transient pipeline name",
+            stable="Planning pipeline",
+        )
+    elif section == "run":
+        graph["runs"][0] = _CaptureWindowMapping(
+            {"source": graph["runs"][0], "state": "succeeded"},
+            field="state",
+            transient="running",
+            stable="succeeded",
+        )
+    else:
+        graph["events"][0] = _CaptureWindowMapping(
+            graph["events"][0],
+            field="summary",
+            transient="transient event summary",
             stable="Planning started",
         )
 

@@ -50,10 +50,13 @@
 
 ### Steward cloud reader trust boundary
 
-- Cloud configuration has exactly four server-only values: Cloudflare account ID,
+- Cloud configuration has exactly four server-side values: Cloudflare account ID,
   D1 database ID, account-scoped D1 Read token, and anonymous public R2 base URL.
-  Values MUST never reach client bundles, browser responses, task/validation
-  containers, or logs; missing or unsafe values fail closed.
+  Account ID, D1 database ID, and token MUST never reach client bundles, browser
+  responses, task/validation containers, or logs. The validated anonymous public
+  R2 base URL MAY appear only as the prefix of the derived artifact `Location`
+  header; it MUST not appear elsewhere in client bundles, browser responses,
+  task/validation containers, or logs. Missing or unsafe values fail closed.
 - D1 acquisition MUST use fixed parameterized statements with bounded timeout,
   response bytes, result sets, and rows. Queries join only a `visible` task head
   to its `visible` publication; staged, superseded, hidden, malformed,

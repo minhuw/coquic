@@ -438,6 +438,13 @@ class LogicalArtifact:
 class PublicBundleComponent:
     artifact: LogicalArtifact
     content: bytes = field(repr=False)
+    # The media stage returns a receipt proving that these exact bytes were
+    # inspected.  It is deliberately omitted from public serialization and
+    # repr; transport stages only need the content-addressed artifact facts.
+    inspection: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    inspection_receipt: Any = field(default=None, repr=False, compare=False, kw_only=True)
+    redaction_applied: bool = field(default=False, compare=False, kw_only=True)
+    original_retained: bool = field(default=False, compare=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.artifact, LogicalArtifact) or not isinstance(self.content, bytes):
@@ -446,9 +453,49 @@ class PublicBundleComponent:
             _fail(ReasonCode.size_mismatch)
         if hashlib.sha256(self.content).hexdigest() != self.artifact.sha256:
             _fail(ReasonCode.digest_mismatch)
+        if type(self.redaction_applied) is not bool or type(self.original_retained) is not bool:
+            _fail(ReasonCode.invalid_metadata)
+        if self.original_retained and not self.redaction_applied:
+            _fail(ReasonCode.invalid_metadata)
+        if self.inspection is not None and self.inspection_receipt is not None and self.inspection is not self.inspection_receipt:
+            _fail(ReasonCode.invalid_metadata)
+        receipt = self.inspection if self.inspection is not None else self.inspection_receipt
+        if receipt is not None:
+            approved = getattr(receipt, "approved", False)
+            inspected_bytes = getattr(receipt, "bytes", None)
+            inspected_size = getattr(receipt, "byte_size", None)
+            inspected_digest = getattr(receipt, "sha256", None)
+            inspected_type = getattr(receipt, "media_type", None)
+            if (
+                approved is not True
+                or inspected_bytes != self.content
+                or inspected_size != self.artifact.byte_size
+                or inspected_digest != self.artifact.sha256
+                or inspected_type != self.artifact.media_type
+            ):
+                _fail(ReasonCode.invalid_metadata)
+            object.__setattr__(self, "inspection", receipt)
+            object.__setattr__(self, "inspection_receipt", receipt)
 
     def as_dict(self) -> dict[str, Any]:
         return self.artifact.as_dict()
+
+    @property
+    def receipt(self) -> Any:
+        """Return the in-process inspection proof, if this component has one."""
+
+        return self.inspection
+
+    @property
+    def inspected(self) -> bool:
+        return self.inspection is not None
+
+    @property
+    def disclosure(self) -> dict[str, bool]:
+        return {
+            "redactionApplied": self.redaction_applied,
+            "originalRetained": self.original_retained,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +516,20 @@ class PublicBundle:
 
     def as_dict(self) -> dict[str, Any]:
         return {"components": [item.as_dict() for item in self.components]}
+
+    @property
+    def inspected(self) -> bool:
+        """Whether every retained public component has an inspection receipt."""
+
+        return all(item.inspected for item in self.components)
+
+    @property
+    def receipts(self) -> tuple[Any, ...]:
+        return tuple(item.inspection for item in self.components if item.inspection is not None)
+
+    @property
+    def disclosures(self) -> tuple[dict[str, bool], ...]:
+        return tuple(item.disclosure for item in self.components)
 
 
 @dataclass(frozen=True, slots=True)

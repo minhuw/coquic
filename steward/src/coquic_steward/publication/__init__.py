@@ -129,6 +129,12 @@ from .media import (
     unregister_media_handler,
     validate_media,
 )
+from .pipeline import (
+    assemble_publication,
+    assemble_publication_bundle,
+    build_publication,
+    build_publication_bundle,
+)
 
 __all__ = [
     "AtifDocument",
@@ -248,4 +254,8 @@ __all__ = [
     "registered_media_handlers",
     "unregister_media_handler",
     "validate_media",
+    "assemble_publication",
+    "assemble_publication_bundle",
+    "build_publication",
+    "build_publication_bundle",
 ]

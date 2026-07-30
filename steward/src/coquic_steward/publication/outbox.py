@@ -489,6 +489,12 @@ class PublicationGeneration:
         object.__setattr__(self, "generation_boundary", _bounded_text(self.generation_boundary, MAX_IDENTIFIER_LENGTH))
         object.__setattr__(self, "metadata_digest", _digest(self.metadata_digest))
         object.__setattr__(self, "idempotency_key", _identifier(self.idempotency_key))
+        identity = GenerationIdentity(self.task_id, self.generation_boundary)
+        if (
+            self.publication_id != identity.publication_id
+            or self.idempotency_key != identity.idempotency_key
+        ):
+            _fail(ReasonCode.invalid_metadata)
         state = _state(self.state)
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "attempt", _count(self.attempt, maximum=MAX_ATTEMPTS))
@@ -517,13 +523,20 @@ class PublicationGeneration:
             _fail()
         if state not in {PublicationState.claimed, PublicationState.building} and lease_owner is not None:
             _fail()
-        if lease_owner is not None and not _within(lease_expires, updated, MAX_LEASE_SECONDS):
-            _fail()
+        if lease_owner is not None:
+            if lease_expires is None or lease_expires < updated:
+                _fail()
+            if not _within(lease_expires, updated, MAX_LEASE_SECONDS):
+                _fail()
         object.__setattr__(self, "lease_owner", lease_owner)
         object.__setattr__(self, "lease_expires_at", lease_expires)
         retry_at = _lease(self.retry_at)
         if state is PublicationState.retry_wait:
-            if retry_at is None or not _within(retry_at, updated, MAX_RETRY_DELAY_SECONDS):
+            if (
+                retry_at is None
+                or retry_at < updated
+                or not _within(retry_at, updated, MAX_RETRY_DELAY_SECONDS)
+            ):
                 _fail()
         elif retry_at is not None:
             _fail()
@@ -535,7 +548,12 @@ class PublicationGeneration:
         exposed_at = None if self.exposed_at is None else _timestamp(self.exposed_at)
         if state is PublicationState.exposed and exposed_at is None:
             exposed_at = updated
-        if exposed_at is not None and exposed_at < created:
+        if state in {PublicationState.exposed, PublicationState.terminal_cleaned}:
+            if exposed_at is None:
+                _fail()
+        elif exposed_at is not None:
+            _fail()
+        if exposed_at is not None and (exposed_at < created or exposed_at > updated):
             _fail()
         object.__setattr__(self, "exposed_at", exposed_at)
 
@@ -685,7 +703,12 @@ HealthSnapshot = PublicationHealth
 def _exact_path(value: object) -> str:
     if not isinstance(value, str) or not 1 <= len(value) <= MAX_CLEANUP_PATH_LENGTH:
         _fail(ReasonCode.invalid_path)
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+    if (
+        not value.startswith("/")
+        or "\\" in value
+        or "//" in value
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+    ):
         _fail(ReasonCode.invalid_path)
     if any(token in value for token in ("*", "?", "[", "]")) or value.endswith(("/", "\\")):
         _fail(ReasonCode.invalid_path)
@@ -694,6 +717,16 @@ def _exact_path(value: object) -> str:
     except (TypeError, ValueError):
         _fail(ReasonCode.invalid_path)
     if not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        _fail(ReasonCode.invalid_path)
+    if str(path) != value:
+        _fail(ReasonCode.invalid_path)
+    return value
+
+
+def _task_archive_path(value: str, task_id: str) -> str:
+    """Require the path to name one exact task archive, not its root."""
+
+    if PurePath(value).name != task_id:
         _fail(ReasonCode.invalid_path)
     return value
 
@@ -729,10 +762,13 @@ class CleanupIntent:
             _fail()
         if completed is not None and (verified is None or completed < verified):
             _fail()
-        if state is CleanupState.completed and completed is None:
+        if state is CleanupState.completed and (verified is None or completed is None):
+            _fail()
+        if state is not CleanupState.completed and completed is not None:
             _fail()
         if state is CleanupState.blocked and self.reason is None:
             _fail()
+        _task_archive_path(self.exact_path, self.task_id)
         object.__setattr__(self, "verified_at", verified)
         object.__setattr__(self, "completed_at", completed)
         object.__setattr__(self, "reason", _reason(self.reason))

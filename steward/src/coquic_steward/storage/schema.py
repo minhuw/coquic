@@ -16,6 +16,61 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 ACTIVE_STATUS_VALUES = ("queued", "running", "reviewing", "integrating")
 
+_PUBLICATION_TIMESTAMP_GLOB = (
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T"
+    "[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z"
+)
+_PUBLICATION_SAFE_REASONS = (
+    "missing",
+    "running",
+    "partial",
+    "invalid_identifier",
+    "invalid_path",
+    "invalid_media_type",
+    "uninspectable_binary",
+    "invalid_digest",
+    "invalid_metadata",
+    "symlink",
+    "non_regular",
+    "hardlink",
+    "oversized",
+    "size_mismatch",
+    "digest_mismatch",
+    "changing",
+    "invalid_utf8",
+    "invalid_jsonl",
+    "source_finding",
+    "patch_finding",
+    "staging_unsafe",
+    "scanner_failure",
+    "ocr_failure",
+    "unsafe_content",
+    "irreparable",
+    "network",
+    "quota",
+    "authentication",
+    "permission",
+    "timeout",
+    "provider",
+    "integrity",
+    "lease_expired",
+    "retry_exhausted",
+    "cleanup_failed",
+    "operator_blocked",
+)
+_PUBLICATION_SAFE_REASON_SQL = ",".join(
+    f"'{value}'" for value in _PUBLICATION_SAFE_REASONS
+)
+
+
+def _publication_timestamp_check(column: str) -> str:
+    return (
+        f"length({column}) = 24 AND {column} GLOB '{_PUBLICATION_TIMESTAMP_GLOB}' "
+        f"AND substr({column}, 1, 4) BETWEEN '0001' AND '9999' "
+        f"AND datetime(substr({column}, 1, 19)) IS NOT NULL "
+        f"AND strftime('%Y-%m-%dT%H:%M:%S', substr({column}, 1, 19)) = substr({column}, 1, 19)"
+    )
+
 
 class Base(DeclarativeBase):
     pass
@@ -599,6 +654,9 @@ class PublicationGenerationRow(Base):
         UniqueConstraint(
             "task_id", "generation_boundary", name="uq_publication_generation_boundary"
         ),
+        UniqueConstraint(
+            "publication_id", "task_id", name="uq_publication_generation_identity"
+        ),
         UniqueConstraint("task_id", "run_id", name="uq_publication_generation_run"),
         UniqueConstraint(
             "task_id", "idempotency_key", name="uq_publication_generation_idempotency"
@@ -644,19 +702,41 @@ class PublicationGenerationRow(Base):
             "attempt BETWEEN 0 AND 32", name="ck_publication_generation_attempt"
         ),
         CheckConstraint(
-            "(lease_owner IS NULL AND lease_expires_at IS NULL) OR "
-            "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",
-            name="ck_publication_generation_lease_pair",
+            "lease_owner IS NULL OR (length(lease_owner) BETWEEN 1 AND 128 AND "
+            "substr(lease_owner, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "lease_owner NOT GLOB '*[^A-Za-z0-9._-]*')",
+            name="ck_publication_generation_lease_owner",
         ),
         CheckConstraint(
-            "(state = 'retry_wait' AND retry_at IS NOT NULL) OR "
-            "(state <> 'retry_wait' AND retry_at IS NULL)",
+            "((state IN ('claimed','building') AND lease_owner IS NOT NULL AND "
+            "lease_expires_at IS NOT NULL) OR "
+            "(state NOT IN ('claimed','building') AND lease_owner IS NULL AND "
+            "lease_expires_at IS NULL))",
+            name="ck_publication_generation_state_lease",
+        ),
+        CheckConstraint(
+            "lease_expires_at IS NULL OR ("
+            + _publication_timestamp_check("lease_expires_at")
+            + " AND julianday(lease_expires_at) >= julianday(updated_at) AND "
+            "julianday(lease_expires_at) <= julianday(updated_at) + 1)",
+            name="ck_publication_generation_lease_timestamp",
+        ),
+        CheckConstraint(
+            "((state = 'retry_wait' AND retry_at IS NOT NULL) OR "
+            "(state <> 'retry_wait' AND retry_at IS NULL)) AND "
+            "(retry_at IS NULL OR ("
+            + _publication_timestamp_check("retry_at")
+            + " AND julianday(retry_at) >= julianday(updated_at) AND "
+            "julianday(retry_at) <= julianday(updated_at) + 30))",
             name="ck_publication_generation_retry_at",
         ),
         CheckConstraint(
-            "reason IS NULL OR (length(reason) BETWEEN 1 AND 64 AND "
-            "reason NOT GLOB '*[^a-z0-9_]*' AND substr(reason, 1, 1) GLOB '[a-z]')",
+            "reason IS NULL OR reason IN (" + _PUBLICATION_SAFE_REASON_SQL + ")",
             name="ck_publication_generation_reason",
+        ),
+        CheckConstraint(
+            "(state = 'blocked' AND reason IS NOT NULL) OR state <> 'blocked'",
+            name="ck_publication_generation_state_reason",
         ),
         CheckConstraint(
             "expected_row_count BETWEEN 0 AND 2147483647 AND "
@@ -668,6 +748,23 @@ class PublicationGenerationRow(Base):
             "expected_artifact_count BETWEEN 0 AND 2147483647",
             name="ck_publication_generation_counts",
         ),
+        CheckConstraint(
+            _publication_timestamp_check("created_at"),
+            name="ck_publication_generation_created_at",
+        ),
+        CheckConstraint(
+            _publication_timestamp_check("updated_at") +
+            " AND julianday(updated_at) >= julianday(created_at)",
+            name="ck_publication_generation_updated_at",
+        ),
+        CheckConstraint(
+            "((state IN ('exposed','terminal_cleaned') AND exposed_at IS NOT NULL) OR "
+            "(state NOT IN ('exposed','terminal_cleaned') AND exposed_at IS NULL)) AND "
+            "(exposed_at IS NULL OR (" + _publication_timestamp_check("exposed_at") +
+            " AND julianday(exposed_at) >= julianday(created_at) AND "
+            "julianday(exposed_at) <= julianday(updated_at)))",
+            name="ck_publication_generation_exposure",
+        ),
     )
 
 
@@ -677,11 +774,8 @@ class PublicationReceiptRow(Base):
     __tablename__ = "publication_receipts"
 
     receipt_id: Mapped[str] = mapped_column(String, primary_key=True)
-    publication_id: Mapped[str] = mapped_column(
-        ForeignKey("publication_generations.publication_id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    publication_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    task_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     receipt_class: Mapped[str] = mapped_column(String, nullable=False)
     sha256: Mapped[str] = mapped_column(String, nullable=False, index=True)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -690,12 +784,27 @@ class PublicationReceiptRow(Base):
     verified_at: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["publication_id", "task_id"],
+            [
+                "publication_generations.publication_id",
+                "publication_generations.task_id",
+            ],
+            ondelete="CASCADE",
+            name="fk_publication_receipt_generation_task",
+        ),
         UniqueConstraint(
             "publication_id", "receipt_class", "sha256", "content_key",
             name="uq_publication_receipt_object",
         ),
         CheckConstraint(
             "receipt_class IN ('public','private')", name="ck_publication_receipt_class"
+        ),
+        CheckConstraint(
+            "length(task_id) BETWEEN 1 AND 128 AND "
+            "substr(task_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "task_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_receipt_task_id",
         ),
         CheckConstraint(
             "length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'",
@@ -705,17 +814,34 @@ class PublicationReceiptRow(Base):
             "byte_size BETWEEN 0 AND 67108864", name="ck_publication_receipt_size"
         ),
         CheckConstraint(
-            "(receipt_class = 'public' AND content_key LIKE 'v1/tasks/%' AND "
-            "substr(content_key, -64) = sha256 AND "
-            "substr(content_key, -67, 2) = substr(sha256, 1, 2)) OR "
-            "(receipt_class = 'private' AND content_key LIKE 'v1/originals/%' AND logical_path IS NULL)",
+            "length(content_key) BETWEEN 1 AND 1024 AND "
+            "content_key NOT GLOB '*[^A-Za-z0-9._/-]*' AND "
+            "content_key NOT LIKE '%//%' AND "
+            "((receipt_class = 'public' AND content_key = "
+            "'v1/tasks/' || task_id || '/objects/sha256/' || substr(sha256, 1, 2) || '/' || sha256) OR "
+            "(receipt_class = 'private' AND "
+            "content_key LIKE 'v1/originals/' || task_id || '/%/sha256/' || sha256 || '.jsonl' AND "
+            "(length(content_key) - length(replace(content_key, '/', ''))) = 5 AND "
+            "length(content_key) - length('v1/originals/' || task_id || '//sha256/' || sha256 || '.jsonl') BETWEEN 1 AND 128 AND "
+            "content_key NOT LIKE 'v1/originals/' || task_id || '/-%/sha256/%' AND "
+            "content_key NOT LIKE 'v1/originals/' || task_id || '/.%/sha256/%' AND "
+            "logical_path IS NULL))",
             name="ck_publication_receipt_locator_class",
         ),
         CheckConstraint(
             "logical_path IS NULL OR (length(logical_path) BETWEEN 1 AND 1024 AND "
-            "logical_path NOT GLOB '/*' AND logical_path NOT LIKE '%://%' AND "
-            "logical_path NOT LIKE '%..%')",
+            "logical_path NOT GLOB '/*' AND "
+            "substr(logical_path, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "logical_path NOT GLOB '*[^A-Za-z0-9._/-]*' AND "
+            "logical_path NOT LIKE '%//%' AND logical_path NOT LIKE '%://%' AND "
+            "logical_path NOT LIKE './%' AND logical_path NOT LIKE '../%' AND "
+            "logical_path NOT LIKE '%/./%' AND logical_path NOT LIKE '%/../%' AND "
+            "logical_path NOT LIKE '%/-%' AND logical_path NOT LIKE '%/.%')",
             name="ck_publication_receipt_logical_path",
+        ),
+        CheckConstraint(
+            _publication_timestamp_check("verified_at"),
+            name="ck_publication_receipt_verified_at",
         ),
     )
 
@@ -743,9 +869,12 @@ class PublicationHealthRow(Base):
             name="ck_publication_health_counts",
         ),
         CheckConstraint(
-            "reason IS NULL OR (length(reason) BETWEEN 1 AND 64 AND "
-            "reason NOT GLOB '*[^a-z0-9_]*' AND substr(reason, 1, 1) GLOB '[a-z]')",
+            "reason IS NULL OR reason IN (" + _PUBLICATION_SAFE_REASON_SQL + ")",
             name="ck_publication_health_reason",
+        ),
+        CheckConstraint(
+            _publication_timestamp_check("updated_at"),
+            name="ck_publication_health_updated_at",
         ),
     )
 
@@ -756,11 +885,7 @@ class PublicationCleanupIntentRow(Base):
     __tablename__ = "publication_cleanup_intents"
 
     intent_id: Mapped[str] = mapped_column(String, primary_key=True)
-    publication_id: Mapped[str] = mapped_column(
-        ForeignKey("publication_generations.publication_id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
+    publication_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     task_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     manifest_digest: Mapped[str] = mapped_column(String, nullable=False)
     exact_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -771,6 +896,15 @@ class PublicationCleanupIntentRow(Base):
     reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["publication_id", "task_id"],
+            [
+                "publication_generations.publication_id",
+                "publication_generations.task_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_publication_cleanup_generation_task",
+        ),
         UniqueConstraint(
             "publication_id", "task_id", name="uq_publication_cleanup_generation_task"
         ),
@@ -785,9 +919,14 @@ class PublicationCleanupIntentRow(Base):
             name="ck_publication_cleanup_manifest_digest",
         ),
         CheckConstraint(
-            "length(exact_path) BETWEEN 1 AND 4096 AND exact_path NOT LIKE '%*%' AND "
-            "exact_path NOT LIKE '%?%' AND exact_path NOT LIKE '%[%]%' AND "
-            "exact_path NOT LIKE '%..%' AND exact_path NOT LIKE '%://%' AND "
+            "length(exact_path) BETWEEN 1 AND 4096 AND substr(exact_path, 1, 1) = '/' AND "
+            "length(exact_path) > length(task_id) + 1 AND "
+            "substr(exact_path, -(length(task_id) + 1)) = '/' || task_id AND "
+            "exact_path NOT GLOB '*[^A-Za-z0-9._/-]*' AND exact_path NOT LIKE '%//%' AND "
+            "exact_path NOT LIKE '%*%' AND exact_path NOT LIKE '%?%' AND "
+            "exact_path NOT LIKE '%[%]%' AND exact_path NOT LIKE '%..%' AND "
+            "exact_path NOT LIKE '%://%' AND exact_path NOT LIKE '%/./%' AND "
+            "exact_path NOT LIKE '%/../%' AND "
             "substr(exact_path, -1, 1) NOT IN ('/','\\\\')",
             name="ck_publication_cleanup_exact_path",
         ),
@@ -795,13 +934,27 @@ class PublicationCleanupIntentRow(Base):
             "state IN ('pending','completed','blocked')", name="ck_publication_cleanup_state"
         ),
         CheckConstraint(
-            "(state = 'completed' AND completed_at IS NOT NULL) OR state <> 'completed'",
-            name="ck_publication_cleanup_completed_at",
+            "((state = 'completed' AND verified_at IS NOT NULL AND completed_at IS NOT NULL) OR "
+            "(state <> 'completed' AND completed_at IS NULL))",
+            name="ck_publication_cleanup_completion_state",
         ),
         CheckConstraint(
-            "reason IS NULL OR (length(reason) BETWEEN 1 AND 64 AND "
-            "reason NOT GLOB '*[^a-z0-9_]*' AND substr(reason, 1, 1) GLOB '[a-z]')",
+            "reason IS NULL OR reason IN (" + _PUBLICATION_SAFE_REASON_SQL + ")",
             name="ck_publication_cleanup_reason",
+        ),
+        CheckConstraint(
+            _publication_timestamp_check("requested_at"),
+            name="ck_publication_cleanup_requested_at",
+        ),
+        CheckConstraint(
+            "verified_at IS NULL OR (" + _publication_timestamp_check("verified_at") +
+            " AND julianday(verified_at) >= julianday(requested_at))",
+            name="ck_publication_cleanup_verified_at",
+        ),
+        CheckConstraint(
+            "completed_at IS NULL OR (" + _publication_timestamp_check("completed_at") +
+            " AND verified_at IS NOT NULL AND julianday(completed_at) >= julianday(verified_at))",
+            name="ck_publication_cleanup_completed_at",
         ),
     )
 

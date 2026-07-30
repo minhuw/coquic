@@ -817,11 +817,10 @@ def _webp_anmf_channels(
         if chunk not in {b"ALPH", b"VP8 ", b"VP8L"}:
             return ReasonCode.unsafe_content
         length = int.from_bytes(payload[position + 4 : position + 8], "little")
-        payload_start = position + 8
-        payload_end = payload_start + length
-        end = payload_end + (length & 1)
-        if payload_end > len(payload) or end > len(payload) or length == 0:
+        bounds = _webp_chunk_bounds(payload, position, length)
+        if bounds is None or length == 0:
             return ReasonCode.unsafe_content
+        payload_start, payload_end, end = bounds
         if chunk == b"ALPH":
             if saw_alpha or saw_pixel:
                 return ReasonCode.unsafe_content
@@ -834,6 +833,19 @@ def _webp_anmf_channels(
     if position != len(payload) or not saw_pixel:
         return ReasonCode.unsafe_content
     return offset_x, offset_y, width, height, saw_alpha
+
+
+def _webp_chunk_bounds(content: bytes, position: int, length: int) -> tuple[int, int, int] | None:
+    """Return one RIFF chunk's bounds after validating its pad byte."""
+
+    payload_start = position + 8
+    payload_end = payload_start + length
+    end = payload_end + (length & 1)
+    if payload_end > len(content) or end > len(content):
+        return None
+    if length & 1 and content[payload_end] != 0:
+        return None
+    return payload_start, payload_end, end
 
 
 def _webp_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
@@ -863,11 +875,10 @@ def _webp_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
         if any(byte < 0x20 or byte > 0x7E for byte in chunk):
             return ReasonCode.unsafe_content
         length = int.from_bytes(content[position + 4 : position + 8], "little")
-        payload_start = position + 8
-        payload_end = payload_start + length
-        end = payload_end + (length & 1)
-        if end > len(content):
+        bounds = _webp_chunk_bounds(content, position, length)
+        if bounds is None:
             return ReasonCode.unsafe_content
+        payload_start, payload_end, end = bounds
         payload = content[payload_start:payload_end]
         if first_chunk and chunk != b"VP8X" and chunk not in {b"VP8 ", b"VP8L"}:
             return ReasonCode.unsafe_content

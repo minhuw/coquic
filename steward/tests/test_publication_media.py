@@ -51,6 +51,18 @@ def _image(media_type: str, *, frames: int = 1, metadata: str | None = None) -> 
     return output.getvalue()
 
 
+def _animated_alpha_webp() -> bytes:
+    values = [
+        Image.new("RGBA", (2, 2), (255, 20, 80, 100)),
+        Image.new("RGBA", (2, 2), (20, 80, 255, 150)),
+    ]
+    output = BytesIO()
+    values[0].save(output, format="WEBP", save_all=True, append_images=values[1:], duration=20, loop=0)
+    for value in values:
+        value.close()
+    return output.getvalue()
+
+
 def _runner(argv: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -107,6 +119,58 @@ def _replace_webp_chunk(payload: bytes, target: bytes, replacement: bytes, occur
     return bytes(output)
 
 
+def _append_odd_webp_metadata(payload: bytes, padding: bytes) -> bytes:
+    output = bytearray(payload)
+    vp8x = next(position for position, chunk, _, _, _ in _webp_chunk_offsets(payload) if chunk == b"VP8X")
+    output[vp8x + 8] |= 0x04
+    output.extend(b"XMP " + (1).to_bytes(4, "little") + b"x" + padding)
+    output[4:8] = (len(output) - 8).to_bytes(4, "little")
+    return bytes(output)
+
+
+def _webp_chunk_offsets(payload: bytes):
+    position = 12
+    while position < len(payload):
+        chunk = payload[position : position + 4]
+        length = int.from_bytes(payload[position + 4 : position + 8], "little")
+        payload_start = position + 8
+        payload_end = payload_start + length
+        end = payload_end + (length & 1)
+        yield position, chunk, length, payload_start, payload_end
+        position = end
+
+
+def _replace_anmf_nested_padding(payload: bytes, padding: bytes) -> bytes:
+    output = bytearray(payload[:12])
+    replaced = False
+    for position, chunk, _, payload_start, payload_end in _webp_chunk_offsets(payload):
+        value = payload[payload_start:payload_end]
+        if chunk == b"ANMF" and not replaced:
+            nested = bytearray(value[:16])
+            nested_position = 16
+            while nested_position < len(value):
+                nested_chunk = value[nested_position : nested_position + 4]
+                nested_length = int.from_bytes(value[nested_position + 4 : nested_position + 8], "little")
+                nested_start = nested_position + 8
+                nested_end = nested_start + nested_length
+                nested.extend(nested_chunk)
+                nested.extend(nested_length.to_bytes(4, "little"))
+                nested.extend(value[nested_start:nested_end])
+                nested_pad = padding if nested_chunk == b"ALPH" and nested_length & 1 else value[nested_end : nested_end + (nested_length & 1)]
+                nested.extend(nested_pad)
+                nested_position = nested_end + (nested_length & 1)
+            value = bytes(nested)
+            replaced = True
+        output.extend(chunk)
+        output.extend(len(value).to_bytes(4, "little"))
+        output.extend(value)
+        if len(value) & 1:
+            output.append(0)
+    assert replaced
+    output[4:8] = (len(output) - 8).to_bytes(4, "little")
+    return bytes(output)
+
+
 @pytest.mark.parametrize("media_type", sorted(SUPPORTED_IMAGE_MEDIA_TYPES))
 def test_format_clean_images_are_byte_identical(media_type: str) -> None:
     payload = _image(media_type)
@@ -155,6 +219,36 @@ def test_webp_unknown_nested_animation_channel_fails_closed() -> None:
     assert not result.approved
     assert result.reason == ReasonCode.unsafe_content
     assert result.bytes is None
+
+
+@pytest.mark.parametrize(
+    ("padding", "approved"),
+    [(b"\x00", True), (b"\x01", False), (b"", False)],
+)
+def test_webp_odd_top_level_metadata_padding_is_validated(padding: bytes, approved: bool) -> None:
+    payload = _append_odd_webp_metadata(_image("image/webp", frames=2), padding)
+    result = _inspect(payload, "image/webp")
+    assert result.approved is approved
+    if approved:
+        assert result.bytes == payload
+    else:
+        assert result.reason == ReasonCode.unsafe_content
+        assert result.bytes is None
+
+
+@pytest.mark.parametrize(
+    ("padding", "approved"),
+    [(b"\x00", True), (b"\x01", False), (b"", False)],
+)
+def test_webp_odd_nested_anmf_padding_is_validated(padding: bytes, approved: bool) -> None:
+    payload = _replace_anmf_nested_padding(_animated_alpha_webp(), padding)
+    result = _inspect(payload, "image/webp")
+    assert result.approved is approved
+    if approved:
+        assert result.bytes == payload
+    else:
+        assert result.reason == ReasonCode.unsafe_content
+        assert result.bytes is None
 
 
 def test_progressive_jpeg_is_completely_inspected() -> None:

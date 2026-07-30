@@ -1,220 +1,137 @@
-# Raw Steward Task Archive
+# Steward Cloud Dataset Boundary
 
-## Shared epoch and control-loop peer
+This document supersedes the former Steward task archive contract. It defines
+the Site V2 consumer view of the public cloud publication; it is not a second
+producer schema. Producer validation, publication ordering, D1 tables, R2 key
+grammar, and disclosure rules live in the [Steward cloud
+contracts](../contracts/steward-cloud/README.md).
 
-The task root and the canonical `$COQUIC_HOME/control-loop/` root share one
-immutable `epochId`, UTC start time, and `post-steward-2.0` policy boundary.
-The task root keeps its task-archive `formatVersion`; the control-loop peer
-keeps an independent `formatVersion` in its own `epoch.json`.  Neither format
-version is inferred from the other.  The control-loop contract, including its
-complete-line event ledger and sealed planner-run manifests, is defined in
-[STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md).  No pre-2.0 import or
-legacy mirror scan is performed.
+The former placement-public raw filesystem tree, rsync transport, importer,
+and local cache are historical context only. They are not Site V2 inputs and
+must not be treated as a compatible ingestion model. The durable reader
+contracts are [DATA.md](DATA.md), [API.md](API.md), [FUNCTIONAL.md](FUNCTIONAL.md),
+and [QUALITY.md](QUALITY.md).
 
-This document defines the public-by-placement archive contract for Steward 2.0.
-It is a separate raw research channel from the sanitized Steward publication
-described in `DATA.md`, `API.md`, and the existing Steward schemas. The archive
-is useful for crash recovery, direct mirroring, and progressive Site V2 import;
-it is not a generated dataset projection.
+## Public source and visibility
 
-## Boundary and ownership
+Site V2 is a standalone Next.js Node reader. It uses server-side native
+`fetch` for Cloudflare D1 and anonymous public R2. It never writes D1, runs a
+Worker or sidecar, scans a local archive, or accepts a caller-supplied object
+URL. The four server-only values are the Cloudflare account ID, D1 database ID,
+account-scoped D1 Read token, and anonymous public R2 base URL.
 
-The producer's canonical archive root is `$COQUIC_HOME/tasks/`. The Site V2
-machine contains the same relative tree below its configured tasks root. There
-is one immutable `post-steward-2.0` epoch at `tasks/epoch.json`; only task
-directories created after that epoch starts are eligible. No legacy task,
-transcript, plan, iteration, or human-assisted archive is copied or backfilled.
+The public source is one visible D1 task head joined to its visible publication
+generation. A query is valid only when all rows belong to that generation and
+pass the public disclosure contract. Staged, superseded, hidden, malformed,
+dangling, or private-shaped rows are invisible and fail closed. A new visible
+generation atomically supersedes the previous head; there is no history
+migration or compatibility read path.
 
-`$COQUIC_HOME/steward.sqlite` remains the private operational ledger and
-`$COQUIC_HOME/worktrees/<task-id>/` remains disposable execution state. Neither
-is part of this archive. A completed task directory is understandable without
-SQLite or its worktree.
+A generation contains one task and its complete bounded publication graph. A
+completed planning run may be published while the task lifecycle is still
+`active`; later completed runs may replace the immutable head. Publication
+identity and object identity come from canonical metadata/content digests, not
+attempt counters or wall-clock values.
 
-Anything durable and non-hidden below `tasks/` is intentionally public. Raw
-prompts, transcripts, commands, source excerpts, and credential-like strings
-are preserved byte-for-byte; they are not sanitized, redacted, scanned,
-filtered, quarantined, or approval-gated. This disclosure rule does not permit
-daemon credentials, Codex session homes, auth payloads, SSH/GitHub configuration,
-Docker state, SQLite/WAL files, global logs, caches, locks, sockets, temporary
-files, worktrees, build outputs, publisher health, or another task below the
-archive root. Placement, rather than content inspection, is the disclosure
-boundary.
+## Task graph
 
-This is the explicit publish-by-placement rule: placement below a task makes
-durable evidence public, while private operational state stays outside.
+The visible graph has these relationships:
 
-## Canonical tree
+- `task` is the stable task identity, title, lifecycle state, timestamps, and
+  disclosure state.
+- `pipelines` belong to the task and retain their stable pipeline identity and
+  ordering.
+- Terminal, immutable `runs` belong to both a task and a pipeline. A run may
+  expose a complete sanitized ATIF artifact.
+- Ordered task-local `events` belong to the task. The reader checks ownership,
+  expected count, and a contiguous sequence beginning at one.
+- `artifacts` belong to a task and run. Each descriptor carries a logical path,
+  media type, byte size, lower-case SHA-256, availability, and disclosure
+  booleans.
 
-The task hierarchy is stable and uses validated opaque IDs as directory names:
+Each completed run's ATIF artifact ID and digest must resolve to an artifact
+owned by that same task and run. A dangling or mismatched link makes the graph
+invalid rather than exposing an incomplete trajectory.
+
+Task summaries are complete within their bounded page and include the owning
+pipeline, completed-run identity when present, event and artifact counts, and
+`completeness: "complete"`. Task detail is all-or-nothing: Site validates
+ownership, counts, event order, run timing, artifact identity, and disclosure
+before returning any graph field.
+
+## Immutable public objects
+
+Public R2 objects are sanitized, immutable, and content addressed. A public
+artifact key is derived only after validating the descriptor and has this exact
+shape:
 
 ```text
-<tasks-root>/
-  epoch.json
-  <task-id>/
-    task.json
-    prompt.md
-    events.jsonl
-    pipelines/<pipeline-id>/
-      pipeline.json
-      inputs/
-      patches/
-      validations/<validation-id>/validation.json
-      validations/<validation-id>/output.log
-      reviews/
-      runs/<run-id>/
-        run.json
-        prompt.md
-        codex.jsonl
-        activities.jsonl
-        telemetry.json
-        last-message.md
-        result.json
-        tool-changes/manifest.jsonl
-        tool-changes/summary.json
-    manifest.json
+v1/tasks/{taskId}/objects/sha256/{sha256[0:2]}/{sha256}
 ```
 
-Optional artifacts are described by an artifact object in their owning metadata;
-absence is explicit and is not represented by an invented empty file. A producer
-and its mirror use these same forward-slash relative paths. There is no second
-`raw-dataset/current`, revision tree, archive bundle, sanitized projection,
-content-addressed copy, root revision manifest, live global manifest, snapshot
-ID, or publication ordering contract.
+The digest prefix and task ID in the key must match the descriptor. Logical
+paths remain metadata in D1; they are not URLs or filesystem paths. Site's
+same-origin artifact action resolves one descriptor and returns one `307`
+redirect to the configured anonymous base. It never proxies bytes or exposes a
+bucket, private locator, credential, scanner result, or filesystem path.
 
-## Epoch, task, pipeline, and run vocabulary
+An optional private original may exist for producer recovery, but it is never
+written to D1 or ATIF and is never read by Site V2. Public output contains only
+the bounded disclosure facts `redactionApplied` and `originalRetained`.
 
-The epoch record contains an opaque `epochId`, format version, UTC start time,
-and the `post-steward-2.0` policy. `task.json` contains the original prompt and
-events paths, exact Steward task status vocabulary, timestamps, current pipeline,
-summary, and ordered pipeline descriptors. The task status is the execution
-status observed by Steward; `succeeded` or another terminal status does not by
-itself mean the archive is verified.
+## Complete trajectory
 
-A pipeline is one bounded processing pass. It has a stable ID, task ID, ordinal,
-trigger, optional parent pipeline, input/base identity, output/patch identities,
-phase, state, timestamps, validation/review/integration descriptors, and ordered
-run descriptors. The allowed triggers are `initial`, `validation-repair`,
-`review-repair`, `integration-rebase`, `integration-conflict`, and `push-race`.
-A phase is one of `planning`, `implementation`, `validation`, `review`,
-`integration`, or `complete`; a pipeline state is `active`, `succeeded`,
-`failed`, `blocked`, `cancelled`, `interrupted`, or `superseded`.
-A repair or base change creates a child pipeline; a daemon restart does not.
+The transcript route is a descriptor for one selected completed run, not a raw
+transcript stream. Its artifact is a complete, terminal, sanitized ATIF-v1.7
+document. The descriptor includes task, pipeline, and run identity; role and
+state; start and completion timestamps; exact duration; optional artifact ID;
+`mediaType: "application/json"`; byte size; SHA-256; public key; availability;
+and disclosure.
 
-A run is exactly one Steward-launched `codex exec` process. Planning,
-implementation, review, formality examination, commit-message generation,
-recovery launches, and every other Steward-level retry are separate runs. Each
-run has a unique ID, open role string, positive role ordinal, directory,
-transcript and result evidence. Deterministic validation and daemon Git/SSH
-actions are pipeline evidence, not runs.
+The response never returns raw ATIF, a partial record set, a JSONL prefix, a
+cursor, a direct R2 URL, or a lossy fallback. The reader verifies the artifact
+descriptor against the run and D1 artifact before exposing it. A task may have
+an active lifecycle and still expose its completed planning trajectory.
 
-A session is a logical Codex conversation. Ordinary role launches use a fresh
-session. Only recovery from an interrupted planning, implementation, or review
-run may resume its session. A resumed process is always a new run with a
-`resumeOfRunId` pointing to the interrupted run; normally a session has one run
-and exceptionally an ordered recovery chain. Public metadata exposes the stable
-archive session ID and never exposes a provider thread/session ID, private
-Codex-home path, or recovery credential. Raw `codex.jsonl` remains opaque and
-may contain an unmistakably synthetic or provider-issued identifier naturally.
+## Responses and failure states
 
-The initial pipeline exists before optional planning, so a planning run has a
-natural parent. Malformed output or a lost invocation creates another run in the
-same pipeline and normally starts a fresh session. A repair that changes the
-patch or base starts a child pipeline and fresh sessions.
+Steward cloud status, task-page, task-detail, trajectory-descriptor, and
+problem responses use `schemaVersion: "3.0"`. Unrelated Site APIs retain their
+own versions. A valid empty publication is distinct from unavailable data.
 
-## Live publication
+The reader distinguishes transient D1/R2/network/timeout/server failures from
+terminal missing, resource, integrity, schema, ownership, and configuration
+failures. Only the documented transient classes offer a manual retry. Site
+never polls, retries automatically, returns a partial graph, or synthesizes
+zero evidence from absent rows.
 
-Active task publication is deliberately eventually consistent. There is no live
-global revision, snapshot manifest, ordering guarantee, or atomic multi-file
-commit. A consumer must tolerate a file, directory, or metadata reference
-arriving before or after related bytes and must preserve its last valid cached
-state while the tree converges. Transport ordering has no semantic meaning.
+## Validation ownership
 
-Producers atomically replace small JSON/Markdown metadata files while live,
-append to JSONL only, never rewrite a published JSONL prefix, use stable paths,
-never reuse an ID, and never delete or rename visible task evidence. Completed
-runs and pipelines are immutable. Temporary names are hidden and never
-contractual.
+The producer builds and validates a complete publication before exposing its
+generation. Site independently validates D1 response bounds, schema, row
+ownership, counts, event sequence, run duration, content-addressed keys,
+artifact hashes, and disclosure before normalization or rendering. The
+executable producer contract remains in
+[`contracts/steward-cloud/`](../contracts/steward-cloud/); the reader behavior
+and response shapes remain in [DATA.md](DATA.md) and [API.md](API.md).
 
-The importer state machine is:
+## Explicit non-goals
 
-1. Discover a task directory and `task.json` even when no manifest exists.
-2. Accept only a complete schema-valid JSON document and retain the last-valid
-   JSON cache on absence or parse failure. Retry after file events and periodic
-   reconciliation.
-3. For JSONL, consume only newline-terminated records. Ignore an incomplete
-   final record, remember the accepted byte offset and prefix identity, and
-   import appended records idempotently. This complete-line rule is the only
-   parsed-record boundary. A replacement, truncation, or changed
-   accepted prefix causes a bounded per-file rebuild rather than duplicate rows
-   or silent history loss. Unknown Codex and observation record shapes remain
-   opaque raw records; they are never normalized by this contract.
-4. Treat missing or cross-version references, metadata-before-artifact,
-   artifact-before-metadata, and a manifest arriving before its content as
-   recoverable live inconsistency. Retry until the tree converges while keeping
-   the last valid cached state.
-5. Run a periodic reconciliation scan after missed or coalesced filesystem
-   events and after watcher restart. Watcher events are latency hints, not
-   recovery truth.
-6. Distinguish a terminal task status observed in `task.json` from a terminal
-   archive verified by `manifest.json`.
+This contract does not define or permit:
 
-## Terminal freeze and verification
+- a raw task tree, placement-public disclosure, rsync, filesystem watching,
+  importer reconciliation, or a local SQLite cache;
+- raw prompts, commands, partial JSONL, local transcript/artifact reads, or
+  authenticated R2 access;
+- private-original access, a raw fallback, a compatibility reader, or
+  historical archive migration; or
+- a global signal, planner, revision, snapshot, or inferred control-loop
+  publication. Those availability boundaries are recorded in
+  [STEWARD_CONTROL_LOOP.md](STEWARD_CONTROL_LOOP.md).
 
-Steward first reaches a terminal task outcome, finalizes every task-owned
-external result, closes and freezes the directory, and writes one immutable
-task-local `manifest.json`. The manifest is terminal-only integrity evidence,
-not a live publication commit point. It contains the epoch/task/completion
-identity and a canonical list of every durable regular file under the task
-directory except itself, with exact relative path, byte size, and lower-case
-SHA-256. No hidden file, symlink, directory, socket, or other non-regular file
-is a descriptor.
+### Historical context (non-normative)
 
-Rsync or another transport may deliver the terminal manifest before referenced
-bytes. Site V2 marks an archive complete only when every descriptor exists and
-verifies; otherwise it remains live/incomplete and retries. After verification,
-any source mutation is archive corruption. No transport ordering is required.
-
-The Site V2 cache stores file identity, accepted prefix/size, parse status, and
-retry state. Aggregate/list requests read SQLite only and never scan multiple
-raw task directories. A task-detail request first resolves one indexed task ID
-and may read metadata or selected accepted evidence from that one task
-directory. Raw artifact downloads return synchronized bytes without
-normalization; parsed transcript chunks stop at the accepted newline boundary
-and incomplete live tails are not returned as parsed records. The cache is
-disposable and is never a second raw payload projection.
-
-## Paths, records, and disclosure
-
-Paths are safe forward-slash relative paths built from validated opaque IDs.
-Reject absolute paths, `.`, `..`, backslashes, NUL, hidden temporary names,
-symlinks, and non-regular artifact files. The raw bytes themselves may contain
-arbitrary strings, including harmless absolute paths or synthetic
-credential-like values; those contents are not path-policy inputs.
-
-Usage and cost availability are explicit. Usage may be available, partial, or
-unavailable, with nullable token fields and a stable reason. Estimated cost is
-an integer micro-USD value with model and pricing provenance; unavailable cost
-must retain its reason and must never be converted to zero.
-
-The JSON Schema in `schemas/steward-dataset.schema.json` defines the structural
-contract. It deliberately does not define an arbitrary Codex JSONL record
-schema. The running and complete trees in `examples/steward-dataset/` are
-synthetic fixtures for producer and importer tests, not a generated dataset.
-
-## Site V2 peer consumer
-
-Site V2 receives this task root beside the raw control-loop root through one
-in-process importer and one rebuildable SQLite cache. `COQUIC_STEWARD_TASKS_ROOT`
-and `COQUIC_STEWARD_CONTROL_LOOP_ROOT` are configured independently, but rows
-join only when both `epoch.json` values match. Missing peers, pending files,
-dangling proposal/task links, and direct-sync reordering are recoverable
-per-domain states; a mismatch is incompatible and retains each last-valid
-domain. Lists, counts, usage, history, and revision requests use SQLite only.
-
-The selected task boundary remains one task root. The selected signal boundary
-is its indexed complete event-record ranges. The selected planner-run boundary
-is its manifest-verified run directory and requested artifact. All raw reads
-revalidate file identity, safe relative containment, and accepted generation.
-The cache contains no raw event, prompt, transcript, planner-output,
-diagnostic, normalized observation payload, or artifact body. Retention and
-sanitization policies are deliberately outside this consumer contract.
+Steward previously mirrored task directories and control-loop files for local
+research and recovery. That design exposed placement and transport details to
+the reader. It is retained only to explain why this document supersedes the
+older archive language; it supplies no current schema, route, or fallback.

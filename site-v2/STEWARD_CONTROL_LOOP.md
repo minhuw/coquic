@@ -1,127 +1,75 @@
-# Steward Control-Loop Archive
+# Steward Global Control-Loop Boundary
 
-Steward 2.0 publishes a raw control-loop archive beside the task archive.  It
-is a research and recovery record, not a web control plane or a generated
-aggregate dataset.  `$COQUIC_HOME/steward.sqlite` remains private operational
-truth; only the roots below are public by placement:
+This document supersedes the former raw control-loop archive contract. The
+initial cloud publication contains task-local events in each visible task
+graph. It does not publish a global signal ledger, planner archive, or revision
+domain. Producer details belong to the [Steward cloud
+contracts](../contracts/steward-cloud/README.md); Site reader behavior belongs
+to [DATA.md](DATA.md), [API.md](API.md), and [FUNCTIONAL.md](FUNCTIONAL.md).
 
-```text
-$COQUIC_HOME/control-loop/
-  epoch.json
-  current.json
-  events/YYYY/MM/DD.jsonl
-  planner-runs/<planner-run-id>/
-```
+## Published task boundary
 
-The control-loop root and `$COQUIC_HOME/tasks/` share one immutable epoch ID,
-UTC start time, and `post-steward-2.0` policy boundary.  Their format versions
-are independent (`control-loop` currently `1.0`; the task archive has its own
-version), so an evolution of one schema does not pretend that records have the
-other archive's shape.  The archive starts at that epoch; it does not scan or
-import pre-2.0 prompts, transcripts, signals, or legacy mirror files.
+Task events are rows in the visible D1 publication for their owning task. They
+carry the task identity, positive sequence, event type, occurrence time, and
+bounded summary. Site validates task ownership, expected event count, and
+contiguous sequence before returning task detail. Events are evidence attached
+to one task; they are not a cross-task event stream and do not establish a
+global revision or snapshot.
 
-## Records and graph
+A completed planning run attached to a task is task evidence. It is the same
+complete sanitized trajectory described by the task publication and is not a
+global scheduler-planner run. Site does not infer signal, planner, proposal,
+or revision relationships from task events, timestamps, labels, or payloads.
 
-Daily event files are append-only JSONL ledgers.  A record is published only
-after its complete newline-terminated bytes and a monotonically allocated,
-non-negative archive sequence are committed privately.  An accepted prefix is
-never rewritten.  Recovery may discard only an unconfirmed incomplete final
-line.  `current.json` is a bounded convenience projection and may be replaced
-atomically; consumers reconstruct history from events and sealed planner runs.
+## Unpublished global domains
 
-Every normalized `SignalFetchRun` and every normalized `SignalItem` observation
-has a stable opaque ID.  Repeated observations are retained even when their
-provider/fingerprint deduplicates to one canonical signal.  Dedupe result and
-canonical signal ID are explicit.  Canonical signal creation and status/link
-transitions, normalized scheduler wakeups, daemon cycles/runtime transitions,
-planner input IDs, proposal dispositions, and task edges are recorded.  The
-causal graph is explicit in both directions:
+Signals, Planning, and revision remain discoverable navigation destinations,
+but the initial cloud contract has no public rows or objects for those global
+domains. Their routes return a terminal no-store `410` problem response:
 
-```text
-observation -> signal -> planner run -> proposal -> optional task
-```
+- `/api/steward/revision`
+- `/api/steward/signals/{signalId}/events`
+- `/api/steward/planner-runs/{plannerRunId}/transcript`
+- `/api/steward/planner-runs/{plannerRunId}/artifacts/{artifact}`
 
-Edges use IDs, never timestamps, labels, payload matching, or consumer
-inference.  A duplicate proposal records the covering task; rejected and
-capacity-skipped proposals may have no task.  Invalid, policy-rejected,
-capacity-skipped, failed, and interrupted work does not silently consume a
-signal.
+Each response uses `schemaVersion: "3.0"`, `code: "UNAVAILABLE"`,
+`status: 410`, and `retryable: false`. It never reflects route parameters,
+query strings, credentials, private values, or a filesystem path. An empty task
+publication is valid; it does not make a global domain available.
 
-## Planner runs
+The unavailable response is intentional ownership, not a transport failure.
+The reader never reads a legacy archive, local fixture, private original, or
+partial task evidence to populate these destinations. It never polls,
+retries, synthesizes global state, or converts task-local events into global
+signals or planner history.
 
-A planner run is one global scheduler-planner `codex exec` process.  It is not a
-task-local planning turn.  Every attempt receives a new private session home,
-run ID, and Codex process.  Steward never resumes a scheduler planner, uses
-`--last`, persists a `planner-thread.txt`, or carries a provider session ID
-between cycles.  The daemon-owned planner container has no repository,
-worktree, SQLite/WAL, Docker socket, daemon configuration, GitHub/SSH/sync
-credential, or network authority.  A dedicated Codex API key is injected only
-at the individual process boundary.
+## Ownership and future activation
 
-The prompt contains current pending normalized signals, active-task summaries,
-allowed evidence IDs, and the output schema.  The only optional mount is the
-read-only `planner-runs/` subtree of sealed prior runs.  History is untrusted
-data and may be queried with read-only `rg`/structured reads for context or
-deduplication; it cannot authorize a task, change policy, or replace a current
-signal ID.
+The task publication producer owns event creation, validation, and exposure.
+The cloud contract in [`contracts/steward-cloud/`](../contracts/steward-cloud/)
+owns D1/R2 publication rules. Site owns read-only acquisition, normalization,
+validation, and rendering. This document owns only the global availability and
+ownership boundary; it does not add a transfer process, deployment operation,
+database, or control-plane mutation.
 
-Every output proposal remains in ordinal order and has a bounded reason code
-and one of `accepted`, `invalid`, `policy_rejected`, `duplicate`, or
-`capacity_skipped`.  Accepted proposals link to a new or adopted task.  A
-planner process/parse failure seals a failed run, leaves inputs pending, and
-uses persisted bounded exponential backoff (30 seconds to five minutes by
-default).  A later attempt is a distinct run and session; queued and active
-task dispatch continues.
+A future global domain requires its own producer contract, schema, fixtures,
+public-safe publication, API response, and reader tests. Until that contract
+exists, global Signals, Planning, and revision remain explicit `410`
+unavailable states. Task-local planning evidence remains available only through
+the published task graph.
 
-## Sealing and disclosure
+## Superseded raw design
 
-Active prompt, transcript, result, session, activity, and telemetry bytes stay
-under private runtime staging.  A terminal planner run is copied to a hidden
-same-filesystem stage, descriptors are validated, and a terminal manifest is
-written before atomic directory placement.  Every visible directory is
-immutable and manifest-sealed.  The raw `codex.jsonl` file remains opaque and
-may end with an incomplete final record; the event ledger never does.
+The former control-loop tree, append-only files, prefix cursors, watcher and
+importer behavior, local cache, raw transcript/artifact reads, and filesystem
+placement disclosure are non-normative historical context. None is a Site V2
+input, fallback, or compatibility obligation. Raw JSONL tails, private
+credentials, authenticated object storage, and historical migration are outside
+the cloud reader boundary.
 
-Manifest descriptors cover every other regular file with relative safe path,
-byte size, and lowercase SHA-256.  Startup reconciliation adopts exact sealed
-bytes, repairs durable outbox lag, and rejects conflicting visible bytes or a
-mismatched shared epoch.  Temporary filesystem errors set truthful lag and
-retry asynchronously.  Only epoch/visible-byte conflicts set
-`planning_blocked`; active task pipelines continue.  Private planner material
-is deleted only after a public run directory and manifest have been
-materialized and independently verified.
+### Historical context (non-normative)
 
-The archive intentionally preserves arbitrary normalized fields and raw text,
-including synthetic credential-like values.  It does not capture provider HTTP
-bodies/headers, transport credentials, SDK objects, daemon secrets, absolute
-private paths, or private Codex homes.  There is no sanitization, redaction,
-secret scanning, quarantine, approval, retention, compression, object storage,
-or generated aggregate dataset.  An existing legacy sanitized mirror is inert:
-Steward stops reading and writing it, and an operator may remove the exact
-directory manually after identifying it.
-
-Control-loop transfer is owned by Plan 009.  Site V2 import, SQLite indexing,
-APIs, routes, and UI are owned by Plan 010; this contract performs no transfer,
-request handling, deployment, or external mutation.
-
-## Site V2 consumption boundary
-
-Site V2 configures this root with `COQUIC_STEWARD_CONTROL_LOOP_ROOT`, beside
-`COQUIC_STEWARD_TASKS_ROOT`, and indexes both through one asynchronous
-in-process importer and one disposable SQLite cache. The importer watches both
-roots as latency hints and performs one startup plus complete 60-second
-reconciliation. Domain health is independent; a missing peer is unavailable,
-while a shared epoch mismatch is incompatible and never merges or erases the
-last valid rows.
-
-The cache stores IDs, normalized bounded metadata, aggregates, explicit graph
-edges, safe relative locators, event-file identities, accepted complete-line
-byte ranges, manifest state, and retry health. It never stores raw event
-bodies, arbitrary normalized observation payloads, prompts, Codex transcript
-records, planner output, diagnostics, or artifact bytes. Aggregate and list
-requests are SQLite-only. A selected signal reads only its indexed event
-ranges; a selected planner run reads only its manifest-verified run directory.
-Both reads revalidate containment and accepted file identity. Cursors bind to
-the selected ID, file/generation identity, ordering, and cache revision;
-stale cursors return a bounded conflict. Raw downloads stream exact validated
-bytes with safe disposition and content type.
+Steward previously recorded global observations and planner runs beside task
+archives for local recovery and research. That archive may explain old names in
+operator material, but it is no longer read or written by the Site cloud
+reader. Removing those assets does not change this availability contract.

@@ -14,6 +14,7 @@ import io
 import os
 import subprocess  # nosec B404 - fixed local Tesseract argv below
 import warnings
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from PIL.Image import DecompressionBombError, DecompressionBombWarning
 
 from .models import (
     AtifDocument,
+    FileIdentity,
     MAX_FINDINGS,
     PublicationError,
     PublicBundle,
@@ -338,7 +340,7 @@ def classify_media(media_type: object, content: bytes | None = None) -> str:
     base = _base_media_type(media_type)
     if base in SUPPORTED_IMAGE_MEDIA_TYPES:
         return "image"
-    if base in SUPPORTED_TEXT_MEDIA_TYPES or (base is not None and base.startswith("text/")):
+    if base in SUPPORTED_TEXT_MEDIA_TYPES:
         return "text"
     return "binary"
 
@@ -370,6 +372,7 @@ class _Source:
     media_type: str
     expected_size: int | None = None
     expected_sha256: str | None = None
+    identity: FileIdentity | None = None
     path: Path | None = None
 
 
@@ -415,6 +418,7 @@ def _coerce_source(source: object, media_type: object) -> tuple[_Source | None, 
     path: Path | None = None
     expected_size: int | None = None
     expected_sha256: str | None = None
+    identity: FileIdentity | None = None
     content: object = source
     declared: object = media_type
     if isinstance(source, PublicBundleComponent):
@@ -431,6 +435,7 @@ def _coerce_source(source: object, media_type: object) -> tuple[_Source | None, 
         content = source.content
         expected_size = source.byte_size
         expected_sha256 = source.sha256
+        identity = source.identity
         declared = "application/octet-stream" if media_type is None else media_type
     elif isinstance(source, Path):
         path = source
@@ -442,6 +447,7 @@ def _coerce_source(source: object, media_type: object) -> tuple[_Source | None, 
         content = stable.content
         expected_size = stable.byte_size
         expected_sha256 = stable.sha256
+        identity = stable.identity
     if not isinstance(content, bytes):
         return None, ReasonCode.invalid_metadata
     base = _base_media_type(declared)
@@ -454,7 +460,7 @@ def _coerce_source(source: object, media_type: object) -> tuple[_Source | None, 
         return None, ReasonCode.size_mismatch
     if expected_sha256 is not None and expected_sha256 != digest:
         return None, ReasonCode.digest_mismatch
-    return _Source(content, base, expected_size, expected_sha256, path), None
+    return _Source(content, base, expected_size, expected_sha256, identity, path), None
 
 
 def _verify_path(source: _Source) -> ReasonCode | None:
@@ -464,11 +470,11 @@ def _verify_path(source: _Source) -> ReasonCode | None:
         stable = read_stable_file(
             source.path,
             max_bytes=MAX_MEDIA_BYTES,
-            expected_size=source.expected_size,
-            expected_sha256=source.expected_sha256,
         )
     except PublicationError as exc:
         return exc.code
+    if source.identity is not None and stable.identity != source.identity:
+        return ReasonCode.changing
     if stable.content != source.content:
         return ReasonCode.changing
     return None
@@ -527,129 +533,315 @@ def _extract_metadata(image: Image.Image) -> tuple[tuple[str, ...], tuple[bytes,
     return tuple(texts), tuple(raw), state[0]
 
 
-def _complete_stream(content: bytes, media_type: str) -> bool:
-    """Require the format's terminal marker to be the final input byte."""
+def _append_format_channel(channels: list[bytes], payload: bytes, total: list[int]) -> ReasonCode | None:
+    """Bound one opaque format channel before retaining it for scanning."""
 
-    if media_type == "image/gif":
-        return _gif_complete(content)
-    if media_type == "image/jpeg":
-        return _jpeg_complete(content)
-    if media_type == "image/webp":
-        return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP" and int.from_bytes(content[4:8], "little") == len(content) - 8
-    if media_type == "image/png":
-        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
-            return False
-        offset = 8
-        saw_end = False
-        while offset + 12 <= len(content):
-            length = int.from_bytes(content[offset : offset + 4], "big")
-            end = offset + 12 + length
-            if end > len(content):
-                return False
-            chunk_length = length
-            chunk = content[offset + 4 : offset + 8]
-            offset = end
-            if chunk == b"IEND":
-                if chunk_length != 0:
-                    return False
-                saw_end = True
-                break
-        return saw_end and offset == len(content)
-    return False
+    if not isinstance(payload, bytes) or len(payload) > MAX_METADATA_BYTES:
+        return ReasonCode.oversized
+    if not payload:
+        return None
+    if len(channels) >= MAX_METADATA_ENTRIES or total[0] + len(payload) > MAX_METADATA_BYTES:
+        return ReasonCode.oversized
+    channels.append(payload)
+    total[0] += len(payload)
+    return None
 
 
-def _jpeg_complete(content: bytes) -> bool:
-    """Parse JPEG markers far enough to distinguish a real EOI from a suffix."""
+def _jpeg_scan_end(content: bytes, position: int) -> int | None:
+    """Return the next marker offset after one entropy-coded scan."""
 
-    if len(content) < 4 or content[:2] != b"\xff\xd8":
-        return False
-    position = 2
     while position < len(content):
         if content[position] != 0xFF:
-            return False
+            position += 1
+            continue
+        marker_start = position
         while position < len(content) and content[position] == 0xFF:
             position += 1
         if position >= len(content):
-            return False
+            return None
+        marker = content[position]
+        position += 1
+        if marker == 0x00 or 0xD0 <= marker <= 0xD7:
+            continue
+        # Leave every non-restart marker for the outer marker parser.  This
+        # permits progressive JPEGs to carry DHT/SOS sequences after a scan.
+        return marker_start
+    return None
+
+
+def _jpeg_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
+    """Parse every JPEG marker and retain bounded APP/COM payloads."""
+
+    if len(content) < 4 or content[:2] != b"\xff\xd8":
+        return ReasonCode.unsafe_content
+    position = 2
+    saw_scan = False
+    channels: list[bytes] = []
+    total = [0]
+    while position < len(content):
+        if content[position] != 0xFF:
+            return ReasonCode.unsafe_content
+        while position < len(content) and content[position] == 0xFF:
+            position += 1
+        if position >= len(content):
+            return ReasonCode.unsafe_content
         marker = content[position]
         position += 1
         if marker == 0xD9:
-            return position == len(content)
-        if marker in {0xD8, 0x01} or 0xD0 <= marker <= 0xD7:
+            if not saw_scan or position != len(content):
+                return ReasonCode.unsafe_content
+            return tuple(channels)
+        if marker == 0xD8 or 0xD0 <= marker <= 0xD7:
+            return ReasonCode.unsafe_content
+        if marker == 0x01:
             continue
+        if marker < 0xC0 or marker > 0xFE:
+            return ReasonCode.unsafe_content
         if position + 2 > len(content):
-            return False
+            return ReasonCode.unsafe_content
         length = int.from_bytes(content[position : position + 2], "big")
         if length < 2 or position + length > len(content):
-            return False
-        position += length
-        if marker != 0xDA:
-            continue
-        # Entropy-coded bytes use 0xff00 for a literal 0xff and restart
-        # markers for block boundaries.  A different marker before EOI would
-        # require a second scan, which is deliberately rejected here.
-        while position < len(content):
-            if content[position] != 0xFF:
-                position += 1
-                continue
-            position += 1
-            while position < len(content) and content[position] == 0xFF:
-                position += 1
-            if position >= len(content):
-                return False
-            marker = content[position]
-            position += 1
-            if marker == 0x00 or 0xD0 <= marker <= 0xD7:
-                continue
-            return marker == 0xD9 and position == len(content)
-        return False
-    return False
+            return ReasonCode.unsafe_content
+        payload_start = position + 2
+        payload_end = position + length
+        payload = content[payload_start:payload_end]
+        position = payload_end
+        if marker == 0xDA:
+            saw_scan = True
+            next_marker = _jpeg_scan_end(content, position)
+            if next_marker is None:
+                return ReasonCode.unsafe_content
+            position = next_marker
+        elif 0xE0 <= marker <= 0xEF or marker == 0xFE:
+            failure = _append_format_channel(channels, payload, total)
+            if failure is not None:
+                return failure
+    return ReasonCode.unsafe_content
 
 
-def _gif_complete(content: bytes) -> bool:
-    """Walk GIF blocks so bytes after the actual trailer cannot hide."""
+def _png_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
+    """Validate PNG framing/CRCs and retain every ancillary payload."""
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not content.startswith(signature):
+        return ReasonCode.unsafe_content
+    position = len(signature)
+    saw_header = False
+    saw_data = False
+    channels: list[bytes] = []
+    total = [0]
+    while position < len(content):
+        chunk_position = position
+        if position + 12 > len(content):
+            return ReasonCode.unsafe_content
+        length = int.from_bytes(content[position : position + 4], "big")
+        chunk_start = position + 8
+        chunk_end = chunk_start + length
+        end = chunk_end + 4
+        if end > len(content):
+            return ReasonCode.unsafe_content
+        chunk = content[position + 4 : position + 8]
+        if len(chunk) != 4 or any(not (0x41 <= byte <= 0x5A or 0x61 <= byte <= 0x7A) for byte in chunk):
+            return ReasonCode.unsafe_content
+        # PNG reserves the third type bit; a lower-case value there is invalid.
+        if chunk[2] & 0x20:
+            return ReasonCode.unsafe_content
+        payload = content[chunk_start:chunk_end]
+        crc = int.from_bytes(content[chunk_end:end], "big")
+        if zlib.crc32(chunk + payload) & 0xFFFFFFFF != crc:
+            return ReasonCode.unsafe_content
+        position = end
+        if chunk == b"IHDR":
+            if saw_header or chunk_position != 8 or len(payload) != 13:
+                return ReasonCode.unsafe_content
+            saw_header = True
+        elif not saw_header:
+            return ReasonCode.unsafe_content
+        elif chunk == b"IDAT":
+            saw_data = True
+        elif chunk == b"IEND":
+            if len(payload) != 0 or not saw_data or position != len(content):
+                return ReasonCode.unsafe_content
+            return tuple(channels)
+        elif chunk == b"PLTE":
+            if not payload or len(payload) % 3:
+                return ReasonCode.unsafe_content
+        elif chunk[0] & 0x20:
+            failure = _append_format_channel(channels, payload, total)
+            if failure is not None:
+                return failure
+        else:
+            # Unknown critical chunks cannot be inspected safely.
+            return ReasonCode.unsafe_content
+    return ReasonCode.unsafe_content
+
+
+def _gif_subblocks(
+    content: bytes,
+    position: int,
+    channels: list[bytes],
+    total: list[int],
+    *,
+    inspect: bool,
+) -> tuple[int, ReasonCode | None]:
+    while True:
+        if position >= len(content):
+            return position, ReasonCode.unsafe_content
+        size = content[position]
+        position += 1
+        if size == 0:
+            return position, None
+        end = position + size
+        if end > len(content):
+            return position, ReasonCode.unsafe_content
+        if inspect:
+            failure = _append_format_channel(channels, content[position:end], total)
+            if failure is not None:
+                return end, failure
+        position = end
+
+
+def _gif_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
+    """Walk GIF blocks and inspect extension channels without decoding data."""
 
     if len(content) < 13 or content[:6] not in {b"GIF87a", b"GIF89a"}:
-        return False
+        return ReasonCode.unsafe_content
     position = 6
     packed = content[position + 4]
     position += 7
+    channels: list[bytes] = []
+    total = [0]
     if packed & 0x80:
         table_size = 3 * (2 ** ((packed & 0x07) + 1))
+        if position + table_size > len(content):
+            return ReasonCode.unsafe_content
         position += table_size
     while position < len(content):
         block = content[position]
         position += 1
         if block == 0x3B:
-            return position == len(content)
+            return tuple(channels) if position == len(content) else ReasonCode.unsafe_content
         if block == 0x2C:
             if position + 9 > len(content):
-                return False
+                return ReasonCode.unsafe_content
             image_packed = content[position + 8]
             position += 9
             if image_packed & 0x80:
                 table_size = 3 * (2 ** ((image_packed & 0x07) + 1))
+                if position + table_size > len(content):
+                    return ReasonCode.unsafe_content
                 position += table_size
             if position >= len(content):
-                return False
+                return ReasonCode.unsafe_content
             position += 1  # LZW minimum code size.
-        elif block == 0x21:
-            if position >= len(content):
-                return False
-            position += 1  # Extension label.
-        else:
-            return False
-        while True:
-            if position >= len(content):
-                return False
-            size = content[position]
+            position, failure = _gif_subblocks(content, position, channels, total, inspect=False)
+            if failure is not None:
+                return failure
+            continue
+        if block != 0x21 or position >= len(content):
+            return ReasonCode.unsafe_content
+        label = content[position]
+        position += 1
+        fixed = b""
+        has_subblocks = True
+        if label == 0xF9:
+            if position >= len(content) or content[position] != 4 or position + 6 > len(content):
+                return ReasonCode.unsafe_content
             position += 1
-            if size == 0:
-                break
-            position += size
-            if position > len(content):
-                return False
-    return False
+            fixed = content[position : position + 4]
+            position += 4
+            if content[position] != 0:
+                return ReasonCode.unsafe_content
+            position += 1
+            has_subblocks = False
+        elif label == 0xFF:
+            if position >= len(content) or content[position] != 11 or position + 12 > len(content):
+                return ReasonCode.unsafe_content
+            position += 1
+            fixed = content[position : position + 11]
+            position += 11
+        elif label == 0x01:
+            if position >= len(content) or content[position] != 12 or position + 13 > len(content):
+                return ReasonCode.unsafe_content
+            position += 1
+            fixed = content[position : position + 12]
+            position += 12
+        elif label != 0xFE:
+            return ReasonCode.unsafe_content
+        failure = _append_format_channel(channels, fixed, total) if fixed else None
+        if failure is not None:
+            return failure
+        if not has_subblocks:
+            continue
+        position, failure = _gif_subblocks(content, position, channels, total, inspect=True)
+        if failure is not None:
+            return failure
+    return ReasonCode.unsafe_content
+
+
+def _webp_channels(content: bytes) -> tuple[bytes, ...] | ReasonCode:
+    """Validate RIFF framing and retain bounded non-image WebP chunks."""
+
+    if len(content) < 12 or content[:4] != b"RIFF" or content[8:12] != b"WEBP":
+        return ReasonCode.unsafe_content
+    if int.from_bytes(content[4:8], "little") != len(content) - 8:
+        return ReasonCode.unsafe_content
+    position = 12
+    channels: list[bytes] = []
+    total = [0]
+    image_chunks = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF"}
+    saw_image = False
+    while position < len(content):
+        if position + 8 > len(content):
+            return ReasonCode.unsafe_content
+        chunk = content[position : position + 4]
+        if any(byte < 0x20 or byte > 0x7E for byte in chunk):
+            return ReasonCode.unsafe_content
+        length = int.from_bytes(content[position + 4 : position + 8], "little")
+        payload_start = position + 8
+        payload_end = payload_start + length
+        end = payload_end + (length & 1)
+        if end > len(content):
+            return ReasonCode.unsafe_content
+        payload = content[payload_start:payload_end]
+        if chunk in image_chunks:
+            saw_image = True
+        else:
+            failure = _append_format_channel(channels, payload, total)
+            if failure is not None:
+                return failure
+        position = end
+    return tuple(channels) if saw_image and position == len(content) else ReasonCode.unsafe_content
+
+
+def _format_channels(content: bytes, media_type: str) -> tuple[bytes, ...] | ReasonCode:
+    if media_type == "image/jpeg":
+        return _jpeg_channels(content)
+    if media_type == "image/png":
+        return _png_channels(content)
+    if media_type == "image/gif":
+        return _gif_channels(content)
+    if media_type == "image/webp":
+        return _webp_channels(content)
+    return ReasonCode.unsafe_content
+
+
+def _complete_stream(content: bytes, media_type: str) -> bool:
+    """Require the format's terminal marker to be the final input byte."""
+
+    return not isinstance(_format_channels(content, media_type), ReasonCode)
+
+
+def _jpeg_complete(content: bytes) -> bool:
+    """Parse all JPEG scans and reject a suffix after EOI."""
+
+    return not isinstance(_jpeg_channels(content), ReasonCode)
+
+
+def _gif_complete(content: bytes) -> bool:
+    """Walk GIF blocks so bytes after the actual trailer cannot hide."""
+
+    return not isinstance(_gif_channels(content), ReasonCode)
 
 
 def _decode_frames(content: bytes, media_type: str) -> tuple[tuple[_FrameInspection, ...], int] | ReasonCode:
@@ -663,6 +855,9 @@ def _decode_frames(content: bytes, media_type: str) -> tuple[tuple[_FrameInspect
             if first.format != expected_format:
                 return ReasonCode.invalid_media_type
             first.verify()
+        format_channels = _format_channels(content, media_type)
+        if isinstance(format_channels, ReasonCode):
+            return format_channels
         stream.seek(0)
         with warnings.catch_warnings():
             warnings.simplefilter("error", DecompressionBombWarning)
@@ -701,10 +896,23 @@ def _decode_frames(content: bytes, media_type: str) -> tuple[tuple[_FrameInspect
                     frames.append(_FrameInspection(image.copy(), metadata, raw_metadata, metadata_count, width, height))
                 except (EOFError, OSError, ValueError, SyntaxError, UnidentifiedImageError):
                     return ReasonCode.unsafe_content
-            # Pillow normally consumes the complete stream when every frame is
-            # loaded.  A remaining suffix is a polyglot or unverified payload.
-            if not _complete_stream(content, media_type):
-                return ReasonCode.unsafe_content
+            # Container channels are kept alongside Pillow metadata so the
+            # exact-secret and scanner boundaries inspect every permitted
+            # ancillary payload without changing the source bytes.
+            if format_channels:
+                first_frame = frames[0]
+                merged_raw = first_frame.raw_metadata + format_channels
+                merged_count = first_frame.metadata_count + len(format_channels)
+                if merged_count > MAX_METADATA_ENTRIES or sum(len(item) for item in merged_raw) > MAX_METADATA_BYTES:
+                    return ReasonCode.oversized
+                frames[0] = _FrameInspection(
+                    first_frame.frame,
+                    first_frame.metadata,
+                    merged_raw,
+                    merged_count,
+                    first_frame.width,
+                    first_frame.height,
+                )
             return tuple(frames), sum(item.metadata_count for item in frames)
     except (DecompressionBombError, DecompressionBombWarning):
         return ReasonCode.oversized
@@ -907,6 +1115,12 @@ def _inspect_image(
         entries.append(CorpusEntry(f"media-metadata-{index:04d}.txt", text.encode("utf-8"), "text"))
     for index, text in enumerate(ocr_texts):
         entries.append(CorpusEntry(f"media-ocr-{index:04d}.txt", text.encode("utf-8"), "text"))
+    for index, raw in enumerate(raw_metadata):
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        entries.append(CorpusEntry(f"media-channel-{index:04d}.txt", decoded.encode("utf-8"), "text"))
     finding_count, reason = _scan_metadata_ocr(
         entries,
         raw_metadata=raw_metadata,

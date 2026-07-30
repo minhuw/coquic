@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import subprocess
+import zlib
 from io import BytesIO
 from pathlib import Path
 
 import pytest
 from PIL import Image, PngImagePlugin
 
+import coquic_steward.publication.media as media_module
+
 from coquic_steward.publication import (
     MAX_MEDIA_BYTES,
     MAX_OCR_OUTPUT_BYTES,
+    FileIdentity,
     MediaInspection,
     ReasonCode,
+    StableRead,
     SUPPORTED_IMAGE_MEDIA_TYPES,
     classify_media,
     inspect_media,
@@ -81,6 +87,49 @@ def test_format_multiframe_images_inspect_every_frame() -> None:
         assert result.approved
         assert result.frame_count == 3
         assert result.ocr_frame_count == 3
+
+
+def test_progressive_jpeg_is_completely_inspected() -> None:
+    output = BytesIO()
+    image = Image.new("RGB", (24, 16), (30, 40, 50))
+    image.save(output, format="JPEG", progressive=True)
+    image.close()
+    payload = output.getvalue()
+    result = _inspect(payload, "image/jpeg")
+    assert result.approved
+    assert result.bytes == payload
+
+
+def test_jpeg_app2_channel_is_scanned() -> None:
+    secret = b"opaque-jpeg-secret"
+    output = BytesIO()
+    image = Image.new("RGB", (8, 8), (1, 2, 3))
+    image.save(output, format="JPEG")
+    image.close()
+    payload = output.getvalue()
+    segment = b"\xff\xe2" + struct.pack(">H", len(secret) + 2) + secret
+    result = _inspect(payload[:2] + segment + payload[2:], "image/jpeg", secrets=(secret.decode(),))
+    assert not result.approved
+    assert result.reason == ReasonCode.unsafe_content
+    assert result.bytes is None
+
+
+def test_png_ancillary_channel_is_scanned() -> None:
+    secret = b"opaque-png-secret"
+    payload = _image("image/png")
+    end = payload.rfind(b"IEND") - 4
+    chunk_type = b"abCd"
+    chunk_data = secret
+    chunk = (
+        struct.pack(">I", len(chunk_data))
+        + chunk_type
+        + chunk_data
+        + struct.pack(">I", zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF)
+    )
+    result = _inspect(payload[:end] + chunk + payload[end:], "image/png", secrets=(secret.decode(),))
+    assert not result.approved
+    assert result.reason == ReasonCode.unsafe_content
+    assert result.bytes is None
 
 
 @pytest.mark.parametrize(
@@ -171,6 +220,22 @@ def test_text_allowlist_requires_utf8_and_preserves_bytes() -> None:
     assert result.bytes == payload
     assert inspect_media(b"\xff", "text/plain").reason == ReasonCode.invalid_utf8
     assert inspect_media(b"ok", "application/octet-stream").reason == ReasonCode.uninspectable_binary
+    assert classify_media("text/x-unregistered") == "binary"
+    assert inspect_media(b"ok", "text/x-unregistered").reason == ReasonCode.uninspectable_binary
+
+
+def test_path_identity_change_blocks_even_when_bytes_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = b"stable bytes"
+    path = tmp_path / "artifact.txt"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    initial = StableRead(payload, FileIdentity(1, 2, len(payload), 3), len(payload), digest)
+    final = StableRead(payload, FileIdentity(1, 2, len(payload), 4), len(payload), digest)
+    reads = iter((initial, final))
+    monkeypatch.setattr(media_module, "read_stable_file", lambda *_args, **_kwargs: next(reads))
+    result = inspect_media(path, "text/plain")
+    assert not result.approved
+    assert result.reason == ReasonCode.changing
 
 
 def test_bundle_report_hides_failed_payloads() -> None:

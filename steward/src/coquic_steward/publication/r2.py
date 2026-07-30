@@ -243,12 +243,16 @@ def _metadata(
         return expected
     if not isinstance(value, Mapping) or len(value) > len(expected):
         _validation()
+    seen: set[str] = set()
     for key, actual in value.items():
         if not isinstance(key, str) or not isinstance(actual, str):
             _validation()
-        normalized = key.casefold().replace("_", "-")
+        normalized = key.casefold()
         if _METADATA_KEY_RE.fullmatch(normalized) is None or normalized not in expected:
             _validation()
+        if normalized in seen:
+            _validation()
+        seen.add(normalized)
         if len(actual) > MAX_R2_METADATA_VALUE_LENGTH or any(
             ord(char) < 0x20 or ord(char) == 0x7F for char in actual
         ):
@@ -524,7 +528,14 @@ class R2Client:
             if category is not R2ErrorCategory.precondition:
                 raise R2Error(category) from None
             return self._head_and_verify(
-                bucket, key, klass, len(content), digest, expected_metadata, conflict=True
+                bucket,
+                key,
+                klass,
+                len(content),
+                digest,
+                md5,
+                expected_metadata,
+                conflict=True,
             )
         return self._head_and_verify(
             bucket,
@@ -532,6 +543,7 @@ class R2Client:
             klass,
             len(content),
             digest,
+            md5,
             expected_metadata,
             conflict=False,
             uploaded=True,
@@ -544,6 +556,7 @@ class R2Client:
         klass: R2ObjectClass,
         byte_size: int,
         digest: str,
+        content_md5: str,
         expected_metadata: Mapping[str, str],
         *,
         conflict: bool,
@@ -570,8 +583,29 @@ class R2Client:
         for name, value in metadata.items():
             if not isinstance(name, str) or not isinstance(value, str):
                 raise R2Error(R2ErrorCategory.integrity)
-            normalized[name.casefold().replace("_", "-")] = value
+            canonical_name = name.casefold()
+            if canonical_name in normalized:
+                raise R2Error(R2ErrorCategory.integrity)
+            normalized[canonical_name] = value
         if normalized != dict(expected_metadata) or normalized.get("sha256") != digest:
+            raise R2Error(R2ErrorCategory.integrity)
+        expected_etag = base64.b64decode(content_md5).hex()
+        expected_checksum = base64.b64encode(bytes.fromhex(digest)).decode("ascii")
+        descriptors = 0
+        if "ETag" in response:
+            etag = response["ETag"]
+            if not isinstance(etag, str) or etag not in {
+                expected_etag,
+                f'"{expected_etag}"',
+            }:
+                raise R2Error(R2ErrorCategory.integrity)
+            descriptors += 1
+        if "ChecksumSHA256" in response:
+            checksum = response["ChecksumSHA256"]
+            if not isinstance(checksum, str) or checksum != expected_checksum:
+                raise R2Error(R2ErrorCategory.integrity)
+            descriptors += 1
+        if descriptors == 0:
             raise R2Error(R2ErrorCategory.integrity)
         return R2PutResult(
             R2PutStatus.uploaded if uploaded else R2PutStatus.existing,
@@ -598,12 +632,19 @@ class R2Client:
         *,
         metadata: Mapping[str, str] | None = None,
     ) -> R2PutResult:
-        key, klass, content, _digest_value, _md5, expected_metadata = self._prepare(
+        key, klass, content, _digest_value, content_md5, expected_metadata = self._prepare(
             key, content, object_class, metadata, None, None
         )
         bucket = self._public_bucket if klass is R2ObjectClass.public else self._private_bucket
         return self._head_and_verify(
-            bucket, key, klass, len(content), _digest_value, expected_metadata, conflict=False
+            bucket,
+            key,
+            klass,
+            len(content),
+            _digest_value,
+            content_md5,
+            expected_metadata,
+            conflict=False,
         )
 
     head_and_verify = verify_object

@@ -21,6 +21,8 @@ from coquic_steward.publication.r2 import (
 
 BODY = b"immutable publication\n"
 DIGEST = hashlib.sha256(BODY).hexdigest()
+ETAG = f'"{hashlib.md5(BODY, usedforsecurity=False).hexdigest()}"'
+CHECKSUM_SHA256 = base64.b64encode(bytes.fromhex(DIGEST)).decode("ascii")
 PUBLIC_KEY = public_object_key("task-1", DIGEST)
 PRIVATE_KEY = private_original_key("task-1", "run-1", DIGEST)
 
@@ -52,11 +54,25 @@ class FakeS3:
         return self.head
 
 
-def _head(*, digest: str = DIGEST, length: int = len(BODY), klass: str = "public") -> dict:
-    return {
+def _head(
+    *,
+    digest: str = DIGEST,
+    length: int = len(BODY),
+    klass: str = "public",
+    etag: str | None = ETAG,
+    checksum_sha256: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> dict:
+    response = {
         "ContentLength": length,
-        "Metadata": {"sha256": digest, "byte-size": str(length), "object-class": klass},
+        "Metadata": metadata
+        or {"sha256": digest, "byte-size": str(length), "object-class": klass},
     }
+    if etag is not None:
+        response["ETag"] = etag
+    if checksum_sha256 is not None:
+        response["ChecksumSHA256"] = checksum_sha256
+    return response
 
 
 def _r2(fake: FakeS3) -> R2Client:
@@ -112,6 +128,62 @@ def test_mismatched_replay_is_fail_closed_integrity() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ETag", f'"{"0" * 32}"'),
+        ("ChecksumSHA256", "0" * len(CHECKSUM_SHA256)),
+    ],
+)
+def test_mismatched_provider_digest_is_fail_closed_integrity(field: str, value: str) -> None:
+    head = _head(checksum_sha256=CHECKSUM_SHA256)
+    head[field] = value
+    fake = FakeS3(put_error=_client_error("PreconditionFailed", 412), head=head)
+    with pytest.raises(R2Error) as error:
+        _r2(fake).put_object(PUBLIC_KEY, BODY)
+    assert error.value.category is R2ErrorCategory.integrity
+
+
+def test_missing_provider_digest_is_fail_closed_integrity() -> None:
+    fake = FakeS3(
+        put_error=_client_error("PreconditionFailed", 412),
+        head=_head(etag=None),
+    )
+    with pytest.raises(R2Error) as error:
+        _r2(fake).put_object(PUBLIC_KEY, BODY)
+    assert error.value.category is R2ErrorCategory.integrity
+
+
+def test_metadata_case_is_canonicalized_but_underscores_are_not() -> None:
+    uppercase = _head(
+        metadata={
+            "SHA256": DIGEST,
+            "BYTE-SIZE": str(len(BODY)),
+            "OBJECT-CLASS": "public",
+        }
+    )
+    uppercase_fake = FakeS3(
+        put_error=_client_error("PreconditionFailed", 412),
+        head=uppercase,
+    )
+    assert _r2(uppercase_fake).put_object(PUBLIC_KEY, BODY).status is R2PutStatus.existing
+
+    underscored = _head(
+        metadata={
+            "sha256": DIGEST,
+            "byte_size": str(len(BODY)),
+            "object_class": "public",
+        }
+    )
+    underscored_fake = FakeS3(
+        put_error=_client_error("PreconditionFailed", 412),
+        head=underscored,
+    )
+    with pytest.raises(R2Error) as error:
+        _r2(underscored_fake).put_object(PUBLIC_KEY, BODY)
+    assert error.value.category is R2ErrorCategory.integrity
+
+
+@pytest.mark.parametrize(
     ("exception", "category", "retryable"),
     [
         (_client_error("AccessDenied", 403), R2ErrorCategory.permission, False),
@@ -140,6 +212,8 @@ def test_key_payload_and_class_contracts_fail_before_provider_call() -> None:
         client.put_object(PRIVATE_KEY, BODY, R2ObjectClass.public)
     with pytest.raises(R2ValidationError):
         client.put_object(PUBLIC_KEY, BODY, metadata={"sha256": "0" * 64})
+    with pytest.raises(R2ValidationError):
+        client.put_object(PUBLIC_KEY, BODY, metadata={"byte_size": str(len(BODY))})
     assert not fake.calls
 
 

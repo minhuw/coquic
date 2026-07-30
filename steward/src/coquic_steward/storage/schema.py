@@ -567,6 +567,245 @@ class StewardResourcePressureRow(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class PublicationGenerationRow(Base):
+    """Durable local state for one deterministic publication generation."""
+
+    __tablename__ = "publication_generations"
+
+    publication_id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String, nullable=False)
+    generation_boundary: Mapped[str] = mapped_column(String, nullable=False)
+    metadata_digest: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_expires_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    retry_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    expected_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expected_object_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expected_task_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    expected_pipeline_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expected_run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expected_event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expected_artifact_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    exposed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id", "generation_boundary", name="uq_publication_generation_boundary"
+        ),
+        UniqueConstraint("task_id", "run_id", name="uq_publication_generation_run"),
+        UniqueConstraint(
+            "task_id", "idempotency_key", name="uq_publication_generation_idempotency"
+        ),
+        CheckConstraint(
+            "length(publication_id) BETWEEN 1 AND 128 AND "
+            "substr(publication_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "publication_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_generation_publication_id",
+        ),
+        CheckConstraint(
+            "length(task_id) BETWEEN 1 AND 128 AND "
+            "substr(task_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "task_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_generation_task_id",
+        ),
+        CheckConstraint(
+            "length(run_id) BETWEEN 1 AND 128 AND "
+            "substr(run_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "run_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_generation_run_id",
+        ),
+        CheckConstraint(
+            "length(generation_boundary) BETWEEN 1 AND 128 AND "
+            "generation_boundary NOT LIKE '%/%' AND generation_boundary NOT LIKE '%\\\\%'",
+            name="ck_publication_generation_boundary",
+        ),
+        CheckConstraint(
+            "length(metadata_digest) = 64 AND metadata_digest NOT GLOB '*[^0-9a-f]*'",
+            name="ck_publication_generation_digest",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 128 AND "
+            "substr(idempotency_key, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "idempotency_key NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_generation_idempotency_key",
+        ),
+        CheckConstraint(
+            "state IN ('queued','claimed','building','uploading','d1_staged','exposed','retry_wait','blocked','terminal_cleaned')",
+            name="ck_publication_generation_state",
+        ),
+        CheckConstraint(
+            "attempt BETWEEN 0 AND 32", name="ck_publication_generation_attempt"
+        ),
+        CheckConstraint(
+            "(lease_owner IS NULL AND lease_expires_at IS NULL) OR "
+            "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_publication_generation_lease_pair",
+        ),
+        CheckConstraint(
+            "(state = 'retry_wait' AND retry_at IS NOT NULL) OR "
+            "(state <> 'retry_wait' AND retry_at IS NULL)",
+            name="ck_publication_generation_retry_at",
+        ),
+        CheckConstraint(
+            "reason IS NULL OR (length(reason) BETWEEN 1 AND 64 AND "
+            "reason NOT GLOB '*[^a-z0-9_]*' AND substr(reason, 1, 1) GLOB '[a-z]')",
+            name="ck_publication_generation_reason",
+        ),
+        CheckConstraint(
+            "expected_row_count BETWEEN 0 AND 2147483647 AND "
+            "expected_object_count BETWEEN 0 AND 2147483647 AND "
+            "expected_task_count = 1 AND "
+            "expected_pipeline_count BETWEEN 0 AND 2147483647 AND "
+            "expected_run_count BETWEEN 0 AND 2147483647 AND "
+            "expected_event_count BETWEEN 0 AND 2147483647 AND "
+            "expected_artifact_count BETWEEN 0 AND 2147483647",
+            name="ck_publication_generation_counts",
+        ),
+    )
+
+
+class PublicationReceiptRow(Base):
+    """Verified public/private object facts associated with a generation."""
+
+    __tablename__ = "publication_receipts"
+
+    receipt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    publication_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_generations.publication_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    receipt_class: Mapped[str] = mapped_column(String, nullable=False)
+    sha256: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_key: Mapped[str] = mapped_column(Text, nullable=False)
+    logical_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "publication_id", "receipt_class", "sha256", "content_key",
+            name="uq_publication_receipt_object",
+        ),
+        CheckConstraint(
+            "receipt_class IN ('public','private')", name="ck_publication_receipt_class"
+        ),
+        CheckConstraint(
+            "length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_publication_receipt_digest",
+        ),
+        CheckConstraint(
+            "byte_size BETWEEN 0 AND 67108864", name="ck_publication_receipt_size"
+        ),
+        CheckConstraint(
+            "(receipt_class = 'public' AND content_key LIKE 'v1/tasks/%' AND "
+            "substr(content_key, -64) = sha256 AND "
+            "substr(content_key, -67, 2) = substr(sha256, 1, 2)) OR "
+            "(receipt_class = 'private' AND content_key LIKE 'v1/originals/%' AND logical_path IS NULL)",
+            name="ck_publication_receipt_locator_class",
+        ),
+        CheckConstraint(
+            "logical_path IS NULL OR (length(logical_path) BETWEEN 1 AND 1024 AND "
+            "logical_path NOT GLOB '/*' AND logical_path NOT LIKE '%://%' AND "
+            "logical_path NOT LIKE '%..%')",
+            name="ck_publication_receipt_logical_path",
+        ),
+    )
+
+
+class PublicationHealthRow(Base):
+    """Singleton bounded publication queue/cleanup health facts."""
+
+    __tablename__ = "publication_health"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    queued_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cleanup_pending_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cleanup_pending_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_publication_health_singleton"),
+        CheckConstraint(
+            "queued_count BETWEEN 0 AND 2147483647 AND "
+            "blocked_count BETWEEN 0 AND 2147483647 AND "
+            "cleanup_pending_count BETWEEN 0 AND 2147483647 AND "
+            "cleanup_pending_bytes BETWEEN 0 AND 2147483647",
+            name="ck_publication_health_counts",
+        ),
+        CheckConstraint(
+            "reason IS NULL OR (length(reason) BETWEEN 1 AND 64 AND "
+            "reason NOT GLOB '*[^a-z0-9_]*' AND substr(reason, 1, 1) GLOB '[a-z]')",
+            name="ck_publication_health_reason",
+        ),
+    )
+
+
+class PublicationCleanupIntentRow(Base):
+    """Exact-path cleanup authority retained until terminal deletion converges."""
+
+    __tablename__ = "publication_cleanup_intents"
+
+    intent_id: Mapped[str] = mapped_column(String, primary_key=True)
+    publication_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_generations.publication_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    manifest_digest: Mapped[str] = mapped_column(String, nullable=False)
+    exact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    requested_at: Mapped[str] = mapped_column(String, nullable=False)
+    verified_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "publication_id", "task_id", name="uq_publication_cleanup_generation_task"
+        ),
+        CheckConstraint(
+            "length(task_id) BETWEEN 1 AND 128 AND "
+            "substr(task_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "task_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_cleanup_task_id",
+        ),
+        CheckConstraint(
+            "length(manifest_digest) = 64 AND manifest_digest NOT GLOB '*[^0-9a-f]*'",
+            name="ck_publication_cleanup_manifest_digest",
+        ),
+        CheckConstraint(
+            "length(exact_path) BETWEEN 1 AND 4096 AND exact_path NOT LIKE '%*%' AND "
+            "exact_path NOT LIKE '%?%' AND exact_path NOT LIKE '%[%]%' AND "
+            "exact_path NOT LIKE '%..%' AND exact_path NOT LIKE '%://%' AND "
+            "substr(exact_path, -1, 1) NOT IN ('/','\\\\')",
+            name="ck_publication_cleanup_exact_path",
+        ),
+        CheckConstraint(
+            "state IN ('pending','completed','blocked')", name="ck_publication_cleanup_state"
+        ),
+        CheckConstraint(
+            "(state = 'completed' AND completed_at IS NOT NULL) OR state <> 'completed'",
+            name="ck_publication_cleanup_completed_at",
+        ),
+        CheckConstraint(
+            "reason IS NULL OR (length(reason) BETWEEN 1 AND 64 AND "
+            "reason NOT GLOB '*[^a-z0-9_]*' AND substr(reason, 1, 1) GLOB '[a-z]')",
+            name="ck_publication_cleanup_reason",
+        ),
+    )
+
+
 class TaskExecutionRow(Base):
     """Normalized private execution ownership and phase cursor."""
 
@@ -878,6 +1117,33 @@ Index(
 
 Index("ix_task_pipelines_task_ordinal", TaskPipelineRow.task_id, TaskPipelineRow.ordinal)
 Index("ix_task_runs_task_started", TaskRunRow.task_id, TaskRunRow.started_at)
+Index(
+    "ix_publication_generations_task_state_created",
+    PublicationGenerationRow.task_id,
+    PublicationGenerationRow.state,
+    PublicationGenerationRow.created_at,
+)
+Index(
+    "ix_publication_generations_active_lease",
+    PublicationGenerationRow.task_id,
+    unique=True,
+    sqlite_where=PublicationGenerationRow.lease_expires_at.is_not(None),
+)
+Index(
+    "ix_publication_receipts_generation_class",
+    PublicationReceiptRow.publication_id,
+    PublicationReceiptRow.receipt_class,
+)
+Index(
+    "ix_publication_receipts_digest",
+    PublicationReceiptRow.sha256,
+)
+Index(
+    "ix_publication_cleanup_pending",
+    PublicationCleanupIntentRow.task_id,
+    PublicationCleanupIntentRow.state,
+    PublicationCleanupIntentRow.requested_at,
+)
 
 # Readable aliases for callers that inspect the normalized SQL schema directly.
 TaskExecution = TaskExecutionRow
@@ -891,3 +1157,13 @@ StewardImageRelease = StewardImageReleaseRow
 StewardContainerReference = StewardContainerReferenceRow
 StewardValidationCleanup = StewardValidationCleanupRow
 StewardResourcePressure = StewardResourcePressureRow
+PublicationGeneration = PublicationGenerationRow
+PublicationReceipt = PublicationReceiptRow
+PublicationHealth = PublicationHealthRow
+PublicationCleanupIntent = PublicationCleanupIntentRow
+OutboxGenerationRow = PublicationGenerationRow
+OutboxReceiptRow = PublicationReceiptRow
+PublicationOutboxGenerationRow = PublicationGenerationRow
+PublicationOutboxReceiptRow = PublicationReceiptRow
+PublicationOutboxHealthRow = PublicationHealthRow
+PublicationOutboxCleanupIntentRow = PublicationCleanupIntentRow

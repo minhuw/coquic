@@ -1,3 +1,0 @@
-{"eventId":"event-running-1","kind":"task.created","at":"2026-07-22T08:00:00Z","status":"queued"}
-{"eventId":"event-running-2","kind":"run.interrupted","at":"2026-07-22T08:03:00Z","runId":"run-implementation-interrupted"}
-{"eventId":"event-running-3","kind":"run.started","at":"2026-07-22T08:04:00Z","runId":"run-implementation-recovery"}

@@ -1,4 +1,0 @@
-{"record_type":"synthetic.user","provider_thread_id":"provider-synthetic-opaque-1","text":"Begin fixture work."}
-{"record_type":"synthetic.assistant","text":"I will inspect the synthetic input."}
-{"record_type":"synthetic.tool","command":"printf '/synthetic/fixture SYNTHETIC_TOKEN_NOT_A_CREDENTIAL'"}
-{"record_type":"synthetic.assistant","text":"Interrupted while editing"

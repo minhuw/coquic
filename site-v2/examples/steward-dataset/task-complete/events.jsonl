@@ -1,4 +1,0 @@
-{"eventId":"event-complete-1","kind":"task.created","at":"2026-07-22T07:00:00Z","status":"queued"}
-{"eventId":"event-complete-2","kind":"pipeline.completed","at":"2026-07-22T08:05:00Z","pipelineId":"pipeline-initial","status":"superseded"}
-{"eventId":"event-complete-3","kind":"pipeline.completed","at":"2026-07-22T08:18:00Z","pipelineId":"pipeline-repair","status":"succeeded"}
-{"eventId":"event-complete-4","kind":"archive.frozen","at":"2026-07-22T08:20:00Z"}

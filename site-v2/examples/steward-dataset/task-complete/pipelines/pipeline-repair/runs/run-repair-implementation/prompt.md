@@ -1,1 +1,0 @@
-Synthetic repair implementation prompt.

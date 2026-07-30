@@ -1,1 +1,0 @@
-Synthetic planning prompt.

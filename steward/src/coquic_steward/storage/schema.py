@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -10,7 +12,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -63,10 +67,33 @@ _PUBLICATION_SAFE_REASON_SQL = ",".join(
 )
 
 
+def _publication_identity_digest(task_id: object, generation_boundary: object) -> str:
+    """Return the canonical generation digest for the SQLite identity check."""
+
+    if not isinstance(task_id, str) or not isinstance(generation_boundary, str):
+        return "invalid"
+    seed = f"coquic-publication-v1\0{task_id}\0{generation_boundary}".encode()
+    return hashlib.sha256(seed).hexdigest()
+
+
+@event.listens_for(Engine, "connect")
+def _register_publication_identity_digest(
+    dbapi_connection: object, _connection_record: object
+) -> None:
+    """Make the identity digest available to every SQLAlchemy SQLite connection."""
+
+    create_function = getattr(dbapi_connection, "create_function", None)
+    if callable(create_function):
+        create_function("coquic_publication_digest", 2, _publication_identity_digest)
+
+
 def _publication_timestamp_check(column: str) -> str:
     return (
         f"length({column}) = 24 AND {column} GLOB '{_PUBLICATION_TIMESTAMP_GLOB}' "
         f"AND substr({column}, 1, 4) BETWEEN '0001' AND '9999' "
+        f"AND substr({column}, 12, 2) BETWEEN '00' AND '23' "
+        f"AND substr({column}, 15, 2) BETWEEN '00' AND '59' "
+        f"AND substr({column}, 18, 2) BETWEEN '00' AND '59' "
         f"AND datetime(substr({column}, 1, 19)) IS NOT NULL "
         f"AND strftime('%Y-%m-%dT%H:%M:%S', substr({column}, 1, 19)) = substr({column}, 1, 19)"
     )
@@ -662,9 +689,9 @@ class PublicationGenerationRow(Base):
             "task_id", "idempotency_key", name="uq_publication_generation_idempotency"
         ),
         CheckConstraint(
-            "length(publication_id) BETWEEN 1 AND 128 AND "
-            "substr(publication_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
-            "publication_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            "length(publication_id) = 68 AND substr(publication_id, 1, 4) = 'pub-' AND "
+            "substr(publication_id, 5) NOT GLOB '*[^0-9a-f]*' AND "
+            "publication_id = 'pub-' || coquic_publication_digest(task_id, generation_boundary)",
             name="ck_publication_generation_publication_id",
         ),
         CheckConstraint(
@@ -689,9 +716,10 @@ class PublicationGenerationRow(Base):
             name="ck_publication_generation_digest",
         ),
         CheckConstraint(
-            "length(idempotency_key) BETWEEN 1 AND 128 AND "
-            "substr(idempotency_key, 1, 1) GLOB '[A-Za-z0-9]' AND "
-            "idempotency_key NOT GLOB '*[^A-Za-z0-9._-]*'",
+            "length(idempotency_key) = 68 AND substr(idempotency_key, 1, 4) = 'gen-' AND "
+            "substr(idempotency_key, 5) NOT GLOB '*[^0-9a-f]*' AND "
+            "substr(idempotency_key, 5) = substr(publication_id, 5) AND "
+            "idempotency_key = 'gen-' || coquic_publication_digest(task_id, generation_boundary)",
             name="ck_publication_generation_idempotency_key",
         ),
         CheckConstraint(
@@ -816,15 +844,18 @@ class PublicationReceiptRow(Base):
         CheckConstraint(
             "length(content_key) BETWEEN 1 AND 1024 AND "
             "content_key NOT GLOB '*[^A-Za-z0-9._/-]*' AND "
-            "content_key NOT LIKE '%//%' AND "
+            "instr(content_key, '//') = 0 AND "
             "((receipt_class = 'public' AND content_key = "
             "'v1/tasks/' || task_id || '/objects/sha256/' || substr(sha256, 1, 2) || '/' || sha256) OR "
             "(receipt_class = 'private' AND "
-            "content_key LIKE 'v1/originals/' || task_id || '/%/sha256/' || sha256 || '.jsonl' AND "
-            "(length(content_key) - length(replace(content_key, '/', ''))) = 5 AND "
-            "length(content_key) - length('v1/originals/' || task_id || '//sha256/' || sha256 || '.jsonl') BETWEEN 1 AND 128 AND "
-            "content_key NOT LIKE 'v1/originals/' || task_id || '/-%/sha256/%' AND "
-            "content_key NOT LIKE 'v1/originals/' || task_id || '/.%/sha256/%' AND "
+            "substr(content_key, 1, length('v1/originals/' || task_id || '/')) = "
+            "'v1/originals/' || task_id || '/' AND "
+            "substr(content_key, -78) = '/sha256/' || sha256 || '.jsonl' AND "
+            "(length(content_key) - length('v1/originals/' || task_id || '/') - 78) BETWEEN 1 AND 128 AND "
+            "substr(content_key, length('v1/originals/' || task_id || '/') + 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "substr(content_key, length('v1/originals/' || task_id || '/') + 1, "
+            "length(content_key) - length('v1/originals/' || task_id || '/') - 78) "
+            "NOT GLOB '*[^A-Za-z0-9._-]*' AND "
             "logical_path IS NULL))",
             name="ck_publication_receipt_locator_class",
         ),
@@ -833,10 +864,20 @@ class PublicationReceiptRow(Base):
             "logical_path NOT GLOB '/*' AND "
             "substr(logical_path, 1, 1) GLOB '[A-Za-z0-9]' AND "
             "logical_path NOT GLOB '*[^A-Za-z0-9._/-]*' AND "
-            "logical_path NOT LIKE '%//%' AND logical_path NOT LIKE '%://%' AND "
-            "logical_path NOT LIKE './%' AND logical_path NOT LIKE '../%' AND "
-            "logical_path NOT LIKE '%/./%' AND logical_path NOT LIKE '%/../%' AND "
-            "logical_path NOT LIKE '%/-%' AND logical_path NOT LIKE '%/.%')",
+            "substr(logical_path, -1, 1) <> '/' AND "
+            "instr(logical_path, '//') = 0 AND instr(logical_path, '://') = 0 AND "
+            "logical_path NOT GLOB '*[/][^A-Za-z0-9]*' AND "
+            "instr('/' || logical_path || '/', '/private/') = 0 AND "
+            "instr('/' || logical_path || '/', '/credential/') = 0 AND "
+            "instr('/' || logical_path || '/', '/credentials/') = 0 AND "
+            "instr('/' || logical_path || '/', '/secret/') = 0 AND "
+            "instr('/' || logical_path || '/', '/token/') = 0 AND "
+            "logical_path NOT GLOB 'private[-_]*' AND "
+            "logical_path NOT GLOB '*[-_]private[-_]*' AND "
+            "logical_path NOT GLOB 'internal[-_]*' AND "
+            "logical_path NOT GLOB '*[-_]internal[-_]*' AND "
+            "logical_path NOT GLOB 'secret[-_]*' AND "
+            "logical_path NOT GLOB '*[-_]secret[-_]*')",
             name="ck_publication_receipt_logical_path",
         ),
         CheckConstraint(

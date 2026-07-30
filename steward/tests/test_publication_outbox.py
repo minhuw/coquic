@@ -83,12 +83,10 @@ def _generation_for_state(state: PublicationState) -> PublicationGeneration:
 
 def _insert_generation_row(connection: object, **overrides: object) -> None:
     values: dict[str, object] = {
-        "publication_id": "pub-schema",
         "task_id": "task-schema",
         "run_id": "run-schema",
         "generation_boundary": "boundary-schema",
         "metadata_digest": DIGEST,
-        "idempotency_key": "gen-schema",
         "state": "queued",
         "attempt": 0,
         "lease_owner": None,
@@ -107,6 +105,13 @@ def _insert_generation_row(connection: object, **overrides: object) -> None:
         "exposed_at": None,
     }
     values.update(overrides)
+    identity = GenerationIdentity(
+        str(values["task_id"]), str(values["generation_boundary"])
+    )
+    if "publication_id" not in overrides:
+        values["publication_id"] = identity.publication_id
+    if "idempotency_key" not in overrides:
+        values["idempotency_key"] = identity.idempotency_key
     connection.execute(
         text(
             "INSERT INTO publication_generations "
@@ -262,17 +267,23 @@ def test_clean_schema_has_constrained_publication_tables_and_indexes() -> None:
         connection.execute(text("PRAGMA foreign_keys=ON"))
         connection.commit()
     with engine.begin() as connection:
+        identity = GenerationIdentity("task-1", "boundary-1")
         connection.execute(
             text(
                 "INSERT INTO publication_generations "
                 "(publication_id,task_id,run_id,generation_boundary,metadata_digest,idempotency_key,state,attempt,"
                 "expected_row_count,expected_object_count,expected_task_count,expected_pipeline_count,expected_run_count,"
                 "expected_event_count,expected_artifact_count,created_at,updated_at) "
-                "VALUES ('pub-1','task-1','run-1','boundary-1',:digest,'gen-1','queued',0,1,1,1,0,1,0,1,"
+                "VALUES (:publication_id,'task-1','run-1','boundary-1',:digest,:idempotency_key,'queued',0,1,1,1,0,1,0,1,"
                 "'2026-07-28T12:00:00.000Z','2026-07-28T12:00:00.000Z')"
             ),
-            {"digest": DIGEST},
+            {
+                "digest": DIGEST,
+                "publication_id": identity.publication_id,
+                "idempotency_key": identity.idempotency_key,
+            },
         )
+        conflicting = GenerationIdentity("task-1", "boundary-2")
         with pytest.raises(IntegrityError):
             connection.execute(
                 text(
@@ -280,20 +291,24 @@ def test_clean_schema_has_constrained_publication_tables_and_indexes() -> None:
                     "(publication_id,task_id,run_id,generation_boundary,metadata_digest,idempotency_key,state,attempt,"
                     "expected_row_count,expected_object_count,expected_task_count,expected_pipeline_count,expected_run_count,"
                     "expected_event_count,expected_artifact_count,created_at,updated_at) "
-                    "VALUES ('pub-2','task-1','run-2','boundary-2',:digest,'gen-1','queued',0,0,0,1,0,0,0,0,"
+                    "VALUES (:publication_id,'task-1','run-2','boundary-2',:digest,:idempotency_key,'queued',0,0,0,1,0,0,0,0,"
                     "'2026-07-28T12:00:00.000Z','2026-07-28T12:00:00.000Z')"
                 ),
-                {"digest": DIGEST},
+                {
+                    "digest": DIGEST,
+                    "publication_id": conflicting.publication_id,
+                    "idempotency_key": identity.idempotency_key,
+                },
             )
         with pytest.raises(IntegrityError):
             connection.execute(
                 text(
                     "INSERT INTO publication_cleanup_intents "
                     "(intent_id,publication_id,task_id,manifest_digest,exact_path,state,requested_at) "
-                    "VALUES ('cleanup-1','pub-1','task-1',:digest,'/var/lib/tasks/*','pending',"
+                    "VALUES ('cleanup-1',:publication_id,'task-1',:digest,'/var/lib/tasks/*','pending',"
                     "'2026-07-28T12:00:00.000Z')"
                 ),
-                {"digest": DIGEST},
+                {"digest": DIGEST, "publication_id": identity.publication_id},
             )
 
 
@@ -304,31 +319,38 @@ def test_schema_rejects_malformed_receipts_and_cross_task_ownership() -> None:
         connection.execute(text("PRAGMA foreign_keys=ON"))
         connection.commit()
     with engine.begin() as connection:
+        identity = GenerationIdentity("task-1", "boundary-receipts")
         _insert_generation_row(
             connection,
-            publication_id="pub-receipts",
             task_id="task-1",
             run_id="run-1",
             generation_boundary="boundary-receipts",
-            idempotency_key="gen-receipts",
         )
         connection.execute(
             text(
                 "INSERT INTO publication_receipts "
                 "(receipt_id,publication_id,task_id,receipt_class,sha256,byte_size,content_key,logical_path,verified_at) "
-                "VALUES ('receipt-public','pub-receipts','task-1','public',:digest,4,:public_key,"
+                "VALUES ('receipt-public',:publication_id,'task-1','public',:digest,4,:public_key,"
                 "'runs/run-1/trajectory.json','2026-07-28T12:00:00.000Z')"
             ),
-            {"digest": DIGEST, "public_key": PUBLIC_KEY},
+            {
+                "digest": DIGEST,
+                "public_key": PUBLIC_KEY,
+                "publication_id": identity.publication_id,
+            },
         )
         connection.execute(
             text(
                 "INSERT INTO publication_receipts "
                 "(receipt_id,publication_id,task_id,receipt_class,sha256,byte_size,content_key,logical_path,verified_at) "
-                "VALUES ('receipt-private','pub-receipts','task-1','private',:digest,4,:private_key,NULL,"
+                "VALUES ('receipt-private',:publication_id,'task-1','private',:digest,4,:private_key,NULL,"
                 "'2026-07-28T12:00:00.000Z')"
             ),
-            {"digest": DIGEST, "private_key": PRIVATE_KEY},
+            {
+                "digest": DIGEST,
+                "private_key": PRIVATE_KEY,
+                "publication_id": identity.publication_id,
+            },
         )
         invalid_receipts = (
             {
@@ -348,6 +370,14 @@ def test_schema_rejects_malformed_receipts_and_cross_task_ownership() -> None:
                 "verified_at": "2026-07-28T12:00:00.000Z",
             },
             {
+                "receipt_id": "receipt-private-wildcard-run",
+                "task_id": "task-1",
+                "receipt_class": "private",
+                "content_key": PRIVATE_KEY.replace("run-1", "_run"),
+                "logical_path": None,
+                "verified_at": "2026-07-28T12:00:00.000Z",
+            },
+            {
                 "receipt_id": "receipt-digest",
                 "task_id": "task-1",
                 "receipt_class": "private",
@@ -361,6 +391,14 @@ def test_schema_rejects_malformed_receipts_and_cross_task_ownership() -> None:
                 "receipt_class": "public",
                 "content_key": PUBLIC_KEY,
                 "logical_path": "../secret",
+                "verified_at": "2026-07-28T12:00:00.000Z",
+            },
+            {
+                "receipt_id": "receipt-private-locator",
+                "task_id": "task-1",
+                "receipt_class": "public",
+                "content_key": PUBLIC_KEY,
+                "logical_path": "runs/private/trajectory.json",
                 "verified_at": "2026-07-28T12:00:00.000Z",
             },
             {
@@ -386,9 +424,9 @@ def test_schema_rejects_malformed_receipts_and_cross_task_ownership() -> None:
                     text(
                         "INSERT INTO publication_receipts "
                         "(receipt_id,publication_id,task_id,receipt_class,sha256,byte_size,content_key,logical_path,verified_at) "
-                        "VALUES (:receipt_id,'pub-receipts',:task_id,:receipt_class,:digest,4,:content_key,:logical_path,:verified_at)"
+                        "VALUES (:receipt_id,:publication_id,:task_id,:receipt_class,:digest,4,:content_key,:logical_path,:verified_at)"
                     ),
-                    {"digest": DIGEST, **receipt},
+                    {"digest": DIGEST, "publication_id": identity.publication_id, **receipt},
                 )
 
 
@@ -443,6 +481,18 @@ def test_schema_rejects_invalid_generation_state_rules_and_timestamps() -> None:
                 "created_at": "not-a-timestamp",
             },
             {
+                "publication_id": GenerationIdentity(
+                    "task-invalid-hour", "boundary-invalid-hour"
+                ).publication_id,
+                "task_id": "task-invalid-hour",
+                "run_id": "run-invalid-hour",
+                "generation_boundary": "boundary-invalid-hour",
+                "idempotency_key": GenerationIdentity(
+                    "task-invalid-hour", "boundary-invalid-hour"
+                ).idempotency_key,
+                "updated_at": "2026-07-28T24:00:00.000Z",
+            },
+            {
                 "publication_id": "pub-reversed-time",
                 "task_id": "task-reversed-time",
                 "run_id": "run-reversed-time",
@@ -465,11 +515,9 @@ def test_schema_rejects_invalid_generation_state_rules_and_timestamps() -> None:
 
         _insert_generation_row(
             connection,
-            publication_id="pub-active-lease-1",
             task_id="task-active-lease",
             run_id="run-active-lease-1",
             generation_boundary="boundary-active-lease-1",
-            idempotency_key="gen-active-lease-1",
             state="claimed",
             lease_owner="worker-1",
             lease_expires_at="2026-07-28T13:00:00.000Z",
@@ -477,14 +525,63 @@ def test_schema_rejects_invalid_generation_state_rules_and_timestamps() -> None:
         with pytest.raises(IntegrityError):
             _insert_generation_row(
                 connection,
-                publication_id="pub-active-lease-2",
                 task_id="task-active-lease",
                 run_id="run-active-lease-2",
                 generation_boundary="boundary-active-lease-2",
-                idempotency_key="gen-active-lease-2",
                 state="building",
                 lease_owner="worker-2",
                 lease_expires_at="2026-07-28T13:00:00.000Z",
+            )
+
+        _insert_generation_row(
+            connection,
+            task_id="task-valid-hour",
+            run_id="run-valid-hour",
+            generation_boundary="boundary-valid-hour",
+            created_at="2026-07-28T23:59:59.999Z",
+            updated_at="2026-07-28T23:59:59.999Z",
+        )
+
+
+def test_schema_requires_matching_publication_and_idempotency_identity() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        identity = GenerationIdentity("task-id", "boundary-id")
+        _insert_generation_row(
+            connection,
+            task_id="task-id",
+            run_id="run-id",
+            generation_boundary="boundary-id",
+        )
+        with pytest.raises(IntegrityError):
+            _insert_generation_row(
+                connection,
+                publication_id=identity.publication_id,
+                idempotency_key="gen-b",
+                task_id="task-id",
+                run_id="run-mismatched-ids",
+                generation_boundary="boundary-mismatched-ids",
+            )
+        wrong_digest = "b" * 64
+        with pytest.raises(IntegrityError):
+            _insert_generation_row(
+                connection,
+                publication_id=f"pub-{wrong_digest}",
+                idempotency_key=identity.idempotency_key,
+                task_id="task-id",
+                run_id="run-mismatched-digest",
+                generation_boundary="boundary-mismatched-digest",
+            )
+        wrong_identity = GenerationIdentity("task-other", "boundary-other")
+        with pytest.raises(IntegrityError):
+            _insert_generation_row(
+                connection,
+                publication_id=wrong_identity.publication_id,
+                idempotency_key=wrong_identity.idempotency_key,
+                task_id="task-id",
+                run_id="run-wrong-task-boundary-digest",
+                generation_boundary="boundary-wrong-task-boundary-digest",
             )
 
 
@@ -495,18 +592,17 @@ def test_schema_rejects_broad_or_unverified_cleanup_authority() -> None:
         connection.execute(text("PRAGMA foreign_keys=ON"))
         connection.commit()
     with engine.begin() as connection:
+        cleanup_identity = GenerationIdentity("task-cleanup", "boundary-cleanup")
         _insert_generation_row(
             connection,
-            publication_id="pub-cleanup",
             task_id="task-cleanup",
             run_id="run-cleanup",
             generation_boundary="boundary-cleanup",
-            idempotency_key="gen-cleanup",
         )
         invalid_cleanups = (
             {
                 "intent_id": "cleanup-root",
-                "publication_id": "pub-cleanup",
+                "publication_id": cleanup_identity.publication_id,
                 "task_id": "task-cleanup",
                 "exact_path": "/var/lib/coquic/tasks",
                 "state": "pending",
@@ -515,7 +611,7 @@ def test_schema_rejects_broad_or_unverified_cleanup_authority() -> None:
             },
             {
                 "intent_id": "cleanup-cross-task",
-                "publication_id": "pub-cleanup",
+                "publication_id": cleanup_identity.publication_id,
                 "task_id": "task-other",
                 "exact_path": "/var/lib/coquic/tasks/task-other",
                 "state": "pending",
@@ -524,7 +620,7 @@ def test_schema_rejects_broad_or_unverified_cleanup_authority() -> None:
             },
             {
                 "intent_id": "cleanup-unverified",
-                "publication_id": "pub-cleanup",
+                "publication_id": cleanup_identity.publication_id,
                 "task_id": "task-cleanup",
                 "exact_path": "/var/lib/coquic/tasks/task-cleanup",
                 "state": "completed",
@@ -547,9 +643,9 @@ def test_schema_rejects_broad_or_unverified_cleanup_authority() -> None:
             text(
                 "INSERT INTO publication_cleanup_intents "
                 "(intent_id,publication_id,task_id,manifest_digest,exact_path,state,requested_at,verified_at,completed_at) "
-                "VALUES ('cleanup-valid','pub-cleanup','task-cleanup',:digest,'/var/lib/coquic/tasks/task-cleanup',"
+                "VALUES ('cleanup-valid',:publication_id,'task-cleanup',:digest,'/var/lib/coquic/tasks/task-cleanup',"
                 "'completed','2026-07-28T12:00:00.000Z','2026-07-28T12:00:01.000Z',"
                 "'2026-07-28T12:00:02.000Z')"
             ),
-            {"digest": DIGEST},
+            {"digest": DIGEST, "publication_id": cleanup_identity.publication_id},
         )

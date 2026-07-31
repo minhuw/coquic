@@ -4,7 +4,9 @@ import {
   CloudRepositoryDataError,
   getCloudRepository,
 } from "@/lib/steward-archive/cloud-repository";
-import { serializeCloudProblem, serializeCloudTrajectoryDescriptor } from "@/lib/steward-archive/cloud-schema";
+import { AtifLoaderError, loadVerifiedAtif } from "@/lib/steward-archive/atif-loader";
+import { buildAtifViewModel } from "@/lib/steward-archive/atif-view-model";
+import { serializeCloudCompleteTrajectory, serializeCloudProblem } from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -48,23 +50,34 @@ function mapError(error: unknown): Problem {
   if (error instanceof InvalidRequestError) {
     return { code: "INVALID_REQUEST", status: 400, message: "The cloud transcript request is invalid.", retryable: false };
   }
+  if (error instanceof AtifLoaderError) {
+    if (error.category === "missing") {
+      return { code: "NOT_FOUND", status: 404, message: "The selected transcript is not available.", retryable: false };
+    }
+    if (error.category === "resource") {
+      return { code: "RESOURCE_LIMIT", status: 413, message: "The selected transcript exceeds the bounded resource limit.", retryable: false };
+    }
+    if (error.category === "integrity") {
+      return { code: "INTEGRITY_FAILURE", status: 422, message: "The selected transcript failed public validation.", retryable: false };
+    }
+    return { code: "UNAVAILABLE", status: 503, message: "The selected transcript is temporarily unavailable.", retryable: true };
+  }
   if (error instanceof CloudReaderConfigError) {
     return { code: "MISCONFIGURED", status: 503, message: "Steward cloud access is not configured.", retryable: false };
   }
   if (error instanceof CloudRepositoryDataError) {
-    return { code: "INTEGRITY_FAILURE", status: 503, message: "Steward cloud data failed validation.", retryable: false };
+    return { code: "INTEGRITY_FAILURE", status: 422, message: "Steward cloud data failed validation.", retryable: false };
   }
   if (error instanceof CloudflareD1Error) {
-    return error.code === "rate-limited"
-      ? { code: "RATE_LIMITED", status: 429, message: "Steward cloud access is rate limited.", retryable: true }
-      : {
-        code: "UNAVAILABLE",
-        status: 503,
-        message: "Steward cloud data is temporarily unavailable.",
-        retryable: error.code === "network-error" || error.code === "timeout" || error.code === "server-error",
-      };
+    if (error.code === "response-too-large" || error.code === "result-set-limit" || error.code === "row-limit") {
+      return { code: "RESOURCE_LIMIT", status: 413, message: "Steward cloud data exceeds the bounded resource limit.", retryable: false };
+    }
+    if (error.code === "network-error" || error.code === "timeout" || error.code === "server-error" || error.code === "rate-limited") {
+      return { code: "UNAVAILABLE", status: 503, message: "Steward cloud data is temporarily unavailable.", retryable: true };
+    }
+    return { code: "INTEGRITY_FAILURE", status: 422, message: "Steward cloud data failed public validation.", retryable: false };
   }
-  return { code: "UNAVAILABLE", status: 503, message: "Steward cloud data is temporarily unavailable.", retryable: false };
+  return { code: "INTEGRITY_FAILURE", status: 422, message: "The selected transcript failed public validation.", retryable: false };
 }
 
 function parseTaskId(value: unknown): string {
@@ -78,16 +91,46 @@ function parseRunId(value: string | null): string | undefined {
   return value;
 }
 
+function resolveRunId(
+  detail: Awaited<ReturnType<ReturnType<typeof getCloudRepository>["getTaskDetail"]>>,
+  requestedRunId: string | undefined,
+): string | null {
+  if (!detail) return null;
+  if (requestedRunId === undefined) return detail.trajectory?.runId ?? null;
+  const run = detail.runs.find((candidate) => candidate.runId === requestedRunId);
+  if (!run || run.runState !== "completed") return null;
+  const atif = detail.artifacts.some((artifact) => artifact.runId === requestedRunId
+    && artifact.mediaType === "application/json"
+    && artifact.availability === "available"
+    && artifact.sha256 === run.atifDigest);
+  return atif ? requestedRunId : null;
+}
+
 export async function GET(request: Request, context: { params: Promise<{ taskId: string }> }) {
   try {
     const { taskId: rawTaskId } = await context.params;
     const taskId = parseTaskId(rawTaskId);
-    const runId = parseRunId(new URL(request.url).searchParams.get("run"));
-    const data = await getCloudRepository().getTrajectoryDescriptor(taskId, runId);
-    if (!data) {
+    const requestedRunId = parseRunId(new URL(request.url).searchParams.get("run"));
+    const repository = getCloudRepository();
+    const detail = await repository.getTaskDetail(taskId);
+    const runId = resolveRunId(detail, requestedRunId);
+    if (!detail || !runId) {
       return problemResponse({ code: "NOT_FOUND", status: 404, message: "The selected transcript is not available.", retryable: false });
     }
-    return response(serializeCloudTrajectoryDescriptor({ schemaVersion: "3.0", generatedAt: new Date().toISOString(), data }), 200);
+
+    const document = await loadVerifiedAtif({
+      taskId,
+      runId,
+      options: {
+        repository: { getTaskDetail: async () => detail },
+      },
+    });
+    const data = buildAtifViewModel(document, {
+      artifacts: detail.artifacts.filter((artifact) => artifact.runId === runId),
+      taskId,
+      runId,
+    });
+    return response(serializeCloudCompleteTrajectory({ schemaVersion: "4.0", generatedAt: new Date().toISOString(), data }), 200);
   } catch (error) {
     return problemResponse(mapError(error));
   }

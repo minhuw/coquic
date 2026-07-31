@@ -1,16 +1,89 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import Module, { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { createElement, type Context } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import cleanPublication from "../../contracts/steward-cloud/fixtures/clean-publication.json";
+import redactedPublication from "../../contracts/steward-cloud/fixtures/redacted-publication.json";
+import { canonicalAtifBytes, type AtifDocument } from "../lib/steward-archive/atif";
 import { parseCloudResponse, type CloudResponse } from "../lib/steward-archive/cloud-schema";
 
 type CloudRepositoryModule = typeof import("../lib/steward-archive/cloud-repository");
 const requireForTest = createRequire(import.meta.url);
 const runtimeModule = Module as unknown as { _resolveFilename: (request: string, parent?: unknown, isMain?: boolean, options?: unknown) => string };
 let cloudRepository: CloudRepositoryModule;
+
+type MutableRecord = Record<string, any>;
+type TrajectorySource = {
+  readonly atif: unknown;
+  readonly publication: { readonly artifacts: readonly MutableRecord[] };
+};
+type TrajectoryIds = { readonly taskId: string; readonly pipelineId: string; readonly runId: string };
+type TrajectoryFixture = {
+  readonly taskId: string;
+  readonly pipelineId: string;
+  readonly runId: string;
+  readonly bytes: Uint8Array;
+  readonly digest: string;
+  readonly disclosure: { readonly redactionApplied: boolean; readonly originalRetained: boolean };
+  readonly artifacts: readonly {
+    readonly artifactId: string;
+    readonly logicalPath: string;
+    readonly publicKey: string;
+    readonly mediaType: string;
+    readonly byteSize: number;
+    readonly sha256: string;
+    readonly availability: "available" | "unavailable";
+    readonly disclosure: { readonly redactionApplied: boolean; readonly originalRetained: boolean };
+  }[];
+};
+
+function trajectoryFixture(
+  source: TrajectorySource,
+  ids: TrajectoryIds,
+  mutate?: (document: MutableRecord) => void,
+  includeArtifact?: (artifactId: string) => boolean,
+): TrajectoryFixture {
+  const document = structuredClone(source.atif) as MutableRecord;
+  const provenance = document.extra.coquic as MutableRecord;
+  Object.assign(provenance, ids);
+  mutate?.(document);
+  const bytes = canonicalAtifBytes(document as unknown as AtifDocument);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const localArtifactIds = new Set(
+    Array.isArray(provenance.artifacts)
+      ? provenance.artifacts.filter((item: unknown): item is MutableRecord => Boolean(item) && typeof item === "object").map((item) => String(item.artifactId))
+      : [],
+  );
+  const artifacts = source.publication.artifacts
+    .filter((artifact) => (includeArtifact?.(String(artifact.artifactId)) ?? true)
+      && (String(artifact.artifactId) === "artifact-atif" || localArtifactIds.has(String(artifact.artifactId))))
+    .map((artifact) => {
+      const artifactId = String(artifact.artifactId);
+      const sha256 = artifactId === "artifact-atif" ? digest : String(artifact.sha256);
+      const logicalPath = artifactId === "artifact-atif"
+        ? `runs/${ids.runId}/trajectory.json`
+        : String(artifact.logicalPath).replace(/^runs\/[^/]+\//, `runs/${ids.runId}/`);
+      const disclosure = {
+        redactionApplied: Boolean(artifact.disclosure?.redactionApplied),
+        originalRetained: Boolean(artifact.disclosure?.originalRetained),
+      };
+      return {
+        artifactId,
+        logicalPath,
+        publicKey: `v1/tasks/${ids.taskId}/objects/sha256/${sha256.slice(0, 2)}/${sha256}`,
+        mediaType: String(artifact.mediaType),
+        byteSize: artifactId === "artifact-atif" ? bytes.byteLength : Number(artifact.byteSize),
+        sha256,
+        availability: (artifact.availability === "unavailable" ? "unavailable" : "available") as "available" | "unavailable",
+        disclosure,
+      };
+    });
+  return { ...ids, bytes, digest, disclosure: provenance.disclosure, artifacts };
+}
 
 function loadCloudRepository(): CloudRepositoryModule {
   const empty = resolve(dirname(requireForTest.resolve("next/package.json")), "dist/compiled/server-only/empty.js");
@@ -50,14 +123,16 @@ type DetailScenario = {
   readonly runs: readonly TaskRow[];
   readonly events: readonly TaskRow[];
   readonly artifacts: readonly TaskRow[];
+  readonly trajectoryFixture: TrajectoryFixture;
 };
 type Scenario = {
   readonly rows: readonly TaskRow[];
   readonly statusRows: readonly TaskRow[];
   readonly activeRows: readonly TaskRow[];
   readonly historyRows: readonly TaskRow[];
-  readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error";
+  readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error" | "timeout";
   readonly detail?: DetailScenario;
+  readonly object?: { readonly status?: number; readonly body?: Uint8Array; readonly headers?: Record<string, string>; readonly error?: "timeout" | "network" };
 };
 
 const ENV_KEYS = [
@@ -78,8 +153,53 @@ const DETAIL_TASK_ID = "task-detail";
 const DETAIL_PUBLICATION_ID = "publication-detail";
 const DETAIL_RUN_ID = "run-detail";
 const DETAIL_PIPELINE_ID = "pipeline-detail";
-const DETAIL_DIGEST = "b".repeat(64);
-const DETAIL_PUBLIC_KEY = `v1/tasks/${DETAIL_TASK_ID}/objects/sha256/bb/${DETAIL_DIGEST}`;
+const DEFAULT_DETAIL_TRAJECTORY = trajectoryFixture(cleanPublication, {
+  taskId: DETAIL_TASK_ID,
+  pipelineId: DETAIL_PIPELINE_ID,
+  runId: DETAIL_RUN_ID,
+});
+const REDACTED_DETAIL_TRAJECTORY = trajectoryFixture(redactedPublication, {
+  taskId: DETAIL_TASK_ID,
+  pipelineId: DETAIL_PIPELINE_ID,
+  runId: DETAIL_RUN_ID,
+});
+const EMPTY_DETAIL_TRAJECTORY = trajectoryFixture(cleanPublication, {
+  taskId: DETAIL_TASK_ID,
+  pipelineId: DETAIL_PIPELINE_ID,
+  runId: DETAIL_RUN_ID,
+}, (document) => {
+  const provenance = document.extra.coquic as MutableRecord;
+  provenance.artifacts = [];
+  const step = document.steps[1] as MutableRecord;
+  step.message = [];
+  step.tool_calls = [];
+  step.observation = { results: [] };
+  step.extra = { coquic: { artifactIds: [] } };
+}, (artifactId) => artifactId === "artifact-atif");
+const TOOL_HEAVY_DETAIL_TRAJECTORY = trajectoryFixture(cleanPublication, {
+  taskId: DETAIL_TASK_ID,
+  pipelineId: DETAIL_PIPELINE_ID,
+  runId: DETAIL_RUN_ID,
+}, (document) => {
+  const step = document.steps[1] as MutableRecord;
+  const calls = Array.from({ length: 8 }, (_, index) => ({
+    arguments: { index },
+    function_name: `inspect-${index + 1}`,
+    tool_call_id: `call-${index + 1}`,
+  }));
+  step.tool_calls = calls;
+  step.observation = {
+    results: calls.map((call) => ({ content: `Inspection ${call.tool_call_id}`, source_call_id: call.tool_call_id })),
+  };
+});
+const SCHEMA_FAILURE_DETAIL_TRAJECTORY = trajectoryFixture(cleanPublication, {
+  taskId: DETAIL_TASK_ID,
+  pipelineId: DETAIL_PIPELINE_ID,
+  runId: DETAIL_RUN_ID,
+}, (document) => {
+  delete document.steps;
+});
+const DETAIL_PUBLIC_KEY = DEFAULT_DETAIL_TRAJECTORY.artifacts.find((artifact) => artifact.artifactId === "artifact-atif")!.publicKey;
 
 function d1Envelope(rows: readonly TaskRow[]): Response {
   return new Response(JSON.stringify({
@@ -158,9 +278,13 @@ function detailScenario(options: {
   availability?: "available" | "unavailable";
   redactionApplied?: boolean;
   originalRetained?: boolean;
-} = {}): DetailScenario {
+} = {}, trajectory: TrajectoryFixture = DEFAULT_DETAIL_TRAJECTORY): DetailScenario {
   const lifecycleState = options.lifecycleState ?? "completed";
   const completedAt = lifecycleState === "active" ? null : "2026-07-28T00:00:03Z";
+  const disclosure = {
+    redactionApplied: options.redactionApplied ?? trajectory.disclosure.redactionApplied,
+    originalRetained: options.originalRetained ?? trajectory.disclosure.originalRetained,
+  };
   const task: TaskRow = {
     head_updated_at: "2026-07-28T00:00:04Z",
     head_state: "visible",
@@ -174,7 +298,7 @@ function detailScenario(options: {
     generation_expected_pipeline_count: 1,
     generation_expected_run_count: 1,
     generation_expected_event_count: 2,
-    generation_expected_artifact_count: 1,
+    generation_expected_artifact_count: trajectory.artifacts.length,
     generation_created_at: "2026-07-28T00:00:00Z",
     generation_exposed_at: EXPOSED_AT,
     task_id: DETAIL_TASK_ID,
@@ -187,7 +311,7 @@ function detailScenario(options: {
     task,
     pipelines: [{
       publication_id: DETAIL_PUBLICATION_ID,
-      pipeline_id: DETAIL_PIPELINE_ID,
+      pipeline_id: trajectory.pipelineId,
       task_id: DETAIL_TASK_ID,
       name: "Detail pipeline",
       created_at: "2026-07-28T00:00:00Z",
@@ -202,26 +326,30 @@ function detailScenario(options: {
       started_at: "2026-07-28T00:00:00Z",
       completed_at: "2026-07-28T00:00:01Z",
       duration_ms: 1_000,
-      atif_digest: DETAIL_DIGEST,
+      atif_digest: trajectory.digest,
     }],
     events: [
       { publication_id: DETAIL_PUBLICATION_ID, task_id: DETAIL_TASK_ID, sequence: 1, event_type: "started", occurred_at: "2026-07-28T00:00:00Z", summary: "Started" },
       { publication_id: DETAIL_PUBLICATION_ID, task_id: DETAIL_TASK_ID, sequence: 2, event_type: "completed", occurred_at: "2026-07-28T00:00:01Z", summary: "Completed" },
     ],
-    artifacts: [{
+    artifacts: trajectory.artifacts.map((artifact) => ({
       publication_id: DETAIL_PUBLICATION_ID,
-      artifact_id: "artifact-atif",
+      artifact_id: artifact.artifactId,
       task_id: DETAIL_TASK_ID,
-      run_id: DETAIL_RUN_ID,
-      logical_path: "runs/run-detail/trajectory.json",
-      public_key: DETAIL_PUBLIC_KEY,
-      media_type: "application/json",
-      byte_size: 128,
-      sha256: DETAIL_DIGEST,
-      availability: options.availability ?? "available",
-      redaction_applied: options.redactionApplied ? 1 : 0,
-      original_retained: options.originalRetained === false ? 0 : 1,
-    }],
+      run_id: trajectory.runId,
+      logical_path: artifact.logicalPath,
+      public_key: artifact.publicKey,
+      media_type: artifact.mediaType,
+      byte_size: artifact.byteSize,
+      sha256: artifact.sha256,
+      availability: artifact.artifactId === "artifact-atif" ? options.availability ?? artifact.availability : artifact.availability,
+      redaction_applied: disclosure.redactionApplied ? 1 : 0,
+      original_retained: disclosure.originalRetained ? 1 : 0,
+    })).sort((left, right) => {
+      const logical = String(left.logical_path).localeCompare(String(right.logical_path));
+      return logical === 0 ? String(left.artifact_id).localeCompare(String(right.artifact_id)) : logical;
+    }),
+    trajectoryFixture: trajectory,
   };
 }
 
@@ -304,12 +432,24 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     calls.count += 1;
     const url = String(input);
     calls.urls.push(url);
+    if (url.startsWith(VALID_ENV.COQUIC_STEWARD_PUBLIC_R2_BASE_URL)) {
+      if (scenarioValue.mode === "timeout") throw new DOMException("route harness timeout", "AbortError");
+      if (scenarioValue.mode === "outage") throw new Error("route-harness-secret outage");
+      if (scenarioValue.mode === "server-error") return new Response(null, { status: 503 });
+      const object = scenarioValue.object;
+      if (object?.error === "timeout") throw new DOMException("route harness timeout", "AbortError");
+      if (object?.error === "network") throw new Error("route-harness-secret network");
+      if (object) return new Response(object.body as unknown as BodyInit, { status: object.status ?? 500, headers: object.headers });
+      const bytes = scenarioValue.detail?.trajectoryFixture.bytes;
+      return new Response(bytes as unknown as BodyInit, { status: 200 });
+    }
     if (url === "https://api.github.com/repos/minhuw/coquic") {
       return new Response(JSON.stringify({ stargazers_count: 0 }), { status: 200, headers: { "content-type": "application/json" } });
     }
     assert.match(url, /^https:\/\/api\.cloudflare\.com\/client\/v4\//);
     if (scenarioValue.mode === "rate-limited") return new Response("rate limited", { status: 429 });
     if (scenarioValue.mode === "outage") throw new Error("route-harness-secret outage");
+    if (scenarioValue.mode === "timeout") throw new DOMException("route harness timeout", "AbortError");
     if (scenarioValue.mode === "unauthorized") return new Response("unauthorized", { status: 401 });
     if (scenarioValue.mode === "server-error") return new Response("server error", { status: 503 });
     const body = JSON.parse(String(init?.body)) as { readonly sql: string; readonly params: readonly unknown[] };
@@ -421,6 +561,7 @@ async function main() {
       globalThis.fetch = fakeFetch(value, calls) as typeof fetch;
       cloudRepository.resetCloudRepository();
       await action();
+      assert.equal(calls.urls.some((url) => url.includes("attacker.example") || url.includes("route-harness-secret")), false);
       if (expectedCalls !== undefined) assert.equal(calls.count, expectedCalls);
       outputs.push(`${name}: pass (${calls.count} mocked requests)`);
     } finally {
@@ -717,6 +858,34 @@ async function main() {
 
   const taskContext = (taskId: string) => ({ params: Promise.resolve({ taskId }) });
 
+  async function transcriptSuccess(response: Response) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.equal(response.headers.get("Content-Type"), "application/json; charset=utf-8");
+    const body = await response.text();
+    const payload = dataResponse(parseCloudResponse(body));
+    assert.equal(payload.schemaVersion, "4.0");
+    assert.equal(payload.data.kind, "atif-display");
+    assert.equal(payload.data.taskId, DETAIL_TASK_ID);
+    for (const forbidden of ["publicKey", "publicUrl", "private://", "https://objects.example.test/public/", "records", "cursor", "prefix", "partial"]) {
+      assert(!body.includes(forbidden), `transcript emitted ${forbidden}`);
+    }
+    return payload.data;
+  }
+
+  async function transcriptProblem(response: Response, status: number, code: string, retryable: boolean) {
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.equal(response.headers.get("Content-Type"), "application/json; charset=utf-8");
+    const body = await response.text();
+    const payload = problemResponse(parseCloudResponse(body));
+    assert.equal(payload.schemaVersion, "3.0");
+    assert.deepEqual(payload.problem, { code, message: payload.problem.message, retryable, status, type: null });
+    assert(!body.includes("route-harness-secret"));
+    assert(!body.includes("objects.example.test"));
+    return payload.problem;
+  }
+
   await runCase("clean cloud detail", scenario([], [], undefined, [], detailScenario()), async () => {
     const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
     assert.equal(response.status, 200);
@@ -807,18 +976,65 @@ async function main() {
     assert(!JSON.stringify(payload).includes("private://object"));
   });
 
-  await runCase("immutable trajectory descriptor", scenario([], [], undefined, [], detailScenario()), async () => {
+  await runCase("clean complete trajectory", scenario([], [], undefined, [], detailScenario()), async () => {
     const response = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=run-detail&path=ignored.json&cursor=ignored&limit=1"), taskContext(DETAIL_TASK_ID));
-    assert.equal(response.status, 200);
-    const payload = dataResponse(parseCloudResponse(await response.text()));
-    assert.equal(payload.schemaVersion, "3.0");
-    if (!("runId" in payload.data) || !("publicKey" in payload.data)) throw new Error("expected trajectory descriptor");
-    assert.equal(payload.data.taskId, DETAIL_TASK_ID);
-    assert.equal(payload.data.pipelineId, DETAIL_PIPELINE_ID);
-    assert.equal(payload.data.runId, DETAIL_RUN_ID);
-    assert.equal(payload.data.artifactId, "artifact-atif");
-    for (const partialField of ["records", "cursor", "prefix", "partial"]) assert(!(partialField in payload.data));
-  });
+    const data = await transcriptSuccess(response);
+    assert.equal(data.steps.length, 2);
+    assert.equal(data.disclosure.redactionApplied, false);
+  }, VALID_ENV, 6);
+
+  await runCase("redacted multimodal complete trajectory", scenario([], [], undefined, [], detailScenario({}, REDACTED_DETAIL_TRAJECTORY)), async () => {
+    const data = await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)));
+    assert.equal(data.disclosure.redactionApplied, true);
+    assert(data.steps.some((step) => step.content.some((part) => part.kind === "image")));
+  }, VALID_ENV, 6);
+
+  await runCase("empty complete trajectory", scenario([], [], undefined, [], detailScenario({}, EMPTY_DETAIL_TRAJECTORY)), async () => {
+    const data = await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)));
+    assert.equal(data.steps.length, 2);
+    assert.deepEqual(data.steps[1]?.content, []);
+    assert.deepEqual(data.artifacts, []);
+  }, VALID_ENV, 6);
+
+  await runCase("tool-heavy complete trajectory", scenario([], [], undefined, [], detailScenario({}, TOOL_HEAVY_DETAIL_TRAJECTORY)), async () => {
+    const data = await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)));
+    assert.equal(data.steps[1]?.calls.length, 8);
+    assert.equal(data.steps[1]?.observations.length, 8);
+  }, VALID_ENV, 6);
+
+  await runCase("missing trajectory object", { ...scenario([], [], undefined, [], detailScenario()), object: { status: 404 } }, async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 404, "NOT_FOUND", false);
+  }, VALID_ENV, 6);
+
+  const oversizedDetail = detailScenario();
+  oversizedDetail.artifacts.find((artifact) => artifact.artifact_id === "artifact-atif")!.byte_size = 16 * 1024 * 1024 + 1;
+  await runCase("bounded transcript resource rejection", scenario([], [], undefined, [], oversizedDetail), async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 413, "RESOURCE_LIMIT", false);
+  }, VALID_ENV, 5);
+
+  const corruptedBytes = DEFAULT_DETAIL_TRAJECTORY.bytes.slice();
+  corruptedBytes[0] = corruptedBytes[0] === 0x7b ? 0x5b : 0x7b;
+  await runCase("transcript integrity rejection", { ...scenario([], [], undefined, [], detailScenario()), object: { body: corruptedBytes, status: 200 } }, async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 422, "INTEGRITY_FAILURE", false);
+  }, VALID_ENV, 6);
+
+  await runCase("transcript schema rejection", scenario([], [], undefined, [], detailScenario({}, SCHEMA_FAILURE_DETAIL_TRAJECTORY)), async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 422, "INTEGRITY_FAILURE", false);
+  }, VALID_ENV, 6);
+
+  const ownershipDetail = detailScenario();
+  ownershipDetail.artifacts.find((artifact) => artifact.artifact_id === "artifact-plot")!.task_id = "other-task";
+  await runCase("transcript ownership rejection", scenario([], [], undefined, [], ownershipDetail), async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 422, "INTEGRITY_FAILURE", false);
+  }, VALID_ENV, 5);
+
+  await runCase("transcript timeout", { ...scenario([], [], undefined, [], detailScenario()), object: { error: "timeout" } }, async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 503, "UNAVAILABLE", true);
+  }, VALID_ENV, 6);
+
+  await runCase("transcript upstream 5xx", { ...scenario([], [], undefined, [], detailScenario()), object: { status: 503 } }, async () => {
+    await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 503, "UNAVAILABLE", true);
+  }, VALID_ENV, 6);
 
   await runCase("unknown task path and run", scenario([], [], undefined, [], detailScenario()), async () => {
     const unknownTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/missing"), taskContext("missing"));

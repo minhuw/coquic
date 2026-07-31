@@ -371,3 +371,21 @@ raw or compatibility fallback, prefix/revision polling, or history migration.
 Unpublished revision, global signal, and planner domains are intentionally
 retired. Their routes return one non-retryable `410` problem envelope rather
 than attempting a legacy read.
+
+## D-024: Transcript reads return normalized complete trajectories
+
+The task transcript route is the one breaking reader boundary for complete
+trajectory content. It resolves the visible D1 descriptor and owned artifact
+map before one bounded anonymous R2 load, verifies the digest and ATIF bytes,
+projects the document to the public display model, and validates the closed
+`schemaVersion: "4.0"` envelope before returning it with `Cache-Control:
+no-store`. It emits no raw ATIF, private locator, direct R2 key, or partial
+compatibility shape. Invalid selectors, missing selections, bounded resource
+rejections, integrity/schema/ownership failures, and transient backend failures
+remain distinct `400`/`404`/`413`/`422`/`503` categories; only transient `503`
+responses are retryable. Artifact delivery remains the existing same-origin
+validated `307` redirect and never proxies bytes.
+
+The production Next configuration sets only `turbopack.root` to the repository
+root because the shared ATIF schema remains outside `site-v2`; copying or
+relocating that schema would create a second contract.

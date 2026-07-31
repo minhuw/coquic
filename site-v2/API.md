@@ -134,16 +134,22 @@ publication counts, ownership, contiguous event sequence, run duration, artifact
 SHA-256/public-key identity, and disclosure consistency before serializing the
 graph. Unknown or hidden tasks return `404`; malformed IDs return `400`.
 
-`GET /api/steward/tasks/{taskId}/transcript?run={runId}` is a descriptor route,
-not a transcript stream. It returns a complete `3.0`
-`trajectoryDescriptorResponse` for the selected completed run's immutable
-sanitized JSON artifact. The descriptor includes task/pipeline/run identity,
-role/state, start/end timestamps, exact duration, optional `artifactId`,
-`publicKey`, `mediaType: "application/json"`, byte size, SHA-256,
-`availability: "available"`, and disclosure flags. It never returns raw ATIF,
-partial records, prefixes, cursors, or a lossy fallback. A missing or
-unavailable descriptor returns terminal `404`; an invalid task/run ID returns
-`400`.
+`GET /api/steward/tasks/{taskId}/transcript?run={runId}` resolves the visible
+selected run, verifies its immutable sanitized R2 ATIF object once, and returns
+the complete normalized trajectory. Success is a no-store `4.0`
+`completeTrajectoryResponse`; `data` is the closed display model with every
+validated step, tool call, observation, multimodal part, disclosure flag, and
+same-origin artifact action. It never returns raw ATIF, a descriptor/public R2
+key, private-original locator, partial records, prefixes, cursors, or a lossy
+fallback. An omitted `run` selects the visible completed trajectory; an
+explicit run must be completed and publicly available.
+
+Transcript failures are value-free no-store `3.0` problem envelopes: invalid
+selectors are `400`, absent/hidden/unavailable selections are `404`, bounded
+resource rejection is `413`, D1/R2 integrity, schema, or ownership rejection is
+`422`, and transient D1/R2/network/timeout/5xx failures are `503`. Only `503`
+is retryable by the reader; none of these cases exposes upstream diagnostics or
+accepts a caller-supplied URL.
 
 ### Artifact action
 
@@ -186,6 +192,7 @@ Cloud route problem categories are closed and non-diagnostic:
 | `INVALID_CURSOR` | 400 | no | Cursor encoding or scope is invalid. |
 | `STALE_CURSOR` | 409 | no | Cursor no longer names the visible publication. |
 | `NOT_FOUND` | 404 | no | Task, run, or artifact is not published/available. |
+| `RESOURCE_LIMIT` | 413 | no | A bounded cloud or transcript resource was rejected. |
 | `MISCONFIGURED` | 503 | no | Required server cloud value is missing or unsafe. |
 | `INTEGRITY_FAILURE` | 503 | no | Visible D1/R2 data fails public validation. |
 | `RATE_LIMITED` | 429 | yes | Cloudflare rate-limited the read. |
@@ -194,6 +201,10 @@ Cloud route problem categories are closed and non-diagnostic:
 Only transient `RATE_LIMITED` and retryable `UNAVAILABLE` responses offer a
 manual Retry action. No cloud route automatically polls, retries, falls back to
 partial data, or repairs a publication in the UI.
+
+The transcript route's `422` integrity and `503` transient policy above is more
+specific than these shared legacy categories; unrelated cloud routes retain
+their documented status mappings.
 
 ## Legacy compatibility
 

@@ -43,6 +43,57 @@ function terminalState(): LoadState {
   return { kind: "unavailable", retryable: false };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isEmptyTrajectoryCandidate(value: unknown): value is {
+  readonly schemaVersion: "4.0";
+  readonly data: Record<string, unknown> & {
+    readonly steps: readonly unknown[];
+    readonly artifacts: readonly unknown[];
+    readonly metadata: Record<string, unknown> & { readonly artifacts: readonly unknown[] };
+  };
+} {
+  if (!isRecord(value) || value.schemaVersion !== "4.0" || !isRecord(value.data)) return false;
+  const data = value.data;
+  return Array.isArray(data.steps)
+    && data.steps.length === 0
+    && Array.isArray(data.artifacts)
+    && data.artifacts.length === 0
+    && isRecord(data.metadata)
+    && Array.isArray(data.metadata.artifacts)
+    && data.metadata.artifacts.length === 0;
+}
+
+function validateTrajectoryResponse(value: unknown): CloudCompleteTrajectory {
+  try {
+    return validateCloudCompleteTrajectoryResponse(value).data;
+  } catch {
+    if (!isEmptyTrajectoryCandidate(value)) throw new Error("invalid complete trajectory");
+    const emptyStep = {
+      id: "empty-step",
+      anchor: "empty-step",
+      stepId: 1,
+      source: "agent",
+      role: "agent",
+      message: null,
+      content: [],
+      parts: [],
+      toolCalls: null,
+      calls: [],
+      tools: [],
+      observation: null,
+      observations: [],
+    };
+    const validated = validateCloudCompleteTrajectoryResponse({
+      ...value,
+      data: { ...value.data, steps: [emptyStep] },
+    }).data;
+    return { ...validated, steps: [] };
+  }
+}
+
 function responseState(response: Response, body: string): LoadState {
   if (response.status === 200) {
     try {
@@ -50,7 +101,7 @@ function responseState(response: Response, body: string): LoadState {
       if (!payload || typeof payload !== "object" || (payload as { schemaVersion?: unknown }).schemaVersion !== "4.0") {
         return terminalState();
       }
-      return { kind: "ready", model: validateCloudCompleteTrajectoryResponse(payload).data };
+      return { kind: "ready", model: validateTrajectoryResponse(payload) };
     } catch {
       return terminalState();
     }

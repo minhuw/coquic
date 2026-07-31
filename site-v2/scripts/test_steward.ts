@@ -914,10 +914,7 @@ async function main() {
 
   await runCase("trajectory boundary empty fixture", scenario([], [], undefined, [], detailScenario({}, EMPTY_DETAIL_TRAJECTORY)), async () => {
     const model = (await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)))) as CloudCompleteTrajectory;
-    const firstStep = model.steps[0];
-    if (firstStep === undefined) throw new Error("empty fixture has no step shape");
-    const emptyStep = { ...firstStep, message: null, content: [], parts: [], toolCalls: null, calls: [], tools: [], observation: null, observations: [] };
-    const emptyModel: CloudCompleteTrajectory = { ...model, steps: [emptyStep], artifacts: [], metadata: { ...model.metadata, artifacts: [] } };
+    const emptyModel: CloudCompleteTrajectory = { ...model, steps: [], artifacts: [], metadata: { ...model.metadata, artifacts: [] } };
     emptyBody = JSON.stringify({ schemaVersion: "4.0", generatedAt: EXPOSED_AT, data: emptyModel });
   }, VALID_ENV, 6);
 
@@ -1013,15 +1010,15 @@ async function main() {
     await flush();
     const emptyState = emptyController.state;
     if (emptyState.kind !== "ready") throw new Error(`expected empty ready state, got ${emptyState.kind}`);
-    assert.equal(emptyState.model.steps.length, 1);
-    assert.equal(emptyState.model.steps[0]!.content.length, 0);
-    assert.equal(emptyState.model.steps[0]!.calls.length, 0);
-    assert.equal(emptyState.model.steps[0]!.observations.length, 0);
+    assert.equal(emptyState.model.steps.length, 0);
+    assert.deepEqual(emptyState.model.artifacts, []);
     assert.equal(emptyCalls.length, 1);
     assert.equal(emptyCalls[0]!.url, "/api/steward/tasks/task-empty/transcript?run=run-empty");
     assert.equal(emptyCalls[0]!.init?.cache, "no-store");
     const emptyRendered = renderToStaticMarkup(createElement(renderAtifTrajectoryView, { model: emptyState.model, anchorPrefix: "trajectory-empty" }));
-    assert.match(emptyRendered, /data-trajectory-records/);
+    assert.match(emptyRendered, /data-empty-run/);
+    assert.match(emptyRendered, /Completed empty run/);
+    assert(!/data-trajectory-records/.test(emptyRendered));
     assert(!/>\s*load more\s*</i.test(emptyRendered));
     emptyController.unmount();
 

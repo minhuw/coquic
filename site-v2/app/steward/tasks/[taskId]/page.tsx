@@ -15,6 +15,7 @@ import {
   type CloudRunView,
   type CloudTaskViewModel,
 } from "@/lib/steward-archive/cloud-view-model";
+import AtifTrajectory from "./atif-trajectory";
 import { TimelineDrawer } from "./timeline-drawer";
 
 export const metadata: Metadata = { title: "Steward task" };
@@ -185,20 +186,18 @@ function Runs({ model, taskId, selectedRunId }: { model: CloudTaskViewModel; tas
   );
 }
 
-function TrajectorySurface({ model, taskId }: { model: CloudTaskViewModel; taskId: string }) {
+function TrajectorySurface({ model, taskId, selectedRunId }: { model: CloudTaskViewModel; taskId: string; selectedRunId: string | null }) {
   const trajectory = model.trajectory;
   const descriptor = trajectory.descriptor;
-  const action = trajectory.action;
-  const artifact = model.artifacts.find((item) => item.artifactId === action?.artifactId) ?? null;
-  const download = artifact ? artifactHref(taskId, artifact) : null;
+  const selectedDescriptor = trajectory.state === "available"
+    && descriptor !== null
+    && descriptor.runId === selectedRunId;
   return (
     <section id="trajectory" aria-labelledby="trajectory-title" className="border-b border-line py-8 sm:py-10">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between"><h2 id="trajectory-title" className="text-lg font-semibold text-ink">Complete trajectory</h2><Status value={trajectory.state === "available" ? "available" : "unavailable"} /></div>
-      <p className="mt-3 max-w-3xl text-sm leading-6 text-muted">The immutable descriptor is the boundary for the complete trajectory. Rendering is deferred until the validated trajectory reader is active.</p>
-      <div className="mt-5 border-y border-line bg-contrast-field px-5 py-5 text-contrast-ink">
-        {descriptor ? <dl className="grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-4"><div><dt className="text-contrast-muted">Run</dt><dd className="mt-1 break-all font-medium data-text">{descriptor.runId}</dd></div><div><dt className="text-contrast-muted">Pipeline</dt><dd className="mt-1 break-all font-medium data-text">{descriptor.pipelineId}</dd></div><div><dt className="text-contrast-muted">Role</dt><dd className="mt-1 font-medium">{titleCase(descriptor.role)}</dd></div><div><dt className="text-contrast-muted">Availability</dt><dd className="mt-1 font-medium">{titleCase(descriptor.availability)}</dd></div><div><dt className="text-contrast-muted">Artifact</dt><dd className="mt-1 break-all font-medium data-text">{descriptor.artifactId ?? "Unavailable"}</dd></div><div><dt className="text-contrast-muted">Size</dt><dd className="mt-1 font-medium data-text">{formatBytes(descriptor.byteSize)}</dd></div><div><dt className="text-contrast-muted">Digest</dt><dd className="mt-1 break-all font-medium data-text">{descriptor.sha256}</dd></div><div><dt className="text-contrast-muted">State</dt><dd className="mt-1 font-medium">{titleCase(descriptor.runState)}</dd></div></dl> : <p className="text-sm leading-6">{model.completeness.warnings[0] ?? "A complete trajectory descriptor is not available in this publication."}</p>}
-        <p className="mt-5 border-t border-contrast-line pt-4 text-sm leading-6">{descriptor ? "Complete trajectory rendering is pending; the published descriptor is immutable." : "No trajectory bytes are exposed until a complete immutable descriptor is available."}</p>
-        {download ? <a href={download} className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-contrast-ink underline underline-offset-4"><FileDown aria-hidden="true" size={14} />Download trajectory artifact</a> : null}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between"><h2 id="trajectory-title" className="text-lg font-semibold text-ink">Complete trajectory</h2><Status value={selectedDescriptor ? "available" : "unavailable"} /></div>
+      <p className="mt-3 max-w-3xl text-sm leading-6 text-muted">{selectedDescriptor ? "The selected immutable run loads once from the validated public transcript." : descriptor && selectedRunId !== descriptor.runId ? "The selected run has no published complete trajectory." : "A complete trajectory descriptor is not available in this publication."}</p>
+      <div className="mt-5">
+        {selectedDescriptor ? <AtifTrajectory key={`${descriptor.taskId}:${descriptor.runId}`} taskId={taskId} runId={descriptor.runId} /> : <div className="border-y border-line py-5 text-sm leading-6 text-muted">{model.completeness.warnings[0] ?? "The selected run trajectory is unavailable."}</div>}
       </div>
     </section>
   );
@@ -257,7 +256,7 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
       <TaskHeader model={model} />
       <Pipelines model={model} taskId={taskId} selectedPipelineId={selectedPipelineId} selectedRunId={selectedRunId} />
       <Runs model={model} taskId={taskId} selectedRunId={selectedRunId} />
-      <TrajectorySurface model={model} taskId={taskId} />
+      <TrajectorySurface model={model} taskId={taskId} selectedRunId={selectedRunId} />
       <Artifacts model={model} taskId={taskId} selectedRunId={selectedRunId} />
     </div></main>
     <TimelineDrawer events={Array.from(model.timeline)} completeness={{ state: model.completeness.state, warnings: Array.from(model.completeness.warnings) }} />

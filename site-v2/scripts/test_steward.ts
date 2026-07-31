@@ -544,11 +544,24 @@ async function main() {
   const { GET: getArchiveArtifact } = await import("../app/api/steward/planner-runs/[plannerRunId]/artifacts/[artifact]/route");
   const { default: renderStewardPage } = await import("../app/steward/page");
   const { default: renderTaskPage } = await import("../app/steward/tasks/[taskId]/page");
+  const { default: renderAtifTrajectory } = await import("../app/steward/tasks/[taskId]/atif-trajectory");
   const nextPackageRoot = dirname(requireForTest.resolve("next/package.json"));
   const { PathnameContext } = requireForTest(resolve(nextPackageRoot, "dist/shared/lib/hooks-client-context.shared-runtime")) as { PathnameContext: Context<string | null> };
   const originalFetch = globalThis.fetch;
   const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   const outputs: string[] = [];
+
+  const trajectoryBoundarySource = await readFile(new URL("../app/steward/tasks/[taskId]/atif-trajectory.tsx", import.meta.url), "utf8");
+  assert.match(trajectoryBoundarySource, /AbortController/);
+  assert.match(trajectoryBoundarySource, /cache:\s*["']no-store["']/);
+  assert.match(trajectoryBoundarySource, /schemaVersion.*4\.0/);
+  assert.match(trajectoryBoundarySource, /retryable/);
+  assert(!trajectoryBoundarySource.includes("objects.example.test"));
+  assert(!trajectoryBoundarySource.includes("raw ATIF"));
+
+  const loadingBoundary = renderToStaticMarkup(createElement(renderAtifTrajectory, { taskId: DETAIL_TASK_ID, runId: DETAIL_RUN_ID }));
+  assert.match(loadingBoundary, /data-trajectory-state="loading"/);
+  assert.match(loadingBoundary, /Loading complete trajectory/);
 
   async function runCase(
     name: string,
@@ -728,8 +741,16 @@ async function main() {
     assert.match(html, /Pipelines/);
     assert.match(html, /Runs/);
     assert.match(html, /Complete trajectory/);
+    assert.match(html, /data-trajectory-state="loading"/);
     assert.match(html, /Download trajectory artifact/);
     assert.match(html, /Timeline/);
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  await runCase("selected run trajectory render", scenario([], [], undefined, [], detailScenario()), async () => {
+    const html = await renderTask(DETAIL_TASK_ID, { pipeline: DETAIL_PIPELINE_ID, run: DETAIL_RUN_ID });
+    assert.match(html, /data-trajectory-state="loading"/);
+    assert.match(html, /run-detail/);
     assertTaskHasNoLegacyOutput(html);
   });
 
@@ -743,7 +764,7 @@ async function main() {
   await runCase("active cloud task render", scenario([], [], undefined, [], detailScenario({ lifecycleState: "active" })), async () => {
     const html = await renderTask();
     assert.match(html, /Active/);
-    assert.match(html, /Complete trajectory rendering is pending/);
+    assert.match(html, /Loading complete trajectory/);
     assertTaskHasNoLegacyOutput(html);
   });
 

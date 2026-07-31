@@ -84,12 +84,11 @@ function fieldRows(rows: readonly [string, ReactNode][]) {
 
 function DisclosureSummary({ model }: { model: AtifDisplayModel }) {
   const { redactionApplied, originalRetained } = model.disclosure;
-  if (!redactionApplied && !originalRetained) return null;
   return (
     <p data-disclosure className={`mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${redactionApplied ? "text-warning" : "text-muted"}`}>
       {redactionApplied ? <span data-disclosure-redaction>Public values redacted</span> : null}
       {redactionApplied && originalRetained ? <span aria-hidden="true" className="text-faint">·</span> : null}
-      {originalRetained ? <span data-disclosure-original>Original retained</span> : redactionApplied ? <span data-disclosure-original>Original unavailable</span> : null}
+      {originalRetained ? <span data-disclosure-original>Original retained</span> : redactionApplied ? <span data-disclosure-original>Original unavailable</span> : <span data-disclosure-original>Original not retained</span>}
     </p>
   );
 }

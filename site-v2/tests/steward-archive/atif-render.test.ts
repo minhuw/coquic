@@ -236,9 +236,9 @@ test("renders compact downloads and explicit unavailable media fallbacks", () =>
   assert.doesNotMatch(unavailable, /href=|src=/);
 });
 
-test("shows disclosure only for redaction or retained originals without private affordances", () => {
+test("shows all disclosure states without private affordances", () => {
   const cases = [
-    { redactionApplied: false, originalRetained: false, text: "", absent: true },
+    { redactionApplied: false, originalRetained: false, text: "Original not retained", absent: false },
     { redactionApplied: true, originalRetained: false, text: "Public values redacted", absent: false },
     { redactionApplied: false, originalRetained: true, text: "Original retained", absent: false },
     { redactionApplied: true, originalRetained: true, text: "Original retained", absent: false },
@@ -254,6 +254,7 @@ test("shows disclosure only for redaction or retained originals without private 
     }
     const summary = html.match(/<p data-disclosure[\s\S]*?<\/p>/)?.[0] ?? "";
     assert.match(summary, new RegExp(disclosure.text));
+    if (!disclosure.redactionApplied) assert.doesNotMatch(summary, /text-warning/);
     assert.doesNotMatch(summary, /href=|src=|private|bucket|key|url|path|raw|filesystem|credential|secret|token|https?:/i);
   }
 });

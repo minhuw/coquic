@@ -881,16 +881,28 @@ async function main() {
     return payload.data;
   }
 
-  async function transcriptProblem(response: Response, status: number, code: string, retryable: boolean) {
+  async function transcriptProblem(
+    response: Response,
+    status: number,
+    code: string,
+    retryable: boolean,
+    expectedMessage?: string,
+    forbiddenValues: readonly string[] = [],
+  ) {
     assert.equal(response.status, status);
     assert.equal(response.headers.get("Cache-Control"), "no-store");
     assert.equal(response.headers.get("Content-Type"), "application/json; charset=utf-8");
     const body = await response.text();
     const payload = problemResponse(parseCloudResponse(body));
     assert.equal(payload.schemaVersion, "3.0");
-    assert.deepEqual(payload.problem, { code, message: payload.problem.message, retryable, status, type: null });
+    if (expectedMessage === undefined) {
+      assert.deepEqual(payload.problem, { code, message: payload.problem.message, retryable, status, type: null });
+    } else {
+      assert.deepEqual(payload.problem, { code, message: expectedMessage, retryable, status, type: null });
+    }
     assert(!body.includes("route-harness-secret"));
     assert(!body.includes("objects.example.test"));
+    for (const value of forbiddenValues) assert(!body.includes(value), `response reflected ${value}`);
     return payload.problem;
   }
 
@@ -1068,9 +1080,9 @@ async function main() {
     const unknownTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/missing"), taskContext("missing"));
     assert.equal(unknownTask.status, 404);
     const unknownRun = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=missing-run"), taskContext(DETAIL_TASK_ID));
-    await transcriptProblem(unknownRun, 404, "NOT_FOUND", false);
+    await transcriptProblem(unknownRun, 404, "NOT_FOUND", false, "The selected transcript is not available.", ["missing-run"]);
     const invalidRun = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=../private"), taskContext(DETAIL_TASK_ID));
-    await transcriptProblem(invalidRun, 400, "INVALID_REQUEST", false);
+    await transcriptProblem(invalidRun, 400, "INVALID_REQUEST", false, "The cloud transcript request is invalid.", ["../private"]);
     const invalidTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/../private"), taskContext("../private"));
     assert.equal(invalidTask.status, 400);
   });

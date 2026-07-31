@@ -147,6 +147,12 @@ function abortError(error: unknown): boolean {
   return isRecord(error) && error.name === "AbortError";
 }
 
+function redirectError(error: unknown): boolean {
+  if (!isRecord(error) || error.name !== "TypeError" || error.message !== "fetch failed") return false;
+  const cause = error.cause;
+  return isRecord(cause) && cause.name === "Error" && cause.message === "unexpected redirect";
+}
+
 function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): void {
   try {
     void Promise.resolve(reader.cancel()).catch(() => undefined);
@@ -270,6 +276,7 @@ async function fetchBody(
         signal: controller.signal,
       });
     } catch (error) {
+      if (redirectError(error)) throw loaderError("integrity");
       if (timedOut || abortError(error)) throw loaderError("transient");
       throw loaderError("transient");
     }

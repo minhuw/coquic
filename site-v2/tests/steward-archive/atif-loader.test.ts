@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import Module, { createRequire } from "node:module";
 import { test } from "node:test";
 import { dirname, resolve } from "node:path";
@@ -153,6 +154,45 @@ test("returns missing for an absent object and transient for 5xx", async () => {
   assert.deepEqual(rejected, { ok: false, category: "integrity" });
 });
 
+test("classifies native redirect denial as integrity without following the target", async () => {
+  const descriptor = descriptorFor(cleanFixture);
+  const bytes = bytesFor(cleanFixture);
+  let requests = 0;
+  const server = createServer((request, response) => {
+    requests += 1;
+    if (request.url === "/followed") {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        "content-length": String(bytes.byteLength),
+        connection: "close",
+      });
+      response.end(Buffer.from(bytes));
+      return;
+    }
+    response.writeHead(302, { Location: "/followed", connection: "close" });
+    response.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  try {
+    const address = server.address();
+    assert(address && typeof address !== "string");
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    const result = await tryLoadVerifiedAtif("task-clean", {
+      ...optionsFor(descriptor, responseFor(bytes)),
+      fetch: (_url, init) => nativeFetch(`http://127.0.0.1:${address.port}/redirect`, init),
+    });
+    assert.deepEqual(result, { ok: false, category: "integrity" });
+    assert.equal(requests, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
 test("rejects declared size conflicts and all bounded body overflows", async () => {
   const descriptor = descriptorFor(cleanFixture);
   const bytes = bytesFor(cleanFixture);
@@ -195,7 +235,9 @@ test("maps timeout and network failures without exposing transport values", asyn
   await assert.rejects(result, (error: unknown) => error instanceof AtifLoaderError && error.category === "transient" && error.message === "transient");
   assert.equal(cleared, true);
 
-  const network = await tryLoadVerifiedAtif("task-clean", optionsFor(descriptor, async () => { throw new Error(`${secretUrl}:${secretBody}`); }));
+  const network = await tryLoadVerifiedAtif("task-clean", optionsFor(descriptor, async () => {
+    throw new TypeError("fetch failed", { cause: new Error(`${secretUrl}:${secretBody}`) });
+  }));
   assert.deepEqual(network, { ok: false, category: "transient" });
   assert.equal(JSON.stringify(network).includes(secretUrl), false);
   assert.equal(JSON.stringify(network).includes(secretBody), false);

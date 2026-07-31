@@ -159,6 +159,28 @@ test("projects roles, content, settings, metrics, lineage, order, and stable anc
   assertNoLocators(value);
 });
 
+test("preserves colliding extension names while filtering recursive object locators", () => {
+  const document = fixtureDocument();
+  const digest = sha("a");
+  document.agent.extra = {
+    name: "extension-name-must-survive",
+    reference: `v1/tasks/${taskId}/objects/sha256/aa/${digest}`,
+    privateReference: `v1/originals/${taskId}/${runId}/sha256/${digest}.jsonl`,
+    nested: {
+      safeFact: "kept safely",
+      publicKey: `v1/tasks/${taskId}/objects/sha256/aa/${digest}`,
+      directReference: "https://private.example/object",
+    },
+  };
+
+  const value = buildAtifViewModel(document as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.equal(value.agent.extensions?.name, "extension-name-must-survive");
+  assert.equal(value.agent.extensions?.reference, "[unavailable]");
+  assert.equal(Object.hasOwn(value.agent.extensions ?? {}, "privateReference"), false);
+  assert.deepEqual(value.agent.extensions?.nested, { safeFact: "kept safely" });
+  assertNoLocators(value);
+});
+
 test("pairs tools by canonical call id while preserving delayed and unpaired results", () => {
   const value = model();
   const calls = value.steps[1]!.calls;
@@ -168,6 +190,23 @@ test("pairs tools by canonical call id while preserving delayed and unpaired res
   assert.equal(value.steps[2]!.observation?.results[0]!.matchedCallId, "call-2");
   assert.equal(value.steps[2]!.observation?.results[1]!.matchedCallId, null);
   assert.equal(value.steps[1]!.toolCalls?.[1]!.anchor, "call-call-2");
+});
+
+test("keeps absent, null, and empty subagent lineage distinct", () => {
+  const nullDocument = fixtureDocument();
+  nullDocument.steps[2].observation.results[0].subagent_trajectory_ref = null;
+  const nullValue = buildAtifViewModel(nullDocument as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.equal(nullValue.steps[2]!.observation?.results[0]!.lineage, null);
+
+  const emptyDocument = fixtureDocument();
+  emptyDocument.steps[2].observation.results[0].subagent_trajectory_ref = [];
+  const emptyValue = buildAtifViewModel(emptyDocument as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.deepEqual(emptyValue.steps[2]!.observation?.results[0]!.lineage, []);
+
+  const absentDocument = fixtureDocument();
+  delete absentDocument.steps[2].observation.results[0].subagent_trajectory_ref;
+  const absentValue = buildAtifViewModel(absentDocument as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.equal(Object.hasOwn(absentValue.steps[2]!.observation?.results[0] ?? {}, "lineage"), false);
 });
 
 test("derives valid timing, preserves explicit zero, and never invents missing duration", () => {
@@ -195,6 +234,32 @@ test("derives valid timing, preserves explicit zero, and never invents missing d
   assert.equal(missing.timing.durationMs, null);
   assert.equal(missing.timing.durationSource, "unavailable");
   assert.equal(missing.metadata.durationMs, null);
+});
+
+test("derives fractional canonical timestamps once and rejects unsafe deltas", () => {
+  const fractionalDocument = fixtureDocument();
+  delete fractionalDocument.extra.coquic.durationMs;
+  fractionalDocument.extra.coquic.startedAt = "2026-07-28T00:00:00.100Z";
+  fractionalDocument.extra.coquic.completedAt = "2026-07-28T00:00:00.400Z";
+  const fractional = buildAtifViewModel(fractionalDocument as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.equal(fractional.timing.durationMs, 300);
+  assert.equal(fractional.timing.durationSource, "derived");
+
+  const negativeDocument = fixtureDocument();
+  delete negativeDocument.extra.coquic.durationMs;
+  negativeDocument.extra.coquic.startedAt = "2026-07-28T00:00:00.400Z";
+  negativeDocument.extra.coquic.completedAt = "2026-07-28T00:00:00.100Z";
+  const negative = buildAtifViewModel(negativeDocument as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.equal(negative.timing.durationMs, null);
+  assert.equal(negative.timing.durationSource, "unavailable");
+
+  const subMillisecondDocument = fixtureDocument();
+  delete subMillisecondDocument.extra.coquic.durationMs;
+  subMillisecondDocument.extra.coquic.startedAt = "2026-07-28T00:00:00.1001Z";
+  subMillisecondDocument.extra.coquic.completedAt = "2026-07-28T00:00:00.1004Z";
+  const subMillisecond = buildAtifViewModel(subMillisecondDocument as unknown as AtifDocument, { artifacts: artifacts() });
+  assert.equal(subMillisecond.timing.durationMs, null);
+  assert.equal(subMillisecond.timing.durationSource, "unavailable");
 });
 
 test("resolves only same-publication logical actions and records unavailable references", () => {

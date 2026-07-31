@@ -258,7 +258,13 @@ interface ProjectionContext {
 
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 const LOCATOR = /(?:[a-z][a-z0-9+.-]*:\/\/|^(?:~[/\\]|\/{1}|[A-Za-z]:[/\\]|\\\\))/i;
-const UNSAFE_KEY = /(?:url|uri|endpoint|bucket|objectkey|publickey|private|secret|credential|password|token|authorization|scanner|filesystem|filepath|raw|direct)/i;
+const PUBLIC_OBJECT_KEY = /^v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}$/;
+const PRIVATE_OBJECT_KEY = /^v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl$/;
+const UNSAFE_KEY = /(?:url|uri|endpoint|bucket|object[_-]?key|public[_-]?key|private|secret|credential|password|token|authorization|scanner|filesystem|filepath|raw|direct)/i;
+
+function unsafeLocator(value: string): boolean {
+  return LOCATOR.test(value) || PUBLIC_OBJECT_KEY.test(value) || PRIVATE_OBJECT_KEY.test(value);
+}
 
 function isRecord(value: unknown): value is RawRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -272,7 +278,7 @@ function safeClone(value: unknown, depth = 0): AtifSafeValue | undefined {
   if (depth > 32) return "[unavailable]";
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "bigint") return value.toString(10);
-  if (typeof value === "string") return LOCATOR.test(value) ? "[unavailable]" : value;
+  if (typeof value === "string") return unsafeLocator(value) ? "[unavailable]" : value;
   if (Array.isArray(value)) return value.map((item) => safeClone(item, depth + 1) ?? "[unavailable]");
   if (!isRecord(value)) return undefined;
   const result: Record<string, AtifSafeValue> = {};
@@ -310,14 +316,13 @@ function optionalNumericArray(value: RawRecord, key: string): readonly (number |
   return candidate.map((item) => typeof item === "bigint" ? item.toString(10) : item).filter((item): item is number | string => typeof item === "number" || typeof item === "string");
 }
 
-function extensionRecord(value: RawRecord, known: readonly string[]): AtifSafeRecord | null | undefined {
+function extensionRecord(value: RawRecord, _known: readonly string[]): AtifSafeRecord | null | undefined {
   if (!has(value, "extra")) return undefined;
   const extra = value.extra;
   if (extra === null) return null;
   if (!isRecord(extra)) return {};
-  const unknown: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(extra)) if (!known.includes(key)) unknown[key] = child;
-  return safeRecord(unknown);
+  // An explicit extension namespace is independent from its parent's vocabulary.
+  return safeRecord(extra);
 }
 
 function mapMetrics(value: unknown): AtifDisplayMetrics | null | undefined {
@@ -376,10 +381,24 @@ function timestampNanos(value: unknown): bigint | null {
   if (typeof value !== "string") return null;
   const match = RFC3339.exec(value);
   if (!match) return null;
-  const milliseconds = Date.parse(value);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[8] === "Z" ? 0 : Number(match[8].slice(1, 3));
+  const offsetMinute = match[8] === "Z" ? 0 : Number(match[8].slice(4, 6));
+  if (year < 1 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) return null;
+  const base = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
+  const milliseconds = Date.parse(base);
   if (!Number.isSafeInteger(milliseconds)) return null;
+  const calendar = new Date(milliseconds);
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() + 1 !== month || calendar.getUTCDate() !== day || calendar.getUTCHours() !== hour || calendar.getUTCMinutes() !== minute || calendar.getUTCSeconds() !== second) return null;
   const fraction = `${match[7] ?? ""}000000000`.slice(0, 9);
-  return BigInt(milliseconds) * 1_000_000n + BigInt(fraction);
+  const localNanos = BigInt(fraction);
+  const offsetNanos = BigInt((offsetHour * 60 + offsetMinute) * 60) * 1_000_000_000n;
+  return BigInt(milliseconds) * 1_000_000n + localNanos - (match[8] === "Z" || match[8][0] === "+" ? offsetNanos : -offsetNanos);
 }
 
 function displayTiming(value: RawRecord): AtifDisplayTiming {
@@ -559,8 +578,12 @@ function mapObservation(value: RawRecord, context: ProjectionContext, calls: Rea
   if (extensions !== undefined) result.extensions = extensions;
   if (has(value, "source_call_id")) (result as { sourceCallId?: string | null }).sourceCallId = sourceCallId ?? null;
   if (has(value, "subagent_trajectory_ref")) {
-    const refs = Array.isArray(value.subagent_trajectory_ref) ? value.subagent_trajectory_ref : [];
-    (result as { lineage?: readonly AtifDisplayLineageReference[] | null }).lineage = refs.map((ref) => mapLineageReference(ref));
+    const refs = value.subagent_trajectory_ref;
+    (result as { lineage?: readonly AtifDisplayLineageReference[] | null }).lineage = refs === null
+      ? null
+      : Array.isArray(refs)
+        ? refs.map((ref) => mapLineageReference(ref))
+        : [];
   }
   return result as unknown as AtifDisplayObservation;
 }

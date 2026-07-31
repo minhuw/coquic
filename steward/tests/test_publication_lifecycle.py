@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from coquic_steward.core.config import StewardPublicationConfig
 from coquic_steward.execution.executor import (
     IntegrationTranscript,
     StewardExecutor,
 )
+from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.generation import PublicationGeneration
 from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
 from coquic_steward.publication.scanner import ScannerReport
@@ -36,6 +39,118 @@ class _Worktrees:
         if self.removed:
             raise RuntimeError("integration worktree removed")
         return "patch"
+
+
+def _publication_config(tmp_path: Path, credential: str) -> StewardPublicationConfig:
+    paths = []
+    for name, value in (
+        ("d1-token", credential),
+        ("r2-access-key", "configured-access-key-value"),
+        ("r2-secret-key", "configured-secret-key-value"),
+    ):
+        path = tmp_path / name
+        path.write_text(value + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        paths.append(path)
+    staging = tmp_path / "publication-staging"
+    staging.mkdir(mode=0o700)
+    return StewardPublicationConfig(
+        enabled=True,
+        account_id="a" * 32,
+        d1_database_id="00000000-0000-4000-8000-000000000000",
+        d1_token_path=paths[0],
+        r2_endpoint="https://example.r2.cloudflarestorage.com",
+        r2_access_key_id_path=paths[1],
+        r2_secret_access_key_path=paths[2],
+        public_bucket="publication-public",
+        private_bucket="publication-private",
+        public_base_url="https://publication.example.test",
+        staging_root=staging,
+    )
+
+
+def _publication_graph(title: str) -> dict[str, object]:
+    task_id = "task-publication-preflight"
+    pipeline_id = "pipeline-publication-preflight"
+    run_id = "run-publication-preflight"
+    documents = {
+        "codex.jsonl": (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "message-1",
+                        "type": "agent_message",
+                        "text": "safe",
+                    },
+                },
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        ),
+        "activities.jsonl": (
+            b'{"record_type":"header","schema_version":1}\n'
+            b'{"record_type":"event","schema_version":1,"sequence":1,'
+            b'"source_event_id":"activity-1","activity":"investigate",'
+            b'"summary":"Complete the task",'
+            b'"recorded_at":"2026-07-28T12:00:00.100Z"}\n'
+            b'{"record_type":"summary","schema_version":1,'
+            b'"capture_state":"complete","recorded":1,"invalid":0,'
+            b'"duplicate":0,"omitted":0,"truncated":false}\n'
+        ),
+        "telemetry.json": (
+            b'{"schema_version":1,"provenance":"codex_exec",'
+            b'"completeness":"complete","aggregate":{},'
+            b'"cost":{"status":"unavailable"}}'
+        ),
+        "run.json": (
+            b'{"taskId":"task-publication-preflight",'
+            b'"pipelineId":"pipeline-publication-preflight",'
+            b'"runId":"run-publication-preflight","role":"planning",'
+            b'"state":"succeeded","startedAt":"2026-07-28T12:00:00.000Z",'
+            b'"completedAt":"2026-07-28T12:00:01.000Z"}\n'
+        ),
+    }
+    source = AtifSource(
+        run={
+            "taskId": task_id,
+            "pipelineId": pipeline_id,
+            "runId": run_id,
+            "role": "planning",
+            "state": "succeeded",
+            "startedAt": "2026-07-28T12:00:00.000Z",
+            "completedAt": "2026-07-28T12:00:01.000Z",
+            "durationMs": 1_000,
+        },
+        documents=documents,
+    )
+    return {
+        "task": {
+            "taskId": task_id,
+            "title": title,
+            "lifecycleState": "active",
+            "createdAt": "2026-07-28T12:00:00Z",
+            "completedAt": None,
+        },
+        "pipelines": [
+            {
+                "pipelineId": pipeline_id,
+                "taskId": task_id,
+                "name": "Planning pipeline",
+                "createdAt": "2026-07-28T12:00:00Z",
+            }
+        ],
+        "runs": [source],
+        "events": [
+            {
+                "taskId": task_id,
+                "sequence": 1,
+                "eventType": "completed",
+                "occurredAt": "2026-07-28T12:00:01Z",
+                "summary": "Planning completed",
+            }
+        ],
+    }
 
 
 def test_source_scanner_keeps_patch_and_tree_categories(
@@ -71,6 +186,64 @@ def test_source_scanner_rejects_symlinked_tree_file(repo: Path) -> None:
 
     with pytest.raises(ValueError, match="symlink"):
         StewardExecutor._scan_integration_source(executor, repo, "patch text")
+
+
+def test_publication_preflight_inspects_configured_credentials(
+    repo: Path, tmp_path: Path
+) -> None:
+    credential = "plain-credential-value"
+    config = _publication_config(tmp_path, credential)
+    executor = object.__new__(StewardExecutor)
+    executor.config = SimpleNamespace(publication=config)
+    executor._publication_scanner_runner = lambda argv, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout=b"",
+    )
+    executor._integration_publication_graph = lambda _source: _publication_graph(
+        credential
+    )
+
+    outcome, counts, fingerprint = executor._build_integration_publication_outcome(
+        SimpleNamespace(id="task-publication-preflight"),
+        repo,
+        "safe patch",
+    )
+
+    assert isinstance(outcome, FailClosed)
+    assert outcome.reason_codes == (ReasonCode.unsafe_content,)
+    assert counts == {"source": 0, "patch": 0}
+    assert credential not in repr(outcome)
+    assert credential not in fingerprint
+
+
+def test_source_scanner_detects_literal_configured_credentials(
+    repo: Path, tmp_path: Path
+) -> None:
+    credential = "plain-credential-value"
+    config = _publication_config(tmp_path, credential)
+    (repo / "README.md").write_text(
+        f"source contains {credential}\n",
+        encoding="utf-8",
+    )
+    executor = object.__new__(StewardExecutor)
+    executor._publication_scanner_runner = lambda argv, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout=b"",
+    )
+
+    report = executor._scan_integration_source(
+        repo,
+        f"patch contains {credential}",
+        credential_sources=(
+            config.d1_token_path,
+            config.r2_access_key_id_path,
+            config.r2_secret_access_key_path,
+        ),
+    )
+
+    assert report.clean is False
+    assert {finding.category for finding in report.findings} == {"source", "patch"}
+    assert credential not in repr(report)
 
 
 def test_repair_required_blocks_current_integration_before_commit(

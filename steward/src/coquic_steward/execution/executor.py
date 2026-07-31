@@ -81,8 +81,14 @@ from .session import (
 from .container_config import TaskRole
 from ..publication.atif import AtifSource
 from ..publication.generation import PublicationGeneration, compose_publication_generation
-from ..publication.models import FailClosed, ReasonCode, RepairRequired
-from ..publication.scanner import CorpusEntry, ScannerReport, run_trufflehog
+from ..publication.models import MAX_FINDINGS, FailClosed, ReasonCode, RepairRequired
+from ..publication.redaction import discover_secrets
+from ..publication.scanner import (
+    CorpusEntry,
+    ScannerFinding,
+    ScannerReport,
+    run_trufflehog,
+)
 from ..core.lifecycle import (
     AdvanceResult,
     PhaseInput,
@@ -4040,10 +4046,16 @@ class StewardExecutor:
     ) -> tuple[PublicationGeneration | RepairRequired | FailClosed, dict[str, int], str]:
         graph = self._integration_publication_graph(source)
         scanner_runner = getattr(self, "_publication_scanner_runner", None)
+        publication = self.config.publication
+        credential_sources = (
+            getattr(publication, "d1_token_path", None),
+            getattr(publication, "r2_access_key_id_path", None),
+            getattr(publication, "r2_secret_access_key_path", None),
+        )
         generation = compose_publication_generation(
             graph,
             task_id=source.id,
-            known_secrets=(),
+            credential_sources=credential_sources,
             scanner_runner=scanner_runner,
             scanner_timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
         )
@@ -4053,7 +4065,11 @@ class StewardExecutor:
                 patch_text, generation, counts
             )
 
-        report = self._scan_integration_source(worktree, patch_text)
+        report = self._scan_integration_source(
+            worktree,
+            patch_text,
+            credential_sources=credential_sources,
+        )
         if report.failure is not None or report.returncode != 0:
             outcome = FailClosed((ReasonCode.scanner_failure,))
             counts = {"source": 0, "patch": 0}
@@ -4194,7 +4210,13 @@ class StewardExecutor:
             "events": events,
         }
 
-    def _scan_integration_source(self, worktree: Path, patch_text: str) -> ScannerReport:
+    def _scan_integration_source(
+        self,
+        worktree: Path,
+        patch_text: str,
+        *,
+        credential_sources: object = None,
+    ) -> ScannerReport:
         entries: list[CorpusEntry] = []
         if patch_text:
             entries.append(
@@ -4236,10 +4258,40 @@ class StewardExecutor:
             entries.append(CorpusEntry(name.replace("\\", "/"), data, "source"))
         if not entries:
             return ScannerReport()
-        return run_trufflehog(
+        report = run_trufflehog(
             entries,
             timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
             runner=getattr(self, "_publication_scanner_runner", None),
+        )
+        if report.failure is not None or report.returncode != 0:
+            return report
+
+        secrets = discover_secrets(credential_sources)
+        covered_categories = {finding.category for finding in report.findings}
+        literal_findings: list[ScannerFinding] = []
+        for entry in entries:
+            if entry.category in covered_categories:
+                continue
+            for secret in secrets:
+                raw = secret.encode("utf-8")
+                if raw in entry.content:
+                    literal_findings.append(
+                        ScannerFinding(
+                            entry.logical_path,
+                            raw,
+                            category=entry.category,
+                            detector="configured-credential",
+                        )
+                    )
+                    covered_categories.add(entry.category)
+                    break
+        if len(report.findings) + len(literal_findings) > MAX_FINDINGS:
+            return ScannerReport(failure=ReasonCode.scanner_failure)
+        if not literal_findings:
+            return report
+        return ScannerReport(
+            findings=(*report.findings, *literal_findings),
+            returncode=report.returncode,
         )
 
     def _publication_validation_result(

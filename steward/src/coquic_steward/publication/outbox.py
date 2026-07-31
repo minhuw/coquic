@@ -236,6 +236,12 @@ def _reason(value: object | None) -> str | None:
     return value
 
 
+def _health_category(value: object | None) -> str | None:
+    if value is None or value == "success":
+        return value
+    return _reason(value)
+
+
 def _content_key(value: object, receipt_class: ReceiptClass) -> str:
     if not isinstance(value, str) or not 1 <= len(value) <= MAX_CONTENT_KEY_LENGTH:
         _fail(ReasonCode.invalid_path)
@@ -707,12 +713,19 @@ class PublicationHealth:
         for name in ("queued_count", "blocked_count", "cleanup_pending_count", "cleanup_pending_bytes"):
             object.__setattr__(self, name, _count(getattr(self, name)))
         object.__setattr__(self, "updated_at", _timestamp(self.updated_at))
-        object.__setattr__(self, "reason", _reason(self.reason))
+        reason = _reason(self.reason)
+        object.__setattr__(self, "reason", reason)
         oldest = None if self.oldest_queued_at is None else _timestamp(self.oldest_queued_at)
         if oldest is not None and oldest > self.updated_at:
             _fail()
         object.__setattr__(self, "oldest_queued_at", oldest)
-        category = _reason(self.last_category)
+        category = _health_category(self.last_category)
+        if category is None:
+            category = reason or "success"
+        if (category == "success") != (reason is None) or (
+            reason is not None and category != reason
+        ):
+            _fail()
         object.__setattr__(self, "last_category", category)
 
     @property
@@ -739,7 +752,7 @@ class PublicationHealth:
             "reason": self.reason,
             "oldestQueuedAt": _timestamp_text(self.oldest_queued_at) if self.oldest_queued_at else None,
             "oldestQueuedAgeSeconds": self.oldest_queued_age_seconds,
-            "lastCategory": self.last_category or self.reason,
+            "lastCategory": self.last_category,
         }
 
 

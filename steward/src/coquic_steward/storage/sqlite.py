@@ -115,10 +115,6 @@ from .schema import (
     DaemonStateRow,
     ValidationRow,
     StewardImageReleaseRow,
-    PublicationGenerationRow,
-    PublicationReceiptRow,
-    PublicationHealthRow,
-    PublicationCleanupIntentRow,
 )
 from ..control_loop import (
     ControlLoopLedger,
@@ -159,9 +155,6 @@ REVIEW_FINISHED_EVENTS = {
 }
 
 _PUBLICATION_ID_RE = re.compile(r"^pub-[0-9a-f]{64}$")
-_PUBLICATION_KEY_TASK_RE = re.compile(
-    r"^v1/(?:tasks|originals)/(?P<task>[A-Za-z0-9][A-Za-z0-9._-]{0,127})/"
-)
 _PUBLICATION_REASON_VALUES = frozenset(
     {
         "missing",
@@ -2051,17 +2044,28 @@ class SQLiteTaskStore:
 
         connection = self.engine.connect()
         inserted = False
+        saved = value
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
-                "WHERE publication_id=:publication_id",
-                {"publication_id": value.publication_id},
+                "WHERE publication_id=:publication_id OR (task_id=:task_id AND run_id=:run_id) "
+                "ORDER BY CASE WHEN publication_id=:publication_id THEN 0 ELSE 1 END LIMIT 1",
+                {
+                    "publication_id": value.publication_id,
+                    "task_id": value.task_id,
+                    "run_id": value.run_id,
+                },
             ).mappings().first()
             if existing_row is not None:
                 existing = _publication_generation_from_row(existing_row)
                 if not _same_generation_input(existing, value):
-                    raise OutboxValidationError("invalid_metadata")
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.conflict,
+                        generation=existing,
+                        reason="integrity",
+                    )
                 connection.commit()
                 return PublicationOperationResult(
                     PublicationOperationStatus.existing,
@@ -2084,6 +2088,13 @@ class SQLiteTaskStore:
                 """,
                 _generation_parameters(value),
             )
+            saved_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": value.publication_id},
+            ).mappings().first()
+            assert saved_row is not None
+            saved = _publication_generation_from_row(saved_row)
             self._refresh_publication_health(connection, updated_at=value.updated_at)
             connection.commit()
             inserted = True
@@ -2096,7 +2107,7 @@ class SQLiteTaskStore:
             self._notify_change()
         return PublicationOperationResult(
             PublicationOperationStatus.enqueued,
-            generation=value,
+            generation=saved,
         )
 
     enqueue_generation = enqueue_publication
@@ -2236,7 +2247,11 @@ class SQLiteTaskStore:
                     )
                 else:
                     if expired:
-                        self._refresh_publication_health(connection, updated_at=timestamp)
+                        self._refresh_publication_health(
+                            connection,
+                            updated_at=timestamp,
+                            reason="lease_expired",
+                        )
                     connection.commit()
                     status = (
                         PublicationOperationStatus.missing
@@ -2396,14 +2411,16 @@ class SQLiteTaskStore:
                     reason="invalid_metadata",
                 )
             now_text = _publication_timestamp(timestamp)
+            renewed_until = max(
+                current.lease_expires_at,
+                timestamp + timedelta(seconds=lease_seconds),
+            )
             update = connection.exec_driver_sql(
                 "UPDATE publication_generations SET lease_expires_at=:lease_expires_at,"
                 "updated_at=:updated_at WHERE publication_id=:publication_id "
                 "AND state=:state AND lease_owner=:lease_owner AND lease_expires_at>:now",
                 {
-                    "lease_expires_at": _publication_timestamp(
-                        timestamp + timedelta(seconds=lease_seconds)
-                    ),
+                    "lease_expires_at": _publication_timestamp(renewed_until),
                     "updated_at": now_text,
                     "publication_id": publication_id,
                     "state": current.state.value,
@@ -2486,6 +2503,19 @@ class SQLiteTaskStore:
                     generation=current,
                     reason="invalid_metadata",
                 )
+            if (
+                expected is PublicationState.queued
+                and target in {PublicationState.claimed, PublicationState.building}
+            ) or (
+                expected is PublicationState.retry_wait
+                and target is PublicationState.building
+            ):
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.illegal_transition,
+                    generation=current,
+                    reason="invalid_metadata",
+                )
             if current.state is not expected:
                 connection.commit()
                 return PublicationOperationResult(
@@ -2510,7 +2540,6 @@ class SQLiteTaskStore:
                     generation=current,
                     reason="lease_expired",
                 )
-            now_text = _publication_timestamp(timestamp)
             update_values = _publication_transition_values(
                 current,
                 target,
@@ -2588,19 +2617,24 @@ class SQLiteTaskStore:
         _publication_identifier(identifier, prefix="receipt-")
         connection = self.engine.connect()
         inserted = False
+        saved = receipt
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             generation_row = connection.exec_driver_sql(
-                "SELECT publication_id,task_id FROM publication_generations "
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
                 "WHERE publication_id=:publication_id",
                 {"publication_id": publication_id},
             ).mappings().first()
             if generation_row is None:
                 connection.commit()
                 return PublicationOperationResult(PublicationOperationStatus.missing)
-            task_id = str(generation_row["task_id"])
-            match = _PUBLICATION_KEY_TASK_RE.match(receipt.content_key)
-            if match is None or match.group("task") != task_id:
+            generation = _publication_generation_from_row(generation_row)
+            expected_prefix = (
+                f"v1/tasks/{generation.task_id}/"
+                if receipt.receipt_class is ReceiptClass.public
+                else f"v1/originals/{generation.task_id}/{generation.run_id}/"
+            )
+            if not receipt.content_key.startswith(expected_prefix):
                 raise OutboxValidationError("invalid_path")
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
@@ -2621,13 +2655,34 @@ class SQLiteTaskStore:
                 ).mappings().first()
             if existing_row is not None:
                 existing = _publication_receipt_from_row(existing_row)
-                if not _same_receipt(existing, receipt):
-                    raise OutboxValidationError("integrity")
+                if (
+                    str(existing_row["publication_id"]) != publication_id
+                    or str(existing_row["task_id"]) != generation.task_id
+                    or not _same_receipt(existing, receipt)
+                ):
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.conflict,
+                        receipt=existing,
+                        reason="integrity",
+                    )
                 connection.commit()
                 return PublicationOperationResult(
                     PublicationOperationStatus.existing,
                     receipt=existing,
                 )
+            if generation.state not in {
+                PublicationState.building,
+                PublicationState.uploading,
+            }:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=generation,
+                    reason="integrity",
+                )
+            if receipt.verified_at < generation.updated_at:
+                raise OutboxValidationError("invalid_metadata")
             connection.exec_driver_sql(
                 """
                 INSERT INTO publication_receipts
@@ -2640,7 +2695,7 @@ class SQLiteTaskStore:
                 {
                     "receipt_id": identifier,
                     "publication_id": publication_id,
-                    "task_id": task_id,
+                    "task_id": generation.task_id,
                     "receipt_class": receipt.receipt_class.value,
                     "sha256": receipt.sha256,
                     "byte_size": receipt.byte_size,
@@ -2649,6 +2704,13 @@ class SQLiteTaskStore:
                     "verified_at": _publication_timestamp(receipt.verified_at),
                 },
             )
+            saved_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
+                "WHERE receipt_id=:receipt_id",
+                {"receipt_id": identifier},
+            ).mappings().first()
+            assert saved_row is not None
+            saved = _publication_receipt_from_row(saved_row)
             self._refresh_publication_health(connection, updated_at=receipt.verified_at)
             connection.commit()
             inserted = True
@@ -2661,7 +2723,7 @@ class SQLiteTaskStore:
             self._notify_change()
         return PublicationOperationResult(
             PublicationOperationStatus.recorded,
-            receipt=receipt,
+            receipt=saved,
         )
 
     record_receipt = record_publication_receipt
@@ -2723,25 +2785,11 @@ class SQLiteTaskStore:
         except (TypeError, ValueError):
             raise OutboxValidationError("invalid_metadata") from None
         if current.attempt >= MAX_ATTEMPTS:
-            if current.state not in {
-                PublicationState.queued,
-                PublicationState.claimed,
-                PublicationState.building,
-                PublicationState.retry_wait,
-            }:
-                result = self.advance_publication(
-                    publication_id,
-                    expected,
-                    PublicationState.retry_wait,
-                    lease_owner=lease_owner or worker_id,
-                    now=timestamp,
-                    retry_at=timestamp,
-                    reason=safe_reason,
-                )
-                return (
-                    result.with_status(PublicationOperationStatus.retry_wait)
-                    if result.status is PublicationOperationStatus.advanced
-                    else result
+            if not allowed_transition(current.state, PublicationState.blocked):
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=current,
+                    reason="retry_exhausted",
                 )
             blocked = self.block_publication(
                 publication_id,
@@ -2838,28 +2886,20 @@ class SQLiteTaskStore:
 
         if not isinstance(intent, CleanupIntent):
             raise OutboxValidationError("invalid_metadata")
-        if intent.state is not CleanupState.pending:
-            raise OutboxValidationError("invalid_metadata")
         connection = self.engine.connect()
         inserted = False
+        saved = intent
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
-            generation = connection.exec_driver_sql(
+            generation_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
                 "WHERE publication_id=:publication_id AND task_id=:task_id",
                 {"publication_id": intent.publication_id, "task_id": intent.task_id},
             ).mappings().first()
-            if generation is None:
+            if generation_row is None:
                 connection.commit()
                 return PublicationOperationResult(PublicationOperationStatus.missing)
-            state = PublicationState(generation["state"])
-            if state not in {PublicationState.exposed, PublicationState.terminal_cleaned}:
-                connection.commit()
-                return PublicationOperationResult(
-                    PublicationOperationStatus.precondition,
-                    generation=_publication_generation_from_row(generation),
-                    reason="running",
-                )
+            generation = _publication_generation_from_row(generation_row)
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
                 "WHERE intent_id=:intent_id",
@@ -2877,12 +2917,35 @@ class SQLiteTaskStore:
             if existing_row is not None:
                 existing = _publication_cleanup_from_row(existing_row)
                 if not _same_cleanup_input(existing, intent):
-                    raise OutboxValidationError("integrity")
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.conflict,
+                        cleanup=existing,
+                        reason="integrity",
+                    )
                 connection.commit()
                 return PublicationOperationResult(
                     PublicationOperationStatus.existing,
                     cleanup=existing,
                 )
+            if (
+                intent.state is not CleanupState.pending
+                or intent.verified_at is not None
+                or intent.completed_at is not None
+                or intent.reason is not None
+            ):
+                raise OutboxValidationError("invalid_metadata")
+            if generation.state is not PublicationState.exposed:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=generation,
+                    reason="integrity"
+                    if generation.state is PublicationState.terminal_cleaned
+                    else "running",
+                )
+            if intent.requested_at < generation.updated_at:
+                raise OutboxValidationError("invalid_metadata")
             connection.exec_driver_sql(
                 """
                 INSERT INTO publication_cleanup_intents
@@ -2901,6 +2964,13 @@ class SQLiteTaskStore:
                     "requested_at": _publication_timestamp(intent.requested_at),
                 },
             )
+            saved_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent.intent_id},
+            ).mappings().first()
+            assert saved_row is not None
+            saved = _publication_cleanup_from_row(saved_row)
             self._refresh_publication_health(connection, updated_at=intent.requested_at)
             connection.commit()
             inserted = True
@@ -2913,7 +2983,7 @@ class SQLiteTaskStore:
             self._notify_change()
         return PublicationOperationResult(
             PublicationOperationStatus.enqueued,
-            cleanup=intent,
+            cleanup=saved,
         )
 
     enqueue_cleanup_intent = create_cleanup_intent
@@ -2969,33 +3039,42 @@ class SQLiteTaskStore:
         """Record manifest verification before a deletion side effect."""
 
         timestamp = _publication_now(verified_at)
-        current = self.get_cleanup_intent(intent_id)
-        if current is None:
-            return PublicationOperationResult(PublicationOperationStatus.missing)
-        if current.manifest_digest != manifest_digest:
-            raise OutboxValidationError("digest_mismatch")
-        if timestamp < current.requested_at:
-            raise OutboxValidationError("invalid_metadata")
-        if current.state is CleanupState.completed:
-            return PublicationOperationResult(
-                PublicationOperationStatus.existing,
-                cleanup=current,
-            )
-        if current.state is CleanupState.blocked:
-            return PublicationOperationResult(
-                PublicationOperationStatus.lost_claim,
-                cleanup=current,
-                reason=current.reason,
-            )
-        if current.verified_at is not None:
-            return PublicationOperationResult(
-                PublicationOperationStatus.existing,
-                cleanup=current,
-            )
         connection = self.engine.connect()
         changed = False
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+            if row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            current = _publication_cleanup_from_row(row)
+            if current.manifest_digest != manifest_digest:
+                raise OutboxValidationError("digest_mismatch")
+            if timestamp < current.requested_at:
+                raise OutboxValidationError("invalid_metadata")
+            if current.state is CleanupState.completed:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    cleanup=current,
+                )
+            if current.state is CleanupState.blocked:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    cleanup=current,
+                    reason=current.reason,
+                )
+            if current.verified_at is not None:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    cleanup=current,
+                )
             update = connection.exec_driver_sql(
                 "UPDATE publication_cleanup_intents SET verified_at=:verified_at "
                 "WHERE intent_id=:intent_id AND state='pending' AND verified_at IS NULL",
@@ -3141,15 +3220,36 @@ class SQLiteTaskStore:
         reason = _publication_reason(reason)
         assert reason is not None
         timestamp = _publication_now(now)
-        current = self.get_cleanup_intent(intent_id)
-        if current is None:
-            return PublicationOperationResult(PublicationOperationStatus.missing)
-        if current.state is CleanupState.completed:
-            return PublicationOperationResult(PublicationOperationStatus.existing, cleanup=current)
         connection = self.engine.connect()
         changed = False
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
+            current_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_CLEANUP_COLUMNS} FROM publication_cleanup_intents "
+                "WHERE intent_id=:intent_id",
+                {"intent_id": intent_id},
+            ).mappings().first()
+            if current_row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            current = _publication_cleanup_from_row(current_row)
+            if timestamp < current.requested_at:
+                raise OutboxValidationError("invalid_metadata")
+            if current.state is CleanupState.completed:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    cleanup=current,
+                )
+            if current.state is CleanupState.blocked:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing
+                    if current.reason == reason
+                    else PublicationOperationStatus.conflict,
+                    cleanup=current,
+                    reason=current.reason,
+                )
             update = connection.exec_driver_sql(
                 "UPDATE publication_cleanup_intents SET state='blocked',reason=:reason "
                 "WHERE intent_id=:intent_id AND state='pending'",
@@ -3205,9 +3305,14 @@ class SQLiteTaskStore:
         *,
         updated_at: datetime,
         reason: str | None = None,
+        preserve_category: bool = False,
     ) -> None:
         _refresh_publication_health(
-            self, connection, updated_at=updated_at, reason=reason
+            self,
+            connection,
+            updated_at=updated_at,
+            reason=reason,
+            preserve_category=preserve_category,
         )
 
     def _publication_exists(self, connection: Connection, publication_id: str) -> bool:
@@ -3225,9 +3330,12 @@ class SQLiteTaskStore:
                 connection,
                 updated_at=timestamp,
                 reason="lease_expired" if expired else None,
+                preserve_category=not expired,
             )
 
-    def get_publication_health(self) -> PublicationHealth:
+    def get_publication_health(
+        self, *, now: datetime | None = None
+    ) -> PublicationHealth:
         """Return bounded queue, block, and cleanup pressure facts."""
 
         with self.engine.begin() as connection:
@@ -3237,12 +3345,13 @@ class SQLiteTaskStore:
                   (SELECT COUNT(*) FROM publication_generations
                     WHERE state IN ('queued','retry_wait')) AS queued_count,
                   (SELECT COUNT(*) FROM publication_generations WHERE state='blocked') AS blocked_count,
-                  (SELECT COUNT(*) FROM publication_cleanup_intents WHERE state='pending') AS cleanup_count,
+                  (SELECT COUNT(*) FROM publication_cleanup_intents
+                    WHERE state IN ('pending','blocked')) AS cleanup_count,
                   (SELECT COALESCE(SUM(receipt.byte_size),0)
                      FROM publication_cleanup_intents AS intent
                      LEFT JOIN publication_receipts AS receipt
                        ON receipt.publication_id=intent.publication_id
-                    WHERE intent.state='pending') AS cleanup_bytes,
+                    WHERE intent.state IN ('pending','blocked')) AS cleanup_bytes,
                   (SELECT MIN(created_at) FROM publication_generations
                     WHERE state IN ('queued','retry_wait')) AS oldest_queued_at,
                   (SELECT reason FROM publication_health WHERE id=1) AS reason,
@@ -3250,12 +3359,20 @@ class SQLiteTaskStore:
                 """
             ).mappings().first()
         assert row is not None
-        timestamp = _publication_datetime(row["updated_at"]) if row["updated_at"] else _publication_now(None)
+        observed_at = _publication_now(now)
+        timestamp = max(
+            _publication_datetime(row["updated_at"])
+            if row["updated_at"]
+            else observed_at,
+            observed_at,
+        )
         oldest = (
             None
             if row["oldest_queued_at"] is None
             else _publication_datetime(row["oldest_queued_at"])
         )
+        if oldest is not None:
+            timestamp = max(timestamp, oldest)
         return PublicationHealth(
             queued_count=_bounded_health_count(row["queued_count"]),
             blocked_count=_bounded_health_count(row["blocked_count"]),
@@ -5744,6 +5861,7 @@ def _refresh_publication_health(
     *,
     updated_at: datetime,
     reason: str | None = None,
+    preserve_category: bool = False,
 ) -> None:
     safe_reason = _publication_reason(reason)
     counts = connection.exec_driver_sql(
@@ -5751,12 +5869,13 @@ def _refresh_publication_health(
         SELECT
           (SELECT COUNT(*) FROM publication_generations WHERE state IN ('queued','retry_wait')) AS queued_count,
           (SELECT COUNT(*) FROM publication_generations WHERE state='blocked') AS blocked_count,
-          (SELECT COUNT(*) FROM publication_cleanup_intents WHERE state='pending') AS cleanup_count,
+          (SELECT COUNT(*) FROM publication_cleanup_intents
+            WHERE state IN ('pending','blocked')) AS cleanup_count,
           (SELECT COALESCE(SUM(receipt.byte_size),0)
              FROM publication_cleanup_intents AS intent
              LEFT JOIN publication_receipts AS receipt
                ON receipt.publication_id=intent.publication_id
-            WHERE intent.state='pending') AS cleanup_bytes
+            WHERE intent.state IN ('pending','blocked')) AS cleanup_bytes
         """
     ).mappings().first()
     assert counts is not None
@@ -5766,7 +5885,7 @@ def _refresh_publication_health(
     timestamp = _publication_now(updated_at)
     if existing is not None and existing["updated_at"]:
         timestamp = max(timestamp, _publication_datetime(existing["updated_at"]))
-    if safe_reason is None and existing is not None:
+    if preserve_category and safe_reason is None and existing is not None:
         safe_reason = _publication_reason(existing["reason"])
     parameters = {
         "queued_count": _bounded_health_count(counts["queued_count"]),

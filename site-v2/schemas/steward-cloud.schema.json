@@ -9,6 +9,7 @@
     { "$ref": "#/$defs/taskPageResponse" },
     { "$ref": "#/$defs/taskDetailResponse" },
     { "$ref": "#/$defs/trajectoryDescriptorResponse" },
+    { "$ref": "#/$defs/completeTrajectoryResponse" },
     { "$ref": "#/$defs/problemResponse" }
   ],
   "$defs": {
@@ -158,6 +159,251 @@
     "problemResponse": {
       "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "problem"],
       "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "problem": { "$ref": "#/$defs/problem" } }
+    },
+    "displayString": {
+      "type": "string", "maxLength": 4096,
+      "allOf": [{ "pattern": "^(?!.*v1/(?:tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/objects/sha256|originals/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/sha256)/)" }],
+      "pattern": "^(?!.*[A-Za-z][A-Za-z0-9+.-]*://)(?!.*(?:^|[\\s\"'([{<>=,:;])(?:~[/\\\\]|/{1}|\\\\\\\\|[A-Za-z]:[/\\\\]))[^\\u0000-\\u001f]*$"
+    },
+    "safeKey": {
+      "type": "string", "maxLength": 128,
+      "pattern": "^(?!.*(?:private|secret|credential|password|authorization|apikey|presign|signed|scanner|filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token|raw|direct))[^\\u0000-\\u001f]{1,128}$"
+    },
+    "safeRecord": {
+      "type": "object", "maxProperties": 256, "additionalProperties": { "$ref": "#/$defs/safeValue" },
+      "propertyNames": { "$ref": "#/$defs/safeKey" }
+    },
+    "safeValue": {
+      "anyOf": [
+        { "$ref": "#/$defs/displayString" },
+        { "type": "number", "minimum": -1000000000000000, "maximum": 1000000000000000 },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/safeValue" } },
+        { "$ref": "#/$defs/safeRecord" }
+      ]
+    },
+    "numericValue": {
+      "anyOf": [
+        { "type": "number", "minimum": -1000000000000000, "maximum": 1000000000000000 },
+        { "type": "string", "maxLength": 128, "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" }
+      ]
+    },
+    "numericArray": {
+      "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/numericValue" }
+    },
+    "displayTiming": {
+      "type": "object", "additionalProperties": false,
+      "required": ["durationMs", "durationSource"],
+      "properties": {
+        "startedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "completedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "durationMs": { "anyOf": [{ "$ref": "#/$defs/duration" }, { "type": "null" }] },
+        "durationSource": { "enum": ["explicit", "derived", "unavailable"] }
+      }
+    },
+    "displayMetrics": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "cachedTokens": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "promptTokens": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "completionTokens": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "costUsd": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "promptTokenIds": { "anyOf": [{ "$ref": "#/$defs/numericArray" }, { "type": "null" }] },
+        "completionTokenIds": { "anyOf": [{ "$ref": "#/$defs/numericArray" }, { "type": "null" }] },
+        "logprobs": { "anyOf": [{ "$ref": "#/$defs/numericArray" }, { "type": "null" }] },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "displayFinalMetrics": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "totalSteps": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "totalPromptTokens": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "totalCompletionTokens": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "totalCachedTokens": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "totalCostUsd": { "anyOf": [{ "$ref": "#/$defs/numericValue" }, { "type": "null" }] },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "displayAgent": {
+      "type": "object", "additionalProperties": false, "required": ["name", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/displayString" }, "version": { "$ref": "#/$defs/displayString" },
+        "modelName": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] },
+        "toolDefinitions": { "anyOf": [{ "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/safeValue" } }, { "type": "null" }] },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "logicalPath": {
+      "type": "string", "minLength": 1, "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*://)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000-\\u001f]+$"
+    },
+    "sameOriginArtifactHref": {
+      "type": "string",
+      "pattern": "^/api/steward/tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/artifact\\?path=(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9._~!$'()*+,;=@-])+$"
+    },
+    "imageMediaType": { "enum": ["image/gif", "image/jpeg", "image/png", "image/webp"] },
+    "artifactUnavailable": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "artifactId", "reason"],
+      "properties": {
+        "kind": { "const": "unavailable" },
+        "artifactId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "reason": { "enum": ["missing", "ownership-mismatch", "descriptor-mismatch", "unavailable", "missing-logical-path", "invalid-logical-path"] }
+      }
+    },
+    "artifactAction": {
+      "type": "object",
+      "oneOf": [
+        { "$ref": "#/$defs/artifactUnavailable" },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "artifactId", "taskId", "runId", "mediaType", "logicalPath", "href"],
+          "properties": {
+            "kind": { "enum": ["image", "download"] }, "artifactId": { "$ref": "#/$defs/id" },
+            "taskId": { "$ref": "#/$defs/id" }, "runId": { "$ref": "#/$defs/id" },
+            "mediaType": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s]+$" },
+            "logicalPath": { "$ref": "#/$defs/logicalPath" }, "href": { "$ref": "#/$defs/sameOriginArtifactHref" }
+          }
+        }
+      ]
+    },
+    "displayArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifactId", "mediaType", "sha256", "byteSize", "ownerStepId", "action"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/id" },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s]+$" },
+        "sha256": { "$ref": "#/$defs/digest" }, "byteSize": { "$ref": "#/$defs/size" },
+        "ownerStepId": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "action": { "$ref": "#/$defs/artifactAction" },
+        "disclosure": { "anyOf": [{ "$ref": "#/$defs/disclosure" }, { "type": "null" }] }
+      }
+    },
+    "displayTextContent": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "type", "text"],
+      "properties": { "kind": { "const": "text" }, "type": { "const": "text" }, "text": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] } }
+    },
+    "displayImageContent": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "type", "mediaType", "artifactId", "action"],
+      "properties": {
+        "kind": { "const": "image" }, "type": { "const": "image" }, "mediaType": { "$ref": "#/$defs/imageMediaType" },
+        "artifactId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }, "action": { "$ref": "#/$defs/artifactAction" }
+      }
+    },
+    "displayGenericContent": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "type", "record"],
+      "properties": { "kind": { "const": "generic" }, "type": { "const": "generic" }, "record": { "$ref": "#/$defs/safeRecord" } }
+    },
+    "displayContent": {
+      "oneOf": [
+        { "$ref": "#/$defs/displayTextContent" },
+        { "$ref": "#/$defs/displayImageContent" },
+        { "$ref": "#/$defs/displayGenericContent" }
+      ]
+    },
+    "displayContentValue": {
+      "anyOf": [
+        { "$ref": "#/$defs/displayString" }, { "type": "null" },
+        { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } }
+      ]
+    },
+    "lineageReference": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "trajectoryId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "sessionId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "displayObservation": {
+      "type": "object", "additionalProperties": false, "required": ["parts", "matchedCallId"],
+      "properties": {
+        "content": { "$ref": "#/$defs/displayContentValue" },
+        "parts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
+        "sourceCallId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "matchedCallId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] },
+        "lineage": { "anyOf": [{ "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/lineageReference" } }, { "type": "null" }] }
+      }
+    },
+    "displayToolCall": {
+      "type": "object", "additionalProperties": false,
+      "required": ["anchor", "callId", "id", "functionName", "arguments", "observations"],
+      "properties": {
+        "anchor": { "$ref": "#/$defs/id" }, "callId": { "$ref": "#/$defs/id" }, "id": { "$ref": "#/$defs/id" },
+        "functionName": { "$ref": "#/$defs/displayString" }, "arguments": { "$ref": "#/$defs/safeRecord" },
+        "observations": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayObservation" } },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "displayStep": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "anchor", "stepId", "source", "role", "content", "parts", "calls", "tools", "observations"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "anchor": { "$ref": "#/$defs/id" },
+        "stepId": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "source": { "enum": ["system", "user", "agent"] }, "role": { "enum": ["system", "user", "agent"] },
+        "message": { "$ref": "#/$defs/displayContentValue" },
+        "content": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
+        "parts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
+        "timestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "reasoning": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] },
+        "modelName": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] },
+        "reasoningEffort": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "number" }, { "type": "null" }] },
+        "copiedContext": { "anyOf": [{ "type": "boolean" }, { "type": "null" }] },
+        "llmCallCount": { "anyOf": [{ "type": "integer", "minimum": 0, "maximum": 1000000 }, { "type": "null" }] },
+        "metrics": { "anyOf": [{ "$ref": "#/$defs/displayMetrics" }, { "type": "null" }] },
+        "toolCalls": { "anyOf": [{ "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayToolCall" } }, { "type": "null" }] },
+        "calls": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayToolCall" } },
+        "tools": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayToolCall" } },
+        "observation": { "anyOf": [{ "type": "object", "additionalProperties": false, "required": ["results"], "properties": { "results": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayObservation" } } } }, { "type": "null" }] },
+        "observations": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayObservation" } },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "displayMetadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["taskId", "pipelineId", "runId", "role", "startedAt", "completedAt", "durationMs", "timing", "disclosure", "artifacts"],
+      "properties": {
+        "taskId": { "$ref": "#/$defs/id" }, "pipelineId": { "$ref": "#/$defs/id" }, "runId": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/displayString" }, "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "$ref": "#/$defs/timestamp" },
+        "durationMs": { "anyOf": [{ "$ref": "#/$defs/duration" }, { "type": "null" }] }, "timing": { "$ref": "#/$defs/displayTiming" },
+        "disclosure": { "$ref": "#/$defs/disclosure" }, "artifacts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayArtifact" } },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "displayLineage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["references", "trajectories"],
+      "properties": {
+        "trajectoryId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "sessionId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "references": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/lineageReference" } },
+        "trajectories": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/displayModel" } }
+      }
+    },
+    "displayModel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "schemaVersion", "agent", "metadata", "taskId", "pipelineId", "runId", "role", "timing", "disclosure", "steps", "lineage", "artifacts"],
+      "properties": {
+        "kind": { "const": "atif-display" }, "schemaVersion": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$" },
+        "agent": { "$ref": "#/$defs/displayAgent" }, "metadata": { "$ref": "#/$defs/displayMetadata" },
+        "taskId": { "$ref": "#/$defs/id" }, "pipelineId": { "$ref": "#/$defs/id" }, "runId": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/displayString" }, "timing": { "$ref": "#/$defs/displayTiming" }, "disclosure": { "$ref": "#/$defs/disclosure" },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 100000, "items": { "$ref": "#/$defs/displayStep" } },
+        "finalMetrics": { "anyOf": [{ "$ref": "#/$defs/displayFinalMetrics" }, { "type": "null" }] },
+        "notes": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] },
+        "sessionId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "trajectoryId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "lineage": { "$ref": "#/$defs/displayLineage" }, "artifacts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayArtifact" } },
+        "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
+      }
+    },
+    "completeTrajectory": { "$ref": "#/$defs/displayModel" },
+    "completeTrajectoryResponse": {
+      "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "data"],
+      "properties": { "schemaVersion": { "const": "4.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/completeTrajectory" } }
     }
   }
 }

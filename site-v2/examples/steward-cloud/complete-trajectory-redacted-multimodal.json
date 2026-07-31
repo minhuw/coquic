@@ -1,0 +1,269 @@
+{
+  "schemaVersion": "4.0",
+  "generatedAt": "2026-07-28T00:00:02Z",
+  "data": {
+    "kind": "atif-display",
+    "schemaVersion": "ATIF-v1.7",
+    "agent": {
+      "name": "codex",
+      "version": "1",
+      "modelName": null,
+      "toolDefinitions": null,
+      "extensions": null
+    },
+    "metadata": {
+      "taskId": "task-redacted",
+      "pipelineId": "pipeline-redacted",
+      "runId": "run-redacted",
+      "role": "planning",
+      "startedAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "durationMs": 1000,
+      "timing": {
+        "startedAt": "2026-07-28T00:00:00Z",
+        "completedAt": "2026-07-28T00:00:01Z",
+        "durationMs": 1000,
+        "durationSource": "derived"
+      },
+      "disclosure": {
+        "redactionApplied": true,
+        "originalRetained": true
+      },
+      "artifacts": [
+        {
+          "artifactId": "artifact-plot",
+          "mediaType": "image/png",
+          "sha256": "77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+          "byteSize": 12,
+          "ownerStepId": 2,
+          "action": {
+            "kind": "image",
+            "artifactId": "artifact-plot",
+            "taskId": "task-redacted",
+            "runId": "run-redacted",
+            "mediaType": "image/png",
+            "logicalPath": "steps/2/plot.png",
+            "href": "/api/steward/tasks/task-redacted/artifact?path=steps%2F2%2Fplot.png"
+          },
+          "disclosure": {
+            "redactionApplied": true,
+            "originalRetained": true
+          }
+        }
+      ],
+      "extensions": null
+    },
+    "taskId": "task-redacted",
+    "pipelineId": "pipeline-redacted",
+    "runId": "run-redacted",
+    "role": "planning",
+    "timing": {
+      "startedAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "durationMs": 1000,
+      "durationSource": "derived"
+    },
+    "disclosure": {
+      "redactionApplied": true,
+      "originalRetained": true
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "anchor": "step-1",
+        "stepId": 1,
+        "source": "system",
+        "role": "system",
+        "message": null,
+        "content": [],
+        "parts": [],
+        "timestamp": null,
+        "reasoning": null,
+        "modelName": null,
+        "reasoningEffort": null,
+        "copiedContext": null,
+        "llmCallCount": null,
+        "metrics": null,
+        "toolCalls": null,
+        "calls": [],
+        "tools": [],
+        "observation": null,
+        "observations": [],
+        "extensions": null
+      },
+      {
+        "id": "step-2",
+        "anchor": "step-2",
+        "stepId": 2,
+        "source": "agent",
+        "role": "agent",
+        "message": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "The image was redacted."
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/png",
+            "artifactId": "artifact-plot",
+            "action": {
+              "kind": "image",
+              "artifactId": "artifact-plot",
+              "taskId": "task-redacted",
+              "runId": "run-redacted",
+              "mediaType": "image/png",
+              "logicalPath": "steps/2/plot.png",
+              "href": "/api/steward/tasks/task-redacted/artifact?path=steps%2F2%2Fplot.png"
+            }
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/jpeg",
+            "artifactId": "artifact-missing",
+            "action": {
+              "kind": "unavailable",
+              "artifactId": "artifact-missing",
+              "reason": "missing"
+            }
+          },
+          {
+            "kind": "generic",
+            "type": "generic",
+            "record": {
+              "status": "redacted"
+            }
+          }
+        ],
+        "content": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "The image was redacted."
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/png",
+            "artifactId": "artifact-plot",
+            "action": {
+              "kind": "image",
+              "artifactId": "artifact-plot",
+              "taskId": "task-redacted",
+              "runId": "run-redacted",
+              "mediaType": "image/png",
+              "logicalPath": "steps/2/plot.png",
+              "href": "/api/steward/tasks/task-redacted/artifact?path=steps%2F2%2Fplot.png"
+            }
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/jpeg",
+            "artifactId": "artifact-missing",
+            "action": {
+              "kind": "unavailable",
+              "artifactId": "artifact-missing",
+              "reason": "missing"
+            }
+          },
+          {
+            "kind": "generic",
+            "type": "generic",
+            "record": {
+              "status": "redacted"
+            }
+          }
+        ],
+        "parts": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "The image was redacted."
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/png",
+            "artifactId": "artifact-plot",
+            "action": {
+              "kind": "image",
+              "artifactId": "artifact-plot",
+              "taskId": "task-redacted",
+              "runId": "run-redacted",
+              "mediaType": "image/png",
+              "logicalPath": "steps/2/plot.png",
+              "href": "/api/steward/tasks/task-redacted/artifact?path=steps%2F2%2Fplot.png"
+            }
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/jpeg",
+            "artifactId": "artifact-missing",
+            "action": {
+              "kind": "unavailable",
+              "artifactId": "artifact-missing",
+              "reason": "missing"
+            }
+          },
+          {
+            "kind": "generic",
+            "type": "generic",
+            "record": {
+              "status": "redacted"
+            }
+          }
+        ],
+        "timestamp": "2026-07-28T00:00:01Z",
+        "reasoning": null,
+        "modelName": null,
+        "reasoningEffort": null,
+        "copiedContext": null,
+        "llmCallCount": null,
+        "metrics": null,
+        "toolCalls": null,
+        "calls": [],
+        "tools": [],
+        "observation": null,
+        "observations": [],
+        "extensions": null
+      }
+    ],
+    "finalMetrics": null,
+    "notes": null,
+    "sessionId": null,
+    "trajectoryId": null,
+    "lineage": {
+      "trajectoryId": null,
+      "sessionId": null,
+      "references": [],
+      "trajectories": []
+    },
+    "artifacts": [
+      {
+        "artifactId": "artifact-plot",
+        "mediaType": "image/png",
+        "sha256": "77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+        "byteSize": 12,
+        "ownerStepId": 2,
+        "action": {
+          "kind": "image",
+          "artifactId": "artifact-plot",
+          "taskId": "task-redacted",
+          "runId": "run-redacted",
+          "mediaType": "image/png",
+          "logicalPath": "steps/2/plot.png",
+          "href": "/api/steward/tasks/task-redacted/artifact?path=steps%2F2%2Fplot.png"
+        },
+        "disclosure": {
+          "redactionApplied": true,
+          "originalRetained": true
+        }
+      }
+    ],
+    "extensions": null
+  }
+}

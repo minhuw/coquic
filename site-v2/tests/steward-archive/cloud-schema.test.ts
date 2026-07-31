@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import cleanTrajectory from "../../examples/steward-cloud/complete-trajectory-clean.json";
+import redactedTrajectory from "../../examples/steward-cloud/complete-trajectory-redacted-multimodal.json";
 import {
   parseCloudResponse,
   serializeCloudProblem,
   serializeCloudResponse,
+  serializeCloudCompleteTrajectory,
   serializeCloudTrajectoryDescriptor,
   validateCloudArtifact,
+  validateCloudCompleteTrajectory,
   validateCloudProblem,
   validateCloudStatus,
   validateCloudTaskDetail,
@@ -39,6 +43,7 @@ function detail(): CloudTaskDetail {
 function response<T>(data: T) { return { schemaVersion: "3.0" as const, generatedAt, data }; }
 function copy<T>(value: T): T { return structuredClone(value); }
 function rejects(value: unknown) { assert.throws(() => validateCloudTaskDetail(value), /invalid Steward cloud response/); }
+function rejectsComplete(value: unknown) { assert.throws(() => validateCloudCompleteTrajectory(value), /invalid Steward cloud response/); }
 
 test("accepts version-3 status, page, detail, descriptor, artifact, and problem envelopes", () => {
   const graph = detail();
@@ -142,4 +147,49 @@ test("validation errors are stable and never contain rejected values", () => {
   try { validateCloudTaskDetail(response(invalidSecond)); } catch (error) { secondMessage = (error as Error).message; }
   assert.equal(firstMessage, secondMessage); assert.equal(firstMessage, "invalid Steward cloud response");
   assert(!firstMessage.includes("secret"));
+});
+
+test("accepts complete normalized trajectories and preserves their public display model", () => {
+  const clean = validateCloudCompleteTrajectory(cleanTrajectory);
+  const redacted = validateCloudCompleteTrajectory(redactedTrajectory);
+  assert.equal(clean.schemaVersion, "4.0");
+  assert.equal(redacted.data.disclosure.redactionApplied, true);
+  assert.equal(redacted.data.steps[1]!.content[2]!.kind, "image");
+  assert.equal((redacted.data.steps[1]!.content[2] as { action: { kind: string } }).action.kind, "unavailable");
+  assert.deepEqual(parseCloudResponse(serializeCloudCompleteTrajectory(cleanTrajectory)), cleanTrajectory);
+  assert(!serializeCloudCompleteTrajectory(cleanTrajectory).includes("publicKey"));
+  assert(!serializeCloudCompleteTrajectory(cleanTrajectory).includes("://"));
+});
+
+test("rejects complete trajectory order, private shape, direct locator, and partial mutations", () => {
+  const clean = structuredClone(cleanTrajectory) as Record<string, any>;
+  const data = clean.data as Record<string, any>;
+  const duplicateAnchor = structuredClone(clean);
+  (duplicateAnchor.data.steps as Record<string, any>[])[1].anchor = "step-1";
+  rejectsComplete(duplicateAnchor);
+  const reordered = structuredClone(clean);
+  (reordered.data.steps as Record<string, any>[])[0].stepId = 2;
+  rejectsComplete(reordered);
+  const directUrl = structuredClone(clean);
+  (directUrl.data.steps as Record<string, any>[])[1].content[1].action.href = "https://r2.example/object";
+  rejectsComplete(directUrl);
+  const objectKey = structuredClone(clean);
+  (objectKey.data.steps as Record<string, any>[])[1].content[0].text = "v1/tasks/task-clean/objects/sha256/aa/" + "a".repeat(64);
+  rejectsComplete(objectKey);
+  const privateField = structuredClone(clean);
+  (privateField.data as Record<string, any>).privateBucket = "hidden";
+  rejectsComplete(privateField);
+  const rawAtif = structuredClone(clean);
+  (rawAtif.data as Record<string, any>).raw = { steps: [] };
+  rejectsComplete(rawAtif);
+  const unknownRecord = structuredClone(clean);
+  (unknownRecord.data.steps as Record<string, any>[])[1].content[1].record = {};
+  rejectsComplete(unknownRecord);
+  const unknownAction = structuredClone(clean);
+  (unknownAction.data.steps as Record<string, any>[])[1].content[1].action.extra = "unexpected";
+  rejectsComplete(unknownAction);
+  const partial = structuredClone(clean);
+  delete (partial.data as Record<string, any>).steps;
+  rejectsComplete(partial);
+  assert.equal(data.schemaVersion, "ATIF-v1.7");
 });

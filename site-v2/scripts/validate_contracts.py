@@ -33,6 +33,8 @@ EXAMPLE_TARGETS = {
     "workbench-command.json": ("workbench.schema.json", "command"),
     "steward-cloud/redacted-publication.json": ("steward-cloud.schema.json", "taskDetailResponse"),
     "steward-cloud/active-after-planning.json": ("steward-cloud.schema.json", "taskDetailResponse"),
+    "steward-cloud/complete-trajectory-clean.json": ("steward-cloud.schema.json", "completeTrajectoryResponse"),
+    "steward-cloud/complete-trajectory-redacted-multimodal.json": ("steward-cloud.schema.json", "completeTrajectoryResponse"),
 }
 
 
@@ -90,7 +92,7 @@ def validate_json_contracts() -> int:
 
 _CLOUD_PRIVATE_KEY = re.compile(
     r"(?:private|secret|credential|password|authorization|apikey|presign|signed|scanner|"
-    r"filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token|source)",
+    r"filesystem|file[_-]?path|endpoint|uri|url|bucket|object[_-]?key|token|raw|direct)",
     re.IGNORECASE,
 )
 _CLOUD_PRIVATE_VALUE = re.compile(
@@ -98,7 +100,25 @@ _CLOUD_PRIVATE_VALUE = re.compile(
     r"(?:^|[-_])(private|internal|secret)[-_](bucket|object(?:[-_]?key)?|url|path)(?:$|[-_])",
     re.IGNORECASE,
 )
+_CLOUD_OBJECT_KEY = re.compile(
+    r"v1/(?:tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/objects/sha256|"
+    r"originals/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/sha256)/"
+)
 _CLOUD_LOCATOR = re.compile(r"(?:^|[\s\"'([{<>=,:;])/(?:[^\s/]|$)")
+_CLOUD_SAME_ORIGIN_HREF = re.compile(
+    r"^/api/steward/tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/artifact\?path="
+    r"(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9._~!$'()*+,;=@-])+$"
+)
+_CLOUD_PUBLIC_FIELDS = {
+    "cachedTokens",
+    "promptTokens",
+    "completionTokens",
+    "promptTokenIds",
+    "completionTokenIds",
+    "totalPromptTokens",
+    "totalCompletionTokens",
+    "totalCachedTokens",
+}
 
 
 def _cloud_public_scan(value: object, path: str = "") -> int:
@@ -106,7 +126,11 @@ def _cloud_public_scan(value: object, path: str = "") -> int:
     if isinstance(value, dict):
         for key, item in value.items():
             child_path = f"{path}.{key}" if path else key
-            if _CLOUD_PRIVATE_KEY.search(key) and key not in {"logicalPath", "publicKey"}:
+            if (
+                _CLOUD_PRIVATE_KEY.search(key)
+                and key not in {"logicalPath", "publicKey"}
+                and key not in _CLOUD_PUBLIC_FIELDS
+            ):
                 print(f"cloud {child_path}: private field is not public")
                 failures += 1
             failures += _cloud_public_scan(item, child_path)
@@ -114,9 +138,61 @@ def _cloud_public_scan(value: object, path: str = "") -> int:
         for index, item in enumerate(value):
             failures += _cloud_public_scan(item, f"{path}[{index}]")
     elif isinstance(value, str):
-        if _CLOUD_LOCATOR.search(value) or _CLOUD_PRIVATE_VALUE.search(value):
+        if (
+            not (path.endswith(".href") and _CLOUD_SAME_ORIGIN_HREF.fullmatch(value))
+            and (
+                _CLOUD_LOCATOR.search(value)
+                or _CLOUD_PRIVATE_VALUE.search(value)
+                or (not path.endswith(".publicKey") and _CLOUD_OBJECT_KEY.search(value))
+            )
+        ):
             print(f"cloud {path}: private locator value is not public")
             failures += 1
+    return failures
+
+
+def validate_complete_trajectory_examples() -> int:
+    failures = 0
+    for name in (
+        "complete-trajectory-clean.json",
+        "complete-trajectory-redacted-multimodal.json",
+    ):
+        response = read_json(CLOUD_EXAMPLE_DIR / name)
+        data = response.get("data", {})
+        if response.get("schemaVersion") != "4.0" or not isinstance(data, dict):
+            failures += 1
+            print(f"cloud {name}: complete trajectory must use schema version 4.0")
+            continue
+        task_id = data.get("taskId")
+        steps = data.get("steps", [])
+        artifacts = data.get("artifacts", [])
+        if not isinstance(task_id, str) or not isinstance(steps, list) or not isinstance(artifacts, list):
+            failures += 1
+            print(f"cloud {name}: display model metadata is malformed")
+            continue
+        if data.get("metadata", {}).get("artifacts") != artifacts:
+            failures += 1
+            print(f"cloud {name}: metadata artifacts must match display artifacts")
+        expected_steps = list(range(1, len(steps) + 1))
+        actual_steps = [item.get("stepId") for item in steps if isinstance(item, dict)]
+        if actual_steps != expected_steps:
+            failures += 1
+            print(f"cloud {name}: steps must be source ordered")
+        anchors = [item.get("anchor") for item in steps if isinstance(item, dict)]
+        if len(anchors) != len(set(anchors)):
+            failures += 1
+            print(f"cloud {name}: step anchors must be unique")
+        disclosure = data.get("disclosure")
+        if disclosure not in (
+            {"redactionApplied": False, "originalRetained": True},
+            {"redactionApplied": True, "originalRetained": True},
+        ):
+            failures += 1
+            print(f"cloud {name}: disclosure must contain only public booleans")
+        if name.endswith("redacted-multimodal.json") and disclosure != {"redactionApplied": True, "originalRetained": True}:
+            failures += 1
+            print(f"cloud {name}: multimodal fixture must disclose redaction")
+        failures += _cloud_public_scan(response, name)
     return failures
 
 
@@ -403,6 +479,7 @@ def main() -> int:
     failures = (
         validate_json_contracts()
         + validate_steward_cloud_examples()
+        + validate_complete_trajectory_examples()
         + validate_markdown_links()
         + validate_steward_dashboard()
         + validate_steward_observability()

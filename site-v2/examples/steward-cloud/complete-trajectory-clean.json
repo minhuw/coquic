@@ -1,0 +1,404 @@
+{
+  "schemaVersion": "4.0",
+  "generatedAt": "2026-07-28T00:00:02Z",
+  "data": {
+    "kind": "atif-display",
+    "schemaVersion": "ATIF-v1.7",
+    "agent": {
+      "name": "codex",
+      "version": "1",
+      "modelName": "gpt-5",
+      "toolDefinitions": [
+        {
+          "name": "inspect",
+          "description": "Inspect the task"
+        }
+      ],
+      "extensions": null
+    },
+    "metadata": {
+      "taskId": "task-clean",
+      "pipelineId": "pipeline-clean",
+      "runId": "run-clean",
+      "role": "planning",
+      "startedAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "durationMs": 1000,
+      "timing": {
+        "startedAt": "2026-07-28T00:00:00Z",
+        "completedAt": "2026-07-28T00:00:01Z",
+        "durationMs": 1000,
+        "durationSource": "explicit"
+      },
+      "disclosure": {
+        "redactionApplied": false,
+        "originalRetained": true
+      },
+      "artifacts": [
+        {
+          "artifactId": "artifact-log",
+          "mediaType": "text/plain",
+          "sha256": "32a997e9fad0c2d0f2b7a0885d232524e0c34a0e9525551c361307fb36562462",
+          "byteSize": 8,
+          "ownerStepId": 2,
+          "action": {
+            "kind": "download",
+            "artifactId": "artifact-log",
+            "taskId": "task-clean",
+            "runId": "run-clean",
+            "mediaType": "text/plain",
+            "logicalPath": "steps/2/output.log",
+            "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Foutput.log"
+          },
+          "disclosure": {
+            "redactionApplied": false,
+            "originalRetained": true
+          }
+        },
+        {
+          "artifactId": "artifact-plot",
+          "mediaType": "image/png",
+          "sha256": "77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+          "byteSize": 12,
+          "ownerStepId": 2,
+          "action": {
+            "kind": "image",
+            "artifactId": "artifact-plot",
+            "taskId": "task-clean",
+            "runId": "run-clean",
+            "mediaType": "image/png",
+            "logicalPath": "steps/2/plot.png",
+            "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
+          },
+          "disclosure": {
+            "redactionApplied": false,
+            "originalRetained": true
+          }
+        }
+      ],
+      "extensions": null
+    },
+    "taskId": "task-clean",
+    "pipelineId": "pipeline-clean",
+    "runId": "run-clean",
+    "role": "planning",
+    "timing": {
+      "startedAt": "2026-07-28T00:00:00Z",
+      "completedAt": "2026-07-28T00:00:01Z",
+      "durationMs": 1000,
+      "durationSource": "explicit"
+    },
+    "disclosure": {
+      "redactionApplied": false,
+      "originalRetained": true
+    },
+    "steps": [
+      {
+        "id": "step-1",
+        "anchor": "step-1",
+        "stepId": 1,
+        "source": "user",
+        "role": "user",
+        "message": "Inspect the task.",
+        "content": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "Inspect the task."
+          }
+        ],
+        "parts": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "Inspect the task."
+          }
+        ],
+        "timestamp": null,
+        "reasoning": null,
+        "modelName": null,
+        "reasoningEffort": null,
+        "copiedContext": null,
+        "llmCallCount": null,
+        "metrics": null,
+        "toolCalls": null,
+        "calls": [],
+        "tools": [],
+        "observation": null,
+        "observations": [],
+        "extensions": null
+      },
+      {
+        "id": "step-2",
+        "anchor": "step-2",
+        "stepId": 2,
+        "source": "agent",
+        "role": "agent",
+        "message": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "The result is ready."
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/png",
+            "artifactId": "artifact-plot",
+            "action": {
+              "kind": "image",
+              "artifactId": "artifact-plot",
+              "taskId": "task-clean",
+              "runId": "run-clean",
+              "mediaType": "image/png",
+              "logicalPath": "steps/2/plot.png",
+              "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
+            }
+          }
+        ],
+        "content": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "The result is ready."
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/png",
+            "artifactId": "artifact-plot",
+            "action": {
+              "kind": "image",
+              "artifactId": "artifact-plot",
+              "taskId": "task-clean",
+              "runId": "run-clean",
+              "mediaType": "image/png",
+              "logicalPath": "steps/2/plot.png",
+              "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
+            }
+          }
+        ],
+        "parts": [
+          {
+            "kind": "text",
+            "type": "text",
+            "text": "The result is ready."
+          },
+          {
+            "kind": "image",
+            "type": "image",
+            "mediaType": "image/png",
+            "artifactId": "artifact-plot",
+            "action": {
+              "kind": "image",
+              "artifactId": "artifact-plot",
+              "taskId": "task-clean",
+              "runId": "run-clean",
+              "mediaType": "image/png",
+              "logicalPath": "steps/2/plot.png",
+              "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
+            }
+          }
+        ],
+        "timestamp": "2026-07-28T00:00:01Z",
+        "reasoning": null,
+        "modelName": "gpt-5",
+        "reasoningEffort": "medium",
+        "copiedContext": false,
+        "llmCallCount": 1,
+        "metrics": {
+          "cachedTokens": null,
+          "promptTokens": 12,
+          "completionTokens": 8,
+          "costUsd": null,
+          "promptTokenIds": [
+            1,
+            2
+          ],
+          "completionTokenIds": null,
+          "logprobs": null,
+          "extensions": null
+        },
+        "toolCalls": [
+          {
+            "anchor": "call-call-1",
+            "callId": "call-1",
+            "id": "call-1",
+            "functionName": "inspect",
+            "arguments": {
+              "scope": "task"
+            },
+            "observations": [
+              {
+                "content": "Inspection complete.",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "type": "text",
+                    "text": "Inspection complete."
+                  }
+                ],
+                "sourceCallId": "call-1",
+                "matchedCallId": "call-1",
+                "extensions": null,
+                "lineage": null
+              }
+            ],
+            "extensions": null
+          }
+        ],
+        "calls": [
+          {
+            "anchor": "call-call-1",
+            "callId": "call-1",
+            "id": "call-1",
+            "functionName": "inspect",
+            "arguments": {
+              "scope": "task"
+            },
+            "observations": [
+              {
+                "content": "Inspection complete.",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "type": "text",
+                    "text": "Inspection complete."
+                  }
+                ],
+                "sourceCallId": "call-1",
+                "matchedCallId": "call-1",
+                "extensions": null,
+                "lineage": null
+              }
+            ],
+            "extensions": null
+          }
+        ],
+        "tools": [
+          {
+            "anchor": "call-call-1",
+            "callId": "call-1",
+            "id": "call-1",
+            "functionName": "inspect",
+            "arguments": {
+              "scope": "task"
+            },
+            "observations": [
+              {
+                "content": "Inspection complete.",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "type": "text",
+                    "text": "Inspection complete."
+                  }
+                ],
+                "sourceCallId": "call-1",
+                "matchedCallId": "call-1",
+                "extensions": null,
+                "lineage": null
+              }
+            ],
+            "extensions": null
+          }
+        ],
+        "observation": {
+          "results": [
+            {
+              "content": "Inspection complete.",
+              "parts": [
+                {
+                  "kind": "text",
+                  "type": "text",
+                  "text": "Inspection complete."
+                }
+              ],
+              "sourceCallId": "call-1",
+              "matchedCallId": "call-1",
+              "extensions": null,
+              "lineage": null
+            }
+          ]
+        },
+        "observations": [
+          {
+            "content": "Inspection complete.",
+            "parts": [
+              {
+                "kind": "text",
+                "type": "text",
+                "text": "Inspection complete."
+              }
+            ],
+            "sourceCallId": "call-1",
+            "matchedCallId": "call-1",
+            "extensions": null,
+            "lineage": null
+          }
+        ],
+        "extensions": null
+      }
+    ],
+    "finalMetrics": {
+      "totalSteps": 2,
+      "totalPromptTokens": 12,
+      "totalCompletionTokens": 8,
+      "totalCachedTokens": null,
+      "totalCostUsd": null,
+      "extensions": null
+    },
+    "notes": null,
+    "sessionId": "session-clean",
+    "trajectoryId": "trajectory-clean",
+    "lineage": {
+      "trajectoryId": "trajectory-clean",
+      "sessionId": "session-clean",
+      "references": [],
+      "trajectories": []
+    },
+    "artifacts": [
+      {
+        "artifactId": "artifact-log",
+        "mediaType": "text/plain",
+        "sha256": "32a997e9fad0c2d0f2b7a0885d232524e0c34a0e9525551c361307fb36562462",
+        "byteSize": 8,
+        "ownerStepId": 2,
+        "action": {
+          "kind": "download",
+          "artifactId": "artifact-log",
+          "taskId": "task-clean",
+          "runId": "run-clean",
+          "mediaType": "text/plain",
+          "logicalPath": "steps/2/output.log",
+          "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Foutput.log"
+        },
+        "disclosure": {
+          "redactionApplied": false,
+          "originalRetained": true
+        }
+      },
+      {
+        "artifactId": "artifact-plot",
+        "mediaType": "image/png",
+        "sha256": "77c76d34207ff17daffa279348c3b463de2390ee28f0ec398bc9e59e5a30fc61",
+        "byteSize": 12,
+        "ownerStepId": 2,
+        "action": {
+          "kind": "image",
+          "artifactId": "artifact-plot",
+          "taskId": "task-clean",
+          "runId": "run-clean",
+          "mediaType": "image/png",
+          "logicalPath": "steps/2/plot.png",
+          "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
+        },
+        "disclosure": {
+          "redactionApplied": false,
+          "originalRetained": true
+        }
+      }
+    ],
+    "extensions": null
+  }
+}

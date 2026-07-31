@@ -1,6 +1,12 @@
-import { Check, LoaderCircle, Terminal, X } from "lucide-react";
+import { Check, Download, LoaderCircle, Terminal, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type {
+  AtifArtifactAction,
+  AtifDisplayContent,
+  AtifDisplayContentValue,
+  AtifSafeRecord,
+} from "@/lib/steward-archive/atif-view-model";
 
 type MessageBlock =
   | { type: "markdown"; text: string }
@@ -74,6 +80,19 @@ function parseMessage(text: string): MessageBlock[] {
   return blocks;
 }
 
+function markdownHref(href: string | undefined): { href: string; external: boolean } | null {
+  if (!href || href.trim() !== href || /[\u0000-\u001f]/.test(href)) return null;
+  if (href.startsWith("#")) return { href, external: false };
+  if (href.startsWith("/") && !href.startsWith("//")) return { href, external: false };
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "mailto:") return null;
+    return { href: url.toString(), external: true };
+  } catch {
+    return null;
+  }
+}
+
 function MarkdownBlock({ text }: { text: string }) {
   return (
     <div className="transcript-markdown typeset typeset-answer max-w-3xl text-muted [overflow-wrap:anywhere]">
@@ -84,8 +103,14 @@ function MarkdownBlock({ text }: { text: string }) {
           h1: ({ node: _, ...props }) => <h4 {...props} />,
           h2: ({ node: _, ...props }) => <h5 {...props} />,
           h3: ({ node: _, ...props }) => <h6 {...props} />,
-          table: ({ node: _, ...props }) => <div className="typeset-scroll"><table {...props} /></div>,
-          a: ({ node: _, href, ...props }) => <a {...props} href={href} target={href?.startsWith("#") ? undefined : "_blank"} rel={href?.startsWith("#") ? undefined : "noreferrer"} />,
+          table: ({ node: _, ...props }) => <div className="typeset-scroll max-w-full overflow-x-auto"><table {...props} /></div>,
+          pre: ({ node: _, children }) => <div className="max-w-full overflow-x-auto"><pre data-transcript-code className="max-w-full overflow-x-auto" >{children}</pre></div>,
+          a: ({ node: _, href, children, ...props }) => {
+            const safe = markdownHref(href);
+            if (!safe) return <span data-blocked-link {...props}>{children}</span>;
+            return <a {...props} href={safe.href} target={safe.external ? "_blank" : undefined} rel={safe.external ? "noreferrer" : undefined}>{children}</a>;
+          },
+          img: ({ node: _, alt }) => <span data-blocked-image>{alt || "Image unavailable"}</span>,
         }}
       >
         {text}
@@ -121,16 +146,68 @@ function CommandBlock({ block }: { block: Extract<MessageBlock, { type: "command
           {status}
         </span>
       </summary>
-      {block.output ? <pre className="max-h-96 overflow-auto border-t border-line bg-diff-gutter px-4 py-3 text-xs leading-5 text-ink data-text">{block.output}</pre> : null}
+      {block.output ? <pre className="max-h-96 max-w-full overflow-auto border-t border-line bg-diff-gutter px-4 py-3 text-xs leading-5 text-ink data-text">{block.output}</pre> : null}
     </details>
   );
 }
 
-export function TranscriptMessage({ text }: { text: string }) {
-  const blocks = parseMessage(text);
+function GenericBlock({ record }: { record: AtifSafeRecord }) {
+  return <pre data-generic-content className="max-w-full overflow-auto border border-line bg-diff-gutter px-4 py-3 text-xs leading-5 text-ink data-text">{JSON.stringify(record, null, 2)}</pre>;
+}
+function ArtifactReference({ action }: { action: AtifArtifactAction }) {
+  if (action.kind === "unavailable") {
+    return <span data-artifact-unavailable className="text-xs text-unavailable">Artifact unavailable ({action.reason})</span>;
+  }
+  if (action.kind === "image") {
+    return (
+      <figure className="mt-3 max-w-full">
+        <div className="flex min-h-24 max-w-full items-center justify-center overflow-hidden border border-line bg-diff-gutter p-2">
+          <img src={action.href} alt="Published image evidence" className="max-h-[32rem] max-w-full object-contain" />
+        </div>
+        <figcaption className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+          <span>{action.mediaType}</span>
+          <span aria-hidden="true">·</span>
+          <a href={action.href} download className="inline-flex items-center gap-1 text-accent no-underline hover:text-ink"><Download aria-hidden="true" size={13} />Download image</a>
+        </figcaption>
+      </figure>
+    );
+  }
+  return <a href={action.href} download className="inline-flex items-center gap-1 text-sm text-accent no-underline hover:text-ink"><Download aria-hidden="true" size={14} />Download artifact<span className="text-muted">({action.mediaType})</span></a>;
+}
+
+function ContentPart({ part }: { part: AtifDisplayContent }) {
+  if (part.kind === "text") return part.text === null ? <p className="text-sm text-unavailable">Unavailable</p> : <MarkdownBlock text={part.text} />;
+  if (part.kind === "generic") return <GenericBlock record={part.record} />;
+  return <ArtifactReference action={part.action} />;
+}
+
+export interface TranscriptMessageProps {
+  /** Legacy plain text remains supported while normalized content migrates. */
+  text?: string | null;
+  content?: AtifDisplayContentValue;
+  parts?: readonly AtifDisplayContent[];
+}
+
+export function TranscriptMessage({ text, content, parts }: TranscriptMessageProps) {
+  const typedParts = parts && parts.length > 0 ? parts : (Array.isArray(content) ? content : undefined);
+  if (typedParts) {
+    return (
+      <div className="mt-4 min-w-0 space-y-5">
+        {typedParts.length > 0
+          ? typedParts.map((part, index) => (
+            <ContentPart key={`${part.kind}-${index}`} part={part} />
+          ))
+          : <p className="text-sm text-unavailable">Unavailable</p>}
+      </div>
+    );
+  }
+
+  const value = text !== undefined ? text : typeof content === "string" ? content : null;
+  if (value === null || value === undefined) return <p className="mt-4 text-sm text-unavailable">Unavailable</p>;
+  const blocks = parseMessage(value);
   return (
-    <div className="mt-4 space-y-5">
-      {blocks.map((block, index) => {
+    <div className="mt-4 min-w-0 space-y-5">
+      {blocks.length === 0 ? <p className="text-sm text-unavailable">Unavailable</p> : blocks.map((block, index) => {
         if (block.type === "markdown") return <MarkdownBlock key={`markdown-${index}`} text={block.text} />;
         if (block.type === "tasks") return <TaskBlock key={`tasks-${index}`} items={block.items} />;
         return <div key={`command-${index}`} className="max-w-4xl border-t border-line"><CommandBlock block={block} /></div>;

@@ -20,6 +20,8 @@ export interface RunOutlinePhase {
   summary: string;
   events: Array<{
     id: string;
+    /** Full destination id when the caller owns the stable anchor. */
+    anchor?: string;
     sequence: number;
     label: string;
     outcome: "passed" | "failed" | "running" | null;
@@ -55,10 +57,10 @@ export function TranscriptLayout({ anchorPrefix, phases, children }: { anchorPre
 
         {expanded ? (
           <ol>
-            {phases.map((phase) => {
+            {phases.map((phase, phaseIndex) => {
               const Icon = phaseIcons[phase.kind];
               return (
-                <li key={phase.kind} className="border-b border-line">
+                <li key={`${phase.kind}-${phaseIndex}`} className="border-b border-line">
                   <details className="group">
                     <summary className="cursor-pointer list-none py-3">
                       <span className="grid grid-cols-[1rem_minmax(0,1fr)_1rem] items-start gap-2">
@@ -74,7 +76,7 @@ export function TranscriptLayout({ anchorPrefix, phases, children }: { anchorPre
                       {phase.events.map((event) => (
                         <li key={event.id}>
                           <a
-                            href={`#${anchorPrefix}-event-${event.id}`}
+                            href={`#${event.anchor ?? `${anchorPrefix}-event-${event.id}`}`}
                             className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-2 py-2 text-muted no-underline hover:text-ink"
                           >
                             <span className="text-xs text-faint data-text">{String(event.sequence).padStart(2, "0")}</span>

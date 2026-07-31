@@ -17,12 +17,14 @@ function openAIModelUrl(model: string) {
   return `https://developers.openai.com/api/docs/models/${encodeURIComponent(model)}`;
 }
 
-function formatEffort(effort: string) {
+function formatEffort(effort: string | number) {
+  if (typeof effort === "number") return String(effort);
   return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
-export function RunConfiguration({ model, reasoningEffort }: { model?: string | null; reasoningEffort?: string | null }) {
-  if (!model && !reasoningEffort) return null;
+export function RunConfiguration({ model, reasoningEffort }: { model?: string | null; reasoningEffort?: string | number | null }) {
+  const hasReasoningEffort = reasoningEffort !== undefined && reasoningEffort !== null;
+  if (!model && !hasReasoningEffort) return null;
 
   return (
     <span className="inline-flex w-full items-center justify-end gap-2 text-faint">
@@ -34,7 +36,7 @@ export function RunConfiguration({ model, reasoningEffort }: { model?: string | 
       ) : model ? (
         <span className="min-w-0 truncate" title={`Model: ${model}`}>{model}</span>
       ) : null}
-      {reasoningEffort ? (
+      {hasReasoningEffort ? (
         <span className="shrink-0" aria-label={`Reasoning effort: ${reasoningEffort}`} title={`Reasoning effort: ${reasoningEffort}`}>{formatEffort(reasoningEffort)}</span>
       ) : null}
     </span>

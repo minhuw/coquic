@@ -550,7 +550,14 @@ async function main() {
   const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   const outputs: string[] = [];
 
-  async function runCase(name: string, value: Scenario, action: () => Promise<void>, environment: Record<string, string | undefined> = VALID_ENV, expectedCalls?: number) {
+  async function runCase(
+    name: string,
+    value: Scenario,
+    action: (calls: { count: number; urls: string[] }) => Promise<void>,
+    environment: Record<string, string | undefined> = VALID_ENV,
+    expectedCalls?: number,
+    assertCalls?: (urls: readonly string[]) => void,
+  ) {
     const calls = { count: 0, urls: [] as string[] };
     try {
       for (const key of ENV_KEYS) {
@@ -560,9 +567,10 @@ async function main() {
       }
       globalThis.fetch = fakeFetch(value, calls) as typeof fetch;
       cloudRepository.resetCloudRepository();
-      await action();
+      await action(calls);
       assert.equal(calls.urls.some((url) => url.includes("attacker.example") || url.includes("route-harness-secret")), false);
       if (expectedCalls !== undefined) assert.equal(calls.count, expectedCalls);
+      assertCalls?.(calls.urls);
       outputs.push(`${name}: pass (${calls.count} mocked requests)`);
     } finally {
       cloudRepository.resetCloudRepository();
@@ -927,6 +935,15 @@ async function main() {
     }
   });
 
+  await runCase("hidden and staged transcript exclusion", scenario([], [], undefined, candidateRows), async () => {
+    const hidden = await getTranscript(new Request("https://site.test/api/steward/tasks/task-hidden/transcript"), taskContext("task-hidden"));
+    const hiddenProblem = await transcriptProblem(hidden, 404, "NOT_FOUND", false);
+    assert(!JSON.stringify(hiddenProblem).includes("task-hidden"));
+    const staged = await getTranscript(new Request("https://site.test/api/steward/tasks/task-staged/transcript"), taskContext("task-staged"));
+    const stagedProblem = await transcriptProblem(staged, 404, "NOT_FOUND", false);
+    assert(!JSON.stringify(stagedProblem).includes("task-staged"));
+  });
+
   const malformedDetail = detailScenario();
   malformedDetail.task!.credential_path = "route-harness-secret";
   await runCase("malformed detail data", scenario([], [], undefined, [], malformedDetail), async () => {
@@ -1036,13 +1053,24 @@ async function main() {
     await transcriptProblem(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)), 503, "UNAVAILABLE", true);
   }, VALID_ENV, 6);
 
+  await runCase("transcript ignores hostile caller URL", scenario([], [], undefined, [], detailScenario()), async () => {
+    await transcriptSuccess(await getTranscript(new Request("https://attacker.example/api/steward/tasks/task-detail/transcript?run=run-detail"), taskContext(DETAIL_TASK_ID)));
+  }, VALID_ENV, 6, (urls) => {
+    const d1Url = `https://api.cloudflare.com/client/v4/accounts/${VALID_ENV.CLOUDFLARE_ACCOUNT_ID}/d1/database/${VALID_ENV.COQUIC_STEWARD_D1_DATABASE_ID}/query`;
+    const d1Urls = urls.filter((url) => url.startsWith("https://api.cloudflare.com/"));
+    assert.equal(d1Urls.length, 5);
+    assert(d1Urls.every((url) => url === d1Url));
+    assert.deepEqual(urls.filter((url) => url.startsWith(VALID_ENV.COQUIC_STEWARD_PUBLIC_R2_BASE_URL)), [`${VALID_ENV.COQUIC_STEWARD_PUBLIC_R2_BASE_URL}${DETAIL_PUBLIC_KEY}`]);
+    assert(!urls.some((url) => url.includes("attacker.example")));
+  });
+
   await runCase("unknown task path and run", scenario([], [], undefined, [], detailScenario()), async () => {
     const unknownTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/missing"), taskContext("missing"));
     assert.equal(unknownTask.status, 404);
     const unknownRun = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=missing-run"), taskContext(DETAIL_TASK_ID));
-    assert.equal(unknownRun.status, 404);
+    await transcriptProblem(unknownRun, 404, "NOT_FOUND", false);
     const invalidRun = await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript?run=../private"), taskContext(DETAIL_TASK_ID));
-    assert.equal(invalidRun.status, 400);
+    await transcriptProblem(invalidRun, 400, "INVALID_REQUEST", false);
     const invalidTask = await getTaskDetail(new Request("https://site.test/api/steward/tasks/../private"), taskContext("../private"));
     assert.equal(invalidTask.status, 400);
   });

@@ -820,6 +820,56 @@ def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None
     assert illegal.status is PublicationOperationStatus.illegal_transition
 
 
+def test_store_claim_skips_later_generation_for_task_with_live_lease(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+
+    def generation(
+        task_id: str,
+        run_id: str,
+        boundary: str,
+        *,
+        created_at: datetime,
+    ) -> PublicationGeneration:
+        identity = GenerationIdentity(task_id, boundary)
+        return PublicationGeneration(
+            publication_id=identity.publication_id,
+            task_id=task_id,
+            run_id=run_id,
+            generation_boundary=boundary,
+            metadata_digest=DIGEST,
+            idempotency_key=identity.idempotency_key,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+    first_generation = generation(
+        "task-1", "run-1", "boundary-1", created_at=NOW
+    )
+    later_generation = generation(
+        "task-1", "run-2", "boundary-2", created_at=NOW + timedelta(seconds=1)
+    )
+    other_task_generation = generation(
+        "task-2", "run-1", "boundary-1", created_at=NOW + timedelta(seconds=2)
+    )
+    for item in (first_generation, later_generation, other_task_generation):
+        store.enqueue_publication(item)
+
+    claim_at = NOW + timedelta(seconds=3)
+    first = store.claim_publication("worker-1", now=claim_at)
+    assert first.status is PublicationOperationStatus.claimed
+    assert first.generation is not None
+    assert first.generation.publication_id == first_generation.publication_id
+
+    second = store.claim_publication("worker-2", now=claim_at)
+    assert second.status is PublicationOperationStatus.claimed
+    assert second.generation is not None
+    assert second.generation.publication_id == other_task_generation.publication_id
+    untouched = store.get_publication_generation(later_generation.publication_id)
+    assert untouched is not None
+    assert untouched.state is PublicationState.queued
+    assert untouched.attempt == 0
+
+
 def test_store_claim_edges_cannot_bypass_attempt_accounting(tmp_path) -> None:
     store = TaskStore(tmp_path / "steward.sqlite")
     generation = _generation()

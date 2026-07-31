@@ -2196,6 +2196,10 @@ class SQLiteTaskStore:
             parameters: dict[str, object] = {"now": now_text}
             selector = (
                 "(state='queued' OR (state='retry_wait' AND retry_at<=:now)) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM publication_generations active "
+                "WHERE active.task_id=publication_generations.task_id "
+                "AND active.lease_expires_at IS NOT NULL) "
                 "AND attempt < :max_attempts"
             )
             parameters["max_attempts"] = MAX_ATTEMPTS

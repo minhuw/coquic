@@ -45,6 +45,15 @@ export interface AtifArtifactDescriptor extends AtifJsonObject {
   readonly ownerStepId: number;
 }
 
+export interface AtifPublicationArtifactDescriptor extends AtifJsonObject {
+  readonly artifactId: string;
+  readonly taskId: string;
+  readonly runId: string;
+  readonly mediaType: string;
+  readonly sha256: string;
+  readonly byteSize: number;
+}
+
 export interface AtifCoquicMetadata extends AtifJsonObject {
   readonly taskId: string;
   readonly pipelineId: string;
@@ -72,9 +81,9 @@ export interface AtifDocument extends AtifJsonObject {
 
 export type AtifSource = Uint8Array | ArrayBuffer | string;
 export type AtifArtifactCollection =
-  | readonly AtifArtifactDescriptor[]
-  | ReadonlyMap<string, AtifArtifactDescriptor>
-  | Readonly<Record<string, AtifArtifactDescriptor>>;
+  | readonly AtifPublicationArtifactDescriptor[]
+  | ReadonlyMap<string, AtifPublicationArtifactDescriptor>
+  | Readonly<Record<string, AtifPublicationArtifactDescriptor>>;
 
 export interface AtifExpectedOwnership {
   readonly taskId?: string;
@@ -136,7 +145,7 @@ interface Limits {
 }
 interface NormalizedOptions {
   readonly expected: AtifExpectedOwnership;
-  readonly expectedArtifacts: Map<string, AtifArtifactDescriptor>;
+  readonly expectedArtifacts: Map<string, AtifPublicationArtifactDescriptor>;
   readonly limits: Limits;
   readonly requireExpectedOwnership: boolean;
 }
@@ -170,9 +179,9 @@ function bounded(value: number | undefined, fallback: number, maximum: number): 
   return value !== undefined && Number.isSafeInteger(value) && value > 0 && value <= maximum ? value : fallback;
 }
 
-function normalizeArtifacts(value: AtifArtifactCollection | undefined): Map<string, AtifArtifactDescriptor> | undefined {
+function normalizeArtifacts(value: AtifArtifactCollection | undefined): Map<string, AtifPublicationArtifactDescriptor> | undefined {
   if (value === undefined) return undefined;
-  const result = new Map<string, AtifArtifactDescriptor>();
+  const result = new Map<string, AtifPublicationArtifactDescriptor>();
   if (value instanceof Map) {
     for (const [key, descriptor] of value) result.set(key, descriptor);
   } else if (Array.isArray(value)) {
@@ -209,6 +218,46 @@ class InputFailure extends Error {
   }
 }
 
+function compareUnicode(left: string, right: string): number {
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftPoints[index] !== rightPoints[index]) return leftPoints[index] - rightPoints[index];
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function canonicalString(value: string): string {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0xd800 || code > 0xdfff) continue;
+    if (code <= 0xdbff && index + 1 < value.length) {
+      const trailing = value.charCodeAt(index + 1);
+      if (trailing >= 0xdc00 && trailing <= 0xdfff) {
+        index += 1;
+        continue;
+      }
+    }
+    throw new InputFailure("canonicalization");
+  }
+  return JSON.stringify(value);
+}
+
+function canonicalFloat(value: number): string {
+  if (!Number.isFinite(value)) throw new InputFailure("bounds");
+  if (Object.is(value, -0)) return "-0.0";
+  if (value === 0) return "0.0";
+  const [mantissa, rawExponent] = value.toExponential().split("e");
+  const exponent = Number(rawExponent);
+  if (exponent < -4 || exponent >= 16) {
+    const sign = exponent < 0 ? "-" : "+";
+    return `${mantissa}e${sign}${Math.abs(exponent).toString().padStart(2, "0")}`;
+  }
+  const decimal = value.toString();
+  return decimal.includes(".") ? decimal : `${decimal}.0`;
+}
+
 function sourceBytes(source: AtifSource, maxBytes: number): Uint8Array {
   let bytes: Uint8Array;
   if (typeof source === "string") bytes = new TextEncoder().encode(source);
@@ -227,8 +276,9 @@ class JsonReader {
 
   read(): unknown {
     const value = this.readValue(0);
-    this.skipWhitespace();
-    if (this.index !== this.source.length) throw new InputFailure("canonicalization");
+    if (this.index !== this.source.length - 1 || this.source[this.index] !== "\n") {
+      throw new InputFailure("canonicalization");
+    }
     return value;
   }
 
@@ -237,11 +287,8 @@ class JsonReader {
   }
 
   private skipWhitespace(): void {
-    while (this.index < this.source.length) {
-      const code = this.source.charCodeAt(this.index);
-      if (code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return;
-      this.index += 1;
-    }
+    const code = this.source.charCodeAt(this.index);
+    if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d) this.fail();
   }
 
   private readValue(depth: number): unknown {
@@ -270,6 +317,7 @@ class JsonReader {
         let value: unknown;
         try { value = JSON.parse(raw); } catch { this.fail(); }
         if (typeof value !== "string" || value.length > this.limits.maxStringLength) this.fail("bounds");
+        if (raw !== canonicalString(value)) this.fail();
         return value;
       }
       if (code < 0x20) this.fail();
@@ -290,9 +338,12 @@ class JsonReader {
   private readNumber(): number {
     const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(this.source.slice(this.index));
     if (!match || match[0].length > 1024) this.fail();
-    const value = Number(match[0]);
+    const raw = match[0];
+    const value = Number(raw);
     if (!Number.isFinite(value)) this.fail("bounds");
-    this.index += match[0].length;
+    const isFloat = raw.includes(".") || raw.includes("e") || raw.includes("E");
+    if ((isFloat && raw !== canonicalFloat(value)) || (!isFloat && raw === "-0")) this.fail();
+    this.index += raw.length;
     return value;
   }
 
@@ -300,6 +351,7 @@ class JsonReader {
     this.index += 1;
     const result: AtifJsonObject = {};
     const keys = new Set<string>();
+    let previousKey: string | undefined;
     this.skipWhitespace();
     if (this.source[this.index] === "}") { this.index += 1; return result; }
     for (let count = 0; ; count += 1) {
@@ -308,7 +360,9 @@ class JsonReader {
       if (this.source[this.index] !== '"') this.fail();
       const key = this.readString();
       if (keys.has(key)) this.fail();
+      if (previousKey !== undefined && compareUnicode(previousKey, key) >= 0) this.fail();
       keys.add(key);
+      previousKey = key;
       this.skipWhitespace();
       if (this.source[this.index] !== ":") this.fail();
       this.index += 1;
@@ -355,7 +409,7 @@ function canonicalJson(value: unknown): string {
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (isObject(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    return `{${Object.keys(value).sort(compareUnicode).map((key) => `${canonicalString(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   }
   throw new InputFailure("canonicalization");
 }
@@ -383,17 +437,27 @@ function schemaIssues(value: unknown, issues: Map<string, AtifIssue>): void {
   }
 }
 
+function privateName(value: string): boolean {
+  const compact = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return PRIVATE_NAME.test(compact) || ["url", "uri", "endpoint", "baseurl", "baseuri"].includes(compact);
+}
+
+function privateIssuePath(path: readonly PathSegment[]): PathSegment[] {
+  return path.map((segment) => typeof segment === "string" && privateName(segment) ? "<private-field>" : segment);
+}
+
 function privateScan(value: unknown, path: readonly PathSegment[], issues: Map<string, AtifIssue>, key?: string): void {
   let compact: string | undefined;
+  const issuePath = privateIssuePath(path);
   if (key !== undefined) {
     compact = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    if (PRIVATE_NAME.test(compact) || ["url", "uri", "endpoint", "baseurl", "baseuri"].includes(compact)) addIssue(issues, "private-field", [...path]);
-    if (["trajectorypath", "filepath", "credentialpath", "privatepath"].includes(compact)) addIssue(issues, "private-locator", [...path]);
+    if (privateName(key)) addIssue(issues, "private-field", issuePath);
+    if (["trajectorypath", "filepath", "credentialpath", "privatepath"].includes(compact)) addIssue(issues, "private-locator", issuePath);
   }
   if (typeof value === "string") {
-    if (value.startsWith("/") || PRIVATE_VALUE.test(value)) addIssue(issues, "private-locator", [...path]);
-    if (compact?.endsWith("path") && compact !== "logicalpath" && !value.startsWith("artifact:")) addIssue(issues, "private-locator", [...path]);
-    if (compact === "mediatype" && value.toLowerCase().startsWith("image/") && !(SUPPORTED_IMAGE_MEDIA_TYPES as readonly string[]).includes(value)) addIssue(issues, "media-type", [...path]);
+    if (value.startsWith("/") || PRIVATE_VALUE.test(value)) addIssue(issues, "private-locator", issuePath);
+    if (compact?.endsWith("path") && compact !== "logicalpath" && !value.startsWith("artifact:")) addIssue(issues, "private-locator", issuePath);
+    if (compact === "mediatype" && value.toLowerCase().startsWith("image/") && !(SUPPORTED_IMAGE_MEDIA_TYPES as readonly string[]).includes(value)) addIssue(issues, "media-type", issuePath);
     return;
   }
   if (Array.isArray(value)) {
@@ -446,8 +510,22 @@ function descriptorFields(value: AtifJsonObject): AtifArtifactDescriptor | null 
   return value as AtifArtifactDescriptor;
 }
 
-function sameDescriptor(left: AtifArtifactDescriptor, right: AtifArtifactDescriptor): boolean {
-  return left.artifactId === right.artifactId && left.mediaType === right.mediaType && left.sha256 === right.sha256 && left.byteSize === right.byteSize && left.ownerStepId === right.ownerStepId;
+function publicationDescriptorFields(value: AtifPublicationArtifactDescriptor): boolean {
+  return nonemptyId(value.artifactId)
+    && nonemptyId(value.taskId)
+    && nonemptyId(value.runId)
+    && typeof value.mediaType === "string"
+    && value.mediaType.length > 0
+    && DIGEST.test(value.sha256)
+    && Number.isSafeInteger(value.byteSize)
+    && value.byteSize >= 0;
+}
+
+function sameDescriptor(left: AtifArtifactDescriptor, right: AtifPublicationArtifactDescriptor): boolean {
+  return left.artifactId === right.artifactId
+    && left.mediaType === right.mediaType
+    && left.sha256 === right.sha256
+    && left.byteSize === right.byteSize;
 }
 
 function sameDisclosure(left: unknown, right: unknown): boolean {
@@ -460,7 +538,7 @@ function sameDisclosure(left: unknown, right: unknown): boolean {
 
 interface SemanticContext {
   readonly expected: AtifExpectedOwnership;
-  readonly expectedArtifacts: Map<string, AtifArtifactDescriptor> | undefined;
+  readonly expectedArtifacts: Map<string, AtifPublicationArtifactDescriptor> | undefined;
   readonly requireExpectedOwnership: boolean;
   readonly issues: Map<string, AtifIssue>;
 }
@@ -513,11 +591,12 @@ function checkArtifactMetadata(coqui: AtifJsonObject, steps: readonly unknown[],
     if (typeof item.byteSize !== "number" || !Number.isSafeInteger(item.byteSize) || item.byteSize < 0) addIssue(context.issues, "artifact-size", [...itemPath, "byteSize"]);
     if (typeof item.ownerStepId !== "number" || !Number.isSafeInteger(item.ownerStepId) || !stepIds.has(item.ownerStepId)) addIssue(context.issues, "artifact-owner", [...itemPath, "ownerStepId"]);
     const expected = context.expectedArtifacts?.get(String(item.artifactId));
-    if (context.expectedArtifacts && (!expected || !descriptor || !sameDescriptor(descriptor, expected))) addIssue(context.issues, "artifact-descriptor", itemPath);
+    if (context.expectedArtifacts && (!expected || !publicationDescriptorFields(expected))) addIssue(context.issues, "artifact-descriptor", itemPath);
+    else if (expected) {
+      if (expected.taskId !== context.expected.taskId || expected.runId !== context.expected.runId) addIssue(context.issues, "artifact-ownership", itemPath);
+      if (!descriptor || !sameDescriptor(descriptor, expected)) addIssue(context.issues, "artifact-descriptor", itemPath);
+    }
   });
-  if (context.expectedArtifacts) {
-    for (const [artifactId] of context.expectedArtifacts) if (!artifacts.has(artifactId)) addIssue(context.issues, "artifact-missing", ["extra", "coquic", "artifacts"]);
-  }
   return artifacts;
 }
 
@@ -631,19 +710,13 @@ function validateTrajectory(value: AtifJsonObject, path: PathSegment[], context:
   checkReferences(value, path, context, root);
 }
 
-function validateDocument(value: unknown, normalized: NormalizedOptions, raw?: Uint8Array): AtifDocument {
+function validateDocument(value: unknown, normalized: NormalizedOptions): AtifDocument {
   const issues = new Map<string, AtifIssue>();
   if (!isObject(value)) addIssue(issues, "schema-type", []);
   else {
     schemaIssues(value, issues);
     privateScan(value, [], issues);
     validateTrajectory(value, [], { expected: normalized.expected, expectedArtifacts: normalized.expectedArtifacts, requireExpectedOwnership: normalized.requireExpectedOwnership, issues }, true);
-  }
-  if (raw !== undefined) {
-    try {
-      const canonical = canonicalAtifBytes(value);
-      if (canonical.length !== raw.length || canonical.some((byte, index) => byte !== raw[index])) addIssue(issues, "canonicalization", []);
-    } catch { addIssue(issues, "canonicalization", []); }
   }
   const sorted = sortedIssues(issues);
   if (sorted.length > 0) throw new AtifValidationError(sorted);
@@ -662,7 +735,7 @@ export function validateAtifBytes(source: AtifSource, options: AtifValidationOpt
     const rule = error instanceof InputFailure ? error.rule : "canonicalization";
     throw new AtifValidationError([{ rule, code: rule, path: "$", jsonPath: "$", segments: [] }]);
   }
-  return validateDocument(value, normalized, bytes);
+  return validateDocument(value, normalized);
 }
 
 export function validateAtifDocument(value: unknown, options: AtifValidationOptions = {}): AtifDocument {

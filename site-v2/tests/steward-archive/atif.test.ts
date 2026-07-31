@@ -10,6 +10,7 @@ import {
   tryValidateAtifBytes,
   validateAtifBytes,
   type AtifDocument,
+  type AtifPublicationArtifactDescriptor,
   type AtifValidationOptions,
 } from "@/lib/steward-archive/atif";
 
@@ -23,8 +24,12 @@ function atif(fixture: Fixture): AtifDocument {
   return copy(fixture.atif) as unknown as AtifDocument;
 }
 
-function options(document: AtifDocument): AtifValidationOptions {
+function options(
+  document: AtifDocument,
+  published: readonly AtifPublicationArtifactDescriptor[] = cleanFixture.publication.artifacts,
+): AtifValidationOptions {
   const coqui = (document.extra as Record<string, any>).coquic;
+  const localIds = new Set(coqui.artifacts.map((artifact: any) => artifact.artifactId));
   return {
     taskId: coqui.taskId,
     pipelineId: coqui.pipelineId,
@@ -34,7 +39,7 @@ function options(document: AtifDocument): AtifValidationOptions {
     completedAt: coqui.completedAt,
     durationMs: coqui.durationMs,
     disclosure: coqui.disclosure,
-    artifacts: coqui.artifacts,
+    artifacts: published.filter((artifact) => localIds.has(artifact.artifactId)),
   };
 }
 
@@ -53,9 +58,18 @@ function assertRule(source: Uint8Array, expected: AtifValidationOptions, rule: s
 test("accepts canonical clean and redacted complete trajectories", () => {
   for (const fixture of [cleanFixture, redactedFixture]) {
     const document = atif(fixture);
-    const result = validateAtifBytes(validBytes(document), options(document));
+    const result = validateAtifBytes(
+      validBytes(document),
+      options(document, fixture.publication.artifacts),
+    );
     assert.equal(result.schema_version, ATIF_VERSION);
-    assert.equal(isValidAtifBytes(validBytes(document), options(document)), true);
+    assert.equal(
+      isValidAtifBytes(
+        validBytes(document),
+        options(document, fixture.publication.artifacts),
+      ),
+      true,
+    );
   }
 });
 
@@ -79,6 +93,32 @@ test("rejects noncanonical, duplicate-key, malformed, and invalid UTF-8 input", 
   assertRule(new TextEncoder().encode('{"agent":{},"agent":{}}'), expected, "canonicalization");
   assertRule(new TextEncoder().encode('{"agent":'), expected, "canonicalization");
   assertRule(new Uint8Array([0xff, 0xfe, 0xfd]), expected, "canonicalization");
+});
+
+test("accepts oracle-canonical floating-point lexemes without lossy reserialization", () => {
+  const document = atif(cleanFixture) as Record<string, any>;
+  document.final_metrics = { total_cost_usd: 1 };
+  const expected = options(document as AtifDocument);
+  const serialized = new TextDecoder().decode(validBytes(document as AtifDocument));
+  assert.ok(serialized.includes('"total_cost_usd":1'));
+  const bytesWith = (number: string) => new TextEncoder().encode(
+    serialized.replace('"total_cost_usd":1', `"total_cost_usd":${number}`),
+  );
+
+  for (const number of [
+    "1.0",
+    "-0.0",
+    "1e+20",
+    "1e-07",
+    "0.0001",
+    "1000000000000000.0",
+    "1.2345678901234567",
+  ]) {
+    assert.equal(validateAtifBytes(bytesWith(number), expected).schema_version, ATIF_VERSION);
+  }
+  for (const number of ["1.00", "1e0", "1E+20", "1e-7", "0.00010", "-0"]) {
+    assertRule(bytesWith(number), expected, "canonicalization");
+  }
 });
 
 test("rejects schema mutations and wrong ATIF version", () => {
@@ -150,6 +190,24 @@ test("resolves owned artifact references and supported image media", () => {
   assertRule(validBytes(unreferenced), options(unreferenced), "artifact-unreferenced");
 });
 
+test("checks publication artifact task and run ownership independently", () => {
+  const document = atif(cleanFixture);
+  const expected = options(document);
+  assert.ok(
+    (expected.artifacts as readonly AtifPublicationArtifactDescriptor[]).every(
+      (artifact) => artifact.ownerStepId === undefined,
+    ),
+  );
+  assert.equal(validateAtifBytes(validBytes(document), expected).schema_version, ATIF_VERSION);
+
+  const foreignTask = (expected.artifacts as readonly AtifPublicationArtifactDescriptor[])
+    .map((artifact) => ({ ...artifact, taskId: "other-task" }));
+  assertRule(validBytes(document), { ...expected, artifacts: foreignTask }, "artifact-ownership");
+  const foreignRun = (expected.artifacts as readonly AtifPublicationArtifactDescriptor[])
+    .map((artifact) => ({ ...artifact, runId: "other-run" }));
+  assertRule(validBytes(document), { ...expected, artifacts: foreignRun }, "artifact-ownership");
+});
+
 test("denies recursive private-shaped fields without echoing values", () => {
   const base = atif(cleanFixture);
   const candidate = copy(base);
@@ -165,6 +223,20 @@ test("denies recursive private-shaped fields without echoing values", () => {
   assert.ok(error.issues.some((issue) => issue.rule === "private-field"));
   assert.ok(error.issues.every((issue) => !issue.path.includes(secret)));
   assert.ok(!error.message.includes(secret));
+});
+
+test("generalizes private-shaped extension names in every diagnostic field", () => {
+  const candidate = atif(cleanFixture);
+  const marker = "accessToken-super-secret-9f2e";
+  (candidate.agent as Record<string, unknown>)[marker] = "safe-extension-value";
+  const result = tryValidateAtifBytes(validBytes(candidate), options(candidate));
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.ok(result.issues.some((issue) => issue.rule === "private-field"));
+    assert.ok(!JSON.stringify(result.issues).includes(marker));
+    assert.ok(result.issues.every((issue) => !issue.segments.includes(marker)));
+  }
 });
 
 test("resolves embedded trajectory IDs and rejects external paths", () => {

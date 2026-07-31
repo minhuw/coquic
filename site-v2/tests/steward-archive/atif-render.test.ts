@@ -93,3 +93,78 @@ test("renders an empty validated run as completed without progressive controls",
   assert.doesNotMatch(html, /data-step-source=/);
   assert.doesNotMatch(html, /load more|virtual|pagination/i);
 });
+
+test("keeps paired observations in source-record order and associated with their call", () => {
+  const model = modelCopy() as any;
+  const observation = {
+    content: "F001-order-sentinel",
+    parts: [textPart("F001-order-sentinel")],
+    matchedCallId: "call-order",
+    sourceCallId: "call-order",
+    extensions: null,
+    lineage: null,
+  };
+  const call = {
+    anchor: "call-order",
+    callId: "call-order",
+    id: "call-order",
+    functionName: "inspect",
+    arguments: {},
+    observations: [observation],
+  };
+  const owner = structuredClone(model.steps[1]);
+  owner.stepId = 3;
+  owner.id = "step-3";
+  owner.anchor = "step-3";
+  owner.message = "F001-owner-record";
+  owner.content = [textPart("F001-owner-record")];
+  owner.parts = owner.content;
+  owner.calls = [];
+  owner.tools = [];
+  owner.observations = [observation];
+  owner.observation = { results: [observation] };
+  model.steps[1].calls = [call];
+  model.steps[1].tools = [call];
+  model.steps = [model.steps[0], model.steps[1], owner];
+
+  const html = render(model);
+  assert.ok(html.indexOf("F001-order-sentinel") > html.indexOf("F001-owner-record"));
+  assert.equal((html.match(/F001-order-sentinel/g) ?? []).length, 1);
+  assert.match(html, /data-paired="true"/);
+  assert.match(html, /data-tool-observation-association="call-order"/);
+});
+
+test("renders safe run facts and recursively bounded child trajectories", () => {
+  const model = modelCopy() as any;
+  model.agent.toolDefinitions = [{ sentinel: "F002-tool-definition" }];
+  model.agent.extensions = { sentinel: "F002-agent-extension" };
+  model.metadata.extensions = { sentinel: "F002-metadata-extension" };
+  model.extensions = { sentinel: "F002-model-extension" };
+  model.notes = "F002-notes";
+  const child = structuredClone(model);
+  child.trajectoryId = "child-f002";
+  child.steps = [structuredClone(model.steps[0])];
+  child.steps[0].message = "F002-child-record";
+  child.steps[0].content = [textPart("F002-child-record")];
+  child.steps[0].parts = child.steps[0].content;
+  child.lineage = { trajectoryId: "child-f002", sessionId: null, references: [], trajectories: [] };
+  model.lineage.trajectories = [child];
+
+  const html = render(model);
+  for (const sentinel of [
+    "F002-tool-definition",
+    "F002-agent-extension",
+    "F002-metadata-extension",
+    "F002-model-extension",
+    "F002-notes",
+    "F002-child-record",
+  ]) assert.match(html, new RegExp(sentinel));
+  const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("keeps media evidence inert in the trajectory document", () => {
+  const html = render(modelCopy());
+  assert.doesNotMatch(html, /<img\b|src=|\bdownload\b/i);
+  assert.match(html, /data-artifact-metadata/);
+});

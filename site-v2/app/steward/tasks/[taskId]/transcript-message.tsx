@@ -1,4 +1,4 @@
-import { Check, Download, LoaderCircle, Terminal, X } from "lucide-react";
+import { Check, LoaderCircle, Terminal, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
@@ -158,21 +158,7 @@ function ArtifactReference({ action }: { action: AtifArtifactAction }) {
   if (action.kind === "unavailable") {
     return <span data-artifact-unavailable className="text-xs text-unavailable">Artifact unavailable ({action.reason})</span>;
   }
-  if (action.kind === "image") {
-    return (
-      <figure className="mt-3 max-w-full">
-        <div className="flex min-h-24 max-w-full items-center justify-center overflow-hidden border border-line bg-diff-gutter p-2">
-          <img src={action.href} alt="Published image evidence" className="max-h-[32rem] max-w-full object-contain" />
-        </div>
-        <figcaption className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
-          <span>{action.mediaType}</span>
-          <span aria-hidden="true">·</span>
-          <a href={action.href} download className="inline-flex items-center gap-1 text-accent no-underline hover:text-ink"><Download aria-hidden="true" size={13} />Download image</a>
-        </figcaption>
-      </figure>
-    );
-  }
-  return <a href={action.href} download className="inline-flex items-center gap-1 text-sm text-accent no-underline hover:text-ink"><Download aria-hidden="true" size={14} />Download artifact<span className="text-muted">({action.mediaType})</span></a>;
+  return <span data-artifact-metadata className="text-xs text-muted">Media evidence ({action.mediaType}) · {action.kind === "image" ? "image" : "artifact"} reference withheld</span>;
 }
 
 function ContentPart({ part }: { part: AtifDisplayContent }) {

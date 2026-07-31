@@ -117,6 +117,7 @@ function RunSummary({ model, anchorPrefix }: { model: AtifDisplayModel; anchorPr
             ["Completed", formatTimestamp(metadata.timing.completedAt)],
             ["Duration", `${formatDuration(metadata.timing.durationMs)}${metadata.timing.durationSource === "derived" ? " (derived)" : ""}`],
           ])}
+          <SafeRecordBlock record={metadata.extensions} label="Metadata extensions" present={hasOwn(metadata, "extensions")} />
         </div>
         <div className="min-w-0 border-t border-line pt-3 lg:border-t-0 lg:pt-0">
           <p className="mb-3 text-xs font-semibold uppercase tracking-[0.08em] text-muted">Agent configuration</p>
@@ -126,8 +127,17 @@ function RunSummary({ model, anchorPrefix }: { model: AtifDisplayModel; anchorPr
             ["Model", model.agent.modelName || "Unavailable"],
           ])}
           {configuredStep ? <div className="mt-3"><RunConfiguration model={configuredStep.modelName} reasoningEffort={configuredStep.reasoningEffort} /></div> : null}
+          <SafeValueBlock value={model.agent.toolDefinitions} label="Tool definitions" present={hasOwn(model.agent, "toolDefinitions")} />
+          <SafeRecordBlock record={model.agent.extensions} label="Agent extensions" present={hasOwn(model.agent, "extensions")} />
         </div>
       </div>
+      {hasOwn(model, "notes") ? (
+        <section aria-labelledby={`${anchorPrefix}-notes-title`} className="mt-6 border-t border-line pt-5">
+          <h3 id={`${anchorPrefix}-notes-title`} className="text-sm font-semibold text-ink">Notes</h3>
+          <TranscriptMessage text={model.notes ?? null} />
+        </section>
+      ) : null}
+      <SafeRecordBlock record={model.extensions} label="Model extensions" present={hasOwn(model, "extensions")} />
     </header>
   );
 }
@@ -136,13 +146,31 @@ function safeRecordEntries(record: AtifSafeRecord | null | undefined): readonly 
   return record ? Object.entries(record) as readonly [string, AtifSafeValue][] : [];
 }
 
-function SafeRecordBlock({ record, label }: { record: AtifSafeRecord | null | undefined; label: string }) {
+function safeValueText(value: AtifSafeValue | null | undefined, present = true): string {
+  if (!present || value === null || value === undefined) return "Unavailable";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value, null, 2);
+}
+
+function SafeValueBlock({ value, label, present = true }: { value: AtifSafeValue | null | undefined; label: string; present?: boolean }) {
+  if (!present) return null;
+  return (
+    <section className="mt-5 border-t border-line pt-4">
+      <h4 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">{label}</h4>
+      <pre className="mt-3 max-w-full overflow-auto bg-diff-gutter px-3 py-3 text-xs leading-5 text-ink data-text">{safeValueText(value, present)}</pre>
+    </section>
+  );
+}
+
+function SafeRecordBlock({ record, label, present = record !== undefined }: { record: AtifSafeRecord | null | undefined; label: string; present?: boolean }) {
+  if (!present) return null;
   const entries = safeRecordEntries(record);
-  if (entries.length === 0) return null;
   return (
     <details className="mt-4 border-t border-line pt-3">
       <summary className="group flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-muted"><ChevronRight aria-hidden="true" size={14} className="transition-transform duration-fast group-open:rotate-90" />{label}</summary>
-      <pre className="mt-3 max-w-full overflow-auto bg-diff-gutter px-3 py-3 text-xs leading-5 text-ink data-text">{JSON.stringify(Object.fromEntries(entries), null, 2)}</pre>
+      {record === null || record === undefined
+        ? <p className="mt-3 text-sm text-unavailable">Unavailable</p>
+        : <pre className="mt-3 max-w-full overflow-auto bg-diff-gutter px-3 py-3 text-xs leading-5 text-ink data-text">{JSON.stringify(Object.fromEntries(entries), null, 2)}</pre>}
     </details>
   );
 }
@@ -162,12 +190,12 @@ function MetricRows({ metrics, titleId }: { metrics: AtifDisplayMetrics | null |
     <section aria-labelledby={titleId} className="mt-5 border-t border-line pt-4">
       <h4 id={titleId} className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Metrics</h4>
       {fieldRows(rows)}
-      <SafeRecordBlock record={metrics?.extensions} label="Metric extensions" />
+      <SafeRecordBlock record={metrics?.extensions} label="Metric extensions" present={hasOwn(metrics, "extensions")} />
     </section>
   );
 }
 
-function FinalMetrics({ model }: { model: AtifDisplayModel }) {
+function FinalMetrics({ model, titleId }: { model: AtifDisplayModel; titleId: string }) {
   const metrics = model.finalMetrics;
   if (metrics === undefined) return null;
   const rows: readonly [string, string][] = [
@@ -178,10 +206,10 @@ function FinalMetrics({ model }: { model: AtifDisplayModel }) {
     ["Cost (USD)", asDisplayText(metrics?.totalCostUsd, hasOwn(metrics, "totalCostUsd"))],
   ];
   return (
-    <section aria-labelledby="trajectory-metrics-title" className="mt-8 border-t border-line pt-6">
-      <h3 id="trajectory-metrics-title" className="text-sm font-semibold text-ink">Final metrics</h3>
+    <section aria-labelledby={titleId} className="mt-8 border-t border-line pt-6">
+      <h3 id={titleId} className="text-sm font-semibold text-ink">Final metrics</h3>
       <div className="mt-3">{fieldRows(rows)}</div>
-      <SafeRecordBlock record={metrics?.extensions} label="Final metric extensions" />
+      <SafeRecordBlock record={metrics?.extensions} label="Final metric extensions" present={hasOwn(metrics, "extensions")} />
     </section>
   );
 }
@@ -197,19 +225,20 @@ function statusFromCall(call: AtifDisplayToolCall): { label: string; failed: boo
   return { label: failed ? "Failed" : running ? "Running" : status ? status : "Unavailable", failed, running, duration };
 }
 
-function Observation({ observation, index }: { observation: AtifDisplayObservation; index: number }) {
+function Observation({ observation, index, anchorPrefix }: { observation: AtifDisplayObservation; index: number; anchorPrefix: string }) {
   const paired = observation.matchedCallId !== null;
   const content: AtifDisplayContentValue = observation.content;
   const parts = observation.parts.length > 0 ? observation.parts : undefined;
+  const observationId = `${anchorPrefix}-${normalizeAnchor(observation.sourceCallId ?? `observation-${index + 1}`)}-${index + 1}`;
   return (
-    <li className="border-t border-line py-4" data-observation data-paired={paired ? "true" : "false"}>
+    <li id={observationId} className="border-t border-line py-4" data-observation data-paired={paired ? "true" : "false"} data-observation-source={observation.sourceCallId ?? "unavailable"}>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
         <span className={paired ? "text-muted" : "font-medium text-warning"}>{paired ? "Paired observation" : "Unpaired observation"}</span>
         <span className="data-text text-faint">{observation.sourceCallId ?? `observation-${index + 1}`}</span>
       </div>
       <TranscriptMessage content={content} parts={parts} />
       {observation.lineage ? <LineageReferences references={observation.lineage} label="Observation lineage" /> : null}
-      <SafeRecordBlock record={observation.extensions} label="Observation extensions" />
+      <SafeRecordBlock record={observation.extensions} label="Observation extensions" present={hasOwn(observation, "extensions")} />
     </li>
   );
 }
@@ -227,8 +256,10 @@ function ToolCall({ call }: { call: AtifDisplayToolCall }) {
           <h5 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Arguments</h5>
           <pre className="mt-2 max-w-full overflow-auto bg-diff-gutter px-3 py-3 text-xs leading-5 text-ink data-text">{JSON.stringify(call.arguments, null, 2)}</pre>
         </div>
-        {call.observations.length > 0 ? <div><h5 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Results</h5><ol className="mt-1">{call.observations.map((observation, index) => <Observation key={`${call.callId}-observation-${index}`} observation={observation} index={index} />)}</ol></div> : <p className="text-sm text-unavailable">No observation recorded.</p>}
-        <SafeRecordBlock record={call.extensions} label="Tool extensions" />
+        {call.observations.length > 0
+          ? <div data-tool-observation-association={call.callId}><h5 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Results</h5><p className="mt-2 text-sm text-muted">{call.observations.length} paired {call.observations.length === 1 ? "observation is" : "observations are"} rendered in source-record order.</p></div>
+          : <p className="text-sm text-unavailable">No observation recorded.</p>}
+        <SafeRecordBlock record={call.extensions} label="Tool extensions" present={hasOwn(call, "extensions")} />
       </div>
     </details>
   );
@@ -238,13 +269,13 @@ function LineageReferences({ references, label = "Lineage references" }: { refer
   return (
     <section className="mt-4 border-t border-line pt-3" aria-label={label}>
       <h5 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted"><GitBranch aria-hidden="true" size={13} />{label}</h5>
-      {references.length === 0 ? <p className="mt-2 text-sm text-unavailable">None recorded.</p> : <ul className="mt-2 space-y-2">{references.map((reference, index) => <li key={`${reference.trajectoryId ?? "trajectory"}-${reference.sessionId ?? "session"}-${index}`} className="grid min-w-0 gap-1 border-l-2 border-line pl-3 text-xs sm:grid-cols-[8rem_minmax(0,1fr)]"><span className="text-muted">Trajectory</span><span className="break-all text-ink data-text">{reference.trajectoryId ?? "Unavailable"}</span><span className="text-muted">Session</span><span className="break-all text-ink data-text">{reference.sessionId ?? "Unavailable"}</span><SafeRecordBlock record={reference.extensions} label="Reference extensions" /></li>)}</ul>}
+      {references.length === 0 ? <p className="mt-2 text-sm text-unavailable">None recorded.</p> : <ul className="mt-2 space-y-2">{references.map((reference, index) => <li key={`${reference.trajectoryId ?? "trajectory"}-${reference.sessionId ?? "session"}-${index}`} className="grid min-w-0 gap-1 border-l-2 border-line pl-3 text-xs sm:grid-cols-[8rem_minmax(0,1fr)]"><span className="text-muted">Trajectory</span><span className="break-all text-ink data-text">{reference.trajectoryId ?? "Unavailable"}</span><span className="text-muted">Session</span><span className="break-all text-ink data-text">{reference.sessionId ?? "Unavailable"}</span><SafeRecordBlock record={reference.extensions} label="Reference extensions" present={hasOwn(reference, "extensions")} /></li>)}</ul>}
     </section>
   );
 }
 
 function StepRecord({ step, eventId }: { step: AtifDisplayStep; eventId: string }) {
-  const observations = step.observations.filter((observation) => observation.matchedCallId === null);
+  const observations = step.observations.length > 0 ? step.observations : step.observation?.results ?? [];
   const configured = step.modelName || step.reasoningEffort !== undefined;
   return (
     <li id={eventId} data-trajectory-anchor={step.anchor} className="scroll-mt-24 border-b border-line-strong py-8 first:pt-0" data-step-source={step.source}>
@@ -267,10 +298,10 @@ function StepRecord({ step, eventId }: { step: AtifDisplayStep; eventId: string 
 
         {step.calls.length > 0 ? <section aria-labelledby={`${eventId}-tools`} className="mt-6 max-w-4xl border-t border-line"><h4 id={`${eventId}-tools`} className="flex items-center gap-2 py-3 text-sm font-semibold text-ink"><Wrench aria-hidden="true" size={15} />Tool calls <span className="text-xs font-normal text-muted data-text">{step.calls.length}</span></h4>{step.calls.map((call) => <ToolCall key={call.anchor} call={call} />)}</section> : null}
 
-        {observations.length > 0 ? <section aria-labelledby={`${eventId}-observations`} className="mt-6 max-w-4xl border-t border-line"><h4 id={`${eventId}-observations`} className="flex items-center gap-2 py-3 text-sm font-semibold text-ink"><AlertCircle aria-hidden="true" size={15} />Unpaired observations <span className="text-xs font-normal text-muted data-text">{observations.length}</span></h4><ol>{observations.map((observation, index) => <Observation key={`${eventId}-unpaired-${index}`} observation={observation} index={index} />)}</ol></section> : null}
+        {observations.length > 0 ? <section aria-labelledby={`${eventId}-observations`} className="mt-6 max-w-4xl border-t border-line"><h4 id={`${eventId}-observations`} className="flex items-center gap-2 py-3 text-sm font-semibold text-ink"><AlertCircle aria-hidden="true" size={15} />Observations <span className="text-xs font-normal text-muted data-text">{observations.length}</span></h4><ol>{observations.map((observation, index) => <Observation key={`${eventId}-observation-${index}`} observation={observation} index={index} anchorPrefix={`${eventId}-observation`} />)}</ol></section> : null}
         {step.copiedContext !== undefined && step.copiedContext !== null ? <p className="mt-5 text-xs text-muted">{step.copiedContext ? "Copied context" : "Original context"}</p> : null}
         {step.llmCallCount !== undefined ? <p className="mt-2 text-xs text-muted data-text">LLM calls: {asDisplayText(step.llmCallCount)}</p> : null}
-        <SafeRecordBlock record={step.extensions} label="Record extensions" />
+        <SafeRecordBlock record={step.extensions} label="Record extensions" present={hasOwn(step, "extensions")} />
       </article>
     </li>
   );
@@ -292,7 +323,7 @@ function ArtifactEntry({ artifact }: { artifact: AtifDisplayModel["artifacts"][n
 
 function ArtifactAction({ action }: { action: AtifArtifactAction }) {
   if (action.kind === "unavailable") return <span data-artifact-unavailable className="text-xs text-unavailable">Unavailable ({action.reason})</span>;
-  return <a href={action.href} download className="inline-flex items-center gap-1 text-sm text-accent no-underline hover:text-ink"><FileText aria-hidden="true" size={14} />Download artifact</a>;
+  return <span data-artifact-metadata className="text-xs text-muted">Media evidence ({action.mediaType}) · {action.kind === "image" ? "image" : "artifact"} reference withheld</span>;
 }
 
 function LineageSummary({ model, titleId }: { model: AtifDisplayModel; titleId: string }) {
@@ -308,7 +339,11 @@ function LineageSummary({ model, titleId }: { model: AtifDisplayModel; titleId: 
         ["Child trajectories", children.length === 0 ? "None recorded" : String(children.length)],
       ])}</div>
       {references.length > 0 ? <LineageReferences references={references} /> : null}
-      {children.length > 0 ? <ul className="mt-4 space-y-2">{children.map((child, index) => <li key={`${child.trajectoryId ?? "child"}-${index}`} className="border-l-2 border-line pl-3 text-xs"><span className="text-muted">Child trajectory</span><span className="ml-2 break-all text-ink data-text">{child.trajectoryId ?? "Unavailable"}</span><span className="ml-2 text-muted">{child.steps.length} records</span></li>)}</ul> : null}
+      {children.length > 0 ? <ol className="mt-6 space-y-8" data-child-trajectories>{children.map((child, index) => {
+        const childKey = normalizeAnchor(child.trajectoryId ?? child.runId ?? `trajectory-${index + 1}`);
+        const childPrefix = `${titleId}-child-${index + 1}-${childKey}`;
+        return <li key={`${childKey}-${index}`} className="border-l-2 border-line pl-4"><AtifTrajectoryView model={child} anchorPrefix={childPrefix} /></li>;
+      })}</ol> : null}
     </section>
   );
 }
@@ -345,7 +380,7 @@ export function AtifTrajectoryView({ model, anchorPrefix: suppliedPrefix }: Atif
             {model.steps.map((step) => <StepRecord key={step.anchor} step={step} eventId={`${anchorPrefix}-event-${step.anchor}`} />)}
           </ol>
         )}
-        <FinalMetrics model={model} />
+        <FinalMetrics model={model} titleId={`${anchorPrefix}-metrics-title`} />
         <LineageSummary model={model} titleId={`${anchorPrefix}-lineage-title`} />
         {model.artifacts.length > 0 ? <section aria-labelledby={`${anchorPrefix}-artifacts-title`} className="mt-8 border-t border-line pt-6"><h3 id={`${anchorPrefix}-artifacts-title`} className="flex items-center gap-2 text-sm font-semibold text-ink"><FileText aria-hidden="true" size={15} />Artifacts <span className="text-xs font-normal text-muted data-text">{model.artifacts.length}</span></h3><ul className="mt-3">{model.artifacts.map((artifact) => <ArtifactEntry key={artifact.artifactId} artifact={artifact} />)}</ul></section> : null}
       </TranscriptLayout>

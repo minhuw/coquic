@@ -141,6 +141,26 @@ test("accepts bounded large integer lexemes without losing their digits", () => 
   }
 });
 
+test("rejects schema-invalid large integers without exposing their value", () => {
+  const document = atif(cleanFixture) as Record<string, any>;
+  document.final_metrics = { total_steps: 1 };
+  const expected = options(document as AtifDocument);
+  const baseline = new TextDecoder().decode(validBytes(document as AtifDocument));
+  const digits = "9".repeat(310);
+  const source = new TextEncoder().encode(
+    baseline.replace(/("total_steps":)1/, `$1-${digits}`),
+  );
+
+  const result = tryValidateAtifBytes(source, expected);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.ok(result.issues.some(
+      (issue) => issue.rule === "schema-minimum" && issue.path === "$.final_metrics.total_steps",
+    ));
+    assert.ok(!JSON.stringify(result.issues).includes(digits));
+  }
+});
+
 test("rejects schema mutations and wrong ATIF version", () => {
   const document = atif(cleanFixture);
   const expected = options(document);

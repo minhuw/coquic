@@ -436,7 +436,7 @@ addFormats(ajv);
 const validateSchema = ajv.compile(atifSchema as AnySchema);
 
 function schemaCompatibleValue(value: unknown): unknown {
-  if (typeof value === "bigint") return 1;
+  if (typeof value === "bigint") return value < 0n ? -1 : 1;
   if (Array.isArray(value)) return value.map(schemaCompatibleValue);
   if (isObject(value)) {
     const result: AtifJsonObject = {};

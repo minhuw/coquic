@@ -161,7 +161,7 @@
       "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "problem": { "$ref": "#/$defs/problem" } }
     },
     "displayString": {
-      "type": "string", "maxLength": 4096,
+      "type": "string", "maxLength": 4194304,
       "allOf": [{ "pattern": "^(?!.*v1/(?:tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/objects/sha256|originals/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/sha256)/)" }],
       "pattern": "^(?!.*[A-Za-z][A-Za-z0-9+.-]*://)(?!.*(?:^|[\\s\"'([{<>=,:;])(?:~[/\\\\]|/{1}|\\\\\\\\|[A-Za-z]:[/\\\\]))[^\\u0000-\\u001f]*$"
     },

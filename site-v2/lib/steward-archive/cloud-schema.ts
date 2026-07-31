@@ -3,6 +3,7 @@ import addFormats from "ajv-formats";
 import cloudSchema from "../../schemas/steward-cloud.schema.json";
 import type {
   AtifArtifactAction,
+  AtifDisplayArtifact,
   AtifDisplayContent,
   AtifDisplayModel,
   AtifDisplayObservation,
@@ -59,19 +60,23 @@ function validatorFor(definition: string) {
   if (!validator) { validator = ajv.compile({ $ref: `${schemaId}#/$defs/${definition}` }); validators.set(definition, validator); }
   return validator;
 }
-function publicScan(value: unknown, key?: string): void {
+function publicScan(value: unknown, key?: string, rejectObjectKeys = true): void {
   if (typeof value === "string") {
-    if (!(key === "href" && SAME_ORIGIN_HREF.test(value)) && (LOCATOR.test(value) || PRIVATE_VALUE.test(value) || (key !== "publicKey" && OBJECT_KEY_VALUE.test(value)))) invalid();
+    if (!(key === "href" && SAME_ORIGIN_HREF.test(value)) && (LOCATOR.test(value) || PRIVATE_VALUE.test(value) || (rejectObjectKeys && key !== "publicKey" && OBJECT_KEY_VALUE.test(value)))) invalid();
     return;
   }
-  if (Array.isArray(value)) { value.forEach((item) => publicScan(item)); return; }
+  if (Array.isArray(value)) { value.forEach((item) => publicScan(item, undefined, rejectObjectKeys)); return; }
   if (!value || typeof value !== "object") return;
   for (const [childKey, item] of Object.entries(value as Record<string, unknown>)) {
     if (PRIVATE_NAME.test(childKey) && !PUBLIC_FIELD_NAMES.has(childKey) && childKey !== "logicalPath" && childKey !== "publicKey") invalid();
-    publicScan(item, childKey);
+    publicScan(item, childKey, rejectObjectKeys);
   }
 }
-function validateDefinition<T>(value: unknown, definition: string): T { if (!isRecord(value) || !validatorFor(definition)(value)) invalid(); publicScan(value); return value as T; }
+function validateDefinition<T>(value: unknown, definition: string): T {
+  if (!isRecord(value) || !validatorFor(definition)(value)) invalid();
+  publicScan(value, undefined, definition.startsWith("completeTrajectory"));
+  return value as T;
+}
 function time(value: string): bigint { const match = TIMESTAMP.exec(value); if (!match) invalid(); const parsed = Date.parse(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`); if (!Number.isSafeInteger(parsed)) invalid(); return BigInt(parsed) * 1000000n + BigInt(((match[7]?.slice(1) || "") + "000000000").slice(0, 9)); }
 function ordered(startedAt: string, completedAt: string) { if (time(startedAt) > time(completedAt)) invalid(); }
 function exactDuration(startedAt: string, completedAt: string, durationMs: number) { const delta = time(completedAt) - time(startedAt); if (delta < 0n || delta % 1000000n !== 0n || BigInt(durationMs) !== delta / 1000000n) invalid(); }
@@ -125,7 +130,7 @@ function same(left: unknown, right: unknown): boolean {
   return false;
 }
 
-function checkAction(action: AtifArtifactAction, taskId: string, runId: string): void {
+function checkAction(action: AtifArtifactAction, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>): void {
   if (action.kind === "unavailable") return;
   if (action.taskId !== taskId || action.runId !== runId || !SAME_ORIGIN_HREF.test(action.href)) invalid();
   const prefix = "/api/steward/tasks/" + encodeURIComponent(taskId) + "/artifact?path=";
@@ -134,24 +139,48 @@ function checkAction(action: AtifArtifactAction, taskId: string, runId: string):
     if (decodeURIComponent(action.href.slice(prefix.length)) !== action.logicalPath) invalid();
   } catch { invalid(); }
   if ((action.kind === "image") !== IMAGE_MEDIA_TYPES.has(action.mediaType)) invalid();
+  const artifact = artifacts.get(action.artifactId);
+  if (!artifact || artifact.action.kind === "unavailable" || artifact.mediaType !== action.mediaType || !same(artifact.action, action)) invalid();
 }
 
-function checkContent(content: AtifDisplayContent, taskId: string, runId: string): void {
+function checkContent(content: AtifDisplayContent, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>, stepId: number, usedArtifactSteps: Map<string, Set<number>>): void {
   if (content.kind === "image") {
-    checkAction(content.action, taskId, runId);
+    if (content.artifactId !== content.action.artifactId) invalid();
+    checkAction(content.action, taskId, runId, artifacts);
+    if (content.artifactId !== null) {
+      const artifact = artifacts.get(content.artifactId);
+      if (artifact && artifact.mediaType !== content.mediaType) invalid();
+      const steps = usedArtifactSteps.get(content.artifactId) ?? new Set<number>();
+      steps.add(stepId);
+      usedArtifactSteps.set(content.artifactId, steps);
+    }
     if (content.action.kind !== "unavailable" && content.action.mediaType !== content.mediaType) invalid();
   }
 }
 
-function checkObservation(observation: AtifDisplayObservation, calls: ReadonlySet<string>, taskId: string, runId: string): void {
+function checkObservation(observation: AtifDisplayObservation, calls: ReadonlySet<string>, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>, stepId: number, usedArtifactSteps: Map<string, Set<number>>): void {
   if (observation.matchedCallId !== null && !calls.has(observation.matchedCallId)) invalid();
-  observation.parts.forEach((content) => checkContent(content, taskId, runId));
+  if (!Object.prototype.hasOwnProperty.call(observation, "sourceCallId") && observation.matchedCallId !== null) invalid();
+  if (observation.sourceCallId === null && observation.matchedCallId !== null) invalid();
+  if (typeof observation.sourceCallId === "string" && observation.matchedCallId !== null && observation.sourceCallId !== observation.matchedCallId) invalid();
+  if (!Object.prototype.hasOwnProperty.call(observation, "content")) {
+    if (observation.parts.length !== 0) invalid();
+  } else if (typeof observation.content === "string") {
+    if (!same(observation.parts, [{ kind: "text", type: "text", text: observation.content }])) invalid();
+  } else if (observation.content === null) {
+    if (observation.parts.length !== 0) invalid();
+  } else if (Array.isArray(observation.content)) {
+    if (!same(observation.content, observation.parts)) invalid();
+  } else {
+    invalid();
+  }
+  observation.parts.forEach((content) => checkContent(content, taskId, runId, artifacts, stepId, usedArtifactSteps));
 }
 
-function checkToolCall(call: AtifDisplayToolCall, seenCalls: Set<string>, anchors: Set<string>, calls: ReadonlySet<string>, taskId: string, runId: string): void {
+function checkToolCall(call: AtifDisplayToolCall, seenCalls: Set<string>, anchors: Set<string>, calls: ReadonlySet<string>, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>, stepId: number, usedArtifactSteps: Map<string, Set<number>>): void {
   if (call.id !== call.callId || seenCalls.has(call.callId) || anchors.has(call.anchor)) invalid();
   seenCalls.add(call.callId); anchors.add(call.anchor);
-  call.observations.forEach((observation) => checkObservation(observation, calls, taskId, runId));
+  call.observations.forEach((observation) => checkObservation(observation, calls, taskId, runId, artifacts, stepId, usedArtifactSteps));
   checkSafe(call.arguments);
 }
 
@@ -164,35 +193,66 @@ function checkSafe(value: unknown): void {
   }
 }
 
-function checkStep(step: AtifDisplayStep, expectedStepId: number, anchors: Set<string>, seenCalls: Set<string>, calls: ReadonlySet<string>, taskId: string, runId: string): void {
+function checkStep(step: AtifDisplayStep, expectedStepId: number, anchors: Set<string>, seenCalls: Set<string>, calls: ReadonlySet<string>, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>, usedArtifactSteps: Map<string, Set<number>>): void {
   if (step.stepId !== expectedStepId || step.id !== step.anchor || anchors.has(step.anchor) || step.role !== step.source) invalid();
   anchors.add(step.anchor);
+  if (!Object.prototype.hasOwnProperty.call(step, "message")) {
+    if (step.content.length !== 0) invalid();
+  } else if (typeof step.message === "string") {
+    if (!same(step.content, [{ kind: "text", type: "text", text: step.message }])) invalid();
+  } else if (step.message === null) {
+    if (step.content.length !== 0) invalid();
+  } else if (Array.isArray(step.message)) {
+    if (!same(step.message, step.content)) invalid();
+  } else {
+    invalid();
+  }
   if (!same(step.content, step.parts) || !same(step.tools, step.calls)) invalid();
   if (step.toolCalls !== undefined && step.toolCalls !== null && !same(step.toolCalls, step.calls)) invalid();
   if (step.toolCalls === null && step.calls.length !== 0) invalid();
+  if (!Object.prototype.hasOwnProperty.call(step, "observation") && step.observations.length !== 0) invalid();
   if (step.observation === null && step.observations.length !== 0) invalid();
   if (step.observation !== undefined && step.observation !== null && !same(step.observation.results, step.observations)) invalid();
-  step.content.forEach((content) => checkContent(content, taskId, runId));
-  step.calls.forEach((call) => checkToolCall(call, seenCalls, anchors, calls, taskId, runId));
-  step.observations.forEach((observation) => checkObservation(observation, calls, taskId, runId));
+  step.content.forEach((content) => checkContent(content, taskId, runId, artifacts, step.stepId, usedArtifactSteps));
+  step.calls.forEach((call) => checkToolCall(call, seenCalls, anchors, calls, taskId, runId, artifacts, step.stepId, usedArtifactSteps));
+  step.observations.forEach((observation) => checkObservation(observation, calls, taskId, runId, artifacts, step.stepId, usedArtifactSteps));
 }
 
 function checkCompleteTrajectory(value: CloudCompleteTrajectory, depth = 0): void {
   if (depth > 32 || value.kind !== "atif-display") invalid();
   if (value.metadata.taskId !== value.taskId || value.metadata.pipelineId !== value.pipelineId || value.metadata.runId !== value.runId || value.metadata.role !== value.role) invalid();
+  if (value.metadata.startedAt !== value.timing.startedAt || value.metadata.completedAt !== value.timing.completedAt || value.metadata.durationMs !== value.timing.durationMs) invalid();
   if (!same(value.metadata.timing, value.timing) || !same(value.metadata.disclosure, value.disclosure) || !same(value.metadata.artifacts, value.artifacts)) invalid();
+  if ((value.timing.durationSource === "unavailable") !== (value.timing.durationMs === null)) invalid();
+  if (value.lineage.trajectoryId !== value.trajectoryId || value.lineage.sessionId !== value.sessionId) invalid();
+  const artifacts = new Map(value.artifacts.map((artifact) => [artifact.artifactId, artifact]));
   const anchors = new Set<string>();
   const calls = new Set<string>();
   value.steps.forEach((step) => step.calls.forEach((call) => calls.add(call.callId)));
   if (calls.size !== value.steps.reduce((total, step) => total + step.calls.length, 0)) invalid();
   const seenCalls = new Set<string>();
-  value.steps.forEach((step, index) => checkStep(step, index + 1, anchors, seenCalls, calls, value.taskId, value.runId));
+  const usedArtifactSteps = new Map<string, Set<number>>();
+  value.steps.forEach((step, index) => checkStep(step, index + 1, anchors, seenCalls, calls, value.taskId, value.runId, artifacts, usedArtifactSteps));
   const artifactIds = new Set<string>();
   value.artifacts.forEach((artifact) => {
     if (artifactIds.has(artifact.artifactId) || !value.steps.some((step) => step.stepId === artifact.ownerStepId)) invalid();
     artifactIds.add(artifact.artifactId);
-    checkAction(artifact.action, value.taskId, value.runId);
-    if (artifact.action.kind !== "unavailable" && artifact.action.artifactId !== artifact.artifactId) invalid();
+    checkAction(artifact.action, value.taskId, value.runId, artifacts);
+    if (artifact.action.artifactId !== artifact.artifactId) invalid();
+    if (artifact.action.kind !== "unavailable" && artifact.action.mediaType !== artifact.mediaType) invalid();
+    if (Object.prototype.hasOwnProperty.call(artifact, "disclosure") && !same(artifact.disclosure, value.disclosure)) invalid();
+    const usedBy = usedArtifactSteps.get(artifact.artifactId);
+    if (usedBy && !usedBy.has(artifact.ownerStepId)) invalid();
+  });
+  const childTrajectoryIds = new Set<string>();
+  value.lineage.trajectories.forEach((trajectory) => {
+    if (trajectory.trajectoryId !== undefined && trajectory.trajectoryId !== null) {
+      if (childTrajectoryIds.has(trajectory.trajectoryId)) invalid();
+      childTrajectoryIds.add(trajectory.trajectoryId);
+    }
+  });
+  value.lineage.references.forEach((reference) => {
+    if (reference.trajectoryId !== undefined && reference.trajectoryId !== null && !childTrajectoryIds.has(reference.trajectoryId)) invalid();
   });
   value.lineage.trajectories.forEach((trajectory) => checkCompleteTrajectory(trajectory, depth + 1));
 }

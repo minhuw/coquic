@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import cleanPublication from "../../../contracts/steward-cloud/fixtures/clean-publication.json";
 import cleanTrajectory from "../../examples/steward-cloud/complete-trajectory-clean.json";
 import redactedTrajectory from "../../examples/steward-cloud/complete-trajectory-redacted-multimodal.json";
+import { canonicalAtifBytes, validateAtifBytes, type AtifPublicationArtifactDescriptor } from "@/lib/steward-archive/atif";
+import { buildAtifViewModel, type AtifViewArtifactDescriptor } from "@/lib/steward-archive/atif-view-model";
 import {
   parseCloudResponse,
   serializeCloudProblem,
@@ -192,4 +195,68 @@ test("rejects complete trajectory order, private shape, direct locator, and part
   delete (partial.data as Record<string, any>).steps;
   rejectsComplete(partial);
   assert.equal(data.schemaVersion, "ATIF-v1.7");
+});
+
+test("accepts bounded mapper-preserved strings without truncation", () => {
+  const source = structuredClone(cleanPublication.atif) as Record<string, any>;
+  const message = "x".repeat(4097);
+  source.steps[0].message = message;
+  const provenance = source.extra.coquic as Record<string, any>;
+  const publicationArtifacts = cleanPublication.publication.artifacts as unknown as readonly AtifPublicationArtifactDescriptor[];
+  const viewArtifacts = publicationArtifacts as unknown as readonly AtifViewArtifactDescriptor[];
+  const document = validateAtifBytes(canonicalAtifBytes(source), {
+    taskId: provenance.taskId,
+    pipelineId: provenance.pipelineId,
+    runId: provenance.runId,
+    role: provenance.role,
+    startedAt: provenance.startedAt,
+    completedAt: provenance.completedAt,
+    durationMs: provenance.durationMs,
+    disclosure: provenance.disclosure,
+    artifacts: publicationArtifacts,
+  });
+  const model = buildAtifViewModel(document, { artifacts: viewArtifacts });
+  assert.equal(model.steps[0]!.message, message);
+  const response = { schemaVersion: "4.0" as const, generatedAt, data: model };
+  assert.equal(validateCloudCompleteTrajectory(response).data.steps[0]!.message, message);
+});
+
+test("rejects mapper-impossible duplicate identities, media, ownership, timing, lineage, disclosure, and actions", () => {
+  const imageIdentity = structuredClone(cleanTrajectory) as Record<string, any>;
+  for (const field of ["message", "content", "parts"]) imageIdentity.data.steps[1][field][1].action.artifactId = "artifact-log";
+  rejectsComplete(imageIdentity);
+
+  const mutations: Array<(candidate: Record<string, any>) => void> = [
+    (candidate) => {
+      candidate.data.artifacts[0].mediaType = "image/png";
+      candidate.data.metadata.artifacts[0].mediaType = "image/png";
+    },
+    (candidate) => { candidate.data.metadata.durationMs = 999; },
+    (candidate) => { candidate.data.lineage.trajectoryId = "trajectory-other"; },
+    (candidate) => {
+      candidate.data.artifacts[0].disclosure.redactionApplied = true;
+      candidate.data.metadata.artifacts[0].disclosure.redactionApplied = true;
+    },
+    (candidate) => { candidate.data.steps[1].content[1].action.taskId = "task-other"; },
+    (candidate) => { candidate.data.artifacts[1].action.logicalPath = "steps/2/other.log"; },
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    const candidate = structuredClone(cleanTrajectory) as Record<string, any>;
+    mutate(candidate);
+    assert.throws(() => validateCloudCompleteTrajectory(candidate), /invalid Steward cloud response/, `mutation ${index} must be rejected`);
+  }
+});
+
+test("keeps public object-key text accepted in v3 while v4 denies it", () => {
+  const graph = detail();
+  const summary = `Published ${graph.artifacts[0].publicKey}`;
+  graph.events[0]!.summary = summary;
+  assert.equal(validateCloudTaskDetail(response(graph)).data.events[0]!.summary, summary);
+
+  const v4 = structuredClone(cleanTrajectory) as Record<string, any>;
+  const objectKey = `v1/tasks/${v4.data.taskId}/objects/sha256/aa/${"a".repeat(64)}`;
+  v4.data.steps[0].message = objectKey;
+  v4.data.steps[0].content = [{ kind: "text", type: "text", text: objectKey }];
+  v4.data.steps[0].parts = [{ kind: "text", type: "text", text: objectKey }];
+  rejectsComplete(v4);
 });

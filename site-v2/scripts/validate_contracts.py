@@ -121,7 +121,7 @@ _CLOUD_PUBLIC_FIELDS = {
 }
 
 
-def _cloud_public_scan(value: object, path: str = "") -> int:
+def _cloud_public_scan(value: object, path: str = "", reject_object_keys: bool = False) -> int:
     failures = 0
     if isinstance(value, dict):
         for key, item in value.items():
@@ -133,17 +133,17 @@ def _cloud_public_scan(value: object, path: str = "") -> int:
             ):
                 print(f"cloud {child_path}: private field is not public")
                 failures += 1
-            failures += _cloud_public_scan(item, child_path)
+            failures += _cloud_public_scan(item, child_path, reject_object_keys)
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            failures += _cloud_public_scan(item, f"{path}[{index}]")
+            failures += _cloud_public_scan(item, f"{path}[{index}]", reject_object_keys)
     elif isinstance(value, str):
         if (
             not (path.endswith(".href") and _CLOUD_SAME_ORIGIN_HREF.fullmatch(value))
             and (
                 _CLOUD_LOCATOR.search(value)
                 or _CLOUD_PRIVATE_VALUE.search(value)
-                or (not path.endswith(".publicKey") and _CLOUD_OBJECT_KEY.search(value))
+                or (reject_object_keys and not path.endswith(".publicKey") and _CLOUD_OBJECT_KEY.search(value))
             )
         ):
             print(f"cloud {path}: private locator value is not public")
@@ -192,7 +192,7 @@ def validate_complete_trajectory_examples() -> int:
         if name.endswith("redacted-multimodal.json") and disclosure != {"redactionApplied": True, "originalRetained": True}:
             failures += 1
             print(f"cloud {name}: multimodal fixture must disclose redaction")
-        failures += _cloud_public_scan(response, name)
+        failures += _cloud_public_scan(response, name, True)
     return failures
 
 

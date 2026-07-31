@@ -6,7 +6,11 @@ import {
   type AtifDisplayModel,
   type AtifViewArtifactDescriptor,
 } from "@/lib/steward-archive/atif-view-model";
-import type { AtifDocument } from "@/lib/steward-archive/atif";
+import {
+  canonicalAtifBytes,
+  validateAtifBytes,
+  type AtifDocument,
+} from "@/lib/steward-archive/atif";
 
 type MutableRecord = Record<string, any>;
 const taskId = "task-clean";
@@ -15,6 +19,22 @@ const sha = (letter: string) => letter.repeat(64);
 
 function copy<T>(value: T): T {
   return structuredClone(value);
+}
+
+function validatedFixtureDocument(document: MutableRecord): AtifDocument {
+  const provenance = document.extra.coquic as MutableRecord;
+  const localIds = new Set((provenance.artifacts as MutableRecord[]).map((artifact) => artifact.artifactId));
+  return validateAtifBytes(canonicalAtifBytes(document), {
+    taskId: provenance.taskId,
+    pipelineId: provenance.pipelineId,
+    runId: provenance.runId,
+    role: provenance.role,
+    startedAt: provenance.startedAt,
+    completedAt: provenance.completedAt,
+    durationMs: provenance.durationMs,
+    disclosure: provenance.disclosure,
+    artifacts: cleanFixture.publication.artifacts.filter((artifact) => localIds.has(artifact.artifactId)),
+  });
 }
 
 function fixtureDocument(): MutableRecord {
@@ -179,6 +199,47 @@ test("preserves colliding extension names while filtering recursive object locat
   assert.equal(Object.hasOwn(value.agent.extensions ?? {}, "privateReference"), false);
   assert.deepEqual(value.agent.extensions?.nested, { safeFact: "kept safely" });
   assertNoLocators(value);
+});
+
+test("redacts embedded public and private object keys while retaining safe extension text", () => {
+  const document = copy(cleanFixture.atif) as MutableRecord;
+  const publicKey = cleanFixture.publication.artifacts.find((artifact) => artifact.artifactId === "artifact-plot")!.publicKey;
+  const privateKey = `v1/originals/${taskId}/${runId}/sha256/${sha("b")}.jsonl`;
+  document.agent.extra = {
+    note: `object key: ${publicKey} remains safe`,
+    nested: {
+      safeFact: "safe surrounding text",
+      details: [`private object key: ${privateKey} remains safe`],
+    },
+  };
+
+  const value = buildAtifViewModel(validatedFixtureDocument(document), {
+    artifacts: artifacts(),
+  });
+  const serialized = JSON.stringify(value);
+  assert.equal(value.agent.extensions?.note, "object key: [unavailable] remains safe");
+  assert.deepEqual(value.agent.extensions?.nested, {
+    safeFact: "safe surrounding text",
+    details: ["private object key: [unavailable] remains safe"],
+  });
+  assert.equal(serialized.includes(publicKey), false);
+  assert.equal(serialized.includes(privateKey), false);
+  assert.match(serialized, /object key: \[unavailable\] remains safe/);
+  assertNoLocators(value);
+});
+
+test("leaves incomplete object-key-shaped extension text intact", () => {
+  const document = copy(cleanFixture.atif) as MutableRecord;
+  const incompletePublic = `v1/tasks/${taskId}/objects/sha256/aa/${"a".repeat(63)}`;
+  const incompletePrivate = `v1/originals/${taskId}/${runId}/sha256/${"b".repeat(63)}.jsonl`;
+  document.agent.extra = {
+    note: `public ${incompletePublic}; private ${incompletePrivate}`,
+  };
+
+  const value = buildAtifViewModel(validatedFixtureDocument(document), {
+    artifacts: artifacts(),
+  });
+  assert.equal(value.agent.extensions?.note, document.agent.extra.note);
 });
 
 test("pairs tools by canonical call id while preserving delayed and unpaired results", () => {

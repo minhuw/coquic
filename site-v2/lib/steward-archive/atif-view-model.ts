@@ -258,12 +258,22 @@ interface ProjectionContext {
 
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 const LOCATOR = /(?:[a-z][a-z0-9+.-]*:\/\/|^(?:~[/\\]|\/{1}|[A-Za-z]:[/\\]|\\\\))/i;
-const PUBLIC_OBJECT_KEY = /^v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}$/;
-const PRIVATE_OBJECT_KEY = /^v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl$/;
+const PUBLIC_OBJECT_KEY = /(?<![A-Za-z0-9])v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}(?=$|[^A-Za-z0-9])/;
+const PRIVATE_OBJECT_KEY = /(?<![A-Za-z0-9])v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl(?=$|[^A-Za-z0-9])/;
+const PUBLIC_OBJECT_KEY_GLOBAL = /(?<![A-Za-z0-9])v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}(?=$|[^A-Za-z0-9])/g;
+const PRIVATE_OBJECT_KEY_GLOBAL = /(?<![A-Za-z0-9])v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl(?=$|[^A-Za-z0-9])/g;
 const UNSAFE_KEY = /(?:url|uri|endpoint|bucket|object[_-]?key|public[_-]?key|private|secret|credential|password|token|authorization|scanner|filesystem|filepath|raw|direct)/i;
 
 function unsafeLocator(value: string): boolean {
   return LOCATOR.test(value) || PUBLIC_OBJECT_KEY.test(value) || PRIVATE_OBJECT_KEY.test(value);
+}
+
+function safeString(value: string): string {
+  if (LOCATOR.test(value)) return "[unavailable]";
+  if (!unsafeLocator(value)) return value;
+  return value
+    .replace(PUBLIC_OBJECT_KEY_GLOBAL, "[unavailable]")
+    .replace(PRIVATE_OBJECT_KEY_GLOBAL, "[unavailable]");
 }
 
 function isRecord(value: unknown): value is RawRecord {
@@ -278,7 +288,7 @@ function safeClone(value: unknown, depth = 0): AtifSafeValue | undefined {
   if (depth > 32) return "[unavailable]";
   if (value === null || typeof value === "boolean" || typeof value === "number") return value;
   if (typeof value === "bigint") return value.toString(10);
-  if (typeof value === "string") return unsafeLocator(value) ? "[unavailable]" : value;
+  if (typeof value === "string") return safeString(value);
   if (Array.isArray(value)) return value.map((item) => safeClone(item, depth + 1) ?? "[unavailable]");
   if (!isRecord(value)) return undefined;
   const result: Record<string, AtifSafeValue> = {};
@@ -529,7 +539,7 @@ function anchor(value: string, context: ProjectionContext): string {
 function mapContentPart(value: unknown, context: ProjectionContext): AtifDisplayContent {
   if (!isRecord(value)) return { kind: "generic", type: "generic", record: {} };
   if (value.type === "text") {
-    return { kind: "text", type: "text", text: value.text === null || typeof value.text === "string" ? value.text : null };
+    return { kind: "text", type: "text", text: value.text === null || typeof value.text !== "string" ? null : safeString(value.text) };
   }
   if (value.type === "image" && isRecord(value.source)) {
     const mediaType = value.source.media_type;
@@ -551,8 +561,9 @@ function mapContentPart(value: unknown, context: ProjectionContext): AtifDisplay
 function mapContent(value: unknown, context: ProjectionContext): { value: AtifDisplayContentValue; parts: readonly AtifDisplayContent[] } {
   if (value === undefined) return { value: undefined, parts: [] };
   if (typeof value === "string") {
-    const part: AtifTextContent = { kind: "text", type: "text", text: value };
-    return { value, parts: [part] };
+    const safe = safeString(value);
+    const part: AtifTextContent = { kind: "text", type: "text", text: safe };
+    return { value: safe, parts: [part] };
   }
   if (value === null) return { value: null, parts: [] };
   if (Array.isArray(value)) {

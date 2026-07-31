@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import Module, { createRequire } from "node:module";
 import { test } from "node:test";
 import { dirname, resolve } from "node:path";
@@ -79,6 +80,21 @@ function descriptorFor(fixture: Fixture, document: AtifDocument = fixture.atif a
 
 function bytesFor(fixture: Fixture, document: AtifDocument = fixture.atif as unknown as AtifDocument): Uint8Array {
   return canonicalAtifBytes(document);
+}
+
+function descriptorForBytes(fixture: Fixture, bytes: Uint8Array): ReturnType<typeof descriptorFor> {
+  const descriptor = descriptorFor(fixture);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const publicKey = `v1/tasks/${descriptor.taskId}/objects/sha256/${sha256.slice(0, 2)}/${sha256}`;
+  return {
+    ...descriptor,
+    publicKey,
+    byteSize: bytes.byteLength,
+    sha256,
+    artifacts: descriptor.artifacts.map((artifact) => artifact.artifactId === descriptor.artifactId
+      ? { ...artifact, publicKey, byteSize: bytes.byteLength, sha256 }
+      : artifact),
+  };
 }
 
 function repositoryFor(descriptor: ReturnType<typeof descriptorFor>) {
@@ -185,10 +201,10 @@ test("maps timeout and network failures without exposing transport values", asyn
   assert.equal(JSON.stringify(network).includes(secretBody), false);
 });
 
-test("requires matching digest, schema, task, run, and logical artifact ownership", async () => {
+test("rejects a mismatched publication digest before ATIF validation", async () => {
   const cleanDocument = copy(cleanFixture.atif) as unknown as AtifDocument;
   const cleanBytes = bytesFor(cleanFixture, cleanDocument);
-  const descriptor = descriptorFor(cleanFixture, cleanDocument);
+  const descriptor = descriptorFor(cleanFixture);
 
   const wrongDigest = copy(descriptor);
   const digest = "f".repeat(64);
@@ -197,20 +213,25 @@ test("requires matching digest, schema, task, run, and logical artifact ownershi
   wrongDigest.artifacts[0] = { ...wrongDigest.artifacts[0], sha256: digest, publicKey: wrongDigest.publicKey };
   const integrity = await tryLoadVerifiedAtif("task-clean", optionsFor(wrongDigest, responseFor(cleanBytes)));
   assert.deepEqual(integrity, { ok: false, category: "integrity" });
+});
 
-  const schemaDocument = copy(cleanDocument) as Record<string, any>;
-  schemaDocument.schema_version = "ATIF-v1.6";
-  const schemaBytes = bytesFor(cleanFixture, schemaDocument as AtifDocument);
-  const schemaDescriptor = descriptorFor(cleanFixture, schemaDocument as AtifDocument);
-  const schemaResult = await tryLoadVerifiedAtif("task-clean", optionsFor(schemaDescriptor, responseFor(schemaBytes)));
-  assert.deepEqual(schemaResult, { ok: false, category: "integrity" });
+test("invokes strict ATIF schema, semantic, and ownership validation after integrity checks", async () => {
+  const cleanDocument = copy(cleanFixture.atif) as unknown as AtifDocument;
+  const mutations: ReadonlyArray<readonly [string, (document: Record<string, any>) => void]> = [
+    ["schema", (document) => { document.schema_version = "ATIF-v1.6"; }],
+    ["semantic", (document) => { document.steps[1].step_id = 3; }],
+    ["task ownership", (document) => { document.extra.coquic.taskId = "foreign-task"; }],
+    ["pipeline ownership", (document) => { document.extra.coquic.pipelineId = "foreign-pipeline"; }],
+    ["run ownership", (document) => { document.extra.coquic.runId = "foreign-run"; }],
+    ["logical-artifact ownership", (document) => { document.extra.coquic.artifacts[0].ownerStepId = 1; }],
+  ];
 
-  const ownershipDocument = copy(cleanDocument) as Record<string, any>;
-  ownershipDocument.extra.coquic.runId = "foreign-run";
-  const ownershipBytes = bytesFor(cleanFixture, ownershipDocument as AtifDocument);
-  const ownershipDescriptor = descriptorFor(cleanFixture, cleanDocument);
-  ownershipDescriptor.byteSize = ownershipBytes.byteLength;
-  ownershipDescriptor.sha256 = "";
-  const ownershipResult = await tryLoadVerifiedAtif("task-clean", optionsFor(ownershipDescriptor, responseFor(ownershipBytes)));
-  assert.deepEqual(ownershipResult, { ok: false, category: "integrity" });
+  for (const [label, mutate] of mutations) {
+    const candidate = copy(cleanDocument) as unknown as Record<string, any>;
+    mutate(candidate);
+    const bytes = bytesFor(cleanFixture, candidate as AtifDocument);
+    const descriptor = descriptorForBytes(cleanFixture, bytes);
+    const result = await tryLoadVerifiedAtif("task-clean", optionsFor(descriptor, responseFor(bytes)));
+    assert.deepEqual(result, { ok: false, category: "integrity" }, label);
+  }
 });

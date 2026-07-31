@@ -21,6 +21,7 @@ const MAX_HARD_DEPTH = 128;
 const MAX_HARD_STRING = 4 * 1024 * 1024;
 const MAX_HARD_COLLECTION = 1_000_000;
 const MAX_HARD_NODES = 2_000_000;
+const PRIVATE_SECRET_PREFIX = /^(?:sk|pk|rk)(?:live|test|proj)/i;
 
 export const DEFAULT_ATIF_LIMITS = Object.freeze({
   maxBytes: 16 * 1024 * 1024,
@@ -335,14 +336,25 @@ class JsonReader {
     this.fail();
   }
 
-  private readNumber(): number {
+  private readNumber(): number | bigint {
     const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(this.source.slice(this.index));
     if (!match || match[0].length > 1024) this.fail();
     const raw = match[0];
+    const isFloat = raw.includes(".") || raw.includes("e") || raw.includes("E");
+    if (!isFloat) {
+      if (raw === "-0") this.fail();
+      try {
+        const integer = BigInt(raw);
+        this.index += raw.length;
+        if (integer > BigInt(Number.MAX_SAFE_INTEGER) || integer < BigInt(Number.MIN_SAFE_INTEGER)) return integer;
+        return Number(integer);
+      } catch {
+        this.fail();
+      }
+    }
     const value = Number(raw);
     if (!Number.isFinite(value)) this.fail("bounds");
-    const isFloat = raw.includes(".") || raw.includes("e") || raw.includes("E");
-    if ((isFloat && raw !== canonicalFloat(value)) || (!isFloat && raw === "-0")) this.fail();
+    if (raw !== canonicalFloat(value)) this.fail();
     this.index += raw.length;
     return value;
   }
@@ -403,6 +415,7 @@ function canonicalJson(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "bigint") return value.toString(10);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new InputFailure("canonicalization");
     return JSON.stringify(value);
@@ -422,6 +435,17 @@ const ajv = new Ajv2020({ allErrors: true, strict: true });
 addFormats(ajv);
 const validateSchema = ajv.compile(atifSchema as AnySchema);
 
+function schemaCompatibleValue(value: unknown): unknown {
+  if (typeof value === "bigint") return 1;
+  if (Array.isArray(value)) return value.map(schemaCompatibleValue);
+  if (isObject(value)) {
+    const result: AtifJsonObject = {};
+    for (const [key, child] of Object.entries(value)) result[key] = schemaCompatibleValue(child);
+    return result;
+  }
+  return value;
+}
+
 function pointerSegments(pointer: string): PathSegment[] {
   if (!pointer) return [];
   return pointer.slice(1).split("/").map((part) => {
@@ -431,7 +455,7 @@ function pointerSegments(pointer: string): PathSegment[] {
 }
 
 function schemaIssues(value: unknown, issues: Map<string, AtifIssue>): void {
-  if (validateSchema(value)) return;
+  if (validateSchema(schemaCompatibleValue(value))) return;
   for (const error of (validateSchema.errors ?? []) as ErrorObject[]) {
     addIssue(issues, `schema-${error.keyword}`, pointerSegments(error.instancePath ?? ""));
   }
@@ -439,7 +463,9 @@ function schemaIssues(value: unknown, issues: Map<string, AtifIssue>): void {
 
 function privateName(value: string): boolean {
   const compact = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
-  return PRIVATE_NAME.test(compact) || ["url", "uri", "endpoint", "baseurl", "baseuri"].includes(compact);
+  return PRIVATE_NAME.test(compact)
+    || PRIVATE_SECRET_PREFIX.test(compact)
+    || ["url", "uri", "endpoint", "baseurl", "baseuri"].includes(compact);
 }
 
 function privateIssuePath(path: readonly PathSegment[]): PathSegment[] {

@@ -121,6 +121,26 @@ test("accepts oracle-canonical floating-point lexemes without lossy reserializat
   }
 });
 
+test("accepts bounded large integer lexemes without losing their digits", () => {
+  const document = atif(cleanFixture) as Record<string, any>;
+  document.final_metrics = { total_cost_usd: 1 };
+  const expected = options(document as AtifDocument);
+  const baseline = new TextDecoder().decode(validBytes(document as AtifDocument));
+  const digits = "9".repeat(310);
+  const source = new TextEncoder().encode(
+    baseline.replace(/("total_cost_usd":)1/, `$1${digits}`),
+  );
+
+  const result = tryValidateAtifBytes(source, expected);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const parsed = (result.value as Record<string, any>).final_metrics.total_cost_usd;
+    assert.equal(typeof parsed, "bigint");
+    assert.equal(parsed.toString(), digits);
+    assert.deepEqual(validBytes(result.value), source);
+  }
+});
+
 test("rejects schema mutations and wrong ATIF version", () => {
   const document = atif(cleanFixture);
   const expected = options(document);
@@ -236,6 +256,22 @@ test("generalizes private-shaped extension names in every diagnostic field", () 
     assert.ok(result.issues.some((issue) => issue.rule === "private-field"));
     assert.ok(!JSON.stringify(result.issues).includes(marker));
     assert.ok(result.issues.every((issue) => !issue.segments.includes(marker)));
+  }
+});
+
+test("masks candidate-controlled private ancestors in diagnostics", () => {
+  const candidate = atif(cleanFixture) as Record<string, any>;
+  const secretName = "sk_live_51_opaque_9f2e";
+  const secretValue = "opaque-secret-value-9f2e";
+  candidate.agent.extra = { [secretName]: { accessToken: secretValue } };
+  const result = tryValidateAtifBytes(validBytes(candidate as AtifDocument), options(candidate as AtifDocument));
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    const serialized = JSON.stringify(result.issues);
+    assert.ok(!serialized.includes(secretName));
+    assert.ok(!serialized.includes(secretValue));
+    assert.ok(result.issues.every((issue) => !issue.segments.includes(secretName)));
   }
 });
 

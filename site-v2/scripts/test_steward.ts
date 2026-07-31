@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import cleanPublication from "../../contracts/steward-cloud/fixtures/clean-publication.json";
 import redactedPublication from "../../contracts/steward-cloud/fixtures/redacted-publication.json";
 import { canonicalAtifBytes, type AtifDocument } from "../lib/steward-archive/atif";
-import { parseCloudResponse, type CloudResponse } from "../lib/steward-archive/cloud-schema";
+import { parseCloudResponse, type CloudCompleteTrajectory, type CloudResponse } from "../lib/steward-archive/cloud-schema";
 
 type CloudRepositoryModule = typeof import("../lib/steward-archive/cloud-repository");
 const requireForTest = createRequire(import.meta.url);
@@ -544,7 +544,8 @@ async function main() {
   const { GET: getArchiveArtifact } = await import("../app/api/steward/planner-runs/[plannerRunId]/artifacts/[artifact]/route");
   const { default: renderStewardPage } = await import("../app/steward/page");
   const { default: renderTaskPage } = await import("../app/steward/tasks/[taskId]/page");
-  const { default: renderAtifTrajectory } = await import("../app/steward/tasks/[taskId]/atif-trajectory");
+  const { createAtifTrajectoryController, default: renderAtifTrajectory } = await import("../app/steward/tasks/[taskId]/atif-trajectory");
+  const { default: renderAtifTrajectoryView } = await import("../app/steward/tasks/[taskId]/atif-trajectory-view");
   const nextPackageRoot = dirname(requireForTest.resolve("next/package.json"));
   const { PathnameContext } = requireForTest(resolve(nextPackageRoot, "dist/shared/lib/hooks-client-context.shared-runtime")) as { PathnameContext: Context<string | null> };
   const originalFetch = globalThis.fetch;
@@ -901,6 +902,162 @@ async function main() {
     }
     return payload.data;
   }
+
+  let completeModel: CloudCompleteTrajectory | null = null;
+  let completeBody = "";
+  let emptyBody = "";
+
+  await runCase("trajectory boundary complete fixture", scenario([], [], undefined, [], detailScenario()), async () => {
+    completeModel = (await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)))) as CloudCompleteTrajectory;
+    completeBody = JSON.stringify({ schemaVersion: "4.0", generatedAt: EXPOSED_AT, data: completeModel });
+  }, VALID_ENV, 6);
+
+  await runCase("trajectory boundary empty fixture", scenario([], [], undefined, [], detailScenario({}, EMPTY_DETAIL_TRAJECTORY)), async () => {
+    const model = (await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)))) as CloudCompleteTrajectory;
+    const firstStep = model.steps[0];
+    if (firstStep === undefined) throw new Error("empty fixture has no step shape");
+    const emptyStep = { ...firstStep, message: null, content: [], parts: [], toolCalls: null, calls: [], tools: [], observation: null, observations: [] };
+    const emptyModel: CloudCompleteTrajectory = { ...model, steps: [emptyStep], artifacts: [], metadata: { ...model.metadata, artifacts: [] } };
+    emptyBody = JSON.stringify({ schemaVersion: "4.0", generatedAt: EXPOSED_AT, data: emptyModel });
+  }, VALID_ENV, 6);
+
+  await runCase("trajectory boundary lifecycle", scenario([], []), async () => {
+    if (completeModel === null || completeBody.length === 0 || emptyBody.length === 0) throw new Error("trajectory fixtures were not prepared");
+
+    type DeferredRequest = {
+      readonly url: string;
+      readonly init: RequestInit | undefined;
+      readonly signal: AbortSignal | null | undefined;
+      aborted: boolean;
+      resolve: (response: Response) => void;
+      reject: (reason?: unknown) => void;
+    };
+    const requests: DeferredRequest[] = [];
+    const deferredFetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      let resolveResponse!: (response: Response) => void;
+      let rejectResponse!: (reason?: unknown) => void;
+      const promise = new Promise<Response>((resolve, reject) => {
+        resolveResponse = resolve;
+        rejectResponse = reject;
+      });
+      const entry: DeferredRequest = {
+        url: String(input),
+        init,
+        signal: init?.signal,
+        aborted: false,
+        resolve: resolveResponse,
+        reject: rejectResponse,
+      };
+      requests.push(entry);
+      init?.signal?.addEventListener("abort", () => { entry.aborted = true; }, { once: true });
+      return promise;
+    };
+    const flush = async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    };
+    const transientBody = JSON.stringify({
+      schemaVersion: "3.0",
+      generatedAt: EXPOSED_AT,
+      problem: { code: "UNAVAILABLE", message: "The transcript is temporarily unavailable.", retryable: true, status: 503, type: null },
+    });
+    const states: import("../app/steward/tasks/[taskId]/atif-trajectory").AtifTrajectoryLoadState[] = [];
+    const controller = createAtifTrajectoryController(deferredFetch);
+    const unsubscribe = controller.subscribe((state) => states.push(state));
+
+    controller.select("task/one", "run one");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.url, "/api/steward/tasks/task%2Fone/transcript?run=run%20one");
+    assert.equal(requests[0]!.init?.cache, "no-store");
+    assert(requests[0]!.signal instanceof AbortSignal);
+
+    controller.select("task/two", "run two");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]!.aborted, true);
+    assert.equal(requests[1]!.url, "/api/steward/tasks/task%2Ftwo/transcript?run=run%20two");
+    requests[0]!.resolve(new Response(completeBody, { status: 200 }));
+    await flush();
+    assert.equal(controller.state.kind, "loading");
+
+    requests[1]!.resolve(new Response(transientBody, { status: 503 }));
+    await flush();
+    assert.deepEqual(controller.state, { kind: "unavailable", retryable: true });
+    assert.equal(controller.retry(), true);
+    assert.equal(requests.length, 3);
+    assert.equal(requests[2]!.url, "/api/steward/tasks/task%2Ftwo/transcript?run=run%20two");
+    assert.deepEqual(controller.state, { kind: "loading", retryable: true });
+    assert.equal(controller.retry(), false);
+
+    requests[2]!.resolve(new Response(completeBody, { status: 200 }));
+    await flush();
+    const ready = controller.state as unknown as import("../app/steward/tasks/[taskId]/atif-trajectory").AtifTrajectoryLoadState;
+    if (ready.kind !== "ready") throw new Error(`expected ready state, got ${ready.kind}`);
+    assert.equal(ready.model.steps.length, completeModel.steps.length);
+    assert.equal(requests.length, 3);
+    assert.equal(controller.retry(), false);
+    assert.deepEqual(states.map((state) => state.kind), ["loading", "loading", "loading", "unavailable", "loading", "ready"]);
+    const rendered = renderToStaticMarkup(createElement(renderAtifTrajectoryView, { model: ready.model, anchorPrefix: "trajectory-harness" }));
+    assert.match(rendered, /data-trajectory-records/);
+    for (const step of completeModel.steps) assert(rendered.includes(`data-trajectory-anchor="${step.anchor}"`), `missing rendered record ${step.anchor}`);
+    assert(!/>\s*load more\s*</i.test(rendered));
+    assert(!/>\s*raw (?:atif|records?)\s*</i.test(rendered));
+    assert(!/>\s*partial\s*</i.test(rendered));
+    unsubscribe();
+    controller.unmount();
+
+    const emptyCalls: { readonly url: string; readonly init: RequestInit | undefined }[] = [];
+    const emptyController = createAtifTrajectoryController((input, init) => {
+      emptyCalls.push({ url: String(input), init });
+      return Promise.resolve(new Response(emptyBody, { status: 200 }));
+    });
+    emptyController.select("task-empty", "run-empty");
+    await flush();
+    const emptyState = emptyController.state;
+    if (emptyState.kind !== "ready") throw new Error(`expected empty ready state, got ${emptyState.kind}`);
+    assert.equal(emptyState.model.steps.length, 1);
+    assert.equal(emptyState.model.steps[0]!.content.length, 0);
+    assert.equal(emptyState.model.steps[0]!.calls.length, 0);
+    assert.equal(emptyState.model.steps[0]!.observations.length, 0);
+    assert.equal(emptyCalls.length, 1);
+    assert.equal(emptyCalls[0]!.url, "/api/steward/tasks/task-empty/transcript?run=run-empty");
+    assert.equal(emptyCalls[0]!.init?.cache, "no-store");
+    const emptyRendered = renderToStaticMarkup(createElement(renderAtifTrajectoryView, { model: emptyState.model, anchorPrefix: "trajectory-empty" }));
+    assert.match(emptyRendered, /data-trajectory-records/);
+    assert(!/>\s*load more\s*</i.test(emptyRendered));
+    emptyController.unmount();
+
+    for (const status of [404, 413, 422]) {
+      let terminalCalls = 0;
+      const terminalController = createAtifTrajectoryController(async () => {
+        terminalCalls += 1;
+        return new Response(null, { status });
+      });
+      terminalController.select("task-terminal", `run-${status}`);
+      await flush();
+      assert.deepEqual(terminalController.state, { kind: "unavailable", retryable: false });
+      assert.equal(terminalController.retry(), false);
+      assert.equal(terminalCalls, 1);
+      terminalController.unmount();
+    }
+
+    const unmountedRequests: DeferredRequest[] = [];
+    const unmountedFetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      let resolveResponse!: (response: Response) => void;
+      const promise = new Promise<Response>((resolve) => { resolveResponse = resolve; });
+      const entry: DeferredRequest = { url: String(input), init, signal: init?.signal, aborted: false, resolve: resolveResponse, reject: () => undefined };
+      unmountedRequests.push(entry);
+      init?.signal?.addEventListener("abort", () => { entry.aborted = true; }, { once: true });
+      return promise;
+    };
+    const unmountedStates: import("../app/steward/tasks/[taskId]/atif-trajectory").AtifTrajectoryLoadState[] = [];
+    const unmountedController = createAtifTrajectoryController(unmountedFetch);
+    unmountedController.subscribe((state) => unmountedStates.push(state));
+    unmountedController.select("task-unmounted", "run-unmounted");
+    unmountedController.unmount();
+    assert.equal(unmountedRequests[0]!.aborted, true);
+    unmountedRequests[0]!.resolve(new Response(completeBody, { status: 200 }));
+    await flush();
+    assert.equal(unmountedStates.some((state) => state.kind === "ready"), false);
+  }, VALID_ENV, 0);
 
   async function transcriptProblem(
     response: Response,

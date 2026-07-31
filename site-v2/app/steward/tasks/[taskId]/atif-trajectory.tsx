@@ -19,6 +19,19 @@ type LoadState =
   | { readonly kind: "ready"; readonly model: CloudCompleteTrajectory }
   | { readonly kind: "unavailable"; readonly retryable: boolean };
 
+export type AtifTrajectoryLoadState = LoadState;
+
+type Fetcher = typeof fetch;
+type StateListener = (state: LoadState) => void;
+
+export interface AtifTrajectoryController {
+  readonly state: LoadState;
+  subscribe(listener: StateListener): () => void;
+  select(taskId: string, runId: string): void;
+  retry(): boolean;
+  unmount(): void;
+}
+
 const TRANSIENT_MESSAGE = "The complete trajectory is temporarily unavailable.";
 const TERMINAL_MESSAGE = "The complete trajectory is unavailable.";
 
@@ -53,6 +66,77 @@ function responseState(response: Response, body: string): LoadState {
   }
 
   return terminalState();
+}
+
+export function createAtifTrajectoryController(fetcher: Fetcher = globalThis.fetch): AtifTrajectoryController {
+  const listeners = new Set<StateListener>();
+  let mounted = true;
+  let state: LoadState = { kind: "loading", retryable: false };
+  let selection: { readonly taskId: string; readonly runId: string } | null = null;
+  let request: { readonly id: number; readonly controller: AbortController } | null = null;
+  let nextRequestId = 0;
+
+  function publish(next: LoadState) {
+    if (!mounted) return;
+    state = next;
+    for (const listener of listeners) listener(next);
+  }
+
+  function abortRequest() {
+    request?.controller.abort();
+    request = null;
+  }
+
+  function start(nextSelection: { readonly taskId: string; readonly runId: string }, retryable: boolean) {
+    if (!mounted) return;
+    abortRequest();
+    selection = nextSelection;
+    const controller = new AbortController();
+    const id = ++nextRequestId;
+    request = { id, controller };
+    publish({ kind: "loading", retryable });
+    const endpoint = transcriptEndpoint(nextSelection.taskId, nextSelection.runId);
+
+    void fetcher(endpoint, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        const body = await response.text();
+        if (!mounted || request?.id !== id || controller.signal.aborted) return;
+        publish(responseState(response, body));
+      })
+      .catch(() => {
+        if (!mounted || request?.id !== id || controller.signal.aborted) return;
+        publish({ kind: "unavailable", retryable: true });
+      })
+      .finally(() => {
+        if (request?.id === id) request = null;
+      });
+  }
+
+  return {
+    get state() {
+      return state;
+    },
+    subscribe(listener) {
+      if (!mounted) return () => undefined;
+      listeners.add(listener);
+      listener(state);
+      return () => listeners.delete(listener);
+    },
+    select(taskId, runId) {
+      start({ taskId, runId }, false);
+    },
+    retry() {
+      if (!mounted || state.kind !== "unavailable" || !state.retryable || selection === null) return false;
+      start(selection, true);
+      return true;
+    },
+    unmount() {
+      if (!mounted) return;
+      mounted = false;
+      abortRequest();
+      listeners.clear();
+    },
+  };
 }
 
 function LoadingState({ retryable }: { retryable: boolean }) {
@@ -96,36 +180,20 @@ function UnavailableState({ retryable, onRetry }: { retryable: boolean; onRetry:
 }
 
 export function AtifTrajectory({ taskId, runId }: AtifTrajectoryProps) {
-  const endpoint = transcriptEndpoint(taskId, runId);
-  const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading", retryable: false });
-  const retrying = useRef(false);
+  const controllerRef = useRef<AtifTrajectoryController | null>(null);
 
   useEffect(() => {
-    let active = true;
-    const controller = new AbortController();
-    const showRetry = retrying.current;
-    retrying.current = false;
-    setState({ kind: "loading", retryable: showRetry });
-
-    async function load() {
-      try {
-        const response = await fetch(endpoint, { cache: "no-store", signal: controller.signal });
-        const body = await response.text();
-        if (!active || controller.signal.aborted) return;
-        setState(responseState(response, body));
-      } catch {
-        if (!active || controller.signal.aborted) return;
-        setState({ kind: "unavailable", retryable: true });
-      }
-    }
-
-    void load();
+    const controller = createAtifTrajectoryController();
+    controllerRef.current = controller;
+    const unsubscribe = controller.subscribe(setState);
+    controller.select(taskId, runId);
     return () => {
-      active = false;
-      controller.abort();
+      unsubscribe();
+      if (controllerRef.current === controller) controllerRef.current = null;
+      controller.unmount();
     };
-  }, [endpoint, attempt]);
+  }, [taskId, runId]);
 
   if (state.kind === "loading") {
     return <LoadingState retryable={state.retryable} />;
@@ -135,9 +203,7 @@ export function AtifTrajectory({ taskId, runId }: AtifTrajectoryProps) {
       <UnavailableState
         retryable={state.retryable}
         onRetry={() => {
-          retrying.current = true;
-          setState({ kind: "loading", retryable: true });
-          setAttempt((value) => value + 1);
+          controllerRef.current?.retry();
         }}
       />
     );

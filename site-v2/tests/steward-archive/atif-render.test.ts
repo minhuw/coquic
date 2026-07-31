@@ -22,6 +22,34 @@ function textPart(text: string) {
   return { kind: "text" as const, type: "text" as const, text };
 }
 
+const imageMediaTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
+
+function imageDescriptor(model: AtifDisplayModel, artifactId: string, mediaType: string, index: number) {
+  const logicalPath = `steps/2/evidence-${index}.${mediaType.slice("image/".length)}`;
+  return {
+    artifactId,
+    mediaType,
+    sha256: String(index).repeat(64),
+    byteSize: index * 10,
+    ownerStepId: 2,
+    action: {
+      kind: "image" as const,
+      artifactId,
+      taskId: model.taskId,
+      runId: model.runId,
+      mediaType,
+      logicalPath,
+      href: `/api/steward/tasks/${model.taskId}/artifact?path=${encodeURIComponent(logicalPath)}`,
+    },
+  };
+}
+
+function setDisclosure(model: AtifDisplayModel, redactionApplied: boolean, originalRetained: boolean) {
+  const disclosure = { redactionApplied, originalRetained };
+  (model as any).disclosure = disclosure;
+  (model.metadata as any).disclosure = disclosure;
+}
+
 test("renders typed records in source order with safe Markdown and stable anchors", () => {
   const model = modelCopy();
   const first = model.steps[0] as any;
@@ -163,8 +191,69 @@ test("renders safe run facts and recursively bounded child trajectories", () => 
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test("keeps media evidence inert in the trajectory document", () => {
-  const html = render(modelCopy());
-  assert.doesNotMatch(html, /<img\b|src=|\bdownload\b/i);
-  assert.match(html, /data-artifact-metadata/);
+test("renders supported image evidence in a stable frame with an unchanged download action", () => {
+  const model = modelCopy() as any;
+  setDisclosure(model, false, false);
+  const imageParts = imageMediaTypes.map((mediaType, index) => {
+    const artifactId = `artifact-image-${index + 1}`;
+    const descriptor = imageDescriptor(model, artifactId, mediaType, index + 1);
+    return { descriptor, part: { kind: "image" as const, type: "image" as const, mediaType, artifactId, action: descriptor.action } };
+  });
+  model.artifacts = [model.artifacts[0], ...imageParts.map(({ descriptor }) => descriptor)];
+  model.metadata.artifacts = model.artifacts;
+  model.steps[1].parts = [textPart("Four image formats."), ...imageParts.map(({ part }) => part)];
+  model.steps[1].content = model.steps[1].parts;
+  model.steps[1].message = model.steps[1].parts;
+
+  const html = render(model);
+  assert.equal((html.match(/data-artifact-image/g) ?? []).length, imageMediaTypes.length * 2);
+  assert.equal((html.match(/data-artifact-frame/g) ?? []).length, imageMediaTypes.length * 2);
+  assert.match(html, /object-contain/);
+  assert.match(html, /data-artifact-error/);
+  assert.match(html, /data-artifact-download/);
+  assert.doesNotMatch(html, /_next\/image|publicKey|logicalPath/);
+  for (const mediaType of imageMediaTypes) {
+    assert.match(html, new RegExp(`alt="${mediaType} evidence`));
+  }
+  const artifactLinks = [...html.matchAll(/(?:src|href)="([^\"]*\/api\/steward\/tasks\/[^\"]*artifact[^\"]*)"/g)].map((match) => match[1]);
+  assert.ok(artifactLinks.length >= imageMediaTypes.length * 2);
+  assert.ok(artifactLinks.every((href) => href.startsWith("/api/steward/tasks/")));
+});
+
+test("renders compact downloads and explicit unavailable media fallbacks", () => {
+  const model = modelCopy() as any;
+  const missing = { kind: "image" as const, type: "image" as const, mediaType: "image/jpeg" as const, artifactId: "artifact-missing", action: { kind: "unavailable" as const, artifactId: "artifact-missing", reason: "missing" as const } };
+  model.steps[1].parts = [...model.steps[1].parts, missing];
+  model.steps[1].content = model.steps[1].parts;
+  model.steps[1].message = model.steps[1].parts;
+
+  const html = render(model);
+  assert.match(html, /data-artifact-download-row/);
+  assert.match(html, /text\/plain evidence.*8 B/);
+  assert.match(html, /data-artifact-download-unavailable/);
+  assert.match(html, /image\/jpeg evidence.*unavailable \(missing\)/);
+  const unavailable = html.match(/<div data-artifact-unavailable[\s\S]*?<\/div>/)?.[0] ?? "";
+  assert.doesNotMatch(unavailable, /href=|src=/);
+});
+
+test("shows disclosure only for redaction or retained originals without private affordances", () => {
+  const cases = [
+    { redactionApplied: false, originalRetained: false, text: "", absent: true },
+    { redactionApplied: true, originalRetained: false, text: "Public values redacted", absent: false },
+    { redactionApplied: false, originalRetained: true, text: "Original retained", absent: false },
+    { redactionApplied: true, originalRetained: true, text: "Original retained", absent: false },
+  ] as const;
+
+  for (const disclosure of cases) {
+    const model = modelCopy();
+    setDisclosure(model, disclosure.redactionApplied, disclosure.originalRetained);
+    const html = render(model);
+    if (disclosure.absent) {
+      assert.doesNotMatch(html, /data-disclosure/);
+      continue;
+    }
+    const summary = html.match(/<p data-disclosure[\s\S]*?<\/p>/)?.[0] ?? "";
+    assert.match(summary, new RegExp(disclosure.text));
+    assert.doesNotMatch(summary, /href=|src=|private|bucket|key|url|path|raw|filesystem|credential|secret|token|https?:/i);
+  }
 });

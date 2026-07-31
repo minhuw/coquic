@@ -389,3 +389,19 @@ validated `307` redirect and never proxies bytes.
 The production Next configuration sets only `turbopack.root` to the repository
 root because the shared ATIF schema remains outside `site-v2`; copying or
 relocating that schema would create a second contract.
+
+## D-025: Byte-preserved published image evidence may animate
+
+Validated JPEG, PNG, GIF, and WebP evidence renders immediately through a
+plain image element and its normalized same-origin artifact action. The image
+bytes are never recompressed or transformed by Site. A bounded contained frame
+keeps the evidence stable even though public descriptors do not carry
+dimensions, and every image keeps an accessible alternative and download
+action.
+
+This immutable-evidence rule is an intentional exception to Site-authored
+reduced-motion behavior: multi-frame PNG, GIF, and WebP evidence may animate
+when the user prefers reduced motion. The exception carries the accepted
+residual WCAG 2.2.2 risk. Site-authored transitions and other nonessential
+motion continue to honor the general reduced-motion contract; revisit this
+decision if reliable browser controls for published animation become available.

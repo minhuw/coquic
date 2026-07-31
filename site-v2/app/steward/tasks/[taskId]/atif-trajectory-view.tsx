@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type {
-  AtifArtifactAction,
   AtifDisplayContentValue,
   AtifDisplayLineageReference,
   AtifDisplayMetrics,
@@ -24,7 +23,7 @@ import type {
 } from "@/lib/steward-archive/atif-view-model";
 import { RunConfiguration } from "./run-configuration";
 import { TranscriptLayout, type RunOutlinePhase } from "./transcript-layout";
-import { TranscriptMessage } from "./transcript-message";
+import { ArtifactMedia, TranscriptMessage } from "./transcript-message";
 
 interface AtifTrajectoryViewProps {
   model: AtifDisplayModel;
@@ -84,11 +83,13 @@ function fieldRows(rows: readonly [string, ReactNode][]) {
 }
 
 function DisclosureSummary({ model }: { model: AtifDisplayModel }) {
+  const { redactionApplied, originalRetained } = model.disclosure;
+  if (!redactionApplied && !originalRetained) return null;
   return (
-    <p className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
-      <span>{model.disclosure.redactionApplied ? "Public values redacted" : "Public values unchanged"}</span>
-      <span aria-hidden="true" className="text-faint">·</span>
-      <span>{model.disclosure.originalRetained ? "Original retained" : "Original unavailable"}</span>
+    <p data-disclosure className={`mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${redactionApplied ? "text-warning" : "text-muted"}`}>
+      {redactionApplied ? <span data-disclosure-redaction>Public values redacted</span> : null}
+      {redactionApplied && originalRetained ? <span aria-hidden="true" className="text-faint">·</span> : null}
+      {originalRetained ? <span data-disclosure-original>Original retained</span> : redactionApplied ? <span data-disclosure-original>Original unavailable</span> : null}
     </p>
   );
 }
@@ -308,7 +309,6 @@ function StepRecord({ step, eventId }: { step: AtifDisplayStep; eventId: string 
 }
 
 function ArtifactEntry({ artifact }: { artifact: AtifDisplayModel["artifacts"][number] }) {
-  const action: AtifArtifactAction = artifact.action;
   return (
     <li className="grid min-w-0 gap-3 border-b border-line py-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,18rem)] sm:items-start">
       <div className="min-w-0">
@@ -316,14 +316,13 @@ function ArtifactEntry({ artifact }: { artifact: AtifDisplayModel["artifacts"][n
         <p className="mt-1 break-words text-xs text-muted">{artifact.mediaType} · {formatBytes(artifact.byteSize)} · owner record {artifact.ownerStepId}</p>
         <p className="mt-1 break-all text-xs text-faint data-text">SHA-256 {artifact.sha256}</p>
       </div>
-      <div className="min-w-0 sm:text-right"><ArtifactAction action={action} /></div>
+      <div className="min-w-0"><ArtifactAction artifact={artifact} /></div>
     </li>
   );
 }
 
-function ArtifactAction({ action }: { action: AtifArtifactAction }) {
-  if (action.kind === "unavailable") return <span data-artifact-unavailable className="text-xs text-unavailable">Unavailable ({action.reason})</span>;
-  return <span data-artifact-metadata className="text-xs text-muted">Media evidence ({action.mediaType}) · {action.kind === "image" ? "image" : "artifact"} reference withheld</span>;
+function ArtifactAction({ artifact }: { artifact: AtifDisplayModel["artifacts"][number] }) {
+  return <ArtifactMedia action={artifact.action} artifactId={artifact.artifactId} mediaType={artifact.mediaType} byteSize={artifact.byteSize} />;
 }
 
 function LineageSummary({ model, titleId }: { model: AtifDisplayModel; titleId: string }) {

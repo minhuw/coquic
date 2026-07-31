@@ -1,4 +1,4 @@
-import { Check, LoaderCircle, Terminal, X } from "lucide-react";
+import { Check, Download, LoaderCircle, Terminal, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
@@ -154,17 +154,76 @@ function CommandBlock({ block }: { block: Extract<MessageBlock, { type: "command
 function GenericBlock({ record }: { record: AtifSafeRecord }) {
   return <pre data-generic-content className="max-w-full overflow-auto border border-line bg-diff-gutter px-4 py-3 text-xs leading-5 text-ink data-text">{JSON.stringify(record, null, 2)}</pre>;
 }
-function ArtifactReference({ action }: { action: AtifArtifactAction }) {
+
+function formatArtifactBytes(value: number | undefined): string | null {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return null;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")} MB`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1).replace(/\.0$/, "")} KB`;
+  return `${value} B`;
+}
+
+function artifactLabel(action: AtifArtifactAction, mediaType: string | undefined, artifactId: string | null | undefined): string {
+  const type = mediaType || (action.kind === "unavailable" ? "artifact" : action.mediaType);
+  return `${type} evidence${artifactId ? ` (${artifactId})` : ""}`;
+}
+
+export interface ArtifactMediaProps {
+  readonly action: AtifArtifactAction;
+  readonly mediaType?: string;
+  readonly artifactId?: string | null;
+  readonly byteSize?: number;
+}
+
+export function ArtifactMedia({ action, mediaType, artifactId, byteSize }: ArtifactMediaProps) {
+  const label = artifactLabel(action, mediaType, artifactId);
+  const size = formatArtifactBytes(byteSize);
   if (action.kind === "unavailable") {
-    return <span data-artifact-unavailable className="text-xs text-unavailable">Artifact unavailable ({action.reason})</span>;
+    return (
+      <div data-artifact-unavailable role="status" className="flex min-w-0 flex-wrap items-center justify-between gap-2 border border-line px-3 py-3 text-xs text-unavailable">
+        <span>{label} unavailable ({action.reason})</span>
+        <span data-artifact-download-unavailable>Download unavailable</span>
+      </div>
+    );
   }
-  return <span data-artifact-metadata className="text-xs text-muted">Media evidence ({action.mediaType}) · {action.kind === "image" ? "image" : "artifact"} reference withheld</span>;
+
+  if (action.kind === "download") {
+    return (
+      <div data-artifact-download-row className="flex min-w-0 flex-wrap items-center justify-between gap-3 border border-line px-3 py-3 text-xs">
+        <span className="min-w-0 break-words text-muted">{label}{size ? ` · ${size}` : ""}</span>
+        <a data-artifact-download href={action.href} download aria-label={`Download ${label}`} className="inline-flex shrink-0 items-center gap-1.5 font-medium text-accent underline-offset-2 hover:underline">
+          <Download aria-hidden="true" size={14} />
+          <span>Download</span>
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <figure data-artifact-media data-artifact-kind="image" aria-label={`${label}. If the image cannot be displayed, use the download action.`} className="min-w-0">
+      <div data-artifact-frame className="flex aspect-[4/3] min-h-40 max-h-96 w-full max-w-3xl items-center justify-center overflow-hidden border border-line bg-diff-gutter">
+        <img
+          data-artifact-image
+          src={action.href}
+          alt={label}
+          className="block h-full w-full object-contain"
+        />
+      </div>
+      <figcaption className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-3 text-xs text-muted">
+        <span>{label}{size ? ` · ${size}` : ""}</span>
+        <a data-artifact-download href={action.href} download aria-label={`Download ${label}`} className="inline-flex shrink-0 items-center gap-1.5 font-medium text-accent underline-offset-2 hover:underline">
+          <Download aria-hidden="true" size={14} />
+          <span>Download</span>
+        </a>
+      </figcaption>
+      <p data-artifact-error className="sr-only">If the image cannot be displayed, use the download action.</p>
+    </figure>
+  );
 }
 
 function ContentPart({ part }: { part: AtifDisplayContent }) {
   if (part.kind === "text") return part.text === null ? <p className="text-sm text-unavailable">Unavailable</p> : <MarkdownBlock text={part.text} />;
   if (part.kind === "generic") return <GenericBlock record={part.record} />;
-  return <ArtifactReference action={part.action} />;
+  return <ArtifactMedia action={part.action} mediaType={part.mediaType} artifactId={part.artifactId} />;
 }
 
 export interface TranscriptMessageProps {

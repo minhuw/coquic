@@ -3883,15 +3883,11 @@ class StewardExecutor:
     ) -> bool | None:
         """Inspect the accepted integration tree before commit or push.
 
-        Publication is intentionally opt-in.  When enabled, this boundary is
-        transport-free: it reads only the detached local archive graph and the
-        exact validated worktree, then routes bounded source findings through
-        the existing validation-revision loop.
+        This boundary is transport-free regardless of publication activation:
+        it inspects the exact validated worktree and routes bounded source
+        findings through the existing validation-revision loop.  Publication
+        credentials and cloud clients are never needed here.
         """
-
-        publication = getattr(self.config, "publication", None)
-        if publication is None or not getattr(publication, "enabled", False):
-            return None
 
         try:
             outcome, counts, fingerprint = self._build_integration_publication_outcome(
@@ -4044,26 +4040,9 @@ class StewardExecutor:
         worktree: Path,
         patch_text: str,
     ) -> tuple[PublicationGeneration | RepairRequired | FailClosed, dict[str, int], str]:
-        graph = self._integration_publication_graph(source)
         scanner_runner = getattr(self, "_publication_scanner_runner", None)
-        publication = self.config.publication
-        credential_sources = (
-            getattr(publication, "d1_token_path", None),
-            getattr(publication, "r2_access_key_id_path", None),
-            getattr(publication, "r2_secret_access_key_path", None),
-        )
-        generation = compose_publication_generation(
-            graph,
-            task_id=source.id,
-            credential_sources=credential_sources,
-            scanner_runner=scanner_runner,
-            scanner_timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
-        )
-        if isinstance(generation, FailClosed):
-            counts = {"source": 0, "patch": 0}
-            return generation, counts, _publication_preflight_fingerprint(
-                patch_text, generation, counts
-            )
+        publication = getattr(self.config, "publication", None)
+        credential_sources = _publication_credential_sources(publication)
 
         report = self._scan_integration_source(
             worktree,
@@ -4089,6 +4068,28 @@ class StewardExecutor:
             outcome = RepairRequired(tuple(reasons))
             return outcome, counts, _publication_preflight_fingerprint(
                 patch_text, outcome, counts
+            )
+
+        # Local-only configurations still require source safety, but they do
+        # not have a complete archive graph to compose or any transport to
+        # activate.  A transport-free clean marker preserves that contract.
+        if not getattr(publication, "enabled", False):
+            outcome = PublicationGeneration({})
+            return outcome, counts, _publication_preflight_fingerprint(
+                patch_text, outcome, counts
+            )
+
+        graph = self._integration_publication_graph(source)
+        generation = compose_publication_generation(
+            graph,
+            task_id=source.id,
+            credential_sources=credential_sources,
+            scanner_runner=scanner_runner,
+            scanner_timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+        if isinstance(generation, FailClosed):
+            return generation, counts, _publication_preflight_fingerprint(
+                patch_text, generation, counts
             )
         if isinstance(generation, RepairRequired):
             return generation, counts, _publication_preflight_fingerprint(
@@ -4731,6 +4732,34 @@ def _next_revision(store: TaskStore, task_id: str) -> int:
     if not iterations:
         return 1
     return max(item.iteration for item in iterations) + 1
+
+
+def _publication_credential_sources(publication: object) -> tuple[object, ...]:
+    """Select present, explicitly configured credential files for inspection."""
+
+    values = (
+        getattr(publication, "d1_token_path", None),
+        getattr(publication, "r2_access_key_id_path", None),
+        getattr(publication, "r2_secret_access_key_path", None),
+    )
+    enabled = bool(getattr(publication, "enabled", False))
+    sources: list[object] = []
+    for value in values:
+        if value is None:
+            continue
+        if enabled:
+            sources.append(value)
+            continue
+        try:
+            present = Path(value).exists()
+        except (OSError, TypeError, ValueError):
+            # Preserve malformed values so the scanner fails closed rather
+            # than silently accepting an invalid configured source.
+            sources.append(value)
+            continue
+        if present:
+            sources.append(value)
+    return tuple(sources)
 
 
 def _publication_outcome_summary(

@@ -14,7 +14,7 @@ from coquic_steward.execution.executor import (
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.generation import PublicationGeneration
 from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
-from coquic_steward.publication.scanner import ScannerReport
+from coquic_steward.publication.scanner import ScannerFinding, ScannerReport
 
 
 class _EventStore:
@@ -356,3 +356,116 @@ def test_fail_closed_publication_preflight_blocks_without_finding_text(
     assert all("private-secret-value" not in str(item) for item in store.items)
     assert "private-secret-value" not in transcript.path.read_text(encoding="utf-8")
     assert store.items[0].data["reason_codes"] == [ReasonCode.scanner_failure.value]
+
+
+def test_disabled_publication_preflight_scans_clean_source(tmp_path: Path) -> None:
+    store = _EventStore()
+    executor = object.__new__(StewardExecutor)
+    executor.config = SimpleNamespace(
+        publication=StewardPublicationConfig(), logs_dir=tmp_path / "logs"
+    )
+    executor.store = store
+    executor.worktrees = _Worktrees()
+    scanned: list[tuple[Path, str, object]] = []
+
+    def scan(worktree: Path, patch_text: str, *, credential_sources: object) -> ScannerReport:
+        scanned.append((worktree, patch_text, credential_sources))
+        return ScannerReport()
+
+    executor._scan_integration_source = scan
+    executor._integration_publication_graph = lambda _source: pytest.fail(
+        "disabled transport must not require an archive graph"
+    )
+    executor._finish_task = lambda *_args: pytest.fail(
+        "clean source must reach the commit path"
+    )
+    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
+
+    result = executor._integration_publication_preflight(
+        SimpleNamespace(id="integration-task"),
+        SimpleNamespace(id="source-task"),
+        tmp_path,
+        "patch",
+        "validated-tree",
+        transcript,
+    )
+
+    assert result is None
+    assert scanned == [(tmp_path, "patch", ())]
+    assert store.items[0].data["status"] == "clean"
+
+
+def test_disabled_publication_preflight_repairs_source_findings(
+    tmp_path: Path,
+) -> None:
+    store = _EventStore()
+    executor = object.__new__(StewardExecutor)
+    executor.config = SimpleNamespace(
+        publication=StewardPublicationConfig(), logs_dir=tmp_path / "logs"
+    )
+    executor.store = store
+    worktrees = _Worktrees()
+    executor.worktrees = worktrees
+    executor._scan_integration_source = lambda *_args, **_kwargs: ScannerReport(
+        findings=(ScannerFinding("README.md", b"source-secret", category="source"),)
+    )
+    executor._integration_publication_graph = lambda _source: pytest.fail(
+        "disabled transport must not require an archive graph"
+    )
+    executor._finish_task = lambda *_args: setattr(worktrees, "removed", True)
+    repaired_patches: list[str] = []
+
+    def repair(*args) -> bool:
+        repaired_patches.append(args[2])
+        return True
+
+    executor._repair_integration_validation_failure = repair
+    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
+
+    result = executor._integration_publication_preflight(
+        SimpleNamespace(id="integration-task"),
+        SimpleNamespace(id="source-task"),
+        tmp_path,
+        "patch",
+        "validated-tree",
+        transcript,
+    )
+
+    assert result is True
+    assert repaired_patches == ["patch"]
+    assert store.items[0].data["status"] == "repair_required"
+
+
+def test_disabled_publication_preflight_fails_closed_on_scan_error(
+    tmp_path: Path,
+) -> None:
+    store = _EventStore()
+    executor = object.__new__(StewardExecutor)
+    executor.config = SimpleNamespace(
+        publication=StewardPublicationConfig(), logs_dir=tmp_path / "logs"
+    )
+    executor.store = store
+    executor.worktrees = _Worktrees()
+    executor._scan_integration_source = lambda *_args, **_kwargs: ScannerReport(
+        failure=ReasonCode.scanner_failure
+    )
+    executor._integration_publication_graph = lambda _source: pytest.fail(
+        "disabled transport must not require an archive graph"
+    )
+    finished: list[tuple[object, ...]] = []
+    executor._finish_task = lambda *args: finished.append(args)
+    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
+
+    result = executor._integration_publication_preflight(
+        SimpleNamespace(id="integration-task"),
+        SimpleNamespace(id="source-task"),
+        tmp_path,
+        "patch contains private-secret-value",
+        "validated-tree",
+        transcript,
+    )
+
+    assert result is False
+    assert len(finished) == 2
+    assert store.items[0].data["reason_codes"] == [ReasonCode.scanner_failure.value]
+    assert "private-secret-value" not in transcript.path.read_text(encoding="utf-8")

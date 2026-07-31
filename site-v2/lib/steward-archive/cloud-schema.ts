@@ -218,6 +218,17 @@ function checkStep(step: AtifDisplayStep, expectedStepId: number, anchors: Set<s
   step.observations.forEach((observation) => checkObservation(observation, calls, taskId, runId, artifacts, step.stepId, usedArtifactSteps));
 }
 
+function matchedObservationsByCall(steps: readonly AtifDisplayStep[]): Map<string, AtifDisplayObservation[]> {
+  const matched = new Map<string, AtifDisplayObservation[]>();
+  steps.forEach((step) => step.observations.forEach((observation) => {
+    if (observation.matchedCallId === null) return;
+    const observations = matched.get(observation.matchedCallId) ?? [];
+    observations.push(observation);
+    matched.set(observation.matchedCallId, observations);
+  }));
+  return matched;
+}
+
 function checkCompleteTrajectory(value: CloudCompleteTrajectory, depth = 0): void {
   if (depth > 32 || value.kind !== "atif-display") invalid();
   if (value.metadata.taskId !== value.taskId || value.metadata.pipelineId !== value.pipelineId || value.metadata.runId !== value.runId || value.metadata.role !== value.role) invalid();
@@ -233,6 +244,10 @@ function checkCompleteTrajectory(value: CloudCompleteTrajectory, depth = 0): voi
   const seenCalls = new Set<string>();
   const usedArtifactSteps = new Map<string, Set<number>>();
   value.steps.forEach((step, index) => checkStep(step, index + 1, anchors, seenCalls, calls, value.taskId, value.runId, artifacts, usedArtifactSteps));
+  const matched = matchedObservationsByCall(value.steps);
+  value.steps.forEach((step) => step.calls.forEach((call) => {
+    if (!same(call.observations, matched.get(call.callId) ?? [])) invalid();
+  }));
   const artifactIds = new Set<string>();
   value.artifacts.forEach((artifact) => {
     if (artifactIds.has(artifact.artifactId) || !value.steps.some((step) => step.stepId === artifact.ownerStepId)) invalid();

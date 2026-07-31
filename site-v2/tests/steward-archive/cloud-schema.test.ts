@@ -164,6 +164,30 @@ test("accepts complete normalized trajectories and preserves their public displa
   assert(!serializeCloudCompleteTrajectory(cleanTrajectory).includes("://"));
 });
 
+test("requires every call alias to mirror matched step observations in source order", () => {
+  const missing = structuredClone(cleanTrajectory) as Record<string, any>;
+  for (const alias of ["toolCalls", "calls", "tools"]) missing.data.steps[1][alias][0].observations = [];
+  rejectsComplete(missing);
+
+  const delayed = structuredClone(cleanTrajectory) as Record<string, any>;
+  const steps = delayed.data.steps as Record<string, any>[];
+  const matched = steps[1].observations[0];
+  const later = structuredClone(matched);
+  const unmatched = structuredClone(matched);
+  unmatched.sourceCallId = null;
+  unmatched.matchedCallId = null;
+  const followUp = structuredClone(steps[0]);
+  followUp.id = "step-3";
+  followUp.anchor = "step-3";
+  followUp.stepId = 3;
+  followUp.observation = { results: [later, unmatched] };
+  followUp.observations = followUp.observation.results;
+  steps.push(followUp);
+  delayed.data.finalMetrics.totalSteps = 3;
+  for (const alias of ["toolCalls", "calls", "tools"]) delayed.data.steps[1][alias][0].observations = [matched, later];
+  assert.equal(validateCloudCompleteTrajectory(delayed).data.steps[2]!.observations[1]!.matchedCallId, null);
+});
+
 test("rejects complete trajectory order, private shape, direct locator, and partial mutations", () => {
   const clean = structuredClone(cleanTrajectory) as Record<string, any>;
   const data = clean.data as Record<string, any>;

@@ -258,10 +258,10 @@ interface ProjectionContext {
 
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 const LOCATOR = /(?:[a-z][a-z0-9+.-]*:\/\/|^(?:~[/\\]|\/{1}|[A-Za-z]:[/\\]|\\\\))/i;
-const PUBLIC_OBJECT_KEY = /(?<![A-Za-z0-9])v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}(?=$|[^A-Za-z0-9])/;
-const PRIVATE_OBJECT_KEY = /(?<![A-Za-z0-9])v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl(?=$|[^A-Za-z0-9])/;
-const PUBLIC_OBJECT_KEY_GLOBAL = /(?<![A-Za-z0-9])v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}(?=$|[^A-Za-z0-9])/g;
-const PRIVATE_OBJECT_KEY_GLOBAL = /(?<![A-Za-z0-9])v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl(?=$|[^A-Za-z0-9])/g;
+const PUBLIC_OBJECT_KEY = /v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}/;
+const PRIVATE_OBJECT_KEY = /v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl/;
+const PUBLIC_OBJECT_KEY_GLOBAL = /v1\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/objects\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}/g;
+const PRIVATE_OBJECT_KEY_GLOBAL = /v1\/originals\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/sha256\/[0-9a-f]{64}\.jsonl/g;
 const UNSAFE_KEY = /(?:url|uri|endpoint|bucket|object[_-]?key|public[_-]?key|private|secret|credential|password|token|authorization|scanner|filesystem|filepath|raw|direct)/i;
 
 function unsafeLocator(value: string): boolean {

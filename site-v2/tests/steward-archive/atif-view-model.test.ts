@@ -228,12 +228,41 @@ test("redacts embedded public and private object keys while retaining safe exten
   assertNoLocators(value);
 });
 
+test("redacts validated canonical keys beside alphanumeric extension text", () => {
+  const publicKey = cleanFixture.publication.artifacts.find((artifact) => artifact.artifactId === "artifact-plot")!.publicKey;
+  const privateKey = `v1/originals/${taskId}/${runId}/sha256/${sha("b")}.jsonl`;
+  const cases = [
+    ["public", publicKey],
+    ["private", privateKey],
+  ] as const;
+
+  for (const [kind, key] of cases) {
+    for (const [position, note] of [
+      ["prefix", `safe-x${key}`],
+      ["suffix", `safe-${key}x`],
+    ] as const) {
+      const document = copy(cleanFixture.atif) as MutableRecord;
+      document.agent.extra = { note, fact: `${kind}-${position}-fact` };
+      const value = buildAtifViewModel(validatedFixtureDocument(document), {
+        artifacts: artifacts(),
+      });
+
+      assert.equal(value.agent.extensions?.note, note.replace(key, "[unavailable]"));
+      assert.equal(value.agent.extensions?.fact, `${kind}-${position}-fact`);
+      assert.equal(JSON.stringify(value).includes(key), false, `${kind} ${position} key leaked`);
+      assertNoLocators(value);
+    }
+  }
+});
+
 test("leaves incomplete object-key-shaped extension text intact", () => {
   const document = copy(cleanFixture.atif) as MutableRecord;
   const incompletePublic = `v1/tasks/${taskId}/objects/sha256/aa/${"a".repeat(63)}`;
   const incompletePrivate = `v1/originals/${taskId}/${runId}/sha256/${"b".repeat(63)}.jsonl`;
+  const noncanonicalPublic = `v1/tasks/${taskId}/objects/sha256/aa/${"g".repeat(64)}`;
+  const noncanonicalPrivate = `v1/originals/${taskId}/${runId}/sha256/${"B".repeat(64)}.jsonl`;
   document.agent.extra = {
-    note: `public ${incompletePublic}; private ${incompletePrivate}`,
+    note: `public ${incompletePublic}; private ${incompletePrivate}; noncanonical ${noncanonicalPublic}; ${noncanonicalPrivate}`,
   };
 
   const value = buildAtifViewModel(validatedFixtureDocument(document), {

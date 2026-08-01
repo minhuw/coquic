@@ -222,27 +222,34 @@ announced without replacing retained valid evidence with an error message.
 
 - Validate task IDs before reading public artifacts; invalid IDs return 400 and
   unknown or hidden IDs return 404.
-- Show title, state, current conclusion, source, priority/risk, creation/update,
-  structured implementation plan, attempts, ordered pipeline, and event timeline.
-- Show implementation-planning runs before attempts, including retry order,
-  status, duration, model settings, exit state, transcript completeness, model
-  usage and cadence when available, and the accepted structured plan result.
-- Pipeline stages: Plan, Implementation, Validation, Review, and Integration,
-  including feedback loops and a text equivalent.
-- Each attempt is selectable and exposes shareable Transcript, Patch,
-  Validation, and Review URL views with native keyboard navigation.
-- At wide desktop widths, implementation plan, selected attempt evidence, and
-  ordered timeline remain visible as three parallel panes. Compact screens keep
-  the same evidence in plan, attempt, timeline order.
-- Transcript records distinguish task/user messages, agent messages, reasoning,
-  tool or command calls, outputs, exit codes, and truncation.
-- Validation exposes exact commands, result, exit code, duration, summary, and
-  log artifact state. Review exposes verdict, structured findings, validation
-  gaps, required changes, and remaining risk.
-- Patch supports unified and side-by-side diff; large code/timelines scroll
-  locally; closing expanded diff restores focus.
+- Show title, lifecycle state, disclosure, creation/completion timestamps,
+  publication counts, pipelines, runs, ordered events, and validated artifacts.
+- Keep pipeline and run selection shareable in the URL. Selected run metadata
+  includes role, status, timing, duration, content digest, and trajectory action.
+- At wide desktop widths, task identity, relational execution evidence, and the
+  selected complete trajectory remain readable as parallel evidence panes.
+  Compact screens keep the same evidence in task, run, trajectory, and timeline
+  order.
+- The selected run exposes one complete trajectory. Render every validated record
+  in source order with a stable deep-link anchor, record role, timestamp,
+  message content, reasoning, metrics, tool calls, observations, lineage, and
+  safe Markdown links. Do not paginate, prefix, or replace records with raw
+  payload bytes.
+- Tool disclosures are native keyboard controls. Failed tools are open by
+  default, show their arguments and failure state, and retain paired or
+  unpaired observation labels. Command output and other wide values scroll only
+  inside their local evidence region.
 - Artifact states distinguish available, not produced, unavailable, redacted,
-  and truncated.
+  and truncated. Timeline events preserve positive sequence and ownership.
+- Validated JPEG, PNG, GIF, and WebP artifacts render immediately in a stable
+  contained frame and keep a same-origin download action. Byte-preserved
+  published animation may continue when reduced motion is requested; this is an
+  accepted WCAG 2.2.2 residual risk, not permission for Site-authored motion.
+- A complete run with no records is a valid empty state and says that no
+  trajectory records were published. Loading is announced, and one transient
+  network, timeout, rate-limit, or server failure exposes a manual Retry. Missing,
+  malformed, integrity, resource, ownership, and schema failures are terminal
+  and never offer Retry or a partial fallback.
 
 ## Steward cloud reader
 
@@ -258,9 +265,11 @@ announced without replacing retained valid evidence with an error message.
   counts, sequence, timing, hashes, public keys, and disclosure before display;
   do not substitute partial or stale data. See [the cloud reader API](API.md#steward-cloud-reader)
   for the version-3 envelope and route contracts.
-- The trajectory route returns one complete `schemaVersion: "3.0"` descriptor
-  for an immutable sanitized JSON artifact. It never returns raw ATIF, partial
-  records, prefixes, cursors, or an unvalidated fallback.
+- The trajectory route returns one complete `schemaVersion: "4.0"` display
+  model for the immutable sanitized JSON artifact. The browser fetch is one
+  cancellable request after the task shell renders; it validates the response
+  before displaying all records. It never returns raw ATIF, partial records,
+  prefixes, cursors, or an unvalidated fallback.
 - Artifact actions validate task identity and logical paths, derive a
   content-addressed public R2 key below the configured base, and return exactly
   one same-origin `307 Temporary Redirect`. Site never proxies bytes or accepts

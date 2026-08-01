@@ -618,6 +618,10 @@ Every analytical figure has:
 - Prefer one orchestrated reveal over staggered decoration.
 - Interaction never waits for animation.
 - Reduced-motion preferences remove nonessential animation.
+- Validated published JPEG, PNG, GIF, and WebP evidence renders immediately and
+  preserves its source bytes; animated evidence may continue under reduced motion.
+  This is an accepted WCAG 2.2.2 residual risk for published media, while all
+  Site-authored nonessential motion still stops for reduced-motion users.
 
 ## Responsive Behavior
 
@@ -711,6 +715,35 @@ Generated reports are primary artifacts, not decorative embeds.
 Use a quiet operational monitor with explicit freshness, conclusion, queues,
 signals, audit, and publication evidence. Do not imitate a command center or
 expose mutation controls. Metadata never occupies a balancing column.
+
+#### Complete task trajectory
+
+The task detail makes the complete validated trajectory the primary evidence
+object. Its hierarchy is stable across routes and widths:
+
+1. run identity, completion state, disclosure, timing, configuration, metrics,
+   and provenance;
+2. a keyboard-operable run outline with stable record anchors;
+3. every record in source order, with message content, reasoning, metrics,
+   tool calls, paired or unpaired observations, and lineage;
+4. validated artifact evidence, using local download actions or a contained
+   media frame.
+
+Complete means every validated record is present. There is no progressive
+control, raw payload fallback, prefix, or client-side pagination. Empty runs
+retain the same hierarchy and state that no records were published. Failed tool
+disclosures open initially so the failure is immediately inspectable; all
+disclosures remain native keyboard controls. Markdown links are allowlisted,
+same-origin artifact actions stay same-origin, and external links use opener
+isolation.
+
+At desktop widths the outline and evidence remain parallel without widening the
+document. At compact widths they return to source order. Code, command output,
+tables, and long identifiers scroll only inside named local regions. Image
+evidence uses an explicit contained frame with reserved geometry at 1600px,
+390px, and 320px widths and at 200% page scale. The browser proof covers
+nonblank screenshots, local overflow, nonoverlapping records, keyboard focus,
+dark, forced-colors, and reduced-motion states.
 
 ## Do and Don't
 

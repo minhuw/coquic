@@ -1,274 +1,312 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { appendFile, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 
-test("dashboard renders canonical counts, totals, coverage, and freshness", async ({ page }) => {
-  const errors: string[] = [];
-  page.on("console", (message) => { if (message.type() === "error" && !message.text().startsWith("Failed to load resource:")) errors.push(message.text()); });
-  page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto("/steward?view=tasks");
-  await expect(page.getByRole("heading", { level: 1, name: "Steward" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "All canonical states" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Synthetic live task" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Synthetic completed task" })).toBeVisible();
-  await expect(page.getByText("1,050", { exact: true })).toBeVisible();
-  await expect(page.getByText("7/209 runs", { exact: true }).first()).toBeVisible();
-  expect(errors).toEqual([]);
-});
+import cleanTrajectory from "../examples/steward-cloud/complete-trajectory-clean.json";
+import redactedTrajectory from "../examples/steward-cloud/complete-trajectory-redacted-multimodal.json";
 
-test("the 51st active task remains reachable while terminal history stays paginated at 50", async ({ page, request }) => {
-  await page.goto("/steward?view=tasks");
-  await expect(page.getByRole("link", { name: "Synthetic live task" })).toBeVisible();
-  const active = await request.get("/api/steward/tasks?scope=active");
-  const activePayload = await active.json() as { data: { tasks: Array<{ status: string }>; nextCursor: string | null; total: number } };
-  expect(activePayload.data.tasks).toHaveLength(50); expect(activePayload.data.nextCursor).toBeTruthy(); expect(activePayload.data.total).toBe(51);
-  await page.getByRole("link", { name: "Next active tasks" }).click();
-  await expect(page).toHaveURL(/activeCursor=/); await expect(page.getByRole("link", { name: "Active task 51" })).toBeVisible();
-  const history = await request.get("/api/steward/tasks");
-  const historyPayload = await history.json() as { data: { tasks: Array<{ status: string }>; nextCursor: string | null } };
-  expect(historyPayload.data.tasks).toHaveLength(50); expect(historyPayload.data.nextCursor).toBeTruthy();
-  expect(historyPayload.data.tasks.every((task) => !["queued", "running", "reviewing", "integrating"].includes(task.status))).toBeTruthy();
-});
+type JsonObject = { [key: string]: unknown };
 
-test("archive-backed signals and planning expose progressive evidence and honest pending links", async ({ page, request }) => {
-  await page.goto("/steward?view=signals&signal=signal-synthetic-consumed");
-  await expect(page.getByRole("heading", { name: "Signals, observations, and their decisions" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "fingerprint-consumed" })).toBeVisible();
-  const signalEvidence = page.getByLabel("Signal evidence");
-  await expect(signalEvidence.locator("ol > li")).toHaveCount(11);
-  await expect(page.getByText("Task task-synthetic-accepted pending archive arrival", { exact: true })).toBeVisible();
+const ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 
-  await page.goto("/steward?view=planning&run=planner-synthetic-success&proposal=proposal-synthetic-1");
-  await expect(page.getByRole("heading", { name: "Every planner run and proposal disposition" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Scheduler wakeups" })).toBeVisible();
-  await expect(page.getByText("signal-synthetic-consumed", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("Task task-synthetic-accepted pending archive arrival; disposition remains accepted.", { exact: true })).toBeVisible();
-  const transcript = page.getByLabel("Planner transcript");
-  const records = transcript.locator("ol > li");
-  await expect(records).toHaveCount(50);
-  await transcript.getByRole("button", { name: "Load more transcript records" }).click();
-  await expect(records).toHaveCount(77);
-  await expect(transcript.getByText(/"compatible":/).first()).toBeVisible();
+function cloneJson(value: unknown): JsonObject {
+  return structuredClone(value) as JsonObject;
+}
 
-  expect((await request.get("/api/steward/signals")).status()).toBe(404);
-  expect((await request.get("/api/steward/signals/signal-synthetic-consumed")).status()).toBe(404);
-  expect((await request.get("/api/steward/planner-runs")).status()).toBe(404);
-  expect((await request.get("/api/steward/planner-runs/planner-synthetic-success")).status()).toBe(404);
-});
+function trajectoryData(value: JsonObject): JsonObject {
+  return value.data as JsonObject;
+}
 
-test("selected signal evidence appends on revision without resetting loaded records", async ({ page, request }) => {
-  await page.addInitScript(() => {
-    const nativeTimeout = window.setTimeout.bind(window);
-    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => nativeTimeout(handler, timeout && timeout >= 30_000 ? 50 : timeout, ...args)) as typeof window.setTimeout;
-  });
-  await page.goto("/steward?view=signals&signal=signal-synthetic-consumed");
-  const evidence = page.getByLabel("Signal evidence");
-  const records = evidence.locator("ol > li");
-  await expect(records).toHaveCount(11);
-  const before = await (await request.get("/api/steward/revision")).json() as { data: { revision: number } };
-  const root = process.env.STEWARD_TEST_CONTROL_LOOP_ROOT!;
-  const event = { eventId: "event-browser-refresh", epochId: "epoch-synthetic-20260722", sequence: 39, occurredAt: "2026-07-25T00:00:00Z", kind: "signal.transition", payload: { transition: { signalId: "signal-synthetic-consumed", fromStatus: "planned", toStatus: "superseded", plannerRunId: "planner-synthetic-success", reasonCode: "refresh_visible" } } };
-  await appendFile(join(root, "events", "2026", "07", "24.jsonl"), `${JSON.stringify(event)}\n`);
-  await expect.poll(async () => ((await (await request.get("/api/steward/revision")).json()) as { data: { revision: number } }).data.revision).toBeGreaterThan(before.data.revision);
-  await expect(records).toHaveCount(12);
-  await expect(evidence.getByText(/refresh_visible/).first()).toBeVisible();
-  const ids = await records.evaluateAll((nodes) => nodes.map((node) => node.textContent));
-  expect(new Set(ids).size).toBe(12);
-});
-
-test("selected signal evidence replaces superseded records after a generation refresh", async ({ page }) => {
-  let replacement = false;
-  await page.route("**/api/steward/signals/signal-synthetic-consumed/events*", async (route) => {
-    const cursor = new URL(route.request().url()).searchParams.get("cursor");
-    if (cursor === "stale-generation") {
-      replacement = true;
-      await route.fulfill({ status: 409, contentType: "application/problem+json", body: JSON.stringify({ status: 409 }) });
+async function serveTrajectory(page: Page, taskId: string, runId: string, value: unknown) {
+  await page.route(`**/api/steward/tasks/${taskId}/transcript**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("run") !== runId) {
+      await route.fallback();
       return;
     }
-    const records = replacement
-      ? [{ eventId: "replacement", sequence: 1, payload: { label: "replacement" } }, { eventId: "retained", sequence: 2, payload: { label: "retained" } }]
-      : [{ eventId: "superseded", sequence: 1, payload: { label: "superseded" } }, { eventId: "retained", sequence: 2, payload: { label: "retained" } }];
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { records, nextCursor: null, resumeCursor: replacement ? "replacement-frontier" : "stale-generation" } }) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(value),
+    });
   });
-  await page.goto("/steward?view=signals&signal=signal-synthetic-consumed");
-  const evidence = page.getByLabel("Signal evidence");
-  await expect(evidence.locator("ol > li")).toHaveCount(2);
-  await expect(evidence.getByText("superseded")).toBeVisible();
+}
 
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent("steward-revision", { detail: 2 })));
-
-  await expect(evidence.getByText("replacement")).toBeVisible();
-  await expect(evidence.getByText("superseded")).toHaveCount(0);
-  await expect(evidence.locator("ol > li")).toHaveCount(2);
-});
-
-test("revision monitoring refreshes once per revision and pauses while hidden", async ({ page }) => {
-  let revision = 1;
-  let polls = 0;
-  let refreshes = 0;
-  await page.addInitScript(() => {
-    const nativeTimeout = window.setTimeout.bind(window);
-    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => nativeTimeout(handler, timeout && timeout >= 30_000 ? 50 : timeout, ...args)) as typeof window.setTimeout;
+async function serveImageArtifacts(page: Page, taskId: string) {
+  await page.route(`**/api/steward/tasks/${taskId}/artifact**`, async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path");
+    if (path === "steps/2/plot.png") {
+      await route.fulfill({ status: 200, contentType: "image/png", body: ONE_PIXEL_PNG });
+      return;
+    }
+    await route.fallback();
   });
-  await page.route("**/api/steward/revision", async (route) => { polls += 1; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { revision } }) }); });
-  page.on("request", (request) => { const headers = request.headers(); if (headers.rsc === "1" && !headers["next-router-prefetch"] && request.url().includes("/steward?view=tasks")) refreshes += 1; });
+}
+
+async function openCleanTrajectory(page: Page) {
+  await serveTrajectory(page, "task-clean", "run-clean", cleanTrajectory);
+  await serveImageArtifacts(page, "task-clean");
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  const trajectory = page.locator("[data-atif-trajectory]");
+  await expect(trajectory).toBeVisible();
+  await expect(page.locator('[data-trajectory-state="ready"]')).toBeVisible();
+  return trajectory;
+}
+
+function failedToolTrajectory(): JsonObject {
+  const payload = cloneJson(cleanTrajectory);
+  const data = trajectoryData(payload);
+  const steps = data.steps as JsonObject[];
+  const calls = (steps[1]?.calls ?? []) as JsonObject[];
+  if (calls[0]) calls[0].extensions = { status: "failed", error: "command failed" };
+  return payload;
+}
+
+function emptyTrajectory(): JsonObject {
+  const payload = cloneJson(cleanTrajectory);
+  const data = trajectoryData(payload);
+  data.steps = [];
+  data.artifacts = [];
+  (data.metadata as JsonObject).artifacts = [];
+  return payload;
+}
+
+function problemBody(retryable: boolean) {
+  return JSON.stringify({
+    schemaVersion: "3.0",
+    problem: {
+      code: "UNAVAILABLE",
+      message: "The complete trajectory is temporarily unavailable.",
+      retryable,
+      status: 503,
+      type: null,
+    },
+  });
+}
+
+async function holdTrajectoryResponse(page: Page, taskId: string, runId: string, response: unknown) {
+  let release!: () => Promise<void>;
+  const pending = new Promise<void>((resolve) => {
+    release = async () => {
+      resolve();
+    };
+  });
+  await page.route(`**/api/steward/tasks/${taskId}/transcript**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("run") !== runId) {
+      await route.fallback();
+      return;
+    }
+    await pending;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
+  });
+  return () => release();
+}
+
+test("Steward task navigation exposes the public task channels", async ({ page }) => {
   await page.goto("/steward?view=tasks");
-  await expect.poll(() => polls).toBeGreaterThan(0);
-  refreshes = 0; revision = 2;
-  await expect.poll(() => refreshes).toBe(1);
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  expect(refreshes).toBe(1);
-  await page.evaluate(() => { Object.defineProperty(document, "hidden", { configurable: true, value: true }); document.dispatchEvent(new Event("visibilitychange")); });
-  const hiddenPolls = polls;
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  expect(polls).toBeLessThanOrEqual(hiddenPolls + 1);
-  await page.evaluate(() => { Object.defineProperty(document, "hidden", { configurable: true, value: false }); document.dispatchEvent(new Event("visibilitychange")); });
-  await expect.poll(() => polls).toBeGreaterThan(hiddenPolls);
+  await expect(page.getByRole("heading", { level: 1, name: "Steward" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Every visible task publication" })).toBeVisible();
+  const channels = page.getByRole("region", { name: "Steward task channels" });
+  for (const label of ["Signals", "Planning", "Tasks", "Integration"]) await expect(channels.getByRole("link", { name: new RegExp(label) })).toBeVisible();
+  const taskLinks = page.locator('a[href^="/steward/tasks/"]');
+  await expect(taskLinks.first()).toBeVisible();
+  await taskLinks.first().click();
+  await expect(page).toHaveURL(/\/steward\/tasks\//);
 });
 
-test("task detail preserves every pipeline run and owned review and patch evidence", async ({ page }) => {
-  await page.goto("/steward/tasks/task-complete-synthetic");
-  await expect(page.getByRole("heading", { level: 1, name: "Synthetic completed task" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Planning runs" })).toContainText("run-plan");
-  await expect(page.locator("#attempts > div:last-child > div")).toHaveCount(2);
-  await page.getByRole("button", { name: /Pipeline 01:/ }).click();
-  const initialPipeline = page.locator("#attempt-1-evidence");
-  for (const runId of ["run-plan", "run-implementation", "run-formality", "run-review", "run-repair-implementation", "run-repair-review", "run-integration"]) await expect(page.getByText(runId, { exact: true }).first()).toBeVisible();
-  await expect(initialPipeline.getByRole("link", { name: /View transcript for run-/ })).toHaveCount(4);
-  await initialPipeline.getByRole("link", { name: "View transcript for run-formality" }).click();
-  await expect(page).toHaveURL(/attempt=0&run=run-formality&artifact=transcript/);
-  await expect(page.getByRole("link", { name: "View transcript for run-formality" })).toHaveAttribute("aria-current", "page");
-  await expect(page.locator("#attempt-1-evidence").getByLabel("Agent transcript")).toBeVisible();
-  const repairDisclosure = page.getByRole("button", { name: /Pipeline 02:/ });
-  if (await repairDisclosure.getAttribute("aria-expanded") === "false") await repairDisclosure.click();
-  const repairPipeline = page.locator("#attempt-2-evidence");
-  await expect(repairPipeline.getByRole("link", { name: /View transcript for run-/ })).toHaveCount(3);
-  await repairPipeline.getByRole("link", { name: "View transcript for run-integration" }).click();
-  await expect(page).toHaveURL(/attempt=1&run=run-integration&artifact=transcript/);
-  await expect(page.getByText("Owned runs").first()).toBeVisible();
-  await expect(page.getByText("Integration").first()).toBeVisible();
-  await page.goto("/steward/tasks/task-complete-synthetic?attempt=0&artifact=review#attempt-1-evidence");
-  await expect(page.getByText(/Raw evidence/).first()).toBeVisible();
-  await expect(page.getByText(/Effective evidence/).first()).toBeVisible();
-  await page.goto("/steward/tasks/task-complete-synthetic?attempt=0&artifact=patch#attempt-1-evidence");
-  await expect(page.getByRole("link", { name: "Download raw patch" })).toHaveAttribute("href", /artifact\?path=/);
-});
-
-test("a transcript already at end discovers active append without losing loaded rows", async ({ page, request }) => {
-  await page.addInitScript(() => {
-    const nativeTimeout = window.setTimeout.bind(window);
-    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => nativeTimeout(handler, timeout && timeout >= 30_000 ? 50 : timeout, ...args)) as typeof window.setTimeout;
-  });
-  await page.goto("/steward/tasks/task-running-synthetic?artifact=transcript");
-  const transcript = page.getByLabel("Agent transcript"); const records = transcript.locator('[id^="archive-event-"]');
-  await transcript.getByRole("button", { name: "Load more" }).click(); await expect(records).toHaveCount(77);
-  const before = await (await request.get("/api/steward/revision")).json() as { data: { revision: number } };
-  const root = process.env.STEWARD_TEST_TASKS_ROOT!;
-  await appendFile(join(root, "task-running", "pipelines", "pipeline-initial", "runs", "run-implementation-recovery", "codex.jsonl"), `${JSON.stringify({ record_type: "assistant.message", text: "Active append after end" })}\n`);
-  await expect.poll(async () => ((await (await request.get("/api/steward/revision")).json()) as { data: { revision: number } }).data.revision).toBeGreaterThan(before.data.revision);
-  const load = transcript.getByRole("button", { name: "Load more" }); await expect(load).toBeEnabled(); await load.click();
-  await expect(records).toHaveCount(78); await expect(transcript.getByText("Active append after end", { exact: true }).first()).toBeVisible();
-  const ordinals = await records.evaluateAll((nodes) => nodes.map((node) => node.id)); expect(new Set(ordinals).size).toBe(78);
-});
-
-test("raw downloads stream accepted bytes with safe attachment headers", async ({ request }) => {
-  const response = await request.get("/api/steward/tasks/task-running-synthetic/artifact?path=prompt.md");
-  expect(response.ok()).toBeTruthy();
-  expect(response.headers()["content-type"]).toContain("text/markdown");
-  expect(response.headers()["content-disposition"]).toMatch(/^attachment; filename="prompt\.md"; filename\*=UTF-8''prompt\.md$/);
-  expect(response.headers()["x-content-type-options"]).toBe("nosniff"); expect(response.headers()["cache-control"]).toBe("no-store");
-  expect(Number(response.headers()["content-length"])).toBe((await response.body()).length);
-});
-
-test("artifact bodies are fetched only after their owning evidence is selected", async ({ page }) => {
-  const artifactRequests: string[] = [];
-  page.on("request", (request) => { if (request.url().includes("/artifact?")) artifactRequests.push(request.url()); });
-  await page.goto("/steward/tasks/task-complete-synthetic?attempt=0&artifact=transcript");
-  expect(artifactRequests).toEqual([]);
-  await page.getByRole("link", { name: "Validation" }).first().click();
-  await expect(page.getByRole("link", { name: "Download validation log" }).first()).toBeVisible(); expect(artifactRequests).toEqual([]);
-  const download = page.waitForEvent("download"); await page.getByRole("link", { name: "Download validation log" }).first().click(); await download;
-  expect(artifactRequests).toHaveLength(1);
-});
-
-test("revision polling backs off, announces delay, and cleans up after unmount", async ({ page }) => {
-  await page.addInitScript(() => {
-    const nativeTimeout = window.setTimeout.bind(window);
-    (window as typeof window & { __revisionDelays: number[] }).__revisionDelays = [];
-    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => { if (timeout && timeout >= 30_000) (window as typeof window & { __revisionDelays: number[] }).__revisionDelays.push(timeout); return nativeTimeout(handler, timeout && timeout >= 30_000 ? timeout / 1000 : timeout, ...args); }) as typeof window.setTimeout;
-  });
-  let polls = 0;
-  await page.route("**/api/steward/revision", async (route) => { polls += 1; if (polls <= 2) await route.fulfill({ status: 503, body: "unavailable" }); else await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: { revision: 1 } }) }); });
-  await page.goto("/steward?view=tasks");
-  await expect(page.getByText("Archive refresh is delayed. Retrying automatically.")).toBeAttached();
-  await expect.poll(async () => page.evaluate(() => (window as typeof window & { __revisionDelays: number[] }).__revisionDelays)).toEqual(expect.arrayContaining([60_000, 120_000]));
-  await expect.poll(() => polls).toBeGreaterThanOrEqual(3); await page.goto("/"); const stoppedAt = polls; await page.waitForTimeout(200); expect(polls).toBe(stoppedAt);
-});
-
-test("Steward surfaces have no serious accessibility findings across supported media", async ({ page }) => {
-  for (const media of [{ colorScheme: "dark" as const, reducedMotion: "reduce" as const }, { forcedColors: "active" as const }]) {
-    await page.emulateMedia(media); await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/steward/tasks/task-complete-synthetic");
-    const findings = (await new AxeBuilder({ page }).analyze()).violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
-    expect(findings, findings.map((finding) => `${finding.id}: ${finding.help}`).join("\n")).toEqual([]);
-    const width = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth })); expect(width.scroll).toBeLessThanOrEqual(width.client);
+test("global Signals and Planning remain explicit terminal unavailable states", async ({ page, request }) => {
+  for (const [view, heading] of [["signals", "Signals unavailable"], ["planning", "Planning unavailable"]] as const) {
+    await page.goto(`/steward?view=${view}`);
+    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    await expect(page.getByText("No local fallback or fixture records are displayed.", { exact: true })).toBeVisible();
+  }
+  for (const endpoint of ["/api/steward/revision", "/api/steward/signals/example/events", "/api/steward/planner-runs/example/transcript"]) {
+    const response = await request.get(endpoint);
+    expect(response.status()).toBe(410);
+    expect(await response.text()).not.toContain("example");
   }
 });
 
-test("selected transcript loads bounded chunks without duplicates and preserves focus", async ({ page }) => {
-  await page.goto("/steward/tasks/task-running-synthetic?artifact=transcript");
-  const transcript = page.getByLabel("Agent transcript");
-  const records = transcript.locator('[id^="archive-event-"]');
-  await expect(records).toHaveCount(50);
-  const load = transcript.getByRole("button", { name: "Load more" });
-  await load.click();
-  await expect(records).toHaveCount(78);
-  const transcriptButton = transcript.getByRole("button", { name: "All complete records loaded" });
-  await expect(transcriptButton).toBeFocused();
+test("complete trajectory renders every record in source order with stable anchors", async ({ page }) => {
+  const trajectory = await openCleanTrajectory(page);
+  const records = trajectory.locator("[data-trajectory-anchor]");
+  await expect(records).toHaveCount(2);
+  expect(await records.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-trajectory-anchor")))).toEqual(["step-1", "step-2"]);
   const ids = await records.evaluateAll((nodes) => nodes.map((node) => node.id));
   expect(new Set(ids).size).toBe(ids.length);
+  const outlineLinks = page.getByRole("complementary", { name: "Run outline" }).locator("a[href^='#']");
+  await expect(outlineLinks).toHaveCount(2);
+  for (const href of await outlineLinks.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("href")))) {
+    expect(href).toMatch(/^#/);
+    expect(await page.locator(href!).count()).toBe(1);
+  }
+  await expect(trajectory.getByRole("button", { name: /load|more|next page/i })).toHaveCount(0);
 });
 
-test("desktop and compact archive surfaces do not overflow", async ({ page }, testInfo) => {
-  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 900 }]) {
-    await page.setViewportSize(viewport);
-    await page.goto("/steward/tasks/task-complete-synthetic");
+test("trajectory content uses safe links, local overflow, and paired tool evidence", async ({ page }) => {
+  const trajectory = await openCleanTrajectory(page);
+  const links = await trajectory.locator("a[href]").evaluateAll((nodes) => nodes.map((node) => ({
+    href: node.getAttribute("href") ?? "",
+    target: node.getAttribute("target"),
+    rel: node.getAttribute("rel"),
+  })));
+  for (const link of links) {
+    expect(link.href.startsWith("/") || link.href.startsWith("#")).toBeTruthy();
+    expect(link.href).not.toMatch(/^https?:\/\//);
+    expect(link.href).not.toContain("objects.example");
+    if (link.target === "_blank") expect(link.rel).toContain("noreferrer");
+  }
+  await expect(trajectory.locator("[data-tool-call]")).toHaveCount(1);
+  await expect(trajectory.locator("[data-tool-observation-association='call-1']")).toBeVisible();
+  const dimensions = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+  expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
+  const localOverflow = await trajectory.locator("[class*='overflow-auto'], [class*='overflow-x-auto']").evaluateAll((nodes) => nodes.map((node) => node.scrollWidth >= node.clientWidth));
+  expect(localOverflow.every(Boolean)).toBeTruthy();
+});
+
+test("failed tools open by default and remain keyboard-operable", async ({ page }) => {
+  await serveTrajectory(page, "task-clean", "run-clean", failedToolTrajectory());
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  const failedTool = page.locator("details[data-tool-status='failed']");
+  await expect(failedTool).toHaveAttribute("open", "");
+  const summary = failedTool.locator("summary");
+  await summary.focus();
+  await expect(summary).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(failedTool).not.toHaveAttribute("open", "");
+  await page.keyboard.press("Enter");
+  await expect(failedTool).toHaveAttribute("open", "");
+});
+
+test("redacted multimodal trajectory preserves disclosure and stable image frames", async ({ page }) => {
+  await serveTrajectory(page, "task-redacted", "run-redacted", redactedTrajectory);
+  await serveImageArtifacts(page, "task-redacted");
+  await page.goto("/steward/tasks/task-redacted?pipeline=pipeline-redacted&run=run-redacted");
+  const trajectory = page.locator("[data-atif-trajectory]");
+  await expect(page.getByText("Public values redacted", { exact: true })).toBeVisible();
+  await expect(page.getByText("Original retained", { exact: true })).toBeVisible();
+  const frame = trajectory.locator("[data-artifact-frame]").first();
+  await expect(frame).toBeVisible();
+  const image = frame.locator("img[data-artifact-image]");
+  await expect(image).toBeVisible();
+  await expect.poll(async () => image.evaluate((node) => ({ width: (node as HTMLImageElement).naturalWidth, height: (node as HTMLImageElement).naturalHeight }))).toEqual({ width: 1, height: 1 });
+  await expect(trajectory.locator("[data-artifact-unavailable]")).toHaveCount(1);
+  const hrefs = await trajectory.locator("[data-artifact-download]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("href") ?? ""));
+  expect(hrefs.length).toBeGreaterThan(0);
+  expect(hrefs.every((href) => href.startsWith("/api/steward/tasks/task-redacted/artifact?path="))).toBeTruthy();
+});
+
+test("trajectory loading announces completion after one cancellable request", async ({ page }) => {
+  const release = await holdTrajectoryResponse(page, "task-clean", "run-clean", cleanTrajectory);
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  await expect(page.locator('[data-trajectory-state="loading"]')).toBeVisible();
+  await expect(page.getByRole("status", { name: "Loading complete trajectory" })).toBeVisible();
+  await release();
+  await expect(page.locator('[data-trajectory-state="ready"]')).toBeVisible();
+  await expect(page.getByRole("status", { name: "Complete trajectory loaded" })).toBeAttached();
+});
+
+test("empty trajectory is complete without fabricated records", async ({ page }) => {
+  await serveTrajectory(page, "task-clean", "run-clean", emptyTrajectory());
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  await expect(page.getByRole("heading", { name: "Completed empty run" })).toBeVisible();
+  await expect(page.locator("[data-empty-run]")).toBeVisible();
+  await expect(page.locator("[data-trajectory-records]")).toHaveCount(0);
+});
+
+test("transient trajectory failure offers manual Retry and terminal failure does not", async ({ page }) => {
+  let attempts = 0;
+  await page.route("**/api/steward/tasks/task-clean/transcript**", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: problemBody(true) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(cleanTrajectory) });
+  });
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  await expect(page.getByRole("heading", { name: "Trajectory unavailable" })).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry" });
+  await expect(retry).toBeVisible();
+  await retry.click();
+  await expect(page.locator('[data-trajectory-state="ready"]')).toBeVisible();
+  expect(attempts).toBe(2);
+
+  await page.unroute("**/api/steward/tasks/task-clean/transcript**");
+  await page.route("**/api/steward/tasks/task-clean/transcript**", async (route) => {
+    await route.fulfill({ status: 404, contentType: "application/json", body: problemBody(false) });
+  });
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Trajectory unavailable" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
+});
+
+test("Steward trajectory surfaces meet accessibility and overflow gates", async ({ page }) => {
+  for (const media of [
+    { colorScheme: "dark" as const, reducedMotion: "reduce" as const },
+    { forcedColors: "active" as const },
+  ]) {
+    await page.emulateMedia(media);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const trajectory = await openCleanTrajectory(page);
+    const findings = (await new AxeBuilder({ page }).analyze()).violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
+    expect(findings, findings.map((finding) => `${finding.id}: ${finding.help}`).join("\n")).toEqual([]);
     const dimensions = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
     expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
-    if (viewport.width !== 320) await page.screenshot({ path: testInfo.outputPath(`task-${viewport.width}.png`), fullPage: true });
+    await expect(trajectory.getByRole("heading", { name: "Complete trajectory" }).first()).toBeVisible();
   }
 });
 
-test("task hierarchy remains usable at 200% browser zoom without overflow or overlap", async ({ page }) => {
+test("trajectory remains nonblank and nonoverlapping at desktop, mobile, and 320px", async ({ page }, testInfo) => {
+  await serveTrajectory(page, "task-clean", "run-clean", cleanTrajectory);
+  await serveImageArtifacts(page, "task-clean");
+  for (const viewport of [{ width: 1600, height: 1000 }, { width: 390, height: 844 }, { width: 320, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+    const trajectory = page.locator("[data-atif-trajectory]");
+    await expect(trajectory).toBeVisible();
+    const dimensions = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
+    const records = await trajectory.locator("[data-trajectory-anchor]").evaluateAll((nodes) => nodes.map((node) => {
+      const box = node.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, clipped: node.scrollWidth > node.clientWidth };
+    }));
+    expect(records.every((record) => !record.clipped)).toBeTruthy();
+    for (let index = 1; index < records.length; index += 1) expect(records[index]!.top).toBeGreaterThanOrEqual(records[index - 1]!.bottom - 1);
+    const screenshot = await page.screenshot({ path: testInfo.outputPath(`trajectory-${viewport.width}.png`), fullPage: true });
+    expect(screenshot.byteLength).toBeGreaterThan(1_000);
+  }
+});
+
+test("task hierarchy remains reachable at 200% page scale", async ({ page }) => {
+  await serveTrajectory(page, "task-clean", "run-clean", cleanTrajectory);
   await page.setViewportSize({ width: 640, height: 900 });
-  await page.goto("/steward/tasks/task-complete-synthetic");
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
   const session = await page.context().newCDPSession(page);
   await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
   const zoom = await page.evaluate(() => ({ scale: window.visualViewport?.scale, width: window.visualViewport?.width, client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
-  expect(zoom.scale).toBe(2); expect(zoom.width).toBe(320); expect(zoom.scroll).toBeLessThanOrEqual(zoom.client);
-  const sections = await page.locator("main > div > section").evaluateAll((nodes) => nodes.map((node) => { const box = node.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, clipped: node.scrollWidth > node.clientWidth }; }));
-  expect(sections.every((section) => !section.clipped)).toBeTruthy();
-  for (let index = 1; index < sections.length; index += 1) expect(sections[index].top).toBeGreaterThanOrEqual(sections[index - 1].bottom - 1);
-  await expect(page.getByRole("heading", { level: 1, name: "Synthetic completed task" })).toBeVisible();
-  const pipeline = page.getByRole("button", { name: /Pipeline 01:/ }); await pipeline.focus(); await page.keyboard.press("Enter"); await expect(pipeline).toHaveAttribute("aria-expanded", "true");
-  const transcript = page.locator("#attempt-1-evidence").getByRole("link", { name: "View transcript for run-review" }); await transcript.focus(); await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/run=run-review/); await expect(page.locator("#attempt-1-evidence").getByLabel("Agent transcript")).toBeVisible();
+  expect(zoom.scale).toBe(2);
+  expect(zoom.width).toBe(320);
+  expect(zoom.scroll).toBeLessThanOrEqual(zoom.client);
+  await expect(page.getByRole("heading", { level: 1, name: "Clean publication fixture" })).toBeVisible();
+  const outlineToggle = page.getByRole("button", { name: "Collapse run outline" });
+  await outlineToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Expand run outline" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Collapse run outline" })).toBeFocused();
 });
 
-test("changed accepted transcript prefix returns a stale cursor without replacement bytes", async ({ request }) => {
-  const root = process.env.STEWARD_TEST_TASKS_ROOT;
-  expect(root).toBeTruthy();
-  const path = "pipelines/pipeline-initial/runs/run-implementation-recovery/codex.jsonl";
-  const first = await request.get(`/api/steward/tasks/task-running-synthetic/transcript?run=run-implementation-recovery&path=${encodeURIComponent(path)}&limit=1`);
-  expect(first.ok()).toBeTruthy();
-  const payload = await first.json() as { data: { nextCursor: string } };
-  const absolute = join(root!, "task-running", ...path.split("/"));
-  const original = await readFile(absolute);
-  await writeFile(absolute, `${JSON.stringify({ record_type: "assistant.message", text: "replacement must not escape" })}\n`);
-  const stale = await request.get(`/api/steward/tasks/task-running-synthetic/transcript?run=run-implementation-recovery&path=${encodeURIComponent(path)}&cursor=${encodeURIComponent(payload.data.nextCursor)}`);
-  expect(stale.status()).toBe(409);
-  expect(await stale.text()).not.toContain("replacement must not escape");
-  await writeFile(absolute, original);
-  const traversal = await request.get("/api/steward/tasks/task-running-synthetic/artifact?path=..%2Fepoch.json");
-  expect(traversal.status()).toBe(404);
+test("artifact actions remain same-origin and return one validated redirect", async ({ request }) => {
+  const response = await request.get("/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png", { maxRedirects: 0 });
+  expect(response.status()).toBe(307);
+  const location = response.headers()["location"];
+  expect(location).toBeTruthy();
+  expect(location).not.toContain("private");
+  expect(location).not.toContain("attacker");
+  expect(response.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(response.body()).resolves.toHaveLength(0);
 });

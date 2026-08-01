@@ -15,6 +15,11 @@
 - Reduced-motion preference MUST remove nonessential animation.
 - Touch targets SHOULD be at least 44 by 44 CSS pixels on coarse pointers.
 - Charts MUST have an equivalent semantic table or list.
+- Steward trajectories MUST expose named headings and landmarks, unique record
+  anchors, keyboard-operable outline and disclosure controls, and visible focus.
+  Failed tool disclosures open by default. Loading, completion, empty, transient
+  Retry, and terminal unavailable states use live status text with no ambiguous
+  color-only distinction.
 
 ## Responsive behavior
 
@@ -24,6 +29,9 @@
 - The document MUST NOT horizontally overflow. Wide code, tables, matrices,
   graphs, traces, and packet data MAY scroll inside clearly named regions.
 - Content and commands MUST remain reachable without hover.
+- Steward proof MUST include 1600x1000, 390x844, and 320x900 screenshots, a
+  200%-scale probe, and nonoverlap checks. Image evidence reserves a stable
+  contained frame; valid image loads MUST have nonzero intrinsic dimensions.
 
 ## Resilience and state integrity
 
@@ -34,6 +42,10 @@
   listeners, streams, timers, or records.
 - Client-only enhancements MUST have a deterministic loading/unavailable state.
 - External payloads MUST be schema-validated before rendering.
+- The trajectory client MUST issue one cancellable request for the selected run,
+  ignore late responses after selection or unmount, and expose manual Retry only
+  for retryable transient failures. Empty, malformed, integrity, ownership,
+  resource, and schema failures are terminal and never fall back to a prefix.
 
 ## Security and privacy
 
@@ -68,6 +80,9 @@
   content-addressed public keys below the configured R2 base. The same-origin
   action returns one `307 Temporary Redirect`, never proxies bytes, and ignores
   caller-supplied URLs.
+- Trajectory Markdown links MUST use the allowlist, external links MUST isolate
+  their opener, and image/download actions MUST remain same-origin logical-path
+  routes. Browser assertions MUST never depend on a direct private or R2 URL.
 - The reader has no D1 mutation, local SQLite/cache, filesystem archive, Worker,
   sidecar, compatibility reader, history migration, automatic polling, or raw
   fallback. Public output contains no private locator, credential, matched
@@ -117,6 +132,11 @@
 - `nix develop -c npm --prefix site-v2 run typecheck` and
   `nix develop -c npm --prefix site-v2 run build` MUST pass without cloud
   credentials or a live publication.
-- Complete ATIF visual rendering and browser proof arrive in Plan 056; this
-  contract requires the cloud transport, schema, normalization, and failure
-  gates above without defining those later visual obligations.
+- Complete ATIF browser proof MUST cover clean, redacted multimodal, tool-heavy,
+  empty, transient Retry, and terminal states; source order and unique anchors;
+  safe links; failed-open tools; image decode and frame geometry; one validated
+  same-origin `307`; Axe critical/serious zero; dark, forced-colors,
+  reduced-motion, desktop, compact, 320px, and 200%-zoom states. Retained
+  screenshots MUST be inspected for nonblank, correctly framed, nonoverlapping
+  content. Validated byte-preserved JPEG/PNG/GIF/WebP evidence may animate under
+  reduced motion as the documented WCAG 2.2.2 residual risk.

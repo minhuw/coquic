@@ -617,6 +617,12 @@ class CloudPublisher:
             if durable_reason is not None
             else ("network" if category == "precondition" else category)
         )
+        # ``precondition`` is a provider operation outcome, not one of the
+        # durable outbox reason values.  Keep the provider category in the
+        # returned result, but persist the hide obligation as the bounded
+        # integrity category accepted by the local model.
+        if persisted_reason == "precondition":
+            persisted_reason = "integrity"
         try:
             scheduled = retry(
                 publication_id,

@@ -235,9 +235,16 @@ class _TransientHideProvider(_FakeProvider):
 
 
 class _SQLitePublicationProvider:
-    def __init__(self, *, hide_failures: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        hide_failures: int = 0,
+        put_failure: BaseException | None = None,
+    ) -> None:
         self.hide_failures = hide_failures
+        self.put_failure = put_failure
         self.hide_attempts = 0
+        self.put_attempts = 0
         self.head_visible = True
 
     def hide_task(self, task_id: str, reason: str) -> None:
@@ -247,6 +254,9 @@ class _SQLitePublicationProvider:
         self.head_visible = False
 
     def put_object(self, key: str, content: bytes, object_class: R2ObjectClass, **kwargs: object):
+        self.put_attempts += 1
+        if self.put_failure is not None:
+            raise self.put_failure
         return SimpleNamespace(
             key=key,
             sha256=kwargs.get("expected_sha256"),
@@ -533,6 +543,51 @@ def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> No
     assert current.state is PublicationState.blocked
     assert provider.head_visible is False
     assert provider.hide_attempts == MAX_ATTEMPTS + 1
+
+
+def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    store.enqueue_publication(_sqlite_generation())
+    provider = _SQLitePublicationProvider(
+        put_failure=R2Error(R2ErrorCategory.precondition),
+        hide_failures=1,
+    )
+    clock = [NOW]
+    publisher = CloudPublisher(
+        store,
+        provider,
+        provider,
+        "worker-1",
+        compose=lambda _source, **_kwargs: _composed(),
+        now=lambda: clock[0],
+    )
+
+    first = publisher.publish(IDENTITY.publication_id, source={"stable": True})
+    current = store.get_publication_generation(IDENTITY.publication_id)
+
+    assert first.status is PublicationStatus.retry_wait
+    assert first.reason == "network"
+    assert current is not None
+    assert current.state is PublicationState.retry_wait
+    assert current.reason == "integrity"
+    assert current.lease_owner is None
+    assert provider.put_attempts == 1
+    assert provider.hide_attempts == 1
+    assert provider.head_visible is True
+
+    clock[0] = NOW + timedelta(seconds=2)
+    replay = publisher.publish(IDENTITY.publication_id, source={"stable": True})
+    current = store.get_publication_generation(IDENTITY.publication_id)
+
+    assert replay.status is PublicationStatus.blocked
+    assert replay.reason == "integrity"
+    assert current is not None
+    assert current.state is PublicationState.blocked
+    assert current.reason == "integrity"
+    assert current.lease_owner is None
+    assert provider.put_attempts == 1
+    assert provider.hide_attempts == 2
+    assert provider.head_visible is False
 
 
 def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import re
 import socket
@@ -10,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from ..core.config import StewardConfig
@@ -52,6 +54,7 @@ from ..execution.session import (
     planner_session_for_config,
 )
 from ..execution.task_archive import TaskArchiveWriter
+from ..publication.atif import AtifSource
 from ..publication.generation import (
     PublicationGeneration as ComposedPublicationGeneration,
     compose_publication_generation,
@@ -2370,6 +2373,166 @@ class StewardDaemon:
 
         return max(completed, key=order)
 
+    @staticmethod
+    def _terminal_publication_lifecycle(task: TaskRecord) -> str:
+        status = str(getattr(task, "status", "failed"))
+        if status == TaskStatus.cancelled.value:
+            return "cancelled"
+        if status in {
+            TaskStatus.succeeded.value,
+            TaskStatus.pushed.value,
+            TaskStatus.no_changes.value,
+        }:
+            return "completed"
+        return "failed"
+
+    @staticmethod
+    def _terminal_publication_run_alias(task: TaskRecord, run: object) -> str | None:
+        run_id = getattr(run, "id", None)
+        if not isinstance(run_id, str):
+            return None
+        completed_at = getattr(task, "updated_at", None)
+        if isinstance(completed_at, datetime):
+            try:
+                completed_text = completed_at.astimezone(timezone.utc).isoformat()
+            except (OverflowError, ValueError):
+                completed_text = ""
+        else:
+            completed_text = str(completed_at)
+        seed = "\0".join(
+            (
+                "terminal-publication-v1",
+                task.id,
+                run_id,
+                str(getattr(task, "status", "failed")),
+                completed_text,
+            )
+        )
+        return f"terminal-{hashlib.sha256(seed.encode('utf-8')).hexdigest()}"
+
+    def _terminal_snapshot_is_final(
+        self,
+        task: TaskRecord,
+        snapshot: object,
+    ) -> bool:
+        if not isinstance(snapshot, Mapping):
+            return False
+        task_value = snapshot.get("task")
+        if not isinstance(task_value, Mapping):
+            return False
+        if (
+            task_value.get("taskId") != task.id
+            or task_value.get("lifecycleState")
+            != self._terminal_publication_lifecycle(task)
+        ):
+            return False
+        completed_at = getattr(task, "updated_at", None)
+        if not isinstance(completed_at, datetime):
+            return True
+        expected_completed = completed_at.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        return task_value.get("completedAt") == expected_completed
+
+    def _terminal_publication_snapshot_run_id(
+        self,
+        task: TaskRecord,
+        run: object,
+    ) -> str | None:
+        """Select the sealed terminal snapshot without reusing active evidence."""
+
+        run_id = getattr(run, "id", None)
+        alias = self._terminal_publication_run_alias(task, run)
+        if not isinstance(run_id, str) or alias is None:
+            return None
+        try:
+            terminal_snapshot = load_publication_snapshot(self.config, task.id, alias)
+            if terminal_snapshot is not None:
+                return alias if self._terminal_snapshot_is_final(task, terminal_snapshot) else None
+            original_snapshot = load_publication_snapshot(self.config, task.id, run_id)
+        except Exception:
+            return None
+        if original_snapshot is None or self._terminal_snapshot_is_final(task, original_snapshot):
+            return run_id
+        # An active snapshot is immutable historical evidence.  The terminal
+        # preparation path must have persisted the distinct alias before seal.
+        return alias
+
+    def _terminal_publication_graph(
+        self,
+        task: TaskRecord,
+        run: object,
+        graph: object,
+        terminal_run_id: str,
+    ) -> dict[str, object] | None:
+        """Detach a terminal graph and alias its latest run when required."""
+
+        if not isinstance(graph, Mapping):
+            return None
+        task_value = graph.get("task")
+        entries = graph.get("runs")
+        if not isinstance(task_value, Mapping) or not isinstance(entries, (list, tuple)):
+            return None
+        original_run_id = getattr(run, "id", None)
+        if not isinstance(original_run_id, str):
+            return None
+        terminal = dict(task_value)
+        terminal["lifecycleState"] = self._terminal_publication_lifecycle(task)
+        completed_at = getattr(task, "updated_at", None)
+        if isinstance(completed_at, datetime):
+            terminal["completedAt"] = completed_at.astimezone(timezone.utc).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z")
+        replaced = False
+        copied_entries: list[object] = []
+        for entry in entries:
+            wrapper = entry if isinstance(entry, Mapping) else None
+            source = wrapper.get("source") if wrapper is not None else entry
+            if not isinstance(source, AtifSource):
+                copied_entries.append(dict(entry) if wrapper is not None else entry)
+                continue
+            run_value = source.run
+            if hasattr(run_value, "as_dict") and callable(run_value.as_dict):
+                run_mapping = dict(run_value.as_dict())
+            elif isinstance(run_value, Mapping):
+                run_mapping = dict(run_value)
+            else:
+                copied_entries.append(dict(wrapper) if wrapper is not None else entry)
+                continue
+            if run_mapping.get("runId") != original_run_id:
+                copied_entries.append(dict(entry) if wrapper is not None else entry)
+                continue
+            run_mapping["runId"] = terminal_run_id
+            documents = dict(source.documents) if isinstance(source.documents, Mapping) else {}
+            run_document = documents.get("run.json")
+            if isinstance(run_document, bytes):
+                try:
+                    decoded = json.loads(run_document.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return None
+                if isinstance(decoded, Mapping) and decoded.get("runId") == original_run_id:
+                    decoded = dict(decoded)
+                    decoded["runId"] = terminal_run_id
+                    documents["run.json"] = (
+                        json.dumps(decoded, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                    ).encode("utf-8")
+            copied_source = AtifSource(
+                run=run_mapping,
+                documents=documents,
+                artifacts=source.artifacts,
+            )
+            if wrapper is None:
+                copied_entries.append(copied_source)
+            else:
+                copied = dict(wrapper)
+                copied["source"] = copied_source
+                copied_entries.append(copied)
+            replaced = True
+        if not replaced:
+            return None
+        return {**dict(graph), "task": terminal, "runs": copied_entries}
+
     def _prepare_terminal_publication_snapshot(
         self,
         task: TaskRecord,
@@ -2378,10 +2541,12 @@ class StewardDaemon:
         """Freeze a final source graph before the task archive is sealed."""
 
         run_id = getattr(run, "id", None)
-        if not isinstance(run_id, str):
+        terminal_run_id = self._terminal_publication_run_alias(task, run)
+        if not isinstance(run_id, str) or terminal_run_id is None:
             return False
         try:
-            if load_publication_snapshot(self.config, task.id, run_id) is not None:
+            existing = load_publication_snapshot(self.config, task.id, run_id)
+            if existing is not None and self._terminal_snapshot_is_final(task, existing):
                 return True
             graph_builder = getattr(self.executor, "_integration_publication_graph", None)
             graph = (
@@ -2389,7 +2554,24 @@ class StewardDaemon:
                 if callable(graph_builder)
                 else publication_graph_for_task(self.config, self.store, task)
             )
-            return _write_publication_snapshot(self.config, task.id, run_id, graph)
+            snapshot_run_id = run_id
+            if existing is not None or not self._terminal_snapshot_is_final(task, graph):
+                snapshot_run_id = terminal_run_id
+            if snapshot_run_id != run_id:
+                graph = self._terminal_publication_graph(
+                    task,
+                    run,
+                    graph,
+                    snapshot_run_id,
+                )
+                if graph is None:
+                    return False
+            return _write_publication_snapshot(
+                self.config,
+                task.id,
+                snapshot_run_id,
+                graph,
+            )
         except Exception as exc:
             self._log(
                 "terminal publication snapshot unavailable "
@@ -2430,6 +2612,26 @@ class StewardDaemon:
             return False, "composition_failed"
         if not isinstance(composed, ComposedPublicationGeneration):
             return False, "composition_incomplete"
+        payload = composed.payload
+        task_value = payload.get("task") if isinstance(payload, Mapping) else None
+        if (
+            hasattr(task, "status")
+            and (
+                not isinstance(task_value, Mapping)
+                or task_value.get("taskId") != task.id
+                or task_value.get("lifecycleState")
+                != self._terminal_publication_lifecycle(task)
+            )
+        ):
+            return False, "terminal_lifecycle_mismatch"
+        head_intent = payload.get("headIntent") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(head_intent, Mapping)
+            or head_intent.get("publicationId") != composed.publication_id
+            or head_intent.get("taskId") != task.id
+            or head_intent.get("state") != "visible"
+        ):
+            return False, "head_mismatch"
 
         expected_identity = {
             "publication_id": composed.publication_id,
@@ -2516,8 +2718,23 @@ class StewardDaemon:
         run_id = getattr(run, "id", None)
         if not isinstance(run_id, str):
             return self._terminal_publication_block(task.id, "final_run_invalid")
+        snapshot_run_id = self._terminal_publication_snapshot_run_id(task, run)
+        if snapshot_run_id is None:
+            return self._terminal_publication_block(task.id, "terminal_snapshot_invalid")
+        enqueue_run = run
+        if snapshot_run_id != run_id:
+            enqueue_run = SimpleNamespace(
+                id=snapshot_run_id,
+                state=getattr(run, "state", None),
+                completed_at=getattr(run, "completed_at", None),
+            )
         try:
-            queued = enqueue_materialized_publication(self.config, self.store, task, run)
+            queued = enqueue_materialized_publication(
+                self.config,
+                self.store,
+                task,
+                enqueue_run,
+            )
         except Exception as exc:
             self._log(
                 "terminal publication enqueue failed "
@@ -2537,7 +2754,7 @@ class StewardDaemon:
                     matches = [
                         item
                         for item in listing(task_id=task.id)
-                        if getattr(item, "run_id", None) == run_id
+                        if getattr(item, "run_id", None) == snapshot_run_id
                     ]
                 except Exception:
                     matches = []
@@ -2548,7 +2765,7 @@ class StewardDaemon:
             return self._terminal_publication_block(task.id, "final_generation_missing")
         if (
             getattr(candidate, "task_id", task.id) != task.id
-            or getattr(candidate, "run_id", run_id) != run_id
+            or getattr(candidate, "run_id", snapshot_run_id) != snapshot_run_id
         ):
             return self._terminal_publication_block(
                 task.id,
@@ -2571,7 +2788,7 @@ class StewardDaemon:
             )
         if (
             getattr(generation, "task_id", None) != task.id
-            or getattr(generation, "run_id", None) != run_id
+            or getattr(generation, "run_id", None) != snapshot_run_id
             or getattr(generation, "publication_id", None) != publication_id
         ):
             return self._terminal_publication_block(

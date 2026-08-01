@@ -542,6 +542,172 @@ def test_terminal_publication_receipts_match_immutable_generation(
     )
 
 
+def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from coquic_steward.publication.generation import compose_publication_generation
+
+    active_graph = _publication_graph("active-snapshot")
+    active_composed = compose_publication_generation(
+        active_graph,
+        scanner_runner=lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b""),
+    )
+    assert isinstance(active_composed, PublicationGeneration)
+    task = SimpleNamespace(
+        id=active_composed.task_id,
+        status="failed",
+        updated_at=datetime(2026, 7, 28, 12, 1, tzinfo=timezone.utc),
+    )
+    run = SimpleNamespace(
+        id=active_composed.run_id,
+        state="succeeded",
+        completed_at=datetime(2026, 7, 28, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    daemon = object.__new__(StewardDaemon)
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    archive = session_module.TaskArchiveWriter(SimpleNamespace(tasks_dir=tasks_dir))
+    archive.ensure_epoch()
+    archive.task_dir(task.id).mkdir()
+    assert session_module._write_publication_snapshot(
+        SimpleNamespace(tasks_dir=tasks_dir),
+        task.id,
+        run.id,
+        active_graph,
+    )
+    daemon.config = SimpleNamespace(
+        tasks_dir=tasks_dir,
+        publication=SimpleNamespace(enabled=True),
+    )
+    daemon.executor = SimpleNamespace(
+        _integration_publication_graph=lambda _task: active_graph,
+    )
+    terminal_run_id = daemon._terminal_publication_run_alias(task, run)
+    assert terminal_run_id is not None and terminal_run_id != run.id
+    assert daemon._prepare_terminal_publication_snapshot(task, run)
+    terminal_graph = session_module.load_publication_snapshot(
+        SimpleNamespace(tasks_dir=tasks_dir),
+        task.id,
+        terminal_run_id,
+    )
+    assert terminal_graph is not None
+    assert session_module.load_publication_snapshot(
+        SimpleNamespace(tasks_dir=tasks_dir), task.id, run.id
+    )["task"]["lifecycleState"] == "active"
+    terminal_composed = compose_publication_generation(
+        terminal_graph,
+        scanner_runner=lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b""),
+    )
+    assert isinstance(terminal_composed, PublicationGeneration)
+    assert terminal_composed.publication_id != active_composed.publication_id
+
+    now = datetime.now(timezone.utc)
+
+    def receipts_for(composed: PublicationGeneration) -> list[PublicationReceipt]:
+        values = [
+            PublicationReceipt.public_receipt(
+                item.sha256,
+                item.byte_size,
+                item.public_key,
+                now,
+                item.logical_path,
+            )
+            for item in composed.objects
+        ]
+        values.extend(
+            PublicationReceipt.private_receipt(
+                item.sha256,
+                item.byte_size,
+                private_original_key(item.task_id, item.run_id, item.sha256),
+                now,
+            )
+            for item in composed.private_originals
+        )
+        return values
+
+    active = replace(
+        active_composed.outbox_record,
+        state="exposed",
+        updated_at=now,
+        exposed_at=now,
+    )
+    terminal = replace(
+        terminal_composed.outbox_record,
+        state="queued",
+        updated_at=now,
+    )
+    current = {"generation": terminal}
+    receipts = {
+        active.publication_id: receipts_for(active_composed),
+        terminal.publication_id: receipts_for(terminal_composed),
+    }
+
+    class Store:
+        def __init__(self) -> None:
+            self.events_value: list[SimpleNamespace] = []
+
+        def list_runs(self, _task_id):
+            return [run]
+
+        def get_publication_generation(self, _publication_id):
+            return current["generation"]
+
+        def list_publication_receipts(self, publication_id):
+            return list(receipts[publication_id])
+
+        def events(self, _task_id):
+            return list(self.events_value)
+
+        def add_event(self, task_id, kind, message, data=None):
+            self.events_value.append(
+                SimpleNamespace(
+                    task_id=task_id,
+                    kind=kind,
+                    message=message,
+                    data=data or {},
+                )
+            )
+
+    store = Store()
+    daemon.store = store
+    daemon.logger = None
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.enqueue_materialized_publication",
+        lambda _config, _store, _task, enqueue_run: _enqueue_terminal(
+            enqueue_run, terminal.run_id, current["generation"]
+        ),
+    )
+    daemon._publication_source = lambda generation: (
+        active_graph
+        if generation.publication_id == active.publication_id
+        else terminal_graph
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.compose_publication_generation",
+        lambda source, **_kwargs: (
+            active_composed if source is active_graph else terminal_composed
+        ),
+    )
+
+    assert daemon._terminal_publication_receipts_verified(task, active) == (
+        False,
+        "terminal_lifecycle_mismatch",
+    )
+    assert daemon._terminal_publication_gate(task) is False
+    assert any(
+        event.data.get("reason") == "final_generation_queued"
+        for event in store.events_value
+    )
+
+    current["generation"] = replace(terminal, state="exposed", exposed_at=now)
+    assert daemon._terminal_publication_gate(task) is True
+
+
+def _enqueue_terminal(run: object, expected: str, generation: object) -> object:
+    assert getattr(run, "id", None) == expected
+    return generation
+
+
 def test_materialized_success_enqueues_deterministically_without_transport(
     monkeypatch,
 ) -> None:

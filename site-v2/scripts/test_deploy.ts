@@ -204,16 +204,20 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
       ["duplicate", [...cloudLines, cloudLines[0]]],
       ["malformed", ["CLOUDFLARE_ACCOUNT_ID=not-an-account", ...cloudLines.slice(1)]],
       ["insecure-url", cloudLines.map((line) => line.replace(cloudBaseUrl, "http://objects.example.test/public"))],
+      ["out-of-range-port", cloudLines.map((line) => line.replace(cloudBaseUrl, "https://objects.example.test:99999/public"))],
       ["private-url", cloudLines.map((line) => line.replace(cloudBaseUrl, "https://objects.example.test/public/../private"))],
       ["writer", [...cloudLines.slice(0, 2), "COQUIC_STEWARD_D1_WRITE_TOKEN=writer", ...cloudLines.slice(2)]],
       ["r2-credential", [...cloudLines.slice(0, 2), "AWS_SECRET_ACCESS_KEY=credential", ...cloudLines.slice(2)]],
       ["private-locator", [...cloudLines.slice(0, 2), "COQUIC_STEWARD_PRIVATE_R2_BUCKET=private", ...cloudLines.slice(2)]],
     ];
+    assert.throws(() => new URL("https://objects.example.test:99999/public"), /Invalid URL/);
+    const sshLogBeforeInvalid = await readFile(sshLog, "utf8");
     for (const [label, lines] of invalidInputs) {
       const invalidInput = await writeCloudInput(lines);
       const invalid = await run("bash", [installCloudConfig, invalidInput], cloudEnv);
       assert.notEqual(invalid.code, 0, `${label} input unexpectedly succeeded`);
       assert.ok(!new RegExp(cloudSecret).test(invalid.output), `${label} rejection is redacted`);
+      if (label === "out-of-range-port") assert.equal(await readFile(sshLog, "utf8"), sshLogBeforeInvalid, "malformed port is rejected before SSH");
     }
     const wrongModeInput = await writeCloudInput(cloudLines, 0o644);
     const wrongMode = await run("bash", [installCloudConfig, wrongModeInput], cloudEnv);

@@ -102,7 +102,7 @@ reject_input() {
 validate_field() {
   local field="$1"
   local value="$2"
-  local authority path segment lower_segment encoded decoded
+  local authority path segment lower_segment encoded decoded port
   normalized_value="${value}"
 
   if [[ "${value}" =~ [[:cntrl:]] ]]; then
@@ -136,6 +136,15 @@ validate_field() {
       fi
       [[ -n "${authority}" && "${authority}" != *'@'* ]] || reject_input "malformed ${field} value"
       [[ "${authority}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || reject_input "malformed ${field} value"
+      if [[ "${authority}" == *:* ]]; then
+        port="${authority##*:}"
+        while [[ "${port}" == 0* && ${#port} -gt 1 ]]; do
+          port="${port:1}"
+        done
+        if [[ ${#port} -gt 5 ]] || (( 10#${port} > 65535 )); then
+          reject_input "malformed ${field} value"
+        fi
+      fi
       IFS='/' read -r -a path_segments <<< "${path}"
       for segment in "${path_segments[@]}"; do
         [[ -z "${segment}" ]] && continue
@@ -261,7 +270,7 @@ reject_input() {
 validate_field() {
   local field="$1"
   local value="$2"
-  local authority path segment lower_segment encoded decoded
+  local authority path segment lower_segment encoded decoded port
   normalized_value="${value}"
   if [[ "${value}" =~ [[:cntrl:]] ]]; then
     reject_input "malformed ${field} value"
@@ -293,6 +302,15 @@ validate_field() {
       fi
       [[ -n "${authority}" && "${authority}" != *'@'* ]] || reject_input "malformed ${field} value"
       [[ "${authority}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || reject_input "malformed ${field} value"
+      if [[ "${authority}" == *:* ]]; then
+        port="${authority##*:}"
+        while [[ "${port}" == 0* && ${#port} -gt 1 ]]; do
+          port="${port:1}"
+        done
+        if [[ ${#port} -gt 5 ]] || (( 10#${port} > 65535 )); then
+          reject_input "malformed ${field} value"
+        fi
+      fi
       IFS='/' read -r -a path_segments <<< "${path}"
       for segment in "${path_segments[@]}"; do
         [[ -z "${segment}" ]] && continue

@@ -91,8 +91,16 @@ The tests use Pulumi mocks and need no account access or network:
 
 ```sh
 nix develop -c uv sync --project infra/cloudflare --locked
-nix develop -c uv run --project infra/cloudflare pytest
-nix develop -c uv run --project infra/cloudflare python -m compileall -q infra/cloudflare
+nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests -q
+nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare python -m compileall -q infra/cloudflare
+```
+
+These bounded checks use the Cloudflare fakes only; they do not contact
+Cloudflare, Wrangler, SSH, or a live endpoint. The rollout-only suite can be
+run separately with the same isolated environment:
+
+```sh
+nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests/test_deploy_production.py -q
 ```
 
 Keep any stack configuration containing operator credentials outside source

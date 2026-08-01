@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -1783,6 +1784,81 @@ class TaskArchive:
         manifest_path = self.task_dir(task_id) / "manifest.json"
         self._verify_manifest_path(task_id, manifest_path)
         return True
+
+    def manifest_digest(self, task_id: str) -> str:
+        """Verify one sealed archive and return its immutable manifest digest."""
+
+        task_id = validate_opaque_id(task_id)
+        manifest_path = self.task_dir(task_id) / "manifest.json"
+        self._verify_manifest_path(task_id, manifest_path)
+        return hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+    def delete_verified(
+        self,
+        task_id: str,
+        *,
+        allow_absent: bool = False,
+        return_digest: bool = False,
+    ) -> str:
+        """Remove one exact, sealed task child after re-verifying its manifest.
+
+        ``allow_absent`` is reserved for restart reconciliation after a durable
+        deletion intent has already been verified.  A normal deletion refuses
+        an absent archive so a missing path cannot be mistaken for a completed
+        destructive action.
+        """
+
+        task_id = validate_opaque_id(task_id)
+        root = self.root
+        try:
+            root_mode = root.lstat().st_mode
+        except FileNotFoundError as exc:
+            raise ArchiveValidationError("archive root is missing") from exc
+        if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+            raise ArchiveValidationError("archive root must be a directory")
+
+        task_dir = self.task_dir(task_id)
+        if task_dir == root or task_dir.parent != root:
+            raise ArchiveValidationError("task archive is not a direct root child")
+        try:
+            task_mode = task_dir.lstat().st_mode
+        except FileNotFoundError as exc:
+            if allow_absent:
+                _fsync_directory(root)
+                return "absent"
+            raise ArchiveValidationError(
+                "task archive is absent before a durable deletion intent"
+            ) from exc
+        if stat.S_ISLNK(task_mode):
+            raise ArchiveValidationError("task archive must not be a symlink")
+        if not stat.S_ISDIR(task_mode):
+            raise ArchiveValidationError("task archive must be a directory")
+
+        resolved_root = root.resolve(strict=True)
+        resolved_task = task_dir.resolve(strict=True)
+        if resolved_task == resolved_root or resolved_task.parent != resolved_root:
+            raise ArchiveValidationError("task archive escapes the configured root")
+
+        manifest_path = task_dir / "manifest.json"
+        self._verify_manifest_path(task_id, manifest_path)
+        manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        try:
+            shutil.rmtree(task_dir)
+        except FileNotFoundError as exc:
+            if allow_absent and not task_dir.exists():
+                _fsync_directory(root)
+                return "absent"
+            raise ArchiveValidationError("task archive disappeared during deletion") from exc
+        _fsync_directory(root)
+        if task_dir.exists() or task_dir.is_symlink():
+            raise ArchiveConflictError("task archive remains after deletion")
+        return manifest_digest if return_digest else "deleted"
+
+    # Keep the destructive operation discoverable under the archive vocabulary
+    # used by callers while preserving one exact task-id input boundary.
+    delete = delete_verified
+    delete_task = delete_verified
+    delete_archive = delete_verified
 
     def _add_task_pipeline_reference(self, task_id: str, pipeline_id: str, ordinal: int) -> None:
         path = self.task_path(task_id, "task.json")

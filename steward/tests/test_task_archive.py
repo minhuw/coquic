@@ -172,6 +172,52 @@ def test_seal_manifest_is_exact_and_terminal(tmp_path: Path) -> None:
     assert not archive.verify("task-safe")
 
 
+def test_delete_verified_removes_only_one_sealed_direct_child(tmp_path: Path) -> None:
+    archive = _live_archive(tmp_path)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+    archive.seal(
+        "task-safe",
+        "succeeded",
+        completion_identity="completion-delete",
+        completed_at=COMPLETED_AT,
+        external_actions_complete=True,
+        writer_final=True,
+    )
+    sibling = archive.root / "task-sibling"
+    sibling.mkdir()
+    (sibling / "evidence").write_text("retain\n", encoding="utf-8")
+
+    assert archive.delete_verified("task-safe") == "deleted"
+    assert not archive.task_dir("task-safe").exists()
+    assert (sibling / "evidence").read_text(encoding="utf-8") == "retain\n"
+    with pytest.raises(ArchiveValidationError, match="absent"):
+        archive.delete_verified("task-safe")
+    assert archive.delete_verified("task-safe", allow_absent=True) == "absent"
+
+
+@pytest.mark.parametrize("task_id", [".", "..", "task/other", "task*"])
+def test_delete_verified_rejects_non_exact_task_ids(tmp_path: Path, task_id: str) -> None:
+    archive = TaskArchive(tmp_path / "tasks")
+    with pytest.raises(ArchiveValidationError):
+        archive.delete_verified(task_id)
+
+
+def test_delete_verified_rejects_symlink_task_child(tmp_path: Path) -> None:
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tasks / "task-safe").symlink_to(outside, target_is_directory=True)
+    archive = TaskArchive(tasks)
+
+    with pytest.raises(ArchiveValidationError, match="symlink"):
+        archive.delete_verified("task-safe")
+    assert outside.exists()
+
+
 def test_seal_requires_caller_finality(tmp_path: Path) -> None:
     archive = _live_archive(tmp_path)
     with pytest.raises(ArchiveSealError):

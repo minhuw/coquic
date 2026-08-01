@@ -59,7 +59,7 @@ from ..publication.generation import (
     PublicationGeneration as ComposedPublicationGeneration,
     compose_publication_generation,
 )
-from ..publication.outbox import ReceiptClass
+from ..publication.outbox import CleanupIntent, CleanupState, ReceiptClass
 from ..publication.d1 import D1PublicationClient
 from ..publication.publisher import CloudPublisher
 from ..publication.r2 import R2Client, private_original_key
@@ -560,12 +560,12 @@ class StewardDaemon:
 
     @property
     def resource_pressure(self) -> dict[str, Any]:
-        return self._resource_pressure.measure().as_dict()
+        return self._refresh_resource_pressure()
 
     def admission_allowed(self) -> bool:
         """Return whether a new planner/task claim may be admitted."""
 
-        return self._resource_pressure.admission_allowed()
+        return bool(self._refresh_resource_pressure().get("admissionAllowed"))
 
     def _refresh_resource_pressure(self) -> dict[str, Any]:
         self._reconcile_docker_resources()
@@ -582,14 +582,63 @@ class StewardDaemon:
             report_dict["cleanupPending"] = pending
         except Exception:
             report_dict["cleanupPending"] = None
+        publication_health = getattr(self.store, "get_publication_health", None)
+        if callable(publication_health):
+            try:
+                health = publication_health()
+                health_dict = (
+                    health.as_dict()
+                    if callable(getattr(health, "as_dict", None))
+                    else dict(health)
+                    if isinstance(health, Mapping)
+                    else {}
+                )
+                bounded_health: dict[str, object] = {}
+                for key, value in health_dict.items():
+                    if isinstance(value, bool):
+                        bounded_health[key] = value
+                    elif isinstance(value, int):
+                        bounded_health[key] = max(0, min(value, 2**31 - 1))
+                    else:
+                        bounded_health[key] = value
+                report_dict["publication"] = bounded_health
+                report_dict["publicationHealth"] = bounded_health
+                aliases = {
+                    "queuedCount": "publicationQueuedCount",
+                    "blockedCount": "publicationBlockedCount",
+                    "cleanupPendingCount": "publicationCleanupPendingCount",
+                    "cleanupPendingBytes": "publicationCleanupPendingBytes",
+                    "oldestQueuedAt": "publicationOldestQueuedAt",
+                    "oldestQueuedAgeSeconds": "publicationOldestQueuedAgeSeconds",
+                    "lastCategory": "publicationLastCategory",
+                }
+                for key, alias in aliases.items():
+                    if key in bounded_health:
+                        report_dict[alias] = bounded_health[key]
+                if "queuedCount" in bounded_health:
+                    report_dict["publicationQueueCount"] = bounded_health["queuedCount"]
+                if "cleanupPendingCount" in bounded_health:
+                    report_dict["publicationCleanupCount"] = bounded_health[
+                        "cleanupPendingCount"
+                    ]
+                if "cleanupPendingBytes" in bounded_health:
+                    report_dict["publicationRetainedBytes"] = bounded_health[
+                        "cleanupPendingBytes"
+                    ]
+            except Exception:
+                report_dict["publication"] = None
         recorder = getattr(self.store, "record_resource_pressure", None)
         if callable(recorder):
             try:
+                cleanup_count = int(report_dict.get("cleanupPending") or 0)
+                publication_cleanup = report_dict.get("publicationCleanupPendingCount")
+                if isinstance(publication_cleanup, int):
+                    cleanup_count = max(cleanup_count, publication_cleanup)
                 recorder(
                     state=report_dict["state"],
                     home_free_bytes=report_dict.get("homeFreeBytes"),
                     owned_docker_bytes=report_dict.get("ownedBytes"),
-                    cleanup_pending_count=int(report_dict.get("cleanupPending") or 0),
+                    cleanup_pending_count=cleanup_count,
                     reason=report_dict.get("reason"),
                 )
             except Exception as exc:
@@ -2818,6 +2867,217 @@ class StewardDaemon:
             )
         return True
 
+    def _terminal_publication_generation_for_cleanup(
+        self, task: TaskRecord
+    ) -> object | None:
+        """Return the exact exposed generation authenticated by the gate."""
+
+        run = self._terminal_publication_run(task.id)
+        if run is None:
+            return None
+        snapshot_run_id = self._terminal_publication_snapshot_run_id(task, run)
+        if snapshot_run_id is None:
+            return None
+        listing = getattr(self.store, "list_publication_generations", None)
+        if not callable(listing):
+            listing = getattr(self.store, "list_generations", None)
+        if not callable(listing):
+            return None
+        try:
+            matches = [
+                item
+                for item in listing(task_id=task.id)
+                if getattr(item, "task_id", None) == task.id
+                and getattr(item, "run_id", None) == snapshot_run_id
+                and getattr(
+                    getattr(item, "state", None),
+                    "value",
+                    getattr(item, "state", None),
+                )
+                == "exposed"
+            ]
+        except Exception:
+            return None
+        if len(matches) != 1:
+            return None
+        candidate = matches[0]
+        publication_id = getattr(candidate, "publication_id", None)
+        getter = getattr(self.store, "get_publication_generation", None)
+        if not callable(getter):
+            getter = getattr(self.store, "get_generation", None)
+        try:
+            generation = getter(publication_id) if callable(getter) else candidate
+        except Exception:
+            return None
+        if (
+            generation is None
+            or getattr(generation, "task_id", None) != task.id
+            or getattr(generation, "run_id", None) != snapshot_run_id
+            or getattr(generation, "publication_id", None) != publication_id
+            or getattr(
+                getattr(generation, "state", None),
+                "value",
+                getattr(generation, "state", None),
+            )
+            != "exposed"
+        ):
+            return None
+        return generation
+
+    def _cleanup_intents_for_task(self, task_id: str) -> list[object]:
+        listing = getattr(self.store, "list_cleanup_intents", None)
+        if not callable(listing):
+            listing = getattr(self.store, "cleanup_intents", None)
+        if not callable(listing):
+            return []
+        try:
+            values = list(listing(task_id=task_id))
+        except TypeError:
+            try:
+                values = [item for item in listing() if getattr(item, "task_id", None) == task_id]
+            except Exception:
+                return []
+        except Exception:
+            return []
+        return [item for item in values if getattr(item, "task_id", task_id) == task_id]
+
+    def _cleanup_intent_for_task(self, task_id: str) -> object | None:
+        intents = self._cleanup_intents_for_task(task_id)
+        if not intents:
+            return None
+        # A completed intent is authoritative after a crash between the
+        # durable completion and the task event.  Otherwise resume the oldest
+        # pending intent deterministically.
+        completed = [
+            item
+            for item in intents
+            if getattr(getattr(item, "state", None), "value", getattr(item, "state", None))
+            == CleanupState.completed.value
+        ]
+        if completed:
+            return max(completed, key=lambda item: str(getattr(item, "completed_at", "")))
+        return min(intents, key=lambda item: str(getattr(item, "requested_at", "")))
+
+    def _create_terminal_cleanup_intent(
+        self,
+        task: TaskRecord,
+        generation: object,
+        archive: TaskArchiveWriter,
+        manifest_digest: str,
+    ) -> object | None:
+        creator = getattr(self.store, "create_cleanup_intent", None)
+        if not callable(creator):
+            self._terminal_publication_block(task.id, "cleanup_intent_unavailable")
+            return None
+        requested_at = utc_now()
+        generation_updated = getattr(generation, "updated_at", None)
+        if isinstance(generation_updated, datetime) and generation_updated > requested_at:
+            requested_at = generation_updated
+        publication_id = getattr(generation, "publication_id", None)
+        if not isinstance(publication_id, str):
+            self._terminal_publication_block(task.id, "cleanup_generation_invalid")
+            return None
+        try:
+            intent = CleanupIntent(
+                task_id=task.id,
+                publication_id=publication_id,
+                manifest_digest=manifest_digest,
+                exact_path=str(archive.task_dir(task.id)),
+                requested_at=requested_at,
+            )
+            result = creator(intent)
+        except Exception as exc:
+            self._log(
+                "terminal cleanup intent unavailable "
+                f"error={exc.__class__.__name__}"
+            )
+            self._terminal_publication_block(task.id, "cleanup_intent_invalid")
+            return None
+        status = getattr(getattr(result, "status", None), "value", getattr(result, "status", None))
+        if status not in {"enqueued", "existing"}:
+            self._terminal_publication_block(task.id, "cleanup_intent_rejected")
+            return None
+        cleanup = getattr(result, "cleanup", None)
+        return cleanup if cleanup is not None else intent
+
+    def _delete_terminal_archive(
+        self,
+        task: TaskRecord,
+        archive: TaskArchiveWriter,
+        intent: object,
+    ) -> bool:
+        """Verify, remove, and durably complete one exact cleanup intent."""
+
+        intent_id = getattr(intent, "intent_id", None)
+        manifest_digest = getattr(intent, "manifest_digest", None)
+        verifier = getattr(self.store, "verify_cleanup_intent", None)
+        completer = getattr(self.store, "complete_cleanup_intent", None)
+        if not isinstance(intent_id, str) or not isinstance(manifest_digest, str):
+            return False
+        if not callable(verifier) or not callable(completer):
+            self._terminal_publication_block(task.id, "cleanup_intent_unavailable")
+            return False
+
+        state = getattr(getattr(intent, "state", None), "value", getattr(intent, "state", None))
+        verified = getattr(intent, "verified_at", None) is not None
+        deletion_observed = False
+        if state == CleanupState.blocked.value:
+            return False
+        try:
+            if not verified:
+                current_digest = archive.manifest_digest(task.id)
+                if current_digest != manifest_digest:
+                    raise ArchiveConflictError("terminal manifest digest changed")
+                result = verifier(intent_id, manifest_digest=manifest_digest)
+                status = getattr(getattr(result, "status", None), "value", getattr(result, "status", None))
+                if status not in {"verified", "existing"}:
+                    return False
+                intent = getattr(result, "cleanup", None) or intent
+                verified = getattr(intent, "verified_at", None) is not None or status in {
+                    "verified",
+                    "existing",
+                }
+
+            # The deletion primitive performs a second manifest verification
+            # immediately before removing the exact direct child.
+            outcome = archive.delete_verified(
+                task.id,
+                allow_absent=verified,
+                return_digest=True,
+            )
+            deletion_observed = True
+            if outcome not in {"absent", manifest_digest}:
+                raise ArchiveConflictError("terminal manifest digest changed during deletion")
+            completed = completer(
+                intent_id,
+                manifest_digest=manifest_digest,
+            )
+            completed_status = getattr(
+                getattr(completed, "status", None),
+                "value",
+                getattr(completed, "status", None),
+            )
+            if completed_status not in {"completed", "existing"}:
+                return False
+            return True
+        except Exception as exc:
+            self._log(
+                "terminal archive deletion blocked "
+                f"error={exc.__class__.__name__}"
+            )
+            if not deletion_observed:
+                try:
+                    archive.task_dir(task.id).lstat()
+                except FileNotFoundError:
+                    deletion_observed = True
+            blocker = getattr(self.store, "block_cleanup_intent", None)
+            if not deletion_observed and callable(blocker):
+                try:
+                    blocker(intent_id, reason="cleanup_failed")
+                except Exception:
+                    pass
+            return False
+
     def finalize_terminal_task(self, task_id: str) -> bool:
         """Seal immutable evidence, then converge terminal-only cleanup."""
 
@@ -2826,8 +3086,24 @@ class StewardDaemon:
             return False
         events = self.store.events(task.id)
         cleanup_complete = any(event.kind == "cleanup_complete" for event in events)
+        existing_intent = self._cleanup_intent_for_task(task.id)
+        existing_state = (
+            getattr(getattr(existing_intent, "state", None), "value", getattr(existing_intent, "state", None))
+            if existing_intent is not None
+            else None
+        )
+        if existing_state == CleanupState.completed.value:
+            if not cleanup_complete:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_complete",
+                    "terminal archive deletion completed",
+                )
+            return True
         if cleanup_complete:
             return True
+        if existing_state == CleanupState.blocked.value:
+            return False
         pipelines = []
         try:
             pipelines = self.store.list_pipelines(task.id)
@@ -2881,61 +3157,126 @@ class StewardDaemon:
                 return False
         archive = TaskArchiveWriter(self.config)
         manifest = archive.task_dir(task.id) / "manifest.json"
-        try:
-            if not manifest.exists():
-                pipeline_id = None
-                try:
-                    pipeline_id = self.store.get_execution(task.id).owning_pipeline_id
-                except Exception:
-                    pass
-                completion_identity = f"completion-{task.id}-{pipeline_id or 'legacy'}"
-                archive.create_task_from_record(
-                    task,
-                    pipeline=self.store.get_pipeline(pipeline_id) if pipeline_id else None,
+        archive_absent_after_intent = False
+        archive_missing_with_intent = False
+        if existing_intent is not None and existing_state == CleanupState.pending.value:
+            try:
+                archive.task_dir(task.id).lstat()
+            except FileNotFoundError:
+                archive_missing_with_intent = True
+                archive_absent_after_intent = (
+                    getattr(existing_intent, "verified_at", None) is not None
                 )
-                for pipeline in pipelines:
-                    runs = self.store.list_runs(
-                        task.id,
-                        pipeline_id=pipeline.id,
-                    )
-                    for run in runs:
-                        archive.materialize_run(task.id, pipeline.id, run)
-                    archive.materialize_pipeline(
-                        task.id,
-                        pipeline,
-                        runs=runs,
-                    )
-                if getattr(
-                    getattr(self.config, "publication", None), "enabled", False
-                ):
-                    final_run = self._terminal_publication_run(task.id)
-                    if final_run is not None:
-                        self._prepare_terminal_publication_snapshot(task, final_run)
-                archive.seal(
-                    task.id,
-                    str(task.status),
-                    completion_identity=completion_identity,
-                    completed_at=task.updated_at.astimezone(timezone.utc)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
-                    external_actions_complete=True,
-                    writer_final=True,
-                )
-            archive.verify_or_raise(task.id)
-        except Exception as exc:
+        if archive_missing_with_intent and not archive_absent_after_intent:
             self.store.add_event(
                 task.id,
                 "cleanup_blocked",
-                "terminal archive is not ready to seal",
-                {"error": exc.__class__.__name__},
+                "terminal archive is absent before deletion verification",
             )
             return False
+        if not archive_absent_after_intent:
+            try:
+                if not manifest.exists():
+                    pipeline_id = None
+                    try:
+                        pipeline_id = self.store.get_execution(task.id).owning_pipeline_id
+                    except Exception:
+                        pass
+                    completion_identity = f"completion-{task.id}-{pipeline_id or 'legacy'}"
+                    archive.create_task_from_record(
+                        task,
+                        pipeline=self.store.get_pipeline(pipeline_id) if pipeline_id else None,
+                    )
+                    for pipeline in pipelines:
+                        runs = self.store.list_runs(
+                            task.id,
+                            pipeline_id=pipeline.id,
+                        )
+                        for run in runs:
+                            archive.materialize_run(task.id, pipeline.id, run)
+                        archive.materialize_pipeline(
+                            task.id,
+                            pipeline,
+                            runs=runs,
+                        )
+                    if getattr(
+                        getattr(self.config, "publication", None), "enabled", False
+                    ):
+                        final_run = self._terminal_publication_run(task.id)
+                        if final_run is not None:
+                            self._prepare_terminal_publication_snapshot(task, final_run)
+                    archive.seal(
+                        task.id,
+                        str(task.status),
+                        completion_identity=completion_identity,
+                        completed_at=task.updated_at.astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        external_actions_complete=True,
+                        writer_final=True,
+                    )
+                archive.verify_or_raise(task.id)
+            except Exception as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_blocked",
+                    "terminal archive is not ready to seal",
+                    {"error": exc.__class__.__name__},
+                )
+                return False
         if not any(event.kind == "cleanup_pending" for event in events):
             self.store.add_event(task.id, "cleanup_pending", "terminal manifest verified")
         events = self.store.events(task.id)
 
-        if not self._terminal_publication_gate(task):
-            return False
+        publication_enabled = bool(
+            getattr(getattr(self.config, "publication", None), "enabled", False)
+        )
+        cleanup_intent = existing_intent
+        cleanup_generation = None
+        if publication_enabled:
+            if not self._terminal_publication_gate(task):
+                return False
+            cleanup_generation = self._terminal_publication_generation_for_cleanup(task)
+            if cleanup_generation is None:
+                return self._terminal_publication_block(
+                    task.id, "final_generation_unavailable"
+                )
+            if archive_absent_after_intent:
+                manifest_digest = getattr(cleanup_intent, "manifest_digest", None)
+            else:
+                try:
+                    manifest_digest = archive.manifest_digest(task.id)
+                except Exception as exc:
+                    self.store.add_event(
+                        task.id,
+                        "cleanup_blocked",
+                        "terminal manifest could not be authenticated for deletion",
+                        {"error": exc.__class__.__name__},
+                    )
+                    return False
+            if not isinstance(manifest_digest, str):
+                self._terminal_publication_block(task.id, "cleanup_manifest_missing")
+                return False
+            if cleanup_intent is not None:
+                if (
+                    getattr(cleanup_intent, "publication_id", None)
+                    != getattr(cleanup_generation, "publication_id", None)
+                    or getattr(cleanup_intent, "manifest_digest", None)
+                    != manifest_digest
+                    or getattr(cleanup_intent, "exact_path", None)
+                    != str(archive.task_dir(task.id))
+                ):
+                    self._terminal_publication_block(task.id, "cleanup_intent_mismatch")
+                    return False
+            else:
+                cleanup_intent = self._create_terminal_cleanup_intent(
+                    task,
+                    cleanup_generation,
+                    archive,
+                    manifest_digest,
+                )
+                if cleanup_intent is None:
+                    return False
 
         if not any(event.kind == "cleanup.container_removed" for event in events):
             try:
@@ -3000,17 +3341,30 @@ class StewardDaemon:
                     {"step": "session-home-remove", "error": exc.__class__.__name__},
                 )
                 return False
-        try:
-            archive.verify_or_raise(task.id)
-        except Exception as exc:
+        if cleanup_generation is not None:
+            if cleanup_intent is None or not self._delete_terminal_archive(
+                task, archive, cleanup_intent
+            ):
+                return False
+        else:
+            try:
+                archive.verify_or_raise(task.id)
+            except Exception as exc:
+                self.store.add_event(
+                    task.id,
+                    "cleanup_blocked",
+                    "terminal archive changed during cleanup",
+                    {"error": exc.__class__.__name__},
+                )
+                return False
+        if not any(event.kind == "cleanup_complete" for event in self.store.events(task.id)):
             self.store.add_event(
                 task.id,
-                "cleanup_blocked",
-                "terminal archive changed during cleanup",
-                {"error": exc.__class__.__name__},
+                "cleanup_complete",
+                "terminal archive deletion completed"
+                if cleanup_generation is not None
+                else "terminal private state removed",
             )
-            return False
-        self.store.add_event(task.id, "cleanup_complete", "terminal private state removed")
         return True
 
     seal_terminal_task = finalize_terminal_task

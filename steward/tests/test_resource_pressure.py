@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
 from coquic_steward.core.lifecycle import (
@@ -192,3 +193,49 @@ def test_production_daemon_restores_pressure_hysteresis_after_restart(
     assert report["state"] == "resource_pressure"
     assert report["ownedBytes"] == 800
     assert report["admissionAllowed"] is False
+
+
+def test_daemon_projects_bounded_publication_health() -> None:
+    recorded: list[dict[str, object]] = []
+
+    class Store:
+        def list_tasks(self, *, limit: int):
+            assert limit == 10_000
+            return []
+
+        def get_publication_health(self):
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "queuedCount": 2**40,
+                    "blockedCount": 3,
+                    "cleanupPendingCount": 4,
+                    "cleanupPendingBytes": 2**40,
+                    "oldestQueuedAgeSeconds": 5,
+                }
+            )
+
+        def record_resource_pressure(self, **kwargs: object) -> None:
+            recorded.append(kwargs)
+
+    report = SimpleNamespace(
+        as_dict=lambda: {
+            "state": "normal",
+            "homeFreeBytes": 100,
+            "ownedBytes": 1,
+            "admissionAllowed": True,
+        },
+        state="normal",
+    )
+    daemon = object.__new__(StewardDaemon)
+    daemon._docker_resources = None
+    daemon._resource_pressure = SimpleNamespace(measure=lambda: report)
+    daemon.store = Store()
+    daemon._log = lambda *_args, **_kwargs: None
+
+    projected = daemon.resource_pressure
+
+    assert projected["publicationQueuedCount"] == 2**31 - 1
+    assert projected["publicationCleanupPendingCount"] == 4
+    assert projected["publicationRetainedBytes"] == 2**31 - 1
+    assert projected["admissionAllowed"] is True
+    assert recorded[-1]["cleanup_pending_count"] == 4

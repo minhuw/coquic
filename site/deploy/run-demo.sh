@@ -4,18 +4,37 @@ set -euo pipefail
 release_dir="${COQUIC_DEMO_RELEASE_DIR:-/opt/coquic-demo/current}"
 rag_env_file="${COQUIC_DEMO_RAG_ENV_FILE:-/etc/coquic-demo/rag.env}"
 app_env_file="${COQUIC_DEMO_APP_ENV_FILE:-/etc/coquic-demo/app.env}"
+cloud_fields=(
+  CLOUDFLARE_ACCOUNT_ID
+  COQUIC_STEWARD_D1_DATABASE_ID
+  COQUIC_STEWARD_D1_READ_TOKEN
+  COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+)
+
+for cloud_field in "${cloud_fields[@]}"; do
+  unset "${cloud_field}"
+done
 if [[ -f "${rag_env_file}" ]]; then
   set -a
   # shellcheck source=/dev/null
   source "${rag_env_file}"
   set +a
 fi
-if [[ -f "${app_env_file}" ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "${app_env_file}"
-  set +a
+for cloud_field in "${cloud_fields[@]}"; do
+  unset "${cloud_field}"
+done
+if [[ ! -f "${app_env_file}" || -L "${app_env_file}" ]]; then
+  echo "protected cloud app.env must be a regular file" >&2
+  exit 1
 fi
+if [[ "$(stat -c '%a' -- "${app_env_file}")" != "600" ]]; then
+  echo "protected cloud app.env must have mode 0600" >&2
+  exit 1
+fi
+set -a
+# shellcheck source=/dev/null
+source "${app_env_file}"
+set +a
 
 host="${COQUIC_DEMO_HOST:-0.0.0.0}"
 port="${COQUIC_DEMO_PORT:-443}"
@@ -28,14 +47,6 @@ qa_port="${COQUIC_QA_PORT:-8787}"
 qa_enabled="${COQUIC_DEMO_QA_ENABLED:-auto}"
 cert_chain="${COQUIC_DEMO_CERTIFICATE_CHAIN:-/etc/coquic-demo/tls/fullchain.pem}"
 private_key="${COQUIC_DEMO_PRIVATE_KEY:-/etc/coquic-demo/tls/privkey.pem}"
-transcript_dataset_dir="${COQUIC_TRANSCRIPT_DATASET_DIR:-/opt/coquic-demo/dataset}"
-transcript_archive_name="codex-history-coquic-transcripts-only-20260630.zip"
-transcript_archive_path="${COQUIC_TRANSCRIPT_ARCHIVE_PATH:-${transcript_dataset_dir}/${transcript_archive_name}}"
-transcript_sqlite_path="${COQUIC_TRANSCRIPT_SQLITE_PATH:-${transcript_dataset_dir}/transcripts.sqlite}"
-transcript_archive_url="${COQUIC_TRANSCRIPT_ARCHIVE_URL:-/dataset/${transcript_archive_name}}"
-steward_tasks_root="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
-steward_control_loop_root="${COQUIC_STEWARD_CONTROL_LOOP_ROOT:-/opt/coquic-demo/steward/control-loop}"
-steward_cache_path="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
 next_root="${release_dir}/app"
 rag_root="${COQUIC_DEMO_RAG_ROOT:-${next_root}/rag}"
@@ -43,68 +54,38 @@ rag_repo_root="${COQUIC_DEMO_RAG_REPO_ROOT:-${next_root}}"
 rag_state_dir="${COQUIC_RAG_STATE_DIR:-${rag_repo_root}/.rag}"
 h3_server="${release_dir}/h3-server"
 
-release_dir_abs="$(cd "${release_dir}" && pwd -P)"
-case "${steward_tasks_root}" in
-  /*) ;;
-  *) echo "COQUIC_STEWARD_TASKS_ROOT must be absolute" >&2; exit 1 ;;
-esac
-case "${steward_cache_path}" in
-  /*) ;;
-  *) echo "COQUIC_STEWARD_CACHE_PATH must be absolute" >&2; exit 1 ;;
-esac
-case "${steward_control_loop_root}" in
-  /*) ;;
-  *) echo "COQUIC_STEWARD_CONTROL_LOOP_ROOT must be absolute" >&2; exit 1 ;;
-esac
-if [[ "$(basename "${steward_tasks_root}")" != "tasks" || "$(basename "${steward_control_loop_root}")" != "control-loop" ]]; then
-  echo "Steward raw roots must use tasks and control-loop basenames" >&2
+cloud_config_error() {
+  echo "invalid protected cloud configuration: $1" >&2
   exit 1
+}
+
+cloud_account_id="${CLOUDFLARE_ACCOUNT_ID:-}"
+cloud_database_id="${COQUIC_STEWARD_D1_DATABASE_ID:-}"
+cloud_read_token="${COQUIC_STEWARD_D1_READ_TOKEN:-}"
+cloud_public_r2_base_url="${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}"
+[[ "${cloud_account_id}" =~ ^[[:xdigit:]]{32}$ ]] || cloud_config_error "CLOUDFLARE_ACCOUNT_ID"
+[[ "${cloud_database_id}" =~ ^[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$ ]] || cloud_config_error "COQUIC_STEWARD_D1_DATABASE_ID"
+[[ -n "${cloud_read_token}" && ${#cloud_read_token} -le 4096 && ! "${cloud_read_token}" =~ [[:cntrl:]] ]] || cloud_config_error "COQUIC_STEWARD_D1_READ_TOKEN"
+[[ "${cloud_public_r2_base_url}" == https://* && "${cloud_public_r2_base_url}" != *'?'* && "${cloud_public_r2_base_url}" != *'#'* && "${cloud_public_r2_base_url}" != *'\\'* ]] || cloud_config_error "COQUIC_STEWARD_PUBLIC_R2_BASE_URL"
+cloud_url_authority="${cloud_public_r2_base_url#https://}"
+if [[ "${cloud_url_authority}" == */* ]]; then
+  cloud_url_authority="${cloud_url_authority%%/*}"
 fi
-case "${steward_tasks_root}" in
-  "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward archive must be outside the release" >&2; exit 1 ;;
-esac
-case "${steward_cache_path}" in
-  "${steward_tasks_root}"|"${steward_tasks_root}"/*) echo "Steward cache must be outside the raw archive" >&2; exit 1 ;;
-esac
-case "${steward_cache_path}" in
-  "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward cache must be outside the release" >&2; exit 1 ;;
-esac
-case "${steward_tasks_root}" in
-  "${steward_cache_path}"|"${steward_cache_path}"/*) echo "Steward raw archive must not contain the cache" >&2; exit 1 ;;
-esac
-case "${steward_control_loop_root}" in
-  "${release_dir_abs}"|"${release_dir_abs}"/*) echo "Steward control-loop archive must be outside the release" >&2; exit 1 ;;
-  "${steward_tasks_root}"|"${steward_tasks_root}"/*) echo "Steward raw roots must be separate" >&2; exit 1 ;;
-  "${steward_cache_path}"|"${steward_cache_path}"/*) echo "Steward control-loop archive must be outside the cache" >&2; exit 1 ;;
-esac
-case "${steward_cache_path}" in
-  "${steward_control_loop_root}"|"${steward_control_loop_root}"/*) echo "Steward cache must be outside the control-loop archive" >&2; exit 1 ;;
-esac
-if [[ -e "${steward_tasks_root}" && ! -d "${steward_tasks_root}" ]]; then
-  echo "Steward raw root is not a directory: ${steward_tasks_root}" >&2
-  exit 1
+[[ "${cloud_url_authority}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || cloud_config_error "COQUIC_STEWARD_PUBLIC_R2_BASE_URL"
+if [[ "${cloud_url_authority}" == *:* ]]; then
+  cloud_url_port="${cloud_url_authority##*:}"
+  while [[ "${cloud_url_port}" == 0* && ${#cloud_url_port} -gt 1 ]]; do
+    cloud_url_port="${cloud_url_port:1}"
+  done
+  [[ ${#cloud_url_port} -le 5 && $((10#${cloud_url_port})) -le 65535 ]] || cloud_config_error "COQUIC_STEWARD_PUBLIC_R2_BASE_URL"
 fi
-if [[ -e "${steward_tasks_root}" && ! -r "${steward_tasks_root}" ]]; then
-  echo "Steward raw root is not readable" >&2
-  exit 1
-fi
-if [[ -e "${steward_control_loop_root}" && ! -d "${steward_control_loop_root}" ]]; then
-  echo "Steward control-loop root is not a directory: ${steward_control_loop_root}" >&2
-  exit 1
-fi
-if [[ -e "${steward_control_loop_root}" && ! -r "${steward_control_loop_root}" ]]; then
-  echo "Steward control-loop root is not readable" >&2
-  exit 1
-fi
-steward_cache_parent="$(dirname "${steward_cache_path}")"
-if [[ ! -d "${steward_cache_parent}" || ! -w "${steward_cache_parent}" ]]; then
-  echo "Steward cache parent is not writable" >&2
-  exit 1
-fi
-if ! (cd "${next_root}" && node -e "const sqlite=require('node:sqlite'); if (typeof sqlite.DatabaseSync !== 'function') process.exit(1)"); then
-  echo "host Node runtime does not provide node:sqlite DatabaseSync" >&2
-  exit 1
-fi
+[[ "${cloud_public_r2_base_url}" != *'..'* ]] || cloud_config_error "COQUIC_STEWARD_PUBLIC_R2_BASE_URL"
+
+# app.env is the protected operator handoff. Keep its cloud values out of all
+# helper processes and pass them explicitly only to the standalone Next server.
+for cloud_field in "${cloud_fields[@]}"; do
+  export -n "${cloud_field}"
+done
 
 if [[ ! -x "${h3_server}" ]]; then
   echo "missing h3-server: ${h3_server}" >&2
@@ -227,12 +208,10 @@ fi
 (
   cd "${next_root}"
   COQUIC_RAG_API_BASE="http://${qa_host}:${qa_port}" \
-  COQUIC_TRANSCRIPT_ARCHIVE_PATH="${transcript_archive_path}" \
-  COQUIC_TRANSCRIPT_ARCHIVE_URL="${transcript_archive_url}" \
-  COQUIC_TRANSCRIPT_SQLITE_PATH="${transcript_sqlite_path}" \
-  COQUIC_STEWARD_TASKS_ROOT="${steward_tasks_root}" \
-  COQUIC_STEWARD_CONTROL_LOOP_ROOT="${steward_control_loop_root}" \
-  COQUIC_STEWARD_CACHE_PATH="${steward_cache_path}" \
+  CLOUDFLARE_ACCOUNT_ID="${cloud_account_id}" \
+  COQUIC_STEWARD_D1_DATABASE_ID="${cloud_database_id}" \
+  COQUIC_STEWARD_D1_READ_TOKEN="${cloud_read_token}" \
+  COQUIC_STEWARD_PUBLIC_R2_BASE_URL="${cloud_public_r2_base_url}" \
   HOSTNAME="${next_host}" \
   PORT="${next_port}" \
   NODE_ENV=production \
@@ -261,19 +240,22 @@ steward_status_ready=0
 for _ in $(seq 1 50); do
   if ! pid_is_alive "${next_pid}"; then
     wait "${next_pid}" || true
-    echo "Next.js server exited before Steward importer status probe" >&2
+    echo "Next.js server exited before cloud publication status probe" >&2
     exit 1
   fi
   steward_status="$(curl -fsS "http://${next_host}:${next_port}/api/steward/status" 2>/dev/null || true)"
   if STEWARD_STATUS_PAYLOAD="${steward_status}" node -e '
     try {
-      const data = JSON.parse(process.env.STEWARD_STATUS_PAYLOAD || "").data;
-      const allowed = new Set(["indexing", "ready", "degraded"]);
-      if (!data || !allowed.has(data.state) || !Array.isArray(data.domains)) process.exit(1);
-      for (const name of ["tasks", "control-loop"]) {
-        const matches = data.domains.filter((domain) => domain && domain.domain === name);
-        if (matches.length !== 1 || !allowed.has(matches[0].state)) process.exit(1);
-      }
+      const payload = JSON.parse(process.env.STEWARD_STATUS_PAYLOAD || "");
+      const data = payload.data;
+      const timestamp = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z$/;
+      const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+      if (!exactKeys(payload, ["schemaVersion", "generatedAt", "data"]) || payload.schemaVersion !== "3.0" || typeof payload.generatedAt !== "string" || !timestamp.test(payload.generatedAt)) process.exit(1);
+      if (!exactKeys(data, ["state", "taskCount", "latestPublicationAt"]) || !["available", "empty"].includes(data.state)) process.exit(1);
+      if (!Number.isSafeInteger(data.taskCount) || data.taskCount < 0 || data.taskCount > 1000000) process.exit(1);
+      if ((data.state === "empty") !== (data.taskCount === 0)) process.exit(1);
+      if ((data.state === "empty") !== (data.latestPublicationAt === null)) process.exit(1);
+      if (data.latestPublicationAt !== null && (typeof data.latestPublicationAt !== "string" || !timestamp.test(data.latestPublicationAt))) process.exit(1);
     } catch { process.exit(1); }
   '; then
     steward_status_ready=1
@@ -282,7 +264,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 if [[ "${steward_status_ready}" != "1" ]]; then
-  echo "Steward importer status did not become available" >&2
+  echo "Cloud publication status did not become available" >&2
   exit 1
 fi
 

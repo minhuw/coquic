@@ -78,13 +78,7 @@ fi
 app_env_vars=(
   COQUIC_DEMO_QA_ENABLED
   COQUIC_V2_PREVIEW_PASSWORD
-  COQUIC_STEWARD_TASKS_ROOT
-  COQUIC_STEWARD_CONTROL_LOOP_ROOT
-  COQUIC_STEWARD_CACHE_PATH
 )
-COQUIC_STEWARD_TASKS_ROOT="${COQUIC_STEWARD_TASKS_ROOT:-/opt/coquic-demo/steward/tasks}"
-COQUIC_STEWARD_CONTROL_LOOP_ROOT="${COQUIC_STEWARD_CONTROL_LOOP_ROOT:-/opt/coquic-demo/steward/control-loop}"
-COQUIC_STEWARD_CACHE_PATH="${COQUIC_STEWARD_CACHE_PATH:-/opt/coquic-demo/steward/cache/site-v2.sqlite}"
 
 remote_prefix="${COQUIC_DEPLOY_OFFLINE_ROOT:-}"
 if [[ -n "${remote_prefix}" ]]; then
@@ -97,7 +91,6 @@ fi
 remote_releases_root="${remote_prefix}/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
 remote_current_link="${remote_prefix}/opt/coquic-demo/current"
-remote_steward_root="${remote_prefix}/opt/coquic-demo/steward"
 remote_config_root="${remote_prefix}/etc/coquic-demo"
 remote_systemd_service="${remote_prefix}/etc/systemd/system/coquic-demo.service"
 remote_tmp_root="${remote_prefix}/tmp"
@@ -568,7 +561,7 @@ rollback_armed=1
 
 deploy_phase="remote install"
 remote_install_status=0
-ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" "${remote_releases_root}" "${remote_steward_root}" "${remote_config_root}" "${remote_systemd_service}" <<'EOF' || remote_install_status=$?
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" "${remote_releases_root}" "${remote_config_root}" "${remote_systemd_service}" <<'EOF' || remote_install_status=$?
 set -euo pipefail
 
 remote_release_dir="$1"
@@ -576,9 +569,8 @@ remote_upload_dir="$2"
 remote_current_link="$3"
 same_release_repair_mode="$4"
 remote_releases_root="$5"
-remote_steward_root="$6"
-remote_config_root="$7"
-remote_systemd_service="$8"
+remote_config_root="$6"
+remote_systemd_service="$7"
 
 backup_or_mark_absent() {
   local source_path="$1"
@@ -628,21 +620,6 @@ if sudo systemctl is-enabled --quiet coquic-demo.service; then
 fi
 
 sudo install -d -m 755 "${remote_releases_root}"
-ensure_steward_state_dir() {
-  local path="$1"
-  if sudo test -e "${path}"; then
-    sudo test -d "${path}" || { echo "Steward state path is not a directory: ${path}" >&2; exit 1; }
-    return
-  fi
-  sudo install -d -m 775 "${path}"
-  # First creation follows the current deployment/receiver account. Existing
-  # operator ownership is preserved on repeat deployments and rollbacks.
-  sudo chown "$(id -un):$(id -gn)" "${path}"
-}
-ensure_steward_state_dir "${remote_steward_root}"
-ensure_steward_state_dir "${remote_steward_root}/tasks"
-ensure_steward_state_dir "${remote_steward_root}/control-loop"
-ensure_steward_state_dir "${remote_steward_root}/cache"
 sudo install -d -m 755 "${remote_config_root}"
 sudo install -d -m 755 "${remote_config_root}/tls"
 

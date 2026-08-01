@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getArchiveConfig } from "../lib/steward-archive/config";
 
 async function executable(path: string, source: string) { await writeFile(path, source); await chmod(path, 0o755); }
 
@@ -32,25 +31,37 @@ void (async () => {
   try {
     const release = join(root, "release");
     const app = join(release, "app");
-    const tasks = join(root, "persistent", "steward", "tasks");
-    const controlLoop = join(root, "persistent", "steward", "control-loop");
-    const cache = join(root, "persistent", "steward", "cache", "site-v2.sqlite");
     const fakeBin = join(root, "bin");
     const processLog = join(root, "process.log");
     const curlLog = join(root, "curl.log");
+    const appEnv = join(root, "app.env");
+    const cloudAccount = "A".repeat(32);
+    const cloudDatabase = "12345678-1234-4abc-8def-1234567890ab";
+    const cloudSecret = ["handoff", "read", "token"].join("-");
+    const cloudBaseUrl = "https://objects.example.test/public";
     const sshLog = join(root, "ssh.log");
     const systemdLog = join(root, "systemd.log");
-    await mkdir(app, { recursive: true }); await mkdir(tasks, { recursive: true }); await mkdir(controlLoop, { recursive: true }); await mkdir(dirname(cache), { recursive: true }); await mkdir(fakeBin);
+    await mkdir(app, { recursive: true }); await mkdir(fakeBin);
     await writeFile(join(app, "server.js"), "// fake Next entry\n");
+    await writeFile(appEnv, [
+      `export CLOUDFLARE_ACCOUNT_ID=${cloudAccount}`,
+      `export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
+      `export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
+      `export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}`,
+      "export COQUIC_DEMO_QA_ENABLED=false",
+      "",
+    ].join("\n"));
+    await chmod(appEnv, 0o600);
     await executable(join(release, "h3-server"), "#!/usr/bin/env bash\necho h3 >>\"${FAKE_PROCESS_LOG}\"\nsleep 0.2\n");
     await executable(join(fakeBin, "node"), `#!/usr/bin/env bash
 if [[ "\${1:-}" == "-e" ]]; then
-  if [[ "\${2:-}" == *"node:sqlite"* ]]; then [[ "\${FAKE_NODE_SQLITE:-1}" == "1" ]]; exit; fi
   exec "\${FAKE_REAL_NODE}" "$@"
 fi
 if [[ "\${1:-}" == "-p" ]]; then printf '%s\\n' 24; exit; fi
 if [[ "\${1:-}" == "--version" ]]; then printf '%s\\n' v24.0.0; exit; fi
-echo "next:\${COQUIC_STEWARD_TASKS_ROOT}:\${COQUIC_STEWARD_CONTROL_LOOP_ROOT}:\${COQUIC_STEWARD_CACHE_PATH}" >>"\${FAKE_PROCESS_LOG}"
+cloud_token_state=missing
+if [[ -n "\${COQUIC_STEWARD_D1_READ_TOKEN:-}" ]]; then cloud_token_state=set; fi
+printf 'next:%s:%s:%s:%s\\n' "\${CLOUDFLARE_ACCOUNT_ID:-}" "\${COQUIC_STEWARD_D1_DATABASE_ID:-}" "\${COQUIC_STEWARD_PUBLIC_R2_BASE_URL:-}" "\${cloud_token_state}" >>"\${FAKE_PROCESS_LOG}"
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 `);
@@ -59,37 +70,54 @@ url="\${!#}"
 echo "\${url}" >>"\${FAKE_CURL_LOG}"
 if [[ "\${url}" == */api/steward/status ]]; then
   if [[ -n "\${FAKE_STEWARD_STATUS:-}" ]]; then printf '%s\\n' "\${FAKE_STEWARD_STATUS}";
-  else printf '%s\\n' '{"data":{"state":"indexing","domains":[{"domain":"tasks","state":"indexing"},{"domain":"control-loop","state":"indexing"}]}}'; fi
+  else printf '%s\\n' '{"schemaVersion":"3.0","generatedAt":"2026-07-31T00:00:00Z","data":{"state":"empty","taskCount":0,"latestPublicationAt":null}}'; fi
 else printf '%s\\n' ready; fi
 `);
-    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoop, COQUIC_STEWARD_CACHE_PATH: cache, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_NODE_SQLITE: "1", FAKE_REAL_NODE: process.execPath };
+    const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_APP_ENV_FILE: appEnv, COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_REAL_NODE: process.execPath };
     const first = await run("bash", [runDemo], env);
     assert.equal(first.code, 0, first.output);
     const processes = await readFile(processLog, "utf8");
-    assert.equal(processes.split("\n").filter((line) => line.startsWith("next:")).length, 1, "exactly one Next process owns the importer");
-    assert.match(processes, new RegExp(`next:${tasks.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:${controlLoop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:${cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.equal(processes.split("\n").filter((line) => line.startsWith("next:")).length, 1, "exactly one Next process receives cloud configuration");
+    assert.match(processes, new RegExp(`next:${cloudAccount}:${cloudDatabase}:${cloudBaseUrl}:set`));
     assert.match(await readFile(curlLog, "utf8"), /\/api\/steward\/status/);
     const repeated = await run("bash", [runDemo], env);
     assert.equal(repeated.code, 0, repeated.output);
     assert.equal((await readFile(processLog, "utf8")).split("\n").filter((line) => line.startsWith("next:")).length, 2);
-    const incompatibleStatus = JSON.stringify({ data: { state: "incompatible", domains: [{ domain: "tasks", state: "ready" }, { domain: "control-loop", state: "incompatible" }] } });
+    const incompatibleStatus = JSON.stringify({ schemaVersion: "3.0", generatedAt: "2026-07-31T00:00:00Z", data: { state: "unavailable", taskCount: 0, latestPublicationAt: null } });
     const incompatible = await run("bash", [runDemo], { ...env, FAKE_STEWARD_STATUS: incompatibleStatus });
     assert.notEqual(incompatible.code, 0); assert.match(incompatible.output, /status did not become available/);
-    const unsafe = await run("bash", [runDemo], { ...env, COQUIC_STEWARD_TASKS_ROOT: join(release, "tasks") });
-    assert.notEqual(unsafe.code, 0); assert.match(unsafe.output, /outside the release/);
-    const noSqlite = await run("bash", [runDemo], { ...env, FAKE_NODE_SQLITE: "0" });
-    assert.notEqual(noSqlite.code, 0); assert.match(noSqlite.output, /node:sqlite/);
-    const config = getArchiveConfig({ NODE_ENV: "test", COQUIC_STEWARD_TASKS_ROOT: tasks, COQUIC_STEWARD_CONTROL_LOOP_ROOT: controlLoop, COQUIC_STEWARD_CACHE_PATH: cache });
-    assert.equal(config.tasksRoot, tasks); assert.equal(config.controlLoopRoot, controlLoop); assert.equal(config.cachePath, cache);
+    const missingCloudEnv = join(root, "missing-cloud.env");
+    await writeFile(missingCloudEnv, [
+      `export CLOUDFLARE_ACCOUNT_ID=${cloudAccount}`,
+      `export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
+      `export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
+      "export COQUIC_DEMO_QA_ENABLED=false",
+      "",
+    ].join("\n"));
+    await chmod(missingCloudEnv, 0o600);
+    const missingCloud = await run("bash", [runDemo], { ...env, COQUIC_DEMO_APP_ENV_FILE: missingCloudEnv });
+    assert.notEqual(missingCloud.code, 0); assert.match(missingCloud.output, /cloud configuration/);
+    const insecureCloudEnv = join(root, "insecure-cloud.env");
+    await writeFile(insecureCloudEnv, await readFile(appEnv));
+    await chmod(insecureCloudEnv, 0o644);
+    const insecureCloud = await run("bash", [runDemo], { ...env, COQUIC_DEMO_APP_ENV_FILE: insecureCloudEnv });
+    assert.notEqual(insecureCloud.code, 0); assert.match(insecureCloud.output, /mode 0600/);
 
     const remoteRoot = join(root, "remote");
     const remoteState = join(remoteRoot, ".fake-systemd");
+    const stewardRoot = join(remoteRoot, "opt", "coquic-demo", "steward");
     const sshKey = join(root, "deploy.key");
     const binary = join(root, "coquic-server");
     const deployApp = join(root, "deploy-app");
     const nixOut = join(root, "curl-http3");
     await mkdir(join(remoteRoot, "etc", "systemd", "system"), { recursive: true });
     await mkdir(join(remoteRoot, "tmp"), { recursive: true });
+    await mkdir(join(stewardRoot, "tasks"), { recursive: true });
+    await mkdir(join(stewardRoot, "cache"), { recursive: true });
+    await mkdir(join(stewardRoot, "control-loop"), { recursive: true });
+    await writeFile(join(stewardRoot, "tasks", "publisher.marker"), "raw-preserved\n");
+    await writeFile(join(stewardRoot, "cache", "index.marker"), "cache-preserved\n");
+    await writeFile(join(stewardRoot, "control-loop", "publisher.marker"), "raw-preserved\n");
     await mkdir(deployApp); await mkdir(join(nixOut, "bin"), { recursive: true });
     await writeFile(join(remoteRoot, ".coquic-deploy-test-root"), "owned\n");
     await writeFile(sshKey, "test key\n");
@@ -152,10 +180,6 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     const current = join(remoteRoot, "opt", "coquic-demo", "current");
     const firstTarget = await readlink(current);
     assert.match(firstTarget, /111111111111$/);
-    const cloudAccount = "A".repeat(32);
-    const cloudDatabase = "12345678-1234-4abc-8def-1234567890ab";
-    const cloudSecret = ["handoff", "read", "token"].join("-");
-    const cloudBaseUrl = "https://objects.example.test/public";
     const cloudLines = [
       `CLOUDFLARE_ACCOUNT_ID=${cloudAccount}`,
       `COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
@@ -182,7 +206,6 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}/`));
     assert.match(installedAppEnv, /export COQUIC_DEMO_QA_ENABLED=false/);
     assert.match(installedAppEnv, /export COQUIC_V2_PREVIEW_PASSWORD=preview-fixture/);
-    assert.match(installedAppEnv, /export COQUIC_STEWARD_TASKS_ROOT=/);
     assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
     const restartCount = () => readFile(systemdLog, "utf8").then((value) => value.split("\n").filter((line) => line.startsWith("restart ")).length);
     const restartCountAfterInstall = await restartCount();
@@ -243,10 +266,6 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal((await stat(join(remoteState, "active"))).isFile(), true, "restart failure restores active service");
     assert.ok(!new RegExp(cloudSecret).test(await readFile(sshLog, "utf8")), "SSH argv logs are redacted");
 
-    const stewardRoot = join(remoteRoot, "opt", "coquic-demo", "steward");
-    await writeFile(join(stewardRoot, "tasks", "publisher.marker"), "raw-preserved\n");
-    await writeFile(join(stewardRoot, "cache", "index.marker"), "cache-preserved\n");
-    await writeFile(join(stewardRoot, "control-loop", "publisher.marker"), "raw-preserved\n");
     const repaired = await run("bash", [deployRemote, binary, deployApp], deployEnv);
     assert.equal(repaired.code, 0, repaired.output);
     assert.equal(await readlink(current), firstTarget, "same-release repair preserves the release identity");

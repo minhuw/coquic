@@ -11,6 +11,7 @@ on:
     paths:
       - site-v2/**
       - site/deploy/**
+      - '!site/deploy/install-cloud-config.sh'
       - src/**
       - build.zig
       - build.zig.zon

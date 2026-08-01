@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ void (async () => {
   const repoRoot = resolve(siteRoot, "..");
   const runDemo = join(repoRoot, "site", "deploy", "run-demo.sh");
   const deployRemote = join(repoRoot, "site", "deploy", "deploy-remote.sh");
+  const installCloudConfig = join(repoRoot, "site", "deploy", "install-cloud-config.sh");
   const root = await mkdtemp(join(tmpdir(), "coquic-deploy-"));
   try {
     const release = join(root, "release");
@@ -37,6 +38,8 @@ void (async () => {
     const fakeBin = join(root, "bin");
     const processLog = join(root, "process.log");
     const curlLog = join(root, "curl.log");
+    const sshLog = join(root, "ssh.log");
+    const systemdLog = join(root, "systemd.log");
     await mkdir(app, { recursive: true }); await mkdir(tasks, { recursive: true }); await mkdir(controlLoop, { recursive: true }); await mkdir(dirname(cache), { recursive: true }); await mkdir(fakeBin);
     await writeFile(join(app, "server.js"), "// fake Next entry\n");
     await executable(join(release, "h3-server"), "#!/usr/bin/env bash\necho h3 >>\"${FAKE_PROCESS_LOG}\"\nsleep 0.2\n");
@@ -92,14 +95,20 @@ else printf '%s\\n' ready; fi
     await writeFile(sshKey, "test key\n");
     await executable(binary, "#!/usr/bin/env bash\nexit 0\n");
     await writeFile(join(deployApp, "server.js"), "// deployment fixture\n");
-    await executable(join(fakeBin, "sudo"), "#!/usr/bin/env bash\nexec \"$@\"\n");
+    await executable(join(fakeBin, "sudo"), "#!/usr/bin/env bash\nif [[ \"${1:-}\" == chown ]]; then exit 0; fi\nexec \"$@\"\n");
+    await executable(join(fakeBin, "mv"), `#!/usr/bin/env bash
+if [[ "\${FAKE_CLOUD_CONFIG_FAIL_MV:-0}" == "1" && " $* " == *"/app.env.tmp."* ]]; then exit 19; fi
+exec /bin/mv "$@"
+`);
     await executable(join(fakeBin, "systemctl"), `#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "\${FAKE_SYSTEMD_STATE}"
+if [[ -n "\${FAKE_SYSTEMD_LOG:-}" ]]; then printf '%s\\n' "$*" >>"\${FAKE_SYSTEMD_LOG}"; fi
 case "\${1:-}" in
   is-active) [[ -f "\${FAKE_SYSTEMD_STATE}/active" ]] ;;
   is-enabled) [[ -f "\${FAKE_SYSTEMD_STATE}/enabled" ]] ;;
-  start|restart) touch "\${FAKE_SYSTEMD_STATE}/active" ;;
+  start) touch "\${FAKE_SYSTEMD_STATE}/active" ;;
+  restart) if [[ "\${FAKE_SYSTEMD_FAIL_RESTART:-0}" == "1" ]]; then rm -f "\${FAKE_SYSTEMD_STATE}/active"; exit 17; fi; touch "\${FAKE_SYSTEMD_STATE}/active" ;;
   stop) rm -f "\${FAKE_SYSTEMD_STATE}/active" ;;
   enable) touch "\${FAKE_SYSTEMD_STATE}/enabled" ;;
   disable) rm -f "\${FAKE_SYSTEMD_STATE}/enabled" ;;
@@ -109,6 +118,11 @@ esac
 `);
     await executable(join(fakeBin, "ssh"), `#!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "\${FAKE_SSH_LOG:-}" ]]; then printf '%q ' "$@" >>"\${FAKE_SSH_LOG}"; printf '\\n' >>"\${FAKE_SSH_LOG}"; fi
+if [[ "\${FAKE_SSH_REQUIRE_HOST_KEY:-0}" == "1" ]]; then
+  args="$*"
+  [[ "\${args}" == *"StrictHostKeyChecking=yes"* && "\${args}" == *"UserKnownHostsFile="* ]] || exit 31
+fi
 while [[ $# -gt 0 && "$1" != *@* ]]; do shift; done
 [[ $# -gt 0 ]] || exit 2
 shift
@@ -118,6 +132,7 @@ exec bash -c "$*"
 `);
     await executable(join(fakeBin, "scp"), `#!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "\${FAKE_SSH_LOG:-}" ]]; then printf '%q ' "$@" >>"\${FAKE_SSH_LOG}"; printf '\\n' >>"\${FAKE_SSH_LOG}"; fi
 source_path="\${@: -2:1}"
 destination="\${@: -1}"
 target="\${destination#*:}"
@@ -131,12 +146,99 @@ if [[ " $* " == *" -I "* ]]; then printf 'HTTP/1.1 200 OK\\r\\nalt-svc: h3=\":44
 elif [[ " $* " == *" -w "* ]]; then printf 3;
 else printf '%s\\n' coquic-wasm-demo-v1; fi
 `);
-    const deployEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_CERT_CHAIN_PEM: "fixture cert", COQUIC_DEMO_PRIVATE_KEY_PEM: "fixture key", COQUIC_DEMO_REMOTE_SSH_KEY_PATH: sshKey, COQUIC_DEPLOY_OFFLINE_ROOT: remoteRoot, COQUIC_DEMO_VERIFICATION_ATTEMPTS: "1", COQUIC_DEMO_VERIFICATION_SLEEP_SECONDS: "0", COQUIC_DEMO_VERIFY_WASM: "false", FAKE_SYSTEMD_STATE: remoteState, FAKE_NIX_OUT: nixOut, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, GITHUB_SHA: "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+    const deployEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_CERT_CHAIN_PEM: "fixture cert", COQUIC_DEMO_PRIVATE_KEY_PEM: "fixture key", COQUIC_DEMO_REMOTE_SSH_KEY_PATH: sshKey, COQUIC_DEPLOY_OFFLINE_ROOT: remoteRoot, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_V2_PREVIEW_PASSWORD: "preview-fixture", COQUIC_DEMO_VERIFICATION_ATTEMPTS: "1", COQUIC_DEMO_VERIFICATION_SLEEP_SECONDS: "0", COQUIC_DEMO_VERIFY_WASM: "false", FAKE_SYSTEMD_STATE: remoteState, FAKE_SYSTEMD_LOG: systemdLog, FAKE_SSH_LOG: sshLog, FAKE_NIX_OUT: nixOut, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, GITHUB_SHA: "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
     const deployed = await run("bash", [deployRemote, binary, deployApp], deployEnv);
     assert.equal(deployed.code, 0, deployed.output);
     const current = join(remoteRoot, "opt", "coquic-demo", "current");
     const firstTarget = await readlink(current);
     assert.match(firstTarget, /111111111111$/);
+    const cloudAccount = "A".repeat(32);
+    const cloudDatabase = "12345678-1234-4abc-8def-1234567890ab";
+    const cloudSecret = ["handoff", "read", "token"].join("-");
+    const cloudBaseUrl = "https://objects.example.test/public";
+    const cloudLines = [
+      `CLOUDFLARE_ACCOUNT_ID=${cloudAccount}`,
+      `COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
+      `COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
+      `COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}`,
+    ];
+    let cloudInputNumber = 0;
+    async function writeCloudInput(lines: string[], mode = 0o600) {
+      const path = join(root, `cloud-input-${cloudInputNumber++}.env`);
+      await writeFile(path, `${lines.join("\n")}\n`);
+      await chmod(path, mode);
+      return path;
+    }
+    const cloudEnv = { ...deployEnv, FAKE_SSH_REQUIRE_HOST_KEY: "1" };
+    const cloudInput = await writeCloudInput(cloudLines);
+    const installed = await run("bash", [installCloudConfig, cloudInput], cloudEnv);
+    assert.equal(installed.code, 0, installed.output);
+    assert.ok(!new RegExp(cloudSecret).test(installed.output), "successful handoff output is redacted");
+    const appEnvPath = join(remoteRoot, "etc", "coquic-demo", "app.env");
+    const installedAppEnv = await readFile(appEnvPath, "utf8");
+    assert.ok(installedAppEnv.includes(`export CLOUDFLARE_ACCOUNT_ID=${cloudAccount.toLowerCase()}`));
+    assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`));
+    assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`));
+    assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}/`));
+    assert.match(installedAppEnv, /export COQUIC_DEMO_QA_ENABLED=false/);
+    assert.match(installedAppEnv, /export COQUIC_V2_PREVIEW_PASSWORD=preview-fixture/);
+    assert.match(installedAppEnv, /export COQUIC_STEWARD_TASKS_ROOT=/);
+    assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
+    const restartCount = () => readFile(systemdLog, "utf8").then((value) => value.split("\n").filter((line) => line.startsWith("restart ")).length);
+    const restartCountAfterInstall = await restartCount();
+    assert.equal(restartCountAfterInstall, 1);
+
+    const unchanged = await run("bash", [installCloudConfig, cloudInput], cloudEnv);
+    assert.equal(unchanged.code, 0, unchanged.output);
+    assert.ok(!new RegExp(cloudSecret).test(unchanged.output), "unchanged handoff output is redacted");
+    assert.equal(await restartCount(), restartCountAfterInstall, "unchanged cloud values do not restart Site");
+    await chmod(appEnvPath, 0o644);
+    const modeRepair = await run("bash", [installCloudConfig, cloudInput], cloudEnv);
+    assert.equal(modeRepair.code, 0, modeRepair.output);
+    assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
+    assert.equal(await restartCount(), restartCountAfterInstall, "mode repair does not restart Site");
+
+    const invalidInputs: Array<[string, string[]]> = [
+      ["missing", cloudLines.slice(0, 3)],
+      ["extra", [...cloudLines, "NEXT_PUBLIC_STEWARD_D1_READ_TOKEN=client"]],
+      ["duplicate", [...cloudLines, cloudLines[0]]],
+      ["malformed", ["CLOUDFLARE_ACCOUNT_ID=not-an-account", ...cloudLines.slice(1)]],
+      ["insecure-url", cloudLines.map((line) => line.replace(cloudBaseUrl, "http://objects.example.test/public"))],
+      ["private-url", cloudLines.map((line) => line.replace(cloudBaseUrl, "https://objects.example.test/public/../private"))],
+      ["writer", [...cloudLines.slice(0, 2), "COQUIC_STEWARD_D1_WRITE_TOKEN=writer", ...cloudLines.slice(2)]],
+      ["r2-credential", [...cloudLines.slice(0, 2), "AWS_SECRET_ACCESS_KEY=credential", ...cloudLines.slice(2)]],
+      ["private-locator", [...cloudLines.slice(0, 2), "COQUIC_STEWARD_PRIVATE_R2_BUCKET=private", ...cloudLines.slice(2)]],
+    ];
+    for (const [label, lines] of invalidInputs) {
+      const invalidInput = await writeCloudInput(lines);
+      const invalid = await run("bash", [installCloudConfig, invalidInput], cloudEnv);
+      assert.notEqual(invalid.code, 0, `${label} input unexpectedly succeeded`);
+      assert.ok(!new RegExp(cloudSecret).test(invalid.output), `${label} rejection is redacted`);
+    }
+    const wrongModeInput = await writeCloudInput(cloudLines, 0o644);
+    const wrongMode = await run("bash", [installCloudConfig, wrongModeInput], cloudEnv);
+    assert.notEqual(wrongMode.code, 0);
+
+    const writeFailureSecret = `${cloudSecret}-write`;
+    const writeFailureInput = await writeCloudInput(cloudLines.map((line) => line.replace(cloudSecret, writeFailureSecret)));
+    const beforeWriteFailure = await readFile(appEnvPath);
+    const writeFailure = await run("bash", [installCloudConfig, writeFailureInput], { ...cloudEnv, FAKE_CLOUD_CONFIG_FAIL_MV: "1" });
+    assert.notEqual(writeFailure.code, 0, writeFailure.output);
+    assert.ok(!new RegExp(writeFailureSecret).test(writeFailure.output), "write failure output is redacted");
+    assert.ok((await readFile(appEnvPath)).equals(beforeWriteFailure), "remote write failure restores app.env bytes");
+    assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(join(remoteState, "active"))).isFile(), true, "remote write failure restores active service");
+
+    const restartFailureSecret = `${cloudSecret}-restart`;
+    const restartFailureInput = await writeCloudInput(cloudLines.map((line) => line.replace(cloudSecret, restartFailureSecret)));
+    const beforeRestartFailure = await readFile(appEnvPath);
+    const restartFailure = await run("bash", [installCloudConfig, restartFailureInput], { ...cloudEnv, FAKE_SYSTEMD_FAIL_RESTART: "1" });
+    assert.notEqual(restartFailure.code, 0, restartFailure.output);
+    assert.ok(!new RegExp(restartFailureSecret).test(restartFailure.output), "restart failure output is redacted");
+    assert.ok((await readFile(appEnvPath)).equals(beforeRestartFailure), "restart failure restores app.env bytes");
+    assert.equal((await stat(join(remoteState, "active"))).isFile(), true, "restart failure restores active service");
+    assert.ok(!new RegExp(cloudSecret).test(await readFile(sshLog, "utf8")), "SSH argv logs are redacted");
+
     const stewardRoot = join(remoteRoot, "opt", "coquic-demo", "steward");
     await writeFile(join(stewardRoot, "tasks", "publisher.marker"), "raw-preserved\n");
     await writeFile(join(stewardRoot, "cache", "index.marker"), "cache-preserved\n");
@@ -144,6 +246,8 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     const repaired = await run("bash", [deployRemote, binary, deployApp], deployEnv);
     assert.equal(repaired.code, 0, repaired.output);
     assert.equal(await readlink(current), firstTarget, "same-release repair preserves the release identity");
+    const repairedAppEnv = await readFile(appEnvPath, "utf8");
+    assert.ok(repairedAppEnv.includes(`export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`), "same-release repair preserves cloud configuration");
     const rolledBack = await run("bash", [deployRemote, binary, deployApp], { ...deployEnv, GITHUB_SHA: "222222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbb", FAKE_VERIFY_FAILURE: "1" });
     assert.notEqual(rolledBack.code, 0, rolledBack.output);
     assert.equal(await readlink(current), firstTarget, "failed verification restores the previous release");
@@ -151,6 +255,17 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal((await readFile(join(stewardRoot, "cache", "index.marker"), "utf8")).trim(), "cache-preserved");
     assert.equal((await readFile(join(stewardRoot, "control-loop", "publisher.marker"), "utf8")).trim(), "raw-preserved");
     assert.equal((await readFile(join(remoteState, "active"), "utf8")).length, 0);
+    assert.ok((await readFile(appEnvPath, "utf8")) === repairedAppEnv, "ordinary rollback preserves installed cloud configuration");
+    assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
+
+    const absentRoot = join(root, "remote-absent");
+    await mkdir(join(absentRoot, "tmp"), { recursive: true });
+    await writeFile(join(absentRoot, ".coquic-deploy-test-root"), "owned\n");
+    const absent = await run("bash", [installCloudConfig, cloudInput], { ...cloudEnv, COQUIC_DEPLOY_OFFLINE_ROOT: absentRoot, FAKE_SYSTEMD_STATE: join(absentRoot, ".fake-systemd") });
+    assert.equal(absent.code, 0, absent.output);
+    const absentAppEnv = join(absentRoot, "etc", "coquic-demo", "app.env");
+    assert.equal((await stat(absentAppEnv)).mode & 0o777, 0o600);
+    assert.doesNotMatch(await readFile(absentAppEnv, "utf8"), /COQUIC_DEMO_QA_ENABLED/);
     const deploySource = await readFile(deployRemote, "utf8");
     assert.doesNotMatch(deploySource, /COQUIC_DEPLOY_TEST_MODE/);
     assert.match(deploySource, /same-release repair mode/);

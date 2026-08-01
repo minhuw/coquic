@@ -594,6 +594,30 @@ backup_or_mark_absent() {
   fi
 }
 
+preserve_installed_cloud_exports() {
+  local source_path="${remote_config_root}/app.env"
+  local candidate_path="${remote_upload_dir}/app.env"
+  local filtered_path="${remote_upload_dir}/app.env.filtered"
+  local preserved_path="${remote_upload_dir}/app.env.cloud"
+
+  # The ordinary deploy owns QA/preview and legacy archive exports, but it
+  # must carry the four operator-installed cloud exports forward unchanged.
+  sudo awk '
+    /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL)=/ { next }
+    { print }
+  ' "${candidate_path}" > "${filtered_path}"
+  sudo mv -f "${filtered_path}" "${candidate_path}"
+
+  if sudo test -f "${source_path}"; then
+    sudo awk '
+      /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL)=/ { print }
+    ' "${source_path}" > "${preserved_path}"
+    if sudo test -s "${preserved_path}"; then
+      sudo cat "${preserved_path}" >> "${candidate_path}"
+    fi
+  fi
+}
+
 service_was_active=0
 if sudo systemctl is-active --quiet coquic-demo.service; then
   service_was_active=1
@@ -653,6 +677,7 @@ backup_or_mark_absent \
   "${remote_config_root}/app.env" \
   "${remote_upload_dir}/app.env.bak" \
   "${remote_upload_dir}/app.env.absent"
+preserve_installed_cloud_exports
 
 if [[ "${same_release_repair_mode}" != "1" ]]; then
   sudo rm -rf "${remote_release_dir}"

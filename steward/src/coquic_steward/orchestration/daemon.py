@@ -167,6 +167,10 @@ def _abort_publication_connection(connection: object) -> None:
             break
 
 
+class _PublicationTransportCancelled(RuntimeError):
+    """Signal a checkout that lost the cancellation race before handoff."""
+
+
 class _PublicationTransportTracker:
     """Track active sync transports so shutdown can interrupt in-flight I/O."""
 
@@ -176,17 +180,15 @@ class _PublicationTransportTracker:
         self._connections: dict[int, object] = {}
         self._pools: dict[int, object] = {}
 
-    def _track_connection(self, connection: object) -> None:
+    def _track_connection(self, connection: object) -> bool:
         if connection is None:
-            return
+            return True
         with self._lock:
             if self._cancelled:
-                abort = True
+                return False
             else:
                 self._connections[id(connection)] = connection
-                abort = False
-        if abort:
-            _abort_publication_connection(connection)
+                return True
 
     def _forget_connection(self, connection: object) -> None:
         if connection is None:
@@ -226,7 +228,11 @@ class _PublicationTransportTracker:
 
         def tracked_get(*args: object, **kwargs: object) -> object:
             connection = get_connection(*args, **kwargs)
-            self._track_connection(connection)
+            if not self._track_connection(connection):
+                # Do not return a checkout after cancellation.  urllib3 would
+                # otherwise reconnect this wrapper while the worker is stopping.
+                _abort_publication_connection(connection)
+                raise _PublicationTransportCancelled()
             return connection
 
         def tracked_put(connection: object, *args: object, **kwargs: object) -> object:

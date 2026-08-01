@@ -381,6 +381,156 @@ def test_publication_worker_shutdown_interrupts_inflight_botocore_request():
         server.join(timeout=1.0)
 
 
+def test_publication_worker_shutdown_linearizes_connection_checkout(monkeypatch):
+    import boto3
+    from botocore.awsrequest import AWSHTTPConnectionPool
+    from botocore.config import Config as BotoConfig
+
+    from coquic_steward.publication.r2 import R2Client, public_object_key
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(0.1)
+    endpoint = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    checkout_returned = threading.Event()
+    release_checkout = threading.Event()
+    connected = threading.Event()
+    server_stop = threading.Event()
+    connection: socket.socket | None = None
+
+    def serve() -> None:
+        nonlocal connection
+        try:
+            while not server_stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                connected.set()
+                connection.settimeout(0.1)
+                while not server_stop.is_set():
+                    try:
+                        if not connection.recv(65536):
+                            return
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        return
+                return
+        except OSError:
+            return
+
+    original_get_conn = AWSHTTPConnectionPool._get_conn
+
+    def paused_get_conn(pool, *args, **kwargs):
+        connection = original_get_conn(pool, *args, **kwargs)
+        checkout_returned.set()
+        release_checkout.wait(timeout=2.0)
+        return connection
+
+    monkeypatch.setattr(AWSHTTPConnectionPool, "_get_conn", paused_get_conn)
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    client = None
+    worker = None
+    stop_thread = None
+    daemon = None
+    try:
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id="test-access-key",
+            aws_secret_access_key="test-secret-key",
+            region_name="auto",
+            config=BotoConfig(
+                connect_timeout=1,
+                read_timeout=60,
+                retries={"max_attempts": 0, "mode": "standard"},
+            ),
+        )
+        r2 = R2Client(
+            endpoint="https://r2.example.test",
+            public_bucket="publication-public",
+            private_bucket="publication-private",
+            client=client,
+        )
+        publisher = SimpleNamespace(r2=r2, d1=SimpleNamespace())
+        daemon = object.__new__(StewardDaemon)
+        daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+        daemon._publication_stop = threading.Event()
+        daemon._publication_wakeup = threading.Event()
+        daemon._publication_cancel = None
+        daemon._publication_thread = None
+        daemon._publication_retry_interval = lambda: 0.01
+        daemon._build_publication_publisher = lambda: publisher
+        daemon._log = lambda _message: None
+        content = b"checkout cancellation boundary"
+        key = public_object_key("task", hashlib.sha256(content).hexdigest())
+
+        def publish(_publisher: object) -> bool:
+            try:
+                r2.put_object(key, content)
+            except Exception:
+                # Cancellation is expected to interrupt the in-flight request.
+                pass
+            return False
+
+        daemon._publish_next_generation = publish
+        worker = threading.Thread(target=daemon._publication_worker_loop, daemon=True)
+        daemon._publication_thread = worker
+        worker.start()
+        assert checkout_returned.wait(timeout=1.0)
+
+        cancellation_called = threading.Event()
+        cancel = daemon._publication_cancel
+        assert cancel is not None
+
+        def cancel_and_signal() -> None:
+            cancel()
+            cancellation_called.set()
+
+        daemon._publication_cancel = cancel_and_signal
+        deadline = time.monotonic() + 0.25
+        stop_thread = threading.Thread(
+            target=daemon._stop_publication_worker,
+            kwargs={"deadline": deadline},
+            daemon=True,
+        )
+        stop_thread.start()
+        assert cancellation_called.wait(timeout=1.0)
+        release_checkout.set()
+        stop_thread.join(timeout=1.0)
+
+        assert not stop_thread.is_alive()
+        assert not worker.is_alive()
+        assert daemon._publication_thread is None
+        assert not connected.is_set()
+    finally:
+        release_checkout.set()
+        server_stop.set()
+        if daemon is not None:
+            daemon._publication_stop.set()
+            daemon._publication_wakeup.set()
+        if worker is not None and worker.is_alive():
+            if connection is not None:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
+            worker.join(timeout=1.0)
+        if stop_thread is not None and stop_thread.is_alive():
+            stop_thread.join(timeout=1.0)
+        if client is not None:
+            client.close()
+        if connection is not None:
+            connection.close()
+        listener.close()
+        server.join(timeout=1.0)
+
+
 def test_planner_retry_defers_unchanged_input_and_success_resets_state(
     config, monkeypatch
 ) -> None:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from coquic_steward.core.config import StewardPublicationConfig
+import coquic_steward.execution.session as session_module
 from coquic_steward.execution.executor import (
     IntegrationTranscript,
     StewardExecutor,
@@ -469,3 +471,43 @@ def test_disabled_publication_preflight_fails_closed_on_scan_error(
     assert len(finished) == 2
     assert store.items[0].data["reason_codes"] == [ReasonCode.scanner_failure.value]
     assert "private-secret-value" not in transcript.path.read_text(encoding="utf-8")
+
+
+def test_materialized_success_enqueues_deterministically_without_transport(
+    monkeypatch,
+) -> None:
+    graph = _publication_graph("completion-boundary")
+    # Build the valid immutable generation through the existing pure contract;
+    # the session hook itself must only hand its outbox record to the store.
+    from coquic_steward.publication.generation import compose_publication_generation
+
+    scanner = lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b"")
+    generation = compose_publication_generation(graph, scanner_runner=scanner)
+    assert isinstance(generation, PublicationGeneration)
+    monkeypatch.setattr(session_module, "publication_graph_for_task", lambda *_args: graph)
+    monkeypatch.setattr(
+        session_module,
+        "compose_publication_generation",
+        lambda *_args, **_kwargs: generation,
+    )
+
+    queued: list[object] = []
+    store = SimpleNamespace(enqueue_publication=lambda value: queued.append(value) or value)
+    config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    task = SimpleNamespace(id="task-publication-preflight")
+    run = SimpleNamespace(
+        state="succeeded", completed_at=datetime.now(timezone.utc)
+    )
+
+    first = session_module.enqueue_materialized_publication(config, store, task, run)
+    second = session_module.enqueue_materialized_publication(config, store, task, run)
+
+    assert first.publication_id == generation.publication_id
+    assert second.publication_id == generation.publication_id
+    assert [item.publication_id for item in queued] == [
+        generation.publication_id,
+        generation.publication_id,
+    ]
+
+    run.state = "running"
+    assert session_module.enqueue_materialized_publication(config, store, task, run) is None

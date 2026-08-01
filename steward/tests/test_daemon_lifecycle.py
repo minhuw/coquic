@@ -92,6 +92,54 @@ def _planner_signal(store: TaskStore, suffix: str = "retry") -> SignalItem:
     return item
 
 
+def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
+    generation = SimpleNamespace(publication_id="pub-worker", task_id="task-worker")
+
+    class Store:
+        def __init__(self):
+            self.on_change = None
+            self.list_calls = 0
+
+        def list_publication_generations(self, **_kwargs):
+            self.list_calls += 1
+            return [generation]
+
+    class Publisher:
+        def __init__(self):
+            self.calls: list[tuple[object, ...]] = []
+
+        def publish(self, *args, **_kwargs):
+            self.calls.append(args)
+            return SimpleNamespace(status="retry_wait")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.executor = SimpleNamespace()
+    daemon.config = SimpleNamespace(
+        publication=SimpleNamespace(
+            enabled=True,
+            d1_token_path=None,
+            r2_access_key_id_path=None,
+            r2_secret_access_key_path=None,
+        )
+    )
+    daemon._publication_wakeup = threading.Event()
+    daemon._publication_lock = threading.RLock()
+    daemon._publication_callback = None
+    daemon._publication_previous_callback = None
+    daemon.logger = None
+    daemon._publication_source = lambda _generation: {}
+
+    publisher = Publisher()
+    assert daemon._publish_next_generation(publisher) is False
+    assert publisher.calls == [("pub-worker",)]
+
+    daemon._install_publication_change_callback()
+    assert callable(daemon.store.on_change)
+    daemon.store.on_change()
+    assert daemon._publication_wakeup.is_set()
+
+
 def test_planner_retry_defers_unchanged_input_and_success_resets_state(
     config, monkeypatch
 ) -> None:

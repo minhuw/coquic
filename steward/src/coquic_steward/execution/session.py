@@ -11,6 +11,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, replace
+from datetime import timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -32,6 +33,8 @@ from ..core.models import (
     WorkerResult,
 )
 from ..core.subprocesses import run_command
+from ..publication.atif import AtifSource
+from ..publication.generation import PublicationGeneration, compose_publication_generation
 from ..storage import TaskStore
 from .container import (
     ContainerBoundaryError,
@@ -63,6 +66,163 @@ class InvocationStatus(StrEnum):
     interrupted = "interrupted"
     forced = "forced"
     unavailable = "unavailable"
+
+
+def _publication_timestamp(value: object) -> str:
+    """Serialize one store timestamp for the detached publication graph."""
+
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def publication_graph_for_task(
+    config: StewardConfig, store: TaskStore, task: TaskRecord
+) -> dict[str, object]:
+    """Return the private, stable archive view consumed by the pure builder.
+
+    This helper intentionally reads only the task archive and local store.  It
+    never reads publication credentials or constructs a transport client, so a
+    session completion can prepare a durable local outbox record without
+    crossing the daemon/provider boundary.
+    """
+
+    archive = TaskArchiveWriter(config)
+    pipelines: list[dict[str, object]] = []
+    runs: list[dict[str, object]] = []
+
+    def run_mapping(run: TaskRun) -> dict[str, object]:
+        completed = run.completed_at
+        duration = (
+            max(0, int((completed - run.started_at).total_seconds() * 1000))
+            if completed is not None
+            else 0
+        )
+        return {
+            "taskId": run.task_id,
+            "pipelineId": run.pipeline_id,
+            "runId": run.id,
+            "role": str(run.role),
+            "state": str(run.state),
+            "startedAt": _publication_timestamp(run.started_at),
+            "completedAt": (
+                _publication_timestamp(completed) if completed is not None else None
+            ),
+            "durationMs": duration,
+            "model": run.model,
+            "reasoning": run.reasoning,
+            "parentRunId": run.parent_run_id,
+            "retryOfRunId": run.retry_of_run_id,
+            "resumeOfRunId": run.resume_of_run_id,
+        }
+
+    for pipeline in store.list_pipelines(task.id):
+        pipeline_value = {
+            "pipelineId": pipeline.id,
+            "taskId": pipeline.task_id,
+            "name": f"pipeline-{pipeline.ordinal}",
+            "createdAt": _publication_timestamp(pipeline.started_at),
+        }
+        pipelines.append(pipeline_value)
+        for run in store.list_runs(task.id, pipeline_id=pipeline.id):
+            if run.completed_at is None or str(run.state) == "running":
+                continue
+            documents: dict[str, bytes] = {}
+            for name in ("codex.jsonl", "activities.jsonl", "telemetry.json", "run.json"):
+                path = archive.task_path(
+                    task.id,
+                    f"pipelines/{pipeline.id}/runs/{run.id}/{name}",
+                )
+                try:
+                    resolved = path.resolve(strict=True)
+                    resolved.relative_to(archive.root.resolve())
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    documents[name] = path.read_bytes()
+                except (OSError, RuntimeError, ValueError):
+                    continue
+            runs.append(
+                {
+                    "source": AtifSource(run=run_mapping(run), documents=documents),
+                    "pipeline": pipeline_value,
+                }
+            )
+
+    try:
+        status = str(task.status)
+    except Exception:
+        status = "failed"
+    lifecycle = (
+        "active"
+        if status in {"queued", "running", "reviewing", "integrating"}
+        else "cancelled"
+        if status == "cancelled"
+        else "failed"
+        if status in {"failed", "blocked"}
+        else "completed"
+    )
+    events = [
+        {
+            "taskId": task.id,
+            "sequence": index,
+            "eventType": event.kind,
+            "occurredAt": _publication_timestamp(event.created_at),
+            "summary": event.message,
+        }
+        for index, event in enumerate(store.events(task.id), start=1)
+    ]
+    return {
+        "task": {
+            "taskId": task.id,
+            "title": task.spec.title,
+            "lifecycleState": lifecycle,
+            "createdAt": _publication_timestamp(task.created_at),
+            "completedAt": (
+                None
+                if lifecycle == "active"
+                else _publication_timestamp(task.updated_at)
+            ),
+        },
+        "pipelines": pipelines,
+        "runs": runs,
+        "events": events,
+    }
+
+
+def enqueue_materialized_publication(
+    config: StewardConfig,
+    store: TaskStore,
+    task: TaskRecord,
+    run: TaskRun,
+) -> object | None:
+    """Queue one successful, fully materialized run without transport I/O."""
+
+    publication = getattr(config, "publication", None)
+    if not getattr(publication, "enabled", False):
+        return None
+    if run.completed_at is None or str(run.state) not in {
+        "succeeded",
+        "completed",
+        "pushed",
+        "no_changes",
+    }:
+        return None
+    try:
+        graph = publication_graph_for_task(config, store, task)
+        outcome = compose_publication_generation(
+            graph,
+            task_id=task.id,
+            # Credential discovery is daemon-only.  The worker repeats the
+            # composition with the trusted credential paths before provider I/O.
+            credential_sources=(),
+        )
+        if not isinstance(outcome, PublicationGeneration):
+            return None
+        return store.enqueue_publication(outcome.to_outbox())
+    except Exception:
+        # A completion hook must not alter the session result.  The daemon's
+        # startup reconciliation can retry the same materialized run later.
+        return None
 
 
 @dataclass(frozen=True)
@@ -1501,6 +1661,11 @@ class SessionSupervisor:
             self._invokers[task.id] = invoker
         return runtime, invoker
 
+    def _enqueue_completed_run(self, task: TaskRecord, run: TaskRun) -> object | None:
+        """Cross the local publication boundary after archive materialization."""
+
+        return enqueue_materialized_publication(self.config, self.store, task, run)
+
     def _execute(
         self,
         task: TaskRecord,
@@ -1673,9 +1838,10 @@ class SessionSupervisor:
             },
         )
         self.archive.materialize_run(task.id, run.pipeline_id, self.store.get_run(run.id))
+        saved_run = self.store.get_run(run.id)
+        self._enqueue_completed_run(task, saved_run)
         with self._active_lock:
             self._active.pop(run.id, None)
-        saved_run = self.store.get_run(run.id)
         externally_interrupted = saved_run.state == CodexRunState.interrupted.value
         return SessionResult(
             task.id,

@@ -43,10 +43,15 @@ from ..execution.session import (
     ResumeCategory,
     SessionResult,
     SessionSupervisor,
+    enqueue_materialized_publication,
+    publication_graph_for_task,
     runtime_factory_for_config,
     planner_session_for_config,
 )
 from ..execution.task_archive import TaskArchiveWriter
+from ..publication.d1 import D1PublicationClient
+from ..publication.publisher import CloudPublisher
+from ..publication.r2 import R2Client
 from ..core.subprocesses import (
     ProcessGroupCancellationOwner,
     run_command,
@@ -85,6 +90,8 @@ from .preflight import PreflightReport, preflight_remote_push, run_preflight
 DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 FINAL_SYNC_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
+PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass
@@ -136,6 +143,12 @@ class StewardDaemon:
         self._sync_final_attempted = False
         self._sync_cycle_count = 0
         self._preflight_report: PreflightReport | None = None
+        self._publication_thread: threading.Thread | None = None
+        self._publication_stop = threading.Event()
+        self._publication_wakeup = threading.Event()
+        self._publication_lock = threading.RLock()
+        self._publication_previous_callback: Callable[[], None] | None = None
+        self._publication_callback: Callable[[], None] | None = None
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
@@ -384,6 +397,8 @@ class StewardDaemon:
                     self._control_loop_wakeup.set()
                 except Exception as exc:
                     self._log(f"control-loop runtime start lag error={exc.__class__.__name__}")
+            self._enqueue_materialized_publications()
+            self._start_publication_worker()
             return tuple(outcomes)
 
     def _startup_reconcile_control_loop(self) -> None:
@@ -583,6 +598,235 @@ class StewardDaemon:
             and self._control_loop_thread is thread
         ):
             self._control_loop_thread = None
+
+    def _install_publication_change_callback(self) -> None:
+        """Wake the publication worker after every committed local mutation."""
+
+        if not getattr(self.config.publication, "enabled", False):
+            return
+        with self._publication_lock:
+            if self._publication_callback is not None:
+                return
+            previous = getattr(self.store, "on_change", None)
+
+            def on_change() -> None:
+                try:
+                    if callable(previous):
+                        previous()
+                finally:
+                    self._publication_wakeup.set()
+
+            try:
+                self.store.on_change = on_change
+            except (AttributeError, TypeError):
+                # A narrow fake store may expose no callback slot.  The worker
+                # still makes progress through its bounded periodic retry.
+                return
+            self._publication_previous_callback = previous if callable(previous) else None
+            self._publication_callback = on_change
+
+    def _build_publication_publisher(self) -> CloudPublisher:
+        """Construct transport clients on the publication worker thread only."""
+
+        publication = self.config.publication
+        r2: object | None = None
+        d1: object | None = None
+        try:
+            r2 = R2Client(
+                config=publication,
+                timeout_seconds=float(publication.network_timeout_seconds),
+            )
+            d1 = D1PublicationClient(
+                config=publication,
+                timeout_seconds=float(publication.network_timeout_seconds),
+            )
+        except Exception:
+            for client in (r2, d1):
+                close = getattr(client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+            raise
+        lease_seconds = max(1, int(publication.lease_duration_seconds))
+        retry_backoff_seconds = max(1, int(publication.retry_backoff_seconds))
+        return CloudPublisher(
+            self.store,
+            r2,
+            d1,
+            worker_id=f"publication-{self.runtime.instance_id}",
+            lease_seconds=lease_seconds,
+            retry_backoff_seconds=retry_backoff_seconds,
+        )
+
+    def _publication_retry_interval(self) -> float:
+        configured = getattr(self.config.publication, "retry_backoff_seconds", None)
+        try:
+            value = float(configured)
+        except (TypeError, ValueError):
+            value = PUBLICATION_RETRY_INTERVAL_SECONDS
+        return max(0.05, min(PUBLICATION_RETRY_INTERVAL_SECONDS, value))
+
+    def _publication_source(self, generation: object) -> object | None:
+        task_id = getattr(generation, "task_id", None)
+        if not isinstance(task_id, str):
+            return None
+        try:
+            task = self.store.get(task_id)
+            graph_builder = getattr(self.executor, "_integration_publication_graph", None)
+            if callable(graph_builder):
+                return graph_builder(task)
+            return publication_graph_for_task(self.config, self.store, task)
+        except Exception as exc:
+            self._log(f"publication source unavailable error={exc.__class__.__name__}")
+            return None
+
+    def _publish_next_generation(self, publisher: CloudPublisher) -> bool:
+        listing = getattr(self.store, "list_publication_generations", None)
+        if not callable(listing):
+            listing = getattr(self.store, "list_generations", None)
+        if not callable(listing):
+            return False
+        try:
+            generations = listing(
+                states={"queued", "retry_wait"},
+                limit=1,
+            )
+        except TypeError:
+            generations = listing(limit=1)
+        if not generations:
+            return False
+        generation = generations[0]
+        publication_id = getattr(generation, "publication_id", None)
+        if not isinstance(publication_id, str):
+            return True
+        source = self._publication_source(generation)
+        try:
+            publication = self.config.publication
+            compose_kwargs = {
+                "credential_sources": tuple(
+                    path
+                    for path in (
+                        publication.d1_token_path,
+                        publication.r2_access_key_id_path,
+                        publication.r2_secret_access_key_path,
+                    )
+                    if path is not None
+                )
+            }
+            result = publisher.publish(
+                publication_id,
+                source=source,
+                compose_kwargs=compose_kwargs,
+            )
+            status = getattr(result, "status", None)
+            self._log(
+                "publication worker processed "
+                f"generation={publication_id} status={status or 'unknown'}"
+            )
+        except Exception as exc:
+            # CloudPublisher reduces expected provider failures to durable retry
+            # states.  This guard keeps an unexpected local failure from taking
+            # down the sole restartable worker.
+            self._log(
+                "publication worker cycle failed "
+                f"generation={publication_id} error={exc.__class__.__name__}"
+            )
+            return True
+        # A successful exposure may immediately drain another queued row.  All
+        # other outcomes wait for the store callback or the bounded retry timer
+        # so a durable retry boundary cannot turn into a busy loop.
+        return str(status) == "exposed"
+
+    def _publication_worker_loop(self) -> None:
+        publisher: CloudPublisher | None = None
+        clients: tuple[object, object] = ()
+        try:
+            while not self._publication_stop.is_set():
+                if publisher is None:
+                    try:
+                        publisher = self._build_publication_publisher()
+                        clients = (
+                            getattr(publisher, "r2", None),
+                            getattr(publisher, "d1", None),
+                        )
+                    except Exception as exc:
+                        self._log(
+                            "publication worker setup failed "
+                            f"error={exc.__class__.__name__}"
+                        )
+                        self._publication_wakeup.wait(self._publication_retry_interval())
+                        self._publication_wakeup.clear()
+                        continue
+                if self._publish_next_generation(publisher):
+                    continue
+                self._publication_wakeup.wait(self._publication_retry_interval())
+                self._publication_wakeup.clear()
+        finally:
+            for client in clients:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+    def _start_publication_worker(self) -> None:
+        """Start the one daemon-owned publication worker when enabled."""
+
+        if not getattr(self.config.publication, "enabled", False):
+            return
+        self._install_publication_change_callback()
+        with self._publication_lock:
+            if self._publication_thread is not None and self._publication_thread.is_alive():
+                return
+            try:
+                expire = getattr(self.store, "expire_publication_leases", None)
+                if callable(expire):
+                    expire()
+            except Exception as exc:
+                self._log(
+                    "publication lease reconciliation failed "
+                    f"error={exc.__class__.__name__}"
+                )
+            self._publication_stop.clear()
+            self._publication_wakeup.clear()
+            self._publication_thread = threading.Thread(
+                target=self._publication_worker_loop,
+                name="steward-publication-worker",
+                daemon=True,
+            )
+            self._publication_thread.start()
+
+    def _stop_publication_worker(self, *, deadline: float | None = None) -> None:
+        self._publication_stop.set()
+        self._publication_wakeup.set()
+        thread = self._publication_thread
+        if thread is None or thread is threading.current_thread():
+            return
+        timeout = PUBLICATION_JOIN_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = max(0.0, min(timeout, deadline - time.monotonic()))
+        thread.join(timeout=timeout)
+        if not thread.is_alive() and self._publication_thread is thread:
+            self._publication_thread = None
+
+    start_publication_worker = _start_publication_worker
+    stop_publication_worker = _stop_publication_worker
+
+    def _enqueue_materialized_publications(self) -> None:
+        """Recover completion notifications missed before a daemon restart."""
+
+        if not getattr(self.config.publication, "enabled", False):
+            return
+        for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):
+            try:
+                runs = self.store.list_runs(task.id)
+            except (AttributeError, KeyError):
+                continue
+            for run in runs:
+                enqueue_materialized_publication(self.config, self.store, task, run)
 
     reconcile_startup = startup_reconcile
     reconcile = startup_reconcile
@@ -1967,6 +2211,7 @@ class StewardDaemon:
         self._stop_control_loop_writer()
         self._drain_control_loop_once()
         deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
+        self._stop_publication_worker(deadline=deadline)
         running_runs: list[tuple[str, str]] = []
         tasks = sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id)
         for task in tasks:

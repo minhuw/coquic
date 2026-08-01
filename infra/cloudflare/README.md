@@ -97,3 +97,58 @@ nix develop -c uv run --project infra/cloudflare python -m compileall -q infra/c
 
 Keep any stack configuration containing operator credentials outside source
 control. The checked-in example contains placeholders only.
+
+## Production rollout
+
+`scripts/deploy-production.sh` is the only Cloudflare rollout command. Run it
+from the operator's local Nix shell with a logged-in Pulumi CLI, the selected
+`production` stack, and a bootstrap `CLOUDFLARE_API_TOKEN` in the environment:
+
+```sh
+nix develop -c infra/cloudflare/scripts/deploy-production.sh \
+  --stack production \
+  --credentials-dir /srv/coquic-steward/private/credentials
+```
+
+The default is a read-only structured preview. Pulumi output is captured in a
+private temporary directory, destructive operations (delete or replacement)
+are rejected, and the saved plan is discarded after the command exits. Add
+`--apply` only after reviewing that preview:
+
+```sh
+nix develop -c infra/cloudflare/scripts/deploy-production.sh \
+  --stack production \
+  --credentials-dir /srv/coquic-steward/private/credentials \
+  --apply
+```
+
+Apply uses the exact accepted saved plan. It then queries D1 through Wrangler
+using a fixed, read-only `sqlite_master` statement. A blank database is
+bootstrapped from `contracts/steward-cloud/d1.sql` and queried again; an exact
+existing schema is a no-op. Any malformed response or drift stops the command
+before host credentials are written. D1 changes after this rollout require an
+explicit forward-migration review.
+
+The command validates the exact `steward_config` and `site_config` Pulumi
+objects before consuming them. It writes only these three files below the
+operator-selected directory, which must be owned by the invoking user and
+mode `0700`:
+
+| File | Source field | Mode |
+| --- | --- | --- |
+| `d1-read-token` | `steward_config.d1_token` | `0600` |
+| `r2-access-key-id` | `steward_config.s3_access_key_id` | `0600` |
+| `r2-secret-access-key` | `steward_config.s3_secret_access_key` | `0600` |
+
+Files are staged privately and replaced atomically; a failed replacement
+restores the prior set. Existing regular files may be replaced, but symlinks,
+unowned targets, and unsafe directories are refused. Values never appear in
+stdout, stderr, command arguments, or the checked-in README.
+
+Finally, apply passes exactly four Site fields in a mode-`0600` temporary input
+file to `site/deploy/install-cloud-config.sh`, which owns the protected SSH
+transaction and rollback. The rollout does not deploy Site, start Steward,
+rotate tokens, destroy resources, or run a recurring monitor. If the Site
+handoff fails after the cloud and D1 boundaries, the verified Steward files
+remain in place and rerunning the same reviewed command is the recovery path;
+no rollback or cleanup command is invoked.

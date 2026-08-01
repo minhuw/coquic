@@ -205,6 +205,52 @@ def test_publication_worker_shutdown_cancels_clients_before_deadline():
     assert daemon._publication_thread is None
 
 
+def test_publication_worker_shutdown_closes_nested_r2_transport_before_deadline():
+    started = threading.Event()
+    released = threading.Event()
+    r2_closed = threading.Event()
+    d1_closed = threading.Event()
+
+    class Transport:
+        def close(self):
+            r2_closed.set()
+            released.set()
+
+    class ConcreteR2:
+        def __init__(self):
+            self._client = Transport()
+
+    class D1:
+        def close(self):
+            d1_closed.set()
+
+    publisher = SimpleNamespace(r2=ConcreteR2(), d1=D1())
+    daemon = object.__new__(StewardDaemon)
+    daemon._publication_stop = threading.Event()
+    daemon._publication_wakeup = threading.Event()
+    daemon._publication_cancel = None
+    daemon._publication_thread = None
+    daemon._publication_retry_interval = lambda: 0.01
+    daemon._build_publication_publisher = lambda: publisher
+    daemon._publish_next_generation = lambda _publisher: (
+        started.set(), released.wait(timeout=2.0), False
+    )[-1]
+    daemon._log = lambda _message: None
+
+    worker = threading.Thread(target=daemon._publication_worker_loop, daemon=True)
+    daemon._publication_thread = worker
+    worker.start()
+    assert started.wait(timeout=1.0)
+
+    deadline = time.monotonic() + 1.0
+    daemon._stop_publication_worker(deadline=deadline)
+
+    assert r2_closed.is_set()
+    assert d1_closed.is_set()
+    assert not worker.is_alive()
+    assert daemon._publication_thread is None
+
+
 def test_planner_retry_defers_unchanged_input_and_success_resets_state(
     config, monkeypatch
 ) -> None:

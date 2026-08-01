@@ -95,6 +95,40 @@ PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
 PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
 
 
+def _close_publication_client(client: object) -> None:
+    """Close a daemon-owned client and its known transport fallback."""
+
+    pending = [client]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop(0)
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        closed = False
+        for name in ("cancel", "close"):
+            try:
+                method = getattr(candidate, name, None)
+            except Exception:
+                method = None
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+                closed = True
+                break
+        if closed:
+            continue
+        for name in ("_client", "_transport", "transport", "_endpoint", "http_session"):
+            try:
+                nested = getattr(candidate, name, None)
+            except Exception:
+                nested = None
+            if nested is not None:
+                pending.append(nested)
+
+
 @dataclass
 class TickResult:
     recovered: int = 0
@@ -777,12 +811,7 @@ class StewardDaemon:
                         pass
                     break
             for client in clients:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
+                _close_publication_client(client)
 
         try:
             while not self._publication_stop.is_set():
@@ -794,6 +823,8 @@ class StewardDaemon:
                             getattr(publisher, "d1", None),
                         )
                         self._publication_cancel = close_clients
+                        if self._publication_stop.is_set():
+                            break
                     except Exception as exc:
                         self._log(
                             "publication worker setup failed "

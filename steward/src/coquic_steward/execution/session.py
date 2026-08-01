@@ -2010,6 +2010,7 @@ class SessionSupervisor:
         )
         self.archive.materialize_run(task.id, run.pipeline_id, self.store.get_run(run.id))
         saved_run = self.store.get_run(run.id)
+        self._enqueue_completed_run(task, saved_run)
         with self._active_lock:
             self._active.pop(run.id, None)
         externally_interrupted = saved_run.state == CodexRunState.interrupted.value

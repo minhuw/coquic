@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -571,3 +572,95 @@ def test_materialized_publication_uses_immutable_snapshot_after_graph_changes(
     daemon.logger = None
     source = daemon._publication_source(queued[0])
     assert source["task"]["title"] == "original-title"
+
+
+def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path) -> None:
+    completed_ids: list[str] = []
+
+    class Archive:
+        def task_path(self, _task_id: str, relative: str) -> Path:
+            return tmp_path / relative
+
+        def append_run_jsonl(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        def write_run_file(
+            self,
+            _task_id: str,
+            _pipeline_id: str,
+            run_id: str,
+            name: str,
+            value: object,
+        ) -> Path:
+            path = tmp_path / "archive" / run_id / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(value, dict):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            elif isinstance(value, str):
+                path.write_text(value, encoding="utf-8")
+            else:
+                path.write_bytes(value)
+            return path
+
+        def materialize_run(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class Store:
+        def __init__(self, run: SimpleNamespace) -> None:
+            self.run = run
+
+        def transition_run(self, _run_id: str, state: str, **_kwargs: object) -> None:
+            self.run.state = state
+            self.run.completed_at = datetime.now(timezone.utc)
+
+        def get_run(self, _run_id: str) -> SimpleNamespace:
+            return self.run
+
+    class Invoker:
+        def invoke(self, _request: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                provider_session_id=None,
+                interrupted=False,
+                forced=False,
+                completed=True,
+                exit_code=0,
+                events=(),
+                incomplete_suffix=b"",
+                malformed_lines=0,
+            )
+
+    for role in ("implementation", "review", "validation", "integration"):
+        run_id = f"run-{role}"
+        run = SimpleNamespace(
+            id=run_id,
+            pipeline_id="pipeline-revisions",
+            state="running",
+            completed_at=None,
+            exit_reason=None,
+        )
+        store = Store(run)
+        supervisor = object.__new__(session_module.SessionSupervisor)
+        supervisor.archive = Archive()
+        supervisor.store = store
+        supervisor.config = SimpleNamespace()
+        supervisor._active = {}
+        supervisor._active_lock = threading.RLock()
+        supervisor._enqueue_completed_run = lambda _task, saved: completed_ids.append(
+            saved.id
+        )
+        task = SimpleNamespace(id=f"task-{role}")
+        session = SimpleNamespace(id=f"session-{role}", checkpoint_id=None, private_home_path=None)
+        request = SimpleNamespace(output_last_message=tmp_path / f"private-{role}.md")
+
+        supervisor._execute(
+            task,
+            session,
+            run,
+            request,
+            runtime=None,
+            invoker=Invoker(),
+            api_key=None,
+            timeout_seconds=1.0,
+        )
+
+    assert completed_ids == ["run-implementation", "run-review", "run-validation", "run-integration"]

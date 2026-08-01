@@ -554,7 +554,23 @@ while IFS= read -r line || [[ -n "${line}" ]]; do
     *" ${field} "*)
       [[ "${rest}" == =* ]] || reject_cloud_config "has a malformed ${field} assignment"
       [[ ${seen_fields["${field}"]+present} != present ]] || reject_cloud_config "has a duplicate ${field} assignment"
-      value="${rest#=}"
+      # The handoff writer uses Bash's %q format. Decode only that canonical
+      # representation; a raw operator or trailing command cannot round-trip.
+      encoded_value="${rest#=}"
+      value=""
+      encoded_index=0
+      while [[ ${encoded_index} -lt ${#encoded_value} ]]; do
+        encoded_char="${encoded_value:encoded_index:1}"
+        if [[ "${encoded_char}" == '\' ]]; then
+          encoded_index=$((encoded_index + 1))
+          [[ ${encoded_index} -lt ${#encoded_value} ]] || reject_cloud_config "has a malformed ${field} assignment"
+          encoded_char="${encoded_value:encoded_index:1}"
+        fi
+        value+="${encoded_char}"
+        encoded_index=$((encoded_index + 1))
+      done
+      printf -v canonical_value '%q' "${value}"
+      [[ "${encoded_value}" == "${canonical_value}" ]] || reject_cloud_config "has a non-canonical ${field} assignment"
       validate_cloud_value "${field}" "${value}"
       seen_fields["${field}"]=1
       ;;

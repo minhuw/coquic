@@ -303,6 +303,7 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
       ["incomplete", async () => { await writeFile(appEnvPath, `${validCloudHostLines.slice(0, 3).join("\n")}\n`); }],
       ["malformed", async () => { await writeFile(appEnvPath, `${["export CLOUDFLARE_ACCOUNT_ID=not-an-account", ...validCloudHostLines.slice(1)].join("\n")}\n`); }],
       ["duplicate", async () => { await writeFile(appEnvPath, `${[...validCloudHostLines, validCloudHostLines[0]].join("\n")}\n`); }],
+      ["trailing-command", async () => { await writeFile(appEnvPath, `${[validCloudHostLines[0], validCloudHostLines[1], `export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}; false`, validCloudHostLines[3]].join("\n")}\n`); }],
       ["insecure-mode", async () => { await writeFile(appEnvPath, `${validCloudHostLines.join("\n")}\n`); await chmod(appEnvPath, 0o644); }],
       ["symlink", async () => { await writeFile(hostSymlinkTarget, `${validCloudHostLines.join("\n")}\n`); await chmod(hostSymlinkTarget, 0o600); await rm(appEnvPath, { recursive: true, force: true }); await symlink(hostSymlinkTarget, appEnvPath); }],
       ["non-regular", async () => { await rm(appEnvPath, { recursive: true, force: true }); await mkdir(appEnvPath); }],

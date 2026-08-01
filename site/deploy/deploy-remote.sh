@@ -463,6 +463,110 @@ printf '%s\n' "${canonical_target}"
 EOF
 )"
 
+deploy_phase="remote protected cloud configuration preflight"
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_config_root}/app.env" <<'EOF'
+set -euo pipefail
+remote_app_env="$1"
+
+if sudo test -L "${remote_app_env}" || ! sudo test -f "${remote_app_env}"; then
+  echo "remote preflight failed: protected cloud app.env must be a regular file" >&2
+  exit 1
+fi
+if [[ "$(sudo stat -c '%a' -- "${remote_app_env}")" != "600" ]]; then
+  echo "remote preflight failed: protected cloud app.env must have mode 0600" >&2
+  exit 1
+fi
+
+sudo bash -s -- "${remote_app_env}" <<'CLOUD_APP_ENV_EOF'
+set -euo pipefail
+remote_app_env="$1"
+cloud_fields=(
+  CLOUDFLARE_ACCOUNT_ID
+  COQUIC_STEWARD_D1_DATABASE_ID
+  COQUIC_STEWARD_D1_READ_TOKEN
+  COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+)
+declare -A seen_fields=()
+
+reject_cloud_config() {
+  echo "remote preflight failed: protected cloud app.env $1" >&2
+  exit 1
+}
+
+validate_cloud_value() {
+  local field="$1"
+  local value="$2"
+  local authority path port segment lower_segment encoded decoded
+
+  [[ "${value}" != *$'\r'* && "${value}" != *$'\n'* ]] || reject_cloud_config "contains an invalid ${field} value"
+  case "${field}" in
+    CLOUDFLARE_ACCOUNT_ID)
+      [[ "${value}" =~ ^[0-9a-f]{32}$ ]] || reject_cloud_config "contains an invalid ${field} value"
+      ;;
+    COQUIC_STEWARD_D1_DATABASE_ID)
+      [[ "${value}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || reject_cloud_config "contains an invalid ${field} value"
+      ;;
+    COQUIC_STEWARD_D1_READ_TOKEN)
+      [[ -n "${value}" && ${#value} -le 4096 ]] || reject_cloud_config "contains an invalid ${field} value"
+      ;;
+    COQUIC_STEWARD_PUBLIC_R2_BASE_URL)
+      [[ "${value}" == https://* && "${value}" == */ ]] || reject_cloud_config "contains an invalid ${field} value"
+      [[ "${value}" != *'?'* && "${value}" != *'#'* && "${value}" != *'\\'* ]] || reject_cloud_config "contains an invalid ${field} value"
+      authority="${value#https://}"
+      path="/"
+      if [[ "${authority}" == */* ]]; then
+        path="/${authority#*/}"
+        authority="${authority%%/*}"
+      fi
+      [[ -n "${authority}" && "${authority}" != *'@'* && "${authority}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || reject_cloud_config "contains an invalid ${field} value"
+      if [[ "${authority}" == *:* ]]; then
+        port="${authority##*:}"
+        while [[ "${port}" == 0* && ${#port} -gt 1 ]]; do
+          port="${port:1}"
+        done
+        [[ ${#port} -le 5 && $((10#${port})) -le 65535 ]] || reject_cloud_config "contains an invalid ${field} value"
+      fi
+      IFS='/' read -r -a path_segments <<< "${path}"
+      for segment in "${path_segments[@]}"; do
+        [[ -z "${segment}" ]] && continue
+        [[ "${segment}" =~ ^([^%]|%[0-9A-Fa-f]{2})*$ ]] || reject_cloud_config "contains an invalid ${field} value"
+        encoded="${segment//%/\\x}"
+        printf -v decoded '%b' "${encoded}"
+        lower_segment="${segment,,}"
+        [[ "${lower_segment}" != "." && "${lower_segment}" != ".." && "${decoded}" != "." && "${decoded}" != ".." ]] || reject_cloud_config "contains an invalid ${field} value"
+        [[ ! "${lower_segment}" =~ %(0[0-9a-f]|1[0-9a-f]|7f) ]] || reject_cloud_config "contains an invalid ${field} value"
+        [[ ! "${decoded}" =~ [[:cntrl:]] && "${decoded}" != *'/'* && "${decoded}" != *'\\'* ]] || reject_cloud_config "contains an invalid ${field} value"
+      done
+      ;;
+    *)
+      reject_cloud_config "contains an unsupported field"
+      ;;
+  esac
+}
+
+assignment_re='^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)(.*)$'
+while IFS= read -r line || [[ -n "${line}" ]]; do
+  [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+  [[ "${line}" =~ ${assignment_re} ]] || reject_cloud_config "has a malformed assignment"
+  field="${BASH_REMATCH[2]}"
+  rest="${BASH_REMATCH[3]}"
+  case " ${cloud_fields[*]} " in
+    *" ${field} "*)
+      [[ "${rest}" == =* ]] || reject_cloud_config "has a malformed ${field} assignment"
+      [[ ${seen_fields["${field}"]+present} != present ]] || reject_cloud_config "has a duplicate ${field} assignment"
+      value="${rest#=}"
+      validate_cloud_value "${field}" "${value}"
+      seen_fields["${field}"]=1
+      ;;
+  esac
+done < "${remote_app_env}"
+
+for field in "${cloud_fields[@]}"; do
+  [[ ${seen_fields["${field}"]+present} == present ]] || reject_cloud_config "is missing ${field}"
+done
+CLOUD_APP_ENV_EOF
+EOF
+
 deploy_phase="remote release retention preflight"
 ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_releases_root}" "${previous_release_target}" "${remote_release_retention}" <<'EOF'
 set -euo pipefail

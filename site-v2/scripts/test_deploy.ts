@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,22 @@ async function run(command: string, args: string[], env: NodeJS.ProcessEnv, time
   ]);
   if (timeout) clearTimeout(timeout);
   return { code, output };
+}
+
+async function snapshotPath(path: string) {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) return { kind: "symlink", mode: info.mode & 0o777, target: await readlink(path) };
+    if (info.isDirectory()) return { kind: "directory", mode: info.mode & 0o777 };
+    return { kind: "file", mode: info.mode & 0o777, content: (await readFile(path)).toString("base64") };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    throw error;
+  }
+}
+
+async function snapshotPaths(paths: string[]) {
+  return Promise.all(paths.map(async (path) => [path, await snapshotPath(path)] as const));
 }
 
 void (async () => {
@@ -110,6 +126,19 @@ else printf '%s\\n' ready; fi
     const binary = join(root, "coquic-server");
     const deployApp = join(root, "deploy-app");
     const nixOut = join(root, "curl-http3");
+    const cloudLines = [
+      `CLOUDFLARE_ACCOUNT_ID=${cloudAccount}`,
+      `COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
+      `COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
+      `COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}`,
+    ];
+    let cloudInputNumber = 0;
+    async function writeCloudInput(lines: string[], mode = 0o600) {
+      const path = join(root, `cloud-input-${cloudInputNumber++}.env`);
+      await writeFile(path, `${lines.join("\n")}\n`);
+      await chmod(path, mode);
+      return path;
+    }
     await mkdir(join(remoteRoot, "etc", "systemd", "system"), { recursive: true });
     await mkdir(join(remoteRoot, "tmp"), { recursive: true });
     await mkdir(join(stewardRoot, "tasks"), { recursive: true });
@@ -175,30 +204,63 @@ elif [[ " $* " == *" -w "* ]]; then printf 3;
 else printf '%s\\n' coquic-wasm-demo-v1; fi
 `);
     const deployEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_CERT_CHAIN_PEM: "fixture cert", COQUIC_DEMO_PRIVATE_KEY_PEM: "fixture key", COQUIC_DEMO_REMOTE_SSH_KEY_PATH: sshKey, COQUIC_DEPLOY_OFFLINE_ROOT: remoteRoot, COQUIC_DEMO_QA_ENABLED: "false", COQUIC_V2_PREVIEW_PASSWORD: "preview-fixture", COQUIC_DEMO_VERIFICATION_ATTEMPTS: "1", COQUIC_DEMO_VERIFICATION_SLEEP_SECONDS: "0", COQUIC_DEMO_VERIFY_WASM: "false", FAKE_SYSTEMD_STATE: remoteState, FAKE_SYSTEMD_LOG: systemdLog, FAKE_SSH_LOG: sshLog, FAKE_NIX_OUT: nixOut, FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, GITHUB_SHA: "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
-    const deployed = await run("bash", [deployRemote, binary, deployApp], deployEnv);
-    assert.equal(deployed.code, 0, deployed.output);
+    const releasesRoot = join(remoteRoot, "opt", "coquic-demo", "releases");
     const current = join(remoteRoot, "opt", "coquic-demo", "current");
-    const firstTarget = await readlink(current);
-    assert.match(firstTarget, /111111111111$/);
-    const cloudLines = [
-      `CLOUDFLARE_ACCOUNT_ID=${cloudAccount}`,
-      `COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
-      `COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
-      `COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}`,
+    const retainedRelease = join(releasesRoot, "retained-sentinel");
+    const obsoleteRelease = join(releasesRoot, "obsolete-sentinel");
+    const remoteConfigRoot = join(remoteRoot, "etc", "coquic-demo");
+    const appEnvPath = join(remoteConfigRoot, "app.env");
+    const servicePath = join(remoteRoot, "etc", "systemd", "system", "coquic-demo.service");
+    await mkdir(retainedRelease, { recursive: true });
+    await mkdir(obsoleteRelease, { recursive: true });
+    await writeFile(join(retainedRelease, "marker"), "retained\n");
+    await writeFile(join(obsoleteRelease, "marker"), "obsolete\n");
+    await symlink(retainedRelease, current);
+    await writeFile(servicePath, "service-preserved\n");
+    await mkdir(join(remoteConfigRoot, "tls"), { recursive: true });
+    await writeFile(join(remoteConfigRoot, "tls", "fullchain.pem"), "fullchain-preserved\n");
+    await writeFile(join(remoteConfigRoot, "tls", "privkey.pem"), "privkey-preserved\n");
+    await mkdir(remoteState, { recursive: true });
+    await writeFile(join(remoteState, "active"), "active\n");
+    await writeFile(join(remoteState, "enabled"), "enabled\n");
+    const mutationPaths = [
+      join(retainedRelease, "marker"),
+      join(obsoleteRelease, "marker"),
+      current,
+      servicePath,
+      join(remoteConfigRoot, "tls", "fullchain.pem"),
+      join(remoteConfigRoot, "tls", "privkey.pem"),
+      appEnvPath,
+      join(remoteState, "active"),
+      join(remoteState, "enabled"),
+      join(stewardRoot, "tasks", "publisher.marker"),
+      join(stewardRoot, "cache", "index.marker"),
+      join(stewardRoot, "control-loop", "publisher.marker"),
     ];
-    let cloudInputNumber = 0;
-    async function writeCloudInput(lines: string[], mode = 0o600) {
-      const path = join(root, `cloud-input-${cloudInputNumber++}.env`);
-      await writeFile(path, `${lines.join("\n")}\n`);
-      await chmod(path, mode);
-      return path;
-    }
+    const beforeMissingHostConfig = await snapshotPaths(mutationPaths);
+    const missingHostConfig = await run("bash", [deployRemote, binary, deployApp], { ...deployEnv, COQUIC_DEMO_RELEASE_RETENTION: "1" });
+    assert.notEqual(missingHostConfig.code, 0, "deployment unexpectedly accepted missing host app.env");
+    assert.match(missingHostConfig.output, /protected cloud app\.env/);
+    assert.ok(!new RegExp(cloudSecret).test(missingHostConfig.output), "missing host config rejection is redacted");
+    assert.deepEqual(await snapshotPaths(mutationPaths), beforeMissingHostConfig, "missing host config mutates deployment state");
+    await rm(join(remoteState, "active"), { force: true });
+
     const cloudEnv = { ...deployEnv, FAKE_SSH_REQUIRE_HOST_KEY: "1" };
     const cloudInput = await writeCloudInput(cloudLines);
     const installed = await run("bash", [installCloudConfig, cloudInput], cloudEnv);
     assert.equal(installed.code, 0, installed.output);
     assert.ok(!new RegExp(cloudSecret).test(installed.output), "successful handoff output is redacted");
-    const appEnvPath = join(remoteRoot, "etc", "coquic-demo", "app.env");
+    const handoffAppEnv = await readFile(appEnvPath, "utf8");
+    assert.ok(handoffAppEnv.includes(`export CLOUDFLARE_ACCOUNT_ID=${cloudAccount.toLowerCase()}`));
+    assert.ok(handoffAppEnv.includes(`export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`));
+    assert.ok(handoffAppEnv.includes(`export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`));
+    assert.ok(handoffAppEnv.includes(`export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}/`));
+    assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
+
+    const deployed = await run("bash", [deployRemote, binary, deployApp], deployEnv);
+    assert.equal(deployed.code, 0, deployed.output);
+    const firstTarget = await readlink(current);
+    assert.match(firstTarget, /111111111111$/);
     const installedAppEnv = await readFile(appEnvPath, "utf8");
     assert.ok(installedAppEnv.includes(`export CLOUDFLARE_ACCOUNT_ID=${cloudAccount.toLowerCase()}`));
     assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`));
@@ -209,7 +271,7 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
     const restartCount = () => readFile(systemdLog, "utf8").then((value) => value.split("\n").filter((line) => line.startsWith("restart ")).length);
     const restartCountAfterInstall = await restartCount();
-    assert.equal(restartCountAfterInstall, 1);
+    assert.equal(restartCountAfterInstall, 0);
 
     const unchanged = await run("bash", [installCloudConfig, cloudInput], cloudEnv);
     assert.equal(unchanged.code, 0, unchanged.output);
@@ -220,6 +282,42 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal(modeRepair.code, 0, modeRepair.output);
     assert.equal((await stat(appEnvPath)).mode & 0o777, 0o600);
     assert.equal(await restartCount(), restartCountAfterInstall, "mode repair does not restart Site");
+
+    const validHostAppEnv = await readFile(appEnvPath);
+    const validCloudHostLines = [
+      `export CLOUDFLARE_ACCOUNT_ID=${cloudAccount.toLowerCase()}`,
+      `export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`,
+      `export COQUIC_STEWARD_D1_READ_TOKEN=${cloudSecret}`,
+      `export COQUIC_STEWARD_PUBLIC_R2_BASE_URL=${cloudBaseUrl}/`,
+    ];
+    const hostSymlinkTarget = join(root, "host-app.env.target");
+    const hostMutationPaths = [...mutationPaths, hostSymlinkTarget];
+    async function restoreHostAppEnv() {
+      await rm(appEnvPath, { recursive: true, force: true });
+      await rm(hostSymlinkTarget, { recursive: true, force: true });
+      await writeFile(appEnvPath, validHostAppEnv);
+      await chmod(appEnvPath, 0o600);
+    }
+    const invalidHostVariants: Array<[string, () => Promise<void>]> = [
+      ["missing", async () => { await rm(appEnvPath, { recursive: true, force: true }); }],
+      ["incomplete", async () => { await writeFile(appEnvPath, `${validCloudHostLines.slice(0, 3).join("\n")}\n`); }],
+      ["malformed", async () => { await writeFile(appEnvPath, `${["export CLOUDFLARE_ACCOUNT_ID=not-an-account", ...validCloudHostLines.slice(1)].join("\n")}\n`); }],
+      ["duplicate", async () => { await writeFile(appEnvPath, `${[...validCloudHostLines, validCloudHostLines[0]].join("\n")}\n`); }],
+      ["insecure-mode", async () => { await writeFile(appEnvPath, `${validCloudHostLines.join("\n")}\n`); await chmod(appEnvPath, 0o644); }],
+      ["symlink", async () => { await writeFile(hostSymlinkTarget, `${validCloudHostLines.join("\n")}\n`); await chmod(hostSymlinkTarget, 0o600); await rm(appEnvPath, { recursive: true, force: true }); await symlink(hostSymlinkTarget, appEnvPath); }],
+      ["non-regular", async () => { await rm(appEnvPath, { recursive: true, force: true }); await mkdir(appEnvPath); }],
+    ];
+    for (const [label, setupInvalidHostAppEnv] of invalidHostVariants) {
+      await restoreHostAppEnv();
+      await setupInvalidHostAppEnv();
+      const beforeInvalidHostConfig = await snapshotPaths(hostMutationPaths);
+      const invalidHostConfig = await run("bash", [deployRemote, binary, deployApp], { ...deployEnv, COQUIC_DEMO_RELEASE_RETENTION: "1" });
+      assert.notEqual(invalidHostConfig.code, 0, `${label} host app.env unexpectedly accepted`);
+      assert.match(invalidHostConfig.output, /protected cloud app\.env/, `${label} rejection is not a protected-config failure`);
+      assert.ok(!new RegExp(cloudSecret).test(invalidHostConfig.output), `${label} rejection is redacted`);
+      assert.deepEqual(await snapshotPaths(hostMutationPaths), beforeInvalidHostConfig, `${label} host app.env mutates deployment state`);
+    }
+    await restoreHostAppEnv();
 
     const invalidInputs: Array<[string, string[]]> = [
       ["missing", cloudLines.slice(0, 3)],

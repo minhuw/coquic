@@ -14,6 +14,8 @@ from coquic_steward.execution.executor import (
     PublicationPreflightClean,
     StewardExecutor,
 )
+from coquic_steward.execution.session import load_publication_snapshot
+from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.generation import PublicationGeneration
 from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
@@ -512,3 +514,60 @@ def test_materialized_success_enqueues_deterministically_without_transport(
 
     run.state = "running"
     assert session_module.enqueue_materialized_publication(config, store, task, run) is None
+
+
+def test_materialized_publication_uses_immutable_snapshot_after_graph_changes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    graph = _publication_graph("original-title")
+    from coquic_steward.publication.generation import compose_publication_generation
+
+    generation = compose_publication_generation(
+        graph,
+        scanner_runner=lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b""),
+    )
+    assert isinstance(generation, PublicationGeneration)
+    observed_titles: list[str] = []
+
+    def compose(source: object, **_kwargs: object) -> object:
+        assert isinstance(source, dict)
+        if source["task"]["title"] != "original-title":
+            raise AssertionError("mutable graph was used for publication")
+        observed_titles.append(source["task"]["title"])
+        return generation
+
+    monkeypatch.setattr(session_module, "publication_graph_for_task", lambda *_args: graph)
+    monkeypatch.setattr(session_module, "compose_publication_generation", compose)
+    queued: list[object] = []
+    config = SimpleNamespace(
+        tasks_dir=tmp_path / "tasks",
+        publication=SimpleNamespace(enabled=True),
+    )
+    store = SimpleNamespace(enqueue_publication=lambda value: queued.append(value) or value)
+    task = SimpleNamespace(id="task-publication-preflight")
+    run = SimpleNamespace(
+        id="run-publication-preflight",
+        state="succeeded",
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    first = session_module.enqueue_materialized_publication(config, store, task, run)
+    graph["task"]["title"] = "mutated-title"
+    second = session_module.enqueue_materialized_publication(config, store, task, run)
+
+    assert first.publication_id == generation.publication_id
+    assert second.publication_id == generation.publication_id
+    assert observed_titles == ["original-title", "original-title"]
+    snapshot = load_publication_snapshot(
+        config, task.id, run.id
+    )
+    assert snapshot is not None
+    assert snapshot["task"]["title"] == "original-title"
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.config = config
+    daemon.store = SimpleNamespace(get=lambda _task_id: task)
+    daemon.executor = SimpleNamespace(_integration_publication_graph=lambda _task: graph)
+    daemon.logger = None
+    source = daemon._publication_source(queued[0])
+    assert source["task"]["title"] == "original-title"

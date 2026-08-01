@@ -76,6 +76,7 @@ from .session import (
     InvocationStatus,
     SessionResult,
     SessionSupervisor,
+    enqueue_materialized_publication,
     runtime_factory_for_config,
     worktree_checkpoint,
 )
@@ -2451,6 +2452,7 @@ class StewardExecutor:
             str(result.exit_code),
             {"diagnostics": result.diagnostics},
         )
+        self._enqueue_completed_publication(task.id, result)
         self.store.finish_iteration_worker(task.id, 0, result)
         if not self._record_worker_result(task.id, result, "worker failed"):
             return False
@@ -2465,6 +2467,25 @@ class StewardExecutor:
         if revisions is None:
             return False
         return self._queue_or_finish_integration(task.id)
+
+    def _enqueue_completed_publication(self, task_id: str, result: WorkerResult) -> None:
+        """Queue a materialized run after its completion event is durable."""
+
+        run_id = getattr(result, "run_id", None)
+        try:
+            task = self.store.get(task_id)
+            if isinstance(run_id, str):
+                run = self.store.get_run(run_id)
+            else:
+                runs = self.store.list_runs(task_id)
+                completed = [item for item in runs if item.completed_at is not None]
+                run = max(completed, key=lambda item: item.updated_at) if completed else None
+            if run is not None:
+                enqueue_materialized_publication(self.config, self.store, task, run)
+        except Exception:
+            # Publication is a restartable local outbox concern and must not
+            # change the worker result or task lifecycle.
+            return
 
     def _run_implementation_plan(self, task_id: str) -> dict[str, Any] | None:
         task = self.store.get(task_id)

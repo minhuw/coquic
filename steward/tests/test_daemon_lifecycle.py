@@ -140,6 +140,71 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     assert daemon._publication_wakeup.is_set()
 
 
+def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():
+    generation = SimpleNamespace(
+        publication_id="pub-expired",
+        task_id="task-expired",
+        run_id="run-expired",
+        state="building",
+    )
+
+    class Store:
+        def __init__(self):
+            self.expire_calls = 0
+
+        def expire_publication_leases(self):
+            self.expire_calls += 1
+            generation.state = "retry_wait"
+
+        def list_publication_generations(self, **_kwargs):
+            return [generation] if generation.state == "retry_wait" else []
+
+    class Publisher:
+        def __init__(self):
+            self.calls: list[tuple[object, ...]] = []
+
+        def publish(self, *args, **_kwargs):
+            self.calls.append(args)
+            return SimpleNamespace(status="exposed")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    daemon.logger = None
+    daemon._publication_source = lambda _generation: {}
+
+    publisher = Publisher()
+    assert daemon._publish_next_generation(publisher) is True
+    assert daemon.store.expire_calls == 1
+    assert publisher.calls == [("pub-expired",)]
+
+
+def test_publication_worker_shutdown_cancels_clients_before_deadline():
+    closed = threading.Event()
+    release = threading.Event()
+
+    class Client:
+        def close(self):
+            closed.set()
+            release.set()
+
+    client = Client()
+    worker = threading.Thread(target=release.wait, daemon=True)
+    worker.start()
+    daemon = object.__new__(StewardDaemon)
+    daemon._publication_thread = worker
+    daemon._publication_stop = threading.Event()
+    daemon._publication_wakeup = threading.Event()
+    daemon._publication_cancel = client.close
+
+    deadline = time.monotonic() + 2.0
+    daemon._stop_publication_worker(deadline=deadline)
+
+    assert closed.is_set()
+    assert not worker.is_alive()
+    assert daemon._publication_thread is None
+
+
 def test_planner_retry_defers_unchanged_input_and_success_resets_state(
     config, monkeypatch
 ) -> None:

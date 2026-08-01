@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import secrets
 import signal
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timezone
 from enum import StrEnum
@@ -35,6 +37,7 @@ from ..core.models import (
 from ..core.subprocesses import run_command
 from ..publication.atif import AtifSource
 from ..publication.generation import PublicationGeneration, compose_publication_generation
+from ..publication.models import LogicalArtifact
 from ..storage import TaskStore
 from .container import (
     ContainerBoundaryError,
@@ -189,6 +192,163 @@ def publication_graph_for_task(
     }
 
 
+_PUBLICATION_SNAPSHOT_MARKER = "$stewardPublicationSnapshot"
+_PUBLICATION_SNAPSHOT_VERSION = 1
+
+
+def _encode_publication_snapshot(value: object) -> object:
+    """Encode one local publication graph without retaining host paths."""
+
+    if isinstance(value, AtifSource):
+        return {
+            _PUBLICATION_SNAPSHOT_MARKER: "atif-source",
+            "run": _encode_publication_snapshot(value.run),
+            "documents": _encode_publication_snapshot(value.documents),
+            "artifacts": _encode_publication_snapshot(value.artifacts),
+        }
+    if isinstance(value, LogicalArtifact):
+        return {
+            _PUBLICATION_SNAPSHOT_MARKER: "logical-artifact",
+            "artifactId": value.artifact_id,
+            "logicalPath": value.logical_path,
+            "mediaType": value.media_type,
+            "byteSize": value.byte_size,
+            "sha256": value.sha256,
+            "ownerStepId": value.owner_step_id,
+        }
+    if isinstance(value, bytes):
+        return {
+            _PUBLICATION_SNAPSHOT_MARKER: "bytes",
+            "base64": base64.b64encode(value).decode("ascii"),
+        }
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("publication snapshot keys must be strings")
+            result[key] = _encode_publication_snapshot(item)
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytearray)):
+        return [_encode_publication_snapshot(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError("publication snapshot contains unsupported value")
+
+
+def _decode_publication_snapshot(value: object) -> object:
+    if isinstance(value, list):
+        return [_decode_publication_snapshot(item) for item in value]
+    if not isinstance(value, Mapping):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        raise ValueError("publication snapshot value is invalid")
+    marker = value.get(_PUBLICATION_SNAPSHOT_MARKER)
+    if marker == "bytes":
+        encoded = value.get("base64")
+        if not isinstance(encoded, str):
+            raise ValueError("publication snapshot bytes are invalid")
+        try:
+            return base64.b64decode(encoded.encode("ascii"), validate=True)
+        except (ValueError, UnicodeEncodeError):
+            raise ValueError("publication snapshot bytes are invalid") from None
+    if marker == "logical-artifact":
+        return LogicalArtifact(
+            artifact_id=value.get("artifactId"),
+            logical_path=value.get("logicalPath"),
+            media_type=value.get("mediaType"),
+            byte_size=value.get("byteSize"),
+            sha256=value.get("sha256"),
+            owner_step_id=value.get("ownerStepId"),
+        )
+    if marker == "atif-source":
+        artifacts = _decode_publication_snapshot(value.get("artifacts", []))
+        if not isinstance(artifacts, list):
+            raise ValueError("publication snapshot artifacts are invalid")
+        return AtifSource(
+            run=_decode_publication_snapshot(value.get("run")),
+            documents=_decode_publication_snapshot(value.get("documents", {})),
+            artifacts=tuple(artifacts),
+        )
+    if marker is not None:
+        raise ValueError("publication snapshot marker is invalid")
+    return {
+        str(key): _decode_publication_snapshot(item) for key, item in value.items()
+    }
+
+
+def _publication_snapshot_relative(run_id: str) -> str:
+    return f"publication/snapshots/{run_id}.json"
+
+
+def publication_snapshot_path(
+    config: StewardConfig, task_id: str, run_id: str
+) -> Path | None:
+    """Return the private archive path for one immutable run source snapshot."""
+
+    if not isinstance(getattr(config, "tasks_dir", None), (str, Path)):
+        return None
+    try:
+        return TaskArchiveWriter(config).task_path(
+            task_id, _publication_snapshot_relative(run_id)
+        )
+    except (TypeError, ValueError, ArchiveError):
+        return None
+
+
+def load_publication_snapshot(
+    config: StewardConfig, task_id: str, run_id: str
+) -> dict[str, object] | None:
+    """Load a complete immutable graph snapshot, or ``None`` when absent."""
+
+    path = publication_snapshot_path(config, task_id, run_id)
+    if path is None or not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("publication snapshot is not a regular file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("publication snapshot is invalid") from None
+    if not isinstance(value, Mapping):
+        raise ValueError("publication snapshot envelope is invalid")
+    if value.get("version") != _PUBLICATION_SNAPSHOT_VERSION:
+        raise ValueError("publication snapshot version is invalid")
+    if value.get("taskId") != task_id or value.get("runId") != run_id:
+        raise ValueError("publication snapshot identity is invalid")
+    graph = _decode_publication_snapshot(value.get("graph"))
+    if not isinstance(graph, dict):
+        raise ValueError("publication snapshot graph is invalid")
+    return graph
+
+
+def _write_publication_snapshot(
+    config: StewardConfig,
+    task_id: str,
+    run_id: str,
+    graph: object,
+) -> bool:
+    path = publication_snapshot_path(config, task_id, run_id)
+    if path is None:
+        return False
+    encoded = {
+        "version": _PUBLICATION_SNAPSHOT_VERSION,
+        "taskId": task_id,
+        "runId": run_id,
+        "graph": _encode_publication_snapshot(graph),
+    }
+    data = (
+        json.dumps(encoded, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != data:
+            raise ValueError("publication snapshot conflicts with existing bytes")
+        return True
+    writer = TaskArchiveWriter(config)
+    writer.write_bytes(task_id, _publication_snapshot_relative(run_id), data)
+    return True
+
+
 def enqueue_materialized_publication(
     config: StewardConfig,
     store: TaskStore,
@@ -203,7 +363,18 @@ def enqueue_materialized_publication(
     if run.completed_at is None or str(run.state) == "running":
         return None
     try:
-        graph = publication_graph_for_task(config, store, task)
+        run_id = getattr(run, "id", None)
+        snapshot_path = (
+            publication_snapshot_path(config, task.id, run_id)
+            if isinstance(run_id, str)
+            else None
+        )
+        snapshot = (
+            load_publication_snapshot(config, task.id, run_id)
+            if isinstance(run_id, str)
+            else None
+        )
+        graph = snapshot if snapshot is not None else publication_graph_for_task(config, store, task)
         outcome = compose_publication_generation(
             graph,
             task_id=task.id,
@@ -213,6 +384,11 @@ def enqueue_materialized_publication(
         )
         if not isinstance(outcome, PublicationGeneration):
             return None
+        if snapshot is None and isinstance(run_id, str) and snapshot_path is not None:
+            # Persist the exact composition input before the durable row.  A
+            # later daemon restart must never rebuild from mutable task state.
+            if not _write_publication_snapshot(config, task.id, run_id, graph):
+                return None
         return store.enqueue_publication(outcome.to_outbox())
     except Exception:
         # A completion hook must not alter the session result.  The daemon's
@@ -1834,7 +2010,6 @@ class SessionSupervisor:
         )
         self.archive.materialize_run(task.id, run.pipeline_id, self.store.get_run(run.id))
         saved_run = self.store.get_run(run.id)
-        self._enqueue_completed_run(task, saved_run)
         with self._active_lock:
             self._active.pop(run.id, None)
         externally_interrupted = saved_run.state == CodexRunState.interrupted.value

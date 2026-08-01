@@ -44,6 +44,7 @@ from ..execution.session import (
     SessionResult,
     SessionSupervisor,
     enqueue_materialized_publication,
+    load_publication_snapshot,
     publication_graph_for_task,
     runtime_factory_for_config,
     planner_session_for_config,
@@ -149,6 +150,8 @@ class StewardDaemon:
         self._publication_lock = threading.RLock()
         self._publication_previous_callback: Callable[[], None] | None = None
         self._publication_callback: Callable[[], None] | None = None
+        self._publication_cancel: Callable[[], None] | None = None
+        self._publication_deadline: float | None = None
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
@@ -670,9 +673,14 @@ class StewardDaemon:
 
     def _publication_source(self, generation: object) -> object | None:
         task_id = getattr(generation, "task_id", None)
+        run_id = getattr(generation, "run_id", None)
         if not isinstance(task_id, str):
             return None
         try:
+            if isinstance(run_id, str):
+                snapshot = load_publication_snapshot(self.config, task_id, run_id)
+                if snapshot is not None:
+                    return snapshot
             task = self.store.get(task_id)
             graph_builder = getattr(self.executor, "_integration_publication_graph", None)
             if callable(graph_builder):
@@ -688,6 +696,18 @@ class StewardDaemon:
             listing = getattr(self.store, "list_generations", None)
         if not callable(listing):
             return False
+        expire = getattr(self.store, "expire_publication_leases", None)
+        if callable(expire):
+            try:
+                # Recovery is part of every worker cycle, not only startup.
+                # The store performs the lease compare-and-set and preserves
+                # all receipts while moving expired work to retry_wait.
+                expire()
+            except Exception as exc:
+                self._log(
+                    "publication lease reconciliation failed "
+                    f"error={exc.__class__.__name__}"
+                )
         try:
             generations = listing(
                 states={"queued", "retry_wait"},
@@ -708,9 +728,9 @@ class StewardDaemon:
                 "credential_sources": tuple(
                     path
                     for path in (
-                        publication.d1_token_path,
-                        publication.r2_access_key_id_path,
-                        publication.r2_secret_access_key_path,
+                        getattr(publication, "d1_token_path", None),
+                        getattr(publication, "r2_access_key_id_path", None),
+                        getattr(publication, "r2_secret_access_key_path", None),
                     )
                     if path is not None
                 )
@@ -742,6 +762,28 @@ class StewardDaemon:
     def _publication_worker_loop(self) -> None:
         publisher: CloudPublisher | None = None
         clients: tuple[object, object] = ()
+        clients_closed = threading.Event()
+
+        def close_clients() -> None:
+            if clients_closed.is_set():
+                return
+            clients_closed.set()
+            for name in ("cancel", "close"):
+                close_publisher = getattr(publisher, name, None)
+                if callable(close_publisher):
+                    try:
+                        close_publisher()
+                    except Exception:
+                        pass
+                    break
+            for client in clients:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
         try:
             while not self._publication_stop.is_set():
                 if publisher is None:
@@ -751,6 +793,7 @@ class StewardDaemon:
                             getattr(publisher, "r2", None),
                             getattr(publisher, "d1", None),
                         )
+                        self._publication_cancel = close_clients
                     except Exception as exc:
                         self._log(
                             "publication worker setup failed "
@@ -764,13 +807,8 @@ class StewardDaemon:
                 self._publication_wakeup.wait(self._publication_retry_interval())
                 self._publication_wakeup.clear()
         finally:
-            for client in clients:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
+            close_clients()
+            self._publication_cancel = None
 
     def _start_publication_worker(self) -> None:
         """Start the one daemon-owned publication worker when enabled."""
@@ -802,15 +840,25 @@ class StewardDaemon:
     def _stop_publication_worker(self, *, deadline: float | None = None) -> None:
         self._publication_stop.set()
         self._publication_wakeup.set()
+        self._publication_deadline = deadline
+        cancel = getattr(self, "_publication_cancel", None)
+        if callable(cancel):
+            # Closing the daemon-owned clients is the provider cancellation
+            # boundary.  The worker still owns final cleanup in its finally.
+            try:
+                cancel()
+            except Exception:
+                pass
         thread = self._publication_thread
         if thread is None or thread is threading.current_thread():
             return
         timeout = PUBLICATION_JOIN_TIMEOUT_SECONDS
         if deadline is not None:
-            timeout = max(0.0, min(timeout, deadline - time.monotonic()))
+            timeout = max(0.0, deadline - time.monotonic())
         thread.join(timeout=timeout)
         if not thread.is_alive() and self._publication_thread is thread:
             self._publication_thread = None
+            self._publication_cancel = None
 
     start_publication_worker = _start_publication_worker
     stop_publication_worker = _stop_publication_worker

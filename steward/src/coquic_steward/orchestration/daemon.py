@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import re
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -127,6 +128,212 @@ def _close_publication_client(client: object) -> None:
                 nested = None
             if nested is not None:
                 pending.append(nested)
+
+
+def _abort_publication_connection(connection: object) -> None:
+    """Interrupt one active provider connection before closing its wrapper."""
+
+    sockets: list[object] = []
+    for name in ("sock", "_sock", "socket", "_socket"):
+        try:
+            value = getattr(connection, name, None)
+        except Exception:
+            value = None
+        if value is not None and all(value is not item for item in sockets):
+            sockets.append(value)
+    for raw_socket in sockets:
+        shutdown = getattr(raw_socket, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+        close = getattr(raw_socket, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    for name in ("cancel", "close"):
+        try:
+            close = getattr(connection, name, None)
+        except Exception:
+            close = None
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+            break
+
+
+class _PublicationTransportTracker:
+    """Track active sync transports so shutdown can interrupt in-flight I/O."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._cancelled = False
+        self._connections: dict[int, object] = {}
+        self._pools: dict[int, object] = {}
+
+    def _track_connection(self, connection: object) -> None:
+        if connection is None:
+            return
+        with self._lock:
+            if self._cancelled:
+                abort = True
+            else:
+                self._connections[id(connection)] = connection
+                abort = False
+        if abort:
+            _abort_publication_connection(connection)
+
+    def _forget_connection(self, connection: object) -> None:
+        if connection is None:
+            return
+        with self._lock:
+            self._connections.pop(id(connection), None)
+
+    def _track_pool(self, pool: object) -> None:
+        if pool is None:
+            return
+        with self._lock:
+            self._pools[id(pool)] = pool
+            cancelled = self._cancelled
+        if cancelled:
+            try:
+                active = getattr(pool, "connections", ())
+                if callable(active):
+                    active = active()
+                items = tuple(active)
+            except Exception:
+                items = ()
+            for connection in items:
+                _abort_publication_connection(connection)
+
+    def _install_r2_pool(self, pool: object) -> None:
+        self._track_pool(pool)
+        marker = "_steward_publication_transport_tracker"
+        try:
+            if getattr(pool, marker, None) is self:
+                return
+            get_connection = getattr(pool, "_get_conn", None)
+            put_connection = getattr(pool, "_put_conn", None)
+        except Exception:
+            return
+        if not callable(get_connection) or not callable(put_connection):
+            return
+
+        def tracked_get(*args: object, **kwargs: object) -> object:
+            connection = get_connection(*args, **kwargs)
+            self._track_connection(connection)
+            return connection
+
+        def tracked_put(connection: object, *args: object, **kwargs: object) -> object:
+            try:
+                return put_connection(connection, *args, **kwargs)
+            finally:
+                self._forget_connection(connection)
+
+        try:
+            setattr(pool, "_get_conn", tracked_get)
+            setattr(pool, "_put_conn", tracked_put)
+            setattr(pool, marker, self)
+        except Exception:
+            return
+
+    def _install_r2_manager(self, manager: object) -> None:
+        marker = "_steward_publication_transport_tracker"
+        try:
+            if getattr(manager, marker, None) is self:
+                return
+            connection_from_url = getattr(manager, "connection_from_url", None)
+        except Exception:
+            return
+        if not callable(connection_from_url):
+            return
+
+        def tracked_connection_from_url(
+            url: object, *args: object, **kwargs: object
+        ) -> object:
+            pool = connection_from_url(url, *args, **kwargs)
+            self._install_r2_pool(pool)
+            return pool
+
+        try:
+            setattr(manager, "connection_from_url", tracked_connection_from_url)
+            setattr(manager, marker, self)
+        except Exception:
+            return
+
+    def _install_r2(self, client: object) -> None:
+        try:
+            endpoint = getattr(getattr(client, "_client", None), "_endpoint", None)
+            session = getattr(endpoint, "http_session", None)
+            get_manager = getattr(session, "_get_connection_manager", None)
+        except Exception:
+            return
+        if not callable(get_manager):
+            return
+        marker = "_steward_publication_transport_tracker"
+        try:
+            if getattr(session, marker, None) is self:
+                return
+        except Exception:
+            return
+
+        def tracked_get_manager(
+            url: object, *args: object, **kwargs: object
+        ) -> object:
+            manager = get_manager(url, *args, **kwargs)
+            self._install_r2_manager(manager)
+            return manager
+
+        try:
+            setattr(session, "_get_connection_manager", tracked_get_manager)
+            setattr(session, marker, self)
+        except Exception:
+            return
+
+    def _install_d1(self, client: object) -> None:
+        try:
+            http_client = getattr(client, "_client", None)
+            transport = getattr(http_client, "_transport", None)
+            pool = getattr(transport, "_pool", None)
+        except Exception:
+            return
+        if pool is not None:
+            self._track_pool(pool)
+
+    def install(self, client: object) -> None:
+        self._install_r2(client)
+        self._install_d1(client)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            pools = tuple(self._pools.values())
+            connections = tuple(self._connections.values())
+        seen: set[int] = set()
+        for pool in pools:
+            try:
+                active = getattr(pool, "connections", ())
+                if callable(active):
+                    active = active()
+            except Exception:
+                active = ()
+            try:
+                items = tuple(active)
+            except TypeError:
+                items = ()
+            for connection in items:
+                if id(connection) not in seen:
+                    seen.add(id(connection))
+                    _abort_publication_connection(connection)
+        for connection in connections:
+            if id(connection) not in seen:
+                seen.add(id(connection))
+                _abort_publication_connection(connection)
 
 
 @dataclass
@@ -796,12 +1003,14 @@ class StewardDaemon:
     def _publication_worker_loop(self) -> None:
         publisher: CloudPublisher | None = None
         clients: tuple[object, object] = ()
+        transport_tracker = _PublicationTransportTracker()
         clients_closed = threading.Event()
 
         def close_clients() -> None:
             if clients_closed.is_set():
                 return
             clients_closed.set()
+            transport_tracker.cancel()
             for name in ("cancel", "close"):
                 close_publisher = getattr(publisher, name, None)
                 if callable(close_publisher):
@@ -822,6 +1031,8 @@ class StewardDaemon:
                             getattr(publisher, "r2", None),
                             getattr(publisher, "d1", None),
                         )
+                        for client in clients:
+                            transport_tracker.install(client)
                         self._publication_cancel = close_clients
                         if self._publication_stop.is_set():
                             break

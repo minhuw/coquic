@@ -286,6 +286,47 @@ def test_identity_mismatch_is_blocked_without_provider_request() -> None:
     assert "d1:hide" not in store.events
 
 
+def test_receipt_logical_path_mismatch_blocks_before_provider_request() -> None:
+    store = _FakeStore()
+    composed = _composed()
+    item = composed.objects[0]
+    store.receipts.append(
+        PublicationReceipt.public_receipt(
+            item.sha256,
+            item.byte_size,
+            item.public_key,
+            NOW,
+            "runs/run-1/wrong.json",
+        )
+    )
+    provider = _FakeProvider(store)
+
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+
+    assert result.status is PublicationStatus.blocked
+    assert result.reason == "integrity"
+    assert provider.calls == []
+
+
+def test_reused_public_object_key_is_uploaded_once() -> None:
+    store = _FakeStore(object_count=2)
+    provider = _FakeProvider(store)
+
+    def compose(_source: object, **_kwargs: object):
+        generated = _composed()
+        generated.objects = (generated.objects[0], generated.objects[0])
+        return generated
+
+    result = _publisher(store, provider, compose=compose).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+
+    assert result.status is PublicationStatus.exposed
+    assert [kind for kind, _ in provider.calls] == ["public"]
+
+
 def test_repair_required_keeps_claim_and_does_not_hide() -> None:
     store = _FakeStore()
     provider = _FakeProvider(store)

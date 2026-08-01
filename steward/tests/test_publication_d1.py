@@ -304,3 +304,33 @@ def test_successful_http_error_envelopes_are_permanent(document: dict[str, objec
         d1.stage(publication("publication-envelope"))
     assert error.value.code == D1ErrorCode.provider
     assert "detail" not in str(error.value)
+
+
+def test_malformed_nested_error_envelope_is_rejected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "errors": [],
+                "result": [
+                    {
+                        "success": True,
+                        "errors": "malformed",
+                        "results": [],
+                        "meta": {},
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    d1 = D1PublicationClient(
+        account_id=ACCOUNT,
+        database_id=DATABASE,
+        token=TOKEN,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(D1Error) as error:
+        d1.stage(publication("publication-malformed-envelope"))
+    assert error.value.code == D1ErrorCode.malformed_response

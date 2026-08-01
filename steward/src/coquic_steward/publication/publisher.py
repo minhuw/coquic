@@ -576,16 +576,17 @@ class CloudPublisher:
         values = listing(publication_id)
         result: dict[tuple[ReceiptClass, str], PublicationReceipt] = {}
         for value in values:
-            if isinstance(value, PublicationReceipt):
-                key = (value.receipt_class, value.content_key)
-                previous = result.get(key)
-                if previous is not None and (
-                    previous.sha256 != value.sha256
-                    or previous.byte_size != value.byte_size
-                    or previous.logical_path != value.logical_path
-                ):
-                    raise ValueError("conflicting receipt")
-                result[key] = value
+            if not isinstance(value, PublicationReceipt):
+                raise ValueError("invalid receipt")
+            key = (value.receipt_class, value.content_key)
+            previous = result.get(key)
+            if previous is not None and (
+                previous.sha256 != value.sha256
+                or previous.byte_size != value.byte_size
+                or previous.logical_path != value.logical_path
+            ):
+                raise ValueError("conflicting receipt")
+            result[key] = value
         return result
 
     def _save_receipt(
@@ -607,6 +608,16 @@ class CloudPublisher:
         except Exception:
             return None, self._block(generation, "integrity", hide=False, phase="receipt")
         if _operation_is(saved, PublicationOperationStatus.recorded) or _operation_is(saved, PublicationOperationStatus.existing):
+            saved_receipt = getattr(saved, "receipt", None)
+            if saved_receipt is not None and (
+                not isinstance(saved_receipt, PublicationReceipt)
+                or saved_receipt.receipt_class is not receipt.receipt_class
+                or saved_receipt.sha256 != receipt.sha256
+                or saved_receipt.byte_size != receipt.byte_size
+                or saved_receipt.content_key != receipt.content_key
+                or saved_receipt.logical_path != receipt.logical_path
+            ):
+                return None, self._block(generation, "integrity", hide=False, phase="receipt")
             return _record_generation(saved, generation), None
         if _is_lost(saved):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase="receipt")
@@ -638,17 +649,33 @@ class CloudPublisher:
             return "integrity"
         if composed.metadata_digest != getattr(durable, "metadata_digest", None):
             return "integrity"
-        counts = composed.generation.get("expectedCounts")
-        if not isinstance(counts, Mapping):
+        payload = composed.payload
+        generation_payload = composed.generation
+        if not isinstance(payload, Mapping) or not isinstance(generation_payload, Mapping):
+            return "integrity"
+        schema_version = payload.get("schemaVersion")
+        if schema_version is not None and schema_version != "1.0":
             return "integrity"
         if (
-            composed.payload.get("publicationId") != composed.publication_id
-            or composed.payload.get("taskId") != composed.task_id
-            or composed.generation.get("publicationId") != composed.publication_id
-            or composed.generation.get("taskId") != composed.task_id
-            or composed.generation.get("idempotencyKey") != composed.idempotency_key
-            or composed.generation.get("metadataDigest") != composed.metadata_digest
+            payload.get("publicationId") != composed.publication_id
+            or payload.get("taskId") != composed.task_id
+            or generation_payload.get("publicationId") != composed.publication_id
+            or generation_payload.get("taskId") != composed.task_id
+            or generation_payload.get("idempotencyKey") != composed.idempotency_key
+            or generation_payload.get("metadataDigest") != composed.metadata_digest
         ):
+            return "integrity"
+        head_intent = payload.get("headIntent")
+        if head_intent is not None:
+            if not isinstance(head_intent, Mapping):
+                return "integrity"
+            if (
+                head_intent.get("publicationId") != composed.publication_id
+                or head_intent.get("taskId") != composed.task_id
+            ):
+                return "integrity"
+        counts = generation_payload.get("expectedCounts")
+        if not isinstance(counts, Mapping):
             return "integrity"
         count_names = ("tasks", "pipelines", "runs", "events", "artifacts")
         for name in count_names:
@@ -664,19 +691,69 @@ class CloudPublisher:
         if expected_objects != getattr(durable, "objects", None):
             return "integrity"
         collections = {
-            "tasks": composed.payload.get("task"),
-            "pipelines": composed.payload.get("pipelines"),
-            "runs": composed.payload.get("runs"),
-            "events": composed.payload.get("events"),
-            "artifacts": composed.payload.get("artifacts"),
+            "tasks": payload.get("task"),
+            "pipelines": payload.get("pipelines"),
+            "runs": payload.get("runs"),
+            "events": payload.get("events"),
+            "artifacts": payload.get("artifacts"),
         }
         if not isinstance(collections["tasks"], Mapping):
+            return "integrity"
+        if collections["tasks"].get("taskId", composed.task_id) != composed.task_id:
             return "integrity"
         for name in ("pipelines", "runs", "events", "artifacts"):
             values = collections[name]
             if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
                 return "integrity"
             if len(values) != counts[name]:
+                return "integrity"
+        pipeline_ids: set[str] = set()
+        for row in collections["pipelines"]:
+            if not isinstance(row, Mapping) or row.get("taskId", composed.task_id) != composed.task_id:
+                return "integrity"
+            pipeline_id = row.get("pipelineId")
+            if pipeline_id is not None:
+                if not isinstance(pipeline_id, str) or pipeline_id in pipeline_ids:
+                    return "integrity"
+                pipeline_ids.add(pipeline_id)
+        run_ids: set[str] = set()
+        for row in collections["runs"]:
+            if not isinstance(row, Mapping) or row.get("taskId", composed.task_id) != composed.task_id:
+                return "integrity"
+            run_id = row.get("runId")
+            if run_id is not None:
+                if not isinstance(run_id, str) or run_id in run_ids:
+                    return "integrity"
+                run_ids.add(run_id)
+            pipeline_id = row.get("pipelineId")
+            if pipeline_id is not None and pipeline_ids and pipeline_id not in pipeline_ids:
+                return "integrity"
+        event_sequences: set[int] = set()
+        for row in collections["events"]:
+            if not isinstance(row, Mapping) or row.get("taskId", composed.task_id) != composed.task_id:
+                return "integrity"
+            sequence = row.get("sequence")
+            if sequence is not None:
+                if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1 or sequence in event_sequences:
+                    return "integrity"
+                event_sequences.add(sequence)
+        artifact_ids: set[str] = set()
+        logical_paths: set[str] = set()
+        for row in collections["artifacts"]:
+            if not isinstance(row, Mapping) or row.get("taskId", composed.task_id) != composed.task_id:
+                return "integrity"
+            artifact_id = row.get("artifactId")
+            if artifact_id is not None:
+                if not isinstance(artifact_id, str) or artifact_id in artifact_ids:
+                    return "integrity"
+                artifact_ids.add(artifact_id)
+            logical_path = row.get("logicalPath")
+            if logical_path is not None:
+                if not isinstance(logical_path, str) or logical_path in logical_paths:
+                    return "integrity"
+                logical_paths.add(logical_path)
+            run_id = row.get("runId")
+            if run_id is not None and run_ids and run_id not in run_ids:
                 return "integrity"
         if counts["tasks"] != 1:
             return "integrity"
@@ -686,12 +763,25 @@ class CloudPublisher:
             if isinstance(row, Mapping)
         }
         represented_runs.add(composed.run_id)
+        if run_ids and composed.run_id not in run_ids:
+            return "integrity"
         for item in composed.objects:
-            if item.task_id != composed.task_id or item.run_id not in represented_runs:
+            if (
+                not isinstance(item, GenerationObject)
+                or item.task_id != composed.task_id
+                or item.run_id not in represented_runs
+            ):
                 return "integrity"
+        private_keys: set[tuple[str, str]] = set()
         for item in composed.private_originals:
-            if item.task_id != composed.task_id or item.run_id not in represented_runs:
+            if (
+                not isinstance(item, GenerationOriginal)
+                or item.task_id != composed.task_id
+                or item.run_id not in represented_runs
+                or (item.run_id, item.sha256) in private_keys
+            ):
                 return "integrity"
+            private_keys.add((item.run_id, item.sha256))
         return None
 
     def publish(
@@ -793,6 +883,8 @@ class CloudPublisher:
                 if existing is not None and (
                     existing.sha256 != item.sha256
                     or existing.byte_size != item.byte_size
+                    or existing.logical_path
+                    != (item.logical_path if isinstance(item, GenerationObject) else None)
                 ):
                     return self._block(durable, "integrity", hide=False, phase="receipts")
         except Exception:

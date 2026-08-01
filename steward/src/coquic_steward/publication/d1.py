@@ -673,6 +673,8 @@ class D1PublicationClient:
         for entry in result:
             if not isinstance(entry, Mapping):
                 _invalid(D1ErrorCode.malformed_response)
+            if "errors" in entry and not isinstance(entry["errors"], list):
+                _invalid(D1ErrorCode.malformed_response)
             if entry.get("success") is False or (
                 isinstance(entry.get("errors"), list) and entry["errors"]
             ):

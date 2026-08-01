@@ -74,6 +74,19 @@ _SAFE_REASONS: Final[frozenset[str]] = frozenset(
         "precondition",
     }
 )
+_HIDE_RECONCILIATION_REASONS: Final[frozenset[str]] = frozenset(
+    _SAFE_REASONS
+    - {
+        "network",
+        "quota",
+        "timeout",
+        "transient",
+        "lease_expired",
+        "retry_exhausted",
+        "cleanup_failed",
+        "operator_blocked",
+    }
+)
 _ACTIVE_STATES: Final[frozenset[PublicationState]] = frozenset(
     {
         PublicationState.claimed,
@@ -328,16 +341,18 @@ def _hide_reconciliation_reason(generation: object | None, now: datetime) -> str
     restart-safe marker without adding another outbox field.
     """
 
-    if _status(getattr(generation, "state", "")) != PublicationState.retry_wait.value:
-        return None
-    retry_at = getattr(generation, "retry_at", None)
-    try:
-        if retry_at is not None and retry_at > now:
+    state = _status(getattr(generation, "state", ""))
+    if state == PublicationState.retry_wait.value:
+        retry_at = getattr(generation, "retry_at", None)
+        try:
+            if retry_at is not None and retry_at > now:
+                return None
+        except TypeError:
             return None
-    except TypeError:
+    elif state not in {item.value for item in _ACTIVE_STATES}:
         return None
     reason = getattr(generation, "reason", None)
-    if not isinstance(reason, str) or reason in _TRANSIENT_REASONS:
+    if not isinstance(reason, str) or reason not in _HIDE_RECONCILIATION_REASONS:
         return None
     return _reason(reason, "integrity")
 

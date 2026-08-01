@@ -17,13 +17,17 @@ from coquic_steward.publication.generation import (
 )
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
+    MAX_ATTEMPTS,
+    MAX_LEASE_SECONDS,
     PublicationOperationStatus,
+    PublicationGeneration,
     PublicationReceipt,
     PublicationState,
     ReceiptClass,
 )
 from coquic_steward.publication.publisher import CloudPublisher, PublicationStatus
 from coquic_steward.publication.r2 import R2Error, R2ErrorCategory, R2ObjectClass
+from coquic_steward.storage import TaskStore
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
@@ -230,6 +234,36 @@ class _TransientHideProvider(_FakeProvider):
         self.head_visible = False
 
 
+class _SQLitePublicationProvider:
+    def __init__(self, *, hide_failures: int = 0) -> None:
+        self.hide_failures = hide_failures
+        self.hide_attempts = 0
+        self.head_visible = True
+
+    def hide_task(self, task_id: str, reason: str) -> None:
+        self.hide_attempts += 1
+        if self.hide_attempts <= self.hide_failures:
+            raise D1Error(D1ErrorCode.transient)
+        self.head_visible = False
+
+    def put_object(self, key: str, content: bytes, object_class: R2ObjectClass, **kwargs: object):
+        return SimpleNamespace(
+            key=key,
+            sha256=kwargs.get("expected_sha256"),
+            byte_size=kwargs.get("expected_size"),
+        )
+
+    def stage(self, payload: object):
+        return SimpleNamespace(publication_id=IDENTITY.publication_id, task_id="task-1")
+
+    def expose(self, payload: object):
+        return SimpleNamespace(
+            state="visible",
+            publication_id=IDENTITY.publication_id,
+            task_id="task-1",
+        )
+
+
 def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> CloudPublisher:
     return CloudPublisher(
         store,
@@ -255,6 +289,26 @@ def _compose_generation(
         )
 
     return compose
+
+
+def _sqlite_generation() -> PublicationGeneration:
+    return PublicationGeneration(
+        publication_id=IDENTITY.publication_id,
+        task_id="task-1",
+        run_id="run-1",
+        generation_boundary="boundary-1",
+        metadata_digest="a" * 64,
+        idempotency_key=IDENTITY.idempotency_key,
+        created_at=NOW,
+        updated_at=NOW,
+        rows=5,
+        objects=1,
+        tasks=1,
+        pipelines=1,
+        runs=1,
+        events=1,
+        artifacts=1,
+    )
 
 
 def test_clean_generation_has_no_private_request_and_preserves_order() -> None:
@@ -439,6 +493,88 @@ def test_transient_hide_failure_replays_before_blocking() -> None:
     assert provider.hide_attempts == 2
     assert compose_calls == [{"task": {}}]
     assert store.events[-4:] == ["claim", "renew", "d1:hide-attempt", "blocked"]
+
+
+def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    store.enqueue_publication(_sqlite_generation())
+    provider = _SQLitePublicationProvider(hide_failures=MAX_ATTEMPTS)
+    clock = [NOW]
+    publisher = CloudPublisher(
+        store,
+        provider,
+        provider,
+        "worker-1",
+        compose=lambda _source, **_kwargs: FailClosed((ReasonCode.unsafe_content,), ()),
+        now=lambda: clock[0],
+    )
+
+    for attempt in range(MAX_ATTEMPTS):
+        clock[0] = NOW + timedelta(seconds=attempt * 2)
+        result = publisher.publish(IDENTITY.publication_id, source={"task": {}})
+        current = store.get_publication_generation(IDENTITY.publication_id)
+        assert result.status is PublicationStatus.retry_wait
+        assert current is not None
+        assert current.state is PublicationState.retry_wait
+        assert current.reason == "unsafe_content"
+        assert current.attempt == min(attempt + 1, MAX_ATTEMPTS)
+
+    current = store.get_publication_generation(IDENTITY.publication_id)
+    assert current is not None
+    assert current.state is PublicationState.retry_wait
+    assert provider.head_visible is True
+    assert provider.hide_attempts == MAX_ATTEMPTS
+
+    clock[0] = NOW + timedelta(seconds=MAX_ATTEMPTS * 2 + 2)
+    replay = publisher.publish(IDENTITY.publication_id, source={"task": {}})
+    current = store.get_publication_generation(IDENTITY.publication_id)
+    assert replay.status is PublicationStatus.blocked
+    assert current is not None
+    assert current.state is PublicationState.blocked
+    assert provider.head_visible is False
+    assert provider.hide_attempts == MAX_ATTEMPTS + 1
+
+
+def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    store.enqueue_publication(_sqlite_generation())
+    store.claim_publication("worker-1", now=NOW)
+    assert store.advance_publication(
+        IDENTITY.publication_id,
+        PublicationState.claimed,
+        PublicationState.building,
+        lease_owner="worker-1",
+        now=NOW,
+    ).status is PublicationOperationStatus.advanced
+    expired_at = NOW + timedelta(seconds=MAX_LEASE_SECONDS)
+    store.expire_publication_leases(now=expired_at)
+    expired = store.get_publication_generation(IDENTITY.publication_id)
+    assert expired is not None
+    assert expired.state is PublicationState.retry_wait
+    assert expired.reason == "lease_expired"
+
+    provider = _SQLitePublicationProvider()
+    compose_calls: list[object] = []
+
+    def compose(source: object, **_kwargs: object):
+        compose_calls.append(source)
+        return _composed()
+
+    result = CloudPublisher(
+        store,
+        provider,
+        provider,
+        "worker-2",
+        compose=compose,
+        now=expired_at,
+    ).publish(IDENTITY.publication_id, source={"stable": True})
+
+    current = store.get_publication_generation(IDENTITY.publication_id)
+    assert result.status is PublicationStatus.exposed
+    assert compose_calls == [{"stable": True}]
+    assert provider.hide_attempts == 0
+    assert current is not None
+    assert current.state is PublicationState.exposed
 
 
 def test_prebuilt_transport_generation_is_not_a_composition_bypass() -> None:

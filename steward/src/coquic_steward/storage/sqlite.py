@@ -199,6 +199,24 @@ _PUBLICATION_REASON_VALUES = frozenset(
         "operator_blocked",
     }
 )
+_PUBLICATION_HIDE_REASONS = frozenset(
+    _PUBLICATION_REASON_VALUES
+    - {
+        "network",
+        "quota",
+        "timeout",
+        "lease_expired",
+        "retry_exhausted",
+        "cleanup_failed",
+        "operator_blocked",
+    }
+)
+_PUBLICATION_HIDE_REASON_SQL = ",".join(
+    f"'{reason}'" for reason in sorted(_PUBLICATION_HIDE_REASONS)
+)
+_PUBLICATION_HIDE_RETRY_SQL = (
+    "state='retry_wait' AND reason IN (" + _PUBLICATION_HIDE_REASON_SQL + ")"
+)
 _PUBLICATION_GENERATION_COLUMNS = (
     "publication_id,task_id,run_id,generation_boundary,metadata_digest,idempotency_key,"
     "state,attempt,lease_owner,lease_expires_at,retry_at,reason,"
@@ -2204,7 +2222,9 @@ class SQLiteTaskStore:
                 "SELECT 1 FROM publication_generations active "
                 "WHERE active.task_id=publication_generations.task_id "
                 "AND active.lease_expires_at IS NOT NULL) "
-                "AND attempt < :max_attempts"
+                "AND (attempt < :max_attempts OR ("
+                + _PUBLICATION_HIDE_RETRY_SQL
+                + "))"
             )
             parameters["max_attempts"] = MAX_ATTEMPTS
             if publication_id is not None:
@@ -2221,7 +2241,10 @@ class SQLiteTaskStore:
                 # fail-closed rather than left permanently claimable-looking.
                 exhausted_parameters: dict[str, object] = {}
                 exhausted_selector = (
-                    "state IN ('queued','retry_wait') AND attempt >= :max_attempts"
+                    "state IN ('queued','retry_wait') AND attempt >= :max_attempts "
+                    "AND NOT ("
+                    + _PUBLICATION_HIDE_RETRY_SQL
+                    + ")"
                 )
                 exhausted_parameters["max_attempts"] = MAX_ATTEMPTS
                 if publication_id is not None:
@@ -2278,10 +2301,16 @@ class SQLiteTaskStore:
                     else PublicationState.building
                 )
                 connection.exec_driver_sql(
-                    "UPDATE publication_generations SET state=:state,attempt=attempt+1,"
+                    "UPDATE publication_generations SET state=:state,"
+                    "attempt=CASE WHEN attempt < :max_attempts THEN attempt+1 ELSE attempt END,"
                     "lease_owner=:lease_owner,lease_expires_at=:lease_expires_at,retry_at=NULL,"
-                    "reason=NULL,updated_at=:updated_at WHERE publication_id=:publication_id "
-                    "AND state=:expected_state AND attempt < :max_attempts",
+                    "reason=CASE WHEN state='retry_wait' AND reason IN ("
+                    + _PUBLICATION_HIDE_REASON_SQL
+                    + ") THEN reason ELSE NULL END,updated_at=:updated_at "
+                    "WHERE publication_id=:publication_id "
+                    "AND state=:expected_state AND (attempt < :max_attempts OR ("
+                    + _PUBLICATION_HIDE_RETRY_SQL
+                    + "))",
                     {
                         "state": target.value,
                         "lease_owner": worker,
@@ -2865,7 +2894,32 @@ class SQLiteTaskStore:
             )
         except (TypeError, ValueError):
             raise OutboxValidationError("invalid_metadata") from None
+        hide_pending = safe_reason in _PUBLICATION_HIDE_REASONS
+        if retry_at is None:
+            delay = 1 if backoff_seconds is None else _bounded_publication_seconds(
+                backoff_seconds, MAX_RETRY_DELAY_SECONDS
+            )
+            retry_at = timestamp + timedelta(seconds=delay)
+        else:
+            retry_at = _publication_datetime(retry_at)
+            if retry_at < timestamp or retry_at > timestamp + timedelta(seconds=MAX_RETRY_DELAY_SECONDS):
+                raise OutboxValidationError("invalid_metadata")
         if current.attempt >= MAX_ATTEMPTS:
+            if hide_pending:
+                retained = self.advance_publication(
+                    publication_id,
+                    expected,
+                    PublicationState.retry_wait,
+                    lease_owner=lease_owner or worker_id,
+                    now=timestamp,
+                    retry_at=retry_at,
+                    reason=safe_reason,
+                )
+                return (
+                    retained.with_status(PublicationOperationStatus.retry_wait)
+                    if retained.status is PublicationOperationStatus.advanced
+                    else retained
+                )
             if not allowed_transition(current.state, PublicationState.blocked):
                 return PublicationOperationResult(
                     PublicationOperationStatus.precondition,
@@ -2884,15 +2938,6 @@ class SQLiteTaskStore:
                 if blocked.status is PublicationOperationStatus.blocked
                 else blocked
             )
-        if retry_at is None:
-            delay = 1 if backoff_seconds is None else _bounded_publication_seconds(
-                backoff_seconds, MAX_RETRY_DELAY_SECONDS
-            )
-            retry_at = timestamp + timedelta(seconds=delay)
-        else:
-            retry_at = _publication_datetime(retry_at)
-            if retry_at < timestamp or retry_at > timestamp + timedelta(seconds=MAX_RETRY_DELAY_SECONDS):
-                raise OutboxValidationError("invalid_metadata")
         result = self.advance_publication(
             publication_id,
             expected,
@@ -5934,7 +5979,8 @@ def _expire_publication_leases_in_connection(
     result = connection.exec_driver_sql(
         "UPDATE publication_generations "
         "SET state='retry_wait',lease_owner=NULL,lease_expires_at=NULL,retry_at=:retry_at,"
-        "reason='lease_expired',updated_at=:updated_at "
+        "reason=CASE WHEN reason IN (" + _PUBLICATION_HIDE_REASON_SQL + ") "
+        "THEN reason ELSE 'lease_expired' END,updated_at=:updated_at "
         "WHERE state IN ('claimed','building','uploading','d1_staged') AND lease_expires_at<=:now",
         {"retry_at": now_text, "updated_at": now_text, "now": now_text},
     )

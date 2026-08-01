@@ -1624,3 +1624,45 @@ def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path
     assert exhausted.status is PublicationOperationStatus.retry_exhausted
     assert exhausted.generation is not None
     assert exhausted.generation.state is PublicationState.blocked
+
+
+def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("worker-1", now=NOW)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_generations SET state='building',attempt=:attempt,"
+            "lease_owner='worker-1',lease_expires_at=:lease_expires_at,updated_at=:updated_at "
+            "WHERE publication_id=:publication_id",
+            {
+                "attempt": MAX_ATTEMPTS,
+                "updated_at": "2026-07-28T12:00:01.000Z",
+                "lease_expires_at": "2026-07-28T13:00:01.000Z",
+                "publication_id": generation.publication_id,
+            },
+        )
+
+    retry = store.schedule_publication_retry(
+        generation.publication_id,
+        expected_state=PublicationState.building,
+        lease_owner="worker-1",
+        reason="unsafe_content",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert retry.status is PublicationOperationStatus.retry_wait
+    assert retry.generation is not None
+    assert retry.generation.state is PublicationState.retry_wait
+    assert retry.generation.reason == "unsafe_content"
+    assert retry.generation.attempt == MAX_ATTEMPTS
+
+    resumed = store.claim_publication(
+        "worker-2",
+        publication_id=generation.publication_id,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert resumed.status is PublicationOperationStatus.claimed
+    assert resumed.generation is not None
+    assert resumed.generation.state is PublicationState.building
+    assert resumed.generation.attempt == MAX_ATTEMPTS

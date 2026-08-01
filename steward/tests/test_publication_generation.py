@@ -16,6 +16,7 @@ from coquic_steward.publication import (
     RunMetadata,
 )
 from coquic_steward.publication.generation import (
+    GenerationIdentity,
     PublicationGeneration,
     compose_publication_generation,
 )
@@ -187,6 +188,36 @@ def test_generation_is_deterministic_and_detached() -> None:
     assert first.payload["generation"]["state"] == "staged"
     with pytest.raises(TypeError):
         first.payload["taskId"] = "other"  # type: ignore[index]
+
+
+def test_generation_boundary_and_outbox_mapping_are_canonical() -> None:
+    result = _compose(_graph(_source()))
+
+    assert isinstance(result, PublicationGeneration)
+    identity = GenerationIdentity(result.task_id, result.generation_boundary)
+    record = result.to_outbox()
+    assert result.publication_id == identity.publication_id
+    assert result.idempotency_key == identity.idempotency_key
+    assert record.publication_id == result.publication_id
+    assert record.generation_boundary == result.generation_boundary
+    assert record.run_id == result.run_id
+    assert record.metadata_digest == result.metadata_digest
+    assert record.rows == sum(result.generation["expectedCounts"].values())
+    assert record.objects == len(result.objects) + len(result.private_originals)
+    assert "generationBoundary" not in json.dumps(result.as_dict(), sort_keys=True)
+
+
+def test_generation_rejects_caller_supplied_identity() -> None:
+    graph = _graph(_source())
+
+    result = compose_publication_generation(
+        graph,
+        publication_id="caller-publication",
+        scanner_runner=_scanner,
+    )
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.invalid_metadata,)
 
 
 def test_active_task_after_completed_planning_run_is_visible() -> None:

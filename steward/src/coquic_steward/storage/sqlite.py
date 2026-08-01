@@ -155,6 +155,10 @@ REVIEW_FINISHED_EVENTS = {
 }
 
 _PUBLICATION_ID_RE = re.compile(r"^pub-[0-9a-f]{64}$")
+_PRIVATE_RECEIPT_KEY_RE = re.compile(
+    r"^v1/originals/(?P<task>[A-Za-z0-9][A-Za-z0-9._-]{0,127})/"
+    r"(?P<run>[A-Za-z0-9][A-Za-z0-9._-]{0,127})/sha256/(?P<digest>[0-9a-f]{64})\.jsonl$"
+)
 _PUBLICATION_REASON_VALUES = frozenset(
     {
         "missing",
@@ -2330,7 +2334,7 @@ class SQLiteTaskStore:
                 str(row[0])
                 for row in connection.exec_driver_sql(
                     "SELECT publication_id FROM publication_generations "
-                    "WHERE state IN ('claimed','building') AND lease_expires_at<=:now",
+                    "WHERE state IN ('claimed','building','uploading','d1_staged') AND lease_expires_at<=:now",
                     {"now": _publication_timestamp(timestamp)},
                 ).fetchall()
             ]
@@ -2386,7 +2390,12 @@ class SQLiteTaskStore:
                 connection.commit()
                 return PublicationOperationResult(PublicationOperationStatus.missing)
             current = _publication_generation_from_row(row)
-            if current.state not in {PublicationState.claimed, PublicationState.building}:
+            if current.state not in {
+                PublicationState.claimed,
+                PublicationState.building,
+                PublicationState.uploading,
+                PublicationState.d1_staged,
+            }:
                 connection.commit()
                 return PublicationOperationResult(
                     PublicationOperationStatus.lost_claim,
@@ -2633,13 +2642,16 @@ class SQLiteTaskStore:
                 connection.commit()
                 return PublicationOperationResult(PublicationOperationStatus.missing)
             generation = _publication_generation_from_row(generation_row)
-            expected_prefix = (
-                f"v1/tasks/{generation.task_id}/"
-                if receipt.receipt_class is ReceiptClass.public
-                else f"v1/originals/{generation.task_id}/{generation.run_id}/"
-            )
-            if not receipt.content_key.startswith(expected_prefix):
-                raise OutboxValidationError("invalid_path")
+            private_run_id: str | None = None
+            if receipt.receipt_class is ReceiptClass.public:
+                expected_prefix = f"v1/tasks/{generation.task_id}/"
+                if not receipt.content_key.startswith(expected_prefix):
+                    raise OutboxValidationError("invalid_path")
+            else:
+                private_match = _PRIVATE_RECEIPT_KEY_RE.fullmatch(receipt.content_key)
+                if private_match is None or private_match.group("task") != generation.task_id:
+                    raise OutboxValidationError("invalid_path")
+                private_run_id = private_match.group("run")
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
                 "WHERE receipt_id=:receipt_id",
@@ -2687,6 +2699,29 @@ class SQLiteTaskStore:
                 )
             if receipt.verified_at < generation.updated_at:
                 raise OutboxValidationError("invalid_metadata")
+            if private_run_id is not None:
+                trajectory = connection.exec_driver_sql(
+                    "SELECT verified_at FROM publication_receipts "
+                    "WHERE publication_id=:publication_id AND task_id=:task_id "
+                    "AND receipt_class='public' AND logical_path=:logical_path "
+                    "ORDER BY verified_at,receipt_id LIMIT 1",
+                    {
+                        "publication_id": publication_id,
+                        "task_id": generation.task_id,
+                        "logical_path": f"runs/{private_run_id}/trajectory.json",
+                    },
+                ).scalar()
+                if trajectory is None:
+                    if private_run_id != generation.run_id:
+                        raise OutboxValidationError("invalid_path")
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        generation=generation,
+                        reason="integrity",
+                    )
+                if _publication_datetime(trajectory) > receipt.verified_at:
+                    raise OutboxValidationError("invalid_metadata")
             connection.exec_driver_sql(
                 """
                 INSERT INTO publication_receipts
@@ -5761,7 +5796,12 @@ def _publication_transition_values(
     expires = lease_expires_at
     retry = retry_at
     safe_reason = _publication_reason(reason)
-    if target in {PublicationState.claimed, PublicationState.building}:
+    if target in {
+        PublicationState.claimed,
+        PublicationState.building,
+        PublicationState.uploading,
+        PublicationState.d1_staged,
+    }:
         owner = owner or current.lease_owner
         if owner is None:
             raise OutboxValidationError("invalid_metadata")
@@ -5853,7 +5893,7 @@ def _expire_publication_leases_in_connection(
         "UPDATE publication_generations "
         "SET state='retry_wait',lease_owner=NULL,lease_expires_at=NULL,retry_at=:retry_at,"
         "reason='lease_expired',updated_at=:updated_at "
-        "WHERE state IN ('claimed','building') AND lease_expires_at<=:now",
+        "WHERE state IN ('claimed','building','uploading','d1_staged') AND lease_expires_at<=:now",
         {"retry_at": now_text, "updated_at": now_text, "now": now_text},
     )
     return result.rowcount > 0

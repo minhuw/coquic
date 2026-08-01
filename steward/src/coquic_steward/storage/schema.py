@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -16,6 +14,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from ..publication.outbox import GenerationIdentity, OutboxValidationError
 
 
 ACTIVE_STATUS_VALUES = ("queued", "running", "reviewing", "integrating")
@@ -72,8 +72,10 @@ def _publication_identity_digest(task_id: object, generation_boundary: object) -
 
     if not isinstance(task_id, str) or not isinstance(generation_boundary, str):
         return "invalid"
-    seed = f"coquic-publication-v1\0{task_id}\0{generation_boundary}".encode()
-    return hashlib.sha256(seed).hexdigest()
+    try:
+        return GenerationIdentity(task_id, generation_boundary).digest
+    except (OutboxValidationError, TypeError, ValueError):
+        return "invalid"
 
 
 @event.listens_for(Engine, "connect")
@@ -736,9 +738,9 @@ class PublicationGenerationRow(Base):
             name="ck_publication_generation_lease_owner",
         ),
         CheckConstraint(
-            "((state IN ('claimed','building') AND lease_owner IS NOT NULL AND "
+            "((state IN ('claimed','building','uploading','d1_staged') AND lease_owner IS NOT NULL AND "
             "lease_expires_at IS NOT NULL) OR "
-            "(state NOT IN ('claimed','building') AND lease_owner IS NULL AND "
+            "(state NOT IN ('claimed','building','uploading','d1_staged') AND lease_owner IS NULL AND "
             "lease_expires_at IS NULL))",
             name="ck_publication_generation_state_lease",
         ),

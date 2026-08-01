@@ -165,6 +165,14 @@ _LEGAL_TRANSITIONS: Final[dict[PublicationState, frozenset[PublicationState]]] =
     PublicationState.blocked: frozenset({PublicationState.queued}),
     PublicationState.terminal_cleaned: frozenset(),
 }
+_LEASED_STATES: Final[frozenset[PublicationState]] = frozenset(
+    {
+        PublicationState.claimed,
+        PublicationState.building,
+        PublicationState.uploading,
+        PublicationState.d1_staged,
+    }
+)
 
 
 def _fail(code: ReasonCode | str = ReasonCode.invalid_metadata) -> None:
@@ -552,9 +560,9 @@ class PublicationGeneration:
         lease_expires = _lease(self.lease_expires_at)
         if (lease_owner is None) != (lease_expires is None):
             _fail()
-        if state in {PublicationState.claimed, PublicationState.building} and lease_owner is None:
+        if state in _LEASED_STATES and lease_owner is None:
             _fail()
-        if state not in {PublicationState.claimed, PublicationState.building} and lease_owner is not None:
+        if state not in _LEASED_STATES and lease_owner is not None:
             _fail()
         if lease_owner is not None:
             if lease_expires is None or lease_expires < updated:
@@ -642,13 +650,13 @@ class PublicationGeneration:
         updated = _timestamp(now or _now())
         if updated < self.updated_at:
             _fail()
-        if destination in {PublicationState.claimed, PublicationState.building}:
+        if destination in _LEASED_STATES:
             lease_owner = lease_owner or self.lease_owner
             lease_expires_at = lease_expires_at or self.lease_expires_at
             if lease_owner is None:
                 _fail()
             lease_expires_at = lease_expires_at or updated + timedelta(seconds=MAX_LEASE_SECONDS)
-        elif destination not in {PublicationState.claimed, PublicationState.building}:
+        elif destination not in _LEASED_STATES:
             lease_owner = None
             lease_expires_at = None
         if destination is PublicationState.retry_wait:

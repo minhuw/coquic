@@ -39,6 +39,10 @@ from .models import (
 from .pipeline import build_publication_bundle
 from .redaction import discover_secrets
 from .scanner import CorpusEntry, run_trufflehog
+from .outbox import (
+    GenerationIdentity as OutboxGenerationIdentity,
+    PublicationGeneration as OutboxGenerationRecord,
+)
 
 
 PUBLICATION_SCHEMA_VERSION: Final[str] = "1.0"
@@ -588,6 +592,24 @@ class GenerationOriginal:
         return {"taskId": self.task_id, "runId": self.run_id, "byteSize": self.byte_size, "sha256": self.sha256}
 
 
+def _generation_boundary_from_payload(value: Mapping[str, Any]) -> str:
+    """Recreate the canonical task-graph seed without exposing it publicly."""
+
+    payload = _thaw(value)
+    try:
+        seed_metadata = {
+            "taskId": payload["taskId"],
+            "task": payload["task"],
+            "pipelines": payload["pipelines"],
+            "runs": payload["runs"],
+            "events": payload["events"],
+            "artifacts": payload["artifacts"],
+        }
+    except (KeyError, TypeError):
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    return hashlib.sha256(_canonical(seed_metadata)).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationGeneration:
     """Immutable generation envelope plus detached public/private bytes."""
@@ -596,6 +618,7 @@ class PublicationGeneration:
     objects: tuple[GenerationObject, ...] = ()
     private_originals: tuple[GenerationOriginal, ...] = ()
     status: str = field(init=False, default="publishable")
+    _generation_boundary: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.payload, Mapping):
@@ -606,6 +629,25 @@ class PublicationGeneration:
             raise PublicationError(ReasonCode.invalid_metadata)
         if len(originals) > MAX_GENERATION_RUNS or any(not isinstance(item, GenerationOriginal) for item in originals):
             raise PublicationError(ReasonCode.invalid_metadata)
+        boundary = _generation_boundary_from_payload(self.payload)
+        try:
+            task_value = self.payload["taskId"]
+            if not isinstance(task_value, str):
+                raise PublicationError(ReasonCode.invalid_metadata)
+            identity = OutboxGenerationIdentity(task_value, boundary)
+            generation = self.payload["generation"]
+            if not isinstance(generation, Mapping):
+                raise PublicationError(ReasonCode.invalid_metadata)
+            if (
+                self.payload.get("publicationId") != identity.publication_id
+                or generation.get("publicationId") != identity.publication_id
+                or generation.get("taskId") != identity.task_id
+                or generation.get("idempotencyKey") != identity.idempotency_key
+            ):
+                raise PublicationError(ReasonCode.invalid_metadata)
+        except (KeyError, TypeError, ValueError):
+            raise PublicationError(ReasonCode.invalid_metadata) from None
+        object.__setattr__(self, "_generation_boundary", boundary)
         object.__setattr__(self, "payload", _freeze(_thaw(self.payload)))
         object.__setattr__(self, "objects", objects)
         object.__setattr__(self, "private_originals", originals)
@@ -640,6 +682,16 @@ class PublicationGeneration:
         return str(self.generation.get("idempotencyKey", ""))
 
     @property
+    def generation_boundary(self) -> str:
+        """The canonical task-graph seed digest used by the outbox identity."""
+
+        return self._generation_boundary
+
+    @property
+    def identity(self) -> OutboxGenerationIdentity:
+        return OutboxGenerationIdentity(self.task_id, self.generation_boundary)
+
+    @property
     def publication(self) -> Mapping[str, Any]:
         return self.payload
 
@@ -664,6 +716,58 @@ class PublicationGeneration:
     @property
     def private_original(self) -> GenerationOriginal | None:
         return self.private_originals[0] if len(self.private_originals) == 1 else None
+
+    @property
+    def outbox_record(self) -> OutboxGenerationRecord:
+        """Return the exact durable outbox record represented by this envelope."""
+
+        counts = self.generation.get("expectedCounts")
+        if not isinstance(counts, Mapping):
+            raise PublicationError(ReasonCode.invalid_metadata)
+        try:
+            count_values = {
+                name: counts[name]
+                for name in ("tasks", "pipelines", "runs", "events", "artifacts")
+            }
+        except KeyError:
+            raise PublicationError(ReasonCode.invalid_metadata) from None
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in count_values.values()):
+            raise PublicationError(ReasonCode.invalid_metadata)
+        head_intent = self.payload.get("headIntent")
+        if not isinstance(head_intent, Mapping):
+            raise PublicationError(ReasonCode.invalid_metadata)
+        return OutboxGenerationRecord(
+            publication_id=self.identity.publication_id,
+            task_id=self.identity.task_id,
+            run_id=self.run_id,
+            generation_boundary=self.identity.generation_boundary,
+            metadata_digest=self.metadata_digest,
+            idempotency_key=self.identity.idempotency_key,
+            rows=sum(count_values.values()),
+            objects=len(self.objects) + len(self.private_originals),
+            tasks=count_values["tasks"],
+            pipelines=count_values["pipelines"],
+            runs=count_values["runs"],
+            events=count_values["events"],
+            artifacts=count_values["artifacts"],
+            created_at=_timestamp_value(self.generation.get("createdAt")),
+            updated_at=_timestamp_value(head_intent.get("updatedAt")),
+        )
+
+    @property
+    def outbox_generation(self) -> OutboxGenerationRecord:
+        return self.outbox_record
+
+    @property
+    def outbox(self) -> OutboxGenerationRecord:
+        return self.outbox_record
+
+    def to_outbox(self) -> OutboxGenerationRecord:
+        return self.outbox_record
+
+    to_outbox_record = to_outbox
+    as_outbox_record = to_outbox
+    as_outbox = to_outbox
 
     def as_dict(self) -> dict[str, Any]:
         return _thaw(self.payload)
@@ -690,6 +794,45 @@ def _extract_items(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return list(value)
     return [value]
+
+
+_IDENTITY_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "publicationId",
+        "publication_id",
+        "idempotencyKey",
+        "idempotency_key",
+        "generationBoundary",
+        "generation_boundary",
+    }
+)
+
+
+def _contains_identity_fields(value: object, *, budget: list[int]) -> bool:
+    """Reject caller-provided identity material before composition."""
+
+    budget[0] += 1
+    if budget[0] > MAX_GENERATION_GRAPH_NODES:
+        raise PublicationError(ReasonCode.oversized)
+    if isinstance(value, Mapping):
+        if any(key in _IDENTITY_FIELDS for key in value):
+            return True
+        return any(_contains_identity_fields(child, budget=budget) for child in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_identity_fields(child, budget=budget) for child in value)
+    if isinstance(value, AtifSource):
+        return any(
+            _contains_identity_fields(child, budget=budget)
+            for child in (value.run, value.documents, value.artifacts)
+        )
+    as_dict = getattr(value, "as_dict", None)
+    if callable(as_dict):
+        try:
+            candidate = as_dict()
+        except Exception:
+            raise PublicationError(ReasonCode.invalid_metadata) from None
+        return _contains_identity_fields(candidate, budget=budget)
+    return False
 
 
 def _graph_parts(
@@ -1173,8 +1316,9 @@ def _build_generation(
         "artifacts": sorted(artifact_rows, key=lambda row: (row["runId"], row["logicalPath"], row["artifactId"])),
     }
     seed = hashlib.sha256(_canonical(seed_metadata)).hexdigest()
-    publication_id = f"publication-{seed}"
-    idempotency_key = f"generation-{seed}"
+    identity = OutboxGenerationIdentity(task_id, seed)
+    publication_id = identity.publication_id
+    idempotency_key = identity.idempotency_key
     payload: dict[str, Any] = {
         "schemaVersion": PUBLICATION_SCHEMA_VERSION,
         "publicationId": publication_id,
@@ -1250,6 +1394,9 @@ def compose_publication_generation(
     ocr_runner: Any = None,
     ocr_timeout: float = 30.0,
     run_scanner: bool = True,
+    generation_boundary: str | None = None,
+    publication_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> GenerationOutcome:
     """Compose one validated generation from a stable task graph.
 
@@ -1259,6 +1406,8 @@ def compose_publication_generation(
     paths, scanner records, credentials, or private bytes in the D1 payload.
     """
 
+    if any(value is not None for value in (generation_boundary, publication_id, idempotency_key)):
+        return _failure(ReasonCode.invalid_metadata)
     if task_id is not None:
         try:
             task_id = _id(task_id)
@@ -1278,6 +1427,8 @@ def compose_publication_generation(
             or detached_fingerprint != source_fingerprint_after
         ):
             return _failure(ReasonCode.changing)
+        if _contains_identity_fields(detached_watch, budget=[0]):
+            return _failure(ReasonCode.invalid_metadata)
         (
             detached_graph,
             detached_task,
@@ -1349,6 +1500,7 @@ assemble_generation = compose_publication_generation
 build_task_generation = compose_publication_generation
 compose_task_generation = compose_publication_generation
 build_task_publication = compose_publication_generation
+GenerationIdentity = OutboxGenerationIdentity
 
 
 __all__ = [
@@ -1362,6 +1514,7 @@ __all__ = [
     "GenerationObjectDescriptor",
     "GenerationOriginal",
     "PrivateOriginalDescriptor",
+    "GenerationIdentity",
     "PublicationGeneration",
     "PublicationGenerationResult",
     "PublishableGeneration",

@@ -74,7 +74,12 @@ def _generation(**overrides: object) -> PublicationGeneration:
 
 def _generation_for_state(state: PublicationState) -> PublicationGeneration:
     values: dict[str, object] = {"state": state}
-    if state in {PublicationState.claimed, PublicationState.building}:
+    if state in {
+        PublicationState.claimed,
+        PublicationState.building,
+        PublicationState.uploading,
+        PublicationState.d1_staged,
+    }:
         values.update(
             lease_owner="worker-1",
             lease_expires_at=NOW + timedelta(days=1),
@@ -159,7 +164,12 @@ def test_every_state_pair_matches_the_expected_transition_table(
     assert generation.can_transition_to(target) is expected
 
     transition_values: dict[str, object] = {}
-    if target in {PublicationState.claimed, PublicationState.building}:
+    if target in {
+        PublicationState.claimed,
+        PublicationState.building,
+        PublicationState.uploading,
+        PublicationState.d1_staged,
+    }:
         transition_values["lease_owner"] = "worker-2"
     if target is PublicationState.retry_wait:
         transition_values["retry_at"] = NOW + timedelta(seconds=10)
@@ -195,7 +205,7 @@ def test_every_legal_transition_is_explicit_and_immutable() -> None:
 
     assert generation.state is PublicationState.queued
     assert building.lease_owner == "worker-1"
-    assert uploading.lease_owner is None
+    assert uploading.lease_owner == "worker-1"
     assert staged.state is PublicationState.d1_staged
     assert exposed.exposed_at == NOW + timedelta(seconds=4)
     assert cleaned.state is PublicationState.terminal_cleaned
@@ -1083,6 +1093,7 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
         generation.publication_id,
         PublicationState.uploading,
         PublicationState.d1_staged,
+        lease_owner="worker-1",
         now=NOW + timedelta(seconds=5),
     )
     another_digest = "b" * 64
@@ -1095,6 +1106,86 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
     assert store.record_publication_receipt(
         generation.publication_id, after_staging
     ).status is PublicationOperationStatus.precondition
+
+
+def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("worker-1", now=NOW, lease_seconds=1)
+    store.advance_publication(
+        generation.publication_id,
+        PublicationState.claimed,
+        PublicationState.building,
+        lease_owner="worker-1",
+        now=NOW + timedelta(milliseconds=100),
+    )
+    receipt = PublicationReceipt.public_receipt(
+        DIGEST,
+        17,
+        PUBLIC_KEY,
+        NOW + timedelta(milliseconds=200),
+        "runs/run-1/trajectory.json",
+    )
+    assert store.record_publication_receipt(generation.publication_id, receipt).status is PublicationOperationStatus.recorded
+    assert store.advance_publication(
+        generation.publication_id,
+        PublicationState.building,
+        PublicationState.uploading,
+        lease_owner="worker-1",
+        now=NOW + timedelta(milliseconds=300),
+    ).status is PublicationOperationStatus.advanced
+    assert store.advance_publication(
+        generation.publication_id,
+        PublicationState.uploading,
+        PublicationState.d1_staged,
+        lease_owner="worker-1",
+        now=NOW + timedelta(milliseconds=400),
+    ).status is PublicationOperationStatus.advanced
+
+    expired = store.expire_publication_leases(now=NOW + timedelta(seconds=2))
+    assert expired[0].state is PublicationState.retry_wait
+    assert expired[0].lease_owner is None
+    assert store.list_publication_receipts(generation.publication_id) == [receipt]
+
+
+def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation(run_id="run-2")
+    store.enqueue_publication(generation)
+    store.claim_publication("worker-1", now=NOW)
+    store.advance_publication(
+        generation.publication_id,
+        PublicationState.claimed,
+        PublicationState.building,
+        lease_owner="worker-1",
+        now=NOW + timedelta(seconds=1),
+    )
+    first = PublicationReceipt.public_receipt(
+        DIGEST,
+        17,
+        PUBLIC_KEY,
+        NOW + timedelta(seconds=2),
+        "runs/run-1/trajectory.json",
+    )
+    second_digest = "b" * 64
+    second = PublicationReceipt.public_receipt(
+        second_digest,
+        17,
+        f"v1/tasks/task-1/objects/sha256/{second_digest[:2]}/{second_digest}",
+        NOW + timedelta(seconds=2),
+        "runs/run-2/trajectory.json",
+    )
+    assert store.record_publication_receipt(generation.publication_id, first).status is PublicationOperationStatus.recorded
+    assert store.record_publication_receipt(generation.publication_id, second).status is PublicationOperationStatus.recorded
+    for run_id, digest in (("run-1", DIGEST), ("run-2", second_digest)):
+        private = PublicationReceipt.private_receipt(
+            digest,
+            17,
+            f"v1/originals/task-1/{run_id}/sha256/{digest}.jsonl",
+            NOW + timedelta(seconds=3),
+        )
+        assert store.record_publication_receipt(generation.publication_id, private).status is PublicationOperationStatus.recorded
 
 
 def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
@@ -1135,7 +1226,17 @@ def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
             generation.publication_id,
             expected,
             target,
-            lease_owner=owner if expected in {PublicationState.claimed, PublicationState.building} else None,
+            lease_owner=(
+                owner
+                if expected
+                in {
+                    PublicationState.claimed,
+                    PublicationState.building,
+                    PublicationState.uploading,
+                    PublicationState.d1_staged,
+                }
+                else None
+            ),
             now=NOW + timedelta(seconds=offset),
         )
         assert result.status is PublicationOperationStatus.advanced
@@ -1242,9 +1343,17 @@ def test_store_cleanup_intents_reject_unsafe_replay_and_remain_in_health(tmp_pat
             generation.publication_id,
             expected,
             target,
-            lease_owner="worker-1"
-            if expected in {PublicationState.claimed, PublicationState.building}
-            else None,
+            lease_owner=(
+                "worker-1"
+                if expected
+                in {
+                    PublicationState.claimed,
+                    PublicationState.building,
+                    PublicationState.uploading,
+                    PublicationState.d1_staged,
+                }
+                else None
+            ),
             now=NOW + timedelta(seconds=offset),
         )
     intent = CleanupIntent(
@@ -1334,17 +1443,19 @@ def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
             "UPDATE publication_generations SET state='uploading',attempt=:attempt,"
-            "lease_owner=NULL,lease_expires_at=NULL,updated_at=:updated_at "
+            "lease_owner='worker-1',lease_expires_at=:lease_expires_at,updated_at=:updated_at "
             "WHERE publication_id=:publication_id",
             {
                 "attempt": MAX_ATTEMPTS,
                 "updated_at": "2026-07-28T12:00:01.000Z",
+                "lease_expires_at": "2026-07-28T13:00:01.000Z",
                 "publication_id": generation.publication_id,
             },
         )
     exhausted = store.schedule_publication_retry(
         generation.publication_id,
         expected_state=PublicationState.uploading,
+        lease_owner="worker-1",
         reason="network",
         now=NOW + timedelta(seconds=2),
     )

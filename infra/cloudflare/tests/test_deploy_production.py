@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -47,6 +48,8 @@ if args[:1] == ["preview"]:
         print(json.dumps({"op": "delete", "urn": "urn:pulumi:production"}))
     elif case == "malformed-preview":
         print("not structured JSON")
+    elif case == "update":
+        print(json.dumps({"op": "update", "urn": "urn:pulumi:production"}))
     else:
         print(json.dumps({"op": "create", "urn": "urn:pulumi:production"}))
     raise SystemExit(0)
@@ -100,7 +103,8 @@ if case in {"blank", "bootstrap-failure"} and not Path(os.environ["WRANGLER_BOOT
 if case == "drift":
     print(json.dumps({"success": True, "results": [{"type": "table", "name": "wrong", "tbl_name": "wrong", "sql": "CREATE TABLE wrong (id INTEGER)"}]}))
     raise SystemExit(0)
-print(Path(os.environ["SCHEMA_ROWS"]).read_text(encoding="utf-8"), end="")
+rows = "SCHEMA_ROWS_POPULATED" if case == "exact-populated" else "SCHEMA_ROWS"
+print(Path(os.environ[rows]).read_text(encoding="utf-8"), end="")
 raise SystemExit(0)
 '''
 
@@ -130,16 +134,57 @@ raise SystemExit(0)
 '''
 
 
+ID_FAKE = r'''#!/usr/bin/env python3
+import os
+import sys
+
+
+if sys.argv[1:] == ["-u"]:
+    uid = os.getuid()
+    print(uid + 1 if os.environ.get("OWNER_CASE") == "foreign" else uid)
+    raise SystemExit(0)
+raise SystemExit(2)
+'''
+
+
+MV_FAKE = r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+
+args = sys.argv[1:]
+if os.environ.get("MV_CASE") == "fail-second-install" and any(
+    Path(arg).name == "new-r2-access-key-id" for arg in args
+):
+    raise SystemExit(1)
+real_mv = os.environ["REAL_MV"]
+os.execv(real_mv, [real_mv, *args])
+'''
+
+
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(textwrap.dedent(content), encoding="utf-8")
     path.chmod(0o700)
 
 
-def _schema_rows(path: Path) -> None:
+def _schema_rows(path: Path, *, populated: bool = False) -> None:
     connection = sqlite3.connect(":memory:")
     try:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.executescript(SCHEMA.read_text(encoding="utf-8"))
+        if populated:
+            connection.execute(
+                """
+                INSERT INTO publication_generations (
+                    publication_id, task_id, run_id, metadata_digest,
+                    idempotency_key, state, expected_task_count,
+                    expected_pipeline_count, expected_run_count,
+                    expected_event_count, expected_artifact_count, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'staged', 0, 0, 0, 0, 0, ?)
+                """,
+                ("publication-1", "task-1", "run-1", "a" * 64, "key-1", "2026-08-01T00:00:00Z"),
+            )
         rows = connection.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_master "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
@@ -147,21 +192,16 @@ def _schema_rows(path: Path) -> None:
     finally:
         connection.close()
 
-    def normalize(value: object) -> object:
-        if value is None:
-            return None
-        return " ".join(str(value).split()).rstrip(";").lower()
-
-    normalized = [
+    schema_rows = [
         {
-            "type": normalize(row[0]),
-            "name": normalize(row[1]),
-            "tbl_name": normalize(row[2]),
-            "sql": normalize(row[3]),
+            "type": row[0],
+            "name": row[1],
+            "tbl_name": row[2],
+            "sql": row[3],
         }
         for row in rows
     ]
-    path.write_text(json.dumps({"success": True, "results": normalized}), encoding="utf-8")
+    path.write_text(json.dumps({"success": True, "results": schema_rows}), encoding="utf-8")
 
 
 def _outputs() -> tuple[dict[str, Any], dict[str, str]]:
@@ -209,24 +249,33 @@ def harness(tmp_path: Path) -> dict[str, Any]:
     pulumi = fake_dir / "pulumi"
     wrangler = fake_dir / "wrangler"
     site = fake_dir / "site-installer"
+    fake_id = fake_dir / "id"
+    fake_mv = fake_dir / "mv"
     _write_executable(pulumi, PULUMI_FAKE)
     _write_executable(wrangler, WRANGLER_FAKE)
     _write_executable(site, SITE_FAKE)
+    _write_executable(fake_id, ID_FAKE)
+    _write_executable(fake_mv, MV_FAKE)
 
     outputs, values = _outputs()
     outputs_path = tmp_path / "outputs.json"
     outputs_path.write_text(json.dumps(outputs), encoding="utf-8")
     rows_path = tmp_path / "schema.json"
     _schema_rows(rows_path)
+    populated_rows_path = tmp_path / "schema-populated.json"
+    _schema_rows(populated_rows_path, populated=True)
     command_log = tmp_path / "commands.jsonl"
     applied = tmp_path / "pulumi-applied"
     bootstrapped = tmp_path / "wrangler-bootstrapped"
     site_input = tmp_path / "site-input"
     credentials = tmp_path / "credentials"
     credentials.mkdir(mode=0o700)
+    real_mv = shutil.which("mv")
+    assert real_mv is not None
     env = os.environ.copy()
     env.update(
         {
+            "PATH": f"{fake_dir}:{env['PATH']}",
             "PULUMI_BIN": str(pulumi),
             "WRANGLER_BIN": str(wrangler),
             "COQUIC_SITE_INSTALLER": str(site),
@@ -234,12 +283,16 @@ def harness(tmp_path: Path) -> dict[str, Any]:
             "COMMAND_LOG": str(command_log),
             "OUTPUTS": str(outputs_path),
             "SCHEMA_ROWS": str(rows_path),
+            "SCHEMA_ROWS_POPULATED": str(populated_rows_path),
             "PULUMI_APPLIED": str(applied),
             "WRANGLER_BOOTSTRAPPED": str(bootstrapped),
             "SITE_INPUT": str(site_input),
             "PULUMI_CASE": "ok",
             "WRANGLER_CASE": "exact",
             "SITE_CASE": "ok",
+            "OWNER_CASE": "owned",
+            "MV_CASE": "ok",
+            "REAL_MV": real_mv,
         }
     )
     return {
@@ -303,6 +356,15 @@ def test_default_preview_is_read_only(harness: dict[str, Any]) -> None:
     assert _argv(logs, "wrangler") == []
     assert all(isinstance(entry, dict) for entry in logs)
     assert "bootstrap-" not in result.stdout + result.stderr
+
+
+def test_update_preview_is_accepted(harness: dict[str, Any]) -> None:
+    harness["env"]["PULUMI_CASE"] = "update"
+    result = _run(harness)
+    assert result.returncode == 0, result.stderr
+    assert "update=1" in result.stdout
+    assert not harness["applied"].exists()
+    assert _argv(_logs(harness), "wrangler") == []
 
 
 @pytest.mark.parametrize(
@@ -379,13 +441,32 @@ def test_apply_bootstraps_blank_schema_and_installs_private_outputs(harness: dic
     assert "bootstrap-" not in joined
 
 
-def test_apply_exact_schema_is_a_noop_for_d1(harness: dict[str, Any]) -> None:
+@pytest.mark.parametrize("case", ["exact-empty", "exact-populated"])
+def test_apply_exact_empty_or_populated_schema_is_a_noop_for_d1(
+    harness: dict[str, Any], case: str
+) -> None:
+    harness["env"]["WRANGLER_CASE"] = case
     result = _run(harness, apply=True)
     assert result.returncode == 0, result.stderr
     wrangler = _argv(_logs(harness), "wrangler")
     assert len(wrangler) == 1
     assert "--command" in wrangler[0]
     assert "--file" not in wrangler[0]
+
+
+def test_quoted_schema_literal_drift_fails_before_host_mutation(harness: dict[str, Any]) -> None:
+    payload = json.loads(Path(harness["env"]["SCHEMA_ROWS"]).read_text(encoding="utf-8"))
+    generation = next(row for row in payload["results"] if row["name"] == "publication_generations")
+    assert "'staged'" in generation["sql"]
+    generation["sql"] = generation["sql"].replace("'staged'", "'STAGED'")
+    Path(harness["env"]["SCHEMA_ROWS"]).write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run(harness, apply=True)
+    assert result.returncode != 0
+    assert "schema drift" in result.stderr
+    assert harness["applied"].exists()
+    assert not any(harness["credentials"].iterdir())
+    assert not harness["site_input"].exists()
 
 
 @pytest.mark.parametrize("case", ["drift", "malformed"])
@@ -461,6 +542,54 @@ def test_existing_credential_directory_must_be_private(harness: dict[str, Any], 
     assert result.returncode != 0
     assert "0700" in result.stderr
     assert not any(harness["credentials"].iterdir())
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_credential_path_must_be_a_real_directory(harness: dict[str, Any], kind: str) -> None:
+    harness["credentials"].rmdir()
+    if kind == "file":
+        harness["credentials"].write_text("not a directory", encoding="utf-8")
+    else:
+        target = harness["tmp"] / "credential-target"
+        target.mkdir(mode=0o700)
+        harness["credentials"].symlink_to(target, target_is_directory=True)
+
+    result = _run(harness, apply=True)
+    assert result.returncode != 0
+    assert "credential directory" in result.stderr
+    assert not harness["site_input"].exists()
+
+
+def test_credential_directory_must_be_owned_by_invoking_user(harness: dict[str, Any]) -> None:
+    harness["env"]["OWNER_CASE"] = "foreign"
+    result = _run(harness, apply=True)
+    assert result.returncode != 0
+    assert "not owned" in result.stderr
+    assert not any(harness["credentials"].iterdir())
+    assert not harness["site_input"].exists()
+
+
+def test_partial_credential_install_restores_prior_files(harness: dict[str, Any]) -> None:
+    old_values = {
+        "d1-read-token": "old-d1-token\n",
+        "r2-access-key-id": "old-r2-access\n",
+        "r2-secret-access-key": "old-r2-secret\n",
+    }
+    for name, value in old_values.items():
+        path = harness["credentials"] / name
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o600)
+    harness["env"]["MV_CASE"] = "fail-second-install"
+
+    result = _run(harness, apply=True)
+    assert result.returncode != 0
+    assert "unable to install credential files" in result.stderr
+    assert not harness["site_input"].exists()
+    assert not list(harness["credentials"].glob(".coquic-steward-rollout.*"))
+    for name, value in old_values.items():
+        path = harness["credentials"] / name
+        assert path.read_text(encoding="utf-8") == value
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_output_failure_is_redacted_and_stops_before_d1(harness: dict[str, Any]) -> None:

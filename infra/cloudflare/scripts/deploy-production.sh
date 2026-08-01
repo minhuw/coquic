@@ -385,18 +385,12 @@ finally:
     connection.close()
 
 
-def normalize(value: object) -> object:
-    if value is None:
-        return None
-    return " ".join(str(value).split()).rstrip(";").lower()
-
-
 result = [
     {
-        "type": normalize(row[0]),
-        "name": normalize(row[1]),
-        "tbl_name": normalize(row[2]),
-        "sql": normalize(row[3]),
+        "type": row[0],
+        "name": row[1],
+        "tbl_name": row[2],
+        "sql": row[3],
     }
     for row in rows
 ]
@@ -420,6 +414,61 @@ import sys
 
 response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 expected = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+
+
+def normalize_structure(value: str) -> str:
+    return " ".join(value.split()).rstrip(";").lower()
+
+
+def normalize_sql(value: str) -> str:
+    result: list[str] = []
+    pending_space = False
+    quote: str | None = None
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if quote is not None:
+            result.append(char)
+            if quote == "[":
+                if char == "]":
+                    quote = None
+            elif char == quote:
+                if index + 1 < len(value) and value[index + 1] == quote:
+                    index += 1
+                    result.append(value[index])
+                else:
+                    quote = None
+        elif char.isspace():
+            pending_space = True
+        else:
+            if pending_space and result:
+                result.append(" ")
+            pending_space = False
+            if char in ("'", '"', "`", "["):
+                quote = char
+                result.append(char)
+            else:
+                result.append(char.lower())
+        index += 1
+    if quote is not None:
+        raise ValueError("remote schema SQL has an unterminated quote")
+    normalized = "".join(result).strip()
+    while normalized.endswith(";"):
+        normalized = normalized[:-1].rstrip()
+    return normalized
+
+
+def normalize_row(row: object) -> dict[str, str | None]:
+    if not isinstance(row, dict) or not {"type", "name", "tbl_name", "sql"} <= set(row):
+        raise ValueError("schema row is malformed")
+    if any(not isinstance(row[key], (str, type(None))) for key in ("type", "name", "tbl_name", "sql")):
+        raise ValueError("schema row has invalid values")
+    return {
+        "type": None if row["type"] is None else normalize_structure(row["type"]),
+        "name": None if row["name"] is None else normalize_structure(row["name"]),
+        "tbl_name": None if row["tbl_name"] is None else normalize_structure(row["tbl_name"]),
+        "sql": None if row["sql"] is None else normalize_sql(row["sql"]),
+    }
 
 
 def result_rows(value: object) -> object:
@@ -452,19 +501,12 @@ def result_rows(value: object) -> object:
 
 
 rows = result_rows(response)
-normalized = []
-for row in rows:
-    if not isinstance(row, dict) or not {"type", "name", "tbl_name", "sql"} <= set(row):
-        raise ValueError("remote schema row is malformed")
-    if any(not isinstance(row[key], (str, type(None))) for key in ("type", "name", "tbl_name", "sql")):
-        raise ValueError("remote schema row has invalid values")
-    normalized.append(
-        {
-            key: None if row[key] is None else " ".join(str(row[key]).split()).rstrip(";").lower()
-            for key in ("type", "name", "tbl_name", "sql")
-        }
-    )
+if not isinstance(expected, list):
+    raise ValueError("canonical schema is malformed")
+normalized = [normalize_row(row) for row in rows]
+expected = [normalize_row(row) for row in expected]
 normalized.sort(key=lambda item: (item["type"] or "", item["name"] or ""))
+expected.sort(key=lambda item: (item["type"] or "", item["name"] or ""))
 if not normalized:
     print("blank")
 elif normalized == expected:

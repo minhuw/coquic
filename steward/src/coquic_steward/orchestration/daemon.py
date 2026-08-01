@@ -180,15 +180,49 @@ class _PublicationTransportTracker:
         self._connections: dict[int, object] = {}
         self._pools: dict[int, object] = {}
 
+    def _is_cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def _guard_connection(self, connection: object) -> bool:
+        """Prevent a registered wrapper from reconnecting after cancellation."""
+
+        marker = "_steward_publication_connection_tracker"
+        try:
+            owner = getattr(connection, marker, None)
+            connect = getattr(connection, "connect", None)
+        except Exception:
+            return False
+        if owner is self:
+            return True
+        if owner is not None or not callable(connect):
+            return False
+
+        def guarded_connect(*args: object, **kwargs: object) -> object:
+            if self._is_cancelled():
+                _abort_publication_connection(connection)
+                raise _PublicationTransportCancelled()
+            result = connect(*args, **kwargs)
+            if self._is_cancelled():
+                _abort_publication_connection(connection)
+                raise _PublicationTransportCancelled()
+            return result
+
+        try:
+            setattr(connection, "connect", guarded_connect)
+            setattr(connection, marker, self)
+        except Exception:
+            return False
+        return True
+
     def _track_connection(self, connection: object) -> bool:
         if connection is None:
             return True
         with self._lock:
-            if self._cancelled:
+            if self._cancelled or not self._guard_connection(connection):
                 return False
-            else:
-                self._connections[id(connection)] = connection
-                return True
+            self._connections[id(connection)] = connection
+            return True
 
     def _forget_connection(self, connection: object) -> None:
         if connection is None:
@@ -228,7 +262,7 @@ class _PublicationTransportTracker:
 
         def tracked_get(*args: object, **kwargs: object) -> object:
             connection = get_connection(*args, **kwargs)
-            if not self._track_connection(connection):
+            if not self._track_connection(connection) or self._is_cancelled():
                 # Do not return a checkout after cancellation.  urllib3 would
                 # otherwise reconnect this wrapper while the worker is stopping.
                 _abort_publication_connection(connection)

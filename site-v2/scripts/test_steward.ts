@@ -638,8 +638,10 @@ async function startPlaywrightFixtureServer(): Promise<void> {
   };
   const calls = { count: 0, urls: [] as string[] };
   const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const originalDevIndicator = process.env.__NEXT_DEV_INDICATOR;
   for (const key of ENV_KEYS) process.env[key] = VALID_ENV[key];
   process.env.NEXT_TELEMETRY_DISABLED = "1";
+  process.env.__NEXT_DEV_INDICATOR = "false";
   cloudRepository = loadCloudRepository();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = fakeFetch(browserScenario, calls) as typeof fetch;
@@ -656,6 +658,8 @@ async function startPlaywrightFixtureServer(): Promise<void> {
       if (previous === undefined) delete process.env[key];
       else process.env[key] = previous;
     }
+    if (originalDevIndicator === undefined) delete process.env.__NEXT_DEV_INDICATOR;
+    else process.env.__NEXT_DEV_INDICATOR = originalDevIndicator;
     if (server) await new Promise<void>((resolveClose) => server!.close(() => resolveClose()));
     await app.close();
     if (exitCode !== undefined) process.exitCode = exitCode;
@@ -669,6 +673,12 @@ async function startPlaywrightFixtureServer(): Promise<void> {
       server!.once("error", rejectListen);
       server!.listen(port, host, () => resolveListen());
     });
+    const devToolsResponse = await originalFetch(`http://${host}:${port}/__nextjs_devtools_config`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ disableDevIndicator: true }),
+    });
+    if (!devToolsResponse.ok) throw new Error(`failed to disable the loopback dev indicator (${devToolsResponse.status})`);
     process.stdout.write(`Steward Playwright fixture listening at http://${host}:${port}\n`);
     await new Promise<void>(() => { /* signal handlers own shutdown */ });
   } finally {

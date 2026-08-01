@@ -440,9 +440,66 @@ test("trajectory remains nonblank and nonoverlapping at desktop, mobile, and 320
     });
     expect(probe.area).toBeGreaterThan(0);
     expect(probe.hasDescendantAtPoint || probe.color !== "rgba(0, 0, 0, 0)" || probe.background !== "rgba(0, 0, 0, 0)").toBeTruthy();
+    const overlays = await page.evaluate(() => {
+      const main = document.querySelector<HTMLElement>("main");
+      if (!main) return { conflicts: ["missing main content"] };
+      const surface = main.getBoundingClientRect();
+      const nodes: HTMLElement[] = [];
+      const collect = (root: Document | ShadowRoot) => {
+        for (const node of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+          nodes.push(node);
+          if (node.shadowRoot) collect(node.shadowRoot);
+        }
+      };
+      collect(document);
+      const conflicts = nodes.flatMap((node) => {
+        const style = getComputedStyle(node);
+        const zIndex = Number.parseInt(style.zIndex, 10);
+        if ((style.position !== "fixed" && style.position !== "absolute") || !Number.isFinite(zIndex) || zIndex < 1_000) return [];
+        if (style.display === "none" || style.visibility === "hidden" || Number.parseFloat(style.opacity) === 0) return [];
+        const box = node.getBoundingClientRect();
+        const inViewport = box.right > 0 && box.bottom > 0 && box.left < window.innerWidth && box.top < window.innerHeight;
+        const overlapsSurface = box.right > surface.left && box.left < surface.right && box.bottom > surface.top && box.top < surface.bottom;
+        return inViewport && overlapsSurface && box.width > 0 && box.height > 0
+          ? [{ tag: node.tagName, className: String(node.className), zIndex, box: { left: box.left, top: box.top, right: box.right, bottom: box.bottom } }]
+          : [];
+      });
+      return { conflicts };
+    });
+    expect(overlays.conflicts, JSON.stringify(overlays.conflicts)).toEqual([]);
     const screenshot = await page.screenshot({ path: testInfo.outputPath(`trajectory-${viewport.width}.png`), fullPage: true });
     expect(screenshot.byteLength).toBeGreaterThan(1_000);
-    expect(screenshot.some((byte) => byte !== 0)).toBeTruthy();
+    const pixels = await page.evaluate(async (encoded) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${encoded}`;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("canvas 2D context unavailable");
+      context.drawImage(image, 0, 0);
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let opaque = 0;
+      let nonBackground = 0;
+      const colors = new Set<string>();
+      for (let index = 0; index < data.length; index += 4) {
+        const red = data[index] ?? 0;
+        const green = data[index + 1] ?? 0;
+        const blue = data[index + 2] ?? 0;
+        const alpha = data[index + 3] ?? 0;
+        if (alpha > 0) opaque += 1;
+        if (alpha > 0 && (red < 245 || green < 245 || blue < 245)) nonBackground += 1;
+        colors.add(`${red >> 4}:${green >> 4}:${blue >> 4}:${alpha >> 4}`);
+      }
+      return { width: image.naturalWidth, height: image.naturalHeight, opaque, nonBackground, colors: colors.size };
+    }, screenshot.toString("base64"));
+    const totalPixels = pixels.width * pixels.height;
+    expect(pixels.width).toBeGreaterThan(0);
+    expect(pixels.height).toBeGreaterThan(0);
+    expect(pixels.opaque).toBeGreaterThan(totalPixels * 0.95);
+    expect(pixels.nonBackground).toBeGreaterThan(Math.max(100, totalPixels * 0.01));
+    expect(pixels.colors).toBeGreaterThan(8);
   }
 });
 

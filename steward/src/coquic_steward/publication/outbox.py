@@ -651,7 +651,12 @@ class PublicationGeneration:
         if updated < self.updated_at:
             _fail()
         if destination in _LEASED_STATES:
-            lease_owner = lease_owner or self.lease_owner
+            if self.lease_owner is not None:
+                if lease_owner is not None and _identifier(lease_owner) != self.lease_owner:
+                    _fail(ReasonCode.invalid_metadata)
+                lease_owner = self.lease_owner
+            else:
+                lease_owner = lease_owner or self.lease_owner
             lease_expires_at = lease_expires_at or self.lease_expires_at
             if lease_owner is None:
                 _fail()

@@ -170,7 +170,17 @@ def test_every_state_pair_matches_the_expected_transition_table(
         PublicationState.uploading,
         PublicationState.d1_staged,
     }:
-        transition_values["lease_owner"] = "worker-2"
+        transition_values["lease_owner"] = (
+            "worker-1"
+            if source
+            in {
+                PublicationState.claimed,
+                PublicationState.building,
+                PublicationState.uploading,
+                PublicationState.d1_staged,
+            }
+            else "worker-2"
+        )
     if target is PublicationState.retry_wait:
         transition_values["retry_at"] = NOW + timedelta(seconds=10)
     if target is PublicationState.blocked:
@@ -211,6 +221,40 @@ def test_every_legal_transition_is_explicit_and_immutable() -> None:
     assert cleaned.state is PublicationState.terminal_cleaned
     assert not allowed_transition(PublicationState.queued, PublicationState.exposed)
     assert not cleaned.can_transition_to(PublicationState.queued)
+
+
+def test_active_transitions_reject_lease_owner_replacement() -> None:
+    building = _generation().transition_to(
+        PublicationState.building,
+        now=NOW + timedelta(seconds=1),
+        lease_owner="worker-1",
+    )
+    with pytest.raises(OutboxValidationError):
+        building.transition_to(
+            PublicationState.uploading,
+            now=NOW + timedelta(seconds=2),
+            lease_owner="worker-2",
+        )
+
+    uploading = building.transition_to(
+        PublicationState.uploading,
+        now=NOW + timedelta(seconds=2),
+        lease_owner="worker-1",
+    )
+    with pytest.raises(OutboxValidationError):
+        uploading.transition_to(
+            PublicationState.d1_staged,
+            now=NOW + timedelta(seconds=3),
+            lease_owner="worker-3",
+        )
+
+    staged = uploading.transition_to(
+        PublicationState.d1_staged,
+        now=NOW + timedelta(seconds=3),
+        lease_owner="worker-1",
+    )
+    assert uploading.lease_owner == "worker-1"
+    assert staged.lease_owner == "worker-1"
 
 
 def test_retry_and_blocked_recovery_are_bounded() -> None:

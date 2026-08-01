@@ -105,6 +105,7 @@ class _FakeStore:
             lease_owner=None,
             lease_expires_at=None,
             retry_at=None,
+            reason=None,
             updated_at=NOW,
             rows=5,
             objects=self.object_count or (2 if self.with_private else 1),
@@ -124,7 +125,13 @@ class _FakeStore:
 
     def claim_publication(self, worker_id: str, *, publication_id: str, now: datetime, lease_seconds: int):
         self.events.append("claim")
-        self.generation.state = PublicationState.claimed
+        self.generation.state = (
+            PublicationState.building
+            if self.generation.state is PublicationState.retry_wait
+            else PublicationState.claimed
+        )
+        self.generation.reason = None
+        self.generation.retry_at = None
         self.generation.lease_owner = worker_id
         self.generation.lease_expires_at = now + timedelta(seconds=lease_seconds)
         return SimpleNamespace(status=PublicationOperationStatus.claimed, generation=self.generation)
@@ -168,6 +175,8 @@ class _FakeStore:
     def schedule_publication_retry(self, publication_id: str, **kwargs):
         self.events.append("retry_wait")
         self.generation.state = PublicationState.retry_wait
+        self.generation.reason = kwargs.get("reason")
+        self.generation.retry_at = kwargs.get("retry_at", NOW)
         self.generation.lease_owner = None
         self.generation.lease_expires_at = None
         return SimpleNamespace(status=PublicationOperationStatus.retry_wait, generation=self.generation)
@@ -177,6 +186,8 @@ class _FakeStore:
         if self.block_lost:
             return SimpleNamespace(status=PublicationOperationStatus.lost_claim, generation=self.generation)
         self.generation.state = PublicationState.blocked
+        self.generation.reason = kwargs.get("reason")
+        self.generation.retry_at = None
         self.generation.lease_owner = None
         self.generation.lease_expires_at = None
         return SimpleNamespace(status=PublicationOperationStatus.blocked, generation=self.generation)
@@ -203,6 +214,20 @@ class _FakeProvider:
 
     def hide_task(self, task_id: str, reason: str):
         self.store.events.append("d1:hide")
+
+
+class _TransientHideProvider(_FakeProvider):
+    def __init__(self, store: _FakeStore) -> None:
+        super().__init__(store)
+        self.hide_attempts = 0
+        self.head_visible = True
+
+    def hide_task(self, task_id: str, reason: str):
+        self.hide_attempts += 1
+        self.store.events.append("d1:hide-attempt")
+        if self.hide_attempts == 1:
+            raise D1Error(D1ErrorCode.transient)
+        self.head_visible = False
 
 
 def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> CloudPublisher:
@@ -381,6 +406,39 @@ def test_fail_closed_composition_is_blocked_and_hides() -> None:
     assert result.reason_codes == (ReasonCode.unsafe_content,)
     assert provider.calls == []
     assert "d1:hide" in store.events
+
+
+def test_transient_hide_failure_replays_before_blocking() -> None:
+    store = _FakeStore()
+    provider = _TransientHideProvider(store)
+    compose_calls: list[object] = []
+
+    def fail(_source: object, **kwargs: object):
+        compose_calls.append(_source)
+        return FailClosed((ReasonCode.unsafe_content,), ())
+
+    publisher = _publisher(store, provider, compose=fail)
+    first = publisher.publish(IDENTITY.publication_id, source={"task": {}})
+
+    assert first.status is PublicationStatus.retry_wait
+    assert first.reason == "network"
+    assert store.generation.state is PublicationState.retry_wait
+    assert store.generation.reason == "unsafe_content"
+    assert provider.head_visible is True
+    assert provider.hide_attempts == 1
+    assert store.events[:5] == ["claim", "building", "renew", "d1:hide-attempt", "retry_wait"]
+
+    # The retry boundary is durable; once it is due, the next worker attempt
+    # reclaims and hides before composing or changing the public state.
+    store.generation.retry_at = NOW
+    second = publisher.publish(IDENTITY.publication_id, source={"task": {}})
+
+    assert second.status is PublicationStatus.blocked
+    assert store.generation.state is PublicationState.blocked
+    assert provider.head_visible is False
+    assert provider.hide_attempts == 2
+    assert compose_calls == [{"task": {}}]
+    assert store.events[-4:] == ["claim", "renew", "d1:hide-attempt", "blocked"]
 
 
 def test_prebuilt_transport_generation_is_not_a_composition_bypass() -> None:

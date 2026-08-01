@@ -320,6 +320,28 @@ def _is_transient(category: str) -> bool:
     return category in _TRANSIENT_REASONS or category == R2ErrorCategory.network.value
 
 
+def _hide_reconciliation_reason(generation: object | None, now: datetime) -> str | None:
+    """Identify a due retry which still needs its public head reconciled.
+
+    Ordinary transport retries persist one of the transient categories.  A
+    hide retry instead persists the original bounded block category, giving a
+    restart-safe marker without adding another outbox field.
+    """
+
+    if _status(getattr(generation, "state", "")) != PublicationState.retry_wait.value:
+        return None
+    retry_at = getattr(generation, "retry_at", None)
+    try:
+        if retry_at is not None and retry_at > now:
+            return None
+    except TypeError:
+        return None
+    reason = getattr(generation, "reason", None)
+    if not isinstance(reason, str) or reason in _TRANSIENT_REASONS:
+        return None
+    return _reason(reason, "integrity")
+
+
 def _call_composer(
     composer: Callable[..., GenerationOutcome],
     source: object,
@@ -485,30 +507,60 @@ class CloudPublisher:
             return None, _result(PublicationStatus.lost_claim, publication_id, reason=getattr(changed, "reason", "lease_expired"))
         return None, _result(PublicationStatus.blocked, publication_id, reason=getattr(changed, "reason", "integrity"))
 
+    def _hide(
+        self,
+        generation: object,
+        category: str,
+        *,
+        phase: str,
+    ) -> tuple[object | None, PublicationResult | None]:
+        """Hide the task head under a current lease, or durably replay it."""
+
+        renewed, lost = self._renew(generation)
+        if lost is not None:
+            return None, lost
+        if renewed is None:
+            return None, _result(
+                PublicationStatus.lost_claim,
+                getattr(generation, "publication_id", None),
+                reason="lease_expired",
+                phase=phase,
+            )
+        hide_task = getattr(self.d1, "hide_task", None)
+        task_id = getattr(renewed, "task_id", None)
+        if hide_task is None or not isinstance(task_id, str):
+            return None, self._retry(
+                renewed,
+                "provider",
+                phase=phase,
+                hide_pending=True,
+                durable_reason=category,
+            )
+        try:
+            # The provider call stays outside the local state transaction.  A
+            # successful no-op is also evidence that no visible head remains.
+            hide_task(task_id, category)
+        except Exception as error:
+            return None, self._retry(
+                renewed,
+                _provider_category(error),
+                phase=phase,
+                hide_pending=True,
+                durable_reason=category,
+            )
+        return renewed, None
+
     def _block(self, generation: object, reason: object, *, hide: bool, phase: str) -> PublicationResult:
         publication_id = getattr(generation, "publication_id", None)
         category = _reason(reason, "integrity")
 
-        # A provider failure may have consumed most of the lease.  Reconfirm
-        # ownership before changing a public head; a stale worker must never
-        # hide a newer generation's task head.
         if hide:
-            renewed, lost = self._renew(generation)
-            if lost is not None:
-                return lost
+            renewed, hidden = self._hide(generation, category, phase=phase)
+            if hidden is not None:
+                return hidden
             if renewed is None:
                 return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
             generation = renewed
-        if hide:
-            hide_task = getattr(self.d1, "hide_task", None)
-            task_id = getattr(generation, "task_id", None)
-            if hide_task is not None and isinstance(task_id, str):
-                try:
-                    # Hiding is outside the local state transaction.  The
-                    # durable block below remains the authoritative outcome.
-                    hide_task(task_id, category)
-                except Exception:
-                    pass
         block = getattr(self.store, "block_publication", None) or getattr(self.store, "block_generation", None)
         block_result: object | None = None
         if block is not None and isinstance(publication_id, str):
@@ -530,28 +582,47 @@ class CloudPublisher:
         codes = (ReasonCode(category),) if category in {item.value for item in ReasonCode} else ()
         return _result(PublicationStatus.blocked, publication_id, reason=category, reason_codes=codes, phase=phase)
 
-    def _retry(self, generation: object, category: str, *, phase: str) -> PublicationResult:
+    def _retry(
+        self,
+        generation: object,
+        category: str,
+        *,
+        phase: str,
+        hide_pending: bool = False,
+        durable_reason: object | None = None,
+    ) -> PublicationResult:
         publication_id = getattr(generation, "publication_id", None)
         retry = getattr(self.store, "schedule_publication_retry", None) or getattr(self.store, "schedule_retry", None)
         if retry is None or not isinstance(publication_id, str):
+            if hide_pending:
+                return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
             return self._block(generation, "integrity", hide=False, phase=phase)
-        durable_reason = "network" if category == "precondition" else category
+        persisted_reason = (
+            _reason(durable_reason, "integrity")
+            if durable_reason is not None
+            else ("network" if category == "precondition" else category)
+        )
         try:
             scheduled = retry(
                 publication_id,
                 expected_state=getattr(generation, "state", None),
                 lease_owner=self.worker_id,
                 retry_at=self._time() + timedelta(seconds=self.retry_backoff_seconds),
-                reason=durable_reason,
+                reason=persisted_reason,
                 now=self._time(),
             )
         except Exception:
+            if hide_pending:
+                return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
             return self._block(generation, "integrity", hide=False, phase=phase)
         if _operation_is(scheduled, PublicationOperationStatus.retry_wait):
-            return _result(PublicationStatus.retry_wait, publication_id, reason=durable_reason, phase=phase)
+            result_reason = "network" if category == "precondition" else category
+            return _result(PublicationStatus.retry_wait, publication_id, reason=result_reason, phase=phase)
         if _is_lost(scheduled):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         if _operation_is(scheduled, PublicationOperationStatus.retry_exhausted):
+            if hide_pending:
+                return _result(PublicationStatus.lost_claim, publication_id, reason="retry_exhausted", phase=phase)
             durable = _generation_from(scheduled)
             if durable is not None and _status(getattr(durable, "state", "")) == PublicationState.blocked.value:
                 return _result(
@@ -561,7 +632,22 @@ class CloudPublisher:
                     phase=phase,
                 )
             return self._block(generation, "retry_exhausted", hide=False, phase=phase)
+        if hide_pending:
+            return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         return self._block(generation, "integrity", hide=False, phase=phase)
+
+    def _reconcile_hide(self, generation: object, reason: str, *, phase: str) -> PublicationResult:
+        renewed, hidden = self._hide(generation, reason, phase=phase)
+        if hidden is not None:
+            return hidden
+        if renewed is None:
+            return _result(
+                PublicationStatus.lost_claim,
+                getattr(generation, "publication_id", None),
+                reason="lease_expired",
+                phase=phase,
+            )
+        return self._block(renewed, reason, hide=False, phase=phase)
 
     def _provider_failure(self, generation: object, error: BaseException, *, phase: str) -> PublicationResult:
         category = _provider_category(error)
@@ -813,14 +899,17 @@ class CloudPublisher:
         if publication_id is None:
             return _result(PublicationStatus.blocked, None, reason="invalid_metadata", reason_codes=(ReasonCode.invalid_metadata,))
         try:
-            durable = self._get(publication_id)
-            durable, early = self._claim(publication_id, durable)
+            current = self._get(publication_id)
+            hide_reason = _hide_reconciliation_reason(current, self._time())
+            durable, early = self._claim(publication_id, current)
         except Exception:
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
         if early is not None:
             return early
         if durable is None:
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
+        if hide_reason is not None:
+            return self._reconcile_hide(durable, hide_reason, phase="hide")
         state = _status(getattr(durable, "state", ""))
         if state in {PublicationState.exposed.value, PublicationState.terminal_cleaned.value} and source is None and generation is None:
             return _result(PublicationStatus.exposed, publication_id)

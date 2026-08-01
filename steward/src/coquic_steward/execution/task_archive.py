@@ -1799,13 +1799,15 @@ class TaskArchive:
         *,
         allow_absent: bool = False,
         return_digest: bool = False,
+        expected_digest: str | None = None,
     ) -> str:
         """Remove one exact, sealed task child after re-verifying its manifest.
 
         ``allow_absent`` is reserved for restart reconciliation after a durable
         deletion intent has already been verified.  A normal deletion refuses
         an absent archive so a missing path cannot be mistaken for a completed
-        destructive action.
+        destructive action.  When supplied, ``expected_digest`` is checked
+        after manifest verification and before any deletion side effect.
         """
 
         task_id = validate_opaque_id(task_id)
@@ -1842,6 +1844,10 @@ class TaskArchive:
         manifest_path = task_dir / "manifest.json"
         self._verify_manifest_path(task_id, manifest_path)
         manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        if expected_digest is not None and manifest_digest != expected_digest:
+            raise ArchiveConflictError(
+                "terminal manifest digest does not match deletion intent"
+            )
         try:
             shutil.rmtree(task_dir)
         except FileNotFoundError as exc:

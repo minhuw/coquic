@@ -198,6 +198,26 @@ def test_delete_verified_removes_only_one_sealed_direct_child(tmp_path: Path) ->
     assert archive.delete_verified("task-safe", allow_absent=True) == "absent"
 
 
+def test_delete_verified_binds_expected_manifest_before_removal(tmp_path: Path) -> None:
+    archive = _live_archive(tmp_path)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+    archive.seal(
+        "task-safe",
+        "succeeded",
+        completion_identity="completion-delete-binding",
+        completed_at=COMPLETED_AT,
+        external_actions_complete=True,
+        writer_final=True,
+    )
+
+    with pytest.raises(ArchiveConflictError, match="deletion intent"):
+        archive.delete_verified("task-safe", expected_digest="0" * 64)
+    assert archive.task_dir("task-safe").is_dir()
+
+
 @pytest.mark.parametrize("task_id", [".", "..", "task/other", "task*"])
 def test_delete_verified_rejects_non_exact_task_ids(tmp_path: Path, task_id: str) -> None:
     archive = TaskArchive(tmp_path / "tasks")

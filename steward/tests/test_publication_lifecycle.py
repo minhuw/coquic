@@ -17,11 +17,17 @@ from coquic_steward.execution.executor import (
     StewardExecutor,
 )
 from coquic_steward.execution.session import load_publication_snapshot
+from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.generation import PublicationGeneration
 from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
-from coquic_steward.publication.outbox import PublicationReceipt, ReceiptClass
+from coquic_steward.publication.outbox import (
+    CleanupIntent,
+    CleanupState,
+    PublicationReceipt,
+    ReceiptClass,
+)
 from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.publication.scanner import ScannerFinding, ScannerReport
 
@@ -803,6 +809,108 @@ def test_materialized_publication_uses_immutable_snapshot_after_graph_changes(
     daemon.logger = None
     source = daemon._publication_source(queued[0])
     assert source["task"]["title"] == "original-title"
+
+
+def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path: Path) -> None:
+    task_id = "task-cleanup-replacement"
+    tasks_dir = tmp_path / "tasks"
+    archive = TaskArchiveWriter(SimpleNamespace(tasks_dir=tasks_dir))
+
+    def seal_archive(completion_identity: str) -> str:
+        archive.create_task(task_id, "prompt", pipeline_id="pipeline-cleanup")
+        archive.materialize_pipeline(
+            task_id,
+            {
+                "pipelineId": "pipeline-cleanup",
+                "taskId": task_id,
+                "runs": [
+                    {
+                        "runId": "run-cleanup",
+                        "role": "implementation",
+                        "roleOrdinal": 1,
+                        "state": "succeeded",
+                        "path": "pipelines/pipeline-cleanup/runs/run-cleanup/run.json",
+                    }
+                ],
+            },
+        )
+        archive.materialize_run(
+            task_id,
+            "pipeline-cleanup",
+            {
+                "runId": "run-cleanup",
+                "taskId": task_id,
+                "pipelineId": "pipeline-cleanup",
+                "role": "implementation",
+                "roleOrdinal": 1,
+                "state": "succeeded",
+                "completedAt": "2026-07-22T00:00:02Z",
+            },
+        )
+        pipeline_path = archive.task_path(
+            task_id, "pipelines/pipeline-cleanup/pipeline.json"
+        )
+        pipeline = json.loads(pipeline_path.read_text())
+        pipeline.update(state="succeeded", completedAt="2026-07-22T00:00:03Z")
+        archive.write_json(task_id, "pipelines/pipeline-cleanup/pipeline.json", pipeline)
+        task_path = archive.task_path(task_id, "task.json")
+        task = json.loads(task_path.read_text())
+        task["status"] = "succeeded"
+        archive.write_json(task_id, "task.json", task)
+        archive.seal(
+            task_id,
+            "succeeded",
+            completion_identity=completion_identity,
+            completed_at="2026-07-22T00:00:04Z",
+            external_actions_complete=True,
+            writer_final=True,
+        )
+        return archive.manifest_digest(task_id)
+
+    expected_digest = seal_archive("completion-cleanup-a")
+    archive.task_dir(task_id).rename(tmp_path / "archive-a")
+    replacement_digest = seal_archive("completion-cleanup-b")
+    assert replacement_digest != expected_digest
+
+    class CleanupStore:
+        def __init__(self) -> None:
+            self.blocked: list[tuple[str, str]] = []
+            self.completed: list[str] = []
+
+        def verify_cleanup_intent(self, *_args: object, **_kwargs: object):
+            raise AssertionError("verified cleanup intent must not be re-verified")
+
+        def block_cleanup_intent(self, intent_id: str, *, reason: str):
+            self.blocked.append((intent_id, reason))
+            return SimpleNamespace(status="blocked")
+
+        def complete_cleanup_intent(self, intent_id: str, **_kwargs: object):
+            self.completed.append(intent_id)
+            return SimpleNamespace(status="completed")
+
+    store = CleanupStore()
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+    daemon._log = lambda _message: None
+    now = datetime.now(timezone.utc)
+    intent = CleanupIntent(
+        task_id=task_id,
+        publication_id="publication-cleanup-replacement",
+        manifest_digest=expected_digest,
+        exact_path=str(archive.task_dir(task_id)),
+        requested_at=now,
+        state=CleanupState.pending,
+        verified_at=now,
+    )
+
+    assert daemon._delete_terminal_archive(
+        SimpleNamespace(id=task_id),
+        archive,
+        intent,
+    ) is False
+    assert archive.task_dir(task_id).is_dir()
+    assert store.blocked == [(intent.intent_id, "cleanup_failed")]
+    assert store.completed == []
 
 
 def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path) -> None:

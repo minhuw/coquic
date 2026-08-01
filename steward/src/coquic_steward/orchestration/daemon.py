@@ -3038,12 +3038,29 @@ class StewardDaemon:
                     "existing",
                 }
 
+            # A verified intent may survive a crash while its exact archive is
+            # still present.  Authenticate that replacement-sensitive path
+            # before invoking the destructive primitive; absent archives remain
+            # a valid post-intent recovery state.
+            if verified:
+                try:
+                    archive.task_dir(task.id).lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    current_digest = archive.manifest_digest(task.id)
+                    if current_digest != manifest_digest:
+                        raise ArchiveConflictError(
+                            "terminal manifest digest changed after verification"
+                        )
+
             # The deletion primitive performs a second manifest verification
             # immediately before removing the exact direct child.
             outcome = archive.delete_verified(
                 task.id,
                 allow_absent=verified,
                 return_digest=True,
+                expected_digest=manifest_digest,
             )
             deletion_observed = True
             if outcome not in {"absent", manifest_digest}:

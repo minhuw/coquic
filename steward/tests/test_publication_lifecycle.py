@@ -11,6 +11,7 @@ from coquic_steward.core.config import StewardPublicationConfig
 import coquic_steward.execution.session as session_module
 from coquic_steward.execution.executor import (
     IntegrationTranscript,
+    PublicationPreflightClean,
     StewardExecutor,
 )
 from coquic_steward.publication.atif import AtifSource
@@ -304,7 +305,7 @@ def test_clean_publication_preflight_allows_commit_path(tmp_path: Path) -> None:
     executor.store = store
     executor.worktrees = _Worktrees()
     executor._build_integration_publication_outcome = lambda *_args: (
-        PublicationGeneration({}),
+        PublicationPreflightClean(),
         {"source": 0, "patch": 0},
         "c" * 64,
     )

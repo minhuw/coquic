@@ -195,17 +195,12 @@ def enqueue_materialized_publication(
     task: TaskRecord,
     run: TaskRun,
 ) -> object | None:
-    """Queue one successful, fully materialized run without transport I/O."""
+    """Queue one completed, fully materialized run without transport I/O."""
 
     publication = getattr(config, "publication", None)
     if not getattr(publication, "enabled", False):
         return None
-    if run.completed_at is None or str(run.state) not in {
-        "succeeded",
-        "completed",
-        "pushed",
-        "no_changes",
-    }:
+    if run.completed_at is None or str(run.state) == "running":
         return None
     try:
         graph = publication_graph_for_task(config, store, task)

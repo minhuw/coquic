@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import timezone
 from enum import StrEnum
 from hashlib import sha256
@@ -104,6 +105,13 @@ MAX_REVIEW_RUN_ATTEMPTS = 2
 WORKER_HEARTBEAT_SECONDS = 30
 PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationPreflightClean:
+    """Transport-free clean result for a publication-disabled preflight."""
+
+    status: str = field(init=False, default="clean")
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _GTEST_DURATION_RE = re.compile(
@@ -3938,7 +3946,7 @@ class StewardExecutor:
             + (f" ({','.join(reasons)})" if reasons else ""),
         )
 
-        if isinstance(outcome, PublicationGeneration):
+        if isinstance(outcome, (PublicationGeneration, PublicationPreflightClean)):
             return None
 
         if isinstance(outcome, RepairRequired):
@@ -4039,7 +4047,11 @@ class StewardExecutor:
         source: TaskRecord,
         worktree: Path,
         patch_text: str,
-    ) -> tuple[PublicationGeneration | RepairRequired | FailClosed, dict[str, int], str]:
+    ) -> tuple[
+        PublicationGeneration | PublicationPreflightClean | RepairRequired | FailClosed,
+        dict[str, int],
+        str,
+    ]:
         scanner_runner = getattr(self, "_publication_scanner_runner", None)
         publication = getattr(self.config, "publication", None)
         credential_sources = _publication_credential_sources(publication)
@@ -4074,7 +4086,7 @@ class StewardExecutor:
         # not have a complete archive graph to compose or any transport to
         # activate.  A transport-free clean marker preserves that contract.
         if not getattr(publication, "enabled", False):
-            outcome = PublicationGeneration({})
+            outcome = PublicationPreflightClean()
             return outcome, counts, _publication_preflight_fingerprint(
                 patch_text, outcome, counts
             )
@@ -4763,9 +4775,9 @@ def _publication_credential_sources(publication: object) -> tuple[object, ...]:
 
 
 def _publication_outcome_summary(
-    outcome: PublicationGeneration | RepairRequired | FailClosed,
+    outcome: PublicationGeneration | PublicationPreflightClean | RepairRequired | FailClosed,
 ) -> tuple[str, list[str], int]:
-    if isinstance(outcome, PublicationGeneration):
+    if isinstance(outcome, (PublicationGeneration, PublicationPreflightClean)):
         return "clean", [], 0
     reasons = [reason.value for reason in outcome.reason_codes]
     finding_count = sum(item.count for item in outcome.findings)
@@ -4774,7 +4786,7 @@ def _publication_outcome_summary(
 
 def _publication_preflight_fingerprint(
     patch_text: str,
-    outcome: PublicationGeneration | RepairRequired | FailClosed,
+    outcome: PublicationGeneration | PublicationPreflightClean | RepairRequired | FailClosed,
     counts: dict[str, int],
 ) -> str:
     payload = {

@@ -270,6 +270,12 @@ announced without replacing retained valid evidence with an error message.
   cancellable request after the task shell renders; it validates the response
   before displaying all records. It never returns raw ATIF, partial records,
   prefixes, cursors, or an unvalidated fallback.
+- The direct mocked route/page harness and the browser proof are independent
+  acceptance gates. The browser proof starts a credential-free loopback fixture
+  and covers clean, redacted multimodal, tool-heavy, empty, Retry, terminal,
+  cancellation, keyboard, Axe, dark, forced-colors, reduced-motion, 1600x1000,
+  390x844, 320x900, and 200% scale states, plus JPEG, PNG, GIF, and WebP decode
+  and stable-frame checks.
 - Artifact actions validate task identity and logical paths, derive a
   content-addressed public R2 key below the configured base, and return exactly
   one same-origin `307 Temporary Redirect`. Site never proxies bytes or accepts

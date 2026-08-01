@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import Module, { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { createElement, type Context } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import createNext from "next";
 
 import cleanPublication from "../../contracts/steward-cloud/fixtures/clean-publication.json";
 import redactedPublication from "../../contracts/steward-cloud/fixtures/redacted-publication.json";
@@ -132,6 +134,7 @@ type Scenario = {
   readonly historyRows: readonly TaskRow[];
   readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error" | "timeout";
   readonly detail?: DetailScenario;
+  readonly details?: Readonly<Record<string, DetailScenario>>;
   readonly object?: { readonly status?: number; readonly body?: Uint8Array; readonly headers?: Record<string, string>; readonly error?: "timeout" | "network" };
 };
 
@@ -274,11 +277,20 @@ function statusRow(row: TaskRow): TaskRow {
 }
 
 function detailScenario(options: {
+  taskId?: string;
+  pipelineId?: string;
+  runId?: string;
+  publicationId?: string;
+  title?: string;
   lifecycleState?: "active" | "completed";
   availability?: "available" | "unavailable";
   redactionApplied?: boolean;
   originalRetained?: boolean;
 } = {}, trajectory: TrajectoryFixture = DEFAULT_DETAIL_TRAJECTORY): DetailScenario {
+  const taskId = options.taskId ?? trajectory.taskId ?? DETAIL_TASK_ID;
+  const pipelineId = options.pipelineId ?? trajectory.pipelineId ?? DETAIL_PIPELINE_ID;
+  const runId = options.runId ?? trajectory.runId ?? DETAIL_RUN_ID;
+  const publicationId = options.publicationId ?? DETAIL_PUBLICATION_ID;
   const lifecycleState = options.lifecycleState ?? "completed";
   const completedAt = lifecycleState === "active" ? null : "2026-07-28T00:00:03Z";
   const disclosure = {
@@ -288,9 +300,9 @@ function detailScenario(options: {
   const task: TaskRow = {
     head_updated_at: "2026-07-28T00:00:04Z",
     head_state: "visible",
-    publication_id: DETAIL_PUBLICATION_ID,
-    generation_task_id: DETAIL_TASK_ID,
-    generation_run_id: DETAIL_RUN_ID,
+    publication_id: publicationId,
+    generation_task_id: taskId,
+    generation_run_id: runId,
     generation_metadata_digest: "a".repeat(64),
     generation_idempotency_key: "harness-detail",
     generation_state: "visible",
@@ -301,8 +313,8 @@ function detailScenario(options: {
     generation_expected_artifact_count: trajectory.artifacts.length,
     generation_created_at: "2026-07-28T00:00:00Z",
     generation_exposed_at: EXPOSED_AT,
-    task_id: DETAIL_TASK_ID,
-    title: "Detail task",
+    task_id: taskId,
+    title: options.title ?? "Detail task",
     lifecycle_state: lifecycleState,
     created_at: "2026-07-28T00:00:00Z",
     completed_at: completedAt,
@@ -310,17 +322,17 @@ function detailScenario(options: {
   return {
     task,
     pipelines: [{
-      publication_id: DETAIL_PUBLICATION_ID,
-      pipeline_id: trajectory.pipelineId,
-      task_id: DETAIL_TASK_ID,
+      publication_id: publicationId,
+      pipeline_id: pipelineId,
+      task_id: taskId,
       name: "Detail pipeline",
       created_at: "2026-07-28T00:00:00Z",
     }],
     runs: [{
-      publication_id: DETAIL_PUBLICATION_ID,
-      run_id: DETAIL_RUN_ID,
-      task_id: DETAIL_TASK_ID,
-      pipeline_id: DETAIL_PIPELINE_ID,
+      publication_id: publicationId,
+      run_id: runId,
+      task_id: taskId,
+      pipeline_id: pipelineId,
       role: "planning",
       run_state: "completed",
       started_at: "2026-07-28T00:00:00Z",
@@ -329,14 +341,14 @@ function detailScenario(options: {
       atif_digest: trajectory.digest,
     }],
     events: [
-      { publication_id: DETAIL_PUBLICATION_ID, task_id: DETAIL_TASK_ID, sequence: 1, event_type: "started", occurred_at: "2026-07-28T00:00:00Z", summary: "Started" },
-      { publication_id: DETAIL_PUBLICATION_ID, task_id: DETAIL_TASK_ID, sequence: 2, event_type: "completed", occurred_at: "2026-07-28T00:00:01Z", summary: "Completed" },
+      { publication_id: publicationId, task_id: taskId, sequence: 1, event_type: "started", occurred_at: "2026-07-28T00:00:00Z", summary: "Started" },
+      { publication_id: publicationId, task_id: taskId, sequence: 2, event_type: "completed", occurred_at: "2026-07-28T00:00:01Z", summary: "Completed" },
     ],
     artifacts: trajectory.artifacts.map((artifact) => ({
-      publication_id: DETAIL_PUBLICATION_ID,
+      publication_id: publicationId,
       artifact_id: artifact.artifactId,
-      task_id: DETAIL_TASK_ID,
-      run_id: trajectory.runId,
+      task_id: taskId,
+      run_id: runId,
       logical_path: artifact.logicalPath,
       public_key: artifact.publicKey,
       media_type: artifact.mediaType,
@@ -390,6 +402,7 @@ function scenario(
   mode?: Scenario["mode"],
   candidates: readonly TaskRow[] = [],
   detail?: DetailScenario,
+  details?: Readonly<Record<string, DetailScenario>>,
 ): Scenario {
   const rows = [...activeRows, ...historyRows, ...candidates];
   const allActiveRows = [...activeRows, ...candidates.filter((row) => row.lifecycle_state === "active")];
@@ -406,7 +419,12 @@ function scenario(
     historyRows: allHistoryRows.sort(compareRows),
     mode,
     detail,
+    details,
   };
+}
+
+function scenarioDetail(value: Scenario, taskId: string): DetailScenario | undefined {
+  return value.details?.[taskId] ?? value.detail;
 }
 
 function pageRows(rows: readonly TaskRow[], statement: string, params: readonly unknown[]): readonly TaskRow[] {
@@ -440,7 +458,9 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
       if (object?.error === "timeout") throw new DOMException("route harness timeout", "AbortError");
       if (object?.error === "network") throw new Error("route-harness-secret network");
       if (object) return new Response(object.body as unknown as BodyInit, { status: object.status ?? 500, headers: object.headers });
-      const bytes = scenarioValue.detail?.trajectoryFixture.bytes;
+      const detail = Object.values(scenarioValue.details ?? {}).find((candidate) => candidate.trajectoryFixture.artifacts.some((artifact) => url.endsWith(artifact.publicKey)))
+        ?? scenarioValue.detail;
+      const bytes = detail?.trajectoryFixture.bytes;
       return new Response(bytes as unknown as BodyInit, { status: 200 });
     }
     if (url === "https://api.github.com/repos/minhuw/coquic") {
@@ -477,16 +497,18 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
             : [],
         );
       }
-      return d1Envelope(scenarioValue.detail?.task?.task_id === taskId ? [scenarioValue.detail.task] : []);
+      const detail = scenarioDetail(scenarioValue, taskId);
+      return d1Envelope(detail?.task?.task_id === taskId ? [detail.task] : []);
     }
-    if (statement === cloudRepository.TASK_DETAIL_PIPELINES_STATEMENT) return d1Envelope(scenarioValue.detail?.pipelines ?? []);
-    if (statement === cloudRepository.TASK_DETAIL_RUNS_STATEMENT) return d1Envelope(scenarioValue.detail?.runs ?? []);
-    if (statement === cloudRepository.TASK_DETAIL_EVENTS_STATEMENT) return d1Envelope(scenarioValue.detail?.events ?? []);
-    if (statement === cloudRepository.TASK_DETAIL_ARTIFACTS_STATEMENT) return d1Envelope(scenarioValue.detail?.artifacts ?? []);
+    const detailTaskId = String(params[1] ?? "");
+    if (statement === cloudRepository.TASK_DETAIL_PIPELINES_STATEMENT) return d1Envelope(scenarioDetail(scenarioValue, detailTaskId)?.pipelines ?? []);
+    if (statement === cloudRepository.TASK_DETAIL_RUNS_STATEMENT) return d1Envelope(scenarioDetail(scenarioValue, detailTaskId)?.runs ?? []);
+    if (statement === cloudRepository.TASK_DETAIL_EVENTS_STATEMENT) return d1Envelope(scenarioDetail(scenarioValue, detailTaskId)?.events ?? []);
+    if (statement === cloudRepository.TASK_DETAIL_ARTIFACTS_STATEMENT) return d1Envelope(scenarioDetail(scenarioValue, detailTaskId)?.artifacts ?? []);
     if (statement === cloudRepository.ARTIFACT_DESCRIPTOR_STATEMENT) {
       const taskId = String(params[0]);
       const logicalPath = String(params[1]);
-      return d1Envelope((scenarioValue.detail?.artifacts ?? []).filter((row) => row.task_id === taskId && row.logical_path === logicalPath));
+      return d1Envelope((scenarioDetail(scenarioValue, taskId)?.artifacts ?? []).filter((row) => row.task_id === taskId && row.logical_path === logicalPath));
     }
     const rows = statement.includes("lifecycle_state = 'active'") || statement === cloudRepository.ACTIVE_COUNT_STATEMENT || statement === cloudRepository.ACTIVE_CURSOR_STATEMENT
       ? scenarioValue.activeRows
@@ -506,6 +528,152 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
 
 async function fixture(path: string): Promise<Fixture> {
   return JSON.parse(await readFile(new URL(path, import.meta.url), "utf8")) as Fixture;
+}
+
+function browserTaskRow(task: Fixture["data"]["task"], updatedAt: string): TaskRow {
+  return taskRow(task, updatedAt);
+}
+
+async function startPlaywrightFixtureServer(): Promise<void> {
+  const port = Number(process.env.COQUIC_PLAYWRIGHT_PORT ?? "3002");
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("COQUIC_PLAYWRIGHT_PORT must be a valid TCP port");
+  const host = "127.0.0.1";
+  const cleanTrajectory = trajectoryFixture(cleanPublication, {
+    taskId: "task-clean",
+    pipelineId: "pipeline-clean",
+    runId: "run-clean",
+  });
+  const redactedTrajectory = trajectoryFixture(redactedPublication, {
+    taskId: "task-redacted",
+    pipelineId: "pipeline-redacted",
+    runId: "run-redacted",
+  });
+  const toolHeavyTrajectory = trajectoryFixture(cleanPublication, {
+    taskId: "task-tool-heavy",
+    pipelineId: "pipeline-tool-heavy",
+    runId: "run-tool-heavy",
+  }, (document) => {
+    const step = document.steps[1] as MutableRecord;
+    const calls = Array.from({ length: 8 }, (_, index) => ({
+      arguments: { index },
+      function_name: `inspect-${index + 1}`,
+      tool_call_id: `call-${index + 1}`,
+    }));
+    step.tool_calls = calls;
+    step.observation = {
+      results: calls.map((call) => ({ content: `Inspection ${call.tool_call_id}`, source_call_id: call.tool_call_id })),
+    };
+  });
+  const cleanDetail = detailScenario({
+    taskId: "task-clean",
+    pipelineId: "pipeline-clean",
+    runId: "run-clean",
+    publicationId: "publication-clean",
+    title: "Clean publication fixture",
+  }, cleanTrajectory);
+  const redactedDetail = detailScenario({
+    taskId: "task-redacted",
+    pipelineId: "pipeline-redacted",
+    runId: "run-redacted",
+    publicationId: "publication-redacted",
+    title: "Redacted publication fixture",
+    redactionApplied: true,
+    originalRetained: true,
+  }, redactedTrajectory);
+  const toolHeavyDetail = detailScenario({
+    taskId: "task-tool-heavy",
+    pipelineId: "pipeline-tool-heavy",
+    runId: "run-tool-heavy",
+    publicationId: "publication-tool-heavy",
+    title: "Tool-heavy publication fixture",
+  }, toolHeavyTrajectory);
+  const cleanTask = {
+    taskId: "task-clean",
+    title: "Clean publication fixture",
+    lifecycleState: "completed" as const,
+    createdAt: "2026-07-28T00:00:00Z",
+    completedAt: "2026-07-28T00:00:01Z",
+    pipelineId: "pipeline-clean",
+    completedRunId: "run-clean",
+    eventCount: 2,
+    artifactCount: cleanTrajectory.artifacts.length,
+    disclosure: cleanTrajectory.disclosure,
+  };
+  const redactedTask = {
+    taskId: "task-redacted",
+    title: "Redacted publication fixture",
+    lifecycleState: "completed" as const,
+    createdAt: "2026-07-28T00:00:00Z",
+    completedAt: "2026-07-28T00:00:01Z",
+    pipelineId: "pipeline-redacted",
+    completedRunId: "run-redacted",
+    eventCount: 2,
+    artifactCount: redactedTrajectory.artifacts.length,
+    disclosure: redactedTrajectory.disclosure,
+  };
+  const toolHeavyTask = {
+    taskId: "task-tool-heavy",
+    title: "Tool-heavy publication fixture",
+    lifecycleState: "completed" as const,
+    createdAt: "2026-07-28T00:00:00Z",
+    completedAt: "2026-07-28T00:00:01Z",
+    pipelineId: "pipeline-tool-heavy",
+    completedRunId: "run-tool-heavy",
+    eventCount: 2,
+    artifactCount: toolHeavyTrajectory.artifacts.length,
+    disclosure: toolHeavyTrajectory.disclosure,
+  };
+  const activeFixture = await fixture("../examples/steward-cloud/active-after-planning.json");
+  const activeRow = browserTaskRow(activeFixture.data.task, "2026-07-28T00:00:03Z");
+  const browserScenario: Scenario = {
+    ...scenario(
+      [activeRow],
+      [browserTaskRow(cleanTask, "2026-07-28T00:00:03Z"), browserTaskRow(toolHeavyTask, "2026-07-28T00:00:02Z"), browserTaskRow(redactedTask, "2026-07-28T00:00:01Z")],
+    ),
+    details: {
+      "task-clean": cleanDetail,
+      "task-redacted": redactedDetail,
+      "task-tool-heavy": toolHeavyDetail,
+    },
+  };
+  const calls = { count: 0, urls: [] as string[] };
+  const originalEnvironment = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
+  for (const key of ENV_KEYS) process.env[key] = VALID_ENV[key];
+  process.env.NEXT_TELEMETRY_DISABLED = "1";
+  cloudRepository = loadCloudRepository();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fakeFetch(browserScenario, calls) as typeof fetch;
+  const app = createNext({ dev: true, hostname: host, port });
+  const handle = app.getRequestHandler();
+  let server: ReturnType<typeof createServer> | null = null;
+  let closing = false;
+  const close = async (exitCode?: number) => {
+    if (closing) return;
+    closing = true;
+    globalThis.fetch = originalFetch;
+    for (const key of ENV_KEYS) {
+      const previous = originalEnvironment[key];
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+    if (server) await new Promise<void>((resolveClose) => server!.close(() => resolveClose()));
+    await app.close();
+    if (exitCode !== undefined) process.exitCode = exitCode;
+  };
+  process.once("SIGINT", () => { void close(0); });
+  process.once("SIGTERM", () => { void close(0); });
+  try {
+    await app.prepare();
+    server = createServer((request, response) => { void handle(request, response); });
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server!.once("error", rejectListen);
+      server!.listen(port, host, () => resolveListen());
+    });
+    process.stdout.write(`Steward Playwright fixture listening at http://${host}:${port}\n`);
+    await new Promise<void>(() => { /* signal handlers own shutdown */ });
+  } finally {
+    await close();
+  }
 }
 
 async function main() {
@@ -1375,7 +1543,9 @@ async function main() {
   process.stdout.write(`${outputs.join("\n")}\nSteward cloud route harness passed with no external requests\n`);
 }
 
-void main().catch((error: unknown) => {
+const mode = process.argv.includes("--playwright-fixture");
+
+void (mode ? startPlaywrightFixtureServer() : main()).catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

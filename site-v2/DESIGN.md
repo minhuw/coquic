@@ -745,6 +745,13 @@ evidence uses an explicit contained frame with reserved geometry at 1600px,
 nonblank screenshots, local overflow, nonoverlapping records, keyboard focus,
 dark, forced-colors, and reduced-motion states.
 
+The deterministic direct route/page harness and the browser proof are separate
+gates. Run `nix develop -c npm --prefix site-v2 run test:steward` for the mocked
+cloud contract, then run
+`nix develop -c npm --prefix site-v2 run test:visual -- tests/steward.spec.ts --workers=1`
+for the loopback Chromium matrix. The browser gate starts its own fixture by
+default; a supplied preview base URL remains an optional operator choice.
+
 ## Do and Don't
 
 ### Do

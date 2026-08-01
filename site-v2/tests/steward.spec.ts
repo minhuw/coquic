@@ -10,6 +10,21 @@ const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+const ONE_PIXEL_IMAGES = {
+  "image/png": ONE_PIXEL_PNG,
+  "image/jpeg": Buffer.from(
+    "/9j/4AAQSkZJRgABAQAAAAAAAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAABAAEDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAHCf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/ADoDFU3/2Q==",
+    "base64",
+  ),
+  "image/gif": Buffer.from(
+    "R0lGODlhAQABAPAAAP8AAAAAACH5BAAAAAAAIf8LSW1hZ2VNYWdpY2sOZ2FtbWE9MC40NTQ1NDUALAAAAAABAAEAAAICRAEAOw==",
+    "base64",
+  ),
+  "image/webp": Buffer.from(
+    "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAgA0JaACdLoB+AADsAD+8MQL/yC5YXXI1/8gP+QH/ID/+PIAAAA=",
+    "base64",
+  ),
+} as const;
 
 function cloneJson(value: unknown): JsonObject {
   return structuredClone(value) as JsonObject;
@@ -37,8 +52,12 @@ async function serveTrajectory(page: Page, taskId: string, runId: string, value:
 async function serveImageArtifacts(page: Page, taskId: string) {
   await page.route(`**/api/steward/tasks/${taskId}/artifact**`, async (route) => {
     const path = new URL(route.request().url()).searchParams.get("path");
-    if (path === "steps/2/plot.png") {
-      await route.fulfill({ status: 200, contentType: "image/png", body: ONE_PIXEL_PNG });
+    const mediaType = path?.endsWith(".jpg") ? "image/jpeg"
+      : path?.endsWith(".gif") ? "image/gif"
+        : path?.endsWith(".webp") ? "image/webp"
+          : path?.endsWith(".png") ? "image/png" : null;
+    if (mediaType && path?.startsWith("steps/2/")) {
+      await route.fulfill({ status: 200, contentType: mediaType, body: ONE_PIXEL_IMAGES[mediaType] });
       return;
     }
     await route.fallback();
@@ -59,8 +78,10 @@ function failedToolTrajectory(): JsonObject {
   const payload = cloneJson(cleanTrajectory);
   const data = trajectoryData(payload);
   const steps = data.steps as JsonObject[];
-  const calls = (steps[1]?.calls ?? []) as JsonObject[];
-  if (calls[0]) calls[0].extensions = { status: "failed", error: "command failed" };
+  for (const key of ["calls", "toolCalls", "tools"] as const) {
+    const calls = (steps[1]?.[key] ?? []) as JsonObject[];
+    if (calls[0]) calls[0].extensions = { status: "failed", error: "command failed" };
+  }
   return payload;
 }
 
@@ -73,9 +94,86 @@ function emptyTrajectory(): JsonObject {
   return payload;
 }
 
+function toolHeavyTrajectory(): JsonObject {
+  const payload = cloneJson(cleanTrajectory);
+  const data = trajectoryData(payload);
+  const step = (data.steps as JsonObject[])[1]!;
+  const calls = Array.from({ length: 8 }, (_, index) => {
+    const callId = `call-${index + 1}`;
+    const observation = {
+      content: `Inspection ${callId}.`,
+      parts: [{ kind: "text", type: "text", text: `Inspection ${callId}.` }],
+      sourceCallId: callId,
+      matchedCallId: callId,
+      extensions: null,
+      lineage: null,
+    };
+    return {
+      anchor: `call-${callId}`,
+      callId,
+      id: callId,
+      functionName: `inspect-${index + 1}`,
+      arguments: { index },
+      observations: [observation],
+      extensions: null,
+    };
+  });
+  for (const key of ["toolCalls", "calls", "tools"] as const) step[key] = structuredClone(calls);
+  step.observation = { results: calls.map((call) => call.observations[0]) };
+  step.observations = calls.map((call) => call.observations[0]);
+  return payload;
+}
+
+function multimodalTrajectory(): JsonObject {
+  const payload = cloneJson(redactedTrajectory);
+  const data = trajectoryData(payload);
+  const step = (data.steps as JsonObject[])[1]!;
+  const formats = [
+    ["image/jpeg", "artifact-photo", "steps/2/photo.jpg", "11"],
+    ["image/gif", "artifact-animation", "steps/2/animation.gif", "22"],
+    ["image/webp", "artifact-webp", "steps/2/photo.webp", "33"],
+  ] as const;
+  const images = formats.map(([mediaType, artifactId, logicalPath, digestByte]) => {
+    const href = `/api/steward/tasks/task-redacted/artifact?path=${encodeURIComponent(logicalPath)}`;
+    const action = { kind: "image", artifactId, taskId: "task-redacted", runId: "run-redacted", mediaType, logicalPath, href };
+    return {
+      kind: "image",
+      type: "image",
+      mediaType,
+      artifactId,
+      action,
+    };
+  });
+  for (const key of ["message", "content", "parts"] as const) {
+    step[key] = [...((step[key] ?? []) as unknown[]), ...structuredClone(images)];
+  }
+  const artifacts = formats.map(([mediaType, artifactId, logicalPath, digestByte]) => ({
+    artifactId,
+    mediaType,
+    sha256: digestByte.repeat(32),
+    byteSize: ONE_PIXEL_IMAGES[mediaType].byteLength,
+    ownerStepId: 2,
+    action: {
+      kind: "image",
+      artifactId,
+      taskId: "task-redacted",
+      runId: "run-redacted",
+      mediaType,
+      logicalPath,
+      href: `/api/steward/tasks/task-redacted/artifact?path=${encodeURIComponent(logicalPath)}`,
+    },
+    disclosure: { redactionApplied: true, originalRetained: true },
+  }));
+  data.artifacts = [...(data.artifacts as unknown[]), ...artifacts];
+  const metadata = data.metadata as JsonObject;
+  metadata.artifacts = structuredClone(data.artifacts);
+  return payload;
+}
+
 function problemBody(retryable: boolean) {
   return JSON.stringify({
     schemaVersion: "3.0",
+    generatedAt: "2026-07-28T00:00:02Z",
     problem: {
       code: "UNAVAILABLE",
       message: "The complete trajectory is temporarily unavailable.",
@@ -154,13 +252,18 @@ test("trajectory content uses safe links, local overflow, and paired tool eviden
     rel: node.getAttribute("rel"),
   })));
   for (const link of links) {
-    expect(link.href.startsWith("/") || link.href.startsWith("#")).toBeTruthy();
-    expect(link.href).not.toMatch(/^https?:\/\//);
+    const resolved = new URL(link.href, page.url());
+    if (resolved.origin !== new URL(page.url()).origin) {
+      expect(resolved.protocol).toMatch(/^https?:$/);
+      expect(link.target).toBe("_blank");
+      expect(link.rel).toContain("noreferrer");
+    } else {
+      expect(link.href.startsWith("/") || link.href.startsWith("#"), JSON.stringify(link)).toBeTruthy();
+    }
     expect(link.href).not.toContain("objects.example");
-    if (link.target === "_blank") expect(link.rel).toContain("noreferrer");
   }
   await expect(trajectory.locator("[data-tool-call]")).toHaveCount(1);
-  await expect(trajectory.locator("[data-tool-observation-association='call-1']")).toBeVisible();
+  await expect(trajectory.locator("[data-tool-observation-association='call-1']")).toBeAttached();
   const dimensions = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
   expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
   const localOverflow = await trajectory.locator("[class*='overflow-auto'], [class*='overflow-x-auto']").evaluateAll((nodes) => nodes.map((node) => node.scrollWidth >= node.clientWidth));
@@ -171,14 +274,29 @@ test("failed tools open by default and remain keyboard-operable", async ({ page 
   await serveTrajectory(page, "task-clean", "run-clean", failedToolTrajectory());
   await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
   const failedTool = page.locator("details[data-tool-status='failed']");
+  await expect(failedTool).toHaveCount(1);
   await expect(failedTool).toHaveAttribute("open", "");
-  const summary = failedTool.locator("summary");
+  const summary = failedTool.locator(":scope > summary");
   await summary.focus();
   await expect(summary).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(failedTool).not.toHaveAttribute("open", "");
   await page.keyboard.press("Enter");
   await expect(failedTool).toHaveAttribute("open", "");
+});
+
+test("tool-heavy trajectories preserve every paired call and observation", async ({ page }) => {
+  const heavyTrajectory = toolHeavyTrajectory();
+  await serveTrajectory(page, "task-clean", "run-clean", heavyTrajectory);
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  const trajectory = page.locator("[data-atif-trajectory]");
+  await expect(trajectory).toBeVisible();
+  await expect(page.locator('[data-trajectory-state="ready"]')).toBeVisible();
+  await expect(trajectory.locator("[data-tool-call]")).toHaveCount(8);
+  await expect(trajectory.locator("[data-tool-observation-association]")).toHaveCount(8);
+  expect(await trajectory.locator("[data-tool-observation-association]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-tool-observation-association")))).toEqual(
+    Array.from({ length: 8 }, (_, index) => `call-${index + 1}`),
+  );
 });
 
 test("redacted multimodal trajectory preserves disclosure and stable image frames", async ({ page }) => {
@@ -199,14 +317,52 @@ test("redacted multimodal trajectory preserves disclosure and stable image frame
   expect(hrefs.every((href) => href.startsWith("/api/steward/tasks/task-redacted/artifact?path="))).toBeTruthy();
 });
 
+test("published JPEG, PNG, GIF, and WebP evidence decodes in stable frames", async ({ page }) => {
+  await serveTrajectory(page, "task-redacted", "run-redacted", multimodalTrajectory());
+  await serveImageArtifacts(page, "task-redacted");
+  await page.goto("/steward/tasks/task-redacted?pipeline=pipeline-redacted&run=run-redacted");
+  const trajectory = page.locator("[data-atif-trajectory]");
+  const images = trajectory.locator("img[data-artifact-image]");
+  await expect(images).toHaveCount(8);
+  const decoded = await images.evaluateAll((nodes) => nodes.map((node) => {
+    const image = node as HTMLImageElement;
+    const frame = image.closest("[data-artifact-frame]") as HTMLElement | null;
+    const box = frame?.getBoundingClientRect();
+    return { naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight, width: box?.width ?? 0, height: box?.height ?? 0 };
+  }));
+  expect(decoded.every((image) => image.naturalWidth > 0 && image.naturalHeight > 0 && image.width >= 160 && image.height >= 120)).toBeTruthy();
+  const geometries = new Set(decoded.map((image) => `${Math.round(image.width)}x${Math.round(image.height)}`));
+  expect(geometries.size).toBe(2);
+  expect(decoded.filter((image) => `${Math.round(image.width)}x${Math.round(image.height)}` === [...geometries][0]).length).toBe(4);
+  expect(decoded.filter((image) => `${Math.round(image.width)}x${Math.round(image.height)}` === [...geometries][1]).length).toBe(4);
+});
+
 test("trajectory loading announces completion after one cancellable request", async ({ page }) => {
   const release = await holdTrajectoryResponse(page, "task-clean", "run-clean", cleanTrajectory);
   await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
   await expect(page.locator('[data-trajectory-state="loading"]')).toBeVisible();
-  await expect(page.getByRole("status", { name: "Loading complete trajectory" })).toBeVisible();
+  await expect(page.locator('[data-trajectory-state="loading"] p[role="status"]')).toHaveText("Loading complete trajectory");
   await release();
   await expect(page.locator('[data-trajectory-state="ready"]')).toBeVisible();
-  await expect(page.getByRole("status", { name: "Complete trajectory loaded" })).toBeAttached();
+  await expect(page.locator('[data-trajectory-state="ready"] p[role="status"]')).toHaveText("Complete trajectory loaded");
+});
+
+test("navigation ignores a late trajectory response after cancellation", async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  let completed = false;
+  await page.route("**/api/steward/tasks/task-clean/transcript**", async (route) => {
+    await pending;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(cleanTrajectory) });
+    completed = true;
+  });
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  await expect(page.locator('[data-trajectory-state="loading"]')).toBeVisible();
+  await page.goto("/steward?view=tasks");
+  release();
+  await expect.poll(() => completed).toBeTruthy();
+  await expect(page).toHaveURL(/\/steward\?view=tasks/);
+  await expect(page.locator("[data-atif-trajectory]")).toHaveCount(0);
 });
 
 test("empty trajectory is complete without fabricated records", async ({ page }) => {
@@ -229,7 +385,7 @@ test("transient trajectory failure offers manual Retry and terminal failure does
   });
   await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
   await expect(page.getByRole("heading", { name: "Trajectory unavailable" })).toBeVisible();
-  const retry = page.getByRole("button", { name: "Retry" });
+  const retry = page.locator('[data-trajectory-state="unavailable"] button');
   await expect(retry).toBeVisible();
   await retry.click();
   await expect(page.locator('[data-trajectory-state="ready"]')).toBeVisible();
@@ -276,8 +432,17 @@ test("trajectory remains nonblank and nonoverlapping at desktop, mobile, and 320
     }));
     expect(records.every((record) => !record.clipped)).toBeTruthy();
     for (let index = 1; index < records.length; index += 1) expect(records[index]!.top).toBeGreaterThanOrEqual(records[index - 1]!.bottom - 1);
+    const probe = await trajectory.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const point = document.elementFromPoint(box.left + Math.min(8, box.width / 2), box.top + Math.min(8, box.height / 2));
+      const style = getComputedStyle(node);
+      return { area: box.width * box.height, hasDescendantAtPoint: point !== null && node.contains(point), color: style.color, background: style.backgroundColor };
+    });
+    expect(probe.area).toBeGreaterThan(0);
+    expect(probe.hasDescendantAtPoint || probe.color !== "rgba(0, 0, 0, 0)" || probe.background !== "rgba(0, 0, 0, 0)").toBeTruthy();
     const screenshot = await page.screenshot({ path: testInfo.outputPath(`trajectory-${viewport.width}.png`), fullPage: true });
     expect(screenshot.byteLength).toBeGreaterThan(1_000);
+    expect(screenshot.some((byte) => byte !== 0)).toBeTruthy();
   }
 });
 

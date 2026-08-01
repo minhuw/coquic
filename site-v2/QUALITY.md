@@ -127,6 +127,12 @@
 - Run the executable cloud reader gates with no live credential:
   `nix develop -c npm --prefix site-v2 run test:unit` and
   `nix develop -c npm --prefix site-v2 run test:steward`.
+- Keep the direct route/page harness separate from the browser gate. The
+  deterministic browser proof is
+  `nix develop -c npm --prefix site-v2 run test:visual -- tests/steward.spec.ts --workers=1`;
+  it starts a loopback fixture server with dummy credentials by default. An
+  explicitly supplied `PLAYWRIGHT_BASE_URL` may target a preview without
+  making that preview a required CI dependency.
 - Validate schemas, examples, and documentation with
   `nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py`.
 - `nix develop -c npm --prefix site-v2 run typecheck` and
@@ -140,3 +146,5 @@
   screenshots MUST be inspected for nonblank, correctly framed, nonoverlapping
   content. Validated byte-preserved JPEG/PNG/GIF/WebP evidence may animate under
   reduced motion as the documented WCAG 2.2.2 residual risk.
+- The Site V2 CI job MUST install Chromium, run the focused browser command, and
+  retain Playwright test results and reports when that gate fails.

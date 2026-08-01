@@ -83,6 +83,8 @@ jobs:
           summarize: false
       - name: Install Site V2 dependencies
         run: nix develop -c npm --prefix site-v2 ci
+      - name: Install Site V2 Playwright Chromium
+        run: nix develop -c npm --prefix site-v2 exec -- playwright install --with-deps chromium
       - name: Contract validation
         run: nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
       - name: Archive unit tests
@@ -93,5 +95,16 @@ jobs:
           nix develop -c npm --prefix site-v2 run build
       - name: Steward archive smoke
         run: nix develop -c npm --prefix site-v2 run test:steward
+      - name: Steward trajectory browser proof
+        run: nix develop -c npm --prefix site-v2 run test:visual -- tests/steward.spec.ts --workers=1
+      - name: Upload Site V2 Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-v2-playwright-artifacts
+          if-no-files-found: ignore
+          path: |
+            site-v2/test-results/**
+            site-v2/playwright-report/**
       - name: Deployment path smoke
         run: nix develop -c npm --prefix site-v2 run test:deploy

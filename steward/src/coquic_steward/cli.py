@@ -5,6 +5,7 @@ from typing import Optional
 import signal
 import json
 import os
+import re
 
 import typer
 
@@ -22,6 +23,7 @@ from .execution.session import (
     FreshPlannerSession,
     SessionSupervisor,
     planner_session_for_config,
+    publication_graph_for_task,
     runtime_factory_for_config,
 )
 from .core.models import (
@@ -42,10 +44,56 @@ from .signals import (
     revalidate_signal_items,
 )
 from .storage import TaskStore
+from .publication.d1 import D1PublicationClient
+from .publication.publisher import (
+    CloudPublisher,
+    PublicationHideStatus,
+    PublicationStatus,
+    publication_generation_views,
+    publication_health_view,
+)
 
 app = typer.Typer(help="CoQUIC Steward maintenance manager.")
 enqueue_app = typer.Typer(help="Enqueue tasks.")
 app.add_typer(enqueue_app, name="enqueue")
+publication_app = typer.Typer(help="Inspect and recover publication state.")
+app.add_typer(publication_app, name="publication")
+
+_PUBLICATION_LIMIT = 100
+_PUBLICATION_HIDE_REASONS = frozenset(
+    {
+        "missing",
+        "partial",
+        "invalid_metadata",
+        "source_finding",
+        "patch_finding",
+        "staging_unsafe",
+        "scanner_failure",
+        "ocr_failure",
+        "unsafe_content",
+        "irreparable",
+        "integrity",
+        "operator_blocked",
+    }
+)
+_PUBLICATION_SAFE_REASONS = _PUBLICATION_HIDE_REASONS | frozenset(
+    {
+        "network",
+        "quota",
+        "authentication",
+        "permission",
+        "timeout",
+        "transient",
+        "provider",
+        "lease_expired",
+        "retry_exhausted",
+        "cleanup_failed",
+        "precondition",
+        "unchanged",
+        "unavailable",
+    }
+)
+_PUBLICATION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _context() -> tuple[TaskStore, object]:
@@ -83,6 +131,275 @@ def _configured_planner_session(config) -> FreshPlannerSession:
         bind_deployment_identity(session.invoker.runtime, config)
         return session
     return FreshPlannerSession(config)
+
+
+def _publication_compose_kwargs(config) -> dict[str, object]:
+    publication = getattr(config, "publication", None)
+    sources = tuple(
+        path
+        for path in (
+            getattr(publication, "d1_token_path", None),
+            getattr(publication, "r2_access_key_id_path", None),
+            getattr(publication, "r2_secret_access_key_path", None),
+        )
+        if path is not None
+    )
+    return {"credential_sources": sources}
+
+
+def _current_publication_source(config, store: TaskStore, generation: object) -> object | None:
+    """Build a fresh graph from current private task evidence."""
+
+    task_id = getattr(generation, "task_id", None)
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    try:
+        task = store.get(task_id)
+        return publication_graph_for_task(config, store, task)
+    except Exception:
+        return None
+
+
+def _build_cli_hide_publisher(config, store: TaskStore) -> tuple[CloudPublisher, object] | None:
+    publication = getattr(config, "publication", None)
+    if not getattr(publication, "enabled", False):
+        return None
+    d1: object | None = None
+    try:
+        d1 = D1PublicationClient(
+            config=publication,
+            timeout_seconds=float(getattr(publication, "network_timeout_seconds", 30.0)),
+        )
+        publisher = CloudPublisher(
+            store,
+            object(),
+            d1,
+            worker_id="publication-cli",
+            retry_backoff_seconds=max(
+                1, int(getattr(publication, "retry_backoff_seconds", 1))
+            ),
+        )
+        return publisher, d1
+    except Exception:
+        close = getattr(d1, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        return None
+
+
+def _emit_publication(value: object) -> None:
+    typer.echo(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
+
+
+def _safe_publication_id(value: object) -> str | None:
+    return value if isinstance(value, str) and _PUBLICATION_IDENTIFIER.fullmatch(value) else None
+
+
+def _publication_result_output(result: object) -> dict[str, object]:
+    status = getattr(result, "status", "blocked")
+    if hasattr(status, "value"):
+        status = status.value
+    if not isinstance(status, str):
+        status = "blocked"
+    publication_id = getattr(result, "publication_id", None)
+    publication_id = _safe_publication_id(publication_id)
+    reason = getattr(result, "reason", None)
+    if not isinstance(reason, str) or reason not in _PUBLICATION_SAFE_REASONS:
+        reason = None
+    values = getattr(result, "reason_codes", ())
+    reason_codes: list[str] = []
+    for value in values if isinstance(values, (tuple, list)) else ():
+        if hasattr(value, "value"):
+            value = value.value
+        if isinstance(value, str) and value in _PUBLICATION_SAFE_REASONS and value not in reason_codes:
+            reason_codes.append(value)
+    if reason is not None and reason not in reason_codes:
+        reason_codes.insert(0, reason)
+    return {
+        "status": status,
+        "publicationId": publication_id,
+        "reason": reason,
+        "reasonCodes": reason_codes,
+    }
+
+
+def _publication_hide_result_output(result: object) -> dict[str, object]:
+    status = getattr(result, "status", "blocked")
+    if hasattr(status, "value"):
+        status = status.value
+    if not isinstance(status, str):
+        status = "blocked"
+    reason = getattr(result, "reason", None)
+    if not isinstance(reason, str) or reason not in _PUBLICATION_SAFE_REASONS:
+        reason = None
+    return {
+        "status": status,
+        "taskId": _safe_publication_id(getattr(result, "task_id", None)),
+        "publicationId": _safe_publication_id(getattr(result, "publication_id", None)),
+        "reason": reason,
+    }
+
+
+@publication_app.command("status")
+def publication_status() -> None:
+    """Print bounded publication health facts."""
+
+    store, _ = _context()
+    try:
+        _emit_publication(publication_health_view(store))
+    except Exception:
+        _emit_publication(
+            {
+                "queuedCount": 0,
+                "blockedCount": 0,
+                "cleanupPendingCount": 0,
+                "cleanupPendingBytes": 0,
+                "oldestQueuedAgeSeconds": 0,
+                "updatedAgeSeconds": 0,
+                "reason": "unavailable",
+                "reasonCodes": ["unavailable"],
+            }
+        )
+        raise typer.Exit(1)
+
+
+@publication_app.command("list")
+def publication_list(
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        min=0,
+        max=_PUBLICATION_LIMIT,
+        help="Maximum generations to show.",
+    ),
+) -> None:
+    """Print bounded publication generation summaries."""
+
+    store, _ = _context()
+    try:
+        _emit_publication(publication_generation_views(store, limit=limit))
+    except Exception:
+        _emit_publication(
+            {
+                "status": "blocked",
+                "reason": "unavailable",
+                "reasonCodes": ["unavailable"],
+            }
+        )
+        raise typer.Exit(1)
+
+
+@publication_app.command("retry")
+def publication_retry(publication_id: str) -> None:
+    """Rebuild current evidence and enqueue a changed generation."""
+
+    store, config = _context()
+    try:
+        generation = store.get_publication_generation(publication_id)
+    except Exception:
+        generation = None
+    if generation is None:
+        _emit_publication(
+            {
+                "status": PublicationStatus.blocked.value,
+                "publicationId": _safe_publication_id(publication_id),
+                "reason": "missing",
+                "reasonCodes": ["missing"],
+            }
+        )
+        raise typer.Exit(1)
+    source = _current_publication_source(config, store, generation)
+    publisher = CloudPublisher(
+        store,
+        object(),
+        object(),
+        worker_id="publication-cli",
+    )
+    try:
+        result = publisher.retry_publication(
+            publication_id,
+            source,
+            compose_kwargs=_publication_compose_kwargs(config),
+        )
+    except Exception:
+        _emit_publication(
+            {
+                "status": PublicationStatus.blocked.value,
+                "publicationId": _safe_publication_id(publication_id),
+                "reason": "integrity",
+                "reasonCodes": ["integrity"],
+            }
+        )
+        raise typer.Exit(1)
+    _emit_publication(_publication_result_output(result))
+    if getattr(result, "status", None) in {
+        PublicationStatus.blocked,
+        PublicationStatus.repair_required,
+    } or getattr(getattr(result, "status", None), "value", None) in {
+        PublicationStatus.blocked.value,
+        PublicationStatus.repair_required.value,
+    }:
+        raise typer.Exit(1)
+
+
+@publication_app.command("hide")
+def publication_hide(
+    task_id: str,
+    reason: str = typer.Option(
+        "operator_blocked",
+        "--reason",
+        help="Allowlisted reason for hiding the task head.",
+    ),
+) -> None:
+    """Hide a task head and reconcile its local publication state."""
+
+    if reason not in _PUBLICATION_HIDE_REASONS:
+        raise typer.BadParameter("unsupported reason", param_hint="--reason")
+    store, config = _context()
+    built = _build_cli_hide_publisher(config, store)
+    if built is None:
+        _emit_publication(
+            {
+                "status": PublicationHideStatus.blocked.value,
+                "taskId": _safe_publication_id(task_id),
+                "publicationId": None,
+                "reason": "precondition",
+            }
+        )
+        raise typer.Exit(1)
+    publisher, client = built
+    try:
+        result = publisher.hide_task(task_id, reason)
+    except Exception:
+        _emit_publication(
+            {
+                "status": PublicationHideStatus.blocked.value,
+                "taskId": _safe_publication_id(task_id),
+                "publicationId": None,
+                "reason": "integrity",
+            }
+        )
+        raise typer.Exit(1)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    payload = _publication_hide_result_output(result)
+    _emit_publication(payload)
+    if getattr(result, "status", None) in {
+        PublicationHideStatus.blocked,
+        PublicationHideStatus.missing,
+    } or getattr(getattr(result, "status", None), "value", None) in {
+        PublicationHideStatus.blocked.value,
+        PublicationHideStatus.missing.value,
+    }:
+        raise typer.Exit(1)
 
 
 @app.command()

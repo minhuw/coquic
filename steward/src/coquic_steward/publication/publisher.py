@@ -54,7 +54,7 @@ CloudPublishStatus = PublicationStatus
 
 
 _TRANSIENT_REASONS: Final[frozenset[str]] = frozenset(
-    {"network", "quota", "timeout", "precondition"}
+    {"network", "quota", "timeout", "transient"}
 )
 _SAFE_REASONS: Final[frozenset[str]] = frozenset(
     {item.value for item in ReasonCode}
@@ -64,6 +64,7 @@ _SAFE_REASONS: Final[frozenset[str]] = frozenset(
         "authentication",
         "permission",
         "timeout",
+        "transient",
         "provider",
         "integrity",
         "lease_expired",
@@ -126,6 +127,37 @@ def _status(value: object) -> str:
 
 def _generation_from(result: object) -> object | None:
     return getattr(result, "generation", None)
+
+
+def _publication_id_from(value: object) -> object | None:
+    candidate = getattr(value, "publication_id", None)
+    if candidate is not None:
+        return candidate
+    if isinstance(value, Mapping):
+        return value.get("publication_id", value.get("publicationId"))
+    return None
+
+
+def _is_composed_generation(value: object) -> bool:
+    """Accept the immutable envelope and bounded test doubles alike."""
+
+    if isinstance(value, ComposedGeneration):
+        return True
+    return all(
+        hasattr(value, name)
+        for name in (
+            "publication_id",
+            "task_id",
+            "run_id",
+            "generation_boundary",
+            "metadata_digest",
+            "idempotency_key",
+            "generation",
+            "payload",
+            "objects",
+            "private_originals",
+        )
+    )
 
 
 def _now() -> datetime:
@@ -267,12 +299,13 @@ def _provider_category(error: BaseException) -> str:
             "invalid_request": "integrity",
             "private_value": "integrity",
             "malformed_response": "integrity",
-            "response_too_large": "quota",
-            "result_limit": "quota",
+            "response_too_large": "integrity",
+            "result_limit": "integrity",
             "generation_conflict": "integrity",
             "generation_state": "integrity",
             "count_mismatch": "integrity",
             "digest_mismatch": "integrity",
+            "transient": "network",
         }.get(category, category)
     for name in ("category", "code", "kind", "reason_code"):
         value = getattr(error, name, None)
@@ -305,20 +338,27 @@ def _call_composer(
         parameters = signature.parameters
         accepts_var_kw = any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values())
         if not accepts_var_kw:
-            selected = {key: value for key, value in selected.items() if key in parameters}
+            selected = {
+                key: value
+                for key, value in selected.items()
+                if key in parameters
+                and parameters[key].kind
+                in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+            }
+    if signature is not None:
+        # Signature filtering above makes this one invocation deterministic;
+        # a TypeError raised by the builder itself is a bounded composition
+        # failure and must not trigger a second side-effecting build.
+        return composer(source, **selected)
     try:
         return composer(source, **selected)
     except TypeError:
-        # Small fake builders commonly accept only the graph positional value.
-        # Retry only when signature inspection proved that no keyword is
-        # accepted; builder exceptions themselves are handled by the caller.
-        if signature is not None and any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in signature.parameters.values()
-        ):
-            raise
-        if signature is not None and "task_id" in signature.parameters:
-            raise
+        # A few opaque callables do not expose a signature.  Retry only for
+        # the argument-shape error that can be established without a second
+        # inspected invocation.
         return composer(source)
 
 
@@ -404,12 +444,15 @@ class CloudPublisher:
         publication_id = getattr(generation, "publication_id", None)
         if renew is None or not isinstance(publication_id, str):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
-        renewed = renew(
-            self.worker_id,
-            publication_id=publication_id,
-            now=self._time(),
-            lease_seconds=self.lease_seconds,
-        )
+        try:
+            renewed = renew(
+                self.worker_id,
+                publication_id=publication_id,
+                now=self._time(),
+                lease_seconds=self.lease_seconds,
+            )
+        except Exception:
+            return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
         if _operation_is(renewed, PublicationOperationStatus.renewed):
             return _record_generation(renewed, generation), None
         if _is_lost(renewed):
@@ -426,13 +469,16 @@ class CloudPublisher:
         publication_id = getattr(generation, "publication_id", None)
         if advance is None or not isinstance(publication_id, str):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
-        changed = advance(
-            publication_id,
-            expected,
-            target,
-            lease_owner=self.worker_id,
-            now=self._time(),
-        )
+        try:
+            changed = advance(
+                publication_id,
+                expected,
+                target,
+                lease_owner=self.worker_id,
+                now=self._time(),
+            )
+        except Exception:
+            return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
         if _operation_is(changed, PublicationOperationStatus.advanced):
             return _record_generation(changed, generation), None
         if _is_lost(changed):
@@ -442,13 +488,24 @@ class CloudPublisher:
     def _block(self, generation: object, reason: object, *, hide: bool, phase: str) -> PublicationResult:
         publication_id = getattr(generation, "publication_id", None)
         category = _reason(reason, "integrity")
+
+        # A provider failure may have consumed most of the lease.  Reconfirm
+        # ownership before changing a public head; a stale worker must never
+        # hide a newer generation's task head.
+        if hide:
+            renewed, lost = self._renew(generation)
+            if lost is not None:
+                return lost
+            if renewed is None:
+                return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+            generation = renewed
         if hide:
             hide_task = getattr(self.d1, "hide_task", None)
             task_id = getattr(generation, "task_id", None)
             if hide_task is not None and isinstance(task_id, str):
                 try:
-                    # Hiding is intentionally best effort and is outside the
-                    # local state transaction.  Its response is not retained.
+                    # Hiding is outside the local state transaction.  The
+                    # durable block below remains the authoritative outcome.
                     hide_task(task_id, category)
                 except Exception:
                     pass
@@ -464,7 +521,11 @@ class CloudPublisher:
                 )
             except Exception:
                 pass
-        if block_result is not None and _is_lost(block_result):
+        if block_result is None:
+            return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+        if _is_lost(block_result):
+            return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+        if not _operation_is(block_result, PublicationOperationStatus.blocked):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         codes = (ReasonCode(category),) if category in {item.value for item in ReasonCode} else ()
         return _result(PublicationStatus.blocked, publication_id, reason=category, reason_codes=codes, phase=phase)
@@ -474,9 +535,6 @@ class CloudPublisher:
         retry = getattr(self.store, "schedule_publication_retry", None) or getattr(self.store, "schedule_retry", None)
         if retry is None or not isinstance(publication_id, str):
             return self._block(generation, "integrity", hide=False, phase=phase)
-        # R2's conditional precondition category is retryable, but the
-        # outbox's durable reason vocabulary intentionally uses ``network``
-        # for that bounded replay path.
         durable_reason = "network" if category == "precondition" else category
         try:
             scheduled = retry(
@@ -494,6 +552,14 @@ class CloudPublisher:
         if _is_lost(scheduled):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         if _operation_is(scheduled, PublicationOperationStatus.retry_exhausted):
+            durable = _generation_from(scheduled)
+            if durable is not None and _status(getattr(durable, "state", "")) == PublicationState.blocked.value:
+                return _result(
+                    PublicationStatus.blocked,
+                    publication_id,
+                    reason="retry_exhausted",
+                    phase=phase,
+                )
             return self._block(generation, "retry_exhausted", hide=False, phase=phase)
         return self._block(generation, "integrity", hide=False, phase=phase)
 
@@ -511,7 +577,15 @@ class CloudPublisher:
         result: dict[tuple[ReceiptClass, str], PublicationReceipt] = {}
         for value in values:
             if isinstance(value, PublicationReceipt):
-                result[(value.receipt_class, value.content_key)] = value
+                key = (value.receipt_class, value.content_key)
+                previous = result.get(key)
+                if previous is not None and (
+                    previous.sha256 != value.sha256
+                    or previous.byte_size != value.byte_size
+                    or previous.logical_path != value.logical_path
+                ):
+                    raise ValueError("conflicting receipt")
+                result[key] = value
         return result
 
     def _save_receipt(
@@ -524,7 +598,12 @@ class CloudPublisher:
         if record is None or not isinstance(publication_id, str):
             return None, self._block(generation, "integrity", hide=False, phase="receipt")
         try:
-            saved = record(publication_id, receipt)
+            saved = record(
+                publication_id,
+                receipt,
+                lease_owner=self.worker_id,
+                now=self._time(),
+            )
         except Exception:
             return None, self._block(generation, "integrity", hide=False, phase="receipt")
         if _operation_is(saved, PublicationOperationStatus.recorded) or _operation_is(saved, PublicationOperationStatus.existing):
@@ -631,24 +710,23 @@ class CloudPublisher:
             source = graph
         if claimed_generation is not None:
             if publication_id is None:
-                publication_id = getattr(claimed_generation, "publication_id", None)
-            if generation is None and hasattr(claimed_generation, "payload"):
-                generation = claimed_generation
-        # Accept an outbox record under the ergonomic ``generation`` spelling;
-        # the composed transport-free envelope is then built from ``source``.
-        if generation is not None and not isinstance(generation, ComposedGeneration):
-            if not all(hasattr(generation, name) for name in ("payload", "objects", "private_originals", "generation")):
-                if publication_id is None:
-                    publication_id = getattr(generation, "publication_id", None)
-                generation = None
+                publication_id = _publication_id_from(claimed_generation)
+        # ``generation`` and ``claimed_generation`` identify the durable
+        # outbox row only.  A caller-supplied transport envelope is never
+        # trusted as a shortcut around composition and source inspection.
+        for durable_candidate in (generation, claimed_generation):
+            if publication_id is None and durable_candidate is not None:
+                publication_id = _publication_id_from(durable_candidate)
+        generation = None
         if publication_id is not None and _identifier(publication_id) is None:
             return _result(PublicationStatus.blocked, None, reason="invalid_metadata", reason_codes=(ReasonCode.invalid_metadata,))
-        if publication_id is None and isinstance(generation, ComposedGeneration):
-            publication_id = generation.publication_id
         if publication_id is None:
             return _result(PublicationStatus.blocked, None, reason="invalid_metadata", reason_codes=(ReasonCode.invalid_metadata,))
-        durable = self._get(publication_id)
-        durable, early = self._claim(publication_id, durable)
+        try:
+            durable = self._get(publication_id)
+            durable, early = self._claim(publication_id, durable)
+        except Exception:
+            return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
         if early is not None:
             return early
         if durable is None:
@@ -674,7 +752,7 @@ class CloudPublisher:
                 )
             except Exception:
                 return self._block(durable, "invalid_metadata", hide=False, phase="compose")
-            generation = composed_value if isinstance(composed_value, ComposedGeneration) else None
+            generation = composed_value if _is_composed_generation(composed_value) else None
             if isinstance(composed_value, RepairRequired):
                 return _result(
                     PublicationStatus.repair_required,
@@ -751,6 +829,10 @@ class CloudPublisher:
                         return self._block(durable, "integrity", hide=True, phase="public")
                 except Exception as error:
                     return self._provider_failure(durable, error, phase="public")
+                durable, early = self._renew(durable)
+                if early is not None:
+                    return early
+                assert durable is not None
                 verified_at = max(self._time(), getattr(durable, "updated_at", self._time()))
                 receipt = PublicationReceipt.public_receipt(item.sha256, item.byte_size, key, verified_at, item.logical_path)
                 durable, early = self._save_receipt(durable, receipt)
@@ -782,6 +864,10 @@ class CloudPublisher:
                         return self._block(durable, "integrity", hide=True, phase="private")
                 except Exception as error:
                     return self._provider_failure(durable, error, phase="private")
+                durable, early = self._renew(durable)
+                if early is not None:
+                    return early
+                assert durable is not None
                 verified_at = max(self._time(), getattr(durable, "updated_at", self._time()))
                 receipt = PublicationReceipt.private_receipt(item.sha256, item.byte_size, key, verified_at)
                 durable, early = self._save_receipt(durable, receipt)
@@ -802,6 +888,10 @@ class CloudPublisher:
                     return self._block(durable, "integrity", hide=True, phase="stage")
             except Exception as error:
                 return self._provider_failure(durable, error, phase="stage")
+            durable, early = self._renew(durable)
+            if early is not None:
+                return early
+            assert durable is not None
             durable, early = self._advance(durable, PublicationState.uploading, PublicationState.d1_staged)
             if early is not None:
                 return early
@@ -819,9 +909,13 @@ class CloudPublisher:
                     or getattr(exposed, "publication_id", publication_id) != publication_id
                     or getattr(exposed, "task_id", generation.task_id) != generation.task_id
                 ):
-                    return self._block(durable, "integrity", hide=False, phase="expose")
+                    return self._block(durable, "integrity", hide=True, phase="expose")
             except Exception as error:
                 return self._provider_failure(durable, error, phase="expose")
+            durable, early = self._renew(durable)
+            if early is not None:
+                return early
+            assert durable is not None
             durable, early = self._advance(durable, PublicationState.d1_staged, PublicationState.exposed)
             if early is not None:
                 return early
@@ -883,11 +977,13 @@ publish_publication_generation = publish_generation
 
 __all__ = [
     "CloudPublicationPublisher",
+    "CloudPublicationResult",
     "CloudPublishStatus",
     "CloudPublisher",
     "GenerationPublisher",
     "PublicationPublisher",
     "PublicationResult",
+    "PublicationOutcomeResult",
     "PublicationStatus",
     "PublishStatus",
     "Publisher",

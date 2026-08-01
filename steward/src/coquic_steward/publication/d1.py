@@ -62,6 +62,12 @@ class D1ErrorCode(StrEnum):
     quota = "quota"
     timeout = "timeout"
     network = "network"
+    # HTTP 5xx uses the existing transport-safe transient vocabulary.  The
+    # aliases make the classification explicit to callers without creating a
+    # second serialized category.
+    transient = "network"
+    server_error = "network"
+    http_5xx = "network"
     provider = "provider"
     malformed_response = "malformed_response"
     response_too_large = "response_too_large"
@@ -628,9 +634,15 @@ class D1PublicationClient:
         if status in {425, 429, 509}:
             _invalid(D1ErrorCode.quota)
         if status >= 500:
-            _invalid(D1ErrorCode.provider)
-        if status < 200 or status >= 300:
+            # HTTP 5xx is the only provider response that is explicitly
+            # retryable.  Keep it distinct from successful-HTTP error
+            # envelopes, which are permanent provider failures.
             _invalid(D1ErrorCode.network)
+        if status < 200 or status >= 300:
+            # Authentication, timeout, and quota statuses were classified
+            # above.  Other HTTP errors are permanent and must never enter a
+            # retry loop.
+            _invalid(D1ErrorCode.provider)
         try:
             content_length = response.headers.get("content-length")
             if content_length and content_length.isdigit() and int(content_length) > self.max_response_bytes:
@@ -659,7 +671,13 @@ class D1PublicationClient:
             _invalid(D1ErrorCode.malformed_response)
         rows: list[Mapping[str, Any]] = []
         for entry in result:
-            if not isinstance(entry, Mapping) or entry.get("success") is not True or not isinstance(entry.get("results"), list) or not isinstance(entry.get("meta"), Mapping):
+            if not isinstance(entry, Mapping):
+                _invalid(D1ErrorCode.malformed_response)
+            if entry.get("success") is False or (
+                isinstance(entry.get("errors"), list) and entry["errors"]
+            ):
+                _invalid(D1ErrorCode.provider)
+            if entry.get("success") is not True or not isinstance(entry.get("results"), list) or not isinstance(entry.get("meta"), Mapping):
                 _invalid(D1ErrorCode.malformed_response)
             for row in entry["results"]:
                 rows.append(_row_values(row))

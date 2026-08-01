@@ -93,6 +93,24 @@ def _generation_for_state(state: PublicationState) -> PublicationGeneration:
     return _generation(**values)
 
 
+def _record(
+    store: TaskStore,
+    publication_id: str,
+    receipt: PublicationReceipt,
+    *,
+    owner: str = "worker-1",
+    now: datetime | None = None,
+    receipt_id: str | None = None,
+):
+    return store.record_publication_receipt(
+        publication_id,
+        receipt,
+        receipt_id=receipt_id,
+        lease_owner=owner,
+        now=now or receipt.verified_at,
+    )
+
+
 def _insert_generation_row(connection: object, **overrides: object) -> None:
     values: dict[str, object] = {
         "task_id": "task-schema",
@@ -1044,7 +1062,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
         building_at + timedelta(milliseconds=100),
         "runs/run-1/trajectory.json",
     )
-    recorded = store.record_publication_receipt(generation.publication_id, receipt)
+    recorded = _record(store, generation.publication_id, receipt, now=building_at + timedelta(milliseconds=100))
     assert recorded.status is PublicationOperationStatus.recorded
     assert recorded.receipt is not None
     store.engine.dispose()
@@ -1071,9 +1089,7 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
         NOW,
         "runs/run-1/trajectory.json",
     )
-    queued = store.record_publication_receipt(
-        generation.publication_id, queued_receipt
-    )
+    queued = _record(store, generation.publication_id, queued_receipt, now=NOW)
     assert queued.status is PublicationOperationStatus.precondition
     assert store.list_publication_receipts(generation.publication_id) == []
 
@@ -1092,7 +1108,7 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
         NOW + timedelta(seconds=2),
     )
     with pytest.raises(OutboxValidationError):
-        store.record_publication_receipt(generation.publication_id, wrong_run)
+        _record(store, generation.publication_id, wrong_run, now=NOW + timedelta(seconds=2))
 
     precise_receipt = PublicationReceipt.public_receipt(
         DIGEST,
@@ -1101,18 +1117,22 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
         NOW + timedelta(seconds=2, microseconds=123456),
         "runs/run-1/trajectory.json",
     )
-    recorded = store.record_publication_receipt(
+    recorded = _record(
+        store,
         generation.publication_id,
         precise_receipt,
         receipt_id="receipt-owned",
+        now=NOW + timedelta(seconds=2),
     )
     assert recorded.status is PublicationOperationStatus.recorded
     assert recorded.receipt is not None
     assert recorded.receipt.verified_at.microsecond == 123000
-    conflicting_receipt = store.record_publication_receipt(
+    conflicting_receipt = _record(
+        store,
         generation.publication_id,
         replace(precise_receipt, byte_size=18),
         receipt_id="receipt-owned",
+        now=NOW + timedelta(seconds=2),
     )
     assert conflicting_receipt.status is PublicationOperationStatus.conflict
     assert conflicting_receipt.reason == "integrity"
@@ -1130,8 +1150,11 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
         PRIVATE_KEY,
         NOW + timedelta(seconds=4),
     )
-    assert store.record_publication_receipt(
-        generation.publication_id, late_receipt
+    assert _record(
+        store,
+        generation.publication_id,
+        late_receipt,
+        now=NOW + timedelta(seconds=4),
     ).status is PublicationOperationStatus.recorded
     store.advance_publication(
         generation.publication_id,
@@ -1147,8 +1170,11 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
         f"v1/tasks/task-1/objects/sha256/{another_digest[:2]}/{another_digest}",
         NOW + timedelta(seconds=6),
     )
-    assert store.record_publication_receipt(
-        generation.publication_id, after_staging
+    assert _record(
+        store,
+        generation.publication_id,
+        after_staging,
+        now=NOW + timedelta(seconds=6),
     ).status is PublicationOperationStatus.precondition
 
 
@@ -1171,7 +1197,7 @@ def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_pat
         NOW + timedelta(milliseconds=200),
         "runs/run-1/trajectory.json",
     )
-    assert store.record_publication_receipt(generation.publication_id, receipt).status is PublicationOperationStatus.recorded
+    assert _record(store, generation.publication_id, receipt, now=NOW + timedelta(milliseconds=200)).status is PublicationOperationStatus.recorded
     assert store.advance_publication(
         generation.publication_id,
         PublicationState.building,
@@ -1191,6 +1217,96 @@ def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_pat
     assert expired[0].state is PublicationState.retry_wait
     assert expired[0].lease_owner is None
     assert store.list_publication_receipts(generation.publication_id) == [receipt]
+
+
+def test_receipt_replay_requires_the_current_unexpired_owner(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("worker-1", now=NOW)
+    store.advance_publication(
+        generation.publication_id,
+        PublicationState.claimed,
+        PublicationState.building,
+        lease_owner="worker-1",
+        now=NOW + timedelta(seconds=1),
+    )
+    receipt = PublicationReceipt.public_receipt(
+        DIGEST,
+        17,
+        PUBLIC_KEY,
+        NOW + timedelta(seconds=2),
+        "runs/run-1/trajectory.json",
+    )
+    first = _record(
+        store,
+        generation.publication_id,
+        receipt,
+        owner="worker-1",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert first.status is PublicationOperationStatus.recorded
+
+    wrong_owner = _record(
+        store,
+        generation.publication_id,
+        receipt,
+        owner="worker-2",
+        now=NOW + timedelta(seconds=3),
+    )
+    assert wrong_owner.status is PublicationOperationStatus.lost_claim
+    expired_owner = _record(
+        store,
+        generation.publication_id,
+        receipt,
+        owner="worker-1",
+        now=NOW + timedelta(seconds=MAX_LEASE_SECONDS + 1),
+    )
+    assert expired_owner.status is PublicationOperationStatus.lost_claim
+    assert store.list_publication_receipts(generation.publication_id) == [receipt]
+
+
+def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("worker-1", now=NOW, lease_seconds=1)
+    store.advance_publication(
+        generation.publication_id,
+        PublicationState.claimed,
+        PublicationState.building,
+        lease_owner="worker-1",
+        now=NOW + timedelta(milliseconds=100),
+    )
+    receipt = PublicationReceipt.public_receipt(
+        DIGEST,
+        17,
+        PUBLIC_KEY,
+        NOW + timedelta(milliseconds=200),
+        "runs/run-1/trajectory.json",
+    )
+    assert _record(
+        store,
+        generation.publication_id,
+        receipt,
+        owner="worker-1",
+        now=NOW + timedelta(milliseconds=200),
+    ).status is PublicationOperationStatus.recorded
+
+    reclaimed_at = NOW + timedelta(seconds=1)
+    store.expire_publication_leases(now=reclaimed_at)
+    reclaimed = store.claim_publication(
+        "worker-2", publication_id=generation.publication_id, now=reclaimed_at
+    )
+    assert reclaimed.status is PublicationOperationStatus.claimed
+    replay = _record(
+        store,
+        generation.publication_id,
+        receipt,
+        owner="worker-2",
+        now=reclaimed_at + timedelta(milliseconds=100),
+    )
+    assert replay.status is PublicationOperationStatus.existing
 
 
 def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_path) -> None:
@@ -1220,8 +1336,8 @@ def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_pa
         NOW + timedelta(seconds=2),
         "runs/run-2/trajectory.json",
     )
-    assert store.record_publication_receipt(generation.publication_id, first).status is PublicationOperationStatus.recorded
-    assert store.record_publication_receipt(generation.publication_id, second).status is PublicationOperationStatus.recorded
+    assert _record(store, generation.publication_id, first, now=NOW + timedelta(seconds=2)).status is PublicationOperationStatus.recorded
+    assert _record(store, generation.publication_id, second, now=NOW + timedelta(seconds=2)).status is PublicationOperationStatus.recorded
     for run_id, digest in (("run-1", DIGEST), ("run-2", second_digest)):
         private = PublicationReceipt.private_receipt(
             digest,
@@ -1229,7 +1345,7 @@ def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_pa
             f"v1/originals/task-1/{run_id}/sha256/{digest}.jsonl",
             NOW + timedelta(seconds=3),
         )
-        assert store.record_publication_receipt(generation.publication_id, private).status is PublicationOperationStatus.recorded
+        assert _record(store, generation.publication_id, private, now=NOW + timedelta(seconds=3)).status is PublicationOperationStatus.recorded
 
 
 def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
@@ -1253,11 +1369,13 @@ def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
         NOW + timedelta(seconds=2),
         "runs/run-1/trajectory.json",
     )
-    recorded = store.record_publication_receipt(generation.publication_id, receipt)
+    recorded = _record(store, generation.publication_id, receipt, now=NOW + timedelta(seconds=2))
     assert recorded.status is PublicationOperationStatus.recorded
-    replayed = store.record_publication_receipt(
+    replayed = _record(
+        store,
         generation.publication_id,
         replace(receipt, verified_at=NOW + timedelta(seconds=3)),
+        now=NOW + timedelta(seconds=3),
     )
     assert replayed.status is PublicationOperationStatus.existing
 
@@ -1377,7 +1495,7 @@ def test_store_cleanup_intents_reject_unsafe_replay_and_remain_in_health(tmp_pat
         NOW + timedelta(seconds=2),
         "runs/run-1/trajectory.json",
     )
-    store.record_publication_receipt(generation.publication_id, receipt)
+    _record(store, generation.publication_id, receipt, now=NOW + timedelta(seconds=2))
     for offset, expected, target in (
         (2, PublicationState.building, PublicationState.uploading),
         (3, PublicationState.uploading, PublicationState.d1_staged),

@@ -2621,11 +2621,30 @@ class SQLiteTaskStore:
         receipt: PublicationReceipt,
         *,
         receipt_id: str | None = None,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        owner: str | None = None,
+        now: datetime | None = None,
     ) -> PublicationOperationResult:
-        """Persist one verified object receipt idempotently."""
+        """Persist one verified object receipt under an active owner lease.
+
+        Receipt replay is still idempotent, but the replay is authorized by the
+        current generation lease before an existing row is returned.  This
+        keeps an expired or replaced worker from manufacturing a successful
+        local boundary after its remote request completed.
+        """
 
         if not isinstance(receipt, PublicationReceipt):
             raise OutboxValidationError("invalid_metadata")
+        owner_value = (
+            lease_owner
+            if lease_owner is not None
+            else worker_id
+            if worker_id is not None
+            else owner
+        )
+        owner = None if owner_value is None else _publication_identifier(owner_value)
+        timestamp = _publication_now(now)
         identifier = receipt_id or _publication_receipt_id(publication_id, receipt)
         _publication_identifier(identifier, prefix="receipt-")
         connection = self.engine.connect()
@@ -2652,6 +2671,39 @@ class SQLiteTaskStore:
                 if private_match is None or private_match.group("task") != generation.task_id:
                     raise OutboxValidationError("invalid_path")
                 private_run_id = private_match.group("run")
+
+            # Verify the active state and lease before looking at an existing
+            # receipt.  Matching bytes do not authorize a stale worker to
+            # replay a receipt after its lease has expired or been replaced.
+            if generation.state not in {
+                PublicationState.building,
+                PublicationState.uploading,
+            }:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=generation,
+                    reason="integrity",
+                )
+            if (
+                owner is None
+                or generation.lease_owner != owner
+                or generation.lease_expires_at is None
+                or generation.lease_expires_at <= timestamp
+            ):
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    generation=generation,
+                    reason="lease_expired",
+                )
+            if timestamp < generation.updated_at:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=generation,
+                    reason="invalid_metadata",
+                )
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_RECEIPT_COLUMNS} FROM publication_receipts "
                 "WHERE receipt_id=:receipt_id",
@@ -2686,16 +2738,6 @@ class SQLiteTaskStore:
                 return PublicationOperationResult(
                     PublicationOperationStatus.existing,
                     receipt=existing,
-                )
-            if generation.state not in {
-                PublicationState.building,
-                PublicationState.uploading,
-            }:
-                connection.commit()
-                return PublicationOperationResult(
-                    PublicationOperationStatus.precondition,
-                    generation=generation,
-                    reason="integrity",
                 )
             if receipt.verified_at < generation.updated_at:
                 raise OutboxValidationError("invalid_metadata")

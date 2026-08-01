@@ -166,7 +166,7 @@ def test_interrupted_visibility_batch_rolls_back_without_changing_head() -> None
     server.fail_visibility_once = True
     with pytest.raises(D1Error) as error:
         d1.expose(second)
-    assert error.value.code == D1ErrorCode.provider
+    assert error.value.code == D1ErrorCode.transient
     assert server.connection.execute("SELECT publication_id FROM task_heads").fetchone()[0] == first["publicationId"]
     assert server.connection.execute("SELECT state FROM publication_generations WHERE publication_id = ?", (second["publicationId"],)).fetchone()[0] == "staged"
 
@@ -254,7 +254,12 @@ def test_hidden_head_replay_does_not_reopen_generation() -> None:
 
 @pytest.mark.parametrize(
     ("status", "expected"),
-    [(401, D1ErrorCode.authentication), (429, D1ErrorCode.quota), (504, D1ErrorCode.provider)],
+    [
+        (400, D1ErrorCode.provider),
+        (401, D1ErrorCode.authentication),
+        (429, D1ErrorCode.quota),
+        (504, D1ErrorCode.transient),
+    ],
 )
 def test_provider_failures_are_bounded(status: int, expected: D1ErrorCode) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -265,3 +270,37 @@ def test_provider_failures_are_bounded(status: int, expected: D1ErrorCode) -> No
         d1.stage(publication())
     assert error.value.code == expected
     assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"success": False, "errors": [{"message": "private provider detail"}], "result": []},
+        {
+            "success": True,
+            "errors": [],
+            "result": [
+                {
+                    "success": False,
+                    "errors": [{"message": "private query detail"}],
+                    "results": [],
+                    "meta": {},
+                }
+            ],
+        },
+    ],
+)
+def test_successful_http_error_envelopes_are_permanent(document: dict[str, object]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=document, request=request)
+
+    d1 = D1PublicationClient(
+        account_id=ACCOUNT,
+        database_id=DATABASE,
+        token=TOKEN,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(D1Error) as error:
+        d1.stage(publication("publication-envelope"))
+    assert error.value.code == D1ErrorCode.provider
+    assert "detail" not in str(error.value)

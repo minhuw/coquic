@@ -9,6 +9,7 @@ from coquic_steward.publication import (
     ReasonCode,
     RepairRequired,
 )
+from coquic_steward.publication.d1 import D1Error, D1ErrorCode
 from coquic_steward.publication.generation import (
     GenerationObject,
     GenerationOriginal,
@@ -29,7 +30,12 @@ NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
 IDENTITY = GenerationIdentity("task-1", "boundary-1")
 
 
-def _composed(*, private: bool = False, metadata_digest: str = "a" * 64):
+def _composed(
+    *,
+    private: bool = False,
+    private_count: int = 1,
+    metadata_digest: str = "a" * 64,
+):
     public_content = b"public object"
     public_digest = __import__("hashlib").sha256(public_content).hexdigest()
     public_key = f"v1/tasks/task-1/objects/sha256/{public_digest[:2]}/{public_digest}"
@@ -42,7 +48,14 @@ def _composed(*, private: bool = False, metadata_digest: str = "a" * 64):
         "application/json",
         public_content,
     )
-    originals = (GenerationOriginal("task-1", "run-1", b"private original"),) if private else ()
+    originals = (
+        tuple(
+            GenerationOriginal("task-1", "run-1", f"private original {index}".encode())
+            for index in range(private_count)
+        )
+        if private
+        else ()
+    )
     counts = {"tasks": 1, "pipelines": 1, "runs": 1, "events": 1, "artifacts": 1}
     payload = {
         "taskId": "task-1",
@@ -78,6 +91,7 @@ def _composed(*, private: bool = False, metadata_digest: str = "a" * 64):
 @dataclass
 class _FakeStore:
     with_private: bool = False
+    object_count: int | None = None
 
     def __post_init__(self) -> None:
         self.generation = SimpleNamespace(
@@ -93,7 +107,7 @@ class _FakeStore:
             retry_at=None,
             updated_at=NOW,
             rows=5,
-            objects=2 if self.with_private else 1,
+            objects=self.object_count or (2 if self.with_private else 1),
             tasks=1,
             pipelines=1,
             runs=1,
@@ -103,6 +117,7 @@ class _FakeStore:
         self.receipts: list[PublicationReceipt] = []
         self.events: list[str] = []
         self.renew_lost = False
+        self.block_lost = False
 
     def get_publication_generation(self, publication_id: str):
         return self.generation if publication_id == self.generation.publication_id else None
@@ -136,7 +151,16 @@ class _FakeStore:
     def list_publication_receipts(self, publication_id: str):
         return list(self.receipts)
 
-    def record_publication_receipt(self, publication_id: str, receipt: PublicationReceipt):
+    def record_publication_receipt(
+        self,
+        publication_id: str,
+        receipt: PublicationReceipt,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ):
+        assert lease_owner == "worker-1"
+        assert now == NOW
         self.events.append(f"receipt:{receipt.receipt_class.value}")
         self.receipts.append(receipt)
         return SimpleNamespace(status=PublicationOperationStatus.recorded, generation=self.generation, receipt=receipt)
@@ -150,6 +174,8 @@ class _FakeStore:
 
     def block_publication(self, publication_id: str, **kwargs):
         self.events.append("blocked")
+        if self.block_lost:
+            return SimpleNamespace(status=PublicationOperationStatus.lost_claim, generation=self.generation)
         self.generation.state = PublicationState.blocked
         self.generation.lease_owner = None
         self.generation.lease_expires_at = None
@@ -190,10 +216,28 @@ def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> C
     )
 
 
+def _compose_generation(
+    *,
+    private: bool = False,
+    private_count: int = 1,
+    metadata_digest: str = "a" * 64,
+):
+    def compose(_source: object, **_kwargs: object):
+        return _composed(
+            private=private,
+            private_count=private_count,
+            metadata_digest=metadata_digest,
+        )
+
+    return compose
+
+
 def test_clean_generation_has_no_private_request_and_preserves_order() -> None:
     store = _FakeStore()
     provider = _FakeProvider(store)
-    result = _publisher(store, provider).publish(IDENTITY.publication_id, generation=_composed())
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
 
     assert result.status is PublicationStatus.exposed
     assert [kind for kind, _ in provider.calls] == ["public"]
@@ -204,7 +248,9 @@ def test_clean_generation_has_no_private_request_and_preserves_order() -> None:
 def test_private_original_follows_all_public_objects() -> None:
     store = _FakeStore(with_private=True)
     provider = _FakeProvider(store)
-    result = _publisher(store, provider).publish(IDENTITY.publication_id, generation=_composed(private=True))
+    result = _publisher(store, provider, compose=_compose_generation(private=True)).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
 
     assert result.exposed
     assert [kind for kind, _ in provider.calls] == ["public", "private"]
@@ -212,10 +258,27 @@ def test_private_original_follows_all_public_objects() -> None:
     assert "private original" not in repr(result)
 
 
+def test_multiple_private_originals_follow_public_objects() -> None:
+    store = _FakeStore(with_private=True, object_count=3)
+    provider = _FakeProvider(store)
+    result = _publisher(
+        store,
+        provider,
+        compose=_compose_generation(private=True, private_count=2),
+    ).publish(IDENTITY.publication_id, source={"stable": True})
+
+    assert result.exposed
+    assert [kind for kind, _ in provider.calls] == ["public", "private", "private"]
+    assert store.events.index("r2:public") < store.events.index("r2:private")
+    assert store.events.index("r2:private") < store.events.index("d1:stage")
+
+
 def test_identity_mismatch_is_blocked_without_provider_request() -> None:
     store = _FakeStore()
     provider = _FakeProvider(store)
-    result = _publisher(store, provider).publish(IDENTITY.publication_id, generation=_composed(metadata_digest="b" * 64))
+    result = _publisher(store, provider, compose=_compose_generation(metadata_digest="b" * 64)).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
 
     assert result.status is PublicationStatus.blocked
     assert result.reason == "integrity"
@@ -242,7 +305,9 @@ def test_repair_required_keeps_claim_and_does_not_hide() -> None:
 def test_transient_provider_failure_is_retry_wait_without_hiding() -> None:
     store = _FakeStore()
     provider = _FakeProvider(store, fail=R2Error(R2ErrorCategory.network))
-    result = _publisher(store, provider).publish(IDENTITY.publication_id, generation=_composed())
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
 
     assert result.status is PublicationStatus.retry_wait
     assert result.reason == "network"
@@ -254,7 +319,9 @@ def test_lost_claim_stops_before_remote_activity() -> None:
     store = _FakeStore()
     store.renew_lost = True
     provider = _FakeProvider(store)
-    result = _publisher(store, provider).publish(IDENTITY.publication_id, generation=_composed())
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
 
     assert result.status is PublicationStatus.lost_claim
     assert provider.calls == []
@@ -272,4 +339,71 @@ def test_fail_closed_composition_is_blocked_and_hides() -> None:
     assert result.status is PublicationStatus.blocked
     assert result.reason_codes == (ReasonCode.unsafe_content,)
     assert provider.calls == []
+    assert "d1:hide" in store.events
+
+
+def test_prebuilt_transport_generation_is_not_a_composition_bypass() -> None:
+    store = _FakeStore()
+    provider = _FakeProvider(store)
+
+    result = _publisher(store, provider).publish(
+        IDENTITY.publication_id,
+        generation=_composed(),
+    )
+
+    assert result.status is PublicationStatus.blocked
+    assert result.reason == "invalid_metadata"
+    assert provider.calls == []
+
+
+def test_permanent_failure_revalidates_before_hiding() -> None:
+    store = _FakeStore()
+    store.renew_lost = True
+    provider = _FakeProvider(store, fail=R2Error(R2ErrorCategory.auth))
+
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+
+    assert result.status is PublicationStatus.lost_claim
+    assert "d1:hide" not in store.events
+    assert "blocked" not in store.events
+
+
+def test_failed_block_compare_and_set_never_reports_blocked() -> None:
+    store = _FakeStore()
+    store.block_lost = True
+    provider = _FakeProvider(store, fail=R2Error(R2ErrorCategory.auth))
+
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+
+    assert result.status is PublicationStatus.lost_claim
+    assert result.reason == "lease_expired"
+
+
+def test_http_5xx_is_retryable_without_hiding() -> None:
+    store = _FakeStore()
+    provider = _FakeProvider(store, fail=D1Error(D1ErrorCode.transient))
+
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+
+    assert result.status is PublicationStatus.retry_wait
+    assert result.reason == "network"
+    assert "d1:hide" not in store.events
+
+
+def test_r2_conflict_is_permanent_and_hides_after_block() -> None:
+    store = _FakeStore()
+    provider = _FakeProvider(store, fail=R2Error(R2ErrorCategory.precondition))
+
+    result = _publisher(store, provider, compose=_compose_generation()).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+
+    assert result.status is PublicationStatus.blocked
+    assert result.reason == "precondition"
     assert "d1:hide" in store.events

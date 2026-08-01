@@ -10,6 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,6 +141,62 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     assert callable(daemon.store.on_change)
     daemon.store.on_change()
     assert daemon._publication_wakeup.is_set()
+
+
+def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):
+    task = SimpleNamespace(id="task-terminal-publication")
+    run = SimpleNamespace(
+        id="run-terminal-publication",
+        state="succeeded",
+        completed_at=datetime.now(timezone.utc),
+    )
+    generation = SimpleNamespace(
+        publication_id="pub-terminal-publication",
+        task_id=task.id,
+        run_id=run.id,
+        state="queued",
+        exposed_at=None,
+    )
+
+    class Store:
+        def __init__(self):
+            self._events: list[SimpleNamespace] = []
+
+        def events(self, _task_id):
+            return list(self._events)
+
+        def add_event(self, task_id, kind, message, data=None):
+            self._events.append(
+                SimpleNamespace(task_id=task_id, kind=kind, message=message, data=data or {})
+            )
+
+        def list_runs(self, _task_id):
+            return [run]
+
+        def get_publication_generation(self, _publication_id):
+            return generation
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    daemon.logger = None
+    daemon._terminal_publication_receipts_verified = lambda *_args: (True, "verified")
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.enqueue_materialized_publication",
+        lambda *_args: generation,
+    )
+
+    assert daemon._terminal_publication_gate(task) is False
+    assert any(
+        event.kind == "cleanup_blocked"
+        and event.data["reason"] == "final_generation_queued"
+        for event in daemon.store.events(task.id)
+    )
+
+    generation.state = "exposed"
+    generation.exposed_at = datetime.now(timezone.utc)
+    assert daemon._terminal_publication_gate(task) is True
+    assert len(daemon.store.events(task.id)) == 1
 
 
 def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():

@@ -44,6 +44,7 @@ from ..execution.session import (
     ResumeCategory,
     SessionResult,
     SessionSupervisor,
+    _write_publication_snapshot,
     enqueue_materialized_publication,
     load_publication_snapshot,
     publication_graph_for_task,
@@ -51,9 +52,14 @@ from ..execution.session import (
     planner_session_for_config,
 )
 from ..execution.task_archive import TaskArchiveWriter
+from ..publication.generation import (
+    PublicationGeneration as ComposedPublicationGeneration,
+    compose_publication_generation,
+)
+from ..publication.outbox import ReceiptClass
 from ..publication.d1 import D1PublicationClient
 from ..publication.publisher import CloudPublisher
-from ..publication.r2 import R2Client
+from ..publication.r2 import R2Client, private_original_key
 from ..core.subprocesses import (
     ProcessGroupCancellationOwner,
     run_command,
@@ -2298,6 +2304,303 @@ class StewardDaemon:
             return
         self.store.add_event(task_id, kind, message, data)
 
+    def _terminal_publication_block(
+        self,
+        task_id: str,
+        reason: str,
+        *,
+        publication_id: str | None = None,
+    ) -> bool:
+        """Retain one bounded publication-gate failure as local evidence."""
+
+        evidence: dict[str, object] = {
+            "publication_gate": True,
+            "reason": reason[:64],
+        }
+        if publication_id is not None:
+            evidence["publication_id"] = publication_id
+        for event in self.store.events(task_id):
+            data = getattr(event, "data", None)
+            if not isinstance(data, Mapping):
+                continue
+            if (
+                event.kind == "cleanup_blocked"
+                and data.get("publication_gate") is True
+                and all(data.get(key) == value for key, value in evidence.items())
+            ):
+                return False
+        self.store.add_event(
+            task_id,
+            "cleanup_blocked",
+            "terminal cleanup requires verified publication",
+            evidence,
+        )
+        return False
+
+    def _terminal_publication_run(self, task_id: str) -> object | None:
+        listing = getattr(self.store, "list_runs", None)
+        if not callable(listing):
+            return None
+        try:
+            runs = listing(task_id)
+        except (AttributeError, KeyError):
+            return None
+        completed: list[object] = []
+        for run in runs:
+            if getattr(run, "completed_at", None) is None:
+                continue
+            if str(getattr(run, "state", "")) == "running":
+                continue
+            if not isinstance(getattr(run, "id", None), str):
+                continue
+            completed.append(run)
+        if not completed:
+            return None
+
+        def order(run: object) -> tuple[str, str]:
+            completed_at = getattr(run, "completed_at", None)
+            if isinstance(completed_at, datetime):
+                try:
+                    timestamp = completed_at.astimezone(timezone.utc).isoformat()
+                except (OverflowError, ValueError):
+                    timestamp = ""
+            else:
+                timestamp = str(completed_at)
+            return timestamp, str(getattr(run, "id", ""))
+
+        return max(completed, key=order)
+
+    def _prepare_terminal_publication_snapshot(
+        self,
+        task: TaskRecord,
+        run: object,
+    ) -> bool:
+        """Freeze a final source graph before the task archive is sealed."""
+
+        run_id = getattr(run, "id", None)
+        if not isinstance(run_id, str):
+            return False
+        try:
+            if load_publication_snapshot(self.config, task.id, run_id) is not None:
+                return True
+            graph_builder = getattr(self.executor, "_integration_publication_graph", None)
+            graph = (
+                graph_builder(task)
+                if callable(graph_builder)
+                else publication_graph_for_task(self.config, self.store, task)
+            )
+            return _write_publication_snapshot(self.config, task.id, run_id, graph)
+        except Exception as exc:
+            self._log(
+                "terminal publication snapshot unavailable "
+                f"error={exc.__class__.__name__}"
+            )
+            return False
+
+    def _terminal_publication_receipts_verified(
+        self,
+        task: TaskRecord,
+        generation: object,
+    ) -> tuple[bool, str]:
+        """Authenticate durable receipts against the immutable source graph."""
+
+        publication_id = getattr(generation, "publication_id", None)
+        if not isinstance(publication_id, str):
+            return False, "invalid_generation"
+        receipts_listing = getattr(self.store, "list_publication_receipts", None)
+        if not callable(receipts_listing):
+            receipts_listing = getattr(self.store, "list_receipts", None)
+        if not callable(receipts_listing):
+            return False, "receipts_unavailable"
+        try:
+            receipts = list(receipts_listing(publication_id))
+        except Exception:
+            return False, "receipts_unavailable"
+
+        source = self._publication_source(generation)
+        if source is None:
+            return False, "source_unavailable"
+        try:
+            composed = compose_publication_generation(
+                source,
+                task_id=task.id,
+                credential_sources=(),
+            )
+        except Exception:
+            return False, "composition_failed"
+        if not isinstance(composed, ComposedPublicationGeneration):
+            return False, "composition_incomplete"
+
+        expected_identity = {
+            "publication_id": composed.publication_id,
+            "task_id": composed.task_id,
+            "run_id": composed.run_id,
+            "generation_boundary": composed.generation_boundary,
+            "metadata_digest": composed.metadata_digest,
+            "idempotency_key": composed.idempotency_key,
+        }
+        for name, expected in expected_identity.items():
+            if getattr(generation, name, None) != expected:
+                return False, "generation_mismatch"
+
+        expected: dict[tuple[str, str], tuple[str, int, str | None]] = {}
+        try:
+            for item in composed.objects:
+                expected[(ReceiptClass.public.value, item.public_key)] = (
+                    item.sha256,
+                    item.byte_size,
+                    item.logical_path,
+                )
+            for item in composed.private_originals:
+                key = private_original_key(item.task_id, item.run_id, item.sha256)
+                expected[(ReceiptClass.private.value, key)] = (
+                    item.sha256,
+                    item.byte_size,
+                    None,
+                )
+        except Exception:
+            return False, "composition_incomplete"
+
+        expected_objects = getattr(generation, "objects", None)
+        expected_artifacts = getattr(generation, "artifacts", None)
+        if (
+            not isinstance(expected_objects, int)
+            or isinstance(expected_objects, bool)
+            or not isinstance(expected_artifacts, int)
+            or isinstance(expected_artifacts, bool)
+            or expected_objects != len(expected)
+            or expected_artifacts != len(composed.objects)
+        ):
+            return False, "receipt_count_mismatch"
+
+        actual: dict[tuple[str, str], tuple[str, int, str | None]] = {}
+        try:
+            for receipt in receipts:
+                receipt_class = getattr(receipt, "receipt_class", None)
+                if receipt_class is None:
+                    receipt_class = getattr(receipt, "object_class", None)
+                receipt_class = getattr(receipt_class, "value", receipt_class)
+                key = getattr(receipt, "content_key", None)
+                digest = getattr(receipt, "sha256", None)
+                byte_size = getattr(receipt, "byte_size", None)
+                if (
+                    receipt_class not in {ReceiptClass.public.value, ReceiptClass.private.value}
+                    or not isinstance(key, str)
+                    or not isinstance(digest, str)
+                    or not isinstance(byte_size, int)
+                    or isinstance(byte_size, bool)
+                ):
+                    return False, "receipt_invalid"
+                identity = (receipt_class, key)
+                if identity in actual:
+                    return False, "receipt_duplicate"
+                actual[identity] = (
+                    digest,
+                    byte_size,
+                    getattr(receipt, "logical_path", None),
+                )
+        except Exception:
+            return False, "receipt_invalid"
+        if actual != expected:
+            return False, "receipt_mismatch"
+        return True, "verified"
+
+    def _terminal_publication_gate(self, task: TaskRecord) -> bool:
+        """Require the final durable generation and all verified receipts."""
+
+        if not getattr(getattr(self.config, "publication", None), "enabled", False):
+            return True
+        run = self._terminal_publication_run(task.id)
+        if run is None:
+            return self._terminal_publication_block(task.id, "final_run_missing")
+        run_id = getattr(run, "id", None)
+        if not isinstance(run_id, str):
+            return self._terminal_publication_block(task.id, "final_run_invalid")
+        try:
+            queued = enqueue_materialized_publication(self.config, self.store, task, run)
+        except Exception as exc:
+            self._log(
+                "terminal publication enqueue failed "
+                f"error={exc.__class__.__name__}"
+            )
+            queued = None
+        candidate = getattr(queued, "generation", None)
+        if candidate is None and getattr(queued, "publication_id", None) is not None:
+            candidate = queued
+        publication_id = getattr(candidate, "publication_id", None)
+        if not isinstance(publication_id, str):
+            listing = getattr(self.store, "list_publication_generations", None)
+            if not callable(listing):
+                listing = getattr(self.store, "list_generations", None)
+            if callable(listing):
+                try:
+                    matches = [
+                        item
+                        for item in listing(task_id=task.id)
+                        if getattr(item, "run_id", None) == run_id
+                    ]
+                except Exception:
+                    matches = []
+                if len(matches) == 1:
+                    candidate = matches[0]
+                    publication_id = getattr(candidate, "publication_id", None)
+        if not isinstance(publication_id, str):
+            return self._terminal_publication_block(task.id, "final_generation_missing")
+        if (
+            getattr(candidate, "task_id", task.id) != task.id
+            or getattr(candidate, "run_id", run_id) != run_id
+        ):
+            return self._terminal_publication_block(
+                task.id,
+                "final_generation_mismatch",
+                publication_id=publication_id,
+            )
+
+        getter = getattr(self.store, "get_publication_generation", None)
+        if not callable(getter):
+            getter = getattr(self.store, "get_generation", None)
+        try:
+            generation = getter(publication_id) if callable(getter) else candidate
+        except Exception:
+            generation = None
+        if generation is None:
+            return self._terminal_publication_block(
+                task.id,
+                "final_generation_missing",
+                publication_id=publication_id,
+            )
+        if (
+            getattr(generation, "task_id", None) != task.id
+            or getattr(generation, "run_id", None) != run_id
+            or getattr(generation, "publication_id", None) != publication_id
+        ):
+            return self._terminal_publication_block(
+                task.id,
+                "final_generation_mismatch",
+                publication_id=publication_id,
+            )
+        state = getattr(getattr(generation, "state", None), "value", getattr(generation, "state", None))
+        if state != "exposed":
+            return self._terminal_publication_block(
+                task.id,
+                f"final_generation_{str(state or 'unknown')}",
+                publication_id=publication_id,
+            )
+        if hasattr(generation, "exposed_at") and getattr(generation, "exposed_at") is None:
+            return self._terminal_publication_block(
+                task.id,
+                "exposure_timestamp_missing",
+                publication_id=publication_id,
+            )
+        verified, reason = self._terminal_publication_receipts_verified(task, generation)
+        if not verified:
+            return self._terminal_publication_block(
+                task.id,
+                reason,
+                publication_id=publication_id,
+            )
+        return True
+
     def finalize_terminal_task(self, task_id: str) -> bool:
         """Seal immutable evidence, then converge terminal-only cleanup."""
 
@@ -2385,6 +2688,12 @@ class StewardDaemon:
                         pipeline,
                         runs=runs,
                     )
+                if getattr(
+                    getattr(self.config, "publication", None), "enabled", False
+                ):
+                    final_run = self._terminal_publication_run(task.id)
+                    if final_run is not None:
+                        self._prepare_terminal_publication_snapshot(task, final_run)
                 archive.seal(
                     task.id,
                     str(task.status),
@@ -2407,6 +2716,9 @@ class StewardDaemon:
         if not any(event.kind == "cleanup_pending" for event in events):
             self.store.add_event(task.id, "cleanup_pending", "terminal manifest verified")
         events = self.store.events(task.id)
+
+        if not self._terminal_publication_gate(task):
+            return False
 
         if not any(event.kind == "cleanup.container_removed" for event in events):
             try:

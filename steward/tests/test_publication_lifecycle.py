@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.generation import PublicationGeneration
 from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
+from coquic_steward.publication.outbox import PublicationReceipt, ReceiptClass
+from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.publication.scanner import ScannerFinding, ScannerReport
 
 
@@ -475,6 +478,68 @@ def test_disabled_publication_preflight_fails_closed_on_scan_error(
     assert len(finished) == 2
     assert store.items[0].data["reason_codes"] == [ReasonCode.scanner_failure.value]
     assert "private-secret-value" not in transcript.path.read_text(encoding="utf-8")
+
+
+def test_terminal_publication_receipts_match_immutable_generation(
+    monkeypatch,
+) -> None:
+    graph = _publication_graph("terminal-receipts")
+    from coquic_steward.publication.generation import compose_publication_generation
+
+    composed = compose_publication_generation(
+        graph,
+        scanner_runner=lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b""),
+    )
+    assert isinstance(composed, PublicationGeneration)
+    now = datetime.now(timezone.utc)
+    durable = replace(
+        composed.outbox_record,
+        state="exposed",
+        updated_at=now,
+        exposed_at=now,
+    )
+    receipts = [
+        PublicationReceipt.public_receipt(
+            item.sha256,
+            item.byte_size,
+            item.public_key,
+            now,
+            item.logical_path,
+        )
+        for item in composed.objects
+    ]
+    receipts.extend(
+        PublicationReceipt.private_receipt(
+            item.sha256,
+            item.byte_size,
+            private_original_key(item.task_id, item.run_id, item.sha256),
+            now,
+        )
+        for item in composed.private_originals
+    )
+
+    class Store:
+        def list_publication_receipts(self, _publication_id):
+            return list(receipts)
+
+    task = SimpleNamespace(id=durable.task_id)
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon._publication_source = lambda _generation: graph
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.compose_publication_generation",
+        lambda *_args, **_kwargs: composed,
+    )
+
+    assert daemon._terminal_publication_receipts_verified(task, durable) == (
+        True,
+        "verified",
+    )
+    receipts.pop()
+    assert daemon._terminal_publication_receipts_verified(task, durable) == (
+        False,
+        "receipt_mismatch",
+    )
 
 
 def test_materialized_success_enqueues_deterministically_without_transport(

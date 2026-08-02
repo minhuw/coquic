@@ -55,8 +55,11 @@ boundary. Do not use it to protect sensitive data.
 - [STACK.md](STACK.md): approved framework, Tailwind, shadcn/ui, and
   shadcn/typeset integration rules plus the deployment boundary.
 - [DATA.md](DATA.md): canonical cloud publication data model, naming rules,
-  resources, and validation policy. It supersedes the historical raw archive
-  notes in `STEWARD_DATASET.md`.
+  resources, and validation policy.
+- [STEWARD_DATASET.md](STEWARD_DATASET.md): the detailed Steward
+  cloud-publication consumer boundary for task graphs, immutable artifacts,
+  trajectories, and failure states. Its former raw filesystem model is
+  historical context only.
 - [API.md](API.md): HTTP and event-stream contracts.
 - [WORKBENCH.md](WORKBENCH.md): clean UI-to-WASM command/event boundary.
 - [MIGRATION.md](MIGRATION.md): independent cloud rollout, activation,
@@ -64,8 +67,9 @@ boundary. Do not use it to protect sensitive data.
 - `schemas/`: normative JSON Schema 2020-12 documents.
 - `examples/`: representative valid payloads for implementers and tests.
 
-`STEWARD_DATASET.md` is retained only as historical context. It is not a Site
-reader input or a production deployment contract.
+`STEWARD_DATASET.md` is the current detailed cloud consumer contract. Only its
+former raw filesystem, rsync, importer, and cache model is non-normative
+historical context.
 
 ## Normative language
 

@@ -134,9 +134,10 @@
   symlinked host configuration fails before mutation.
 - The on-demand checker MUST accept a valid empty publication with explicit
   detail/trajectory/artifact skips. With one real task it MUST select the first
-  visible task, verify ownership and complete trajectory content, and prove one
-  same-origin `307` redirect to a validated public key. It MUST not require a
-  scheduled monitor, canary, polling loop, or fabricated task.
+  visible task, verify ownership and complete trajectory content, call the
+  same-origin artifact action, and verify one `307` redirect to a safe HTTPS
+  location whose decoded path matches the validated public key. It MUST not
+  require a scheduled monitor, canary, polling loop, or fabricated task.
 - Run the executable cloud reader gates with no live credential:
   `nix develop -c npm --prefix site-v2 run test:unit` and
   `nix develop -c npm --prefix site-v2 run test:steward`.

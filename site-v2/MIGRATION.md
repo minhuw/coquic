@@ -76,7 +76,7 @@ empty publication. It must not require a canary, schedule, polling loop, or
 synthetic task.
 
 ```sh
-python scripts/check-steward-deployment.py \
+nix develop -c uv run --project steward python scripts/check-steward-deployment.py \
   --base-url https://coquic.minhuw.dev \
   --output .remote-ci/steward-deployment.json
 ```
@@ -84,9 +84,10 @@ python scripts/check-steward-deployment.py \
 For an empty deployment, the checker proves valid status and task envelopes and
 records explicit skips for detail, trajectory, and artifacts. Once one real
 published task exists, it selects the first task, verifies task ownership,
-loads its complete trajectory, and follows exactly one validated same-origin
-artifact action to a single 307 redirect under the public R2 base. A failed
-schema, ownership, integrity, or redirect check fails closed.
+loads its complete trajectory, calls the same-origin artifact action, and
+verifies one `307` redirect to a safe HTTPS location whose decoded path matches
+the validated public key. A failed schema, ownership, integrity, or redirect
+check fails closed.
 
 The checker is on-demand only. There is no scheduled live monitor or dedicated
 canary, and no deployment step fabricates an empty or real task.
@@ -104,11 +105,15 @@ Provider rollback is a separately reviewed operator action. A schema change
 requires a forward migration review; an infrastructure change must pass the
 same preview safety checks. No routine Site deploy invokes that action.
 
-Retired Site replica roots and any Steward source archives remain available
-through the rollback window. After the cutover has been verified with the empty
-or first-real-task checker and the operator's rollback window has elapsed, an
-operator may remove those old roots manually. Ordinary deploy and rollback do
-not perform that cleanup.
+Retired Site replica roots remain available through the rollback window. The
+Steward source archives and private cache remain preserved at
+`/opt/coquic-demo/steward/tasks`, `/opt/coquic-demo/steward/control-loop`, and
+`/opt/coquic-demo/steward/cache/site-v2.sqlite`; they are not Site deployment
+cleanup targets. After the cutover has been verified with the empty or
+first-real-task checker and the operator's rollback window has elapsed, an
+operator may remove retired Site replica roots manually. This deletion is
+explicit and never part of ordinary deploy or rollback, which do not delete
+those roots or the preserved Steward paths.
 
 ## Per-route acceptance checklist
 

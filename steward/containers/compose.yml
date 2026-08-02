@@ -68,8 +68,12 @@ services:
         target: /run/secrets/codex-api-key
       - source: github_identity
         target: /run/secrets/github-identity
-      - source: dataset_identity
-        target: /run/secrets/dataset-identity
+      - source: d1_token
+        target: /run/secrets/d1-read-token
+      - source: r2_access_key_id
+        target: /run/secrets/r2-access-key-id
+      - source: r2_secret_access_key
+        target: /run/secrets/r2-secret-access-key
     healthcheck:
       test: ["CMD", "/usr/bin/env", "coquic-steward", "health"]
       interval: 30s
@@ -82,5 +86,9 @@ secrets:
     file: ${CODEX_API_KEY_PATH:?}
   github_identity:
     file: ${GITHUB_IDENTITY_PATH:?}
-  dataset_identity:
-    file: ${DATASET_IDENTITY_PATH:?}
+  d1_token:
+    file: ${D1_TOKEN_PATH:?}
+  r2_access_key_id:
+    file: ${R2_ACCESS_KEY_ID_PATH:?}
+  r2_secret_access_key:
+    file: ${R2_SECRET_ACCESS_KEY_PATH:?}

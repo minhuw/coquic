@@ -71,7 +71,9 @@ check_private_file() {
 validate_credentials() {
   check_private_file "${CODEX_API_KEY_PATH:-$home/private/credentials/codex-api}" 'Codex API credential'
   check_private_file "${GITHUB_IDENTITY_PATH:-$home/private/credentials/github}" 'GitHub integration identity'
-  check_private_file "${DATASET_IDENTITY_PATH:-$home/private/credentials/dataset-sync}" 'dataset publication identity'
+  check_private_file "${D1_TOKEN_PATH:-$home/private/credentials/d1-read-token}" 'D1 publication token'
+  check_private_file "${R2_ACCESS_KEY_ID_PATH:-$home/private/credentials/r2-access-key-id}" 'R2 access-key ID'
+  check_private_file "${R2_SECRET_ACCESS_KEY_PATH:-$home/private/credentials/r2-secret-access-key}" 'R2 secret access key'
   check_private_file "${KNOWN_HOSTS_PATH:-$home/private/credentials/known_hosts}" 'known-hosts'
 }
 

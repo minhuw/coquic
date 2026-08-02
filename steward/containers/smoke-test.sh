@@ -32,6 +32,9 @@ cleanup() {
   if [[ "$remove_loaded_image" -eq 1 && -n "$loaded_image" ]]; then
     docker image rm "$loaded_image" >/dev/null 2>&1 || true
   fi
+  if [[ -d "$tmp" ]]; then
+    chmod -R u+rwX "$tmp" >/dev/null 2>&1 || true
+  fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -45,6 +48,7 @@ if [[ "$mode" == production-compose ]]; then
   bash "$root/steward/containers/test-manage.sh" --config
   bash "$root/steward/containers/test-manage.sh" --bootstrap
   bash "$root/steward/containers/test-manage.sh" --lifecycle
+  bash "$root/steward/containers/smoke-test.sh" --planner
   echo "steward container smoke test passed (production-compose; fake state only)"
   exit 0
 fi
@@ -86,7 +90,10 @@ if labels["coquic.steward.owner"] != "steward":
 
 required = {
     "task": ("bin/codex", "bin/git", "bin/pre-commit", "bin/steward-task-validate", "bin/uv", "bin/zig"),
-    "daemon": ("bin/coquic-steward", "bin/docker", "bin/gh", "bin/git", "bin/ssh"),
+    "daemon": (
+        "bin/coquic-steward", "bin/docker", "bin/gh", "bin/git", "bin/ssh",
+        "bin/tesseract", "bin/trufflehog",
+    ),
     "validation": ("bin/git", "bin/nix", "bin/pre-commit", "bin/uv", "bin/zig", "bin/validation-entrypoint.sh"),
 }[kind]
 for path in required:
@@ -97,7 +104,11 @@ if kind == "daemon" and not any(
 ):
     raise SystemExit("daemon image does not contain the Steward Python package")
 if kind == "task":
-    forbidden = ("bin/docker", "bin/gh", "auth.json", "docker.sock", ".ssh/id_")
+    forbidden = (
+        "bin/docker", "bin/gh", "auth.json", "docker.sock", ".ssh/id_",
+        "run/secrets", "d1-read-token", "r2-access-key-id", "r2-secret-access-key",
+        "D1_TOKEN_PATH", "R2_ACCESS_KEY_ID_PATH", "R2_SECRET_ACCESS_KEY_PATH",
+    )
     for path in names:
         if any(item in path for item in forbidden):
             raise SystemExit(f"task image contains daemon authority material: {path}")
@@ -106,7 +117,11 @@ if kind == "validation":
         raise SystemExit("validation image runtime label is missing")
     if labels.get("coquic.steward.codex-version") != "none":
         raise SystemExit("validation image unexpectedly contains Codex identity")
-    forbidden = ("bin/codex", "bin/docker", "bin/gh", "auth.json", ".ssh/id_")
+    forbidden = (
+        "bin/codex", "bin/docker", "bin/gh", "auth.json", ".ssh/id_",
+        "run/secrets", "d1-read-token", "r2-access-key-id", "r2-secret-access-key",
+        "D1_TOKEN_PATH", "R2_ACCESS_KEY_ID_PATH", "R2_SECRET_ACCESS_KEY_PATH",
+    )
     for path in names:
         if any(item in path for item in forbidden):
             raise SystemExit(f"validation image contains forbidden authority material: {path}")
@@ -211,38 +226,113 @@ if [[ "$mode" == planner ]]; then
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from coquic_steward.execution.container import PlannerContainerRuntime
-from coquic_steward.execution.container_config import PlannerContainerConfig
+from coquic_steward.execution.container import (
+    PlannerContainerRuntime,
+    TaskContainerRuntime,
+    ValidationContainerRuntime,
+)
+from coquic_steward.execution.container_config import (
+    PlannerContainerConfig,
+    TaskContainerConfig,
+    ValidationContainerConfig,
+)
+
+FORBIDDEN = (
+    "run/secrets",
+    "d1-read-token",
+    "d1_token",
+    "d1_token_path",
+    "d1_write_token_path",
+    "r2-access-key-id",
+    "r2-secret-access-key",
+    "r2_access_key_id",
+    "r2_secret_access_key",
+    "r2_secret_access_key_path",
+    "cloudflare",
+    "cloudflare_account_id",
+    "cloudflare_database_id",
+)
+
+
+def assert_no_publication_authority(values: object) -> None:
+    rendered = repr(values).lower()
+    assert all(item not in rendered for item in FORBIDDEN)
 
 with TemporaryDirectory() as value:
     root = Path(value)
     history = root / "history"
     private = root / "private"
     output = root / "output"
-    for path in (history, private, output):
+    worktree = root / "worktree"
+    archive = root / "archive"
+    sessions = root / "sessions"
+    linked_git = root / "linked-git"
+    common_git = root / "common-git"
+    scratch = root / "scratch"
+    store = root / "store"
+    for path in (history, private, output, worktree, archive, sessions, linked_git, common_git, scratch, store):
         path.mkdir()
-    config = PlannerContainerConfig(
+    planner_config = PlannerContainerConfig(
         image="coquic-steward-task",
         image_digest="sha256:" + "a" * 64,
         history_root=history,
         private_root=private,
         output_root=output,
     )
-    argv = PlannerContainerRuntime(config).create_argv()
-    assert config.network == "bridge"
-    assert argv[argv.index("--network") + 1] == "bridge"
-    assert argv[argv.index("--cap-drop") + 1] == "ALL"
-    assert "--cap-add" not in argv
-    assert "--privileged" not in argv
-    assert all("docker.sock" not in value for value in argv)
-    assert config.container_name == "coquic-steward-planner"
-    assert [mount.target for mount in config.mounts] == [
+    planner_argv = PlannerContainerRuntime(planner_config).create_argv()
+    assert planner_config.network == "bridge"
+    assert planner_argv[planner_argv.index("--network") + 1] == "bridge"
+    assert planner_argv[planner_argv.index("--cap-drop") + 1] == "ALL"
+    assert "--cap-add" not in planner_argv
+    assert "--privileged" not in planner_argv
+    assert all("docker.sock" not in value for value in planner_argv)
+    assert planner_config.container_name == "coquic-steward-planner"
+    assert [mount.target for mount in planner_config.mounts] == [
         "/planner/history",
         "/planner/session",
         "/planner/output",
     ]
-    assert all(mount.source not in {Path("/"), Path("/var/run/docker.sock")} for mount in config.mounts)
-print("planner container boundary ok")
+    assert all(mount.source not in {Path("/"), Path("/var/run/docker.sock")} for mount in planner_config.mounts)
+    planner_environment = planner_config.environment(
+        "planner", session_uid=10000, session_id="smoke-planner"
+    )
+
+    task_config = TaskContainerConfig(
+        task_id="smoke-task",
+        image="coquic-steward-task",
+        image_digest="sha256:" + "b" * 64,
+        worktree=worktree,
+        archive=archive,
+        private_sessions=sessions,
+        git_dir=linked_git,
+        git_common_dir=common_git,
+        scratch=scratch,
+    )
+    task_argv = TaskContainerRuntime(task_config).create_argv()
+    task_environment = task_config.environment(
+        "reviewer", session_uid=10000, session_id="smoke-task"
+    )
+
+    validation_config = ValidationContainerConfig(
+        run_id="smoke-validation",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "c" * 64,
+        worktree=worktree,
+        output=output,
+        store=store,
+    )
+    validation_argv = ValidationContainerRuntime(validation_config).create_argv()
+
+    for candidate in (
+        planner_argv,
+        planner_environment,
+        task_argv,
+        task_environment,
+        validation_argv,
+        validation_config.labels,
+    ):
+        assert_no_publication_authority(candidate)
+print("planner/task/validation container boundary ok")
 PY
   echo "steward container smoke test passed ($mode; fake inputs only)"
   exit 0

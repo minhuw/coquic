@@ -29,13 +29,21 @@ services:
         target: /run/secrets/codex-api
       - source: github
         target: /run/secrets/github-identity
-      - source: dataset
-        target: /run/secrets/dataset-identity
+      - source: d1-token
+        target: /run/secrets/d1-read-token
+      - source: r2-access-key-id
+        target: /run/secrets/r2-access-key-id
+      - source: r2-secret-access-key
+        target: /run/secrets/r2-secret-access-key
 
 secrets:
   codex:
     file: /tmp/fake-codex
   github:
     file: /tmp/fake-github
-  dataset:
-    file: /tmp/fake-dataset
+  d1-token:
+    file: /tmp/fake-d1-read-token
+  r2-access-key-id:
+    file: /tmp/fake-r2-access-key-id
+  r2-secret-access-key:
+    file: /tmp/fake-r2-secret-access-key

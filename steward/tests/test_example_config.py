@@ -8,7 +8,7 @@ import pytest
 from coquic_steward.core.config import load_config
 
 
-def test_steward_example_config_loads_with_raw_archive_settings(repo: Path) -> None:
+def test_steward_example_config_loads_with_publication_settings(repo: Path) -> None:
     example = Path(__file__).resolve().parents[1] / "steward.example.toml"
 
     config = load_config(repo_root=repo, config_path=example)
@@ -16,10 +16,6 @@ def test_steward_example_config_loads_with_raw_archive_settings(repo: Path) -> N
     assert config.scheduler_wait_interval_sec == 1.0
     assert config.control_loop_dir == config.coquic_home / "control-loop"
     assert config.tasks_dir == config.coquic_home / "tasks"
-    assert Path(config.dataset_sync.ssh_bin).is_absolute()
-    assert Path(config.dataset_sync.rsync_bin).is_absolute()
-    assert Path(config.dataset_sync.ssh_bin).name == "ssh"
-    assert Path(config.dataset_sync.rsync_bin).name == "rsync"
     assert config.publication.enabled is False
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
@@ -29,7 +25,6 @@ def _write_publication_config(
     tmp_path: Path,
     *,
     publication_overrides: str = "",
-    dataset_enabled: bool = False,
 ) -> tuple[Path, tuple[Path, Path, Path], Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     credentials = tuple(tmp_path / name for name in ("d1-token", "access-key", "secret-key"))
@@ -39,14 +34,6 @@ def _write_publication_config(
     staging = tmp_path / "publication-staging"
     staging.mkdir()
     staging.chmod(0o700)
-    dataset_values = (
-        "remote_user = \"archive\"\n"
-        "remote_host = \"receiver.example.test\"\n"
-        f"identity_path = {str(credentials[1])!r}\n"
-        f"known_hosts_path = {str(credentials[2])!r}\n"
-        if dataset_enabled
-        else ""
-    )
     config_path = tmp_path / "publication.toml"
     config_path.write_text(
         f"""
@@ -63,10 +50,6 @@ private_bucket = "coquic-private"
 public_base_url = "https://objects.example.test/coquic/"
 staging_root = {str(staging)!r}
 {publication_overrides}
-
-[steward.dataset_sync]
-enabled = {str(dataset_enabled).lower()}
-{dataset_values}
 """,
         encoding="utf-8",
     )
@@ -131,7 +114,7 @@ def test_enabled_publication_rejects_unsafe_values(
         load_config(repo_root=repo, config_path=config_path)
 
 
-def test_publication_rejects_unknown_keys_and_dual_transport(
+def test_publication_rejects_unknown_keys_and_dataset_section(
     repo: Path, tmp_path: Path
 ) -> None:
     unknown_path, _credentials, _staging = _write_publication_config(
@@ -141,12 +124,13 @@ def test_publication_rejects_unknown_keys_and_dual_transport(
     with pytest.raises(ValueError, match="unsupported keys"):
         load_config(repo_root=repo, config_path=unknown_path)
 
-    dual_path, _credentials, _staging = _write_publication_config(
-        tmp_path / "dual",
-        dataset_enabled=True,
+    dataset_path = tmp_path / "dataset.toml"
+    dataset_path.write_text(
+        "[steward.dataset_sync]\nenabled = false\n",
+        encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="cannot both be enabled"):
-        load_config(repo_root=repo, config_path=dual_path)
+    with pytest.raises(ValueError, match="unknown configuration section"):
+        load_config(repo_root=repo, config_path=dataset_path)
 
 
 def test_explicit_runtime_repository_loads_config_outside_a_checkout(

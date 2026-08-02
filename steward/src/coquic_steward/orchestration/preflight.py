@@ -37,7 +37,6 @@ class PreflightReport:
 
     checks: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    configured_sync: bool = False
 
     @property
     def summary(self) -> str:
@@ -53,8 +52,8 @@ def run_preflight(
 ) -> PreflightReport:
     """Validate all daemon-owned launch boundaries before dispatch.
 
-    Checks are intentionally local and bounded. Docker, SSH, and rsync are
-    required only when their corresponding section is explicitly enabled.
+    Checks are intentionally local and bounded. Docker is required only when
+    the task container section is explicitly enabled.
     """
 
     config.ensure_dirs()
@@ -119,32 +118,6 @@ def run_preflight(
         _validate_task_image_identity(inspect.stdout, container.runtime_protocol)
         checks.extend(("docker", "task-image"))
 
-    sync_configured = False
-    if config.dataset_sync.enabled:
-        sync = config.dataset_sync
-        _check_secret_file(sync.identity_path, "dataset-sync identity")
-        _check_known_hosts(sync.known_hosts_path)
-        _check_executable(
-            sync.ssh_bin,
-            "SSH",
-            expected_name="ssh",
-            path_command="ssh",
-        )
-        _check_executable(
-            sync.rsync_bin,
-            "rsync",
-            expected_name="rsync",
-            path_command="rsync",
-        )
-        # Construction performs strict host/user/receiver validation without
-        # launching a network operation or reading credential bytes.
-        try:
-            sync.to_dataset_sync_config(config.tasks_dir, config.control_loop_dir)
-        except Exception as exc:
-            raise StewardPreflightError("preflight failed: dataset sync configuration is invalid") from exc
-        sync_configured = True
-        checks.append("dataset-sync")
-
     if (
         check_remote_push
         and config.integration_mode == IntegrationMode.push_main.value
@@ -152,7 +125,7 @@ def run_preflight(
     ):
         preflight_remote_push(config)
         checks.append("remote-push")
-    return PreflightReport(tuple(checks), tuple(warnings), sync_configured)
+    return PreflightReport(tuple(checks), tuple(warnings))
 
 
 def _validate_deployment_boundary(config: StewardConfig) -> None:

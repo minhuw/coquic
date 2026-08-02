@@ -36,7 +36,6 @@ from coquic_steward.planning import (
 from coquic_steward.core.config import (
     StewardConfig,
     StewardContainerConfig,
-    StewardDatasetSyncConfig,
 )
 from coquic_steward.execution.container import TaskContainerRuntime
 from coquic_steward.execution.container_config import TaskContainerConfig
@@ -1237,7 +1236,7 @@ def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):
 
     assert daemon.preflight_report is not None
     assert "epoch" in daemon.preflight_report.checks
-    assert daemon.preflight_report.configured_sync is False
+    assert "dataset-sync" not in daemon.preflight_report.checks
     assert "private" not in daemon.preflight_report.summary
     assert config.epoch_path.exists()
 
@@ -1289,7 +1288,7 @@ def test_preflight_rejects_unrelated_task_image_metadata(config, monkeypatch):
         run_preflight(nested, check_remote_push=False)
 
 
-def test_preflight_rejects_unlocked_docker_and_sync_executables(config, monkeypatch):
+def test_preflight_rejects_unlocked_docker(config, monkeypatch):
     key = config.coquic_home / "codex-key"
     key.write_text("fake\n", encoding="utf-8")
     key.chmod(0o600)
@@ -1318,29 +1317,6 @@ def test_preflight_rejects_unlocked_docker_and_sync_executables(config, monkeypa
 
     with pytest.raises(StewardPreflightError, match="Docker executable identity"):
         run_preflight(nested, check_remote_push=False)
-
-    identity = config.coquic_home / "task-sync-key"
-    identity.write_text("fake\n", encoding="utf-8")
-    identity.chmod(0o600)
-    known_hosts = config.coquic_home / "known-hosts"
-    known_hosts.write_text("receiver.example.test ssh-ed25519 fake\n", encoding="utf-8")
-    sync = StewardDatasetSyncConfig(
-        enabled=True,
-        remote_user="archive",
-        remote_host="receiver.example.test",
-        identity_path=identity,
-        known_hosts_path=known_hosts,
-        ssh_bin="/bin/true",
-        rsync_bin=shutil.which("rsync") or "rsync",
-    )
-    sync_config = StewardConfig(
-        repo_root=config.repo_root,
-        dataset_sync=sync,
-        local_codex_test_harness=True,
-    )
-
-    with pytest.raises(StewardPreflightError, match="SSH executable identity"):
-        run_preflight(sync_config, check_remote_push=False)
 
 
 def test_startup_reconcile_orders_task_identity_before_dispatch(config):
@@ -1970,7 +1946,6 @@ def test_shutdown_does_not_claim_failed_container_stop(config):
     assert result.state.value == "stopping"
     assert daemon.lifecycle_state.value == "stopping"
     assert result.stopped_containers == 0
-    assert result.final_sync_attempted is False
     assert ("stop", task.id) in supervisor.calls
 
 
@@ -2305,96 +2280,6 @@ def test_recovered_result_advances_exact_interrupted_phase_once(config):
     assert second.disposition == "resumed"
     assert len(matching_finishes) == 1
     assert len(matching_completions) == 1
-
-
-def test_sync_immediate_cadence_coalesces_overlap_and_failure_is_nonblocking(
-    config, monkeypatch
-):
-    store = TaskStore(config.db_path)
-    task, _ = _task(store, "sync independent")
-    daemon = StewardDaemon(config, store)
-    object.__setattr__(
-        daemon.config,
-        "dataset_sync",
-        SimpleNamespace(
-            enabled=True,
-            transfer_timeout_seconds=1,
-            to_dataset_sync_config=lambda *_roots: object(),
-        ),
-    )
-    calls = []
-
-    class FailingSync:
-        def __init__(self, *_args, **_kwargs):
-            calls.append("start")
-
-        def run_once(self):
-            raise RuntimeError("fake receiver unavailable")
-
-    monkeypatch.setattr(
-        "coquic_steward.orchestration.daemon.StewardDatasetSynchronizer",
-        FailingSync,
-    )
-    daemon._sync_running = True
-    assert daemon._run_dataset_sync_cycle() is False
-    assert calls == []
-    daemon._sync_running = False
-    assert daemon._run_dataset_sync_cycle() is False
-    assert calls == ["start"]
-    assert store.get(task.id).status == TaskStatus.queued
-
-
-def test_final_sync_obeys_shutdown_deadline(config):
-    daemon = StewardDaemon(config, TaskStore(config.db_path))
-    object.__setattr__(
-        daemon.config,
-        "dataset_sync",
-        SimpleNamespace(
-            enabled=True,
-            transfer_timeout_seconds=30,
-            to_dataset_sync_config=lambda *_roots: object(),
-        ),
-    )
-    release = threading.Event()
-    daemon._run_dataset_sync_cycle = lambda: release.wait(2)
-
-    started = time.monotonic()
-    daemon._stop_dataset_sync(final=True, deadline=started + 0.05)
-    elapsed = time.monotonic() - started
-    release.set()
-
-    assert elapsed < 0.5
-    assert daemon._sync_final_attempted
-    assert daemon._sync_stop.is_set()
-
-
-def test_final_sync_requires_control_loop_writer_to_stop(config):
-    daemon = StewardDaemon(config, TaskStore(config.db_path))
-
-    class StuckWriter:
-        def __init__(self) -> None:
-            self.alive = True
-            self.join_timeouts: list[float | None] = []
-
-        def join(self, timeout: float | None = None) -> None:
-            self.join_timeouts.append(timeout)
-
-        def is_alive(self) -> bool:
-            return self.alive
-
-    writer = StuckWriter()
-    daemon._control_loop_thread = writer
-
-    daemon._stop_control_loop_writer()
-
-    assert writer.join_timeouts == [2.0]
-    assert daemon._control_loop_thread is writer
-    assert not daemon._public_writers_quiescent()
-
-    writer.alive = False
-    daemon._stop_control_loop_writer()
-    assert daemon._control_loop_thread is None
-    assert daemon._public_writers_quiescent()
 
 
 def test_terminal_seal_uses_canonical_utc_timestamp(config):

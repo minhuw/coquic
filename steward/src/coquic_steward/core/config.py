@@ -61,8 +61,6 @@ DEFAULT_SIGNAL_SUPPRESSION_HOURS = 24
 DEFAULT_SIGNAL_MAX_ITEMS = 12
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 VALID_TELEMETRY_BILLING_MODES = {"unknown", "chatgpt", "api"}
-_SAFE_SYNC_USER = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-_SAFE_SYNC_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 _SAFE_RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _CLOUDFLARE_ACCOUNT_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 _CLOUDFLARE_DATABASE_ID = re.compile(
@@ -160,88 +158,6 @@ class StewardContainerConfig:
     @property
     def image_digest_locked(self) -> bool:
         return self.image_digest is not None
-
-
-@dataclass(frozen=True)
-class StewardDatasetSyncConfig:
-    """Optional daemon-only raw dataset transport settings.
-
-    Disabled mode deliberately accepts absent credentials so development and
-    unit tests do not need fake files. Enabled mode is strict and is converted
-    to ``DatasetSyncConfig`` by :meth:`to_dataset_sync_config`.
-    """
-
-    enabled: bool = False
-    remote_user: str = ""
-    remote_host: str = ""
-    remote_port: int = 22
-    identity_path: Path | None = None
-    known_hosts_path: Path | None = None
-    ssh_bin: str = "ssh"
-    rsync_bin: str = "rsync"
-    connect_timeout_seconds: float = 10.0
-    transfer_timeout_seconds: float = 300.0
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.enabled, bool):
-            raise ValueError("dataset_sync.enabled must be a boolean")
-        object.__setattr__(
-            self, "ssh_bin", _bounded_token(self.ssh_bin, "dataset_sync.ssh_bin")
-        )
-        object.__setattr__(
-            self,
-            "rsync_bin",
-            _bounded_token(self.rsync_bin, "dataset_sync.rsync_bin"),
-        )
-        if isinstance(self.remote_port, bool) or not isinstance(self.remote_port, int) or not 1 <= self.remote_port <= 65535:
-            raise ValueError("dataset_sync.remote_port must be between 1 and 65535")
-        for value, label in ((self.connect_timeout_seconds, "connect_timeout_seconds"), (self.transfer_timeout_seconds, "transfer_timeout_seconds")):
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < float(value) <= 86400:
-                raise ValueError(f"dataset_sync.{label} must be between 0 and 86400 seconds")
-        if self.enabled:
-            remote_user = _bounded_token(self.remote_user, "dataset_sync.remote_user")
-            remote_host = _bounded_token(self.remote_host, "dataset_sync.remote_host")
-            if _SAFE_SYNC_USER.fullmatch(remote_user) is None:
-                raise ValueError("dataset_sync.remote_user is not a safe SSH token")
-            if _SAFE_SYNC_HOST.fullmatch(remote_host) is None:
-                raise ValueError("dataset_sync.remote_host is not a safe hostname")
-            object.__setattr__(self, "remote_user", remote_user)
-            object.__setattr__(self, "remote_host", remote_host)
-            object.__setattr__(self, "identity_path", _absolute_path(self.identity_path, "dataset_sync.identity_path"))
-            object.__setattr__(self, "known_hosts_path", _absolute_path(self.known_hosts_path, "dataset_sync.known_hosts_path"))
-        else:
-            if self.identity_path is not None:
-                object.__setattr__(self, "identity_path", Path(self.identity_path).expanduser())
-            if self.known_hosts_path is not None:
-                object.__setattr__(self, "known_hosts_path", Path(self.known_hosts_path).expanduser())
-
-    @property
-    def identity_file(self) -> Path | None:
-        return self.identity_path
-
-    @property
-    def known_hosts_file(self) -> Path | None:
-        return self.known_hosts_path
-
-    def to_dataset_sync_config(self, tasks_dir: Path, control_loop_dir: Path):
-        if not self.enabled:
-            return None
-        from ..dataset_sync_config import DatasetSyncConfig
-
-        return DatasetSyncConfig(
-            enabled=True,
-            tasks_dir=tasks_dir,
-            control_loop_dir=control_loop_dir,
-            remote_user=self.remote_user,
-            remote_host=self.remote_host,
-            remote_port=self.remote_port,
-            identity_path=self.identity_path,
-            known_hosts_path=self.known_hosts_path,
-            connect_timeout_seconds=self.connect_timeout_seconds,
-            transfer_timeout_seconds=self.transfer_timeout_seconds,
-            ssh_bin=self.ssh_bin,
-            rsync_bin=self.rsync_bin,
-        )
 
 
 def _publication_value(
@@ -658,7 +574,6 @@ class StewardPublicationConfig:
 
 # Descriptive aliases used by callers that refer to the host-side boundary.
 DaemonContainerConfig = StewardContainerConfig
-DatasetSyncSettings = StewardDatasetSyncConfig
 PublicationSettings = StewardPublicationConfig
 
 
@@ -876,16 +791,11 @@ class StewardConfig:
     path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
     container: StewardContainerConfig = field(default_factory=StewardContainerConfig)
     publication: StewardPublicationConfig = field(default_factory=StewardPublicationConfig)
-    dataset_sync: StewardDatasetSyncConfig = field(default_factory=StewardDatasetSyncConfig)
     deployment: StewardDeploymentConfig = field(default_factory=StewardDeploymentConfig)
     shutdown_grace_seconds: float = 30.0
     resume_attempt_limit: int = 2
 
     def __post_init__(self) -> None:
-        if self.publication.enabled and self.dataset_sync.enabled:
-            raise ValueError(
-                "publication and dataset_sync transports cannot both be enabled"
-            )
         if self.deployment.enabled and self.deployment.stop_grace_seconds <= self.shutdown_grace_seconds:
             raise ValueError(
                 "deployment.stop_grace_seconds must exceed shutdown_grace_seconds"
@@ -959,10 +869,6 @@ class StewardConfig:
     @property
     def containers(self) -> StewardContainerConfig:
         return self.container
-
-    @property
-    def dataset(self) -> StewardDatasetSyncConfig:
-        return self.dataset_sync
 
     @property
     def grace_period_seconds(self) -> float:
@@ -1362,9 +1268,10 @@ def load_config(
     )
     if legacy_sync_sections:
         raise ValueError(
-            "legacy raw sync configuration is unsupported; use [steward.dataset_sync]"
+            "legacy raw sync configuration is unsupported"
         )
-    sync_data = _section_alias(steward, "dataset_sync")
+    if "dataset_sync" in steward:
+        raise ValueError("unknown configuration section: steward.dataset_sync")
     enabled_signals = _string_tuple(
         signals_data.get(
             "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
@@ -1454,7 +1361,6 @@ def load_config(
             fallback_digest=steward.get("task_image_digest"),
         ),
         publication=_publication_config(publication_data),
-        dataset_sync=_dataset_sync_config(sync_data),
         deployment=deployment_config,
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
         resume_attempt_limit=int(steward.get("resume_attempt_limit", 2)),
@@ -1738,51 +1644,6 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
         retry_limit=data.get("retry_limit"),
         max_retry_count=data.get("max_retry_count"),
         retry_backoff_seconds=data.get("retry_backoff_seconds", 5.0),
-    )
-
-
-def _dataset_sync_config(raw: object) -> StewardDatasetSyncConfig:
-    data = raw if isinstance(raw, dict) else {}
-    allowed = {
-        "enabled",
-        "remote_user",
-        "remote_host",
-        "remote_port",
-        "identity_path",
-        "known_hosts_path",
-        "ssh_bin",
-        "rsync_bin",
-        "connect_timeout_seconds",
-        "transfer_timeout_seconds",
-        "timeout_seconds",
-        "destination",
-    }
-    unknown = sorted(set(data) - allowed)
-    if unknown:
-        raise ValueError(
-            "dataset_sync accepts only fixed transport settings; unsupported keys: "
-            + ", ".join(str(value) for value in unknown)
-        )
-    if "destination" in data and data["destination"] != "steward-dataset":
-        raise ValueError(
-            "dataset_sync.destination is fixed to the steward-dataset module"
-        )
-    enabled = bool(data.get("enabled", False))
-    identity = data.get("identity_path")
-    known_hosts = data.get("known_hosts_path")
-    return StewardDatasetSyncConfig(
-        enabled=enabled,
-        remote_user=str(data.get("remote_user", "")),
-        remote_host=str(data.get("remote_host", "")),
-        remote_port=int(data.get("remote_port", 22)),
-        identity_path=Path(identity).expanduser() if identity is not None else None,
-        known_hosts_path=Path(known_hosts).expanduser() if known_hosts is not None else None,
-        ssh_bin=_resolve_executable(str(data.get("ssh_bin", "ssh"))),
-        rsync_bin=_resolve_executable(str(data.get("rsync_bin", "rsync"))),
-        connect_timeout_seconds=float(data.get("connect_timeout_seconds", 10.0)),
-        transfer_timeout_seconds=float(
-            data.get("transfer_timeout_seconds", data.get("timeout_seconds", 300.0))
-        ),
     )
 
 

@@ -620,31 +620,6 @@ def diagnostics() -> None:
     except Exception as exc:
         invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
     retry = ledger.pending_retry("planner") if ledger else None
-    dataset_health = None
-    if hasattr(store, "get_dataset_sync_health"):
-        try:
-            health = store.get_dataset_sync_health()
-            dataset_health = {
-                "enabled": health.enabled,
-                "active": health.active,
-                "activeCycleId": health.active_cycle_id,
-                "lastStartedAt": health.last_started_at.isoformat()
-                if health.last_started_at is not None
-                else None,
-                "lastFinishedAt": health.last_finished_at.isoformat()
-                if health.last_finished_at is not None
-                else None,
-                "lastSuccessAt": health.last_success_at.isoformat()
-                if health.last_success_at is not None
-                else None,
-                "lastDurationSeconds": health.last_duration_seconds,
-                "lastExitCode": health.last_exit_code,
-                "lastCategory": health.last_category,
-                "lastDetail": health.last_detail,
-                "consecutiveFailureCount": health.consecutive_failure_count,
-            }
-        except Exception:
-            dataset_health = None
     active_run = None
     last_materialized_sequence = None
     last_materialized_at = None
@@ -692,7 +667,6 @@ def diagnostics() -> None:
         "archiveConflictCount": len(invalid_runs),
         "visiblePlannerRuns": visible_runs,
         "invalidPlannerRuns": invalid_runs,
-        "datasetSync": dataset_health,
     }
     typer.echo(json.dumps(payload, sort_keys=True))
 
@@ -704,7 +678,7 @@ def health() -> None:
     config = load_config()
     active_tasks = 0
     cleanup_pending = 0
-    sync_active = False
+    publication_health = None
     planner_active = False
     archive_pending = False
     database_healthy = False
@@ -719,8 +693,8 @@ def health() -> None:
                 event.kind == "cleanup_complete" for event in events
             ):
                 cleanup_pending += 1
-        sync = store.get_dataset_sync_health()
-        sync_active = bool(sync.active)
+        if callable(getattr(store, "get_publication_health", None)):
+            publication_health = publication_health_view(store)
         ledger = getattr(store, "control_loop_ledger", None)
         planner_active = bool(ledger and ledger.list_planner_runs(include_terminal=False))
         archive_pending = bool(ledger and ledger.outbox(limit=1))
@@ -766,13 +740,11 @@ def health() -> None:
         and not (
             active_tasks
             or cleanup_pending
-            or sync_active
             or planner_active
             or archive_pending
         ),
         "activeTasks": active_tasks,
         "cleanupPending": cleanup_pending,
-        "syncActive": sync_active,
         "plannerActive": planner_active,
         "archivePending": archive_pending,
         "pressure": pressure,
@@ -789,15 +761,7 @@ def health() -> None:
             "recoveryOwnedDockerBytes": deployment.recovery_owned_docker_bytes,
         },
         "containerCounts": container_counts,
-        "syncHealth": (
-            {
-                "active": bool(sync_active),
-                "category": getattr(sync, "last_category", None),
-                "consecutiveFailures": getattr(sync, "consecutive_failure_count", 0),
-            }
-            if database_healthy
-            else None
-        ),
+        "publicationHealth": publication_health if database_healthy else None,
         "release": deployment.release_id,
         "runtimeProtocol": config.runtime_protocol,
     }

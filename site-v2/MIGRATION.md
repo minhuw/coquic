@@ -106,14 +106,16 @@ requires a forward migration review; an infrastructure change must pass the
 same preview safety checks. No routine Site deploy invokes that action.
 
 Retired Site replica roots remain available through the rollback window. The
-Steward source archives and private cache remain preserved at
-`/opt/coquic-demo/steward/tasks`, `/opt/coquic-demo/steward/control-loop`, and
-`/opt/coquic-demo/steward/cache/site-v2.sqlite`; they are not Site deployment
-cleanup targets. After the cutover has been verified with the empty or
-first-real-task checker and the operator's rollback window has elapsed, an
-operator may remove retired Site replica roots manually. This deletion is
-explicit and never part of ordinary deploy or rollback, which do not delete
-those roots or the preserved Steward paths.
+Steward source archives remain permanently preserved at
+`/opt/coquic-demo/steward/tasks` and
+`/opt/coquic-demo/steward/control-loop`; ordinary deploy, repair, and rollback
+never delete either path. The Site replica cache
+`/opt/coquic-demo/steward/cache/site-v2.sqlite` remains available during that
+window and is the delayed manual cleanup target. After the cutover has been
+verified with the empty or first-real-task checker and the operator's rollback
+window has elapsed, an operator may remove that exact cache path manually.
+This deletion is explicit and never part of ordinary deploy, repair, or
+rollback; those actions delete none of the named paths.
 
 ## Per-route acceptance checklist
 

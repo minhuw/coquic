@@ -648,10 +648,11 @@ def run_check(
     if isinstance(tasks_data, dict) and isinstance(tasks_data.get("items"), list) and isinstance(tasks_data.get("pagination"), dict):
         task_items = tasks_data["items"]
         pagination = tasks_data["pagination"]
-        if pagination.get("total") == 0 and task_items:
+        total = pagination.get("total")
+        if total == 0 and (task_items or pagination.get("hasNextPage") is not False):
             _add_check(result, "task_collection", "fail", detail="pagination_mismatch")
-        elif pagination.get("total", 0) > 0 and not task_items and pagination.get("hasNextPage") is False:
-            _add_check(result, "task_collection", "skip", detail="no_task_in_scope")
+        elif total > 0 and not task_items:
+            _add_check(result, "task_collection", "fail", detail="missing_first_page_task")
         else:
             _add_check(result, "task_collection", "pass")
     else:
@@ -660,10 +661,24 @@ def run_check(
     if isinstance(status_data, dict) and isinstance(tasks_data, dict):
         state = status_data.get("state")
         total = tasks_data.get("pagination", {}).get("total") if isinstance(tasks_data.get("pagination"), dict) else None
+        task_count = status_data.get("taskCount")
         if state == "empty" and (total != 0 or task_items):
             _add_check(result, "publication_state", "fail", detail="empty_state_mismatch")
         elif state == "empty":
-            _add_check(result, "publication_state", "pass")
+            if task_count == 0:
+                _add_check(result, "publication_state", "pass")
+            else:
+                _add_check(result, "publication_state", "fail", detail="empty_state_mismatch")
+        elif state == "available":
+            first_task_selectable = bool(
+                task_items
+                and isinstance(task_items[0], dict)
+                and _valid_identifier(task_items[0].get("taskId"))
+            )
+            if task_count > 0 and total == task_count and first_task_selectable:
+                _add_check(result, "publication_state", "pass")
+            else:
+                _add_check(result, "publication_state", "fail", detail="available_state_mismatch")
         else:
             _add_check(result, "publication_state", "pass")
     else:

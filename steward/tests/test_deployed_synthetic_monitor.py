@@ -223,6 +223,24 @@ def test_empty_publication_passes_with_explicit_skips(tmp_path: Path) -> None:
     assert _statuses(result, "task_artifact") == ["skip"]
 
 
+def test_available_publication_requires_a_consistent_first_page(tmp_path: Path) -> None:
+    responses = _empty_responses()
+    responses["/api/steward/status"].body = _json_bytes(_status(empty=False))
+
+    with FixtureServer(responses) as server:
+        completed, result = _run_check(server.base_url, tmp_path)
+
+    assert completed.returncode == 1
+    assert result["ok"] is False
+    assert _statuses(result, "publication_state") == ["fail"]
+    assert _statuses(result, "task_selection") == ["skip"]
+    assert any(
+        check.get("detail") == "available_state_mismatch"
+        for check in result["checks"]
+        if check["name"] == "publication_state"
+    )
+
+
 def test_populated_publication_checks_detail_trajectory_and_one_redirect(tmp_path: Path) -> None:
     responses = _populated_responses()
     with FixtureServer(responses) as server:

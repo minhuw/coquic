@@ -198,32 +198,24 @@ def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
     assert store.get_publication_generation(repaired.publication_id).state is PublicationState.queued
 
 
-def test_hide_real_store_blocks_queued_generation_and_replays(tmp_path) -> None:
+def test_hide_real_store_blocks_101_queued_generations_and_replays(tmp_path) -> None:
     store = TaskStore(tmp_path / "steward.sqlite")
-    identity = GenerationIdentity("task-hide", "boundary-hide")
-    generation = PublicationGeneration(
-        publication_id=identity.publication_id,
-        task_id="task-hide",
-        run_id="run-hide",
-        generation_boundary="boundary-hide",
-        metadata_digest="a" * 64,
-        idempotency_key=identity.idempotency_key,
-        created_at=NOW,
-        updated_at=NOW,
-    )
-    second_identity = GenerationIdentity("task-hide", "boundary-hide-second")
-    second_generation = PublicationGeneration(
-        publication_id=second_identity.publication_id,
-        task_id="task-hide",
-        run_id="run-hide-second",
-        generation_boundary="boundary-hide-second",
-        metadata_digest="b" * 64,
-        idempotency_key=second_identity.idempotency_key,
-        created_at=NOW,
-        updated_at=NOW,
-    )
-    assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
-    assert store.enqueue_publication(second_generation).status is PublicationOperationStatus.enqueued
+    generations = []
+    for index in range(101):
+        boundary = f"boundary-hide-{index}"
+        identity = GenerationIdentity("task-hide", boundary)
+        generation = PublicationGeneration(
+            publication_id=identity.publication_id,
+            task_id="task-hide",
+            run_id=f"run-hide-{index}",
+            generation_boundary=boundary,
+            metadata_digest=f"{index:064x}",
+            idempotency_key=identity.idempotency_key,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+        generations.append(generation)
 
     class D1:
         changed = True
@@ -231,7 +223,7 @@ def test_hide_real_store_blocks_queued_generation_and_replays(tmp_path) -> None:
         def hide_task(self, task_id, reason):
             result = SimpleNamespace(
                 task_id=task_id,
-                publication_id=generation.publication_id,
+                publication_id=generations[0].publication_id,
                 state="hidden",
                 changed=self.changed,
             )
@@ -242,25 +234,24 @@ def test_hide_real_store_blocks_queued_generation_and_replays(tmp_path) -> None:
     hidden = publisher.hide_task(generation.task_id, "unsafe_content")
     assert hidden.status is PublicationHideStatus.hidden
     assert hidden.changed is True
-    for item in (generation, second_generation):
-        persisted = store.get_publication_generation(item.publication_id)
-        assert persisted is not None
-        assert persisted.state is PublicationState.blocked
-        assert persisted.reason == "unsafe_content"
-        assert (
-            store.claim_publication(
-                "worker-1",
-                publication_id=item.publication_id,
-                now=NOW + timedelta(seconds=2),
-            ).status
-            is PublicationOperationStatus.empty
-        )
+    persisted = store.list_publication_generations(task_id="task-hide", limit=None)
+    assert len(persisted) == 101
+    assert all(item.state is PublicationState.blocked for item in persisted)
+    assert all(item.reason == "unsafe_content" for item in persisted)
+    assert (
+        store.claim_publication(
+            "worker-1",
+            now=NOW + timedelta(seconds=2),
+        ).status
+        is PublicationOperationStatus.empty
+    )
 
-    replay = publisher.hide_task(generation.task_id, "unsafe_content")
+    replay = publisher.hide_task("task-hide", "unsafe_content")
     assert replay.status is PublicationHideStatus.unchanged
     assert replay.changed is False
-    assert store.get_publication_generation(generation.publication_id).state is PublicationState.blocked
-    assert store.get_publication_generation(second_generation.publication_id).state is PublicationState.blocked
+    replayed = store.list_publication_generations(task_id="task-hide", limit=None)
+    assert len(replayed) == 101
+    assert all(item.state is PublicationState.blocked for item in replayed)
 
 
 def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:

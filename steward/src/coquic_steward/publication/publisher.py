@@ -1151,10 +1151,24 @@ class CloudPublisher:
         )
         if callable(listing):
             try:
-                generations = listing(task_id=task_id, limit=_MAX_VIEW_LIMIT)
+                # Hide reconciliation is an internal safety operation, not a
+                # bounded operator view.  Read the complete typed task scope
+                # so an older queued generation cannot remain claimable after
+                # a successful remote hide.
+                generations = listing(task_id=task_id, limit=None)
             except TypeError:
                 try:
-                    generations = listing(limit=_MAX_VIEW_LIMIT)
+                    generations = listing(task_id=task_id)
+                except TypeError:
+                    try:
+                        generations = listing(limit=None)
+                    except Exception:
+                        return PublicationHideResult(
+                            PublicationHideStatus.blocked,
+                            task_id=task_id,
+                            publication_id=publication_id,
+                            reason="integrity",
+                        )
                 except Exception:
                     return PublicationHideResult(
                         PublicationHideStatus.blocked,

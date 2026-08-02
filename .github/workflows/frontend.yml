@@ -72,7 +72,7 @@ jobs:
             site/next/playwright-report/**
 
   site-v2-quality:
-    name: Site V2 archive quality
+    name: Site V2 cloud publication quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -87,13 +87,13 @@ jobs:
         run: nix develop -c npm --prefix site-v2 exec -- playwright install --with-deps chromium
       - name: Contract validation
         run: nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
-      - name: Archive unit tests
+      - name: Cloud publication unit tests
         run: nix develop -c npm --prefix site-v2 run test:unit
       - name: Typecheck and build
         run: |
           nix develop -c npm --prefix site-v2 run typecheck
           nix develop -c npm --prefix site-v2 run build
-      - name: Steward archive smoke
+      - name: Steward cloud publication smoke
         run: nix develop -c npm --prefix site-v2 run test:steward
       - name: Steward trajectory browser proof
         run: nix develop -c npm --prefix site-v2 run test:visual -- tests/steward.spec.ts --workers=1

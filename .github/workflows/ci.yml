@@ -46,7 +46,7 @@ jobs:
       - name: Test Steward contract compatibility
         run: nix develop -c uv run --project steward python -m pytest steward/tests/test_public_schema.py
 
-      - name: Test deployed monitor fixtures
+      - name: Test on-demand cloud checker fixtures
         run: nix develop -c uv run --project steward python -m pytest steward/tests/test_deployed_synthetic_monitor.py
 
   format:

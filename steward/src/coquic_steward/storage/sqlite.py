@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import sqlite3
@@ -59,12 +58,6 @@ from ..core.models import (
     new_signal_item_id,
     utc_now,
 )
-from ..dataset_sync_config import (
-    DATASET_SYNC_HEALTH_ID,
-    DatasetSyncHealth,
-    bounded_safe_detail,
-    validate_cycle_id,
-)
 from .mappers import (
     PathCodec,
     event_to_row,
@@ -95,7 +88,6 @@ from .mappers import (
     update_plan_run_row,
     update_task_row,
     validation_to_row,
-    row_to_dataset_sync_health,
 )
 from .schema import (
     Base,
@@ -111,7 +103,6 @@ from .schema import (
     TaskRow,
     TaskRunRow,
     TaskWorktreeCheckpointRow,
-    DatasetSyncHealthRow,
     DaemonStateRow,
     ValidationRow,
     StewardImageReleaseRow,
@@ -270,7 +261,6 @@ class SQLiteTaskStore:
             except (OSError, json.JSONDecodeError):
                 epoch_id = None
             self.control_loop = ControlLoopLedger(self.path, epoch_id=epoch_id)
-        self._ensure_dataset_sync_health()
         self._ensure_publication_health()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
@@ -3795,127 +3785,6 @@ class SQLiteTaskStore:
     get_publication_health_snapshot = get_publication_health
 
     # ------------------------------------------------------------------
-    # Standalone raw dataset synchronizer health
-
-    def _ensure_dataset_sync_health(self) -> None:
-        """Create or migrate the one dataset health row.
-
-        Databases from the task-only release carry one unambiguous legacy row.
-        It is copied byte-for-byte into the dataset identity and the obsolete
-        table is removed. A database containing both identities is rejected so
-        startup can never silently schedule two competing health cycles.
-        """
-
-        legacy_table = "task_" + "archive_" + "sync_health"
-        with self.engine.begin() as connection:
-            current_rows = connection.exec_driver_sql(
-                "SELECT id FROM dataset_sync_health"
-            ).fetchall()
-            current_ids = {str(row[0]) for row in current_rows}
-            # A database that contains an unknown dataset identity is neither
-            # a fresh store nor an unambiguous task-only migration. Do not add
-            # the canonical row beside it and accidentally schedule a second
-            # interpretation of the same health state.
-            if current_ids - {DATASET_SYNC_HEALTH_ID}:
-                raise RuntimeError("ambiguous dataset sync health migration")
-            current = (
-                (DATASET_SYNC_HEALTH_ID,)
-                if DATASET_SYNC_HEALTH_ID in current_ids
-                else None
-            )
-            legacy_exists = bool(
-                connection.exec_driver_sql(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name",
-                    {"name": legacy_table},
-                ).fetchone()
-            )
-            if legacy_exists:
-                rows = connection.exec_driver_sql(
-                    f"SELECT id,enabled,active_cycle_id,last_started_at,last_finished_at,"
-                    f"last_success_at,last_duration_seconds,last_exit_code,last_category,"
-                    f"last_detail,consecutive_failure_count FROM {legacy_table}"
-                ).fetchall()
-                if (
-                    len(rows) != 1
-                    or current is not None
-                    or str(rows[0][0]) != "task-archive-sync"
-                ):
-                    raise RuntimeError("ambiguous dataset sync health migration")
-                values = rows[0]
-                connection.exec_driver_sql(
-                    """
-                    INSERT INTO dataset_sync_health
-                      (id,enabled,active_cycle_id,last_started_at,last_finished_at,
-                       last_success_at,last_duration_seconds,last_exit_code,last_category,
-                       last_detail,consecutive_failure_count)
-                    VALUES
-                      (:id,:enabled,:active_cycle_id,:last_started_at,:last_finished_at,
-                       :last_success_at,:last_duration_seconds,:last_exit_code,:last_category,
-                       :last_detail,:consecutive_failure_count)
-                    """,
-                    {
-                        "id": DATASET_SYNC_HEALTH_ID,
-                        "enabled": values[1],
-                        "active_cycle_id": values[2],
-                        "last_started_at": values[3],
-                        "last_finished_at": values[4],
-                        "last_success_at": values[5],
-                        "last_duration_seconds": values[6],
-                        "last_exit_code": values[7],
-                        "last_category": values[8],
-                        "last_detail": values[9],
-                        "consecutive_failure_count": values[10],
-                    },
-                )
-                connection.exec_driver_sql(f"DROP TABLE {legacy_table}")
-            elif current is None:
-                connection.exec_driver_sql(
-                    """
-                    INSERT INTO dataset_sync_health
-                      (id,enabled,consecutive_failure_count)
-                    VALUES (:id,0,0)
-                    """,
-                    {"id": DATASET_SYNC_HEALTH_ID},
-                )
-
-    def get_dataset_sync_health(self) -> DatasetSyncHealth:
-        with Session(self.engine) as session:
-            row = session.get(DatasetSyncHealthRow, DATASET_SYNC_HEALTH_ID)
-            if row is None:
-                # This is defensive for databases created by an interrupted
-                # migration; normal construction always creates the row.
-                session.add(
-                    DatasetSyncHealthRow(
-                        id=DATASET_SYNC_HEALTH_ID,
-                        enabled=False,
-                        consecutive_failure_count=0,
-                    )
-                )
-                session.commit()
-                row = session.get(DatasetSyncHealthRow, DATASET_SYNC_HEALTH_ID)
-            assert row is not None
-            return row_to_dataset_sync_health(row)
-
-    dataset_sync_health = get_dataset_sync_health
-
-    def set_dataset_sync_enabled(self, enabled: bool) -> DatasetSyncHealth:
-        if not isinstance(enabled, bool):
-            raise ValueError("enabled must be a boolean")
-        with self.engine.begin() as connection:
-            connection.exec_driver_sql(
-                """
-                UPDATE dataset_sync_health
-                   SET enabled = :enabled
-                 WHERE id = :id
-                """,
-                {"enabled": int(enabled), "id": DATASET_SYNC_HEALTH_ID},
-            )
-        self._notify_change()
-        return self.get_dataset_sync_health()
-
-    enable_dataset_sync = set_dataset_sync_enabled
-
-    # ------------------------------------------------------------------
     # Private Compose release/container/resource facts
 
     def record_image_release(
@@ -4305,230 +4174,6 @@ class SQLiteTaskStore:
         if row is None:
             return {"state": "normal", "home_free_bytes": None, "owned_docker_bytes": None, "cleanup_pending_count": 0, "reason": None, "updated_at": None}
         return {"state": row[0], "home_free_bytes": row[1], "owned_docker_bytes": row[2], "cleanup_pending_count": row[3], "reason": row[4], "updated_at": row[5]}
-
-    def claim_dataset_sync_cycle(
-        self,
-        cycle_id: str,
-        *,
-        started_at: datetime | None = None,
-        require_enabled: bool = False,
-    ) -> bool:
-        """Atomically claim the idle health row for one transfer cycle."""
-
-        validate_cycle_id(cycle_id)
-        if not isinstance(require_enabled, bool):
-            raise ValueError("require_enabled must be a boolean")
-        timestamp = (started_at or utc_now()).isoformat()
-        predicate = "AND enabled = 1" if require_enabled else ""
-        with self.engine.begin() as connection:
-            result = connection.exec_driver_sql(
-                f"""
-                UPDATE dataset_sync_health
-                   SET active_cycle_id = :cycle_id,
-                       last_started_at = :started_at,
-                       last_finished_at = NULL,
-                       last_exit_code = NULL,
-                       last_category = NULL,
-                       last_detail = NULL,
-                       last_duration_seconds = NULL
-                 WHERE id = :id
-                   AND active_cycle_id IS NULL
-                   {predicate}
-                """,
-                {
-                    "id": DATASET_SYNC_HEALTH_ID,
-                    "cycle_id": cycle_id,
-                    "started_at": timestamp,
-                },
-            )
-            claimed = result.rowcount == 1
-        if claimed:
-            self._notify_change()
-        return claimed
-
-
-    @staticmethod
-    def _bounded_duration(duration_seconds: float | None) -> float | None:
-        if duration_seconds is None:
-            return None
-        if isinstance(duration_seconds, bool):
-            return None
-        try:
-            value = float(duration_seconds)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(value):
-            return None
-        if value < 0:
-            return 0.0
-        return min(value, 86400.0)
-
-    @staticmethod
-    def _bounded_exit_code(exit_code: int | None) -> int | None:
-        if exit_code is None:
-            return None
-        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-            raise ValueError("exit_code must be an integer or None")
-        return max(-255, min(255, exit_code))
-
-    def finish_dataset_sync_success(
-        self,
-        cycle_id: str,
-        *,
-        finished_at: datetime | None = None,
-        duration_seconds: float | None = None,
-        exit_code: int = 0,
-        safe_detail: str | None = None,
-        detail: str | None = None,
-    ) -> bool:
-        """Record rsync exit 0 and release the active-cycle claim."""
-
-        validate_cycle_id(cycle_id)
-        bounded_exit_code = self._bounded_exit_code(exit_code)
-        if bounded_exit_code != 0:
-            raise ValueError("success requires exit_code 0")
-        timestamp = (finished_at or utc_now()).isoformat()
-        with self.engine.begin() as connection:
-            result = connection.exec_driver_sql(
-                """
-                UPDATE dataset_sync_health
-                   SET active_cycle_id = NULL,
-                       last_finished_at = :finished_at,
-                       last_success_at = :finished_at,
-                       last_duration_seconds = :duration,
-                       last_exit_code = :exit_code,
-                       last_category = 'success',
-                       last_detail = :detail,
-                       consecutive_failure_count = 0
-                 WHERE id = :id AND active_cycle_id = :cycle_id
-                """,
-                {
-                    "id": DATASET_SYNC_HEALTH_ID,
-                    "cycle_id": cycle_id,
-                    "finished_at": timestamp,
-                    "duration": self._bounded_duration(duration_seconds),
-                    "exit_code": bounded_exit_code,
-                    "detail": bounded_safe_detail(
-                        safe_detail if safe_detail is not None else detail
-                    ),
-                },
-            )
-            finished = result.rowcount == 1
-        if finished:
-            self._notify_change()
-        return finished
-
-
-    def finish_dataset_sync_failure(
-        self,
-        cycle_id: str,
-        *,
-        category: str,
-        exit_code: int | None = None,
-        safe_detail: str | None = None,
-        detail: str | None = None,
-        finished_at: datetime | None = None,
-        duration_seconds: float | None = None,
-    ) -> bool:
-        """Record a bounded failure/incomplete outcome and release the claim."""
-
-        validate_cycle_id(cycle_id)
-        if not isinstance(category, str) or not category or len(category) > 64:
-            raise ValueError("category must be a short non-empty string")
-        if any(not character.isalnum() and character not in "_-" for character in category):
-            raise ValueError("category contains unsupported characters")
-        bounded_exit_code = self._bounded_exit_code(exit_code)
-        timestamp = (finished_at or utc_now()).isoformat()
-        with self.engine.begin() as connection:
-            result = connection.exec_driver_sql(
-                """
-                UPDATE dataset_sync_health
-                   SET active_cycle_id = NULL,
-                       last_finished_at = :finished_at,
-                       last_duration_seconds = :duration,
-                       last_exit_code = :exit_code,
-                       last_category = :category,
-                       last_detail = :detail,
-                       consecutive_failure_count = MIN(consecutive_failure_count + 1, 1000000)
-                 WHERE id = :id AND active_cycle_id = :cycle_id
-                """,
-                {
-                    "id": DATASET_SYNC_HEALTH_ID,
-                    "cycle_id": cycle_id,
-                    "finished_at": timestamp,
-                    "duration": self._bounded_duration(duration_seconds),
-                    "exit_code": bounded_exit_code,
-                    "category": category,
-                    "detail": bounded_safe_detail(
-                        safe_detail if safe_detail is not None else detail
-                    ),
-                },
-            )
-            finished = result.rowcount == 1
-        if finished:
-            self._notify_change()
-        return finished
-
-
-    def finish_dataset_sync_incomplete(
-        self,
-        cycle_id: str,
-        *,
-        exit_code: int | None = 24,
-        safe_detail: str | None = None,
-        detail: str | None = None,
-        finished_at: datetime | None = None,
-        duration_seconds: float | None = None,
-    ) -> bool:
-        return self.finish_dataset_sync_failure(
-            cycle_id,
-            category="incomplete",
-            exit_code=exit_code,
-            safe_detail=safe_detail,
-            detail=detail,
-            finished_at=finished_at,
-            duration_seconds=duration_seconds,
-        )
-
-
-    def reconcile_interrupted_dataset_sync(
-        self,
-        *,
-        finished_at: datetime | None = None,
-        safe_detail: str = "cycle interrupted before completion",
-        detail: str | None = None,
-    ) -> bool:
-        """Close an active cycle left by a process restart."""
-
-        timestamp = (finished_at or utc_now()).isoformat()
-        with self.engine.begin() as connection:
-            result = connection.exec_driver_sql(
-                """
-                UPDATE dataset_sync_health
-                   SET active_cycle_id = NULL,
-                       last_finished_at = :finished_at,
-                       last_duration_seconds = NULL,
-                       last_exit_code = NULL,
-                       last_category = 'interrupted',
-                       last_detail = :detail,
-                       consecutive_failure_count = MIN(consecutive_failure_count + 1, 1000000)
-                 WHERE id = :id AND active_cycle_id IS NOT NULL
-                """,
-                {
-                    "id": DATASET_SYNC_HEALTH_ID,
-                    "finished_at": timestamp,
-                    "detail": bounded_safe_detail(
-                        safe_detail if detail is None else detail
-                    )
-                    or "cycle interrupted before completion",
-                },
-            )
-            reconciled = result.rowcount == 1
-        if reconciled:
-            self._notify_change()
-        return reconciled
-
-    reconcile_dataset_sync = reconcile_interrupted_dataset_sync
 
     def pending_wakeups(self, *, limit: int | None = None) -> list[SchedulerWakeup]:
         statement = (
@@ -5341,9 +4986,6 @@ class SQLiteTaskStore:
             }
             if not wakeup_columns:
                 Base.metadata.create_all(connection)
-            # This table is additive and independent of task, pipeline, run,
-            # and sanitized public-mirror health state.
-            DatasetSyncHealthRow.__table__.create(connection, checkfirst=True)
             StewardImageReleaseRow.__table__.create(connection, checkfirst=True)
             image_release_columns = {
                 row[1]

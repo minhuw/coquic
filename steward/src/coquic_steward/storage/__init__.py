@@ -9,12 +9,10 @@ from ..core.models import (
     SchedulerState,
     SignalFetchStatus,
 )
-from ..dataset_sync_config import DatasetSyncHealth
 from .sqlite import SQLiteTaskStore
 from ..control_loop import ControlLoopLedger
 from .schema import (
     CodexSessionRow,
-    DatasetSyncHealthRow,
     TaskExecutionRow,
     TaskPipelineRow,
     TaskRunRow,
@@ -172,8 +170,6 @@ __all__ = [
     "TaskPipelineRow",
     "TaskRunRow",
     "TaskWorktreeCheckpointRow",
-    "DatasetSyncHealthRow",
-    "DatasetSyncHealth",
     "TaskExecution",
     "TaskPipeline",
     "CodexSession",

@@ -21,10 +21,6 @@ from ..core.models import (
     TaskSpec,
     ValidationResult,
 )
-from ..dataset_sync_config import (
-    DATASET_SYNC_HEALTH_ID,
-    DatasetSyncHealth,
-)
 from .schema import (
     CodexSessionRow,
     EventRow,
@@ -38,7 +34,6 @@ from .schema import (
     TaskRow,
     TaskRunRow,
     TaskWorktreeCheckpointRow,
-    DatasetSyncHealthRow,
     ValidationRow,
 )
 
@@ -783,61 +778,6 @@ def row_to_scheduler_wakeup(
         created_at=_load_datetime(row.created_at),
         consumed_at=_load_datetime(row.consumed_at) if row.consumed_at else None,
         data=_loads_dict(row.data_json, path_codec=path_codec),
-    )
-
-
-def dataset_sync_health_to_row(
-    health: DatasetSyncHealth,
-    *,
-    row: DatasetSyncHealthRow | None = None,
-) -> DatasetSyncHealthRow:
-    values = {
-        "id": DATASET_SYNC_HEALTH_ID,
-        "enabled": health.enabled,
-        "active_cycle_id": health.active_cycle_id,
-        "last_started_at": _dump_datetime(health.last_started_at)
-        if health.last_started_at
-        else None,
-        "last_finished_at": _dump_datetime(health.last_finished_at)
-        if health.last_finished_at
-        else None,
-        "last_success_at": _dump_datetime(health.last_success_at)
-        if health.last_success_at
-        else None,
-        "last_duration_seconds": health.last_duration_seconds,
-        "last_exit_code": health.last_exit_code,
-        "last_category": health.last_category,
-        "last_detail": health.last_detail,
-        "consecutive_failure_count": health.consecutive_failure_count,
-    }
-    if row is None:
-        return DatasetSyncHealthRow(**values)
-    for name, value in values.items():
-        if name != "id":
-            setattr(row, name, value)
-    return row
-
-
-def row_to_dataset_sync_health(
-    row: DatasetSyncHealthRow,
-) -> DatasetSyncHealth:
-    return DatasetSyncHealth(
-        enabled=bool(row.enabled),
-        active_cycle_id=row.active_cycle_id,
-        last_started_at=_load_datetime(row.last_started_at)
-        if row.last_started_at
-        else None,
-        last_finished_at=_load_datetime(row.last_finished_at)
-        if row.last_finished_at
-        else None,
-        last_success_at=_load_datetime(row.last_success_at)
-        if row.last_success_at
-        else None,
-        last_duration_seconds=row.last_duration_seconds,
-        last_exit_code=row.last_exit_code,
-        last_category=row.last_category,
-        last_detail=row.last_detail,
-        consecutive_failure_count=int(row.consecutive_failure_count),
     )
 
 

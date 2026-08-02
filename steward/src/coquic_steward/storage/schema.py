@@ -551,26 +551,6 @@ class ControlLoopRetryRow(Base):
     )
 
 
-class DatasetSyncHealthRow(Base):
-    """Single operational row for the standalone raw dataset synchronizer."""
-
-    __tablename__ = "dataset_sync_health"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    active_cycle_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_started_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_success_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_duration_seconds: Mapped[float | None] = mapped_column(nullable=True)
-    last_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    last_category: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    consecutive_failure_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0
-    )
-
-
 class DaemonStateRow(Base):
     """One compare-and-set row for daemon ownership and lifecycle state."""
 
@@ -1347,7 +1327,6 @@ TaskPipeline = TaskPipelineRow
 CodexSession = CodexSessionRow
 TaskRun = TaskRunRow
 WorktreeCheckpoint = TaskWorktreeCheckpointRow
-DatasetSyncHealth = DatasetSyncHealthRow
 DaemonState = DaemonStateRow
 StewardImageRelease = StewardImageReleaseRow
 StewardContainerReference = StewardContainerReferenceRow

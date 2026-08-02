@@ -140,7 +140,7 @@ def test_enabled_publication_rejects_unsafe_values(
         load_config(repo_root=repo, config_path=config_path)
 
 
-def test_publication_rejects_unknown_keys_and_dataset_section(
+def test_publication_rejects_unknown_keys_and_unknown_section(
     repo: Path, tmp_path: Path
 ) -> None:
     unknown_path, _credentials, _staging = _write_publication_config(
@@ -150,13 +150,13 @@ def test_publication_rejects_unknown_keys_and_dataset_section(
     with pytest.raises(ValueError, match="unsupported keys"):
         load_config(repo_root=repo, config_path=unknown_path)
 
-    dataset_path = tmp_path / "dataset.toml"
-    dataset_path.write_text(
-        "[steward.dataset_sync]\nenabled = false\n",
+    unsupported_path = tmp_path / "unsupported.toml"
+    unsupported_path.write_text(
+        "[steward.unsupported]\nenabled = false\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="unknown configuration section"):
-        load_config(repo_root=repo, config_path=dataset_path)
+        load_config(repo_root=repo, config_path=unsupported_path)
 
 
 def test_explicit_runtime_repository_loads_config_outside_a_checkout(

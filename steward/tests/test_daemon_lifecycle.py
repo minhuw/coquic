@@ -1236,7 +1236,6 @@ def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):
 
     assert daemon.preflight_report is not None
     assert "epoch" in daemon.preflight_report.checks
-    assert "dataset-sync" not in daemon.preflight_report.checks
     assert "private" not in daemon.preflight_report.summary
     assert config.epoch_path.exists()
 

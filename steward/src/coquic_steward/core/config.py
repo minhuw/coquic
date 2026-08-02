@@ -70,6 +70,22 @@ _R2_BUCKET_NAME = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])$")
 _MAX_PUBLICATION_URL_LENGTH = 2048
 _MAX_PUBLICATION_TIMEOUT_SECONDS = 86400.0
 _MAX_PUBLICATION_RETRIES = 20
+_KNOWN_STEWARD_SECTIONS = frozenset(
+    {
+        "limits",
+        "signals",
+        "telemetry",
+        "path_policy",
+        "codex",
+        "container",
+        "containers",
+        "task_container",
+        "publication",
+        "cloud_publication",
+        "deployment",
+        "container_operations",
+    }
+)
 
 
 def _bounded_token(value: object, label: str, *, allow_empty: bool = False) -> str:
@@ -1229,6 +1245,9 @@ def load_config(
     if not isinstance(steward, dict):
         raise ValueError("steward configuration must be a table")
     _reject_embedded_secrets(steward)
+    for section_name, section_value in steward.items():
+        if isinstance(section_value, dict) and section_name not in _KNOWN_STEWARD_SECTIONS:
+            raise ValueError(f"unknown configuration section: steward.{section_name}")
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
     telemetry_data = steward.get("telemetry", {})
@@ -1251,17 +1270,6 @@ def load_config(
     if selected_task_image is not None:
         runtime_container_data["image"] = selected_task_image
         runtime_container_data["image_digest"] = selected_task_image
-    legacy_sync_sections = tuple(
-        name
-        for name in ("task_" + "sync", "task_" + "archive_" + "sync", "sync", "archive_" + "sync")
-        if name in steward
-    )
-    if legacy_sync_sections:
-        raise ValueError(
-            "legacy raw sync configuration is unsupported"
-        )
-    if "dataset_sync" in steward:
-        raise ValueError("unknown configuration section: steward.dataset_sync")
     enabled_signals = _string_tuple(
         signals_data.get(
             "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)

@@ -832,6 +832,57 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
     assert len(store.list_publication_generations()) == 1
 
 
+def test_store_queued_hide_requires_explicit_expectation_and_replays(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generation = _generation()
+    assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+
+    implicit = store.block_publication(
+        generation.publication_id,
+        reason="unsafe_content",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert implicit.status is PublicationOperationStatus.illegal_transition
+    assert store.get_publication_generation(generation.publication_id).state is PublicationState.queued
+
+    leased = store.block_publication(
+        generation.publication_id,
+        expected_state=PublicationState.queued,
+        lease_owner="worker-1",
+        reason="unsafe_content",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert leased.status is PublicationOperationStatus.precondition
+    assert store.get_publication_generation(generation.publication_id).state is PublicationState.queued
+
+    hidden = store.block_publication(
+        generation.publication_id,
+        expected_state=PublicationState.queued,
+        reason="unsafe_content",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert hidden.status is PublicationOperationStatus.blocked
+    assert hidden.generation is not None
+    assert hidden.generation.state is PublicationState.blocked
+    replay = store.block_publication(
+        generation.publication_id,
+        expected_state=PublicationState.queued,
+        reason="unsafe_content",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert replay.status is PublicationOperationStatus.existing
+    assert replay.generation is not None
+    assert replay.generation.state is PublicationState.blocked
+    assert (
+        store.claim_publication(
+            "worker-1",
+            publication_id=generation.publication_id,
+            now=NOW + timedelta(seconds=3),
+        ).status
+        is PublicationOperationStatus.empty
+    )
+
+
 def _blocked_generation_store(path):
     store = TaskStore(path)
     generation = _generation()

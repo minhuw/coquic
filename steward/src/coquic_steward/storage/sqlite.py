@@ -3165,6 +3165,109 @@ class SQLiteTaskStore:
             )
         except (TypeError, ValueError):
             raise OutboxValidationError("invalid_metadata") from None
+        # A successful task-head hide must also retire an unpublished queued
+        # generation.  Keep the normal state graph unchanged: this explicit
+        # compare-and-set is available only when the caller supplies the
+        # queued expectation and one of the bounded hide reasons.
+        if (
+            expected_state is not None
+            and current.state is PublicationState.queued
+            and expected is PublicationState.queued
+        ):
+            if safe_reason not in _PUBLICATION_HIDE_REASONS and safe_reason != "operator_blocked":
+                return PublicationOperationResult(
+                    PublicationOperationStatus.illegal_transition,
+                    generation=current,
+                    reason="invalid_metadata",
+                )
+            timestamp = _publication_now(now)
+            if timestamp < current.updated_at:
+                raise OutboxValidationError("invalid_metadata")
+            if lease_owner is not None or worker_id is not None:
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=current,
+                    reason="integrity",
+                )
+            connection = self.engine.connect()
+            changed = False
+            updated = current
+            try:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                    "WHERE publication_id=:publication_id",
+                    {"publication_id": publication_id},
+                ).mappings().first()
+                if row is None:
+                    connection.commit()
+                    return PublicationOperationResult(PublicationOperationStatus.missing)
+                latest = _publication_generation_from_row(row)
+                if latest.state is PublicationState.blocked:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.existing,
+                        generation=latest,
+                        reason=latest.reason,
+                    )
+                if latest.state is not PublicationState.queued:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.lost_claim,
+                        generation=latest,
+                        reason="lease_expired" if latest.lease_owner else None,
+                    )
+                if latest.lease_owner is not None or latest.lease_expires_at is not None:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        generation=latest,
+                        reason="integrity",
+                    )
+                if timestamp < latest.updated_at:
+                    raise OutboxValidationError("invalid_metadata")
+                update = connection.exec_driver_sql(
+                    "UPDATE publication_generations SET state='blocked',reason=:reason,"
+                    "retry_at=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=:updated_at "
+                    "WHERE publication_id=:publication_id AND state='queued' "
+                    "AND lease_owner IS NULL AND lease_expires_at IS NULL",
+                    {
+                        "reason": safe_reason,
+                        "updated_at": _publication_timestamp(timestamp),
+                        "publication_id": publication_id,
+                    },
+                )
+                if update.rowcount != 1:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.lost_claim,
+                        generation=latest,
+                        reason="lease_expired",
+                    )
+                updated_row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                    "WHERE publication_id=:publication_id",
+                    {"publication_id": publication_id},
+                ).mappings().first()
+                assert updated_row is not None
+                updated = _publication_generation_from_row(updated_row)
+                self._refresh_publication_health(
+                    connection, updated_at=timestamp, reason=updated.reason
+                )
+                connection.commit()
+                changed = True
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+            if changed:
+                self._notify_change()
+            return PublicationOperationResult(
+                PublicationOperationStatus.blocked,
+                generation=updated,
+                reason=updated.reason,
+            )
         result = self.advance_publication(
             publication_id,
             expected,

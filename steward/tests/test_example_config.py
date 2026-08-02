@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import fields
 import shutil
 from pathlib import Path
 
 import pytest
 
-from coquic_steward.core.config import load_config
+from coquic_steward.core.config import StewardDeploymentConfig, load_config
+from coquic_steward.orchestration.preflight import run_preflight
 
 
 def test_steward_example_config_loads_with_publication_settings(repo: Path) -> None:
@@ -19,6 +21,30 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     assert config.publication.enabled is False
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
+
+
+def test_example_and_deployment_contract_exclude_raw_sync_credentials(repo: Path) -> None:
+    example = Path(__file__).resolve().parents[1] / "steward.example.toml"
+
+    field_names = {item.name for item in fields(StewardDeploymentConfig)}
+    assert "dataset_identity_path" not in field_names
+    assert "known_hosts_path" not in field_names
+    example_text = example.read_text(encoding="utf-8")
+    assert "dataset_identity_path" not in example_text
+    assert "known_hosts_path" not in example_text
+
+
+def test_enabled_publication_runs_preflight_without_deployment_credentials(
+    repo: Path, tmp_path: Path
+) -> None:
+    config_path, _credentials, _staging = _write_publication_config(tmp_path)
+
+    config = load_config(repo_root=repo, config_path=config_path)
+    report = run_preflight(config, check_remote_push=False)
+
+    assert config.publication.enabled is True
+    assert config.deployment.enabled is False
+    assert "deployment" not in report.checks
 
 
 def _write_publication_config(

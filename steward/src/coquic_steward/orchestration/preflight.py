@@ -160,16 +160,12 @@ def _validate_deployment_boundary(config: StewardConfig) -> None:
     credentials = (
         (deployment.codex_credential_path, "Codex API credential"),
         (deployment.github_credential_path, "GitHub integration identity"),
-        (deployment.dataset_identity_path, "dataset publication identity"),
     )
     for path, label in credentials:
         _check_secret_file(path, label)
         assert path is not None
         if deployment.host_uid is not None and path.lstat().st_uid != deployment.host_uid:
             raise StewardPreflightError(f"preflight failed: {label} owner is mismatched")
-    _check_known_hosts(deployment.known_hosts_path)
-    if deployment.host_uid is not None and deployment.known_hosts_path is not None and deployment.known_hosts_path.lstat().st_uid != deployment.host_uid:
-        raise StewardPreflightError("preflight failed: known-hosts owner is mismatched")
     remote = run_command(["git", "config", "--get", f"remote.{deployment.expected_remote}.url"], cwd=repository)
     if not remote.ok or remote.stdout.strip() == "":
         raise StewardPreflightError("preflight failed: expected Git remote is unavailable")
@@ -270,21 +266,6 @@ def _check_secret_file(path: Path | None, label: str) -> None:
         raise StewardPreflightError(f"preflight failed: {label} file is not regular")
     if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise StewardPreflightError(f"preflight failed: {label} file permissions are unsafe")
-
-
-def _check_known_hosts(path: Path | None) -> None:
-    if path is None:
-        raise StewardPreflightError("preflight failed: known-hosts path is missing")
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise StewardPreflightError("preflight failed: known-hosts file is unavailable") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise StewardPreflightError("preflight failed: known-hosts file is not regular")
-    if stat.S_IMODE(metadata.st_mode) & 0o022:
-        raise StewardPreflightError("preflight failed: known-hosts permissions are unsafe")
-    if not path.read_text(encoding="utf-8", errors="replace").strip():
-        raise StewardPreflightError("preflight failed: known-hosts file is empty")
 
 
 def _validate_container_host_mapping(config: StewardConfig) -> None:

@@ -600,8 +600,6 @@ class StewardDeploymentConfig:
     compose_project: str = "coquic-steward"
     codex_credential_path: Path | None = None
     github_credential_path: Path | None = None
-    dataset_identity_path: Path | None = None
-    known_hosts_path: Path | None = None
     release_id: str | None = None
     daemon_image: str = "coquic-steward-daemon"
     daemon_image_id: str | None = None
@@ -624,7 +622,7 @@ class StewardDeploymentConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("deployment.enabled must be a boolean")
-        for name in ("home", "repository", "codex_credential_path", "github_credential_path", "dataset_identity_path", "known_hosts_path"):
+        for name in ("home", "repository", "codex_credential_path", "github_credential_path"):
             value = getattr(self, name)
             if value is not None:
                 path = _absolute_path(value, f"deployment.{name}")
@@ -935,14 +933,6 @@ class StewardConfig:
     @property
     def github_credential_path(self) -> Path | None:
         return self.deployment.github_credential_path
-
-    @property
-    def dataset_identity_path(self) -> Path | None:
-        return self.deployment.dataset_identity_path
-
-    @property
-    def known_hosts_path(self) -> Path | None:
-        return self.deployment.known_hosts_path
 
     @property
     def host_uid(self) -> int | None:
@@ -1495,8 +1485,6 @@ def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
         compose_project=str(data.get("compose_project", "coquic-steward")),
         codex_credential_path=_path("codex_credential_path", "codex_api_key_path"),
         github_credential_path=_path("github_credential_path", "github_identity_path"),
-        dataset_identity_path=_path("dataset_identity_path", "dataset_sync_key_path"),
-        known_hosts_path=_path("known_hosts_path"),
         release_id=(
             os.getenv("STEWARD_RELEASE_ID")
             if enabled and os.getenv("STEWARD_RELEASE_ID")

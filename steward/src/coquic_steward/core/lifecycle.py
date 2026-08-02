@@ -508,7 +508,6 @@ class ShutdownResult:
     forced: bool = False
     interrupted_runs: int = 0
     stopped_containers: int = 0
-    final_sync_attempted: bool = False
 
 
 @dataclass(frozen=True)

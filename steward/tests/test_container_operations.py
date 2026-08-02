@@ -41,8 +41,6 @@ def _deployment(tmp_path: Path, **overrides) -> StewardDeploymentConfig:
         "docker_gid": 999,
         "codex_credential_path": tmp_path / "codex",
         "github_credential_path": tmp_path / "github",
-        "dataset_identity_path": tmp_path / "dataset",
-        "known_hosts_path": tmp_path / "known_hosts",
         "min_free_bytes": 1000,
         "max_owned_docker_bytes": 2000,
         "recovery_free_bytes": 1500,

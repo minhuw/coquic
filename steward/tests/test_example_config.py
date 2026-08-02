@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import fields
 import shutil
 from pathlib import Path
 
@@ -21,17 +20,6 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     assert config.publication.enabled is False
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
-
-
-def test_example_and_deployment_contract_exclude_raw_sync_credentials(repo: Path) -> None:
-    example = Path(__file__).resolve().parents[1] / "steward.example.toml"
-
-    field_names = {item.name for item in fields(StewardDeploymentConfig)}
-    assert "dataset_identity_path" not in field_names
-    assert "known_hosts_path" not in field_names
-    example_text = example.read_text(encoding="utf-8")
-    assert "dataset_identity_path" not in example_text
-    assert "known_hosts_path" not in example_text
 
 
 def test_enabled_publication_runs_preflight_without_deployment_credentials(

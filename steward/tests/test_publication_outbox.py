@@ -832,6 +832,168 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
     assert len(store.list_publication_generations()) == 1
 
 
+def _blocked_generation_store(path):
+    store = TaskStore(path)
+    generation = _generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("worker-1", now=NOW)
+    blocked = store.block_publication(
+        generation.publication_id,
+        expected_state=PublicationState.claimed,
+        lease_owner="worker-1",
+        reason="scanner_failure",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert blocked.status is PublicationOperationStatus.blocked
+    return store, generation
+
+
+def _repaired_generation() -> PublicationGeneration:
+    identity = GenerationIdentity("task-1", "boundary-2")
+    return _generation(
+        publication_id=identity.publication_id,
+        generation_boundary="boundary-2",
+        idempotency_key=identity.idempotency_key,
+        metadata_digest="b" * 64,
+        created_at=NOW + timedelta(seconds=2),
+        updated_at=NOW + timedelta(seconds=2),
+    )
+
+
+def test_store_replace_blocked_publication_is_atomic_and_replays(tmp_path) -> None:
+    path = tmp_path / "steward.sqlite"
+    first_store, old = _blocked_generation_store(path)
+    second_store = TaskStore(path)
+    repaired = _repaired_generation()
+    observed: list[list[str]] = []
+    first_store.on_change = lambda: observed.append(
+        [item.publication_id for item in first_store.list_publication_generations()]
+    )
+
+    replaced = first_store.replace_blocked_publication(old.publication_id, repaired)
+    assert replaced.status is PublicationOperationStatus.enqueued
+    assert replaced.generation == repaired
+    assert first_store.get_publication_generation(old.publication_id) is None
+    assert first_store.get_publication_generation(repaired.publication_id).state is PublicationState.queued
+    assert observed == [[repaired.publication_id]]
+
+    replay = second_store.replace_blocked_publication(old.publication_id, repaired)
+    assert replay.status is PublicationOperationStatus.existing
+    assert replay.generation is not None
+    assert replay.generation.publication_id == repaired.publication_id
+    assert len(second_store.list_publication_generations()) == 1
+
+
+def test_store_replace_blocked_publication_concurrent_replay_converges(tmp_path) -> None:
+    path = tmp_path / "steward.sqlite"
+    first_store, old = _blocked_generation_store(path)
+    second_store = TaskStore(path)
+    repaired = _repaired_generation()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda item: item[0].replace_blocked_publication(old.publication_id, repaired),
+                ((first_store,), (second_store,)),
+            )
+        )
+    assert sorted(result.status.value for result in results) == ["enqueued", "existing"]
+    assert [item.publication_id for item in first_store.list_publication_generations()] == [
+        repaired.publication_id
+    ]
+
+
+@pytest.mark.parametrize("guard", ["same_identity", "wrong_task_run", "receipt", "cleanup"])
+def test_store_replace_blocked_publication_refuses_proof_and_identity_guards(tmp_path, guard) -> None:
+    store, old = _blocked_generation_store(tmp_path / f"{guard}.sqlite")
+    candidate = _repaired_generation()
+    if guard == "same_identity":
+        candidate = replace(
+            old,
+            state=PublicationState.queued,
+            attempt=0,
+            reason=None,
+            created_at=NOW + timedelta(seconds=2),
+            updated_at=NOW + timedelta(seconds=2),
+        )
+    elif guard == "wrong_task_run":
+        identity = GenerationIdentity("task-2", "boundary-2")
+        candidate = replace(
+            candidate,
+            publication_id=identity.publication_id,
+            task_id="task-2",
+            idempotency_key=identity.idempotency_key,
+        )
+    elif guard == "receipt":
+        # Receipts are recorded only while the generation owns a live lease;
+        # block it afterward and ensure the proof still prevents replacement.
+        store2 = TaskStore(tmp_path / "receipt-source.sqlite")
+        receipt_old = _generation()
+        store2.enqueue_publication(receipt_old)
+        store2.claim_publication("worker-1", now=NOW)
+        store2.advance_publication(
+            receipt_old.publication_id,
+            PublicationState.claimed,
+            PublicationState.building,
+            lease_owner="worker-1",
+            now=NOW + timedelta(seconds=1),
+        )
+        assert _record(
+            store2,
+            receipt_old.publication_id,
+            PublicationReceipt.public_receipt(
+                DIGEST,
+                17,
+                PUBLIC_KEY,
+                NOW + timedelta(seconds=2),
+                "runs/run-1/trajectory.json",
+            ),
+            now=NOW + timedelta(seconds=2),
+        ).status is PublicationOperationStatus.recorded
+        assert store2.block_publication(
+            receipt_old.publication_id,
+            expected_state=PublicationState.building,
+            lease_owner="worker-1",
+            reason="scanner_failure",
+            now=NOW + timedelta(seconds=3),
+        ).status is PublicationOperationStatus.blocked
+        store = store2
+        old = receipt_old
+    elif guard == "cleanup":
+        intent = CleanupIntent(
+            old.task_id,
+            old.publication_id,
+            DIGEST,
+            "/var/lib/coquic/tasks/task-1",
+            NOW + timedelta(seconds=2),
+        )
+        with store.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO publication_cleanup_intents "
+                    "(intent_id,publication_id,task_id,manifest_digest,exact_path,state,requested_at) "
+                    "VALUES (:intent_id,:publication_id,:task_id,:manifest_digest,:exact_path,'pending',:requested_at)"
+                ),
+                {
+                    "intent_id": intent.intent_id,
+                    "publication_id": intent.publication_id,
+                    "task_id": intent.task_id,
+                    "manifest_digest": intent.manifest_digest,
+                    "exact_path": intent.exact_path,
+                    "requested_at": "2026-07-28T12:00:02.000Z",
+                },
+            )
+
+    refused = store.replace_blocked_publication(old.publication_id, candidate)
+    assert refused.status in {
+        PublicationOperationStatus.precondition,
+        PublicationOperationStatus.conflict,
+    }
+    assert refused.reason == "integrity"
+    assert store.get_publication_generation(old.publication_id) is not None
+    if candidate.publication_id != old.publication_id:
+        assert store.get_publication_generation(candidate.publication_id) is None
+
+
 def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
     first_store = TaskStore(path)

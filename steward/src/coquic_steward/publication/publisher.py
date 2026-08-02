@@ -955,7 +955,7 @@ class CloudPublisher:
         *,
         compose_kwargs: Mapping[str, object] | None = None,
     ) -> PublicationResult:
-        """Rescan current evidence and enqueue only a changed generation.
+        """Rescan current evidence and replace only a changed generation.
 
         The existing row remains blocked when composition returns the same
         deterministic identity, a repair outcome, or a fail-closed outcome.
@@ -982,23 +982,20 @@ class CloudPublisher:
             )
         if current is None:
             return _result(PublicationStatus.blocked, publication_id, reason="missing", phase="retry")
+        state = _status(getattr(current, "state", ""))
+        if state != PublicationState.blocked.value:
+            return _result(
+                PublicationStatus.blocked,
+                publication_id,
+                reason="precondition",
+                phase="retry",
+            )
         if source is None:
             self._retry_hide_head(current, "missing")
             return _result(
                 PublicationStatus.blocked,
                 publication_id,
                 reason="missing",
-                phase="retry",
-            )
-        state = _status(getattr(current, "state", ""))
-        if state in {
-            PublicationState.exposed.value,
-            PublicationState.terminal_cleaned.value,
-        }:
-            return _result(
-                PublicationStatus.blocked,
-                publication_id,
-                reason="precondition",
                 phase="retry",
             )
         try:
@@ -1060,13 +1057,11 @@ class CloudPublisher:
             record = getattr(composed, "outbox", None)
         if record is None or _view_identifier(_publication_id_from(record)) != composed.publication_id:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        enqueue = getattr(self.store, "enqueue_publication", None) or getattr(
-            self.store, "enqueue_generation", None
-        )
-        if not callable(enqueue):
+        replace = getattr(self.store, "replace_blocked_publication", None)
+        if not callable(replace):
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         try:
-            operation = enqueue(record)
+            operation = replace(publication_id, record)
         except Exception:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         operation_status = _status(getattr(operation, "status", operation))

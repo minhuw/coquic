@@ -9,7 +9,13 @@ from typer.testing import CliRunner
 from coquic_steward import cli
 from coquic_steward.cli import app
 from coquic_steward.publication.models import FailClosed, ReasonCode
-from coquic_steward.publication.outbox import PublicationState, ReceiptClass
+from coquic_steward.publication.outbox import (
+    GenerationIdentity,
+    PublicationGeneration,
+    PublicationOperationStatus,
+    PublicationState,
+    ReceiptClass,
+)
 from coquic_steward.publication.publisher import (
     CloudPublisher,
     PublicationHideStatus,
@@ -17,6 +23,7 @@ from coquic_steward.publication.publisher import (
     publication_generation_views,
     publication_health_view,
 )
+from coquic_steward.storage import TaskStore
 
 
 NOW = datetime(2026, 8, 1, tzinfo=timezone.utc)
@@ -96,14 +103,14 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
 
 def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
     current = _generation()
-    queued: list[object] = []
+    replaced: list[tuple[str, object]] = []
 
     class Store:
         def get_publication_generation(self, publication_id):
             return current if publication_id == current.publication_id else None
 
-        def enqueue_publication(self, value):
-            queued.append(value)
+        def replace_blocked_publication(self, publication_id, value):
+            replaced.append((publication_id, value))
             return SimpleNamespace(status="enqueued")
 
     changed = SimpleNamespace(
@@ -122,13 +129,73 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
     publisher = CloudPublisher(Store(), object(), object(), compose=lambda *_a, **_k: changed)
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.queued
-    assert queued == [changed.outbox_record]
+    assert replaced == [(current.publication_id, changed.outbox_record)]
 
     unchanged = SimpleNamespace(**{**changed.__dict__, "publication_id": current.publication_id, "metadata_digest": "a" * 64})
     publisher = CloudPublisher(Store(), object(), object(), compose=lambda *_a, **_k: unchanged)
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.blocked
     assert result.reason == "unchanged"
+
+
+def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    old_identity = GenerationIdentity("task-retry", "boundary-old")
+    old = PublicationGeneration(
+        publication_id=old_identity.publication_id,
+        task_id="task-retry",
+        run_id="run-retry",
+        generation_boundary="boundary-old",
+        metadata_digest="a" * 64,
+        idempotency_key=old_identity.idempotency_key,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    assert store.enqueue_publication(old).status is PublicationOperationStatus.enqueued
+    assert store.claim_publication("worker-1", publication_id=old.publication_id, now=NOW).status is PublicationOperationStatus.claimed
+    assert store.block_publication(
+        old.publication_id,
+        expected_state=PublicationState.claimed,
+        lease_owner="worker-1",
+        reason="scanner_failure",
+        now=NOW + timedelta(seconds=1),
+    ).status is PublicationOperationStatus.blocked
+
+    new_identity = GenerationIdentity("task-retry", "boundary-new")
+    repaired = PublicationGeneration(
+        publication_id=new_identity.publication_id,
+        task_id="task-retry",
+        run_id="run-retry",
+        generation_boundary="boundary-new",
+        metadata_digest="b" * 64,
+        idempotency_key=new_identity.idempotency_key,
+        created_at=NOW + timedelta(seconds=2),
+        updated_at=NOW + timedelta(seconds=2),
+    )
+    composed = SimpleNamespace(
+        publication_id=repaired.publication_id,
+        task_id=repaired.task_id,
+        run_id=repaired.run_id,
+        generation_boundary=repaired.generation_boundary,
+        metadata_digest=repaired.metadata_digest,
+        idempotency_key=repaired.idempotency_key,
+        generation={},
+        payload={},
+        objects=(),
+        private_originals=(),
+        outbox_record=repaired,
+    )
+    publisher = CloudPublisher(
+        store,
+        object(),
+        object(),
+        compose=lambda *_args, **_kwargs: composed,
+    )
+    result = publisher.retry_publication(old.publication_id, {"fresh": True})
+    assert result.status is PublicationStatus.queued
+    assert result.publication_id == repaired.publication_id
+    assert store.get_publication_generation(old.publication_id) is None
+    assert store.get_publication_generation(repaired.publication_id).state is PublicationState.queued
 
 
 def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:

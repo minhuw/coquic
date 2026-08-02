@@ -2137,6 +2137,183 @@ class SQLiteTaskStore:
     queue_publication = enqueue_publication
     enqueue_publication_generation = enqueue_publication
 
+    def replace_blocked_publication(
+        self,
+        old_publication_id: str,
+        generation: PublicationGeneration,
+    ) -> PublicationOperationResult:
+        """Atomically replace one blocked, unpublished generation.
+
+        A repaired generation keeps the original task/run uniqueness boundary,
+        so the old row must be removed in the same transaction as the new
+        queued row.  Receipts and cleanup intents are durable publication
+        proof; refusing when either exists prevents a cascade from erasing it.
+        """
+
+        try:
+            old_id = _publication_identifier(old_publication_id, prefix="pub-")
+        except OutboxValidationError as error:
+            return PublicationOperationResult(
+                PublicationOperationStatus.precondition,
+                reason=error.code.value,
+            )
+        if not isinstance(generation, PublicationGeneration):
+            return PublicationOperationResult(
+                PublicationOperationStatus.precondition,
+                reason="invalid_metadata",
+            )
+        if (
+            generation.state is not PublicationState.queued
+            or generation.attempt != 0
+            or generation.reason is not None
+            or generation.lease_owner is not None
+            or generation.lease_expires_at is not None
+            or generation.retry_at is not None
+            or generation.exposed_at is not None
+        ):
+            return PublicationOperationResult(
+                PublicationOperationStatus.precondition,
+                reason="invalid_metadata",
+            )
+
+        connection = self.engine.connect()
+        changed = False
+        saved = generation
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            old_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": old_id},
+            ).mappings().first()
+            candidate_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": generation.publication_id},
+            ).mappings().first()
+
+            # Once the old row has been replaced, an exact replay is the new
+            # row.  Do not emit another wakeup or touch its health timestamp.
+            if old_row is None:
+                if candidate_row is not None:
+                    existing = _publication_generation_from_row(candidate_row)
+                    if _same_generation_input(existing, generation):
+                        connection.commit()
+                        return PublicationOperationResult(
+                            PublicationOperationStatus.existing,
+                            generation=existing,
+                        )
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.conflict,
+                        generation=existing,
+                        reason="integrity",
+                    )
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.missing,
+                    reason="missing",
+                )
+
+            old = _publication_generation_from_row(old_row)
+            if old.task_id != generation.task_id or old.run_id != generation.run_id:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.conflict,
+                    generation=old,
+                    reason="integrity",
+                )
+            if old.publication_id == generation.publication_id:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.conflict,
+                    generation=old,
+                    reason="integrity",
+                )
+            if (
+                old.state is not PublicationState.blocked
+                or old.lease_owner is not None
+                or old.lease_expires_at is not None
+                or old.exposed_at is not None
+            ):
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=old,
+                    reason="integrity",
+                )
+
+            receipt_count = connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM publication_receipts "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": old.publication_id},
+            ).scalar_one()
+            cleanup_count = connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM publication_cleanup_intents "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": old.publication_id},
+            ).scalar_one()
+            if receipt_count or cleanup_count:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=old,
+                    reason="integrity",
+                )
+            if candidate_row is not None:
+                existing = _publication_generation_from_row(candidate_row)
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.conflict,
+                    generation=existing,
+                    reason="integrity",
+                )
+
+            connection.exec_driver_sql(
+                "DELETE FROM publication_generations WHERE publication_id=:publication_id",
+                {"publication_id": old.publication_id},
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO publication_generations
+                  (publication_id,task_id,run_id,generation_boundary,metadata_digest,
+                   idempotency_key,state,attempt,lease_owner,lease_expires_at,retry_at,
+                   reason,expected_row_count,expected_object_count,expected_task_count,
+                   expected_pipeline_count,expected_run_count,expected_event_count,
+                   expected_artifact_count,created_at,updated_at,exposed_at)
+                VALUES
+                  (:publication_id,:task_id,:run_id,:generation_boundary,:metadata_digest,
+                   :idempotency_key,'queued',0,NULL,NULL,NULL,NULL,
+                   :expected_row_count,:expected_object_count,:expected_task_count,
+                   :expected_pipeline_count,:expected_run_count,:expected_event_count,
+                   :expected_artifact_count,:created_at,:updated_at,NULL)
+                """,
+                _generation_parameters(generation),
+            )
+            saved_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE publication_id=:publication_id",
+                {"publication_id": generation.publication_id},
+            ).mappings().first()
+            assert saved_row is not None
+            saved = _publication_generation_from_row(saved_row)
+            self._refresh_publication_health(connection, updated_at=saved.updated_at)
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.enqueued,
+            generation=saved,
+        )
+
+    replace_blocked_generation = replace_blocked_publication
+
     def get_publication_generation(
         self, publication_id: str
     ) -> PublicationGeneration | None:

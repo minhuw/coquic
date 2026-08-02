@@ -11,7 +11,7 @@ The trusted daemon is deployed as one Docker Compose service. It runs as the
 configured numeric host UID/GID plus the Docker socket group and creates task
 and scheduler-planner siblings through the standard local Unix Docker socket.
 The daemon-owned clone is always `$COQUIC_HOME/repository/`; an interactive
-checkout is rejected. Codex, GitHub, and dataset-publication identities are
+checkout is rejected. Codex, GitHub, and cloud-publication credentials are
 individual read-only files exposed only to the trusted service as
 `/run/secrets/` targets. No task container receives the socket, whole home,
 credentials, or daemon configuration. See
@@ -29,8 +29,8 @@ bash steward/containers/manage.sh status
 Bootstrap builds the pinned Nix `steward-daemon-image`, `steward-task-image`,
 and no-Codex `steward-validation-image`, records exact local image IDs, validates the private
 layout and credentials, and clones only an absent canonical repository. It
-does not create credentials, initialize SQLite/epochs, contact the receiver, or
-start work. Upgrades require proven quiescence unless the operator explicitly
+does not create credentials, initialize SQLite/epochs, or start work. Upgrades
+require proven quiescence unless the operator explicitly
 uses `--force`; ordinary stop preserves recoverable state.
 
 ## Quick start
@@ -64,7 +64,7 @@ queued and active task pipelines remain runnable.
 
 ## Control-loop archive
 
-The raw scheduler archive is public by placement under
+The scheduler archive is private local evidence under
 `$COQUIC_HOME/control-loop/`:
 
 ```text
@@ -80,39 +80,24 @@ observations, canonical signals, wakeups, cycles, planner dispositions, and
 causal graph edges are committed there with monotonic event sequences. A
 daemon-owned asynchronous writer materializes only ledger-confirmed event
 bytes. Event files are append-only; startup may discard only an unconfirmed
-incomplete final line.
+incomplete final line. Raw scheduler records stay private local evidence.
 
 Terminal planner runs are copied to a hidden same-filesystem stage, checked by
 manifest descriptors, and atomically placed. The manifest covers every raw
 prompt, transcript, result, activity, telemetry, and tool-change file that is
 available. `current.json` is a bounded convenience projection and can be
-replaced; consumers reconstruct history from events and sealed runs.
+replaced; local diagnostics reconstruct history from events and sealed runs.
 
 See [CONTROL_LOOP_ARCHIVE.md](CONTROL_LOOP_ARCHIVE.md) for the storage and
 recovery contract.
 
-## Dataset synchronization
+## Cloud publication
 
-The optional daemon-only publisher transfers exactly the sibling
-`$COQUIC_HOME/tasks/` and `$COQUIC_HOME/control-loop/` roots in one restricted
-rsync process. Both `epoch.json` files must be schema-valid and carry the same
-immutable epoch ID immediately before launch. Sources are passed as directories
-so the receiver sees stable `tasks/` and `control-loop/` names below its fixed
-dataset parent; the destination is always `user@host::steward-dataset` over the
-locked SSH transport.
-
-Arrival order is intentionally eventual: epoch, manifest, event, and sealed-run
-files may arrive independently. Exit 0 records only transport completion;
-exit 24 and live source races record an incomplete retryable cycle. There is no
-delete, staging tree, archive bundle, remote acknowledgement, or Site V2 import
-claim. SQLite keeps one bounded dataset health row with timestamps, category,
-duration, exit code, active cycle, and consecutive failures.
-
-The dedicated identity is readable only by the daemon sync boundary. The
-receiver key is `restrict`-confined to a write-only rsync process; its parent
-and cache are owned separately and only pre-created public roots are writable.
-Real key installation, account ownership, and receiver provisioning remain
-operator work. See [DATASET_SYNC.md](DATASET_SYNC.md) for the contract.
+Steward keeps SQLite and local task/control-loop archives private. A completed,
+inspected, sanitized generation is the only data sent to Cloudflare D1/R2; no
+raw archive transport or transcript fallback runs beside it. See
+[CLOUD_PUBLICATION.md](CLOUD_PUBLICATION.md) for eligibility, publication
+order, recovery, and terminal archive cleanup.
 
 ## Planner boundary
 
@@ -125,7 +110,7 @@ the output schema, and read-only sealed prior run history.
 The locked Docker bridge provides the outbound provider transport required by
 `codex exec`. The planner has no host networking, network-administration
 capability, repository, worktree, SQLite/WAL, Docker socket, daemon
-configuration, or GitHub/SSH/sync credential. Failed or invalid output seals a
+configuration, or GitHub/SSH credential. Failed or invalid output seals a
 failed run, leaves inputs pending, and uses bounded persistent backoff.
 Accepted, duplicate, rejected, and capacity-skipped proposals remain ordinal
 evidence.
@@ -141,7 +126,7 @@ reviewer, formality, and commit-message roles are read-only.
 `CODEX_API_KEY` is delivered to the trusted wrapper as a length-prefixed stdin
 value immediately before `execve`; it is not written to argv, labels, SQLite,
 configuration, or archive records. The task image has no Docker socket,
-GitHub/SSH/sync credential, or daemon home.
+GitHub/SSH credential, or daemon home.
 
 Build and inspect the locked images with:
 
@@ -165,7 +150,7 @@ interrupted work leaves it pending.
 
 Tasks are queued through the CLI or planner and are advanced by the daemon.
 Use `enqueue`, `run`, `timeline`, and `status` for local operations. Commits,
-pushes, issue comments, and external synchronization remain daemon or human
+pushes, issue comments, and external publication remain daemon or human
 responsibilities; Codex workers do not perform those actions directly.
 
 ## State layout
@@ -180,18 +165,17 @@ $COQUIC_HOME/
 └── steward/                compatibility logs, prompts, and local diagnostics
 ```
 
-Keep the entire state root private except for the exact archive directories
-that an operator intentionally places where consumers can read them. Steward
-does not generate a sanitized mirror, redaction cache, aggregate dataset,
-retention bundle, or outbound publication as part of the scheduler.
+Keep the entire state root private. Cloud publication reads a completed task
+snapshot through the daemon boundary and writes only validated D1 metadata and
+immutable R2 objects; it does not expose SQLite, raw archives, credentials,
+worktrees, or session homes.
 
 ## Verification
 
 ```bash
-nix develop -c uv run --project steward python -m pytest steward/tests
-nix develop -c ./scripts/check-steward-migration.py
-bash steward/containers/smoke-test.sh
-bash steward/containers/smoke-test.sh --dataset-sync
+nix develop -c uv run --project steward python -m pytest steward/tests -q
+nix develop -c python scripts/validate_steward_cloud_contracts.py
+nix develop -c pre-commit run --files steward/README.md steward/CLOUD_PUBLICATION.md
 git diff --check
 ```
 

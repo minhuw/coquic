@@ -45,9 +45,6 @@ radius, shadow, or spacing values. A genuine new token requires a DESIGN.md
 change. Arbitrary values remain acceptable for data-driven chart coordinates,
 measured dimensions, and values that cannot be known at build time.
 
-Complex plots, matrices, and simulations MAY use authored SVG/CSS where utility
-classes would obscure the analytical geometry.
-
 ## shadcn/ui
 
 shadcn/ui is source code owned by this application, not a visual theme or
@@ -86,15 +83,16 @@ The first application scaffold MUST:
 Required presets:
 
 | Preset            | Use                                        | Size | Leading | Flow   |
-| ----------------- | ------------------------------------------ | ---- | ------- | ------ |
+| ----------------- | ------------------------------------------ | ---- | ------- | ------- |
 | `typeset-docs`    | Documentation and reference prose          | 16px | 1.70    | 1.35em |
 | `typeset-journal` | Long-form project journal                  | 17px | 1.75    | 1.50em |
 | `typeset-answer`  | QA answers and rendered transcript content | 16px | 1.60    | 1.00em |
 
-Typeset is allowed for authored HTML and sanitized rendered Markdown. It is not
-used for navigation, page openings, forms, filters, charts, evidence rankings,
-matrices, status lines, metadata, or application controls. Interactive elements
-embedded inside prose use `not-typeset` or `data-not-typeset`.
+Typeset is allowed for authored HTML and sanitized rendered Markdown. It is
+not used for navigation, page openings, forms, filters, charts, evidence
+rankings, matrices, status lines, metadata, or application controls.
+Interactive elements embedded inside prose use `not-typeset` or
+`data-not-typeset`.
 
 Wide prose tables use the Typeset `typeset-scroll` wrapper. Typeset does not
 own reading width; the route layout retains the measures defined in DESIGN.md.
@@ -126,6 +124,38 @@ Performance and history requirements before fixing this dependency.
 Documentation and Journal sources SHOULD use validated MDX or Markdown catalogs.
 Rendering must sanitize untrusted Markdown and transcript content. Typeset owns
 rich-text rhythm after sanitization; it does not own content loading or safety.
+
+## Cloud reader and deployment boundary
+
+Site V2 is a standalone Next.js Node process. Server-side native `fetch` reads
+fixed, bounded D1 REST statements and validates public R2 descriptors before
+rendering or producing a same-origin 307 redirect. The browser never calls D1,
+receives a D1 token, or receives a direct provider URL.
+
+The reader's only server configuration is:
+
+- `CLOUDFLARE_ACCOUNT_ID`;
+- `COQUIC_STEWARD_D1_DATABASE_ID`;
+- `COQUIC_STEWARD_D1_READ_TOKEN`; and
+- `COQUIC_STEWARD_PUBLIC_R2_BASE_URL`.
+
+All four values are server-only. The account-scoped D1 token is never bundled,
+logged, or passed to task, planner, or validation containers. Missing or unsafe
+values fail closed. Builds and tests use mocked transports and need no live
+credential.
+
+Cloudflare infrastructure is an independent local operator action. Run
+`infra/cloudflare/scripts/deploy-production.sh` from the reproducible Nix
+shell; it previews by default, requires explicit `--apply`, rejects unsafe
+Pulumi deletes/replacements, verifies the D1 schema, and installs the protected
+Steward credentials before handing four Site values to the SSH installer. It
+does not deploy Site or start Steward.
+
+Ordinary Site deploy/repair/rollback uses `site/deploy/deploy-remote.sh` and
+preserves the four protected values. GitHub Actions invokes that path only; it
+does not invoke Pulumi or Wrangler and stores no Cloudflare credential. There
+is no local SQLite/cache, filesystem archive importer, Worker, sidecar, D1
+mutation, compatibility reader, or history migration in this boundary.
 
 ## Testing
 

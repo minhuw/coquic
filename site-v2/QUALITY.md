@@ -2,8 +2,9 @@
 
 ## Accessibility
 
-- Target WCAG 2.2 AA. Automated critical/serious violations MUST be zero on every
-  primary route and representative state; automation does not replace manual review.
+- Target WCAG 2.2 AA. Automated critical/serious violations MUST be zero on
+  every primary route and representative state; automation does not replace
+  manual review.
 - Keyboard users MUST reach and operate every command, link, tab, disclosure,
   locally scrollable region, matrix cell, chart datum, and dialog.
 - Focus MUST be visible, logically ordered, never trapped outside a modal, and
@@ -16,10 +17,10 @@
 - Touch targets SHOULD be at least 44 by 44 CSS pixels on coarse pointers.
 - Charts MUST have an equivalent semantic table or list.
 - Steward trajectories MUST expose named headings and landmarks, unique record
-  anchors, keyboard-operable outline and disclosure controls, and visible focus.
-  Failed tool disclosures open by default. Loading, completion, empty, transient
-  Retry, and terminal unavailable states use live status text with no ambiguous
-  color-only distinction.
+  anchors, keyboard-operable outline and disclosure controls, and visible
+  focus. Failed tool disclosures open by default. Loading, completion, empty,
+  transient Retry, and terminal unavailable states use live status text with no
+  ambiguous color-only distinction.
 
 ## Responsive behavior
 
@@ -53,7 +54,8 @@
   embedded script or event-handler content.
 - Validate dynamic slugs, task IDs, session IDs, filenames, artifact paths, and
   proxy paths against explicit allowlists or safe patterns.
-- Dataset files are read-only and served with safe content disposition/type.
+- Published artifacts are read-only and served with safe content disposition
+  and type.
 - The RAG proxy forwards only documented headers and has a bounded timeout.
 - Steward publications are read-only and sanitized at the producer boundary.
 - External links opened in a new context use appropriate opener isolation.
@@ -62,16 +64,17 @@
 
 ### Steward cloud reader trust boundary
 
-- Cloud configuration has exactly four server-side values: Cloudflare account ID,
-  D1 database ID, account-scoped D1 Read token, and anonymous public R2 base URL.
-  Account ID, D1 database ID, and token MUST never reach client bundles, browser
-  responses, task/validation containers, or logs. The validated anonymous public
-  R2 base URL MAY appear only as the prefix of the derived artifact `Location`
-  header; it MUST not appear elsewhere in client bundles, browser responses,
-  task/validation containers, or logs. Missing or unsafe values fail closed.
+- Cloud configuration has exactly four server-side values: Cloudflare account
+  ID, D1 database ID, account-scoped D1 Read token, and anonymous public R2 base
+  URL. Account ID, D1 database ID, and token MUST never reach client bundles,
+  browser responses, task/validation containers, or logs. The validated
+  anonymous public R2 base URL MAY appear only as the prefix of the derived
+  artifact `Location` header; it MUST not appear elsewhere in client bundles,
+  browser responses, task/validation containers, or logs. Missing or unsafe
+  values fail closed.
 - D1 acquisition MUST use fixed parameterized statements with bounded timeout,
-  response bytes, result sets, and rows. Queries join only a `visible` task head
-  to its `visible` publication; staged, superseded, hidden, malformed,
+  response bytes, result sets, and rows. Queries join only a `visible` task
+  head to its `visible` publication; staged, superseded, hidden, malformed,
   dangling, and private-shaped rows are rejected before normalization.
 - D1 responses and R2 object descriptors, including trajectory descriptors, MUST
   pass strict schema, ownership, disclosure, size, and SHA-256 validation before
@@ -83,10 +86,10 @@
 - Trajectory Markdown links MUST use the allowlist, external links MUST isolate
   their opener, and image/download actions MUST remain same-origin logical-path
   routes. Browser assertions MUST never depend on a direct private or R2 URL.
-- The reader has no D1 mutation, local SQLite/cache, filesystem archive, Worker,
-  sidecar, compatibility reader, history migration, automatic polling, or raw
-  fallback. Public output contains no private locator, credential, matched
-  secret, scanner record, or filesystem path.
+- The reader has no D1 mutation, local SQLite/cache, filesystem archive,
+  Worker, sidecar, compatibility reader, history migration, automatic polling,
+  or raw fallback. Public output contains no private locator, credential,
+  matched secret, scanner record, or filesystem path.
 
 ## Performance budgets
 
@@ -98,7 +101,8 @@
   under 200ms at the 75th percentile on an agreed preview profile.
 - Long tables/lists SHOULD paginate or virtualize without breaking findability,
   browser history, or accessibility.
-- Images, frames, and charts MUST reserve stable dimensions to avoid layout shift.
+- Images, frames, and charts MUST reserve stable dimensions to avoid layout
+  shift.
 
 ## Compatibility and observability
 
@@ -115,20 +119,29 @@
 
 - Mocked cloud unit and route tests MUST cover available, valid empty, transient
   unavailable, terminal unavailable, malformed, and integrity-failure states;
-  visible-head/generation filtering; active-after-planning visibility; relational
-  task ownership/count/sequence checks; complete trajectory validation; one
-  same-origin `307` redirect; R2 base/key containment; and the absence of raw,
-  partial, private, cached, or compatibility fallback data.
-- The mocked suites MUST prove account-scoped credentials stay server-only,
-  D1 statements remain fixed and parameterized, and D1 transport/result limits
+  visible-head/generation filtering; active-after-planning visibility;
+  relational task ownership/count/sequence checks; complete trajectory
+  validation; one same-origin `307` redirect; R2 base/key containment; and the
+  absence of raw, partial, private, cached, or compatibility fallback data.
+- The mocked suites MUST prove account-scoped credentials stay server-only, D1
+  statements remain fixed and parameterized, and D1 transport/result limits
   bound timeout, response bytes, result sets, and rows. They MUST exercise
   invalid identifiers, unsafe logical paths, dangling rows, private-shaped data,
   and caller-supplied URL rejection without leaking diagnostic values.
+- Deployment-path tests MUST prove the four protected values are validated,
+  redacted from output, preserved across ordinary deploy/repair/rollback, and
+  passed only to the Next.js process. They MUST prove missing, insecure, or
+  symlinked host configuration fails before mutation.
+- The on-demand checker MUST accept a valid empty publication with explicit
+  detail/trajectory/artifact skips. With one real task it MUST select the first
+  visible task, verify ownership and complete trajectory content, and prove one
+  same-origin `307` redirect to a validated public key. It MUST not require a
+  scheduled monitor, canary, polling loop, or fabricated task.
 - Run the executable cloud reader gates with no live credential:
   `nix develop -c npm --prefix site-v2 run test:unit` and
   `nix develop -c npm --prefix site-v2 run test:steward`.
 - Keep the direct route/page harness separate from the browser gate. The
-  deterministic browser proof is
+  deterministic browser proof is:
   `nix develop -c npm --prefix site-v2 run test:visual -- tests/steward.spec.ts --workers=1`;
   it starts a loopback fixture server with dummy credentials by default. An
   explicitly supplied `PLAYWRIGHT_BASE_URL` may target a preview without

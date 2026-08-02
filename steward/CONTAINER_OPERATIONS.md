@@ -1,48 +1,54 @@
 # Steward container operations
 
-This document is the canonical operations record for the Steward 2.0 host
-deployment. Docker Compose is the only outer lifecycle manager. It runs one
-trusted Steward service and the daemon creates task and scheduler-planner
-containers as siblings through the standard local Unix Docker socket. Docker
-outside Docker is accepted host authority for this trusted controller; it is
-not task security. DinD, a nested daemon, systemd, rootless Docker, remote
-Docker, a registry, and privileged mode are deferred decisions.
+This is the canonical manual runbook for the Steward 2.0 host. Docker Compose
+is the outer lifecycle manager. It starts one trusted daemon; the daemon starts
+task, planner, and validation containers as siblings through the local Unix
+Docker socket. Starting Steward is an operator action. Bootstrap never starts
+the service, creates credentials, initializes SQLite, or contacts a receiver.
 
-## Authority and paths
+## Authority and private paths
 
-The service runs as the configured numeric host UID/GID and receives only the
-numeric Docker socket group. `$COQUIC_HOME` is one absolute path identical on
-the host, in the service, and in every task mount specification. The service
-may read its whole home, but task/planner containers receive only their
-allowlisted worktree, archive, session, scratch, Git, or sealed-history paths.
-No task container receives the socket, repository clone, SQLite, deployment
-state, daemon home, Compose files, or credentials.
+Set one absolute `COQUIC_HOME` on the host and in the daemon. The only clone is
+`$COQUIC_HOME/repository/`. Bootstrap refuses a dirty, detached, wrong-remote,
+wrong-branch, non-fast-forward, interactive, or ambiguous checkout and never
+resets an existing clone or uses a human checkout.
 
-The only canonical clone is `$COQUIC_HOME/repository/`. Bootstrap rejects a
-dirty, detached, wrong-remote, wrong-branch, non-fast-forward, interactive, or
-ambiguous clone. It never resets or repairs an existing checkout and never
-uses the human interactive checkout.
+The trusted daemon is the only service with Docker authority and the full
+private home. Compose mounts the local Unix socket and these host files as
+individual read-only files:
 
-Host credentials are individual private files below
-`$COQUIC_HOME/private/credentials/`: the Codex API credential, GitHub
-integration identity, and dataset-publication SSH identity. Known-hosts is
-non-secret but is separately read-only. Compose exposes each file at its own
-`/run/secrets/` target. Values never enter Compose YAML, `.env`, TOML, image
-labels, container environment, Docker argv, SQLite, logs, or public archives.
-The trusted daemon reads the Codex file only at a run boundary and delivers it
-through the existing length-prefixed control pipe. It is never passed through
-`docker exec --env`, `auth.json`, or a task-readable file.
+| Host path | Compose target | Purpose |
+| --- | --- | --- |
+| `$COQUIC_HOME/private/credentials/codex-api` | `/run/secrets/codex-api-key` | provider credential delivered at a run boundary |
+| `$COQUIC_HOME/private/credentials/github` | `/run/secrets/github-identity` | integration identity |
+| `$COQUIC_HOME/private/credentials/d1-read-token` | `/run/secrets/d1-read-token` | Steward D1 publication token |
+| `$COQUIC_HOME/private/credentials/r2-access-key-id` | `/run/secrets/r2-access-key-id` | public R2 access-key ID |
+| `$COQUIC_HOME/private/credentials/r2-secret-access-key` | `/run/secrets/r2-secret-access-key` | public R2 secret access key |
+| `$COQUIC_HOME/private/credentials/known_hosts` | `/etc/coquic-steward/known_hosts` | SSH host verification |
+
+The three publication files are produced by
+`infra/cloudflare/scripts/deploy-production.sh`. All credential files are
+regular, non-symlink files with mode `0600`, owned by `STEWARD_UID`; the
+credential directory is mode `0700`. Values never enter Compose YAML, `.env`,
+TOML, image labels, process arguments, SQLite, logs, or public objects.
+
+Task, planner, and validation containers receive only their declared worktree,
+archive/history, session, scratch, Git, or output mounts. They receive no
+socket, repository clone, SQLite, deployment state, daemon home, or secret.
+Task roles get a read-only worktree view by default; only the implementation
+role gets one scoped writable worktree and scratch mount. Validation always
+gets a read-only worktree plus bounded output and store mounts. The planner has
+only sealed history, one private session, and output staging.
 
 ## Releases and state
 
-Images are built only from the pinned Nix outputs
-`.#steward-daemon-image`, `.#steward-task-image`, and
-`.#steward-validation-image`, loaded into the selected local daemon, and
-inspected for exact IDs and immutable source, closure, architecture, protocol,
-Codex, and runtime labels. The validation image is a one-shot no-Codex,
-no-network boundary for the four canonical gates; it is never a Compose
-service. The content-derived release identity is private deployment state.
-The deployment directory contains:
+Build images from pinned Nix outputs and inspect their immutable IDs and labels:
+
+```text
+nix build --no-link .#steward-daemon-image .#steward-task-image .#steward-validation-image
+```
+
+The deployment directory is private and contains only bounded release facts:
 
 ```text
 $COQUIC_HOME/private/deployment/
@@ -54,96 +60,185 @@ $COQUIC_HOME/private/deployment/
   last-outcome.json       # bounded status/category only
 ```
 
-No selector changes until both images build, load, and inspect successfully.
-The current and previous pairs, plus every image referenced by an active,
-interrupted, recoverable, cleanup-pending, or nonterminal ledger record, are
-retained. Reclamation can remove only exact Steward-owned unreferenced image
-IDs. `docker system prune`, `docker image prune`, `docker container prune`,
-age-based deletion, and removal of another Compose project's objects are never
-used.
+Selectors change only after all three images build, load, and pass inspection.
+Current, previous, active, interrupted, recoverable, and cleanup-pending
+release identities remain retained. Never run Docker-wide prune commands or
+remove objects that are not proven Steward-owned and unreferenced.
 
-## Operations
+## Ordered launch
 
-`manage.sh bootstrap` takes the deployment lock, creates only the private
-directory skeleton, validates ownership/mode of pre-existing credential files,
-builds/verifies images, and clones the explicit remote only when the canonical
-repository path is absent. It does not generate credentials, initialize the
-database or archive epoch, contact the receiver, fetch signals, push, or start
-normal processing. Repeating a successful bootstrap is idempotent.
+Use this sequence after the Cloudflare operator has verified D1 and installed
+the three publication files. Keep non-secret Compose values in a private copy
+of `steward/containers/.env.example`; it contains paths and limits, not
+credential values.
 
-`start` requires a completed bootstrap and delegates supervision to Compose
-with `restart: unless-stopped`. Steward startup performs normal Plan 006
-preflight, epoch initialization, reconciliation, and the Plan 009 two-root
-sync. `stop` sends SIGTERM with a grace period strictly longer than Steward's
-configured shutdown grace plus wrapper reconciliation allowance. It preserves
-stopped task containers and recovery state and never calls `docker compose
-down`.
+1. Verify ownership and mode of the credential files, the absolute
+   `COQUIC_HOME`, the canonical clone settings, pinned image inputs, and the
+   local Docker Unix socket.
+2. Load the non-secret environment in the operator shell and validate the
+   production-shaped Compose file:
 
-`upgrade` builds a candidate and asks the bounded local health/quiescence API
-whether task/planner runs, integration/push, archive writers, sync, or cleanup
-are active. Busy or ambiguous state refuses before recreation. A forced
-upgrade is visibly separate, invokes bounded Plan 006 shutdown, preserves
-interruption evidence, recreates only the Steward service, and lets startup
-reconciliation resume or fall back from exact identities. Failed health keeps
-the candidate loaded but restores the previous verified selector. `rollback`
-selects only a compatible recorded previous pair.
+   ```sh
+   bash steward/containers/manage.sh config
+   ```
 
-Every management phase is journaled before and after its side effect. Recovery
-is deterministic: an interrupted layout/build/load/clone phase is retried only
-when the journal proves exact operation ownership; a pre-existing repository is
-never removed. An interrupted selector move compares both immutable records
-before choosing current/previous. An interrupted Compose recreate leaves task
-containers and archives untouched and startup decides recovery.
+3. Run bootstrap. It takes the deployment lock, validates every credential
+   without reading or printing its value, creates the private directory
+   skeleton, clones the configured remote only when the canonical clone is
+   absent, builds and verifies images, and records the first release:
 
-## Cleanup and pressure
+   ```sh
+   bash steward/containers/manage.sh bootstrap
+   ```
 
-Terminal cleanup belongs to the existing daemon transaction. After external
-effects, archive writers, and the owning session quiesce, Steward seals and
-verifies the terminal manifest, records `cleanup_pending`, removes the exact
-stopped labeled container and bounded scratch, removes the disposable worktree
-and eligible private session home, verifies the archive again, then records
-`cleanup_complete`. A crash or Docker error leaves `cleanup_pending`; startup
-and each bounded reconciliation retry only exact eligible ownership. Active,
-interrupted, recoverable, unknown, mismatched, and foreign containers are
-never removed by age.
+4. Inspect bounded state before starting the service:
 
-Docker local-log rotation, writable layers, tmpfs scratch, process count, task
-concurrency, and `$COQUIC_HOME` free space are measured as bounded facts.
-Production must configure minimum home free bytes, higher free-space recovery
-headroom, maximum Steward-owned Docker bytes, and a lower owned-byte recovery
-threshold; there are no machine-independent production defaults. Under pressure,
-eligible terminal cleanup and exact
-unreferenced image reclamation run first. If usage remains high, Steward
-persists/reports `resource_pressure`, stops admitting new planner/task work,
-and continues heartbeat, active/recoverable work, archive writing, cleanup,
-and synchronization. Admission resumes only above the free-space recovery
-headroom and below the owned-byte recovery threshold.
-Host-wide Docker usage is never claimed as Steward-owned and Docker's data root
-is never mounted or scanned.
+   ```sh
+   bash steward/containers/manage.sh status
+   ```
 
-Local health/status reports only release identity, lifecycle/heartbeat, safe
-task/container categories, cleanup-pending count, owned-byte and threshold
-facts, sync health, and pressure state. It does not expose secret paths or
-values, repository paths, raw inspect/config output, transcripts, inventory, or
-raw exceptions.
+5. Start Compose explicitly and confirm the daemon health and release:
 
-Validation containers use the exact owner, epoch, release, runtime, and image
-labels of their task or pipeline ledger row. They receive a read-only worktree
-and a fresh bounded writable output/store only, with `--network none`, no
-Docker socket, no host Nix store, and no credential mount. Gate command arrays
-and exit identities are retained in private validation evidence before the
-container and scratch root are removed. A crash leaves the exact resource
-under `cleanup_pending` for startup reconciliation; unknown or mismatched
-validation containers are reported and preserved.
+   ```sh
+   bash steward/containers/manage.sh start
+   bash steward/containers/manage.sh status
+   ```
 
-## Operator rollout boundary
+6. After Site is activated, run the read-only checker once for the empty state
+   or for the first real published task. The checker is never a launch hook.
 
-Real credential/key creation, receiver accounts and forced commands,
-production `.env` values, remote permissions, live Compose bootstrap/start,
-Site V2 coordination, an end-to-end canary, monitoring delivery, and a
-rollback exercise are manual post-backlog operator work. This repository uses
-fake credentials, local bare remotes, and temporary Docker state only. The
-operator checklist is: provision individual files and ownership, verify the
-canonical clone and pinned images, run `manage.sh bootstrap`, inspect bounded
-`status`, start Compose, prove a complete signal-to-archive-to-Site V2 canary,
-and exercise rollback without changing this contract.
+Bootstrap is idempotent. A successful repeat verifies the same clone and keeps
+the current release; it does not initialize a database or begin processing.
+
+## Lifecycle and recovery
+
+The management wrapper is the only lifecycle interface:
+
+```text
+bash steward/containers/manage.sh config
+bash steward/containers/manage.sh bootstrap
+bash steward/containers/manage.sh build
+bash steward/containers/manage.sh start
+bash steward/containers/manage.sh stop
+bash steward/containers/manage.sh status
+bash steward/containers/manage.sh logs
+bash steward/containers/manage.sh upgrade [--force]
+bash steward/containers/manage.sh rollback
+```
+
+`start` delegates to Compose with `restart: unless-stopped`. `stop` sends
+SIGTERM with the configured grace and preserves task containers and recovery
+state; it never calls `docker compose down`. `status` reports release,
+lifecycle, bounded pressure and cleanup facts, and safe Compose health. `logs`
+is limited to the Steward service.
+
+`upgrade` first proves quiescence through the daemon health API. Without
+`--force`, active task/planner work, integration, archive writing, or cleanup
+refuses the operation. It then builds a candidate, recreates only the Steward
+service, verifies the candidate release and heartbeat, and moves `current` and
+`previous` atomically. A failed candidate is restored to the prior verified
+release; the failed candidate remains recorded for diagnosis. `--force` is a
+separate, visibly disruptive stop that preserves interruption evidence before
+the recreate.
+
+`rollback` requires a recorded compatible `previous` release and proven
+quiescence. It verifies health before swapping selectors. If the previous pair
+cannot start cleanly, the current pair is restored and the operation fails
+closed. Neither upgrade nor rollback changes Pulumi, D1, R2, Site configuration,
+or publication objects.
+
+Every phase is journaled before and after its side effect. On restart,
+reconciliation retries only an interrupted operation whose journal proves exact
+ownership. A pre-existing repository is never deleted. An interrupted clone
+temporary path is removed only when the journal names that exact path; unknown
+or mismatched state remains for operator inspection. An interrupted selector
+move compares immutable records before choosing `current` or `previous`.
+
+## Pressure and cleanup
+
+Configure these host-specific limits in the private environment:
+
+```text
+STEWARD_MIN_FREE_BYTES
+STEWARD_RECOVERY_FREE_BYTES
+STEWARD_MAX_OWNED_DOCKER_BYTES
+STEWARD_RECOVERY_OWNED_DOCKER_BYTES
+STEWARD_MAX_PIDS
+STEWARD_MAX_MEMORY
+STEWARD_MAX_LOG_BYTES
+STEWARD_MAX_SCRATCH_BYTES
+```
+
+The daemon measures free space and exact Steward-owned Docker bytes. Under
+pressure it records bounded pressure and publication queue/blocked/cleanup
+counts, denies new planner/task admission, and continues active or recoverable
+work, archive writing, and cleanup. Admission resumes only above the free-space
+recovery headroom and below the owned-byte recovery threshold. Host-wide Docker
+usage and Docker's data root are never claimed or scanned.
+
+Terminal task cleanup remains a daemon transaction. After the remote generation
+and every expected public/private receipt are verified, the daemon seals and
+rechecks the manifest, records one exact `cleanup_pending` intent, and removes
+only the stopped labeled container, bounded scratch, disposable worktree, and
+eligible private session. A crash, mismatch, foreign object, or missing receipt
+leaves the intent for restart reconciliation. Never use age-based deletion,
+recursive globs, or a host-wide cleanup command.
+
+## Site proof and delayed cleanup
+
+An empty public D1 is healthy. Once Site is activated, run the retained checker
+manually after the first real completed publication:
+
+```sh
+nix develop -c uv run --project steward python scripts/check-steward-deployment.py \
+  --base-url https://coquic.minhuw.dev \
+  --output .remote-ci/steward-deployment.json
+```
+
+The checker accepts the valid empty state with explicit skips. With a real task
+it selects the first visible task, verifies ownership, loads the complete
+trajectory, and proves one same-origin artifact action returns a safe `307`
+redirect. Missing, malformed, private, integrity, ownership, and unsafe
+redirect responses fail closed. Only transient endpoint failures are suitable
+for a manual rerun. There is no scheduled monitor, synthetic canary, polling
+loop, or fabricated task.
+
+Site application deploy and rollback are owned by Site. They never alter D1,
+R2, Pulumi state, Steward credentials, or the Steward release selectors.
+Retired Site replica roots are a separate, delayed operator cleanup after the
+checker proof and the chosen rollback window:
+
+```text
+/opt/coquic-demo/steward/tasks
+/opt/coquic-demo/steward/control-loop
+/opt/coquic-demo/steward/cache
+```
+
+Remove only those exact Site-host paths, one at a time, with an operator-owned
+command after verifying cutover. Do not delete `$COQUIC_HOME/tasks`,
+`$COQUIC_HOME/control-loop`, or any Steward source archive; those private
+archives and their per-task verified cleanup protocol are not Site replicas.
+Ordinary Site deploy, repair, and rollback remove none of these paths.
+
+## Local proof
+
+The deterministic management tests use fake credentials, a local bare remote,
+and fake Docker state only:
+
+```sh
+nix develop -c bash steward/containers/test-manage.sh --config
+nix develop -c bash steward/containers/test-manage.sh --bootstrap
+nix develop -c bash steward/containers/test-manage.sh --lifecycle
+```
+
+The production-shaped smoke entry point runs those checks plus planner-boundary
+checks without launching a real service:
+
+```sh
+nix develop -c bash steward/containers/smoke-test.sh --production-compose
+nix develop -c bash steward/containers/smoke-test.sh --planner
+```
+
+Image and Docker isolation checks are separate operator actions and require the
+corresponding local tools. No local proof command performs a live Cloudflare,
+Site SSH, or production lifecycle action.

@@ -1,105 +1,138 @@
-# Steward task containers
+# Steward container boundaries
 
-The daemon image is the trusted control side. It owns Docker, GitHub/SSH
-integration credentials, SQLite, worktrees, public task/control-loop archives,
-and the dedicated dataset-sync key. The task image is an untrusted development
-closure and is created once per active task with only task-scoped mounts. The
-validation image is a separate no-Codex/no-network closure used only for one
-run of the four canonical gates.
+The daemon image is the trusted control side. It owns Docker, the GitHub
+integration, SQLite, private worktrees and archives, and the cloud publication
+client. The task image is an untrusted development closure. The validation
+image is a separate no-provider, no-network closure for the canonical gates.
+The planner image receives only sealed planning history, one private session,
+and a bounded output directory.
 
-The daemon creates a task container with the locked `sha256` image digest,
-read-only Git administration, a read-only archive, and separate worktree views.
-The control protocol is `task-container-v1`.
-Only an implementation session receives the task write group. Validation gets a
-bounded scratch mount; planner, reviewer, formality, and commit-message roles
-remain read-only. The trusted wrapper creates a private home for one persisted
-session UID and then launches Codex as that UID.
+## Mount and credential contract
 
-`CODEX_API_KEY` is delivered as a length-prefixed control value on the wrapper
-stdin immediately before `execve`. It is not persisted in `auth.json`, TOML,
-SQLite, labels, Docker argv/configuration, or public artifacts. Codex tool
-children use `shell_environment_policy.inherit = "none"` with the explicit
-Steward allowlist.
-
-The accepted residual risk is that a deliberately probing process in the same
-session can recover its own key through `/proc` or an equivalent same-container
-mechanism. The key is dedicated and revocable; rotation/revocation is the
-response. This design does not claim same-session process isolation.
-
-Build locked images with:
+Compose starts exactly one `steward` service from `compose.yml`. It runs as the
+configured host UID/GID, receives only the local Unix Docker socket group, and
+uses a read-only root with bounded `/tmp` and `/run` tmpfs. The daemon receives
+the full `$COQUIC_HOME` plus these individual read-only credential files and a
+known-hosts mount:
 
 ```text
+/run/secrets/codex-api-key       <- private/credentials/codex-api
+/run/secrets/github-identity     <- private/credentials/github
+/run/secrets/d1-read-token        <- private/credentials/d1-read-token
+/run/secrets/r2-access-key-id    <- private/credentials/r2-access-key-id
+/run/secrets/r2-secret-access-key <- private/credentials/r2-secret-access-key
+/etc/coquic-steward/known_hosts  <- private/credentials/known_hosts
+```
+
+The three publication files are installed by the Cloudflare rollout. Run that
+rollout as the account configured by `STEWARD_UID`: bootstrap checks every
+credential file as a mode-`0600` regular file owned by that UID, without reading
+or printing its value. The credential directory is mode `0700`. No credential is
+placed in an environment variable, image, label, Docker argument, SQLite row,
+transcript, or public object.
+
+Task containers receive only their task worktree, read-only archive, Git views,
+bounded scratch, and one private session home. Read-only roles use the
+read-only worktree view; only the implementation role receives one scoped
+writable worktree and scratch mount. Planner containers receive read-only
+sealed history, a fresh session, and output staging. Validation containers
+receive a read-only worktree and bounded writable output/store with
+`--network none`. None receives the Docker socket, daemon home, repository clone, SQLite,
+deployment state, provider files, or raw subprocess output.
+
+The task wrapper delivers `CODEX_API_KEY` as a length-prefixed value on stdin
+immediately before `execve`; it is not persisted in `auth.json`, TOML, labels,
+argv, or public artifacts. Same-session process inspection remains a known
+residual risk; the credential is dedicated and revocable.
+
+## Build and run commands
+
+Build the pinned images without changing host state:
+
+```sh
 nix build --no-link .#steward-daemon-image .#steward-task-image .#steward-validation-image
 ```
 
-Use `smoke-test.sh` with fake credentials and fake Codex output for image and
-isolation checks. `compose.yml` is the production-shaped, value-free boundary;
-operator values belong in the private `.env` file copied from `.env.example`.
-`compose.example.yml` remains a synthetic fixture used by the deterministic
-management tests.
-
-The checked-in management command is the only bootstrap/lifecycle wrapper:
+The checked-in management wrapper is the only bootstrap and lifecycle command:
 
 ```text
+bash steward/containers/manage.sh config
 bash steward/containers/manage.sh bootstrap
-bash steward/containers/manage.sh start|stop|status|logs
+bash steward/containers/manage.sh build
+bash steward/containers/manage.sh start
+bash steward/containers/manage.sh stop
+bash steward/containers/manage.sh status
+bash steward/containers/manage.sh logs
 bash steward/containers/manage.sh upgrade [--force]
 bash steward/containers/manage.sh rollback
 ```
 
-It uses one `$COQUIC_HOME/private/deployment/` lock/journal and records only
-verified image/release identities and bounded outcomes. Bootstrap validates
-three individual credential files without printing values, creates the
-daemon-owned `$COQUIC_HOME/repository/` clone only when absent, and never
-initializes the database, receiver, or task processing.
+`config` validates the one-service Compose file and numeric limits; lifecycle
+commands validate the configured local Unix socket. `bootstrap` validates
+private files, creates only the daemon-owned
+directory skeleton, clones the configured `main` remote only when the canonical
+clone is absent, builds/releases the three images, and records an atomic
+selector. It does not initialize SQLite, create credentials, contact a
+receiver, or start normal processing. `start` is the explicit Compose launch;
+`stop` preserves task state and never calls `docker compose down`.
 
-The daemon preflight resolves the locked task image and verifies host/container
-path mappings before dispatch. The task image receives only its task worktree,
-archive, scratch, Git metadata, and one private session home. It never receives
-Docker, GitHub, SSH, dataset-sync identity, known-hosts, daemon home, or raw
-subprocess output. Dataset credentials and receiver policy stay on the daemon.
+`upgrade` requires proven quiescence unless `--force` is supplied, verifies a
+candidate health/release identity, and restores the prior selector if health
+fails. `rollback` selects only the recorded compatible previous pair and
+restores the current pair if the rollback candidate fails health. Both retain
+bounded journals and never change provider or Site state.
 
-Normal SIGINT/SIGTERM stops active task containers after the configured grace
-but preserves their state directories for restart. Terminal cleanup removes a
-container only after a verified archive manifest and durable `cleanup_pending`.
-Task/planner containers are sibling objects with restart policy `no`; they never
-receive the host socket or `/run/secrets`. Use fake values for smoke checks:
+## Container smoke checks
 
-```bash
-bash steward/containers/smoke-test.sh --shutdown
-bash steward/containers/smoke-test.sh --dataset-sync
+Use fake inputs for local checks. The production-shaped mode runs management
+configuration, bootstrap, lifecycle, and planner checks without starting a
+real service:
+
+```sh
+nix develop -c bash steward/containers/smoke-test.sh --production-compose
+nix develop -c bash steward/containers/smoke-test.sh --planner
 ```
 
-Validation siblings carry `coquic.steward.runtime=validation-container-v1`,
-`restart=no`, and the exact release/epoch/run labels. They mount the worktree
-read-only and receive only a bounded writable root/store and output directory.
-The socket, host Nix store/daemon, credentials, Codex binary, and network are
-rejected before launch. Gate command/result identity is written to the task
-archive before the validation container and scratch are removed; interrupted
-runs remain `cleanup_pending` for the daemon's normal reconciliation.
+Image inspection and Docker isolation are separate modes:
 
-### Scheduler planner container
-
-The scheduler planner is a separate daemon-owned boundary. Its locked image is
-mounted with only:
-
-* read-only sealed `$COQUIC_HOME/control-loop/planner-runs/` history;
-* a fresh private session home for the one planner process; and
-* a private output staging directory.
-
-It uses the locked `network=bridge` transport required for `codex exec` provider
-calls. The read-only container drops all capabilities, forbids privilege
-escalation, and has no host networking, repository, worktree, SQLite/WAL,
-Docker socket, daemon configuration, GitHub/SSH/sync credential, or task image
-authority. Every attempt receives a new planner run and session identity. A
-planner failure is sealed and retried from the ledger; it does not resume a
-provider thread or use `--last`.
-
-The value-object boundary is `PlannerContainerConfig`; production runtime
-construction must reject repository or credential mounts. The image, mount,
-egress, and network-control contract can be checked without making a provider
-call by the planner smoke mode:
-
-```bash
-bash steward/containers/smoke-test.sh --planner
+```sh
+nix develop -c bash steward/containers/smoke-test.sh --images
+nix develop -c bash steward/containers/smoke-test.sh --isolation
+nix develop -c bash steward/containers/smoke-test.sh --shutdown
 ```
+
+The image checks require the pinned Nix outputs. Isolation checks require a
+local Docker daemon and prove that task and validation containers cannot reach
+provider files, the host socket, or unrelated host paths. They do not publish
+anything or contact Cloudflare.
+
+## Pressure, cleanup, and Site handoff
+
+Configure explicit host limits for free space, owned Docker bytes, process
+count, memory, logs, and scratch. The daemon denies new work under pressure,
+retains active/recoverable work, and reports bounded publication queue, blocked,
+and cleanup facts. It never scans host-wide Docker state or runs broad prune
+commands.
+
+Terminal cleanup is tied to verified publication receipts and one exact archive
+manifest. An interrupted or mismatched operation remains pending for daemon
+reconciliation. Task, planner, and validation containers are never removed by
+age or an unbounded glob.
+
+Cloudflare rollout and Site configuration are separate operator actions. After
+Site activation, an operator may run the read-only checker against an empty
+deployment or the first real task; no container entrypoint runs it, and there
+is no scheduled monitor or synthetic canary. Site deploy and rollback do not
+alter the Steward release or cloud provider state. Delayed Site cleanup is
+limited to these exact old replica roots after cutover proof and the rollback
+window:
+
+```text
+/opt/coquic-demo/steward/tasks
+/opt/coquic-demo/steward/control-loop
+/opt/coquic-demo/steward/cache
+```
+
+Those are Site-host paths. Do not delete Steward's private `$COQUIC_HOME/tasks`,
+`$COQUIC_HOME/control-loop`, or source archives, and never replace the exact
+paths above with a recursive glob.

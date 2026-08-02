@@ -1,57 +1,44 @@
-# Cloudflare publication storage
+# Cloudflare publication operations
 
-This Pulumi program describes the clean publication topology and least-privilege
-credentials used by Steward and Site V2:
+This stack is the provider boundary for Steward cloud publication and Site V2.
+It creates one protected D1 database for public metadata, one public R2 bucket
+for immutable sanitized objects, and one private R2 bucket for optional
+originals. The private bucket has no public endpoint or development URL and
+expires objects after 2,592,000 seconds (30 days).
 
-- one protected D1 database for public metadata;
-- one protected R2 bucket with the public custom domain
-  `artifacts.coquic.minhuw.dev` for immutable sanitized objects; and
-- one protected R2 bucket for private originals, with an all-object lifecycle
-  rule that expires objects after 2,592,000 seconds (30 days).
+D1 rows and public objects contain only the validated public contract. Local
+SQLite, task archives, and the optional original remain Steward's private
+operational evidence. Cloudflare account-token policies are account-scoped, so
+the D1 database must never receive private-shaped rows.
 
-The private bucket has no public endpoint, custom domain, or development URL.
-This stack contains only non-secret account, zone, naming, hostname, and
-retention inputs. It creates two protected account tokens only after resolving
-the exact Cloudflare permission-group names below; duplicate, missing, or
-broader lookup results fail closed.
+## Inputs and authority
 
-| Token | Permission groups | Resource scope |
-| --- | --- | --- |
-| `coquic-steward-publication` | `D1 Read`, `D1 Edit`, `Workers R2 Storage Read`, `Workers R2 Storage Write` | the configured account |
-| `coquic-site-reader` | `D1 Read` | the configured account |
+Run the rollout from the operator's local reproducible shell. It is not a
+GitHub Actions step, a Site deploy step, or a Steward lifecycle hook.
 
-Cloudflare account-token policies cannot scope D1 to one database. D1 therefore
-contains public-safe rows only. Site receives no R2 permission or credential;
-sanitized objects remain anonymously readable at
-`https://artifacts.coquic.minhuw.dev`.
+Before the rollout, the operator must have:
 
-The stack exports three non-secret topology values (`d1_database_id`,
-`public_bucket_name`, and `public_base_url`) and the following secret values:
+- `nix develop`, Pulumi, Wrangler, and the repository checkout available;
+- a logged-in Pulumi CLI and the selected `production` stack;
+- a bootstrap `CLOUDFLARE_API_TOKEN` in the process environment only;
+- an absolute credential directory that is either absent or owned by the
+  invoking user and mode `0700`; and
+- the protected SSH key and known-hosts entry required by
+  `site/deploy/install-cloud-config.sh`.
 
-- `steward_config`: account ID, D1 database ID, Steward D1 token, both R2
-  bucket names, and the S3 access-key pair;
-- `site_config`: account ID, D1 database ID, Site D1 Read token, and the public
-  R2 base URL;
-- standalone Steward/Site token and S3 credential exports for the downstream
-  secret-file handoff.
+The provider token is authentication for Pulumi only. Do not put it in Pulumi
+configuration, a command argument, `.env`, a credential file, or a log. Keep
+Pulumi state and any stack configuration containing secrets outside source
+control.
 
-The S3 access-key ID is the Steward token ID. Its secret access key is the
-lower-case SHA-256 digest of the one-time Steward token value. Pulumi marks the
-provider token value, composite objects, and standalone credential exports as
-secret; no output or log should stringify a secret. The bootstrap Cloudflare
-token is provider authentication only and is never a stack input or export.
-
-## Operator workflow
-
-Run Pulumi from the reproducible development shell:
+Initialize or select the stack and set only the non-secret topology values:
 
 ```sh
 nix develop
 nix develop -c uv sync --project infra/cloudflare --locked
 cd infra/cloudflare
 pulumi login
-pulumi stack init production
-cp Pulumi.production.yaml.example Pulumi.production.yaml
+pulumi stack select production
 pulumi config set account_id <account-id>
 pulumi config set zone_id <zone-id>
 pulumi config set database_name coquic-publication
@@ -61,56 +48,19 @@ pulumi config set public_hostname artifacts.coquic.minhuw.dev
 pulumi config set private_retention_seconds 2592000
 ```
 
-When a later operator workflow needs sensitive stack configuration, set it with
-Pulumi's encrypted form (`pulumi config set --secret`). Plans 050 and 057 define
-which credentials exist and how they are handed off; this topology plan never
-stores those values in configuration. Write the secret exports to daemon-only
-regular files with private permissions; never mount them into task, planner, or
-validation containers. Rotate both account tokens together through an explicit
-operator review because the S3 secret derivation changes when the Steward token
-changes.
+Use `pulumi config set --secret` for any later sensitive stack input. Token
+creation and the protected handoff are owned by this rollout; token rotation
+requires a separate review because the Steward R2 secret is derived from the
+Steward token.
 
-Use the operator's approved bootstrap authentication for the read-only preview:
+## Preview and apply
 
-```sh
-pulumi preview --diff
-```
+Return to the repository root after setting the Pulumi configuration; the
+rollout command below is written relative to that root.
 
-Review the graph and any replacement proposal before an operator applies it.
-The preview must show exactly five storage resources, two account tokens, and
-redacted token values. Stop if Pulumi proposes a delete or replacement outside
-an explicit credential rotation review, if a policy contains a broader group,
-or if any secret appears in preview output. This plan does not run `pulumi up`.
-Plan 059 owns the explicit apply and D1 schema rollout. Plans 050 and 057 own
-credential creation and the protected secret handoff. Plan 060 owns Site V2
-activation and rollback. This plan never runs `pulumi up`.
-
-## Local checks
-
-The tests use Pulumi mocks and need no account access or network:
-
-```sh
-nix develop -c uv sync --project infra/cloudflare --locked
-nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests -q
-nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare python -m compileall -q infra/cloudflare
-```
-
-These bounded checks use the Cloudflare fakes only; they do not contact
-Cloudflare, Wrangler, SSH, or a live endpoint. The rollout-only suite can be
-run separately with the same isolated environment:
-
-```sh
-nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests/test_deploy_production.py -q
-```
-
-Keep any stack configuration containing operator credentials outside source
-control. The checked-in example contains placeholders only.
-
-## Production rollout
-
-`scripts/deploy-production.sh` is the only Cloudflare rollout command. Run it
-from the operator's local Nix shell with a logged-in Pulumi CLI, the selected
-`production` stack, and a bootstrap `CLOUDFLARE_API_TOKEN` in the environment:
+`infra/cloudflare/scripts/deploy-production.sh` is the only rollout command.
+It requires an absolute credentials directory and permits only the
+`production` stack:
 
 ```sh
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
@@ -118,10 +68,14 @@ nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --credentials-dir /srv/coquic-steward/private/credentials
 ```
 
-The default is a read-only structured preview. Pulumi output is captured in a
-private temporary directory, destructive operations (delete or replacement)
-are rejected, and the saved plan is discarded after the command exits. Add
-`--apply` only after reviewing that preview:
+The default is a read-only structured Pulumi preview. Provider output is
+captured below a mode-`0700` temporary directory and reduced to operation counts;
+the temporary plan is mode `0400` and is removed on exit. Review the preview
+before continuing. Stop when the preview is malformed, contains a delete or
+replacement, proposes a broader permission, or exposes a secret. The command
+never applies a plan in its default mode.
+
+After reviewing the preview, rerun the same command with `--apply`:
 
 ```sh
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
@@ -130,33 +84,100 @@ nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --apply
 ```
 
-Apply uses the exact accepted saved plan. It then queries D1 through Wrangler
-using a fixed, read-only `sqlite_master` statement. A blank database is
-bootstrapped from `contracts/steward-cloud/d1.sql` and queried again; an exact
-existing schema is a no-op. Any malformed response or drift stops the command
-before host credentials are written. D1 changes after this rollout require an
-explicit forward-migration review.
+The apply invocation creates and rechecks a fresh structured preview, then
+applies that exact saved plan with Pulumi. It does not accept a separate plan
+file or silently approve a destructive change. It never destroys resources,
+rotates tokens, deploys the Site application, starts Steward, or starts a
+recurring monitor.
 
-The command validates the exact `steward_config` and `site_config` Pulumi
-objects before consuming them. It writes only these three files below the
-operator-selected directory, which must be owned by the invoking user and
-mode `0700`:
+## D1 and credential handoff
 
-| File | Source field | Mode |
+After a successful provider apply, the command validates the exact Pulumi
+`steward_config` and `site_config` objects from a private `--show-secrets`
+capture. Unexpected fields, mismatched account/database IDs, malformed IDs, or
+invalid URLs stop the run without printing the values.
+
+It then queries D1 with a fixed read-only `sqlite_master` statement:
+
+- a blank database is bootstrapped from `contracts/steward-cloud/d1.sql` and
+  queried again;
+- an exact schema is a no-op; and
+- malformed output or any schema drift stops before host credentials are
+  written.
+
+Schema changes require a separately reviewed forward migration. Do not edit
+the schema in place or use a rollback to hide drift.
+
+The `--credentials-dir` target must be a real mode-`0700` directory owned by
+the invoking user. The command atomically installs exactly these three regular
+files, each mode `0600`:
+
+| Path | Pulumi value | Compose target |
 | --- | --- | --- |
-| `d1-read-token` | `steward_config.d1_token` | `0600` |
-| `r2-access-key-id` | `steward_config.s3_access_key_id` | `0600` |
-| `r2-secret-access-key` | `steward_config.s3_secret_access_key` | `0600` |
+| `d1-read-token` | `steward_config.d1_token` | `/run/secrets/d1-read-token` |
+| `r2-access-key-id` | `steward_config.s3_access_key_id` | `/run/secrets/r2-access-key-id` |
+| `r2-secret-access-key` | `steward_config.s3_secret_access_key` | `/run/secrets/r2-secret-access-key` |
 
-Files are staged privately and replaced atomically; a failed replacement
-restores the prior set. Existing regular files may be replaced, but symlinks,
-unowned targets, and unsafe directories are refused. Values never appear in
-stdout, stderr, command arguments, or the checked-in README.
+The path names are the host contract; the D1 token has the provider permission
+needed by the trusted publisher. Symlinks, non-regular files, unowned targets,
+unsafe directory modes, and unsafe replacement states are refused. Existing
+regular files are staged and restored if any part of the three-file install
+fails. Values never appear in stdout, stderr, arguments, Compose environment,
+or public publication data.
 
-Finally, apply passes exactly four Site fields in a mode-`0600` temporary input
-file to `site/deploy/install-cloud-config.sh`, which owns the protected SSH
-transaction and rollback. The rollout does not deploy Site, start Steward,
-rotate tokens, destroy resources, or run a recurring monitor. If the Site
-handoff fails after the cloud and D1 boundaries, the verified Steward files
-remain in place and rerunning the same reviewed command is the recovery path;
-no rollback or cleanup command is invoked.
+Finally, the command creates a mode-`0600` temporary input containing exactly
+these four Site fields and invokes the protected SSH handoff:
+
+```text
+CLOUDFLARE_ACCOUNT_ID
+COQUIC_STEWARD_D1_DATABASE_ID
+COQUIC_STEWARD_D1_READ_TOKEN
+COQUIC_STEWARD_PUBLIC_R2_BASE_URL
+```
+
+`site/deploy/install-cloud-config.sh` owns remote validation, atomic app-env
+replacement, service configuration, and its rollback transaction. The
+rollout unsets provider credentials for that child process. It installs Site's
+cloud values but does not deploy a Site release or launch Steward.
+
+## Failure and rerun boundaries
+
+The stages are intentionally not one fictional transaction. Use this table to
+decide what is safe to inspect and rerun:
+
+| Failure | State that may remain | Recovery |
+| --- | --- | --- |
+| Pulumi auth/preview/parse | No provider or host mutation | Correct local inputs and rerun preview. |
+| Pulumi apply | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next preview, then rerun the same command. |
+| Outputs or D1 verification | Cloud apply may be complete; no host files were installed | Resolve the provider/schema issue under review, then rerun. |
+| Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership/mode/path issues and rerun. |
+| Site SSH handoff | Cloud, D1, and verified Steward files remain | Repair the protected SSH boundary and rerun; no automatic cloud rollback runs. |
+
+Every rerun repeats the destructive-plan and schema checks. An exact D1 schema
+is a no-op, and existing credential files are replaced atomically. Never use a
+manual delete, broad glob, or ad hoc secret copy to recover a partial run.
+
+Site application rollback is independent: it preserves the four cloud fields
+and does not change Pulumi resources, D1 schema, R2 objects, or Steward files.
+Provider changes and token rotation remain explicit operator reviews. There is
+no routine provider rollback command.
+
+## Local checks
+
+The provider tests use mocks and do not contact Cloudflare, Wrangler, SSH, or a
+live endpoint:
+
+```sh
+nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests -q
+nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare pytest infra/cloudflare/tests/test_deploy_production.py -q
+nix develop -c env -u PYTHONPATH uv run --project infra/cloudflare python -m compileall -q infra/cloudflare
+```
+
+The checked-in example contains names and paths only. Keep generated Pulumi
+state, temporary output, and credentials outside source control.
+
+Related operator runbooks:
+
+- [Steward container operations](../../steward/CONTAINER_OPERATIONS.md)
+- [Steward cloud publication](../../steward/CLOUD_PUBLICATION.md)
+- [Site V2 cutover and checker](../../site-v2/MIGRATION.md)

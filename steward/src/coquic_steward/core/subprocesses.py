@@ -206,8 +206,7 @@ class _ProcessCapture:
             self._threads.append(thread)
 
     def finish(self) -> tuple[str | bytes, str | bytes]:
-        for thread in self._threads:
-            thread.join()
+        self.wait_for_drain()
         if self.input_error is not None:
             raise self.input_error
         if self.stdout.error is not None:
@@ -215,6 +214,20 @@ class _ProcessCapture:
         if self.stderr.error is not None:
             raise self.stderr.error
         return self.stdout.value(), self.stderr.value()
+
+    def wait_for_drain(self, timeout: float | None = None) -> bool:
+        """Wait for every capture worker, returning whether all streams ended."""
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        for thread in self._threads:
+            if deadline is None:
+                thread.join()
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+        return not any(thread.is_alive() for thread in self._threads)
 
     def _write_input(self) -> None:
         assert self.process.stdin is not None
@@ -267,9 +280,17 @@ def _communicate_bounded(
     except subprocess.TimeoutExpired:
         timed_out = True
         terminate(signal.SIGTERM)
+        grace_deadline = time.monotonic() + max(0.0, timeout_grace)
+        process_exited = False
         try:
-            process.wait(timeout=timeout_grace)
+            process.wait(timeout=max(0.0, grace_deadline - time.monotonic()))
+            process_exited = True
         except subprocess.TimeoutExpired:
+            pass
+        streams_drained = capture.wait_for_drain(
+            timeout=max(0.0, grace_deadline - time.monotonic())
+        )
+        if not process_exited or not streams_drained:
             terminate(signal.SIGKILL)
             process.wait()
     stdout, stderr = capture.finish()

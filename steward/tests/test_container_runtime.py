@@ -4,6 +4,7 @@ import json
 import io
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,6 +155,22 @@ def test_docker_capture_delivers_input_and_reaps_after_timeout() -> None:
         )
     assert error.value.output == b"rea"
     assert error.value.stderr == b""
+
+
+def test_docker_timeout_kills_descendants_holding_capture_pipes() -> None:
+    client = SubprocessDockerClient(sys.executable)
+    code = (
+        "import os, signal, time; "
+        "child = os.fork(); "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN) if child == 0 else None; "
+        "time.sleep(3.5) if child == 0 else time.sleep(30)"
+    )
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        client.run(["-c", code], timeout=0.2)
+
+    assert time.monotonic() - started < 3.0
 
 
 def test_planner_container_mounts_only_sealed_history_and_private_io(

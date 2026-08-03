@@ -1089,10 +1089,11 @@ class TaskArchive:
                     )
                     if archive_ordinal is None and unavailable_text is not None:
                         current_unavailable_candidates += 1
-                        self._invocation_collection_error(
-                            "conflicting current unavailable telemetry markers",
-                            strict,
-                        )
+                        if current_unavailable_candidates > 1:
+                            self._invocation_collection_error(
+                                "conflicting current unavailable telemetry markers",
+                                strict,
+                            )
                     candidates.append(
                         (path, archive_ordinal, retry_text is not None)
                     )

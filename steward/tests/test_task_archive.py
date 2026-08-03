@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -217,6 +218,35 @@ def test_collect_invocation_evidence_orders_retries_and_keeps_missing_partial(
     )
     assert partial[-1].availability == "partial"
     assert partial[-1].aggregate is None
+
+
+def test_collect_invocation_evidence_accepts_single_current_unavailable_marker(
+    tmp_path: Path,
+) -> None:
+    archive = _invocation_archive(tmp_path)
+    marker_path = archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.unavailable-1.json",
+        {"availability": "unavailable", "reason": "failed"},
+    )
+
+    values = archive.collect_invocation_evidence(
+        "task-safe", "pipeline-initial", "run-safe"
+    )
+
+    assert len(values) == 1
+    evidence = values[0]
+    assert evidence.invocation_id is None
+    assert evidence.retry_ordinal == 0
+    assert evidence.availability == "partial"
+    assert evidence.completeness == "unavailable"
+    assert evidence.reason == "failed"
+    assert evidence.byte_size == marker_path.stat().st_size
+    assert evidence.content_digest == hashlib.sha256(
+        marker_path.read_bytes()
+    ).hexdigest()
 
 
 def test_collect_invocation_evidence_rejects_ordinal_gaps_and_keeps_unavailable(

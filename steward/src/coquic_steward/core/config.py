@@ -1169,6 +1169,19 @@ class StewardConfig:
         marker = self.migration_marker_path
         legacy_marker = self.legacy_migration_marker_path
         backup = self.legacy_backup_path
+        if source.is_symlink() or destination.is_symlink():
+            raise RuntimeError("Steward database paths must not be symlinks")
+        _validate_private_mode(self.legacy_steward_home)
+        migration_marked = marker.exists() or legacy_marker.exists()
+        if (
+            not require_epoch
+            and not source.exists()
+            and destination.exists()
+            and backup.exists()
+            and migration_marked
+            and _legacy_backup_is_complete(self, destination, backup)
+        ):
+            return destination
         if daemon_running:
             raise RuntimeError("cannot migrate Steward state while daemon is running")
         with _migration_lock(self.state_dir / "daemon.lock"):

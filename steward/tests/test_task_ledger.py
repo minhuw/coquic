@@ -69,6 +69,20 @@ def test_legacy_database_migration_accepts_released_persistent_lock(
     assert lock_path.read_text(encoding="utf-8") == "pid=stale\n"
 
 
+def test_completed_legacy_migration_does_not_require_daemon_lock(
+    repo: Path, coquic_home: Path
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    with sqlite3.connect(config.legacy_db_path) as connection:
+        connection.execute("CREATE TABLE fixture (value TEXT)")
+        connection.execute("INSERT INTO fixture VALUES ('complete')")
+    config.migrate_legacy_database()
+
+    with acquire_daemon_lock(config):
+        assert config.migrate_legacy_database() == config.db_path
+
+
 def test_legacy_database_migration_rejects_live_lock_before_state_changes(
     repo: Path, coquic_home: Path
 ) -> None:

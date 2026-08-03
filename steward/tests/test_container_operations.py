@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 import coquic_steward.cli as cli_module
 from coquic_steward.core.config import StewardConfig, StewardDeploymentConfig
 from coquic_steward.core.lifecycle import DockerResourceManager
+from coquic_steward.core.subprocesses import CommandResult
 from coquic_steward.execution.container import (
     ContainerBoundaryError,
     ContainerErrorCategory,
@@ -29,6 +30,7 @@ from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.validation import (
     MAX_VALIDATION_OUTPUT_BYTES,
     _docker_validation_runner,
+    run_validation,
 )
 from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.storage import TaskStore
@@ -281,6 +283,85 @@ def test_validation_container_waits_for_entrypoint_readiness(tmp_path: Path) -> 
     ]
 
 
+_VALIDATION_TRUNCATION_MARKER = (
+    "[output truncated by Steward validation boundary]"
+)
+
+
+def _assert_bounded_validation_artifact(
+    result, *, expected_exit_code: int
+) -> None:
+    artifact = result.output_path.read_text(encoding="utf-8")
+    stdout = artifact.split("STDOUT:\n", 1)[1].split("\n\nSTDERR:\n", 1)[0]
+    stderr = artifact.split("STDERR:\n", 1)[1].rstrip("\n")
+
+    assert result.exit_code == expected_exit_code
+    assert not result.passed
+    assert artifact.count(_VALIDATION_TRUNCATION_MARKER) == 2
+    assert len(stdout.encode("utf-8")) <= MAX_VALIDATION_OUTPUT_BYTES
+    assert len(stderr.encode("utf-8")) <= MAX_VALIDATION_OUTPUT_BYTES
+    assert result.summary == stdout.strip()[-1000:]
+
+
+def _validation_task_context(config: StewardConfig):
+    store = TaskStore(config.db_path)
+    task, _created = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="bounded validation",
+            prompt="validate",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    task.worktree_path = config.repo_root
+    store.save(task)
+    return store, task, pipeline
+
+
+def test_run_validation_bounds_host_dual_stream_artifact(
+    config: StewardConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    oversized_stdout = "stdout:" + "o" * (MAX_VALIDATION_OUTPUT_BYTES + 128)
+    oversized_stderr = "stderr:" + "e" * (MAX_VALIDATION_OUTPUT_BYTES + 128)
+    calls: list[dict[str, object]] = []
+
+    def recording_run_command(
+        command, cwd, *, timeout=None, max_output_bytes=None, **kwargs
+    ):
+        calls.append(
+            {
+                "command": command,
+                "timeout": timeout,
+                "max_output_bytes": max_output_bytes,
+                "kwargs": kwargs,
+            }
+        )
+        if command[:2] == ["git", "rev-parse"]:
+            return CommandResult(command, cwd, 0, "", "")
+        return CommandResult(
+            command,
+            cwd,
+            17,
+            oversized_stdout,
+            oversized_stderr,
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation.run_command", recording_run_command
+    )
+    result = run_validation(
+        config,
+        "host-bounded",
+        config.repo_root,
+        "validation.txt",
+        ["verbose-gate"],
+    )
+
+    assert calls[-1]["max_output_bytes"] == MAX_VALIDATION_OUTPUT_BYTES
+    _assert_bounded_validation_artifact(result, expected_exit_code=17)
+
+
 def test_direct_validation_runner_uses_bootstrap_and_writable_nix_boundary(
     config: StewardConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,6 +402,221 @@ def test_direct_validation_runner_uses_bootstrap_and_writable_nix_boundary(
     assert any("dst=/nix/var/nix" in value for value in argv)
     assert any(value.startswith("/nix/store:rw,") for value in argv)
     assert argv[argv.index(digest) + 1 :] == ["--exec", "nix", "flake", "check"]
+
+
+def test_direct_validation_runner_bounds_dual_stream_output_and_timeout(
+    config: StewardConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = "sha256:" + "c" * 64
+    config = replace(
+        config,
+        validation_image="coquic-steward-validation",
+        validation_image_digest=digest,
+    )
+    clients = []
+
+    class RecordingDockerClient:
+        def __init__(self, _docker_bin):
+            self.calls: list[dict[str, object]] = []
+            clients.append(self)
+
+        def run(self, argv, **kwargs):
+            self.calls.append({"argv": argv, **kwargs})
+            limit = kwargs["max_output_bytes"]
+            return subprocess.CompletedProcess(
+                argv,
+                23,
+                b"stdout:" + b"o" * (limit + 128),
+                b"stderr:" + b"e" * (limit + 128),
+            )
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation.SubprocessDockerClient",
+        RecordingDockerClient,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation._validation_git_common_dir",
+        lambda _worktree: config.repo_root / ".git",
+    )
+    runner = _docker_validation_runner(config, "direct-bounded", config.repo_root)
+    result = run_validation(
+        config,
+        "direct-bounded",
+        config.repo_root,
+        "validation.txt",
+        ["verbose-gate"],
+        command_runner=runner,
+    )
+
+    assert len(clients) == 1
+    assert clients[0].calls[-1]["max_output_bytes"] == MAX_VALIDATION_OUTPUT_BYTES
+    _assert_bounded_validation_artifact(result, expected_exit_code=23)
+
+    class TimeoutDockerClient:
+        def __init__(self, _docker_bin):
+            pass
+
+        def run(self, argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation.SubprocessDockerClient",
+        TimeoutDockerClient,
+    )
+    timeout_runner = _docker_validation_runner(
+        config, "direct-timeout", config.repo_root
+    )
+    timeout_result = timeout_runner(["slow-gate"], config.repo_root, 30)
+    assert timeout_result.returncode == 124
+    assert timeout_result.stderr == "validation container timed out"
+
+
+def test_task_container_validation_runner_propagates_cap_and_statuses(
+    config: StewardConfig,
+) -> None:
+    store, task, pipeline = _validation_task_context(config)
+    roots = {
+        name: config.private_dir / f"task-validation-{name}"
+        for name in ("archive", "sessions", "git", "common", "scratch")
+    }
+    for root in roots.values():
+        root.mkdir(parents=True)
+    task_config = TaskContainerConfig(
+        task_id=task.id,
+        image="coquic-steward-task",
+        image_digest="sha256:" + "a" * 64,
+        worktree=config.repo_root,
+        archive=roots["archive"],
+        private_sessions=roots["sessions"],
+        git_dir=roots["git"],
+        git_common_dir=roots["common"],
+        scratch=roots["scratch"],
+    )
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def run(self, argv, **kwargs):
+            self.calls.append({"argv": argv, **kwargs})
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"stdout:" + b"o" * (MAX_VALIDATION_OUTPUT_BYTES + 128),
+                b"stderr:" + b"e" * (MAX_VALIDATION_OUTPUT_BYTES + 128),
+            )
+
+    class RecordingRuntime:
+        def __init__(self) -> None:
+            self.config = task_config
+            self.client = RecordingClient()
+            self.exit_code = 17
+
+        def ensure_started(self) -> str:
+            return self.config.container_name
+
+        def exec(self, _role, *, command, timeout, **_kwargs):
+            captured = self.client.run(command, timeout=timeout)
+            return SimpleNamespace(
+                exit_code=self.exit_code,
+                stdout=captured.stdout,
+                stderr=captured.stderr,
+            )
+
+    runtime = RecordingRuntime()
+
+    class RecordingSupervisor:
+        def _boundary_for(self, _task):
+            return runtime, None
+
+    executor = StewardExecutor(
+        config, store, session_supervisor=RecordingSupervisor()
+    )
+    runner = executor._container_validation_runner(task, pipeline)
+    for exit_code in (17, 124):
+        runtime.exit_code = exit_code
+        result = run_validation(
+            config,
+            "task-bounded",
+            config.repo_root,
+            f"validation-{exit_code}.txt",
+            ["verbose-gate"],
+            command_runner=runner,
+        )
+        _assert_bounded_validation_artifact(result, expected_exit_code=exit_code)
+
+    assert runtime.client.calls[-1]["max_output_bytes"] == MAX_VALIDATION_OUTPUT_BYTES
+
+
+def test_isolated_validation_runner_propagates_cap_and_statuses(
+    config: StewardConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, task, pipeline = _validation_task_context(config)
+    store.claim_daemon_instance("isolated-validation-daemon")
+    digest = "sha256:" + "b" * 64
+    runtimes = []
+
+    class RecordingRuntime:
+        def __init__(self, runtime_config, **_kwargs) -> None:
+            self.config = runtime_config
+            self.client = RecordingClient()
+            self.exit_code = 23
+            self.cleaned = False
+            runtimes.append(self)
+
+        def ensure_started(self) -> str:
+            return "d" * 64
+
+        def exec(self, command, *, timeout, **_kwargs):
+            captured = self.client.run(command, timeout=timeout)
+            return SimpleNamespace(
+                exit_code=self.exit_code,
+                stdout=captured.stdout,
+                stderr=captured.stderr,
+            )
+
+        def cleanup_owned(self, *, timeout=5) -> None:
+            self.cleaned = True
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def run(self, argv, **kwargs):
+            self.calls.append({"argv": argv, **kwargs})
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                b"stdout:" + b"o" * (MAX_VALIDATION_OUTPUT_BYTES + 128),
+                b"stderr:" + b"e" * (MAX_VALIDATION_OUTPUT_BYTES + 128),
+            )
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.container.ValidationContainerRuntime",
+        RecordingRuntime,
+    )
+    executor = StewardExecutor(config, store)
+    monkeypatch.setattr(
+        executor,
+        "_validation_git_common_dir",
+        lambda _worktree: config.repo_root / ".git",
+    )
+    runner = executor._isolated_validation_runner(task, pipeline, digest)
+    for exit_code in (23, 124):
+        runtimes[0].exit_code = exit_code
+        result = run_validation(
+            config,
+            "isolated-bounded",
+            config.repo_root,
+            f"validation-{exit_code}.txt",
+            ["verbose-gate"],
+            command_runner=runner,
+        )
+        _assert_bounded_validation_artifact(result, expected_exit_code=exit_code)
+    runner.cleanup()
+
+    assert runtimes[0].client.calls[-1]["max_output_bytes"] == MAX_VALIDATION_OUTPUT_BYTES
+    assert runtimes[0].cleaned
 
 
 def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(

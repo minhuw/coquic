@@ -6,13 +6,24 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
-from sqlalchemy import Connection, Select, create_engine, event, func, select, text
+from sqlalchemy import (
+    Connection,
+    Select,
+    and_,
+    create_engine,
+    event,
+    func,
+    or_,
+    select,
+    text,
+)
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, aliased, selectinload
 
 from ..core.lifecycle import (
     TaskPhase,
@@ -222,6 +233,21 @@ _PUBLICATION_CLEANUP_COLUMNS = (
     "intent_id,publication_id,task_id,manifest_digest,exact_path,state,requested_at,"
     "verified_at,completed_at,reason"
 )
+
+
+class TaskPage(NamedTuple):
+    """One detached keyset page of tasks and its continuation cursor."""
+
+    items: list[TaskRecord]
+    next_cursor: tuple[str, str] | None
+
+    @property
+    def tasks(self) -> list[TaskRecord]:
+        return self.items
+
+    @property
+    def cursor(self) -> tuple[str, str] | None:
+        return self.next_cursor
 
 
 class SQLiteTaskStore:
@@ -1212,6 +1238,27 @@ class SQLiteTaskStore:
             return [row_to_run(row) for row in rows]
 
     run_history = list_runs
+
+    def running_runs(
+        self, *, task_id: str | None = None, limit: int | None = None
+    ) -> list[TaskRun]:
+        """Return every currently running run in stable start/id order."""
+
+        statement = select(TaskRunRow).where(
+            TaskRunRow.state == CodexRunState.running.value
+        )
+        if task_id is not None:
+            statement = statement.where(TaskRunRow.task_id == task_id)
+        statement = statement.order_by(TaskRunRow.started_at, TaskRunRow.id)
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("running run limit must not be negative")
+            statement = statement.limit(limit)
+        with Session(self.engine) as session:
+            rows = session.scalars(statement).all()
+            return [row_to_run(row) for row in rows]
+
+    list_running_runs = running_runs
 
     def transition_run(
         self,
@@ -4628,6 +4675,109 @@ class SQLiteTaskStore:
                 for row in session.scalars(statement).all()
             ]
 
+    def list_tasks_page(
+        self,
+        *,
+        limit: int = 100,
+        statuses: Iterable[TaskStatus | str] | TaskStatus | str | None = None,
+        status: TaskStatus | str | None = None,
+        after: tuple[str, str] | None = None,
+        cursor: tuple[str, str] | None = None,
+        page_size: int | None = None,
+    ) -> TaskPage:
+        """Return one detached, stable keyset page of tasks.
+
+        Pages use newest-first ``(created_at, id)`` ordering.  The immutable
+        task id breaks timestamp ties, and the returned cursor is the last
+        materialized row rather than an offset.  A page owns its database
+        transaction; callers can safely perform external work before asking
+        for the next page.
+        """
+
+        if page_size is not None:
+            if limit != 100 and limit != page_size:
+                raise ValueError("limit and page_size disagree")
+            limit = page_size
+        if limit <= 0:
+            raise ValueError("task page limit must be positive")
+        if status is not None:
+            if statuses is not None:
+                raise ValueError("status and statuses are mutually exclusive")
+            statuses = status
+        if after is not None and cursor is not None and after != cursor:
+            raise ValueError("after and cursor disagree")
+        selected_cursor = cursor if cursor is not None else after
+        if selected_cursor is not None:
+            if (
+                not isinstance(selected_cursor, tuple)
+                or len(selected_cursor) != 2
+                or any(not isinstance(value, str) for value in selected_cursor)
+            ):
+                raise ValueError("task cursor must be a (created_at, task_id) tuple")
+
+        normalized_statuses = _normalize_task_statuses(statuses)
+        statement = _task_query()
+        if normalized_statuses is not None:
+            statement = statement.where(TaskRow.status.in_(normalized_statuses))
+        if normalized_statuses == ():
+            return TaskPage([], None)
+        if selected_cursor is not None:
+            created_at, task_id = selected_cursor
+            statement = statement.where(
+                or_(
+                    TaskRow.created_at < created_at,
+                    and_(
+                        TaskRow.created_at == created_at,
+                        TaskRow.id < task_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
+        with Session(self.engine) as session:
+            rows = session.scalars(statement.limit(limit + 1)).all()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            tasks = [
+                row_to_task(row, path_codec=self.path_codec)
+                for row in rows
+            ]
+        next_cursor = (
+            (rows[-1].created_at, rows[-1].id) if has_more and rows else None
+        )
+        return TaskPage(tasks, next_cursor)
+
+    # A short name is useful to callers that already use ``list_*`` for
+    # unpaged compatibility methods.
+    task_page = list_tasks_page
+
+    def iter_tasks(
+        self,
+        *,
+        page_size: int = 100,
+        statuses: Iterable[TaskStatus | str] | TaskStatus | str | None = None,
+        status: TaskStatus | str | None = None,
+    ) -> Iterator[TaskRecord]:
+        """Iterate detached task pages without holding a transaction open."""
+
+        if status is not None:
+            if statuses is not None:
+                raise ValueError("status and statuses are mutually exclusive")
+            statuses = status
+        statuses = _normalize_task_statuses(statuses)
+        cursor: tuple[str, str] | None = None
+        while True:
+            page = self.list_tasks_page(
+                limit=page_size,
+                statuses=statuses,
+                cursor=cursor,
+            )
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
+
+    iterate_tasks = iter_tasks
+
     def queued_tasks(self, *, limit: int | None = None) -> list[TaskRecord]:
         tasks = self._tasks_by_status(TaskStatus.queued)
         tasks.sort(
@@ -4694,7 +4844,7 @@ class SQLiteTaskStore:
         statement = (
             select(EventRow)
             .where(EventRow.task_id == task_id)
-            .order_by(EventRow.created_at)
+            .order_by(EventRow.created_at, EventRow.id)
         )
         if limit is not None:
             statement = statement.limit(limit)
@@ -4703,6 +4853,110 @@ class SQLiteTaskStore:
                 row_to_event(row, path_codec=self.path_codec)
                 for row in session.scalars(statement).all()
             ]
+
+    def event_exists(self, task_id: str, kind: str) -> bool:
+        """Return whether one event kind exists for a task."""
+
+        with Session(self.engine) as session:
+            return (
+                session.scalar(
+                    select(EventRow.id)
+                    .where(EventRow.task_id == task_id, EventRow.kind == kind)
+                    .limit(1)
+                )
+                is not None
+            )
+
+    has_event = event_exists
+
+    def count_task_events(self, task_id: str, kind: str | None = None) -> int:
+        statement = select(func.count()).select_from(EventRow).where(
+            EventRow.task_id == task_id
+        )
+        if kind is not None:
+            statement = statement.where(EventRow.kind == kind)
+        with Session(self.engine) as session:
+            return session.scalar(statement) or 0
+
+    def cleanup_pending_tasks(
+        self,
+        *,
+        limit: int | None = None,
+        statuses: Iterable[TaskStatus | str] | TaskStatus | str | None = None,
+        status: TaskStatus | str | None = None,
+    ) -> list[TaskRecord]:
+        """Return tasks whose latest cleanup obligation is still pending.
+
+        A completion only clears a pending event when it was recorded later
+        than that pending event.  Duplicate pending events therefore describe
+        one task obligation, while a later pending event re-opens an earlier
+        completed obligation.
+        """
+
+        if status is not None:
+            if statuses is not None:
+                raise ValueError("status and statuses are mutually exclusive")
+            statuses = status
+        normalized_statuses = _normalize_task_statuses(statuses)
+        if normalized_statuses == ():
+            return []
+        statement = _task_query().where(_cleanup_pending_predicate())
+        if normalized_statuses is not None:
+            statement = statement.where(TaskRow.status.in_(normalized_statuses))
+        statement = statement.order_by(TaskRow.created_at, TaskRow.id)
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("cleanup task limit must not be negative")
+            statement = statement.limit(limit)
+        with Session(self.engine) as session:
+            rows = session.scalars(statement).all()
+            return [
+                row_to_task(row, path_codec=self.path_codec)
+                for row in rows
+            ]
+
+    pending_cleanup_tasks = cleanup_pending_tasks
+    list_cleanup_pending_tasks = cleanup_pending_tasks
+
+    def cleanup_pending_task_ids(self, *, limit: int | None = None) -> list[str]:
+        statement = (
+            select(TaskRow.id)
+            .where(_cleanup_pending_predicate())
+            .order_by(TaskRow.created_at, TaskRow.id)
+        )
+        if limit is not None:
+            if limit < 0:
+                raise ValueError("cleanup task limit must not be negative")
+            statement = statement.limit(limit)
+        with Session(self.engine) as session:
+            return list(session.scalars(statement).all())
+
+    def cleanup_pending_count(self) -> int:
+        with Session(self.engine) as session:
+            return (
+                session.scalar(
+                    select(func.count())
+                    .select_from(TaskRow)
+                    .where(_cleanup_pending_predicate())
+                )
+                or 0
+            )
+
+    pending_cleanup_count = cleanup_pending_count
+    count_cleanup_pending = cleanup_pending_count
+
+    def has_cleanup_pending(self, task_id: str) -> bool:
+        with Session(self.engine) as session:
+            return (
+                session.scalar(
+                    select(TaskRow.id)
+                    .where(TaskRow.id == task_id, _cleanup_pending_predicate())
+                    .limit(1)
+                )
+                is not None
+            )
+
+    has_pending_cleanup = has_cleanup_pending
 
     def count_events(self, kind: str) -> int:
         with Session(self.engine) as session:
@@ -5321,6 +5575,51 @@ def _run_fields(fields: dict[str, object]) -> dict[str, object]:
 
 def _task_query() -> Select[tuple[TaskRow]]:
     return select(TaskRow).options(selectinload(TaskRow.validations))
+
+
+def _normalize_task_statuses(
+    statuses: Iterable[TaskStatus | str] | TaskStatus | str | None,
+) -> tuple[str, ...] | None:
+    if statuses is None:
+        return None
+    if isinstance(statuses, (TaskStatus, str)):
+        statuses = (statuses,)
+    normalized: list[str] = []
+    for status in statuses:
+        value = status.value if isinstance(status, TaskStatus) else str(status)
+        normalized_value = TaskStatus(value).value
+        if normalized_value not in normalized:
+            normalized.append(normalized_value)
+    return tuple(normalized)
+
+
+def _cleanup_pending_predicate():
+    """Correlate each task with its latest unresolved cleanup event."""
+
+    pending = aliased(EventRow)
+    complete = aliased(EventRow)
+    later_completion = (
+        select(1)
+        .select_from(complete)
+        .where(
+            complete.task_id == pending.task_id,
+            complete.kind == "cleanup_complete",
+            complete.id > pending.id,
+        )
+        .correlate(pending)
+        .exists()
+    )
+    return (
+        select(1)
+        .select_from(pending)
+        .where(
+            pending.task_id == TaskRow.id,
+            pending.kind == "cleanup_pending",
+            ~later_completion,
+        )
+        .correlate(TaskRow)
+        .exists()
+    )
 
 
 def _count_tasks(

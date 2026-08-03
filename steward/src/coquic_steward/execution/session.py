@@ -844,14 +844,16 @@ class ContainerSessionInvoker:
                     on_started(identity)
                 succeeded = True
                 return supervised_process
-            except BaseException:
+            except BaseException as setup_error:
+                cleanup_confirmed = False
                 try:
-                    self._cleanup_launch_failure(process, identity)
+                    cleanup_confirmed = self._cleanup_launch_failure(process, identity)
                 except BaseException:
-                    # Cleanup must not replace the setup failure with an
-                    # unrelated runtime error. The boundary remains unacknowledged
-                    # when the helper cannot prove that it was reaped.
+                    # Preserve the setup failure while reporting the cleanup
+                    # boundary as unconfirmed below.
                     pass
+                if not cleanup_confirmed:
+                    setup_error.add_note("container exec cleanup unconfirmed")
                 raise
             finally:
                 if not succeeded:

@@ -630,6 +630,7 @@ def test_cleanup_reports_unconfirmed_boundary_when_container_stop_fails(
         )
 
     assert failure.value.__cause__ is None
+    assert failure.value.__notes__ == ["container exec cleanup unconfirmed"]
     assert process.returncode == 143
     assert not runtime.signals
     assert runtime.container_live

@@ -649,14 +649,11 @@ class StewardDaemon:
         """Retry each durable terminal cleanup transaction once per cycle."""
 
         self.executor.retry_validation_cleanup_pending()
-        for task in self.store.list_tasks(limit=10_000):
+        cleanup_tasks = list(self.store.cleanup_pending_tasks())
+        for task in cleanup_tasks:
             if not TaskStatus(task.status).terminal:
                 continue
-            events = self.store.events(task.id)
-            if any(event.kind == "cleanup_pending" for event in events) and not any(
-                event.kind == "cleanup_complete" for event in events
-            ):
-                self.finalize_terminal_task(task.id)
+            self.finalize_terminal_task(task.id)
 
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Reconcile durable ownership before any new dispatch is allowed."""
@@ -676,7 +673,8 @@ class StewardDaemon:
             self.executor.retry_validation_cleanup_pending()
             self._reconcile_docker_resources()
             self._startup_reconcile_control_loop()
-            for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):
+            tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
+            for task in tasks:
                 outcome = self._reconcile_task(task)
                 outcomes.append(outcome)
                 try:
@@ -1311,13 +1309,16 @@ class StewardDaemon:
 
         if not getattr(self.config.publication, "enabled", False):
             return
-        for task in sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id):
+        tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
+        materialized: list[tuple[TaskRecord, object]] = []
+        for task in tasks:
             try:
                 runs = self.store.list_runs(task.id)
             except (AttributeError, KeyError):
                 continue
-            for run in runs:
-                enqueue_materialized_publication(self.config, self.store, task, run)
+            materialized.extend((task, run) for run in runs)
+        for task, run in materialized:
+            enqueue_materialized_publication(self.config, self.store, task, run)
 
     reconcile_startup = startup_reconcile
     reconcile = startup_reconcile
@@ -3542,17 +3543,11 @@ class StewardDaemon:
         self._drain_control_loop_once()
         deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
         self._stop_publication_worker(deadline=deadline)
-        running_runs: list[tuple[str, str]] = []
-        tasks = sorted(self.store.list_tasks(limit=10000), key=lambda item: item.id)
-        for task in tasks:
-            try:
-                running_runs.extend(
-                    (task.id, run.id)
-                    for run in self.store.list_runs(task.id)
-                    if str(run.state) == "running"
-                )
-            except (AttributeError, KeyError):
-                continue
+        running_runs = [
+            (run.task_id, run.id)
+            for run in list(self.store.running_runs())
+        ]
+        tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
         interrupted_runs = len(running_runs)
         if self.planner_session is not None and self._active_planner_run_id is not None:
             try:

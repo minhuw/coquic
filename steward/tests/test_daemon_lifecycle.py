@@ -106,6 +106,25 @@ def _task(store: TaskStore, title: str = "lifecycle"):
     return task, store.list_pipelines(task.id)[0]
 
 
+def _force_task_pages(monkeypatch, store: TaskStore) -> list[int]:
+    """Exercise detached lifecycle enumeration with a deliberately tiny page."""
+
+    calls: list[int] = []
+    original = store.list_tasks_page
+
+    def page(**kwargs):
+        calls.append(2)
+        store._task_page_active = True
+        try:
+            kwargs["limit"] = 2
+            return original(**kwargs)
+        finally:
+            store._task_page_active = False
+
+    monkeypatch.setattr(store, "list_tasks_page", page)
+    return calls
+
+
 def _planner_signal(store: TaskStore, suffix: str = "retry") -> SignalItem:
     item = SignalItem(
         id=f"signal-item-{suffix}",
@@ -1466,6 +1485,155 @@ def test_startup_reconcile_orders_task_identity_before_dispatch(config):
 
     assert [item.task_id for item in outcomes] == sorted([first.id, second.id])
     assert daemon.runtime.reconciliation_complete
+
+
+def test_startup_reconciles_oldest_active_run_after_detached_pages(
+    config, monkeypatch
+):
+    store = TaskStore(config.db_path)
+    oldest, pipeline = _task(store, "oldest active")
+    store.start_worker(oldest.id, "running")
+    session = store.create_session(oldest.id, pipeline.id)
+    run = store.create_run(oldest.id, pipeline.id, session.id, role="implementation")
+    for index in range(4):
+        newer, _ = _task(store, f"newer terminal {index}")
+        store.finish_task(newer.id, TaskStatus.succeeded, "terminal")
+
+    page_calls = _force_task_pages(monkeypatch, store)
+    daemon = StewardDaemon(config, store, session_supervisor=None)
+    reconciled: list[str] = []
+    original = daemon._reconcile_task
+
+    def reconcile(task):
+        assert not getattr(store, "_task_page_active", False)
+        reconciled.append(task.id)
+        return original(task)
+
+    monkeypatch.setattr(daemon, "_reconcile_task", reconcile)
+
+    daemon.startup_reconcile()
+
+    assert len(page_calls) >= 3
+    assert oldest.id in reconciled
+    assert store.get_run(run.id).state != CodexRunState.running.value
+
+
+def test_publication_recovery_enqueues_oldest_run_after_detached_pages(
+    config, monkeypatch
+):
+    store = TaskStore(config.db_path)
+    oldest, pipeline = _task(store, "oldest publication")
+    session = store.create_session(oldest.id, pipeline.id)
+    run = store.create_run(oldest.id, pipeline.id, session.id, role="implementation")
+    for index in range(4):
+        _task(store, f"newer publication {index}")
+    page_calls = _force_task_pages(monkeypatch, store)
+    queued: list[tuple[str, str]] = []
+
+    def enqueue(_config, _store, task, materialized_run):
+        assert not getattr(store, "_task_page_active", False)
+        queued.append((task.id, materialized_run.id))
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.enqueue_materialized_publication",
+        enqueue,
+    )
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+    daemon.config = SimpleNamespace(
+        publication=SimpleNamespace(enabled=True),
+    )
+
+    daemon._enqueue_materialized_publications()
+
+    assert len(page_calls) >= 3
+    assert queued == [(oldest.id, run.id)]
+
+
+def test_cleanup_retry_uses_complete_pending_predicate(config, monkeypatch):
+    store = TaskStore(config.db_path)
+    oldest, _ = _task(store, "oldest cleanup")
+    store.finish_task(oldest.id, TaskStatus.failed, "terminal")
+    store.add_event(oldest.id, "cleanup_pending", "retry")
+    for index in range(4):
+        newer, _ = _task(store, f"newer cleanup {index}")
+        store.finish_task(newer.id, TaskStatus.failed, "terminal")
+    monkeypatch.setattr(
+        store,
+        "list_tasks",
+        lambda **_kwargs: pytest.fail("cleanup retry used a capped task listing"),
+    )
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+    daemon.executor = SimpleNamespace(retry_validation_cleanup_pending=lambda: None)
+    finalized: list[str] = []
+
+    def finalize(task_id):
+        assert not getattr(store, "_cleanup_query_active", False)
+        finalized.append(task_id)
+        return True
+
+    def pending_tasks():
+        store._cleanup_query_active = True
+        try:
+            return TaskStore.cleanup_pending_tasks(store)
+        finally:
+            store._cleanup_query_active = False
+
+    monkeypatch.setattr(store, "cleanup_pending_tasks", pending_tasks)
+    daemon.finalize_terminal_task = finalize
+
+    daemon._retry_cleanup_pending_tasks()
+
+    assert finalized == [oldest.id]
+
+
+def test_shutdown_interrupts_oldest_running_run_from_direct_query(
+    config, monkeypatch
+):
+    store = TaskStore(config.db_path)
+    oldest, pipeline = _task(store, "oldest running")
+    session = store.create_session(oldest.id, pipeline.id)
+    run = store.create_run(oldest.id, pipeline.id, session.id, role="implementation")
+    for index in range(4):
+        _task(store, f"newer running {index}")
+    page_calls = _force_task_pages(monkeypatch, store)
+    original_running = store.running_runs
+
+    def running_runs(**kwargs):
+        store._running_query_active = True
+        try:
+            return original_running(**kwargs)
+        finally:
+            store._running_query_active = False
+
+    monkeypatch.setattr(store, "running_runs", running_runs)
+
+    class Supervisor:
+        def __init__(self):
+            self.interrupted: list[str] = []
+            self.stopped: list[str] = []
+
+        def interrupt(self, run_id, **_kwargs):
+            assert not getattr(store, "_running_query_active", False)
+            self.interrupted.append(run_id)
+            store.mark_run_interrupted(run_id, reason="shutdown test")
+
+        def stop_container(self, task_id, **_kwargs):
+            assert not getattr(store, "_task_page_active", False)
+            self.stopped.append(task_id)
+            return True
+
+    supervisor = Supervisor()
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    result = daemon.shutdown(force=True)
+
+    assert len(page_calls) >= 3
+    assert result.interrupted_runs == 1
+    assert supervisor.interrupted
+    assert set(supervisor.interrupted) == {run.id}
+    assert set(supervisor.stopped) == {task.id for task in store.list_tasks()}
 
 
 def test_reconcile_adopts_matching_live_wrapper_without_duplicate(config):

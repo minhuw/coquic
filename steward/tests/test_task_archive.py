@@ -450,6 +450,121 @@ def test_seal_rejects_persisted_invocation_descriptor_mismatch(
         )
 
 
+def test_seal_rejects_equal_size_sidecar_replacement(tmp_path: Path) -> None:
+    archive = _invocation_archive(tmp_path)
+    original = _telemetry("task-safe", "invocation-final", 0)
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.json",
+        original,
+    )
+    archive.materialize_run(
+        "task-safe",
+        "pipeline-initial",
+        {
+            "runId": "run-safe",
+            "taskId": "task-safe",
+            "pipelineId": "pipeline-initial",
+            "role": "implementation",
+            "roleOrdinal": 1,
+            "sessionId": "session-safe",
+            "state": "succeeded",
+            "completedAt": "2026-07-22T00:00:02Z",
+        },
+    )
+    replacement = dict(original)
+    replacement["reasoning_effort"] = "mid"
+    sidecar = archive.task_path(
+        "task-safe",
+        "pipelines/pipeline-initial/runs/run-safe/telemetry.json",
+    )
+    replacement_bytes = (
+        json.dumps(replacement, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    assert len(replacement_bytes) == sidecar.stat().st_size
+    sidecar.write_bytes(replacement_bytes)
+
+    pipeline_path = archive.task_path(
+        "task-safe", "pipelines/pipeline-initial/pipeline.json"
+    )
+    pipeline = json.loads(pipeline_path.read_text())
+    pipeline["state"] = "succeeded"
+    pipeline["phase"] = "complete"
+    pipeline["completedAt"] = "2026-07-22T00:00:03Z"
+    archive.write_json("task-safe", "pipelines/pipeline-initial/pipeline.json", pipeline)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+
+    with pytest.raises(ArchiveSealError, match="invocation descriptors"):
+        archive.seal(
+            "task-safe",
+            "succeeded",
+            completion_identity="completion-equal-size-replacement",
+            completed_at=COMPLETED_AT,
+            external_actions_complete=True,
+            writer_final=True,
+        )
+
+
+def test_seal_rejects_conflicting_current_unavailable_markers(tmp_path: Path) -> None:
+    archive = _invocation_archive(tmp_path)
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.unavailable-1.json",
+        {"availability": "unavailable", "reason": "failed"},
+    )
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.unavailable-2.json",
+        {"availability": "unavailable", "reason": "interrupted"},
+    )
+    archive.materialize_run(
+        "task-safe",
+        "pipeline-initial",
+        {
+            "runId": "run-safe",
+            "taskId": "task-safe",
+            "pipelineId": "pipeline-initial",
+            "role": "implementation",
+            "roleOrdinal": 1,
+            "sessionId": "session-safe",
+            "state": "succeeded",
+            "completedAt": "2026-07-22T00:00:02Z",
+        },
+    )
+    pipeline_path = archive.task_path(
+        "task-safe", "pipelines/pipeline-initial/pipeline.json"
+    )
+    pipeline = json.loads(pipeline_path.read_text())
+    pipeline["state"] = "succeeded"
+    pipeline["phase"] = "complete"
+    pipeline["completedAt"] = "2026-07-22T00:00:03Z"
+    archive.write_json("task-safe", "pipelines/pipeline-initial/pipeline.json", pipeline)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+
+    with pytest.raises(ArchiveSealError, match="invocation evidence"):
+        archive.seal(
+            "task-safe",
+            "succeeded",
+            completion_identity="completion-conflicting-current-markers",
+            completed_at=COMPLETED_AT,
+            external_actions_complete=True,
+            writer_final=True,
+        )
+
+
 def test_atomic_materialization_and_exact_reconciliation(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
     archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")

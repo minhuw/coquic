@@ -167,6 +167,7 @@ class ArchiveInvocation:
     started_at: str | None
     completed_at: str | None
     byte_size: int | None
+    content_digest: str | None
     turn_count: int | None
     aggregate: dict[str, int] | None
     reason: str | None = None
@@ -187,6 +188,7 @@ class ArchiveInvocation:
             "startedAt": self.started_at,
             "completedAt": self.completed_at,
             "byteSize": self.byte_size,
+            "contentDigest": self.content_digest,
             "turnCount": self.turn_count,
             "aggregate": (
                 dict(self.aggregate) if self.aggregate is not None else None
@@ -221,6 +223,7 @@ def _validate_invocation_descriptor(value: Any, label: str = "invocation") -> No
         "startedAt",
         "completedAt",
         "byteSize",
+        "contentDigest",
         "turnCount",
         "aggregate",
         "reason",
@@ -247,6 +250,12 @@ def _validate_invocation_descriptor(value: Any, label: str = "invocation") -> No
             _validate_nonnegative_integer(value[key], f"{label}.{key}")
     if value["byteSize"] is not None and value["byteSize"] > MAX_ARCHIVE_INVOCATION_BYTES:
         raise ArchiveValidationError(f"{label}.byteSize exceeds bound")
+    digest = value["contentDigest"]
+    if digest is not None and (
+        not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise ArchiveValidationError(f"{label}.contentDigest is invalid")
     if value["turnCount"] is not None and value["turnCount"] > TELEMETRY_MAX_TURNS:
         raise ArchiveValidationError(f"{label}.turnCount exceeds bound")
     validate_relative_path(value["path"])
@@ -297,6 +306,10 @@ def _validate_invocation_descriptor(value: Any, label: str = "invocation") -> No
             raise ArchiveValidationError(f"{label} available completeness is invalid")
     elif value["reason"] is None:
         raise ArchiveValidationError(f"{label} partial reason is required")
+    if value["byteSize"] is not None and value["contentDigest"] is None:
+        raise ArchiveValidationError(f"{label} sidecar content digest is missing")
+    if value["byteSize"] is None and value["contentDigest"] is not None:
+        raise ArchiveValidationError(f"{label} content digest has no sidecar")
 
 
 def _is_unavailable_telemetry_marker(value: object) -> bool:
@@ -1049,6 +1062,7 @@ class TaskArchive:
             run_dir = self.run_dir(task_id, pipeline_id, run_id)
 
         candidates: list[tuple[Path, int | None, bool]] = []
+        current_unavailable_candidates = 0
         if run_dir.is_dir() and not run_dir.is_symlink():
             try:
                 for path in sorted(run_dir.iterdir(), key=lambda item: item.name):
@@ -1073,6 +1087,12 @@ class TaskArchive:
                     archive_ordinal = (
                         int(retry_text) - 1 if retry_text is not None else None
                     )
+                    if archive_ordinal is None and unavailable_text is not None:
+                        current_unavailable_candidates += 1
+                        self._invocation_collection_error(
+                            "conflicting current unavailable telemetry markers",
+                            strict,
+                        )
                     candidates.append(
                         (path, archive_ordinal, retry_text is not None)
                     )
@@ -1089,7 +1109,7 @@ class TaskArchive:
         selected: list[ArchiveInvocation] = []
         by_id: dict[str, tuple[str, ArchiveInvocation]] = {}
         unavailable_ordinals: dict[int, ArchiveInvocation] = {}
-        current_unavailable: tuple[str, str, int] | None = None
+        current_unavailable: tuple[str, str, int, str] | None = None
         authenticated_ordinals: set[int] = set()
         total_bytes = 0
         current_seen = False
@@ -1109,6 +1129,7 @@ class TaskArchive:
                 if total_bytes > MAX_ARCHIVE_TELEMETRY_BYTES:
                     raise ArchiveValidationError("telemetry archive exceeds bound")
                 raw = path.read_bytes()
+                content_digest = hashlib.sha256(raw).hexdigest()
                 try:
                     marker = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1116,7 +1137,12 @@ class TaskArchive:
                 if _is_unavailable_telemetry_marker(marker):
                     reason = str(marker.get("reason") or "telemetry_unavailable")
                     if archive_ordinal is None:
-                        current_unavailable = (relative, reason, info.st_size)
+                        current_unavailable = (
+                            relative,
+                            reason,
+                            info.st_size,
+                            content_digest,
+                        )
                         continue
                     ordinal = archive_ordinal
                     authenticated_ordinals.add(ordinal)
@@ -1128,6 +1154,7 @@ class TaskArchive:
                         path=relative,
                         reason=reason,
                         byte_size=info.st_size,
+                        content_digest=content_digest,
                     )
                     previous = unavailable_ordinals.get(ordinal)
                     if previous is not None and previous.path != evidence.path:
@@ -1180,6 +1207,7 @@ class TaskArchive:
                     started_at=str(payload.get("started_at")),
                     completed_at=str(payload.get("completed_at")),
                     byte_size=info.st_size,
+                    content_digest=content_digest,
                     turn_count=len(turns),
                     aggregate=aggregate_value,
                     reason=(
@@ -1241,7 +1269,7 @@ class TaskArchive:
 
         selected.extend(unavailable_ordinals.values())
         if current_unavailable is not None:
-            relative, reason, byte_size = current_unavailable
+            relative, reason, byte_size, content_digest = current_unavailable
             selected.append(
                 self._missing_invocation(
                     task_id,
@@ -1251,6 +1279,7 @@ class TaskArchive:
                     path=relative,
                     reason=reason,
                     byte_size=byte_size,
+                    content_digest=content_digest,
                 )
             )
         if not current_seen:
@@ -1453,6 +1482,7 @@ class TaskArchive:
         path: str,
         reason: str,
         byte_size: int | None,
+        content_digest: str | None = None,
     ) -> ArchiveInvocation:
         return ArchiveInvocation(
             invocation_id=None,
@@ -1466,6 +1496,7 @@ class TaskArchive:
             started_at=None,
             completed_at=None,
             byte_size=byte_size,
+            content_digest=content_digest,
             turn_count=None,
             aggregate=None,
             reason=reason,

@@ -10,6 +10,7 @@ from pathlib import Path
 from ..core.config import StewardConfig
 from ..core.models import TaskRecord, ValidationResult, utc_now
 from ..core.subprocesses import CommandResult, run_command
+from .container import SubprocessDockerClient
 
 VALIDATION_SCOPE_CONTROL = """\
 Validation repair scope control:
@@ -139,6 +140,7 @@ def _docker_validation_runner(
     validation_uid = 10000 if deployment.host_uid is None else int(deployment.host_uid)
     validation_gid = 10000 if deployment.host_gid is None else int(deployment.host_gid)
     scratch_bytes = deployment.max_scratch_bytes
+    docker_client = SubprocessDockerClient(docker_bin)
 
     def execute(command: list[str], workdir: Path, timeout: float) -> CommandResult:
         mapped = [
@@ -146,8 +148,7 @@ def _docker_validation_runner(
             .replace(workdir.resolve().as_uri(), "file:///validation/worktree")
             for item in command
         ]
-        argv = [
-            docker_bin,
+        docker_argv = [
             "run",
             "--rm",
             "--network",
@@ -202,17 +203,32 @@ def _docker_validation_runner(
             *mapped,
         ]
         try:
-            result = subprocess.run(
-                argv,
-                cwd=workdir,
-                check=False,
-                capture_output=True,
-                text=True,
+            captured = docker_client.run(
+                docker_argv,
                 timeout=timeout,
+                max_output_bytes=MAX_VALIDATION_OUTPUT_BYTES,
             )
         except subprocess.TimeoutExpired:
-            return CommandResult(command, workdir, 124, "", "validation container timed out")
-        return CommandResult(command, workdir, result.returncode, result.stdout, result.stderr)
+            return CommandResult(
+                command, workdir, 124, "", "validation container timed out"
+            )
+        stdout = (
+            captured.stdout.decode("utf-8", errors="replace")
+            if isinstance(captured.stdout, bytes)
+            else str(captured.stdout)
+        )
+        stderr = (
+            captured.stderr.decode("utf-8", errors="replace")
+            if isinstance(captured.stderr, bytes)
+            else str(captured.stderr)
+        )
+        return CommandResult(
+            command,
+            workdir,
+            captured.returncode,
+            stdout,
+            stderr,
+        )
 
     return execute
 
@@ -267,9 +283,15 @@ def run_validation(
                     cwd=cwd,
                     timeout=timeout,
                     env=environment,
+                    max_output_bytes=MAX_VALIDATION_OUTPUT_BYTES,
                 )
         else:
-            result = run_command(command, cwd=cwd, timeout=timeout)
+            result = run_command(
+                command,
+                cwd=cwd,
+                timeout=timeout,
+                max_output_bytes=MAX_VALIDATION_OUTPUT_BYTES,
+            )
     stdout = _bounded_output(result.stdout)
     stderr = _bounded_output(result.stderr)
     output_path.write_text(
@@ -289,7 +311,7 @@ def run_validation(
 
 
 def _bounded_output(value: str) -> str:
-    if len(value.encode("utf-8", errors="replace")) <= MAX_VALIDATION_OUTPUT_BYTES:
+    if len(value.encode("utf-8", errors="replace")) < MAX_VALIDATION_OUTPUT_BYTES:
         return value
     encoded = value.encode("utf-8", errors="replace")
     suffix = b"\n[output truncated by Steward validation boundary]\n"

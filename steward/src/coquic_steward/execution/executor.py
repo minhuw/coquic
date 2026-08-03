@@ -70,6 +70,7 @@ from .implementation_plan import (
     deterministic_plan_skip_reason,
     implementation_plan_required,
 )
+from . import validation as validation_module
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
 from .session import (
@@ -106,6 +107,45 @@ MAX_REVIEW_RUN_ATTEMPTS = 2
 WORKER_HEARTBEAT_SECONDS = 30
 PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+
+
+class _BoundedDockerClient:
+    """Apply the validation cap while retaining the runtime's boundary checks."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: bytes | None = None,
+        timeout: float | None = None,
+        max_output_bytes: int | None = None,
+    ) -> Any:
+        return self._client.run(
+            argv,
+            input=input,
+            timeout=timeout,
+            max_output_bytes=validation_module.MAX_VALIDATION_OUTPUT_BYTES,
+        )
+
+    def popen(self, argv: list[str]) -> Any:
+        return self._client.popen(argv)
+
+
+def _run_with_bounded_container_capture(
+    runtime: Any, operation: Callable[[], Any]
+) -> Any:
+    client = getattr(runtime, "client", None)
+    if client is None or not callable(getattr(client, "run", None)):
+        return operation()
+    bounded_client = _BoundedDockerClient(client)
+    runtime.client = bounded_client
+    try:
+        return operation()
+    finally:
+        runtime.client = client
 
 
 @dataclass(frozen=True, slots=True)
@@ -2038,17 +2078,20 @@ class StewardExecutor:
                 _rewrite_mounted_argument(item, cwd, container_workdir)
                 for item in command
             ]
-            result = runtime.exec(
-                role,
-                session_uid=session_uid,
-                session_id=session_id,
-                command=container_command,
-                env={
-                    "GIT_OBJECT_DIRECTORY": container_objects,
-                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": container_alternate,
-                },
-                workdir=container_workdir,
-                timeout=timeout,
+            result = _run_with_bounded_container_capture(
+                runtime,
+                lambda: runtime.exec(
+                    role,
+                    session_uid=session_uid,
+                    session_id=session_id,
+                    command=container_command,
+                    env={
+                        "GIT_OBJECT_DIRECTORY": container_objects,
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES": container_alternate,
+                    },
+                    workdir=container_workdir,
+                    timeout=timeout,
+                ),
             )
             return CommandResult(
                 args=command,
@@ -2166,10 +2209,13 @@ class StewardExecutor:
                 _rewrite_mounted_argument(item, cwd, config.container_path(cwd))
                 for item in command
             ]
-            result = runtime.exec(
-                container_command,
-                workdir=config.container_path(cwd),
-                timeout=timeout,
+            result = _run_with_bounded_container_capture(
+                runtime,
+                lambda: runtime.exec(
+                    container_command,
+                    workdir=config.container_path(cwd),
+                    timeout=timeout,
+                ),
             )
             return CommandResult(
                 args=command,

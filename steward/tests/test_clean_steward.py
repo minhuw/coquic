@@ -71,6 +71,7 @@ from coquic_steward.execution.review import (
     review_schema_path,
 )
 from coquic_steward.execution.validation import (
+    MAX_VALIDATION_OUTPUT_BYTES,
     default_gates,
     render_validation_revision_prompt,
 )
@@ -5833,10 +5834,13 @@ def test_run_validation_applies_configured_timeout(
     )
     observed: dict[str, object] = {}
 
-    def fake_run_command(command, cwd, *, timeout=None):
+    def fake_run_command(
+        command, cwd, *, timeout=None, max_output_bytes=None, **_kwargs
+    ):
         observed["command"] = command
         observed["cwd"] = cwd
         observed["timeout"] = timeout
+        observed["max_output_bytes"] = max_output_bytes
         return CommandResult(
             args=command,
             cwd=cwd,
@@ -5861,6 +5865,7 @@ def test_run_validation_applies_configured_timeout(
         "command": ["slow-command"],
         "cwd": config.repo_root,
         "timeout": 120,
+        "max_output_bytes": MAX_VALIDATION_OUTPUT_BYTES,
     }
     assert result.exit_code == 124
     assert not result.passed

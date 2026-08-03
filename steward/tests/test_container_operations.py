@@ -26,7 +26,10 @@ from coquic_steward.execution.container_config import (
 )
 from coquic_steward.execution.container_config import ValidationContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
-from coquic_steward.execution.validation import _docker_validation_runner
+from coquic_steward.execution.validation import (
+    MAX_VALIDATION_OUTPUT_BYTES,
+    _docker_validation_runner,
+)
 from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
 from coquic_steward.storage import TaskStore
 
@@ -287,18 +290,33 @@ def test_direct_validation_runner_uses_bootstrap_and_writable_nix_boundary(
         validation_image="coquic-steward-validation",
         validation_image_digest=digest,
     )
-    argv_calls: list[list[str]] = []
+    argv_calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def capture(argv, **_kwargs):
-        argv_calls.append(argv)
-        return subprocess.CompletedProcess(argv, 17, "", "canonical gate failed")
+    class RecordingDockerClient:
+        def __init__(self, _docker_bin):
+            pass
 
-    monkeypatch.setattr(subprocess, "run", capture)
+        def run(self, argv, **kwargs):
+            argv_calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(
+                argv, 17, b"", b"canonical gate failed"
+            )
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation.SubprocessDockerClient",
+        RecordingDockerClient,
+    )
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.validation._validation_git_common_dir",
+        lambda _worktree: config.repo_root / ".git",
+    )
     runner = _docker_validation_runner(config, "integration-task", config.repo_root)
     result = runner(["nix", "flake", "check"], config.repo_root, 30)
 
     assert result.returncode == 17
-    argv = argv_calls[0]
+    argv, kwargs = argv_calls[0]
+    assert kwargs["max_output_bytes"] == MAX_VALIDATION_OUTPUT_BYTES
     assert "--read-only" in argv
     assert any("dst=/nix/var/nix" in value for value in argv)
     assert any(value.startswith("/nix/store:rw,") for value in argv)

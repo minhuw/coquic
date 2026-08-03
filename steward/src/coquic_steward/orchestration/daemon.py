@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+from itertools import islice
 import json
 import re
 import socket
@@ -25,6 +26,7 @@ from ..core.lifecycle import (
     TaskPhase,
 )
 from ..core.models import (
+    ACTIVE_STATUSES,
     DaemonCycleResult,
     DaemonCycleSummary,
     DaemonRuntime,
@@ -35,6 +37,7 @@ from ..core.models import (
     SignalItem,
     TaskRecord,
     TaskStatus,
+    TERMINAL_STATUSES,
     utc_now,
     WorkerKind,
 )
@@ -101,6 +104,13 @@ DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
 PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
+PLANNER_TERMINAL_CONTEXT_LIMIT = 200
+
+_ACTIVE_TASK_STATUSES = tuple(ACTIVE_STATUSES)
+_RESUMABLE_TASK_STATUSES = tuple(
+    status for status in ACTIVE_STATUSES if status != TaskStatus.queued
+)
+_TERMINAL_TASK_STATUSES = tuple(TERMINAL_STATUSES)
 
 
 def _close_publication_client(client: object) -> None:
@@ -3961,7 +3971,7 @@ class StewardDaemon:
         queued = self.store.queued_tasks()
         active = [
             task
-            for task in self.store.list_tasks(limit=10000)
+            for task in self.store.iter_tasks(statuses=_RESUMABLE_TASK_STATUSES)
             if not TaskStatus(task.status).terminal
             and TaskStatus(task.status) != TaskStatus.queued
         ]
@@ -3980,6 +3990,25 @@ class StewardDaemon:
             budget -= 1
             seen.add(task.id)
             self._log(f"dispatch scheduled {task.id} {_task_label(task)}")
+
+    def _planner_task_context(self) -> tuple[list[TaskRecord], list[TaskRecord]]:
+        """Return complete active state plus bounded terminal planner history."""
+
+        active = list(self.store.iter_tasks(statuses=_ACTIVE_TASK_STATUSES))
+        terminal = list(
+            islice(
+                self.store.iter_tasks(statuses=_TERMINAL_TASK_STATUSES),
+                PLANNER_TERMINAL_CONTEXT_LIMIT,
+            )
+        )
+        context: list[TaskRecord] = []
+        seen: set[str] = set()
+        for task in [*active, *terminal]:
+            if task.id in seen:
+                continue
+            seen.add(task.id)
+            context.append(task)
+        return active, context
 
     def _run_task_worker(self, task_id: str) -> bool:
         """Advance one task until a terminal/blocked cursor or shutdown."""
@@ -4299,7 +4328,7 @@ class StewardDaemon:
                 return
 
     def _plan(self, result: TickResult, inbox_items: list[SignalItem]) -> None:
-        task_context = self.store.list_tasks(limit=200)
+        active_tasks, task_context = self._planner_task_context()
         signals = project_signals_from_items(self.config, inbox_items)
         active_count = self.store.source_active_count()
         self._log(
@@ -4327,11 +4356,11 @@ class StewardDaemon:
                 control_claim = self._control_loop_ledger.claim_planner_run(
                     control_run_id,
                     canonical_signal_ids,
-                    [task.id for task in task_context if not TaskStatus(task.status).terminal],
+                    [task.id for task in active_tasks],
                     prompt={
                         "signalIds": canonical_signal_ids,
                         "signalItemIds": [item.id for item in inbox_items],
-                        "activeTaskCount": len(task_context),
+                        "activeTaskCount": len(active_tasks),
                     },
                 )
                 self._active_planner_run_id = control_run_id

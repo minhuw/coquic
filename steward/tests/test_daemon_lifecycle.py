@@ -942,6 +942,70 @@ def test_planner_retry_defers_unchanged_input_and_success_resets_state(
     assert store.control_loop.pending_retry("planner") is None
 
 
+def test_planner_context_keeps_all_active_tasks_and_bounds_terminal_history(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    oldest_active, _ = _task(store, "oldest active planner context")
+    store.start_worker(oldest_active.id, "running")
+    queued_active, _ = _task(store, "queued active planner context")
+    terminal_tasks = []
+    for index in range(205):
+        terminal, _ = _task(store, f"terminal planner context {index}")
+        store.finish_task(terminal.id, TaskStatus.succeeded, "terminal")
+        terminal_tasks.append(terminal)
+    item = _planner_signal(store, "complete-context")
+    captured: list[list[object]] = []
+
+    def fake_run_planner(_config, _signals, tasks, **_kwargs):
+        captured.append(list(tasks))
+        return SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.private_dir / "planner-context.jsonl",
+            thread_id=None,
+            consumed_item_ids=[item.id],
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", fake_run_planner
+    )
+    monkeypatch.setattr(
+        store,
+        "list_tasks",
+        lambda **_kwargs: pytest.fail("planner used a capped task listing"),
+    )
+
+    daemon = StewardDaemon(config, store)
+    daemon._plan(TickResult(), [item])
+
+    assert len(captured) == 1
+    context = captured[0]
+    active_ids = [oldest_active.id, queued_active.id]
+    assert {task.id for task in context[:2]} == set(active_ids)
+    terminal_context = [
+        task for task in context if TaskStatus(task.status).terminal
+    ]
+    assert len(terminal_context) == 200
+    expected_terminal = sorted(
+        terminal_tasks,
+        key=lambda task: (task.created_at, task.id),
+        reverse=True,
+    )[:200]
+    assert [task.id for task in terminal_context] == [
+        task.id for task in expected_terminal
+    ]
+
+    planner_run = store.control_loop.list_planner_runs()[-1]
+    assert planner_run.active_task_ids == [task.id for task in context[:2]]
+    assert planner_run.prompt is not None
+    assert planner_run.prompt["activeTaskCount"] == len(active_ids)
+
+
 def test_startup_reconstructs_terminal_planner_publication(config) -> None:
     store = TaskStore(config.db_path)
     item = _planner_signal(store, "publication")
@@ -2037,6 +2101,41 @@ def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(confi
     daemon._complete_cycle(TickResult(), "heartbeat")
     release.set()
     pool.shutdown(wait=True)
+
+
+def test_worker_pool_dispatches_old_active_task_beyond_legacy_window(
+    config, monkeypatch
+):
+    store = TaskStore(config.db_path)
+    oldest_active, _ = _task(store, "oldest active pool task")
+    store.start_worker(oldest_active.id, "running")
+    for index in range(4):
+        terminal, _ = _task(store, f"newer pool history {index}")
+        store.finish_task(terminal.id, TaskStatus.succeeded, "terminal")
+    monkeypatch.setattr(
+        store,
+        "list_tasks",
+        lambda **_kwargs: pytest.fail("pool dispatch used a capped task listing"),
+    )
+    daemon = StewardDaemon(config, store)
+    scheduled: list[str] = []
+    release = threading.Event()
+
+    def worker(task_id):
+        scheduled.append(task_id)
+        release.wait(1)
+        return True
+
+    daemon._run_task_worker = worker
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = TickResult()
+        daemon._dispatch_queued_pool(result, pool, max_dispatch=1)
+        assert scheduled == [oldest_active.id]
+        assert result.dispatched == 1
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
 
 
 def test_shutdown_grace_bounds_blocked_worker_pool(config):

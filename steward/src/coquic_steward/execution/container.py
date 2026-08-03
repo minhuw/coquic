@@ -18,7 +18,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..core.subprocesses import current_subprocess_owner
+from ..core.subprocesses import (
+    _communicate_bounded,
+    _validate_capture_limit,
+    current_subprocess_owner,
+)
 from .container_config import (
     ContainerMount,
     PlannerContainerConfig,
@@ -86,6 +90,7 @@ class DockerClient(Protocol):
         *,
         input: bytes | None = None,
         timeout: float | None = None,
+        max_output_bytes: int | None = None,
     ) -> subprocess.CompletedProcess[bytes]: ...
 
 
@@ -99,7 +104,9 @@ class SubprocessDockerClient:
         *,
         input: bytes | None = None,
         timeout: float | None = None,
+        max_output_bytes: int | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
+        _validate_capture_limit(max_output_bytes)
         process = subprocess.Popen(  # nosec B603 - argv is validated by caller
             [self.docker_bin, *argv],
             stdout=subprocess.PIPE,
@@ -112,20 +119,22 @@ class SubprocessDockerClient:
         if owner is not None:
             owner.register(process)
         try:
-            stdout, stderr = process.communicate(input=input, timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            _terminate_docker_group(process, signal.SIGTERM)
-            try:
-                stdout, stderr = process.communicate(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                _terminate_docker_group(process, signal.SIGKILL)
-                stdout, stderr = process.communicate()
-            raise subprocess.TimeoutExpired(
-                [self.docker_bin, *argv],
-                timeout,
-                output=stdout,
-                stderr=stderr,
-            ) from exc
+            stdout, stderr, timed_out = _communicate_bounded(
+                process,
+                input_value=input,
+                timeout=timeout,
+                max_output_bytes=max_output_bytes,
+                text=False,
+                terminate=lambda sig: _terminate_docker_group(process, sig),
+                timeout_grace=2.0,
+            )
+            if timed_out:
+                raise subprocess.TimeoutExpired(
+                    [self.docker_bin, *argv],
+                    timeout,
+                    output=stdout,
+                    stderr=stderr,
+                )
         finally:
             if owner is not None:
                 owner.unregister(process)

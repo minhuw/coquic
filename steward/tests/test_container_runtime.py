@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,8 @@ from coquic_steward.execution import (
     TaskContainerRuntime,
     TaskRole,
 )
-from coquic_steward.execution.container import PlannerContainerRuntime
+from coquic_steward.core.subprocesses import run_command
+from coquic_steward.execution.container import PlannerContainerRuntime, SubprocessDockerClient
 from coquic_steward.execution.container_config import PlannerContainerConfig
 from coquic_steward.agents.invocation import InvocationRequest
 from coquic_steward.core.config import StewardConfig
@@ -48,6 +50,110 @@ class FakeDocker:
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps([payload]).encode(), b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def test_host_capture_is_unlimited_by_default(tmp_path: Path) -> None:
+    output = 256 * 1024
+    result = run_command(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; os.write(1, b'o' * %d); os.write(2, b'e' * %d)"
+            % (output, output),
+        ],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert len(result.stdout.encode("utf-8")) == output
+    assert len(result.stderr.encode("utf-8")) == output
+
+
+def test_host_capture_drains_both_streams_with_an_opt_in_byte_cap(
+    tmp_path: Path,
+) -> None:
+    cap = 1024
+    output = 512 * 1024
+    result = run_command(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'o' * %d); os.write(2, b'e' * %d)"
+            % (output, output),
+        ],
+        cwd=tmp_path,
+        max_output_bytes=cap,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "o" * cap
+    assert result.stderr == "e" * cap
+
+
+def test_host_capture_preserves_input_and_timeout_reaping(tmp_path: Path) -> None:
+    input_result = run_command(
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        cwd=tmp_path,
+        input_text="input delivered\n",
+        max_output_bytes=64,
+    )
+    assert input_result.stdout == "input delivered\n"
+
+    timeout_result = run_command(
+        [
+            sys.executable,
+            "-c",
+            "import sys, time; print('ready', flush=True); print('error', file=sys.stderr, flush=True); time.sleep(30)",
+        ],
+        cwd=tmp_path,
+        timeout=0.1,
+        max_output_bytes=3,
+    )
+    assert timeout_result.returncode == 124
+    assert timeout_result.stdout == "rea"
+    assert timeout_result.stderr.startswith("err")
+    assert "command timed out after 0.1 seconds" in timeout_result.stderr
+
+
+def test_docker_capture_is_unlimited_by_default_and_bounded_when_opted_in() -> None:
+    output = 256 * 1024
+    client = SubprocessDockerClient(sys.executable)
+    argv = [
+        "-c",
+        "import os, sys; os.write(1, b'o' * %d); os.write(2, b'e' * %d)"
+        % (output, output),
+    ]
+
+    unlimited = client.run(argv)
+    bounded = client.run(argv, max_output_bytes=1024)
+
+    assert unlimited.returncode == 0
+    assert len(unlimited.stdout) == output
+    assert len(unlimited.stderr) == output
+    assert bounded.stdout == b"o" * 1024
+    assert bounded.stderr == b"e" * 1024
+
+
+def test_docker_capture_delivers_input_and_reaps_after_timeout() -> None:
+    client = SubprocessDockerClient(sys.executable)
+    delivered = client.run(
+        ["-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        input=b"docker input\n",
+        max_output_bytes=64,
+    )
+    assert delivered.stdout == b"docker input\n"
+
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        client.run(
+            [
+                "-c",
+                "import sys, time; sys.stdout.write('ready'); sys.stdout.flush(); time.sleep(30)",
+            ],
+            timeout=0.1,
+            max_output_bytes=3,
+        )
+    assert error.value.output == b"rea"
+    assert error.value.stderr == b""
 
 
 def test_planner_container_mounts_only_sealed_history_and_private_io(

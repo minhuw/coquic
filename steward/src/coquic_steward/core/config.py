@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -9,9 +10,10 @@ import shutil
 import sqlite3
 import stat
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 from .models import CodexStage, IntegrationMode
@@ -1166,62 +1168,67 @@ class StewardConfig:
         destination = self.db_path
         marker = self.migration_marker_path
         legacy_marker = self.legacy_migration_marker_path
-        if require_epoch:
-            self.ensure_epoch()
-        if source.is_symlink() or destination.is_symlink():
-            raise RuntimeError("Steward database paths must not be symlinks")
-        _validate_private_mode(self.legacy_steward_home)
         backup = self.legacy_backup_path
-        migration_marked = marker.exists() or legacy_marker.exists()
-        if (
-            not source.exists()
-            and destination.exists()
-            and backup.exists()
-            and migration_marked
-            and _legacy_backup_is_complete(self, destination, backup)
-        ):
-            return destination
         if daemon_running:
             raise RuntimeError("cannot migrate Steward state while daemon is running")
-        if (self.state_dir / "daemon.lock").exists():
-            raise RuntimeError("cannot migrate Steward state while daemon lock exists")
-        if destination.exists() and source.exists():
-            if not _same_sqlite_content(source, destination):
-                raise RuntimeError("ambiguous differing active Steward databases")
-            # Identical copies are safe to make authoritative; still preserve
-            # the source below as a marked backup when migration is incomplete.
-        if not source.exists():
-            if destination.exists():
-                _validate_sqlite(destination)
-                if backup.exists():
-                    _finish_legacy_backup(self, destination, backup)
-                elif marker.exists() or legacy_marker.exists():
-                    raise RuntimeError("Steward migration provenance has no legacy backup")
+        with _migration_lock(self.state_dir / "daemon.lock"):
+            if require_epoch:
+                self.ensure_epoch()
+            if source.is_symlink() or destination.is_symlink():
+                raise RuntimeError("Steward database paths must not be symlinks")
+            _validate_private_mode(self.legacy_steward_home)
+            migration_marked = marker.exists() or legacy_marker.exists()
+            if (
+                not source.exists()
+                and destination.exists()
+                and backup.exists()
+                and migration_marked
+                and _legacy_backup_is_complete(self, destination, backup)
+            ):
                 return destination
-            return destination
-        _validate_private_mode(self.coquic_home)
-        temporary = destination.with_name(f".{destination.name}.copy-{secrets.token_hex(8)}")
-        temporary.unlink(missing_ok=True)
-        try:
-            _sqlite_backup(source, temporary)
-            _validate_sqlite(temporary)
-            os.replace(temporary, destination)
-            os.chmod(destination, 0o600)
-            _fsync_directory(destination.parent)
-        finally:
+            if destination.exists() and source.exists():
+                if not _same_sqlite_content(source, destination):
+                    raise RuntimeError("ambiguous differing active Steward databases")
+                # Identical copies are safe to make authoritative; still preserve
+                # the source below as a marked backup when migration is incomplete.
+            if not source.exists():
+                if destination.exists():
+                    _validate_sqlite(destination)
+                    if backup.exists():
+                        _finish_legacy_backup(self, destination, backup)
+                    elif marker.exists() or legacy_marker.exists():
+                        raise RuntimeError(
+                            "Steward migration provenance has no legacy backup"
+                        )
+                    return destination
+                return destination
+            _validate_private_mode(self.coquic_home)
+            temporary = destination.with_name(
+                f".{destination.name}.copy-{secrets.token_hex(8)}"
+            )
             temporary.unlink(missing_ok=True)
-        _checkpoint_sqlite(source)
-        if not _same_sqlite_content(source, destination):
-            raise RuntimeError("verified Steward destination differs from legacy source")
-        if source.exists() and source != backup:
-            if backup.exists():
-                if not _same_sqlite_content(source, backup):
-                    raise RuntimeError("legacy database backup conflicts with source")
-                source.unlink()
-            else:
-                os.replace(source, backup)
-        _finish_legacy_backup(self, destination, backup)
-        return destination
+            try:
+                _sqlite_backup(source, temporary)
+                _validate_sqlite(temporary)
+                os.replace(temporary, destination)
+                os.chmod(destination, 0o600)
+                _fsync_directory(destination.parent)
+            finally:
+                temporary.unlink(missing_ok=True)
+            _checkpoint_sqlite(source)
+            if not _same_sqlite_content(source, destination):
+                raise RuntimeError(
+                    "verified Steward destination differs from legacy source"
+                )
+            if source.exists() and source != backup:
+                if backup.exists():
+                    if not _same_sqlite_content(source, backup):
+                        raise RuntimeError("legacy database backup conflicts with source")
+                    source.unlink()
+                else:
+                    os.replace(source, backup)
+            _finish_legacy_backup(self, destination, backup)
+            return destination
 
     # Compatibility spellings used by migration callers and tests.
     migrate_legacy_state = migrate_legacy_database
@@ -1841,6 +1848,29 @@ def _reject_symlink_roots(*paths: Path) -> None:
     for path in paths:
         if path.is_symlink():
             raise RuntimeError(f"Steward root must not be a symlink: {path}")
+
+
+@contextmanager
+def _migration_lock(path: Path) -> Iterator[None]:
+    """Hold the daemon lock while an offline migration changes Steward state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                "cannot migrate Steward state while daemon is running"
+            ) from exc
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def _validate_private_mode(path: Path) -> None:

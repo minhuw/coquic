@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+import coquic_steward.core.config as config_module
 from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.models import (
     TaskKind,
@@ -18,6 +20,7 @@ from coquic_steward.core.models import (
 )
 from coquic_steward.storage import TaskStore
 from coquic_steward.execution.worktree import Worktrees
+from coquic_steward.orchestration import DaemonAlreadyRunning, acquire_daemon_lock
 
 
 def test_new_layout_and_epoch_are_explicit(repo: Path, coquic_home: Path) -> None:
@@ -46,6 +49,97 @@ def test_legacy_database_migration_preserves_source_and_marks_backup(
     assert config.migration_marker_path.exists()
     with sqlite3.connect(config.db_path) as connection:
         assert connection.execute("SELECT value FROM fixture").fetchone() == ("kept",)
+
+
+def test_legacy_database_migration_accepts_released_persistent_lock(
+    repo: Path, coquic_home: Path
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    with sqlite3.connect(config.legacy_db_path) as connection:
+        connection.execute("CREATE TABLE fixture (value TEXT)")
+        connection.execute("INSERT INTO fixture VALUES ('stale')")
+    lock_path = config.state_dir / "daemon.lock"
+    lock_path.write_text("pid=stale\n", encoding="utf-8")
+
+    config.migrate_legacy_database()
+
+    assert config.db_path.exists()
+    assert lock_path.exists()
+    assert lock_path.read_text(encoding="utf-8") == "pid=stale\n"
+
+
+def test_legacy_database_migration_rejects_live_lock_before_state_changes(
+    repo: Path, coquic_home: Path
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    with sqlite3.connect(config.legacy_db_path) as connection:
+        connection.execute("CREATE TABLE fixture (value TEXT)")
+        connection.execute("INSERT INTO fixture VALUES ('live')")
+    source_bytes = config.legacy_db_path.read_bytes()
+
+    with acquire_daemon_lock(config):
+        with pytest.raises(
+            RuntimeError, match="cannot migrate Steward state while daemon is running"
+        ):
+            config.migrate_legacy_database()
+
+    assert config.legacy_db_path.read_bytes() == source_bytes
+    assert not config.db_path.exists()
+    assert not config.legacy_backup_path.exists()
+    assert not config.migration_marker_path.exists()
+
+
+def test_legacy_database_migration_holds_lock_through_backup_finalization(
+    repo: Path, coquic_home: Path, monkeypatch
+) -> None:
+    config = StewardConfig(repo_root=repo)
+    config.ensure_dirs()
+    with sqlite3.connect(config.legacy_db_path) as connection:
+        connection.execute("CREATE TABLE fixture (value TEXT)")
+        connection.execute("INSERT INTO fixture VALUES ('held')")
+
+    entered_finalization = threading.Event()
+    release_finalization = threading.Event()
+    errors: list[BaseException] = []
+    real_finish = config_module._finish_legacy_backup
+
+    def pause_before_finalization(
+        migration_config: StewardConfig, destination: Path, backup: Path
+    ) -> None:
+        entered_finalization.set()
+        if not release_finalization.wait(timeout=5):
+            raise AssertionError("migration finalization did not resume")
+        real_finish(migration_config, destination, backup)
+
+    monkeypatch.setattr(
+        config_module, "_finish_legacy_backup", pause_before_finalization
+    )
+
+    def migrate() -> None:
+        try:
+            config.migrate_legacy_database()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    worker = threading.Thread(target=migrate)
+    worker.start()
+    try:
+        assert entered_finalization.wait(timeout=5)
+        with pytest.raises(DaemonAlreadyRunning):
+            with acquire_daemon_lock(config):
+                pass
+    finally:
+        release_finalization.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not errors
+    assert config.db_path.exists()
+    assert config.legacy_backup_path.exists()
+    with acquire_daemon_lock(config):
+        pass
 
 
 def test_normal_startup_migrates_legacy_database(

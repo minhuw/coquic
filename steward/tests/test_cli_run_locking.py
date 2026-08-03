@@ -51,6 +51,16 @@ def _assert_lock_held(config) -> None:
             pass
 
 
+def test_daemon_lock_inode_persists_after_release(repo, monkeypatch) -> None:
+    config, _store, _task = _task_context(repo, monkeypatch)
+    lock_path = config.state_dir / "daemon.lock"
+
+    with acquire_daemon_lock(config):
+        pass
+
+    assert lock_path.is_file()
+
+
 def test_run_rejects_daemon_lock_contention(repo, monkeypatch) -> None:
     config, _store, task = _task_context(repo, monkeypatch)
 

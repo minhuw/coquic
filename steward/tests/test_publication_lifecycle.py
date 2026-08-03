@@ -912,6 +912,176 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
     assert later.reason == "integrity"
 
 
+def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
+    tmp_path: Path,
+) -> None:
+    credential = "synthetic-restart-provider-credential"
+    config = _publication_config(tmp_path, credential)
+    base_graph = _publication_graph("restart-provider-ordering")
+
+    def rewrite(value: object, replacements: dict[str, str]) -> object:
+        if isinstance(value, AtifSource):
+            return replace(
+                value,
+                run=rewrite(value.run, replacements),
+                documents=rewrite(value.documents, replacements),
+                artifacts=tuple(
+                    rewrite(item, replacements) for item in value.artifacts
+                ),
+            )
+        if isinstance(value, dict):
+            return {
+                key: rewrite(item, replacements) for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [rewrite(item, replacements) for item in value]
+        if isinstance(value, tuple):
+            return tuple(rewrite(item, replacements) for item in value)
+        if isinstance(value, bytes):
+            for old, new in replacements.items():
+                value = value.replace(old.encode(), new.encode())
+            return value
+        if isinstance(value, str):
+            for old, new in replacements.items():
+                value = value.replace(old, new)
+            return value
+        return value
+
+    older_graph = rewrite(
+        base_graph,
+        {
+            "task-publication-preflight": "task-restart-provider-older",
+            "pipeline-publication-preflight": "pipeline-restart-provider-older",
+            "run-publication-preflight": "run-restart-provider-older",
+        },
+    )
+    assert isinstance(older_graph, dict)
+    later_graph = rewrite(base_graph, {})
+    assert isinstance(later_graph, dict)
+    source = later_graph["runs"][0]
+    assert isinstance(source, AtifSource)
+    later_graph["runs"][0] = replace(
+        source,
+        documents={
+            **source.documents,
+            "codex.jsonl": source.documents["codex.jsonl"].replace(
+                b'"safe"', json.dumps(credential).encode()
+            ),
+        },
+    )
+
+    scanner = lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b"")
+    older = session_module.compose_publication_generation(
+        older_graph,
+        scanner_runner=scanner,
+        credential_sources=(),
+    )
+    later_free = session_module.compose_publication_generation(
+        later_graph,
+        scanner_runner=scanner,
+        credential_sources=(),
+    )
+    later_aware = session_module.compose_publication_generation(
+        later_graph,
+        scanner_runner=scanner,
+        credential_sources=(
+            config.d1_token_path,
+            config.r2_access_key_id_path,
+            config.r2_secret_access_key_path,
+        ),
+    )
+    assert isinstance(older, PublicationGeneration)
+    assert isinstance(later_free, PublicationGeneration)
+    assert isinstance(later_aware, PublicationGeneration)
+    assert later_free.publication_id != later_aware.publication_id
+
+    database = tmp_path / "publication-restart-provider.sqlite"
+    store = TaskStore(database)
+    first_created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.enqueue_publication(
+        replace(older.to_outbox(), created_at=first_created, updated_at=first_created)
+    )
+    store.block_publication(
+        older.publication_id,
+        expected_state="queued",
+        reason="integrity",
+        now=first_created,
+    )
+    later_created = first_created.replace(second=1)
+    store.enqueue_publication(
+        replace(
+            later_free.to_outbox(),
+            created_at=later_created,
+            updated_at=later_created,
+        )
+    )
+    store.block_publication(
+        later_free.publication_id,
+        expected_state="queued",
+        reason="integrity",
+        now=later_created,
+    )
+    restarted = TaskStore(database)
+    older_before = restarted.get_publication_generation(older.publication_id)
+    assert older_before is not None
+
+    class R2Recorder:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def put_object(self, *args: object, **kwargs: object) -> object:
+            self.calls.append(("put_object", args, kwargs))
+            raise AssertionError("unexpected R2 publication call")
+
+    class D1Recorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+            self.heads = {older.task_id: older.publication_id}
+
+        def hide_task(self, task_id: str, reason: str) -> object:
+            self.calls.append(("hide_task", task_id, reason))
+            previous = self.heads.pop(task_id, None)
+            return SimpleNamespace(
+                task_id=task_id,
+                publication_id=previous,
+                state="hidden",
+                changed=previous is not None,
+            )
+
+    r2 = R2Recorder()
+    d1 = D1Recorder()
+    source_by_task = {
+        older.task_id: older_graph,
+        later_free.task_id: later_graph,
+    }
+    daemon = object.__new__(StewardDaemon)
+    daemon.config = SimpleNamespace(publication=config)
+    daemon.store = restarted
+    daemon.logger = None
+    daemon._publication_source = lambda generation: source_by_task[generation.task_id]
+    publisher = CloudPublisher(
+        restarted,
+        r2,
+        d1,
+        worker_id="publication-restart-provider",
+        compose=lambda source, **kwargs: session_module.compose_publication_generation(
+            source,
+            scanner_runner=scanner,
+            **kwargs,
+        ),
+    )
+
+    assert daemon._publish_next_generation(publisher) is True
+    assert r2.calls == []
+    assert d1.calls == []
+    assert d1.heads == {older.task_id: older.publication_id}
+    assert restarted.get_publication_generation(older.publication_id) == older_before
+    assert restarted.get_publication_generation(later_free.publication_id) is None
+    later = restarted.get_publication_generation(later_aware.publication_id)
+    assert later is not None
+    assert later.state.value == "queued"
+
+
 def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation(
     tmp_path: Path, monkeypatch
 ) -> None:

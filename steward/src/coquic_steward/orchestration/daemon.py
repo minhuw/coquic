@@ -61,7 +61,7 @@ from ..publication.generation import (
 )
 from ..publication.outbox import CleanupIntent, CleanupState, ReceiptClass
 from ..publication.d1 import D1PublicationClient
-from ..publication.publisher import CloudPublisher
+from ..publication.publisher import CloudPublisher, _call_composer
 from ..publication.r2 import R2Client, private_original_key
 from ..core.subprocesses import (
     ProcessGroupCancellationOwner,
@@ -1031,6 +1031,32 @@ class StewardDaemon:
         retry = getattr(publisher, "retry_publication", None)
         if not isinstance(publication_id, str) or source is None or not callable(retry):
             return False
+        composer = getattr(publisher, "compose", None)
+        task_id = getattr(generation, "task_id", None)
+        if callable(composer):
+            if not isinstance(task_id, str):
+                return False
+            try:
+                candidate = _call_composer(
+                    composer,
+                    source,
+                    task_id=task_id,
+                    kwargs=compose_kwargs,
+                )
+            except Exception as exc:
+                self._log(
+                    "publication generation identity check failed "
+                    f"generation={publication_id} error={exc.__class__.__name__}"
+                )
+                return False
+            # A blocked row is eligible for replacement only when the daemon's
+            # credential-aware composition proves a different canonical
+            # generation.  This check is transport-free and avoids replaying
+            # an unchanged row's hide reconciliation against the provider.
+            if not isinstance(candidate, ComposedPublicationGeneration):
+                return False
+            if candidate.task_id != task_id or candidate.publication_id == publication_id:
+                return False
         try:
             result = retry(
                 publication_id,

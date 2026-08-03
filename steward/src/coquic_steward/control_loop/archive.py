@@ -48,6 +48,14 @@ def _json_bytes(value: Mapping[str, Any] | list[Any]) -> bytes:
     return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _accepted_prefix(data: bytes) -> bytes:
+    """Return complete JSONL records, excluding a torn final record."""
+
+    if data.endswith(b"\n"):
+        return data
+    return data[: data.rfind(b"\n") + 1] if b"\n" in data else b""
+
+
 def _fsync(path: Path) -> None:
     with path.open("rb") as handle:
         os.fsync(handle.fileno())
@@ -83,6 +91,7 @@ class ControlLoopArchive:
         ).expanduser()
         self._epoch_id = validate_id(epoch_id) if epoch_id else None
         self._epoch: Epoch | None = None
+        self._verified_append_context: dict[str, Any] | None = None
 
     @property
     def epoch_path(self) -> Path:
@@ -221,9 +230,16 @@ class ControlLoopArchive:
         existing = path.read_bytes() if path.exists() else b""
         # Complete records are the append boundary.  A torn final line may be
         # discarded only when it is not a complete JSON record.
-        accepted = existing
-        if accepted and not accepted.endswith(b"\n"):
-            accepted = accepted[: accepted.rfind(b"\n") + 1] if b"\n" in accepted else b""
+        accepted = _accepted_prefix(existing)
+        context = self._verified_append_context
+        if context is not None:
+            verified_files = context["files"]
+            facts = verified_files.get(path)
+            if facts is None:
+                facts = self._empty_verified_event_file(path)
+                verified_files[path] = facts
+            return self._append_verified_event(item, path, content, facts, context)
+        if accepted != existing:
             self._atomic_write(path, accepted)
         prior_sequences: list[int] = []
         for line in accepted.splitlines():
@@ -260,6 +276,83 @@ class ControlLoopArchive:
             os.fsync(handle.fileno())
         _fsync_dir(path.parent)
         return len(accepted) + len(content)
+
+    def _empty_verified_event_file(self, path: Path) -> dict[str, Any]:
+        try:
+            relative_path = path.relative_to(self.events_root).as_posix()
+        except ValueError:
+            relative_path = path.as_posix()
+        return {
+            "path": relative_path,
+            "sha256": sha256(b"").hexdigest(),
+            "byteSize": 0,
+            "eventCount": 0,
+            "sequences": [],
+            "eventIds": [],
+            "sequenceStart": None,
+            "sequenceEnd": None,
+            "highWatermark": None,
+        }
+
+    def _append_verified_event(
+        self,
+        item: Event,
+        path: Path,
+        content: bytes,
+        facts: dict[str, Any],
+        context: dict[str, Any],
+    ) -> int:
+        """Append a row using a byte-verified in-memory file snapshot."""
+
+        existing = path.read_bytes() if path.exists() else b""
+        accepted = _accepted_prefix(existing)
+        if (
+            len(accepted) != facts.get("byteSize")
+            or sha256(accepted).hexdigest() != facts.get("sha256")
+        ):
+            raise ArchiveConflictError("event file changed after verification")
+        if accepted != existing:
+            self._atomic_write(path, accepted)
+
+        context_high = context.get("highWatermark")
+        facts_high = facts.get("highWatermark")
+        visible_max = max(
+            context_high if context_high is not None else -1,
+            facts_high if facts_high is not None else -1,
+        )
+        if facts_high is not None:
+            context["highWatermark"] = max(
+                context_high if context_high is not None else -1,
+                facts_high,
+            )
+        event_ids = facts.get("eventIds", [])
+        if item.event_id in event_ids:
+            index = event_ids.index(item.event_id)
+            sequences = facts.get("sequences", [])
+            if index >= len(sequences) or sequences[index] != item.sequence:
+                raise ArchiveConflictError("event ID has conflicting visible bytes")
+            return len(accepted)
+        if item.sequence <= visible_max:
+            raise ArchiveConflictError("event sequence is not monotonically increasing")
+
+        with path.open("ab") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_dir(path.parent)
+
+        updated = accepted + content
+        facts["sha256"] = sha256(updated).hexdigest()
+        facts["byteSize"] = len(updated)
+        facts["eventCount"] = int(facts.get("eventCount", 0)) + 1
+        facts.setdefault("sequences", []).append(item.sequence)
+        facts.setdefault("eventIds", []).append(item.event_id)
+        if facts.get("sequenceStart") is None:
+            facts["sequenceStart"] = item.sequence
+        facts["sequenceEnd"] = item.sequence
+        facts["highWatermark"] = item.sequence
+        context["highWatermark"] = max(context.get("highWatermark", -1), item.sequence)
+        return len(updated)
 
     def write_current(self, state: CurrentState | Mapping[str, Any]) -> Path:
         epoch = self._require_epoch()
@@ -404,34 +497,56 @@ class ControlLoopArchive:
         self._require_epoch()
         materialized = 0
         conflicts = 0
+        verified_files: dict[Path, dict[str, Any]] = {}
         if ledger is not None:
             try:
                 for event_path in self.events_root.rglob("*.jsonl"):
                     if event_path.is_symlink() or not event_path.is_file():
                         raise ArchiveValidationError("event archive contains a special path")
-                    self._assert_confirmed_event_file(event_path, ledger)
+                    verified_files[event_path] = self._assert_confirmed_event_file(
+                        event_path, ledger
+                    )
             except (ArchiveConflictError, ArchiveValidationError):
                 conflicts += 1
                 ledger.set_planning_blocked(True, reason="visible event conflict")
-            for row in ledger.outbox(limit=limit):
+            else:
+                verification_context = {
+                    "files": verified_files,
+                    "highWatermark": max(
+                        (
+                            facts["highWatermark"]
+                            if facts.get("highWatermark") is not None
+                            else -1
+                            for facts in verified_files.values()
+                        ),
+                        default=-1,
+                    ),
+                }
+                self._verified_append_context = verification_context
                 try:
-                    self._assert_confirmed_event_prefix(row["event"], ledger)
-                    self.append_event(row["event"])
-                except ArchiveConflictError:
-                    conflicts += 1
-                    ledger.set_planning_blocked(True, reason="visible event conflict")
-                    break
-                except OSError:
-                    # A filesystem error is lag, not an epoch/identity
-                    # conflict.  The daemon's asynchronous writer retries it
-                    # on its next wakeup.
-                    break
-                except ArchiveValidationError:
-                    conflicts += 1
-                    ledger.set_planning_blocked(True, reason="visible event path conflict")
-                    break
-                ledger.mark_materialized(row["sequence"], event_id=row["event_id"])
-                materialized += 1
+                    for row in ledger.outbox(limit=limit):
+                        try:
+                            self._assert_confirmed_event_prefix(
+                                row["event"], ledger, verified_files=verified_files
+                            )
+                            self.append_event(row["event"])
+                        except ArchiveConflictError:
+                            conflicts += 1
+                            ledger.set_planning_blocked(True, reason="visible event conflict")
+                            break
+                        except OSError:
+                            # A filesystem error is lag, not an epoch/identity
+                            # conflict.  The daemon's asynchronous writer retries it
+                            # on its next wakeup.
+                            break
+                        except ArchiveValidationError:
+                            conflicts += 1
+                            ledger.set_planning_blocked(True, reason="visible event path conflict")
+                            break
+                        ledger.mark_materialized(row["sequence"], event_id=row["event_id"])
+                        materialized += 1
+                finally:
+                    self._verified_append_context = None
         if current is not None:
             try:
                 self.write_current(current)
@@ -464,30 +579,109 @@ class ControlLoopArchive:
         }
 
     def _assert_confirmed_event_prefix(
-        self, event: Mapping[str, Any], ledger: ControlLoopLedger
-    ) -> None:
+        self,
+        event: Mapping[str, Any],
+        ledger: ControlLoopLedger,
+        *,
+        verified_files: dict[Path, dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         """Reject a visible complete prefix that is not ledger-confirmed."""
 
         occurred_at = event.get("occurredAt")
         if not isinstance(occurred_at, str):
             raise ArchiveValidationError("event occurredAt is invalid")
         path = self._event_path(occurred_at)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ArchiveValidationError("event path must be a regular file")
         if not path.exists():
-            return
-        self._assert_confirmed_event_file(path, ledger)
+            if verified_files is not None and path in verified_files:
+                verified_files.pop(path, None)
+                raise ArchiveConflictError("verified event file disappeared")
+            return None
+        if verified_files is not None and path in verified_files:
+            facts = verified_files[path]
+            accepted = _accepted_prefix(path.read_bytes())
+            if (
+                len(accepted) == facts.get("byteSize")
+                and sha256(accepted).hexdigest() == facts.get("sha256")
+            ):
+                return facts
+            verified_files.pop(path, None)
+        facts = self._assert_confirmed_event_file(path, ledger)
+        if verified_files is not None:
+            verified_files[path] = facts
+        return facts
 
-    def _assert_confirmed_event_file(self, path: Path, ledger: ControlLoopLedger) -> None:
+    def _assert_confirmed_event_file(
+        self, path: Path, ledger: ControlLoopLedger
+    ) -> dict[str, Any]:
+        """Verify one accepted event-file prefix against ledger bytes.
+
+        The returned facts are intentionally in-memory only.  They identify
+        the verified file and its sequence range so a later incremental plan
+        can reconstruct a snapshot without introducing a second persistent
+        source of truth.
+        """
+
+        epoch = self._require_epoch()
         data = path.read_bytes()
-        accepted = data if data.endswith(b"\n") else data[: data.rfind(b"\n") + 1]
+        accepted = _accepted_prefix(data)
+        records: list[tuple[bytes, Event]] = []
+        seen_sequences: set[int] = set()
+        seen_event_ids: set[str] = set()
+        previous_sequence: int | None = None
         for line in accepted.splitlines():
             try:
                 payload = json.loads(line)
-                sequence = int(payload["sequence"])
-            except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+                event = Event.model_validate(payload)
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
                 raise ArchiveConflictError("event file has malformed accepted prefix") from exc
-            confirmed = ledger.event_at(sequence)
-            if confirmed is None or _json_bytes(confirmed.model_dump(by_alias=True, mode="json")).rstrip(b"\n") != line:
+            if event.epoch_id != epoch.epoch_id:
+                raise ArchiveConflictError("event file contains a conflicting epoch")
+            if event.sequence in seen_sequences:
+                raise ArchiveConflictError("event file contains a duplicate sequence")
+            if previous_sequence is not None and event.sequence < previous_sequence:
+                raise ArchiveConflictError("event file contains an out-of-order sequence")
+            if event.event_id in seen_event_ids:
+                raise ArchiveConflictError("event file contains a duplicate event ID")
+            seen_sequences.add(event.sequence)
+            seen_event_ids.add(event.event_id)
+            previous_sequence = event.sequence
+            records.append((line, event))
+
+        sequences = [event.sequence for _, event in records]
+        try:
+            confirmed_events = ledger.events_at(sequences)
+        except LedgerConflictError as exc:
+            raise ArchiveConflictError(
+                f"event file ledger verification failed: {exc}"
+            ) from exc
+        for line, event in records:
+            confirmed = confirmed_events[event.sequence]
+            if (
+                _json_bytes(confirmed.model_dump(by_alias=True, mode="json")).rstrip(b"\n")
+                != line
+            ):
                 raise ArchiveConflictError("event file contains an unconfirmed accepted prefix")
+
+        try:
+            relative_path = path.relative_to(self.events_root).as_posix()
+        except ValueError:
+            relative_path = path.as_posix()
+        digest = sha256(accepted).hexdigest()
+        first_sequence = sequences[0] if sequences else None
+        last_sequence = sequences[-1] if sequences else None
+        return {
+            "path": relative_path,
+            "sha256": digest,
+            "byteSize": len(accepted),
+            "eventCount": len(records),
+            "sequences": sequences,
+            "eventIds": [event.event_id for _, event in records],
+            "sequenceStart": first_sequence,
+            "sequenceEnd": last_sequence,
+            "highWatermark": last_sequence,
+        }
 
 
 ArchiveWriter = ControlLoopArchive

@@ -150,6 +150,29 @@ def test_reconcile_stops_at_temporary_outbox_gap(tmp_path: Path, monkeypatch) ->
     assert [json.loads(line)["sequence"] for line in path.read_bytes().splitlines()] == [0, 1]
 
 
+def test_reconcile_does_not_drain_outbox_after_archive_validation_failure(
+    tmp_path: Path,
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    malformed = archive.events_root / "2026" / "07" / "23.jsonl"
+    malformed.parent.mkdir(parents=True)
+    malformed.write_bytes(b'{"sequence":"not-an-event"}\n')
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+
+    result = archive.reconcile(ledger)
+
+    assert result["materialized"] == 0
+    assert result["conflicts"] == 1
+    assert [row["sequence"] for row in ledger.outbox()] == [0]
+    assert not (archive.events_root / "2026" / "07" / "24.jsonl").exists()
+    assert ledger.planning_blocked
+
+
 def test_reconcile_blocks_planning_when_hidden_planner_stage_survives(
     tmp_path: Path,
 ) -> None:
@@ -169,3 +192,156 @@ def test_reconcile_blocks_planning_when_hidden_planner_stage_survives(
     assert result["hiddenStages"] == [stage.name]
     assert ledger.planning_blocked
     assert stage.exists()
+
+
+def test_confirmed_event_file_uses_one_bulk_lookup_and_returns_verified_facts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        event = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+    path = archive.events_root / "2026" / "07" / "24.jsonl"
+    path.parent.mkdir(parents=True)
+    line = json.dumps(
+        event.model_dump(by_alias=True, mode="json"),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    path.write_bytes(line + b"\n")
+
+    original_connect = ledger._connect
+    connection_count = 0
+
+    def counted_connect():
+        nonlocal connection_count
+        connection_count += 1
+        return original_connect()
+
+    monkeypatch.setattr(ledger, "_connect", counted_connect)
+    facts = archive._assert_confirmed_event_file(path, ledger)
+
+    assert connection_count == 1
+    assert facts["path"] == "2026/07/24.jsonl"
+    assert facts["sha256"]
+    assert facts["eventCount"] == 1
+    assert facts["sequenceStart"] == 0
+    assert facts["sequenceEnd"] == 0
+    assert facts["highWatermark"] == 0
+
+
+def test_reconcile_reuses_verified_file_for_outbox_prefixes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        events = [
+            ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
+            for ordinal in range(2)
+        ]
+    path = archive.events_root / "2026" / "07" / "24.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        b"".join(
+            json.dumps(
+                event.model_dump(by_alias=True, mode="json"),
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+            for event in events
+        )
+    )
+
+    original_verify = archive._assert_confirmed_event_file
+    verification_count = 0
+
+    def counted_verify(*args, **kwargs):
+        nonlocal verification_count
+        verification_count += 1
+        return original_verify(*args, **kwargs)
+
+    monkeypatch.setattr(archive, "_assert_confirmed_event_file", counted_verify)
+    result = archive.reconcile(ledger)
+
+    assert result["materialized"] == 2
+    assert verification_count == 1
+
+
+def test_reconcile_parses_an_accepted_file_once_for_pending_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+    import coquic_steward.control_loop.archive as archive_module
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        events = [
+            ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
+            for ordinal in range(5)
+        ]
+    archive.append_event(events[0])
+    archive.append_event(events[1])
+    ledger.mark_materialized(events[0].sequence, event_id=events[0].event_id)
+    ledger.mark_materialized(events[1].sequence, event_id=events[1].event_id)
+
+    original_loads = archive_module.json.loads
+    byte_line_parses = 0
+
+    def counted_loads(value, *args, **kwargs):
+        nonlocal byte_line_parses
+        if isinstance(value, bytes):
+            byte_line_parses += 1
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(archive_module.json, "loads", counted_loads)
+    result = archive.reconcile(ledger)
+
+    assert result["materialized"] == 3
+    assert result["conflicts"] == 0
+    assert byte_line_parses == 2
+
+
+def test_reconcile_invalidates_verified_file_when_accepted_bytes_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        events = [
+            ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
+            for ordinal in range(3)
+        ]
+
+    original_append = archive.append_event
+    path = archive.events_root / "2026" / "07" / "24.jsonl"
+
+    def append_and_tamper(event):
+        result = original_append(event)
+        if event["sequence"] == 0:
+            lines = path.read_bytes().splitlines()
+            payload = json.loads(lines[0])
+            payload["payload"]["tampered"] = True
+            lines[0] = json.dumps(
+                payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            path.write_bytes(b"\n".join(lines) + b"\n")
+        return result
+
+    monkeypatch.setattr(archive, "append_event", append_and_tamper)
+    result = archive.reconcile(ledger)
+
+    assert result["materialized"] == 1
+    assert result["conflicts"] == 1
+    assert [row["sequence"] for row in ledger.outbox()] == [1, 2]
+    assert json.loads(path.read_bytes().splitlines()[0])["payload"]["tampered"] is True

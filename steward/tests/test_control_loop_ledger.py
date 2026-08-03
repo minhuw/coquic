@@ -379,3 +379,50 @@ def test_retry_state_rolls_back_when_planner_completion_fails(tmp_path: Path) ->
 
     assert ledger.pending_retry("planner") is None
     assert ledger.list_planner_runs()[-1].state == "claimed"
+
+
+def test_events_at_requires_ordered_unique_sequences_and_preserves_compatibility(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    with ledger.transaction() as connection:
+        for ordinal in range(3):
+            ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
+
+    assert ledger.events_at([]) == {}
+    events = ledger.events_at([0, 1, 2])
+    assert list(events) == [0, 1, 2]
+    assert [event.sequence for event in events.values()] == [0, 1, 2]
+    assert ledger.event_at(1) == events[1]
+    assert ledger.event_at(99) is None
+
+    with pytest.raises(LedgerConflictError, match="missing"):
+        ledger.events_at([0, 3])
+    with pytest.raises(LedgerConflictError, match="duplicate"):
+        ledger.events_at([0, 1, 1])
+    with pytest.raises(LedgerConflictError, match="out of order"):
+        ledger.events_at([1, 0])
+
+
+def test_events_at_uses_one_connection_and_bounded_chunks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ledger = _ledger(tmp_path)
+    with ledger.transaction() as connection:
+        for ordinal in range(501):
+            ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
+
+    original_connect = ledger._connect
+    connection_count = 0
+
+    def counted_connect():
+        nonlocal connection_count
+        connection_count += 1
+        return original_connect()
+
+    monkeypatch.setattr(ledger, "_connect", counted_connect)
+    events = ledger.events_at(list(range(501)))
+
+    assert connection_count == 1
+    assert len(events) == 501
+    assert events[500].sequence == 500

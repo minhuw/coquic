@@ -46,6 +46,13 @@ class LedgerBlockedError(RuntimeError):
     """Planning is blocked by a shared epoch or visible archive conflict."""
 
 
+class _MissingEventError(LedgerConflictError):
+    """A requested event sequence is absent from the ledger."""
+
+
+_EVENT_LOOKUP_CHUNK_SIZE = 500
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
@@ -943,23 +950,85 @@ class ControlLoopLedger:
             ).fetchone()
         return str(row[0]) if row is not None else None
 
-    def event_at(self, sequence: int) -> Event | None:
+    def events_at(self, sequences: Iterable[int]) -> dict[int, Event]:
+        """Return ledger events for a strictly ordered sequence request.
+
+        SQLite parameters are bounded explicitly so a large archive file is
+        verified through one connection without relying on the connection's
+        variable limit.  The request is intentionally strict: duplicate or
+        out-of-order sequences are evidence that the caller's archive view is
+        ambiguous and must be rejected rather than normalized.
+        """
+
+        requested = list(sequences)
+        if not requested:
+            return {}
+        if any(
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 0
+            for sequence in requested
+        ):
+            raise LedgerConflictError("event sequences must be non-negative integers")
+        seen: set[int] = set()
+        duplicates: list[int] = []
+        for sequence in requested:
+            if sequence in seen:
+                duplicates.append(sequence)
+            else:
+                seen.add(sequence)
+        if duplicates:
+            duplicate = duplicates[0]
+            raise LedgerConflictError(f"duplicate event sequence request: {duplicate}")
+        if any(left >= right for left, right in zip(requested, requested[1:])):
+            raise LedgerConflictError("event sequence request is out of order")
+
+        events: dict[int, Event] = {}
+        event_ids: dict[str, int] = {}
         with self._connect() as db:
-            row = db.execute(
-                "SELECT event_id,epoch_id,sequence,occurred_at,kind,payload_json "
-                "FROM control_loop_events WHERE sequence=?",
-                (sequence,),
-            ).fetchone()
-        if row is None:
+            for offset in range(0, len(requested), _EVENT_LOOKUP_CHUNK_SIZE):
+                chunk = requested[offset : offset + _EVENT_LOOKUP_CHUNK_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = db.execute(
+                    "SELECT event_id,epoch_id,sequence,occurred_at,kind,payload_json "
+                    f"FROM control_loop_events WHERE sequence IN ({placeholders}) ORDER BY sequence",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    sequence = int(row["sequence"])
+                    if sequence in events:
+                        raise LedgerConflictError(
+                            f"ambiguous ledger rows for event sequence {sequence}"
+                        )
+                    event_id = str(row["event_id"])
+                    prior_sequence = event_ids.get(event_id)
+                    if prior_sequence is not None and prior_sequence != sequence:
+                        raise LedgerConflictError(
+                            f"ambiguous ledger event identity {event_id}"
+                        )
+                    events[sequence] = Event(
+                        eventId=event_id,
+                        epochId=row["epoch_id"],
+                        sequence=sequence,
+                        occurredAt=row["occurred_at"],
+                        kind=row["kind"],
+                        payload=_loads(row["payload_json"], {}),
+                    )
+                    event_ids[event_id] = sequence
+
+        missing = [sequence for sequence in requested if sequence not in events]
+        if missing:
+            values = ", ".join(str(sequence) for sequence in missing)
+            raise _MissingEventError(f"missing ledger event sequence(s): {values}")
+        return events
+
+    def event_at(self, sequence: int) -> Event | None:
+        """Return one event while preserving the historical missing-row API."""
+
+        try:
+            return self.events_at([sequence])[sequence]
+        except LedgerConflictError:
             return None
-        return Event(
-            eventId=row[0],
-            epochId=row[1],
-            sequence=row[2],
-            occurredAt=row[3],
-            kind=row[4],
-            payload=_loads(row[5], {}),
-        )
 
 
 def _signal_fetch(value: SignalFetch | SignalFetchRun) -> SignalFetch:

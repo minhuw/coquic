@@ -183,7 +183,29 @@ reconciliation retries only an interrupted operation whose journal proves exact
 ownership. A pre-existing repository is never deleted. An interrupted clone
 temporary path is removed only when the journal names that exact path; unknown
 or mismatched state remains for operator inspection. An interrupted selector
-move compares immutable records before choosing `current` or `previous`.
+move uses a selector-pair journal written after health verification and before
+the first selector write. It records the operation, the verified `fromRelease`
+and `toRelease`, the pending selector, and the complete before/after pair. The
+pair is written in this order:
+
+```text
+operation.journal: selector pending, selectorPending=previous
+write previous
+operation.journal: selector pending, selectorPending=current
+write current
+operation.journal: complete success
+```
+
+The next locked management command validates both immutable release records,
+the selector values, and the running daemon identity before changing anything.
+If the daemon is verified on `toRelease`, recovery finishes
+`previous=fromRelease` and `current=toRelease`; if it is verified on
+`fromRelease`, recovery restores the recorded before pair (including restoring
+an absent `previous` selector). Any unknown release, malformed or tampered
+journal, foreign selector, missing record, or running release outside the
+recorded pair refuses the operation. Repeating recovery after either exact
+pair is complete only revalidates it and marks the journal complete; it never
+guesses a release or performs Docker cleanup.
 
 ## Pressure and cleanup
 

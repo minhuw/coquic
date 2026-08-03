@@ -120,6 +120,123 @@ check_credential_refusals() {
   export STEWARD_UID="$original_uid"
 }
 
+set_fake_pair() {
+  local daemon_digit="$1" task_digit="$2" daemon_hex task_hex
+  daemon_hex="$(printf '%*s' 64 '' | tr ' ' "$daemon_digit")"
+  task_hex="$(printf '%*s' 64 '' | tr ' ' "$task_digit")"
+  export STEWARD_FAKE_DAEMON_ID="sha256:$daemon_hex"
+  export STEWARD_FAKE_TASK_ID="sha256:$task_hex"
+}
+
+release_for_fake_pair() {
+  printf '%s\n' "$STEWARD_FAKE_DAEMON_ID:$STEWARD_FAKE_TASK_ID:$STEWARD_FAKE_VALIDATION_ID" | sha256sum | cut -c1-24
+}
+
+expect_manage_refusal() {
+  local output
+  if output="$($manage "$@" 2>&1)"; then
+    printf 'expected management refusal for %s\n' "$*" >&2
+    return 1
+  fi
+  [[ "$output" == *'operation refused'* ]]
+}
+
+interrupt_upgrade_and_recover() {
+  local point="$1" candidate
+  set_fake_pair e f
+  candidate="$(release_for_fake_pair)"
+  export STEWARD_FAKE_SELECTOR_INTERRUPT="$point"
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  [[ -f "$home/private/deployment/operation.journal" ]]
+  "$manage" start >/dev/null
+  "$manage" start >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$candidate" ]]
+  [[ "$(cat "$home/private/deployment/previous")" == "$old" ]]
+  "$manage" rollback >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
+}
+
+interrupt_upgrade_and_restore_before() {
+  local candidate
+  set_fake_pair e f
+  candidate="$(release_for_fake_pair)"
+  export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  printf '%s\n' "$old" >"$home/private/deployment/service.release"
+  "$manage" start >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
+  [[ "$(cat "$home/private/deployment/service.release")" == "$old" ]]
+  [[ "$(cat "$home/private/deployment/current")" != "$candidate" ]]
+}
+
+interrupt_rollback_and_recover() {
+  local point="$1" candidate
+  set_fake_pair e f
+  candidate="$(release_for_fake_pair)"
+  "$manage" upgrade >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$candidate" ]]
+  export STEWARD_FAKE_SELECTOR_INTERRUPT="$point"
+  ! "$manage" rollback >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  "$manage" start >/dev/null
+  "$manage" start >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
+  [[ "$(cat "$home/private/deployment/previous")" == "$candidate" ]]
+  "$manage" upgrade >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$candidate" ]]
+}
+
+selector_recovery_negative_fixtures() {
+  local candidate journal_backup record_backup selector_backup service_backup
+  set_fake_pair e f
+  candidate="$(release_for_fake_pair)"
+  export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+
+  journal_backup="$tmp/selector.journal.valid"
+  cp "$home/private/deployment/operation.journal" "$journal_backup"
+  printf '{malformed\n' >"$home/private/deployment/operation.journal"
+  expect_manage_refusal start
+  cp "$journal_backup" "$home/private/deployment/operation.journal"
+  "$manage" start >/dev/null
+  "$manage" rollback >/dev/null
+
+  export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  record_backup="$tmp/$candidate.json.valid"
+  mv "$home/private/deployment/releases/$candidate.json" "$record_backup"
+  expect_manage_refusal start
+  mv "$record_backup" "$home/private/deployment/releases/$candidate.json"
+  "$manage" start >/dev/null
+  "$manage" rollback >/dev/null
+
+  export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  selector_backup="$tmp/current.valid"
+  cp "$home/private/deployment/current" "$selector_backup"
+  printf 'unknown-selector\n' >"$home/private/deployment/current"
+  expect_manage_refusal start
+  cp "$selector_backup" "$home/private/deployment/current"
+  "$manage" start >/dev/null
+  "$manage" rollback >/dev/null
+
+  export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  service_backup="$tmp/service.release.valid"
+  cp "$home/private/deployment/service.release" "$service_backup"
+  printf 'foreign-running-release\n' >"$home/private/deployment/service.release"
+  expect_manage_refusal start
+  cp "$service_backup" "$home/private/deployment/service.release"
+  "$manage" start >/dev/null
+  "$manage" rollback >/dev/null
+}
+
 case "$mode" in
   --config)
     "$manage" --config
@@ -223,6 +340,14 @@ PY
     unset STEWARD_FAKE_BUSY
     "$manage" rollback
     [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
+    interrupt_upgrade_and_restore_before
+    for point in after-journal after-previous after-current; do
+      interrupt_upgrade_and_recover "$point"
+    done
+    for point in after-journal after-previous after-current; do
+      interrupt_rollback_and_recover "$point"
+    done
+    selector_recovery_negative_fixtures
     ;;
 esac
 printf 'management smoke test passed (%s; fake credentials, remote, and Docker state only)\n' "$mode"

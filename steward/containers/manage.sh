@@ -92,7 +92,7 @@ compose_argv() {
 
 release_field() {
   local release="$1" field="$2" record="$deployment/releases/$release.json"
-  [[ -f "$record" ]] || die 'selected release record is unavailable'
+  [[ -f "$record" && ! -L "$record" ]] || die 'selected release record is unavailable'
   python - "$record" "$field" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))[sys.argv[2]]
@@ -128,6 +128,28 @@ compose_run() {
   "${args[@]}"
 }
 
+read_release_file() {
+  local path="$1" label="$2"
+  [[ -f "$path" && ! -L "$path" ]] || die "$label is unavailable"
+  python - "$path" <<'PY' || die "${2:-release selector} is malformed"
+import re, sys
+from pathlib import Path
+
+value = Path(sys.argv[1]).read_bytes()
+if not value.endswith(b"\n") or value.count(b"\n") != 1:
+    raise SystemExit(1)
+release = value[:-1].decode("ascii")
+if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}", release) is None:
+    raise SystemExit(1)
+print(release)
+PY
+}
+
+selector_value() {
+  local name="$1"
+  read_release_file "$deployment/$name" "$name selector"
+}
+
 journal() {
   local phase="$1" outcome="${2:-pending}" candidate="${3:-}" clone_temp="${4:-}"
   mkdir -p -m 700 "$deployment"
@@ -146,10 +168,195 @@ journal() {
   mv -f "$deployment/operation.journal.tmp" "$deployment/operation.journal"
 }
 
+selector_journal() {
+  local operation="$1" from_release="$2" to_release="$3" selector_pending="$4"
+  local before_current="$5" before_previous="$6" after_current="$7" after_previous="$8"
+  release_token "$from_release" && release_token "$to_release" || die 'selector journal release identity is invalid'
+  [[ "$from_release" != "$to_release" ]] || die 'selector journal identities must differ'
+  [[ "$operation" == upgrade || "$operation" == rollback ]] || die 'selector journal operation is invalid'
+  [[ "$selector_pending" == previous || "$selector_pending" == current ]] || die 'selector journal pending selector is invalid'
+  [[ "$before_current" == "$from_release" && "$after_current" == "$to_release" ]] || die 'selector journal pair is inconsistent'
+  [[ "$after_previous" == "$from_release" ]] || die 'selector journal previous identity is inconsistent'
+  local before_previous_json='null'
+  if [[ "$before_previous" != __NONE__ ]]; then
+    release_token "$before_previous" || die 'selector journal before identity is invalid'
+    before_previous_json="\"$before_previous\""
+  fi
+  mkdir -p -m 700 "$deployment"
+  printf '{"phase":"selector","outcome":"pending","operation":"%s","fromRelease":"%s","toRelease":"%s","selectorPending":"%s","beforeCurrent":"%s","beforePrevious":%s,"afterCurrent":"%s","afterPrevious":"%s"}\n' \
+    "$operation" "$from_release" "$to_release" "$selector_pending" "$before_current" "$before_previous_json" "$after_current" "$after_previous" >"$deployment/operation.journal.tmp"
+  chmod 600 "$deployment/operation.journal.tmp"
+  mv -f "$deployment/operation.journal.tmp" "$deployment/operation.journal"
+}
+
+selector_interrupt() {
+  local operation="$1" point="$2" requested="${STEWARD_FAKE_SELECTOR_INTERRUPT:-${STEWARD_FAKE_INTERRUPT_AFTER:-${STEWARD_FAKE_INTERRUPT:-}}}"
+  case "$operation" in
+    upgrade) requested="${STEWARD_FAKE_UPGRADE_INTERRUPT:-$requested}" ;;
+    rollback) requested="${STEWARD_FAKE_ROLLBACK_INTERRUPT:-$requested}" ;;
+  esac
+  case "$requested" in
+    "$point"|"${point#after-}"|"$operation-$point"|"$operation:${point#after-}"|"$operation/$point")
+      die "fake selector interruption after ${point#after-}"
+      ;;
+  esac
+}
+
+validate_selector_state() {
+  local current previous
+  if [[ ! -e "$deployment/current" ]]; then
+    [[ ! -e "$deployment/previous" ]] || die 'previous selector exists without current selector'
+    return 0
+  fi
+  current="$(selector_value current)"
+  select_release "$current"
+  if [[ -e "$deployment/previous" ]]; then
+    previous="$(selector_value previous)"
+    select_release "$previous"
+  fi
+}
+
+running_release_identity() {
+  local health
+  if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
+    [[ -f "$deployment/service.running" && ! -L "$deployment/service.running" ]] || return 1
+    [[ -f "$deployment/service.release" && ! -L "$deployment/service.release" ]] || return 1
+    local release="$(<"$deployment/service.release")"
+    release_token "$release" || return 1
+    printf '%s\n' "$release"
+    return 0
+  fi
+  health="$(compose_run exec -T --workdir "$repository" steward /usr/bin/env coquic-steward health 2>/dev/null)" || return 1
+  python -c '
+import json, sys
+value = json.loads(sys.stdin.read())
+release = value.get("release")
+if value.get("lifecycle") != "running" or value.get("heartbeat") != "ok" or value.get("runtimeProtocol") != "task-container-v1":
+    raise SystemExit(1)
+if not isinstance(release, str) or "\n" in release:
+    raise SystemExit(1)
+print(release)
+' <<<"$health"
+}
+
+selector_journal_fields() {
+  python - "$deployment/operation.journal" <<'PY'
+import json, re, sys
+
+release_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}\Z")
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if not isinstance(value, dict):
+    raise SystemExit(1)
+if value.get("phase") not in {"selector", "selector-pair"} or value.get("outcome") != "pending":
+    print("none")
+    raise SystemExit(0)
+required = ("operation", "fromRelease", "toRelease", "selectorPending", "beforeCurrent", "beforePrevious", "afterCurrent", "afterPrevious")
+if any(key not in value for key in required):
+    raise SystemExit(1)
+operation = value["operation"]
+pending = value["selectorPending"]
+if operation not in {"upgrade", "rollback"} or pending not in {"previous", "current"}:
+    raise SystemExit(1)
+for key in ("fromRelease", "toRelease", "beforeCurrent", "afterCurrent", "afterPrevious"):
+    if not isinstance(value[key], str) or release_re.fullmatch(value[key]) is None:
+        raise SystemExit(1)
+before_previous = value["beforePrevious"]
+if before_previous is not None and (not isinstance(before_previous, str) or release_re.fullmatch(before_previous) is None):
+    raise SystemExit(1)
+if value["beforeCurrent"] != value["fromRelease"] or value["afterCurrent"] != value["toRelease"] or value["afterPrevious"] != value["fromRelease"]:
+    raise SystemExit(1)
+print("\t".join((operation, value["fromRelease"], value["toRelease"], pending, value["beforeCurrent"], before_previous or "__NONE__", value["afterCurrent"], value["afterPrevious"])))
+PY
+}
+
+remove_selector() {
+  local name="$1" path="$deployment/$1"
+  [[ ! -e "$path" ]] && return 0
+  [[ -f "$path" && ! -L "$path" ]] || die "$name selector is not removable"
+  rm -f -- "$path"
+}
+
+recover_selector_commit() {
+  local journal_path="$deployment/operation.journal"
+  [[ ! -e "$journal_path" ]] && return 0
+  [[ -f "$journal_path" && ! -L "$journal_path" ]] || die 'deployment operation journal is not a regular file'
+  local fields
+  fields="$(selector_journal_fields)" || die 'selector recovery journal is malformed'
+  [[ "$fields" == none ]] && return 0
+  local operation from_release to_release selector_pending before_current before_previous after_current after_previous
+  IFS=$'\t' read -r operation from_release to_release selector_pending before_current before_previous after_current after_previous <<<"$fields"
+  if [[ "$operation" == rollback && "$before_previous" != "$to_release" ]]; then
+    die 'selector recovery before pair is inconsistent'
+  fi
+  [[ -f "$deployment/current" ]] || die 'selector recovery current selector is unavailable'
+  local current previous='__NONE__'
+  current="$(selector_value current)"
+  if [[ -e "$deployment/previous" ]]; then
+    previous="$(selector_value previous)"
+  fi
+  select_release "$from_release"
+  select_release "$to_release"
+  if [[ "$before_previous" != __NONE__ ]]; then
+    select_release "$before_previous"
+  fi
+  [[ "$current" == "$before_current" || "$current" == "$after_current" ]] || die 'selector recovery current identity is ambiguous'
+  [[ "$previous" == "$before_previous" || "$previous" == "$after_previous" ]] || die 'selector recovery previous identity is ambiguous'
+  local before_match=0 partial_match=0 after_match=0
+  [[ "$current" == "$before_current" && "$previous" == "$before_previous" ]] && before_match=1
+  [[ "$current" == "$before_current" && "$previous" == "$after_previous" ]] && partial_match=1
+  [[ "$current" == "$after_current" && "$previous" == "$after_previous" ]] && after_match=1
+  (( before_match || partial_match || after_match )) || die 'selector recovery pair is ambiguous'
+  if [[ "$selector_pending" == previous && $after_match -eq 0 && $before_match -eq 0 && $partial_match -eq 0 ]]; then
+    die 'selector recovery pending selector is inconsistent'
+  fi
+  if [[ "$selector_pending" == current && $before_match -eq 1 ]]; then
+    die 'selector recovery pending selector is inconsistent'
+  fi
+  local running
+  select_release "$current"
+  if ! running="$(running_release_identity)"; then
+    die 'selector recovery running release is unverified'
+  fi
+  local target_current target_previous
+  if [[ "$running" == "$to_release" ]]; then
+    target_current="$after_current"
+    target_previous="$after_previous"
+  elif [[ "$running" == "$from_release" ]]; then
+    target_current="$before_current"
+    target_previous="$before_previous"
+  else
+    die 'selector recovery running release is outside the recorded pair'
+  fi
+  selector_journal "$operation" "$from_release" "$to_release" previous "$before_current" "$before_previous" "$after_current" "$after_previous"
+  if [[ "$target_previous" == __NONE__ ]]; then
+    remove_selector previous
+  elif [[ "$previous" != "$target_previous" ]]; then
+    write_selector previous "$target_previous"
+  fi
+  selector_journal "$operation" "$from_release" "$to_release" current "$before_current" "$before_previous" "$after_current" "$after_previous"
+  if [[ "$current" != "$target_current" ]]; then
+    write_selector current "$target_current"
+  fi
+  current="$(selector_value current)"
+  previous='__NONE__'
+  if [[ -e "$deployment/previous" ]]; then
+    previous="$(selector_value previous)"
+  fi
+  [[ "$current" == "$target_current" && "$previous" == "$target_previous" ]] || die 'selector recovery did not persist an exact pair'
+  select_release "$target_current"
+  if ! running="$(running_release_identity)" || [[ "$running" != "$target_current" ]]; then
+    die 'selector recovery running release changed during commit'
+  fi
+  journal complete success
+  record_outcome "$operation" recovered
+}
+
 with_lock() {
   mkdir -p -m 700 "$deployment"
   exec {lock_fd}>"$deployment/operation.lock"
   flock -n "$lock_fd" || die 'another deployment operation is active'
+  validate_selector_state
+  recover_selector_commit
 }
 
 record_outcome() {
@@ -164,6 +371,18 @@ write_selector() {
   printf '%s\n' "$release" >"$deployment/$name.tmp"
   chmod 600 "$deployment/$name.tmp"
   mv -f "$deployment/$name.tmp" "$deployment/$name"
+}
+
+commit_selector_pair() {
+  local operation="$1" from_release="$2" to_release="$3" before_previous="$4"
+  selector_journal "$operation" "$from_release" "$to_release" previous "$from_release" "$before_previous" "$to_release" "$from_release"
+  selector_interrupt "$operation" after-journal
+  write_selector previous "$from_release"
+  selector_journal "$operation" "$from_release" "$to_release" current "$from_release" "$before_previous" "$to_release" "$from_release"
+  selector_interrupt "$operation" after-previous
+  write_selector current "$to_release"
+  selector_interrupt "$operation" after-current
+  journal complete success
 }
 
 release_id_from_values() {
@@ -392,8 +611,11 @@ upgrade_service() {
   if (( force == 0 )); then
     require_quiescence upgrade
   fi
-  local old candidate
-  old="$(tr -d '\n' <"$deployment/current")"
+  local old candidate before_previous='__NONE__'
+  old="$(selector_value current)"
+  if [[ -e "$deployment/previous" ]]; then
+    before_previous="$(selector_value previous)"
+  fi
   candidate="$(build_release)"
   if (( force == 1 )); then
     journal forced-stop
@@ -411,19 +633,21 @@ upgrade_service() {
     die 'candidate release failed health verification; previous release restored'
   fi
   if [[ "$candidate" != "$old" ]]; then
-    write_selector previous "$old"
+    commit_selector_pair upgrade "$old" "$candidate" "$before_previous"
+  else
+    journal complete success
   fi
-  write_selector current "$candidate"
-  journal complete success; record_outcome upgrade success
+  record_outcome upgrade success
 }
 
 rollback_service() {
   require_paths; require_numeric_config; validate_socket; with_lock
   [[ -f "$deployment/previous" ]] || die 'no previous verified release is recorded'
-  local previous current
-  previous="$(tr -d '\n' <"$deployment/previous")"
-  current="$(tr -d '\n' <"$deployment/current")"
-  [[ -f "$deployment/releases/$previous.json" ]] || die 'previous release record is unavailable'
+  local previous current before_previous
+  previous="$(selector_value previous)"
+  current="$(selector_value current)"
+  before_previous="$previous"
+  select_release "$previous"
   require_quiescence rollback
   journal rollback
   if ! recreate_release "$previous" || ! verify_release_health "$previous"; then
@@ -431,9 +655,8 @@ rollback_service() {
     record_outcome rollback failure
     die 'rollback release failed health verification; current release restored'
   fi
-  write_selector previous "$current"
-  write_selector current "$previous"
-  journal complete success; record_outcome rollback success
+  commit_selector_pair rollback "$current" "$previous" "$before_previous"
+  record_outcome rollback success
 }
 
 usage() { printf 'usage: %s {config|bootstrap|build|start|stop|status|logs|upgrade [--force]|rollback}\n' "$0"; }

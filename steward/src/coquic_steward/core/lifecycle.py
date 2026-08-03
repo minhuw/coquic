@@ -107,6 +107,7 @@ class ResourcePressureController:
 
 _DOCKER_CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 _DOCKER_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}$")
 
 
 class DockerResourceManager:
@@ -385,20 +386,34 @@ class DockerResourceManager:
         selected_releases: dict[str, str] = {}
         for selector in ("current", "previous"):
             selector_path = deployment_dir / selector
+            if selector_path.is_symlink():
+                raise ValueError("deployment selector must not be a symlink")
+            if selector_path.exists() and not selector_path.is_file():
+                raise ValueError("deployment selector must be a regular file")
             if selector_path.is_file():
-                selected_releases[selector] = selector_path.read_text(
-                    encoding="utf-8"
-                ).strip()
+                raw_selector = selector_path.read_bytes()
+                if not raw_selector.endswith(b"\n") or raw_selector.count(b"\n") != 1:
+                    raise ValueError("deployment selector is malformed")
+                try:
+                    selected = raw_selector[:-1].decode("ascii")
+                except UnicodeDecodeError as error:
+                    raise ValueError("deployment selector is not ASCII") from error
+                if _RELEASE_ID.fullmatch(selected) is None:
+                    raise ValueError("deployment selector is malformed")
+                selected_releases[selector] = selected
         release_images: dict[str, tuple[str, ...]] = {}
         release_dir = deployment_dir / "releases"
         for record_path in sorted(release_dir.glob("*.json")):
+            if record_path.is_symlink() or not record_path.is_file():
+                raise ValueError("deployment release record must be a regular file")
             value = json.loads(record_path.read_text(encoding="utf-8"))
             release_id = str(value.get("releaseId", ""))
             daemon_id = value.get("daemonImageId")
             task_id = value.get("taskImageId")
             validation_id = value.get("validationImageId")
             if (
-                record_path.name != f"{release_id}.json"
+                _RELEASE_ID.fullmatch(release_id) is None
+                or record_path.name != f"{release_id}.json"
                 or value.get("runtimeProtocol") != "task-container-v1"
                 or _DOCKER_IMAGE_ID.fullmatch(str(daemon_id)) is None
                 or _DOCKER_IMAGE_ID.fullmatch(str(task_id)) is None
@@ -420,22 +435,96 @@ class DockerResourceManager:
             )
         if any(value not in release_images for value in selected_releases.values()):
             raise ValueError("deployment selector has no verified release record")
-        in_flight: frozenset[str] = frozenset()
+        in_flight: set[str] = set()
         journal_path = deployment_dir / "operation.journal"
+        if journal_path.is_symlink():
+            raise ValueError("deployment operation journal must not be a symlink")
+        if journal_path.exists() and not journal_path.is_file():
+            raise ValueError("deployment operation journal must be a regular file")
         if journal_path.is_file():
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
             if not isinstance(journal, dict):
                 raise ValueError("deployment operation journal is malformed")
-            if (
-                journal.get("outcome") == "pending"
-                and journal.get("phase") in {"build", "recreate"}
-            ):
+            if journal.get("outcome") == "pending" and journal.get("phase") in {
+                "build",
+                "recreate",
+            }:
                 candidate = journal.get("candidateRelease")
                 if candidate is not None and not isinstance(candidate, str):
                     raise ValueError("deployment candidate release is malformed")
                 if candidate in release_images:
-                    in_flight = frozenset({candidate})
-        return release_images, in_flight
+                    in_flight.add(candidate)
+            elif journal.get("outcome") == "pending" and journal.get("phase") in {
+                "selector",
+                "selector-pair",
+            }:
+                required = (
+                    "operation",
+                    "fromRelease",
+                    "toRelease",
+                    "selectorPending",
+                    "beforeCurrent",
+                    "beforePrevious",
+                    "afterCurrent",
+                    "afterPrevious",
+                )
+                if any(key not in journal for key in required):
+                    raise ValueError("deployment selector journal is malformed")
+                operation = journal["operation"]
+                from_release = journal["fromRelease"]
+                to_release = journal["toRelease"]
+                selector_pending = journal["selectorPending"]
+                before_current = journal["beforeCurrent"]
+                before_previous = journal["beforePrevious"]
+                after_current = journal["afterCurrent"]
+                after_previous = journal["afterPrevious"]
+                if operation not in {"upgrade", "rollback"}:
+                    raise ValueError("deployment selector journal operation is invalid")
+                if selector_pending not in {"previous", "current"}:
+                    raise ValueError("deployment selector journal pending selector is invalid")
+                if from_release == to_release:
+                    raise ValueError("deployment selector journal identities must differ")
+                for identity in (
+                    from_release,
+                    to_release,
+                    before_current,
+                    after_current,
+                    after_previous,
+                ):
+                    if not isinstance(identity, str) or _RELEASE_ID.fullmatch(identity) is None:
+                        raise ValueError("deployment selector journal identity is invalid")
+                if before_previous is not None and (
+                    not isinstance(before_previous, str)
+                    or _RELEASE_ID.fullmatch(before_previous) is None
+                ):
+                    raise ValueError("deployment selector journal before identity is invalid")
+                if (
+                    before_current != from_release
+                    or after_current != to_release
+                    or after_previous != from_release
+                    or (operation == "rollback" and before_previous != to_release)
+                ):
+                    raise ValueError("deployment selector journal pair is inconsistent")
+                if from_release not in release_images or to_release not in release_images:
+                    raise ValueError("deployment selector journal release record is unavailable")
+                if before_previous is not None and before_previous not in release_images:
+                    raise ValueError("deployment selector journal before record is unavailable")
+                current = selected_releases.get("current")
+                previous = selected_releases.get("previous")
+                before_previous_value = before_previous
+                before_match = (
+                    current == before_current and previous == before_previous_value
+                )
+                partial_match = current == before_current and previous == after_previous
+                after_match = current == after_current and previous == after_previous
+                if not (before_match or partial_match or after_match) or (
+                    selector_pending == "current" and before_match
+                ):
+                    raise ValueError("deployment selector journal pair is ambiguous")
+                in_flight.update((from_release, to_release))
+                if before_previous is not None:
+                    in_flight.add(before_previous)
+        return release_images, frozenset(in_flight)
 
 
 def retained_image_ids(

@@ -1000,6 +1000,83 @@ def test_labeled_docker_reconciliation_retains_references_and_reclaims_exact_ima
     assert not any("prune" in value for call in calls for value in call)
 
 
+def test_pending_selector_journal_retains_before_and_after_releases(
+    tmp_path: Path,
+) -> None:
+    deployment = _deployment(tmp_path)
+    deployment_dir = deployment.deployment_dir
+    releases = deployment_dir / "releases"
+    releases.mkdir(parents=True)
+    prior = "release-prior"
+    before = "release-before"
+    after = "release-after"
+    prior_daemon = "sha256:" + "1" * 64
+    prior_task = "sha256:" + "2" * 64
+    prior_validation = "sha256:" + "3" * 64
+    before_daemon = "sha256:" + "a" * 64
+    before_task = "sha256:" + "b" * 64
+    before_validation = "sha256:" + "c" * 64
+    after_daemon = "sha256:" + "d" * 64
+    after_task = "sha256:" + "e" * 64
+    after_validation = "sha256:" + "f" * 64
+    for release_id, daemon, task, validation in (
+        (prior, prior_daemon, prior_task, prior_validation),
+        (before, before_daemon, before_task, before_validation),
+        (after, after_daemon, after_task, after_validation),
+    ):
+        (releases / f"{release_id}.json").write_text(
+            json.dumps(
+                {
+                    "releaseId": release_id,
+                    "daemonImageId": daemon,
+                    "taskImageId": task,
+                    "validationImageId": validation,
+                    "runtimeProtocol": "task-container-v1",
+                }
+            ),
+            encoding="utf-8",
+        )
+    (deployment_dir / "current").write_text(before + "\n", encoding="ascii")
+    (deployment_dir / "previous").write_text(prior + "\n", encoding="ascii")
+    (deployment_dir / "operation.journal").write_text(
+        json.dumps(
+            {
+                "phase": "selector",
+                "outcome": "pending",
+                "operation": "upgrade",
+                "fromRelease": before,
+                "toRelease": after,
+                "selectorPending": "previous",
+                "beforeCurrent": before,
+                "beforePrevious": prior,
+                "afterCurrent": after,
+                "afterPrevious": before,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class RecordingStore:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def record_image_release(self, release_id: str, **kwargs: object) -> None:
+            self.calls.append((release_id, kwargs))
+
+    store = RecordingStore()
+    release_images, in_flight = DockerResourceManager._record_deployment_releases(
+        store, deployment
+    )
+
+    assert set(in_flight) == {prior, before, after}
+    assert set(release_images) == {prior, before, after}
+    assert {release_id for release_id, _kwargs in store.calls} == {prior, before, after}
+    assert all(
+        kwargs["current"] is (release_id == before)
+        for release_id, kwargs in store.calls
+    )
+
+
 def test_health_fails_closed_when_database_state_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

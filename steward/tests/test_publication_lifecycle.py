@@ -743,6 +743,175 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.parametrize("older_reason", ("operator_blocked", "integrity"))
+def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
+    tmp_path: Path, older_reason: str
+) -> None:
+    credential = "synthetic-restart-ordering-credential"
+    config = _publication_config(tmp_path, credential)
+    base_graph = _publication_graph("restart-ordering")
+
+    def rewrite(value: object, replacements: dict[str, str]) -> object:
+        if isinstance(value, AtifSource):
+            return replace(
+                value,
+                run=rewrite(value.run, replacements),
+                documents=rewrite(value.documents, replacements),
+                artifacts=tuple(
+                    rewrite(item, replacements) for item in value.artifacts
+                ),
+            )
+        if isinstance(value, dict):
+            return {
+                key: rewrite(item, replacements) for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [rewrite(item, replacements) for item in value]
+        if isinstance(value, tuple):
+            return tuple(rewrite(item, replacements) for item in value)
+        if isinstance(value, bytes):
+            for old, new in replacements.items():
+                value = value.replace(old.encode(), new.encode())
+            return value
+        if isinstance(value, str):
+            for old, new in replacements.items():
+                value = value.replace(old, new)
+            return value
+        return value
+
+    older_graph = rewrite(
+        base_graph,
+        {
+            "task-publication-preflight": "task-older-unrelated",
+            "pipeline-publication-preflight": "pipeline-older-unrelated",
+            "run-publication-preflight": "run-older-unrelated",
+        },
+    )
+    assert isinstance(older_graph, dict)
+    later_graph = rewrite(base_graph, {})
+    assert isinstance(later_graph, dict)
+    source = later_graph["runs"][0]
+    assert isinstance(source, AtifSource)
+    credential_bytes = source.documents["codex.jsonl"].replace(
+        b'"safe"', json.dumps(credential).encode("utf-8")
+    )
+    later_graph["runs"][0] = replace(
+        source,
+        documents={**source.documents, "codex.jsonl": credential_bytes},
+    )
+
+    scanner = lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b"")
+    older = session_module.compose_publication_generation(
+        older_graph,
+        scanner_runner=scanner,
+        credential_sources=(),
+    )
+    later_free = session_module.compose_publication_generation(
+        later_graph,
+        scanner_runner=scanner,
+        credential_sources=(),
+    )
+    later_aware = session_module.compose_publication_generation(
+        later_graph,
+        scanner_runner=scanner,
+        credential_sources=(
+            config.d1_token_path,
+            config.r2_access_key_id_path,
+            config.r2_secret_access_key_path,
+        ),
+    )
+    assert isinstance(older, PublicationGeneration)
+    assert isinstance(later_free, PublicationGeneration)
+    assert isinstance(later_aware, PublicationGeneration)
+    assert later_free.publication_id != later_aware.publication_id
+
+    database = tmp_path / "publication-restart-ordering.sqlite"
+    store = TaskStore(database)
+    first_created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.enqueue_publication(
+        replace(older.to_outbox(), created_at=first_created, updated_at=first_created)
+    )
+    store.block_publication(
+        older.publication_id,
+        expected_state="queued",
+        reason=older_reason,
+        now=first_created,
+    )
+    later_created = first_created.replace(second=1)
+    store.enqueue_publication(
+        replace(
+            later_free.to_outbox(),
+            created_at=later_created,
+            updated_at=later_created,
+        )
+    )
+    store.block_publication(
+        later_free.publication_id,
+        expected_state="queued",
+        reason="integrity",
+        now=later_created,
+    )
+
+    restarted = TaskStore(database)
+
+    class Publisher:
+        def __init__(self) -> None:
+            self.publish_calls: list[object] = []
+            self.retry_calls: list[tuple[object, object, object]] = []
+
+        def publish(self, *args: object, **_kwargs: object) -> object:
+            self.publish_calls.append(args)
+            return SimpleNamespace(status="blocked")
+
+        def retry_publication(
+            self,
+            publication_id: object,
+            source: object,
+            *,
+            compose_kwargs: object,
+        ) -> object:
+            self.retry_calls.append((publication_id, source, compose_kwargs))
+            if publication_id == older.publication_id:
+                return SimpleNamespace(status="blocked")
+            return SimpleNamespace(status="queued")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.config = SimpleNamespace(publication=config)
+    daemon.store = restarted
+    daemon.logger = None
+    source_calls: list[str] = []
+    source_by_task = {
+        older.task_id: older_graph,
+        later_free.task_id: later_graph,
+    }
+
+    def publication_source(generation: object) -> object:
+        source_calls.append(generation.publication_id)
+        return source_by_task[generation.task_id]
+
+    daemon._publication_source = publication_source
+    publisher = Publisher()
+
+    assert daemon._publish_next_generation(publisher) is True
+    assert publisher.publish_calls == []
+    expected_retry_ids = (
+        [older.publication_id, later_free.publication_id]
+        if older_reason == "integrity"
+        else [later_free.publication_id]
+    )
+    assert [call[0] for call in publisher.retry_calls] == expected_retry_ids
+    assert source_calls == expected_retry_ids
+
+    untouched = restarted.get_publication_generation(older.publication_id)
+    assert untouched is not None
+    assert untouched.state.value == "blocked"
+    assert untouched.reason == older_reason
+    later = restarted.get_publication_generation(later_free.publication_id)
+    assert later is not None
+    assert later.state.value == "blocked"
+    assert later.reason == "integrity"
+
+
 def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation(
     tmp_path: Path, monkeypatch
 ) -> None:

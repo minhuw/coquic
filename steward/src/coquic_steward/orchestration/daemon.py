@@ -1102,9 +1102,9 @@ class StewardDaemon:
             # credential-free staging identity but before retry_publication
             # replaces it.  Reconcile that bounded local state on restart.
             try:
-                blocked = listing(states={"blocked"}, limit=1)
+                blocked = listing(states={"blocked"}, limit=None)
             except TypeError:
-                blocked = listing(limit=1)
+                blocked = listing(limit=None)
             generations = [
                 item
                 for item in blocked
@@ -1112,24 +1112,32 @@ class StewardDaemon:
             ]
         if not generations:
             return False
-        generation = generations[0]
-        publication_id = getattr(generation, "publication_id", None)
-        if not isinstance(publication_id, str):
-            return True
-        source = self._publication_source(generation)
         compose_kwargs = self._publication_compose_kwargs()
+        generation = generations[0]
         state = getattr(
             getattr(generation, "state", None),
             "value",
             getattr(generation, "state", None),
         )
         if state == "blocked":
-            return self._repair_staged_generation(
-                publisher,
-                generation,
-                source,
-                compose_kwargs,
-            )
+            for generation in generations:
+                publication_id = getattr(generation, "publication_id", None)
+                if not isinstance(publication_id, str):
+                    continue
+                source = self._publication_source(generation)
+                if self._repair_staged_generation(
+                    publisher,
+                    generation,
+                    source,
+                    compose_kwargs,
+                ):
+                    return True
+            return False
+        generation = generations[0]
+        publication_id = getattr(generation, "publication_id", None)
+        if not isinstance(publication_id, str):
+            return True
+        source = self._publication_source(generation)
         try:
             result = publisher.publish(
                 publication_id,

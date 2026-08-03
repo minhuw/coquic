@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import coquic_steward.execution.session as session_module
 
 from coquic_steward.execution import (
     ContainerErrorCategory,
@@ -303,6 +304,198 @@ class _FakeStreamProcess:
 
     def kill(self):
         self.returncode = 137
+
+
+class _TrackedStreamProcess(_FakeStreamProcess):
+    def __init__(self, *, stdin=None, returncode=None) -> None:
+        self.stdin = stdin if stdin is not None else io.BytesIO()
+        self.stdout = io.BytesIO()
+        self.stderr = io.BytesIO()
+        self.returncode = returncode
+        self.terminate_calls = 0
+        self.wait_calls = 0
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+        self.returncode = 143
+
+
+class _FailingStdin:
+    def __init__(self, failure: str) -> None:
+        self.failure = failure
+        self.data = bytearray()
+
+    def write(self, value: bytes) -> int:
+        self.data.extend(value)
+        if self.failure == "write":
+            raise OSError("write failed")
+        return len(value)
+
+    def flush(self) -> None:
+        if self.failure == "flush":
+            raise OSError("flush failed")
+
+
+def _invocation_request(container_config: TaskContainerConfig) -> InvocationRequest:
+    for path in (
+        container_config.worktree,
+        container_config.archive,
+        container_config.private_sessions / "session-one",
+        container_config.git_dir,
+        container_config.git_common_dir,
+        container_config.scratch,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    last_message = (
+        container_config.private_sessions / "session-one" / "last-message.md"
+    )
+    schema = container_config.private_sessions / "session-one" / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    (last_message.parent / "wrapper-run-one.pid").write_text(
+        "4321\n", encoding="ascii"
+    )
+    return InvocationRequest(
+        codex_bin="/daemon/host/codex",
+        cwd=container_config.worktree,
+        prompt="prompt",
+        output_last_message=last_message,
+        output_schema=schema,
+        stage=CodexStage.review,
+        role=TaskRole.reviewer.value,
+        session_uid=10000,
+        session_id="session-one",
+        run_id="run-one",
+    )
+
+
+class _FailureRuntime:
+    def __init__(self, config: TaskContainerConfig, process: _TrackedStreamProcess):
+        self.config = config
+        self.process = process
+        self.signals: list[tuple[ExecIdentity, int]] = []
+        self.stop_calls = 0
+
+    def ensure_started(self):
+        return None
+
+    def exec_stream(self, role, **kwargs):
+        return self.process
+
+    def signal(self, identity, sig):
+        self.signals.append((identity, int(sig)))
+        self.process.returncode = 128 + int(sig)
+
+    def stop(self):
+        self.stop_calls += 1
+        self.process.returncode = 137
+
+
+def test_container_invocation_reaps_unidentified_exec_and_stops_container(
+    container_config: TaskContainerConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _invocation_request(container_config)
+    (request.output_last_message.parent / "wrapper-run-one.pid").unlink()
+    process = _TrackedStreamProcess()
+    runtime = _FailureRuntime(container_config, process)
+    clock = iter((0.0, 3.0))
+    monkeypatch.setattr(session_module.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="process identity"):
+        ContainerSessionInvoker(runtime).invoke(
+            request,
+            api_key="secret-key",
+            append=lambda _line: None,
+            timeout_seconds=1,
+            interrupt_grace_seconds=0.1,
+        )
+
+    assert process.stdin.getvalue() == b""
+    assert process.terminate_calls == 1
+    assert process.wait_calls == 1
+    assert runtime.stop_calls == 1
+
+
+def test_container_invocation_reaps_exec_that_exits_before_identity(
+    container_config: TaskContainerConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _invocation_request(container_config)
+    (request.output_last_message.parent / "wrapper-run-one.pid").unlink()
+    process = _TrackedStreamProcess(returncode=0)
+    runtime = _FailureRuntime(container_config, process)
+    clock = iter((0.0, 0.0))
+    monkeypatch.setattr(session_module.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="process identity"):
+        ContainerSessionInvoker(runtime).invoke(
+            request,
+            api_key="secret-key",
+            append=lambda _line: None,
+            timeout_seconds=1,
+            interrupt_grace_seconds=0.1,
+        )
+
+    assert process.stdin.getvalue() == b""
+    assert process.terminate_calls == 0
+    assert process.wait_calls == 1
+    assert runtime.stop_calls == 1
+
+
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_container_invocation_reaps_identified_exec_on_key_setup_failure(
+    container_config: TaskContainerConfig, failure: str
+) -> None:
+    request = _invocation_request(container_config)
+    process = _TrackedStreamProcess(stdin=_FailingStdin(failure))
+    runtime = _FailureRuntime(container_config, process)
+    invoker = ContainerSessionInvoker(runtime)
+
+    with pytest.raises(OSError, match=failure):
+        invoker.invoke(
+            request,
+            api_key="secret-key",
+            append=lambda _line: None,
+            timeout_seconds=1,
+            interrupt_grace_seconds=0.1,
+        )
+
+    assert process.wait_calls == 1
+    assert runtime.signals == [
+        (ExecIdentity(container_config.container_name, "run-one", 4321, 10000), 15)
+    ]
+    assert runtime.stop_calls == 0
+    assert invoker.process is None
+    assert invoker.identity is None
+
+
+def test_container_invocation_reaps_identified_exec_when_on_started_fails(
+    container_config: TaskContainerConfig,
+) -> None:
+    request = _invocation_request(container_config)
+    process = _TrackedStreamProcess()
+    runtime = _FailureRuntime(container_config, process)
+    invoker = ContainerSessionInvoker(runtime)
+
+    with pytest.raises(ValueError, match="callback failed"):
+        invoker.invoke(
+            request,
+            api_key="secret-key",
+            append=lambda _line: None,
+            on_started=lambda _identity: (_ for _ in ()).throw(
+                ValueError("callback failed")
+            ),
+            timeout_seconds=1,
+            interrupt_grace_seconds=0.1,
+        )
+
+    assert process.wait_calls == 1
+    assert runtime.signals
+    assert runtime.stop_calls == 0
+    assert invoker.process is None
+    assert invoker.identity is None
 
 
 def test_container_invocation_translates_all_runtime_paths(

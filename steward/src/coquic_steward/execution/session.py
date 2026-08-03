@@ -785,6 +785,7 @@ class ContainerSessionInvoker:
     def __init__(self, runtime: TaskContainerRuntime):
         self.runtime = runtime
         self.process = None
+        self.identity: ExecIdentity | None = None
 
     def invoke(
         self,
@@ -802,6 +803,7 @@ class ContainerSessionInvoker:
             raise ValueError("container invocation requires session and run identities")
         role = TaskRole(request.role)
         self.runtime.ensure_started()
+        self._clear_process_refs()
         path_mapper = lambda path: self.runtime.config.container_path(path, role)
 
         def launch() -> _ContainerProcess:
@@ -817,24 +819,43 @@ class ContainerSessionInvoker:
                 env={"COQUIC_STEWARD_RUN_ID": request.run_id},
                 workdir=path_mapper(request.cwd),
             )
-            # The wrapper consumes this control prefix before forwarding the prompt
-            # to Codex.  It is never part of stdout, argv, environment, or logs.
-            if process.stdin is not None:
+            # The interval between Docker exec and wrapper identity publication is
+            # owned state even though no validated in-container PID exists yet.
+            self.process = process
+            identity: ExecIdentity | None = None
+            succeeded = False
+            try:
+                identity = self._identity(request, process)
+                self.identity = identity
+                supervised_process = _ContainerProcess(process, self.runtime, identity)
+                self.process = supervised_process
+                # The wrapper consumes this control prefix before forwarding the
+                # prompt to Codex. It is never part of stdout, argv, environment,
+                # or logs, and is sent only after identity validation.
+                if supervised_process.stdin is None:
+                    raise RuntimeError("container exec did not provide stdin")
                 key = _api_key_bytes(api_key)
-                process.stdin.write(len(key).to_bytes(4, "big") + key)
-                process.stdin.flush()
-            identity = self._identity(request, process)
-            self.identity = identity
-            supervised_process = _ContainerProcess(process, self.runtime, identity)
-            self.process = supervised_process
-            if on_started is not None:
-                on_started(identity)
-            return supervised_process
+                payload = len(key).to_bytes(4, "big") + key
+                written = supervised_process.stdin.write(payload)
+                if written != len(payload):
+                    raise OSError("container exec received an incomplete credential")
+                supervised_process.stdin.flush()
+                if on_started is not None:
+                    on_started(identity)
+                succeeded = True
+                return supervised_process
+            except BaseException:
+                self._cleanup_launch_failure(process, identity)
+                raise
+            finally:
+                if not succeeded:
+                    self._clear_process_refs()
 
         launched, supervised_process = (
             launch_gate.launch(launch) if launch_gate is not None else (True, launch())
         )
         if not launched:
+            self._clear_process_refs()
             return _interrupted_invocation_outcome()
         try:
             return stream_process(
@@ -846,7 +867,104 @@ class ContainerSessionInvoker:
                 interrupt_grace_seconds=interrupt_grace_seconds,
             )
         finally:
-            self.process = None
+            self._clear_process_refs()
+
+    def _cleanup_launch_failure(
+        self, process: Any, identity: ExecIdentity | None
+    ) -> None:
+        """Reap failed setup without allowing an unowned exec to survive."""
+
+        if identity is None:
+            reaped = self._terminate_raw_process(process)
+            # A live Docker exec has no validated PID, so stopping the
+            # identity-validated task container is the only narrower boundary
+            # available. This remains necessary even when the Docker client has
+            # already exited: the in-container process may have outlived it.
+            self._stop_task_container()
+            if not reaped:
+                self._wait_for_process(process)
+            return
+        if not self._terminate_identified_process(process, identity):
+            self._stop_task_container()
+            self._terminate_raw_process(process)
+
+    @staticmethod
+    def _process_is_live(process: Any) -> bool:
+        poll = getattr(process, "poll", None)
+        if not callable(poll):
+            return True
+        try:
+            return poll() is None
+        except BaseException:
+            return True
+
+    @staticmethod
+    def _wait_for_process(process: Any) -> bool:
+        wait = getattr(process, "wait", None)
+        if not callable(wait):
+            return False
+        try:
+            try:
+                wait(timeout=2.0)
+            except TypeError:
+                wait()
+        except BaseException:
+            return False
+        return not ContainerSessionInvoker._process_is_live(process)
+
+    def _terminate_raw_process(self, process: Any) -> bool:
+        if not self._process_is_live(process):
+            return self._wait_for_process(process)
+        try:
+            terminate = getattr(process, "terminate", None)
+            if callable(terminate):
+                terminate()
+            else:
+                send_signal = getattr(process, "send_signal", None)
+                if not callable(send_signal):
+                    return False
+                send_signal(signal.SIGTERM)
+        except BaseException:
+            return False
+        if self._wait_for_process(process):
+            return True
+        try:
+            kill = getattr(process, "kill", None)
+            if not callable(kill):
+                return False
+            kill()
+        except BaseException:
+            return False
+        return self._wait_for_process(process)
+
+    def _terminate_identified_process(
+        self, process: Any, identity: ExecIdentity
+    ) -> bool:
+        if not self._process_is_live(process):
+            return self._wait_for_process(process)
+        try:
+            self.runtime.signal(identity, signal.SIGTERM)
+        except BaseException:
+            return False
+        if self._wait_for_process(process):
+            return True
+        try:
+            self.runtime.signal(identity, signal.SIGKILL)
+        except BaseException:
+            return False
+        return self._wait_for_process(process)
+
+    def _stop_task_container(self) -> None:
+        try:
+            self.runtime.stop()
+        except BaseException:
+            # Preserve the setup exception. The daemon's container lifecycle
+            # reconciliation will retry a failed boundary stop.
+            pass
+
+    def _clear_process_refs(self) -> None:
+        self.process = None
+        self.identity = None
 
     def _identity(self, request: InvocationRequest, process: Any) -> ExecIdentity:
         pid_path = request.output_last_message.parent / f"wrapper-{request.run_id}.pid"

@@ -27,7 +27,37 @@ COMPATIBILITY_FIXTURE = ROOT / "steward" / "schema" / "fixtures" / "public-monit
 @pytest.mark.parametrize("fixture", sorted(FIXTURE_DIR.glob("*.json")))
 def test_v3_fixtures_validate(fixture: Path) -> None:
     document = json.loads(fixture.read_text(encoding="utf-8"))
-    validate_public_monitor(document)
+    assert validate_public_monitor(document) is None
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "field_path", "replacement"),
+    [
+        ("idle", ("runtime", "instance_id"), "invalid instance id"),
+        ("idle", ("publication", "snapshot_id"), "g" * 64),
+        (
+            "integration",
+            ("planner_runs", 0, "artifacts", "transcript", "sha256"),
+            "g" * 64,
+        ),
+    ],
+)
+def test_pattern_constraints_reject_type_correct_invalid_strings(
+    fixture_name: str, field_path: tuple[str | int, ...], replacement: str
+) -> None:
+    document = json.loads((FIXTURE_DIR / f"{fixture_name}.json").read_text(encoding="utf-8"))
+    target = document
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = replacement
+
+    with pytest.raises(SchemaValidationError) as first_error:
+        validate_public_monitor(document)
+    with pytest.raises(SchemaValidationError) as second_error:
+        validate_public_monitor(document)
+
+    assert str(first_error.value) == str(second_error.value)
+    assert len(str(first_error.value)) <= 1024
 
 
 def test_schema_requires_runtime_and_rejects_bounded_overflow() -> None:

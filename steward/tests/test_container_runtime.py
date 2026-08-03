@@ -376,6 +376,7 @@ class _FailureRuntime:
     def __init__(self, config: TaskContainerConfig, process: _TrackedStreamProcess):
         self.config = config
         self.process = process
+        self.container_live = True
         self.signals: list[tuple[ExecIdentity, int]] = []
         self.stop_calls = 0
 
@@ -387,11 +388,22 @@ class _FailureRuntime:
 
     def signal(self, identity, sig):
         self.signals.append((identity, int(sig)))
+        self.container_live = False
         self.process.returncode = 128 + int(sig)
 
     def stop(self):
         self.stop_calls += 1
+        self.container_live = False
         self.process.returncode = 137
+
+    def exec_is_live(self, identity):
+        return self.container_live
+
+
+class _StopFailureRuntime(_FailureRuntime):
+    def stop(self):
+        self.stop_calls += 1
+        raise RuntimeError("task container stop failed")
 
 
 def test_container_invocation_reaps_unidentified_exec_and_stops_container(
@@ -496,6 +508,45 @@ def test_container_invocation_reaps_identified_exec_when_on_started_fails(
     assert runtime.stop_calls == 0
     assert invoker.process is None
     assert invoker.identity is None
+
+
+def test_cleanup_signals_validated_pid_after_docker_client_exits(
+    container_config: TaskContainerConfig,
+) -> None:
+    process = _TrackedStreamProcess(returncode=0)
+    runtime = _FailureRuntime(container_config, process)
+    invoker = ContainerSessionInvoker(runtime)
+    identity = ExecIdentity(container_config.container_name, "run-one", 4321, 10000)
+
+    assert invoker._cleanup_launch_failure(process, identity)
+    assert runtime.signals == [(identity, 15)]
+    assert not runtime.container_live
+
+
+def test_cleanup_reports_unconfirmed_boundary_when_container_stop_fails(
+    container_config: TaskContainerConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _invocation_request(container_config)
+    (request.output_last_message.parent / "wrapper-run-one.pid").unlink()
+    process = _TrackedStreamProcess()
+    runtime = _StopFailureRuntime(container_config, process)
+    clock = iter((0.0, 3.0))
+    monkeypatch.setattr(session_module.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(RuntimeError, match="cleanup unconfirmed") as failure:
+        ContainerSessionInvoker(runtime).invoke(
+            request,
+            api_key="secret-key",
+            append=lambda _line: None,
+            timeout_seconds=1,
+            interrupt_grace_seconds=0.1,
+        )
+
+    assert isinstance(failure.value.__cause__, RuntimeError)
+    assert "process identity" in str(failure.value.__cause__)
+    assert process.returncode == 143
+    assert not runtime.signals
+    assert runtime.container_live
 
 
 def test_container_invocation_translates_all_runtime_paths(

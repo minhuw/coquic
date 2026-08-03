@@ -844,8 +844,15 @@ class ContainerSessionInvoker:
                     on_started(identity)
                 succeeded = True
                 return supervised_process
-            except BaseException:
-                self._cleanup_launch_failure(process, identity)
+            except BaseException as setup_error:
+                try:
+                    cleanup_confirmed = self._cleanup_launch_failure(process, identity)
+                except BaseException:
+                    cleanup_confirmed = False
+                if not cleanup_confirmed:
+                    # Keep the setup failure as the cause while making an
+                    # unacknowledged process boundary visible to callers.
+                    raise RuntimeError("container exec cleanup unconfirmed") from setup_error
                 raise
             finally:
                 if not succeeded:
@@ -871,8 +878,8 @@ class ContainerSessionInvoker:
 
     def _cleanup_launch_failure(
         self, process: Any, identity: ExecIdentity | None
-    ) -> None:
-        """Reap failed setup without allowing an unowned exec to survive."""
+    ) -> bool:
+        """Reap failed setup and report whether its boundary was acknowledged."""
 
         if identity is None:
             reaped = self._terminate_raw_process(process)
@@ -880,13 +887,16 @@ class ContainerSessionInvoker:
             # identity-validated task container is the only narrower boundary
             # available. This remains necessary even when the Docker client has
             # already exited: the in-container process may have outlived it.
-            self._stop_task_container()
             if not reaped:
-                self._wait_for_process(process)
-            return
-        if not self._terminate_identified_process(process, identity):
-            self._stop_task_container()
-            self._terminate_raw_process(process)
+                reaped = self._wait_for_process(process)
+            return reaped and self._stop_task_container()
+        if self._terminate_identified_process(process, identity):
+            return True
+        # Exact identity cleanup is preferred. If it cannot be verified, a
+        # successful task-container stop is the only acknowledged fallback.
+        stopped = self._stop_task_container()
+        reaped = self._terminate_raw_process(process)
+        return stopped and reaped
 
     @staticmethod
     def _process_is_live(process: Any) -> bool:
@@ -940,27 +950,50 @@ class ContainerSessionInvoker:
     def _terminate_identified_process(
         self, process: Any, identity: ExecIdentity
     ) -> bool:
-        if not self._process_is_live(process):
-            return self._wait_for_process(process)
+        probe = getattr(self.runtime, "exec_is_live", None)
+        has_probe = callable(probe)
+        live: bool | None = None
+        if has_probe:
+            try:
+                live = bool(probe(identity))
+            except BaseException:
+                # An unavailable probe is not proof of termination. Signal the
+                # validated PID and require a later acknowledged boundary.
+                live = None
+            if live is False:
+                return self._wait_for_process(process)
         try:
             self.runtime.signal(identity, signal.SIGTERM)
         except BaseException:
             return False
-        if self._wait_for_process(process):
+        if has_probe:
+            try:
+                live = bool(probe(identity))
+            except BaseException:
+                live = None
+            if live is False:
+                return self._wait_for_process(process)
+        elif self._wait_for_process(process):
             return True
         try:
             self.runtime.signal(identity, signal.SIGKILL)
         except BaseException:
             return False
+        if has_probe:
+            try:
+                live = bool(probe(identity))
+            except BaseException:
+                live = None
+            if live is False:
+                return self._wait_for_process(process)
         return self._wait_for_process(process)
 
-    def _stop_task_container(self) -> None:
+    def _stop_task_container(self) -> bool:
         try:
-            self.runtime.stop()
+            result = self.runtime.stop()
         except BaseException:
-            # Preserve the setup exception. The daemon's container lifecycle
-            # reconciliation will retry a failed boundary stop.
-            pass
+            return False
+        return result is not False
 
     def _clear_process_refs(self) -> None:
         self.process = None

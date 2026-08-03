@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -162,7 +163,7 @@ class PlanVerifier:
                     )
                 )
                 continue
-            task_spec = _task_spec_from_proposal(proposed, signals.items)
+            task_spec = _task_spec_from_proposal(proposed, signals)
             accepted.append(
                 (
                     task_spec,
@@ -380,23 +381,37 @@ def _feature_issue_proposal_is_safe(
         and len(selected_feature_items) == 1
         and len(feature_ids) == 1
         and selected_ids == evidence_ids == feature_ids
+        and _feature_issue_identity(selected_feature_items[0], signals.repository)
+        is not None
     )
 
 
 def _task_spec_from_proposal(
-    proposed: ProposedTask, items: list[SignalItem]
+    proposed: ProposedTask, signals: ProjectSignals
 ) -> TaskSpec:
     metadata = dict(proposed.metadata)
     metadata["dedupe_key"] = proposed.dedupe_key
     metadata["evidence"] = list(proposed.evidence)
-    source_context = _source_context(items, proposed)
+    source_context = _source_context(signals.items, proposed)
     if source_context:
         metadata["source_context"] = source_context
+    title = proposed.title.strip()
+    prompt = proposed.prompt.strip()
+    if proposed.kind == TaskKind.feature:
+        selected = _selected_signal_items(proposed, signals.items)
+        identity = (
+            _feature_issue_identity(selected[0], signals.repository)
+            if len(selected) == 1
+            else None
+        )
+        if identity is None:
+            raise ValueError("feature task is missing a verified issue identity")
+        title, prompt = _canonical_feature_task(identity)
     return TaskSpec(
         kind=proposed.kind,
         worker=proposed.worker,
-        title=proposed.title.strip(),
-        prompt=proposed.prompt.strip(),
+        title=title,
+        prompt=prompt,
         priority=proposed.priority,
         risk=proposed.risk,
         source="planner",
@@ -410,6 +425,64 @@ def _metadata_is_bounded(metadata: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         return False
     return len(encoded) <= 4096
+
+
+def _feature_issue_identity(
+    item: dict[str, Any], repository: str
+) -> tuple[int, str] | None:
+    """Return a canonical issue identity only when the selected evidence agrees."""
+
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    raw_number = payload.get("issue_number")
+    if isinstance(raw_number, bool):
+        return None
+    if isinstance(raw_number, int):
+        number = raw_number
+    elif isinstance(raw_number, str) and raw_number.isascii() and raw_number.isdigit():
+        number = int(raw_number)
+    else:
+        return None
+    if number < 1:
+        return None
+
+    repository = repository.strip()
+    owner, separator, name = repository.partition("/")
+    if (
+        not separator
+        or not owner
+        or not name
+        or "/" in name
+        or any(character.isspace() for character in repository)
+    ):
+        return None
+    raw_url = payload.get("issue_url")
+    if not isinstance(raw_url, str) or not raw_url or raw_url != raw_url.strip():
+        return None
+    parsed = urlparse(raw_url)
+    expected_path = f"/{repository}/issues/{number}"
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != expected_path
+    ):
+        return None
+    return number, f"https://github.com/{repository}/issues/{number}"
+
+
+def _canonical_feature_task(identity: tuple[int, str]) -> tuple[str, str]:
+    number, url = identity
+    return (
+        f"Implement GitHub feature issue #{number}",
+        f"Implement GitHub issue #{number} ({url}) as a local-only patch. "
+        "Keep the change focused on the selected issue and add focused tests or "
+        "validation. Do not comment on, label, close, or otherwise mutate GitHub "
+        "issues, and do not commit or push.",
+    )
 
 
 def _source_context(items: list[SignalItem], proposed: ProposedTask) -> dict[str, Any]:

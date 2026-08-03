@@ -26,10 +26,13 @@ Before the rollout, the operator must have:
 - the protected SSH key and known-hosts entry required by
   `site/deploy/install-cloud-config.sh`.
 
-The provider token is authentication for Pulumi only. Do not put it in Pulumi
-configuration, a command argument, `.env`, a credential file, or a log. Keep
-Pulumi state and any stack configuration containing secrets outside source
-control.
+The process-local bootstrap `CLOUDFLARE_API_TOKEN` authorizes both Pulumi
+provider operations and the Wrangler remote D1 inspection/bootstrap performed
+by this rollout; Wrangler inherits it for its `d1 execute --remote` calls. It
+is never persisted or logged: do not put it in Pulumi configuration, a command
+argument, `.env`, a credential file, or any captured output. It is not a
+Steward or Site runtime credential. Keep Pulumi state and any stack
+configuration containing secrets outside source control.
 
 Initialize or select the stack and set only the non-secret topology values:
 
@@ -136,9 +139,11 @@ COQUIC_STEWARD_PUBLIC_R2_BASE_URL
 ```
 
 `site/deploy/install-cloud-config.sh` owns remote validation, atomic app-env
-replacement, service configuration, and its rollback transaction. The
-rollout unsets provider credentials for that child process. It installs Site's
-cloud values but does not deploy a Site release or launch Steward.
+replacement, service configuration, and its rollback transaction. The rollout
+invokes that child with `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_API_KEY`, and
+`PULUMI_ACCESS_TOKEN` explicitly unset, so Site receives only the four fields
+listed above. It installs Site's cloud values but does not deploy a Site
+release or launch Steward.
 
 ## Failure and rerun boundaries
 
@@ -161,6 +166,26 @@ Site application rollback is independent: it preserves the four cloud fields
 and does not change Pulumi resources, D1 schema, R2 objects, or Steward files.
 Provider changes and token rotation remain explicit operator reviews. There is
 no routine provider rollback command.
+
+## Site replica cleanup boundary
+
+The Cloudflare rollout and ordinary Site deploy or rollback never delete local
+replicas. For this rollout, the following exact set is the sole cleanup
+authority for retired Site-host replica roots after the checker proof and the
+chosen rollback window:
+
+```text
+/opt/coquic-demo/steward/tasks
+/opt/coquic-demo/steward/control-loop
+/opt/coquic-demo/steward/cache
+```
+
+Remove at most one listed directory at a time with an operator-owned manual
+command. No other Site path or document is cleanup authority for this rollout;
+do not add or reclassify a target from another document. These are retired Site
+replicas, not Steward's private `$COQUIC_HOME/tasks`,
+`$COQUIC_HOME/control-loop`, or any source archive; never delete those private
+archives or use a recursive glob.
 
 ## Local checks
 

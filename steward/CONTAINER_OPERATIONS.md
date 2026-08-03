@@ -70,19 +70,50 @@ remove objects that are not proven Steward-owned and unreferenced.
 Use this sequence after the Cloudflare operator has verified D1 and installed
 the three publication files. Keep non-secret Compose values in a private copy
 of `steward/containers/.env.example`; it contains paths and limits, not
-credential values.
+credential values. Before bootstrap or start, the daemon configuration must
+also enable publication and point its credential fields at the daemon's secret
+mounts.
 
 1. Verify ownership and mode of the credential files, the absolute
    `COQUIC_HOME`, the canonical clone settings, pinned image inputs, and the
    local Docker Unix socket.
-2. Load the non-secret environment in the operator shell and validate the
+2. Create the host config at the absolute `STEWARD_CONFIG_PATH` from the
+   private environment (the checked-in example uses
+   `/srv/coquic-steward/private/runtime/steward.toml`) from
+   `steward/steward.example.toml`. Compose mounts that file in the daemon at
+   `/etc/coquic-steward/steward.toml`. Set every non-secret publication value
+   explicitly; the account, database, buckets, R2 endpoint, public URL, and
+   staging root are required before enabling the section:
+
+   ```toml
+   [steward.publication]
+   enabled = true
+   account_id = "<cloudflare-account-id>"
+   d1_database_id = "<d1-database-id>"
+   d1_token_path = "/run/secrets/d1-read-token"
+   r2_endpoint = "https://<cloudflare-account-id>.r2.cloudflarestorage.com"
+   r2_access_key_id_path = "/run/secrets/r2-access-key-id"
+   r2_secret_access_key_path = "/run/secrets/r2-secret-access-key"
+   public_bucket = "<public-bucket-name>"
+   private_bucket = "<private-bucket-name>"
+   public_base_url = "https://<public-r2-host>/"
+   staging_root = "/srv/coquic-steward/private/publication-staging"
+   ```
+
+   Replace the example host prefix in `staging_root` when `COQUIC_HOME` is
+   different, and create that real, non-symlink directory with mode `0700`
+   before config validation. The three credential paths above are
+   daemon-container targets, not host paths; their host sources remain the
+   individual files listed in the credential table. Do not put any credential
+   value in this TOML file.
+3. Load the non-secret environment in the operator shell and validate the
    production-shaped Compose file:
 
    ```sh
    bash steward/containers/manage.sh config
    ```
 
-3. Run bootstrap. It takes the deployment lock, validates every credential
+4. Run bootstrap. It takes the deployment lock, validates every credential
    without reading or printing its value, creates the private directory
    skeleton, clones the configured remote only when the canonical clone is
    absent, builds and verifies images, and records the first release:
@@ -91,20 +122,20 @@ credential values.
    bash steward/containers/manage.sh bootstrap
    ```
 
-4. Inspect bounded state before starting the service:
+5. Inspect bounded state before starting the service:
 
    ```sh
    bash steward/containers/manage.sh status
    ```
 
-5. Start Compose explicitly and confirm the daemon health and release:
+6. Start Compose explicitly and confirm the daemon health and release:
 
    ```sh
    bash steward/containers/manage.sh start
    bash steward/containers/manage.sh status
    ```
 
-6. After Site is activated, run the read-only checker once for the empty state
+7. After Site is activated, run the read-only checker once for the empty state
    or for the first real published task. The checker is never a launch hook.
 
 Bootstrap is idempotent. A successful repeat verifies the same clone and keeps
@@ -204,8 +235,9 @@ for a manual rerun. There is no scheduled monitor, synthetic canary, polling
 loop, or fabricated task.
 
 Site application deploy and rollback are owned by Site. They never alter D1,
-R2, Pulumi state, Steward credentials, or the Steward release selectors.
-Retired Site replica roots are a separate, delayed operator cleanup after the
+R2, Pulumi state, Steward credentials, or the Steward release selectors. For
+this rollout, the following exact set is the sole cleanup authority for retired
+Site replica roots; it is a separate, delayed operator cleanup after the
 checker proof and the chosen rollback window:
 
 ```text
@@ -214,11 +246,13 @@ checker proof and the chosen rollback window:
 /opt/coquic-demo/steward/cache
 ```
 
-Remove only those exact Site-host paths, one at a time, with an operator-owned
-command after verifying cutover. Do not delete `$COQUIC_HOME/tasks`,
+Treat each listed directory as one exact target: remove at most one at a time
+with an operator-owned command after verifying cutover. No other Site path or
+document is cleanup authority for this rollout; do not add or reclassify a
+target from another document. Ordinary Site deploy, repair, and rollback
+remove none of these paths. Do not delete `$COQUIC_HOME/tasks`,
 `$COQUIC_HOME/control-loop`, or any Steward source archive; those private
 archives and their per-task verified cleanup protocol are not Site replicas.
-Ordinary Site deploy, repair, and rollback remove none of these paths.
 
 ## Local proof
 

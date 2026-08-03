@@ -123,9 +123,9 @@ Cloudflare rollout and Site configuration are separate operator actions. After
 Site activation, an operator may run the read-only checker against an empty
 deployment or the first real task; no container entrypoint runs it, and there
 is no scheduled monitor or synthetic canary. Site deploy and rollback do not
-alter the Steward release or cloud provider state. Delayed Site cleanup is
-limited to these exact old replica roots after cutover proof and the rollback
-window:
+alter the Steward release or cloud provider state. For this rollout, the
+following exact set is the sole cleanup authority for delayed Site cleanup
+after cutover proof and the rollback window:
 
 ```text
 /opt/coquic-demo/steward/tasks
@@ -133,6 +133,10 @@ window:
 /opt/coquic-demo/steward/cache
 ```
 
-Those are Site-host paths. Do not delete Steward's private `$COQUIC_HOME/tasks`,
+Those are Site-host replica roots. Treat each directory as one exact target and
+remove at most one manually after the rollback window. No other Site path or
+document is cleanup authority for this rollout; do not add or reclassify a
+target from another document. Ordinary deploy, repair, and rollback remove
+none. Do not delete Steward's private `$COQUIC_HOME/tasks`,
 `$COQUIC_HOME/control-loop`, or source archives, and never replace the exact
 paths above with a recursive glob.

@@ -844,15 +844,14 @@ class ContainerSessionInvoker:
                     on_started(identity)
                 succeeded = True
                 return supervised_process
-            except BaseException as setup_error:
+            except BaseException:
                 try:
-                    cleanup_confirmed = self._cleanup_launch_failure(process, identity)
+                    self._cleanup_launch_failure(process, identity)
                 except BaseException:
-                    cleanup_confirmed = False
-                if not cleanup_confirmed:
-                    # Keep the setup failure as the cause while making an
-                    # unacknowledged process boundary visible to callers.
-                    raise RuntimeError("container exec cleanup unconfirmed") from setup_error
+                    # Cleanup must not replace the setup failure with an
+                    # unrelated runtime error. The boundary remains unacknowledged
+                    # when the helper cannot prove that it was reaped.
+                    pass
                 raise
             finally:
                 if not succeeded:
@@ -887,15 +886,18 @@ class ContainerSessionInvoker:
             # identity-validated task container is the only narrower boundary
             # available. This remains necessary even when the Docker client has
             # already exited: the in-container process may have outlived it.
+            stopped = self._stop_task_container()
             if not reaped:
                 reaped = self._wait_for_process(process)
-            return reaped and self._stop_task_container()
+            return stopped and reaped
         if self._terminate_identified_process(process, identity):
             return True
         # Exact identity cleanup is preferred. If it cannot be verified, a
         # successful task-container stop is the only acknowledged fallback.
         stopped = self._stop_task_container()
         reaped = self._terminate_raw_process(process)
+        if not reaped:
+            reaped = self._wait_for_process(process)
         return stopped and reaped
 
     @staticmethod
@@ -962,6 +964,8 @@ class ContainerSessionInvoker:
                 live = None
             if live is False:
                 return self._wait_for_process(process)
+        elif not self._process_is_live(process):
+            return self._wait_for_process(process)
         try:
             self.runtime.signal(identity, signal.SIGTERM)
         except BaseException:
@@ -983,9 +987,14 @@ class ContainerSessionInvoker:
             try:
                 live = bool(probe(identity))
             except BaseException:
-                live = None
+                # A failed canonical probe is not evidence that the
+                # identity disappeared; let the container fallback own it.
+                return False
             if live is False:
                 return self._wait_for_process(process)
+            # A stale client returncode cannot override a live canonical
+            # identity. The caller must stop the task container instead.
+            return False
         return self._wait_for_process(process)
 
     def _stop_task_container(self) -> bool:

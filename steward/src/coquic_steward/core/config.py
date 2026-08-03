@@ -763,6 +763,13 @@ class CodexRunSettings:
 
 @dataclass(frozen=True)
 class TelemetryConfig:
+    """Telemetry settings.
+
+    ``price_catalog_path`` is retained solely so older configuration files
+    remain readable.  Runtime pricing always uses the repository's committed
+    catalog; the path cannot select a different authority.
+    """
+
     billing_mode: str = "unknown"
     price_catalog_path: Path | None = None
 

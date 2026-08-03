@@ -119,11 +119,12 @@ max_scratch_bytes = 8589934592
 
 # Usage telemetry is observational. Codex exec exposes turns, not upstream
 # requests, billing, TTFT, or token streaming rates. Leave billing_mode=unknown
-# unless an operator deliberately selects an API catalog with exact model and
-# effective-date coverage. Never put credentials in a catalog.
+# unless an operator deliberately selects API billing with exact model and
+# effective-date coverage in the committed steward/model-prices.json catalog.
+# Never put credentials in a catalog. A legacy price_catalog_path setting is
+# accepted for config compatibility but cannot override the committed catalog.
 # [steward.telemetry]
 # billing_mode = "unknown" # unknown, chatgpt, or api
-# price_catalog_path = "model-prices.example.json" # fictional example only
 
 # Steward owns the raw task and control-loop archive peers below COQUIC_HOME.
 # Their roots are immutable-by-placement research data. Transfer is configured

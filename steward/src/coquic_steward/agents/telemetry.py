@@ -12,13 +12,14 @@ import json
 import os
 import re
 import tempfile
-from urllib.parse import urlsplit
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 
@@ -34,6 +35,9 @@ TELEMETRY_MAX_TASK_ID_BYTES = 160
 TELEMETRY_MAX_RUN_NAME_BYTES = 160
 TELEMETRY_MAX_SOURCE_LABEL_BYTES = 160
 TELEMETRY_MAX_SOURCE_URL_BYTES = 512
+PRICE_CATALOG_MAX_BYTES = 256 * 1024
+PRICE_CATALOG_MAX_ENTRIES = 256
+PRICE_RATE_MAX = 10**12
 _UTC = timezone.utc
 _MODEL_RE = re.compile(r"^[^\x00\r\n]{1,256}$")
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
@@ -213,17 +217,36 @@ class PriceEntry:
             self.effective_until is None or when < self.effective_until
         )
 
-    def to_public_dict(self) -> dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
+        """Return the complete canonical catalog representation."""
+
+        return {
+            "id": self.entry_id,
+            "model": self.model,
+            "effective_from": _format_price_utc(self.effective_from),
+            "effective_until": (
+                _format_price_utc(self.effective_until)
+                if self.effective_until is not None
+                else None
+            ),
+            "input_micro_usd_per_million": self.input_micro_usd_per_million,
+            "cached_input_micro_usd_per_million": self.cached_input_micro_usd_per_million,
+            "output_micro_usd_per_million": self.output_micro_usd_per_million,
+            "source": {"label": self.source_label, "url": self.source_url},
+        }
+
+    def to_public_dict(self, *, catalog_digest: str | None = None) -> dict[str, object]:
         return {
             "entry_id": self.entry_id,
             "model": self.model,
-            "effective_from": _format_utc(self.effective_from),
+            "effective_from": _format_price_utc(self.effective_from),
             "effective_until": (
-                _format_utc(self.effective_until)
+                _format_price_utc(self.effective_until)
                 if self.effective_until is not None
                 else None
             ),
             "source": {"label": self.source_label, "url": self.source_url},
+            **({"catalog_digest": catalog_digest} if catalog_digest else {}),
         }
 
 
@@ -231,22 +254,54 @@ class PriceEntry:
 class PriceCatalog:
     entries: tuple[PriceEntry, ...] = ()
 
+    def __post_init__(self) -> None:
+        entries = tuple(self.entries)
+        if len(entries) > PRICE_CATALOG_MAX_ENTRIES:
+            raise ValueError("price catalog entries")
+        if any(not isinstance(entry, PriceEntry) for entry in entries):
+            raise ValueError("price catalog entry")
+        if len({entry.entry_id for entry in entries}) != len(entries):
+            raise ValueError("duplicate price entry id")
+        _reject_price_overlaps(entries)
+        object.__setattr__(
+            self,
+            "entries",
+            tuple(
+                sorted(
+                    entries,
+                    key=lambda entry: (
+                        entry.model,
+                        entry.effective_from,
+                        entry.entry_id,
+                    ),
+                )
+            ),
+        )
+
     @classmethod
     def from_path(cls, path: Path) -> "PriceCatalog":
         if not isinstance(path, Path):
             path = Path(path)
+        info = path.lstat()
+        if path.is_symlink() or not path.is_file() or info.st_nlink != 1:
+            raise ValueError("price catalog is not a regular file")
+        if info.st_size < 0 or info.st_size > PRICE_CATALOG_MAX_BYTES:
+            raise ValueError("price catalog exceeds bound")
         data = json.loads(path.read_text(encoding="utf-8"))
         return cls.from_dict(data)
 
     @classmethod
     def from_dict(cls, value: object) -> "PriceCatalog":
-        if not isinstance(value, dict) or value.get("schema_version") != 1:
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema_version", "entries"}
+            or value.get("schema_version") != 1
+        ):
             raise ValueError("price catalog schema")
         raw_entries = value.get("entries")
-        if not isinstance(raw_entries, list) or len(raw_entries) > 256:
+        if not isinstance(raw_entries, list) or len(raw_entries) > PRICE_CATALOG_MAX_ENTRIES:
             raise ValueError("price catalog entries")
         entries = tuple(_parse_price_entry(item) for item in raw_entries)
-        _reject_price_overlaps(entries)
         return cls(entries=entries)
 
     @classmethod
@@ -256,8 +311,41 @@ class PriceCatalog:
     def find(self, model: str | None, when: datetime) -> PriceEntry | None:
         if not isinstance(model, str):
             return None
-        when = _as_utc(when)
+        try:
+            when = _as_utc(when)
+        except (TypeError, ValueError):
+            return None
         return next((entry for entry in self.entries if entry.covers(model, when)), None)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the canonical, complete catalog document."""
+
+        return {
+            "schema_version": 1,
+            "entries": [entry.to_dict() for entry in self.entries],
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(
+            self.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+
+    def canonical_bytes(self) -> bytes:
+        return self.canonical_json().encode("utf-8")
+
+    @property
+    def digest(self) -> str:
+        return sha256(self.canonical_bytes()).hexdigest()
+
+    @property
+    def catalog_digest(self) -> str:
+        """Alias used by persistence consumers for the canonical digest."""
+
+        return self.digest
+
+    @property
+    def canonical_digest(self) -> str:
+        return self.digest
 
 
 @dataclass(frozen=True)
@@ -266,6 +354,10 @@ class CostEstimate:
     reason: str | None = None
     micro_usd: int | None = None
     price_entry: dict[str, object] | None = None
+    uncached_input_micro_usd: int | None = None
+    cached_input_micro_usd: int | None = None
+    output_micro_usd: int | None = None
+    catalog_digest: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {"status": self.status.value}
@@ -273,8 +365,17 @@ class CostEstimate:
             result["reason"] = self.reason
         if self.micro_usd is not None:
             result["micro_usd"] = self.micro_usd
+        for key, value in (
+            ("uncached_input_micro_usd", self.uncached_input_micro_usd),
+            ("cached_input_micro_usd", self.cached_input_micro_usd),
+            ("output_micro_usd", self.output_micro_usd),
+        ):
+            if value is not None:
+                result[key] = value
         if self.price_entry is not None:
             result["price_entry"] = self.price_entry
+        if self.catalog_digest is not None:
+            result["catalog_digest"] = self.catalog_digest
         return result
 
 
@@ -329,14 +430,42 @@ class TelemetryInvocation:
 
 
 def estimate_cost(
-    aggregate: TelemetryAggregate,
+    aggregate: TelemetryAggregate | Iterable[TelemetryTurn] | None = None,
     *,
     billing_mode: str | BillingMode,
     configured_model: str | None,
     started_at: datetime,
     catalog: PriceCatalog | None,
+    turns: Iterable[TelemetryTurn] | None = None,
 ) -> CostEstimate:
-    """Estimate API cost using integer micro-USD arithmetic only."""
+    """Estimate API cost using independently rounded turn components.
+
+    ``TelemetryAggregate`` remains accepted for compatibility with callers
+    that only have invocation totals.  The recorder passes its validated turn
+    sequence so each turn is rounded before components are summed.
+    """
+
+    selected_turns: list[TelemetryTurn] | None = None
+    aggregate_value: TelemetryAggregate
+    if turns is not None:
+        selected_turns = list(turns)
+        aggregate_value = TelemetryAggregate.from_turns(selected_turns)
+    elif isinstance(aggregate, TelemetryAggregate):
+        aggregate_value = aggregate
+        try:
+            TelemetryAggregate.from_dict(aggregate.to_dict())
+        except ValueError:
+            return CostEstimate(CostStatus.unavailable, "usage_unavailable")
+    elif aggregate is None:
+        return CostEstimate(CostStatus.unavailable, "usage_unavailable")
+    else:
+        try:
+            selected_turns = list(aggregate)
+        except TypeError:
+            return CostEstimate(CostStatus.unavailable, "usage_unavailable")
+        if any(not isinstance(turn, TelemetryTurn) for turn in selected_turns):
+            return CostEstimate(CostStatus.unavailable, "usage_unavailable")
+        aggregate_value = TelemetryAggregate.from_turns(selected_turns)
 
     try:
         mode = BillingMode(billing_mode)
@@ -346,31 +475,57 @@ def estimate_cost(
         return CostEstimate(CostStatus.unavailable, "chatgpt_cost_unavailable")
     if mode == BillingMode.unknown:
         return CostEstimate(CostStatus.unavailable, "billing_mode_unknown")
-    if aggregate.completed_turns == 0:
+    if aggregate_value.completed_turns == 0:
         return CostEstimate(CostStatus.unavailable, "usage_unavailable")
     if not isinstance(configured_model, str) or not configured_model:
         return CostEstimate(CostStatus.unavailable, "configured_model_missing")
     if catalog is None:
         return CostEstimate(CostStatus.unavailable, "price_catalog_unavailable")
-    entry = catalog.find(configured_model, started_at)
+    try:
+        entry = catalog.find(configured_model, started_at)
+    except Exception:
+        return CostEstimate(CostStatus.unavailable, "price_catalog_unavailable")
     if entry is None:
         return CostEstimate(CostStatus.unavailable, "price_entry_unmatched")
-    micro_usd = (
-        _round_micro_usd(
-            aggregate.uncached_input_tokens, entry.input_micro_usd_per_million
-        )
-        + _round_micro_usd(
-            aggregate.cached_input_tokens,
-            entry.cached_input_micro_usd_per_million,
-        )
-        + _round_micro_usd(
-            aggregate.output_tokens, entry.output_micro_usd_per_million
-        )
+    if selected_turns is None:
+        selected_turns = [
+            TelemetryTurn(
+                ordinal=1,
+                input_tokens=aggregate_value.input_tokens,
+                cached_input_tokens=aggregate_value.cached_input_tokens,
+                uncached_input_tokens=aggregate_value.uncached_input_tokens,
+                output_tokens=aggregate_value.output_tokens,
+                reasoning_output_tokens=aggregate_value.reasoning_output_tokens,
+                total_tokens=aggregate_value.total_tokens,
+            )
+        ]
+    uncached_input_micro_usd = sum(
+        _round_micro_usd(turn.uncached_input_tokens, entry.input_micro_usd_per_million)
+        for turn in selected_turns
     )
+    cached_input_micro_usd = sum(
+        _round_micro_usd(
+            turn.cached_input_tokens, entry.cached_input_micro_usd_per_million
+        )
+        for turn in selected_turns
+    )
+    output_micro_usd = sum(
+        _round_micro_usd(turn.output_tokens, entry.output_micro_usd_per_million)
+        for turn in selected_turns
+    )
+    micro_usd = uncached_input_micro_usd + cached_input_micro_usd + output_micro_usd
+    try:
+        catalog_digest = catalog.digest
+    except Exception:
+        return CostEstimate(CostStatus.unavailable, "price_catalog_unavailable")
     return CostEstimate(
         CostStatus.estimated,
         micro_usd=micro_usd,
-        price_entry=entry.to_public_dict(),
+        uncached_input_micro_usd=uncached_input_micro_usd,
+        cached_input_micro_usd=cached_input_micro_usd,
+        output_micro_usd=output_micro_usd,
+        price_entry=entry.to_public_dict(catalog_digest=catalog_digest),
+        catalog_digest=catalog_digest,
     )
 
 
@@ -491,7 +646,7 @@ class TelemetryRecorder:
         aggregate = self.aggregate
         completeness = self._completeness()
         cost = estimate_cost(
-            aggregate,
+            self.turns,
             billing_mode=self.billing_mode,
             configured_model=self.configured_model,
             started_at=self.started_at or completed_at,
@@ -733,11 +888,30 @@ def _merge_costs(values: list[dict[str, object]]) -> dict[str, object]:
         }
     total = sum(int(item.get("micro_usd", 0)) for item in usable)
     result: dict[str, object] = {"status": CostStatus.estimated.value, "micro_usd": total}
+    component_keys = (
+        "uncached_input_micro_usd",
+        "cached_input_micro_usd",
+        "output_micro_usd",
+    )
+    if all(all(key in item for key in component_keys) for item in usable):
+        for key in component_keys:
+            result[key] = sum(int(item[key]) for item in usable)
     entries = [item.get("price_entry") for item in usable if isinstance(item.get("price_entry"), dict)]
     if len(entries) == 1:
         result["price_entry"] = entries[0]
     elif entries:
         result["price_entries"] = entries[:32]
+    digests = sorted(
+        {
+            str(item["catalog_digest"])
+            for item in usable
+            if isinstance(item.get("catalog_digest"), str)
+        }
+    )
+    if len(digests) == 1:
+        result["catalog_digest"] = digests[0]
+    elif digests:
+        result["catalog_digests"] = digests[:32]
     return result
 
 
@@ -768,7 +942,11 @@ def _parse_price_entry(value: object) -> PriceEntry:
     model = value["model"]
     if not isinstance(entry_id, str) or not _SAFE_ID_RE.fullmatch(entry_id):
         raise ValueError("price entry id")
-    if not isinstance(model, str) or not _MODEL_RE.fullmatch(model):
+    if (
+        not isinstance(model, str)
+        or not _MODEL_RE.fullmatch(model)
+        or len(model.encode("utf-8")) > TELEMETRY_MAX_MODEL_BYTES
+    ):
         raise ValueError("price entry model")
     effective_from = _parse_utc(value["effective_from"])
     effective_until = (
@@ -785,7 +963,7 @@ def _parse_price_entry(value: object) -> PriceEntry:
         "output_micro_usd_per_million",
     ):
         rate = value[key]
-        if type(rate) is not int or rate < 0:
+        if type(rate) is not int or rate < 0 or rate > PRICE_RATE_MAX:
             raise ValueError(f"price entry {key}")
         rates[key] = rate
     source = value["source"]
@@ -800,8 +978,9 @@ def _parse_price_entry(value: object) -> PriceEntry:
         or any(character in label for character in "\x00\r\n")
         or not isinstance(url, str)
         or not url.startswith("https://")
+        or url != url.strip()
         or len(url.encode()) > TELEMETRY_MAX_SOURCE_URL_BYTES
-        or any(character in url for character in "\x00\r\n")
+        or any(character.isspace() for character in url)
     ):
         raise ValueError("price entry source")
     parsed_url = urlsplit(url)
@@ -850,6 +1029,20 @@ def _validate_cost(value: object) -> None:
         micro = value.get("micro_usd")
         if type(micro) is not int or micro < 0:
             raise ValueError("telemetry cost amount")
+        component_keys = (
+            "uncached_input_micro_usd",
+            "cached_input_micro_usd",
+            "output_micro_usd",
+        )
+        present = [key in value for key in component_keys]
+        if any(present) and not all(present):
+            raise ValueError("telemetry cost components")
+        if all(present):
+            components = [value[key] for key in component_keys]
+            if any(type(component) is not int or component < 0 for component in components):
+                raise ValueError("telemetry cost components")
+            if sum(components) != micro:
+                raise ValueError("telemetry cost component total")
         price = value.get("price_entry")
         if not isinstance(price, dict):
             raise ValueError("telemetry cost provenance")
@@ -858,6 +1051,12 @@ def _validate_cost(value: object) -> None:
     reason = value.get("reason")
     if reason is not None and (not isinstance(reason, str) or len(reason) > 96):
         raise ValueError("telemetry cost reason")
+    digest = value.get("catalog_digest")
+    if digest is not None and (
+        not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+    ):
+        raise ValueError("telemetry cost catalog digest")
 
 
 def _validate_issues(value: object) -> None:
@@ -925,6 +1124,9 @@ def _as_utc(value: datetime) -> datetime:
 def _parse_utc(value: object) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ValueError("expected UTC timestamp")
+    fraction = re.search(r"[.,](\d+)Z$", value)
+    if fraction is not None and len(fraction.group(1)) > 6:
+        raise ValueError("invalid UTC timestamp")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
@@ -936,6 +1138,14 @@ def _format_utc(value: datetime | None) -> str:
     return _as_utc(value or datetime.now(_UTC)).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _format_price_utc(value: datetime) -> str:
+    """Serialize price boundaries without discarding accepted precision."""
+
+    value = _as_utc(value)
+    timespec = "milliseconds" if value.microsecond % 1_000 == 0 else "microseconds"
+    return value.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 
 def _atomic_write_json(path: Path, value: dict[str, object]) -> None:
@@ -970,6 +1180,9 @@ __all__ = [
     "BillingMode",
     "CostEstimate",
     "CostStatus",
+    "PRICE_CATALOG_MAX_BYTES",
+    "PRICE_CATALOG_MAX_ENTRIES",
+    "PRICE_RATE_MAX",
     "PriceCatalog",
     "PriceEntry",
     "TELEMETRY_MAX_SIDECAR_BYTES",

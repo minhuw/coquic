@@ -49,6 +49,7 @@ _CODEX_RETRY_PROMPT = (
     "Continue the interrupted turn. Complete the original task and return the "
     "required final response."
 )
+_OPERATIONAL_PRICE_CATALOG = Path("steward") / "model-prices.json"
 _TRANSIENT_CODEX_PATTERNS = (
     "selected model is at capacity",
     "stream disconnected before completion",
@@ -1162,15 +1163,17 @@ def _new_telemetry_recorder(
 ) -> TelemetryRecorder:
     catalog: PriceCatalog | None = None
     catalog_error = False
-    catalog_path = config.telemetry.price_catalog_path
-    if catalog_path is not None:
-        selected = catalog_path
-        if not selected.is_absolute():
-            selected = config.repo_root / selected
-        try:
-            catalog = PriceCatalog.from_path(selected)
-        except Exception:
-            catalog_error = True
+    catalog_override = config.telemetry.price_catalog_path is not None
+    catalog_path = config.repo_root / _OPERATIONAL_PRICE_CATALOG
+    try:
+        catalog = PriceCatalog.from_path(catalog_path)
+    except FileNotFoundError:
+        # A source checkout used only as a test fixture may not carry the
+        # optional operational data file; cost remains N.A. without changing
+        # capture completeness.
+        pass
+    except Exception:
+        catalog_error = True
     clock_error = False
     monotonic_ns = time.monotonic_ns
     try:
@@ -1197,6 +1200,8 @@ def _new_telemetry_recorder(
     )
     if catalog_error:
         recorder.add_issue("price_catalog_unavailable")
+    if catalog_override:
+        recorder.add_issue("price_catalog_override_ignored")
     if clock_error:
         recorder.add_issue("telemetry_clock_unavailable")
     return recorder

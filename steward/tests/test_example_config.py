@@ -20,6 +20,8 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     assert config.publication.enabled is False
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
+    assert config.telemetry.billing_mode == "unknown"
+    assert config.telemetry.price_catalog_path is None
 
 
 def test_enabled_publication_runs_preflight_without_deployment_credentials(

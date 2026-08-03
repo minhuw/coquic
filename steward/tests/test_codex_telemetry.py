@@ -15,8 +15,19 @@ from coquic_steward.agents.telemetry import (
     estimate_cost,
     load_sidecar,
 )
-from coquic_steward.agents.runner import CodexRunner, _archive_retry_artifacts
-from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind, WorkerResult
+from coquic_steward.agents.runner import (
+    CodexRunner,
+    _archive_retry_artifacts,
+    _new_telemetry_recorder,
+)
+from coquic_steward.core.config import TelemetryConfig
+from coquic_steward.core.models import (
+    CodexStage,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
+    WorkerResult,
+)
 from coquic_steward.storage import TaskStore
 
 
@@ -178,6 +189,211 @@ def test_catalog_rejects_source_urls_with_credentials() -> None:
                 ],
             }
         )
+
+
+def test_catalog_digest_is_canonical_and_ids_are_unique() -> None:
+    entries = [
+        {
+            "id": "new",
+            "model": "m",
+            "effective_from": "2026-02-01T00:00:00Z",
+            "input_micro_usd_per_million": 2,
+            "cached_input_micro_usd_per_million": 2,
+            "output_micro_usd_per_million": 2,
+            "source": {"label": "Example", "url": "https://example.invalid/new"},
+        },
+        {
+            "id": "old",
+            "model": "m",
+            "effective_from": "2026-01-01T00:00:00Z",
+            "effective_until": "2026-02-01T00:00:00Z",
+            "input_micro_usd_per_million": 1,
+            "cached_input_micro_usd_per_million": 1,
+            "output_micro_usd_per_million": 1,
+            "source": {"label": "Example", "url": "https://example.invalid/old"},
+        },
+    ]
+    first = PriceCatalog.from_dict({"schema_version": 1, "entries": entries})
+    second = PriceCatalog.from_dict(
+        {"schema_version": 1, "entries": list(reversed(entries))}
+    )
+    assert first.digest == second.digest == first.catalog_digest
+    assert [entry.entry_id for entry in first.entries] == ["old", "new"]
+    assert first.find("m", datetime(2026, 2, 1, tzinfo=UTC)).entry_id == "new"
+    assert first.find("m", datetime(2026, 1, 31, 23, 59, 59, tzinfo=UTC)).entry_id == "old"
+
+    duplicate = dict(entries[0])
+    duplicate["effective_from"] = "2027-01-01T00:00:00Z"
+    with pytest.raises(ValueError, match="duplicate price entry id"):
+        PriceCatalog.from_dict({"schema_version": 1, "entries": [entries[0], duplicate]})
+
+
+def test_catalog_preserves_microsecond_boundaries_in_digest_and_lookup() -> None:
+    def make_catalog(effective_from: str) -> PriceCatalog:
+        return PriceCatalog.from_dict(
+            {
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "id": "microsecond-boundary",
+                        "model": "m",
+                        "effective_from": effective_from,
+                        "input_micro_usd_per_million": 1,
+                        "cached_input_micro_usd_per_million": 1,
+                        "output_micro_usd_per_million": 1,
+                        "source": {
+                            "label": "Example",
+                            "url": "https://example.invalid/microsecond",
+                        },
+                    }
+                ],
+            }
+        )
+
+    first = make_catalog("2026-01-01T00:00:00.000001Z")
+    second = make_catalog("2026-01-01T00:00:00.000002Z")
+    lookup = datetime(2026, 1, 1, 0, 0, 0, 1, tzinfo=UTC)
+
+    assert first.digest != second.digest
+    assert first.find("m", lookup) is not None
+    assert second.find("m", lookup) is None
+    assert PriceCatalog.from_dict(first.to_dict()).digest == first.digest
+    assert PriceCatalog.from_dict(second.to_dict()).digest == second.digest
+    assert "2026-01-01T00:00:00.000001Z" in first.canonical_json()
+    assert "2026-01-01T00:00:00.000002Z" in second.canonical_json()
+    with pytest.raises(ValueError, match="invalid UTC timestamp"):
+        make_catalog("2026-01-01T00:00:00.0000019Z")
+
+
+def test_recorder_prices_each_turn_components_and_reasoning_once(tmp_path: Path) -> None:
+    catalog = PriceCatalog.from_dict(
+        {
+            "schema_version": 1,
+            "entries": [
+                {
+                    "id": "m-2026",
+                    "model": "fictional-example-model",
+                    "effective_from": "2026-01-01T00:00:00Z",
+                    "input_micro_usd_per_million": 500_000,
+                    "cached_input_micro_usd_per_million": 500_000,
+                    "output_micro_usd_per_million": 500_000,
+                    "source": {"label": "Example", "url": "https://example.invalid/m"},
+                }
+            ],
+        }
+    )
+    recorder = _recorder(
+        tmp_path / "telemetry.json", billing_mode=BillingMode.api, catalog=catalog
+    )
+    # Rounding each one-token turn produces 1 + 1, while aggregate rounding
+    # would produce 1. Reasoning remains an output subset and is not billed a
+    # second time.
+    assert recorder.observe({"type": "turn.completed", "usage": _usage(1, 0, 1, 1)})
+    assert recorder.observe({"type": "turn.completed", "usage": _usage(1, 0, 1, 0)})
+    payload = recorder.finalize(process_outcome="completed")
+    assert payload["cost"] == {
+        "status": "estimated",
+        "micro_usd": 4,
+        "uncached_input_micro_usd": 2,
+        "cached_input_micro_usd": 0,
+        "output_micro_usd": 2,
+        "price_entry": {
+            "entry_id": "m-2026",
+            "model": "fictional-example-model",
+            "effective_from": "2026-01-01T00:00:00.000Z",
+            "effective_until": None,
+            "source": {"label": "Example", "url": "https://example.invalid/m"},
+            "catalog_digest": catalog.digest,
+        },
+        "catalog_digest": catalog.digest,
+    }
+
+
+def test_estimate_cost_uses_invocation_start_and_rejects_fuzzy_models() -> None:
+    catalog = PriceCatalog.from_dict(
+        {
+            "schema_version": 1,
+            "entries": [
+                {
+                    "id": "old",
+                    "model": "m",
+                    "effective_from": "2026-01-01T00:00:00Z",
+                    "effective_until": "2026-02-01T00:00:00Z",
+                    "input_micro_usd_per_million": 1_000_000,
+                    "cached_input_micro_usd_per_million": 1_000_000,
+                    "output_micro_usd_per_million": 1_000_000,
+                    "source": {"label": "Example", "url": "https://example.invalid/old"},
+                },
+                {
+                    "id": "new",
+                    "model": "m",
+                    "effective_from": "2026-02-01T00:00:00Z",
+                    "input_micro_usd_per_million": 2_000_000,
+                    "cached_input_micro_usd_per_million": 2_000_000,
+                    "output_micro_usd_per_million": 2_000_000,
+                    "source": {"label": "Example", "url": "https://example.invalid/new"},
+                },
+            ],
+        }
+    )
+    turns = [TelemetryTurn.from_usage(_usage(1, 0, 1, 1))]
+    before = estimate_cost(
+        turns,
+        billing_mode=BillingMode.api,
+        configured_model="m",
+        started_at=datetime(2026, 1, 31, tzinfo=UTC),
+        catalog=catalog,
+    )
+    after = estimate_cost(
+        turns,
+        billing_mode=BillingMode.api,
+        configured_model="m",
+        started_at=datetime(2026, 2, 1, tzinfo=UTC),
+        catalog=catalog,
+    )
+    assert before.micro_usd == 2
+    assert after.micro_usd == 4
+    assert after.price_entry["entry_id"] == "new"
+    rejected = estimate_cost(
+        turns,
+        billing_mode=BillingMode.api,
+        configured_model="m-preview",
+        started_at=datetime(2026, 2, 1, tzinfo=UTC),
+        catalog=catalog,
+    )
+    assert rejected.status is CostStatus.unavailable
+    assert rejected.reason == "price_entry_unmatched"
+
+
+def test_runner_ignores_legacy_catalog_override(config, tmp_path: Path) -> None:
+    operational = config.repo_root / "steward"
+    operational.mkdir()
+    (operational / "model-prices.json").write_text(
+        '{"schema_version": 1, "entries": []}\n', encoding="utf-8"
+    )
+    override = tmp_path / "override.json"
+    override.write_text('{"schema_version": 1, "entries": []}\n', encoding="utf-8")
+    configured = config.__class__(
+        **{
+            **config.__dict__,
+            "telemetry": TelemetryConfig(
+                billing_mode="api", price_catalog_path=override
+            ),
+        }
+    )
+    recorder = _new_telemetry_recorder(
+        configured,
+        tmp_path / "transcript.jsonl",
+        task_id="task",
+        run_name="run",
+        stage=CodexStage.code,
+        model="m",
+        reasoning_effort="low",
+        retry_ordinal=0,
+    )
+    assert recorder.catalog is not None
+    assert recorder.catalog.entries == ()
+    assert recorder.issues["price_catalog_override_ignored"] == 1
 
 
 def test_api_cost_without_completed_turns_is_unavailable() -> None:

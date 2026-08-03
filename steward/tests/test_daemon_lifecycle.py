@@ -2150,6 +2150,119 @@ def test_shutdown_treats_queued_task_without_container_as_noop(config):
     assert daemon.lifecycle_state.value == "stopped"
 
 
+@pytest.mark.parametrize(
+    "cleanup_events",
+    [
+        ("cleanup.container_removed", "cleanup_complete"),
+        ("cleanup_complete",),
+    ],
+    ids=["container-removed", "cleanup-complete"],
+)
+def test_shutdown_skips_uncached_cleaned_terminal_container(
+    config, cleanup_events
+):
+    store = TaskStore(config.db_path)
+    task, _ = _task(store, "cleaned terminal container")
+    store.finish_task(task.id, TaskStatus.failed, "terminal")
+    worktree = config.worktrees_dir / task.id
+    private_home = config.private_sessions_dir / task.id
+    worktree.mkdir(parents=True)
+    private_home.mkdir(parents=True)
+    shutil.rmtree(worktree)
+    shutil.rmtree(private_home)
+    task = store.get(task.id)
+    task.worktree_path = worktree
+    store.save(task)
+    for kind in cleanup_events:
+        store.add_event(task.id, kind, "terminal cleanup evidence")
+
+    factory_calls = []
+
+    class RecreatedRuntime:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+
+        def stop(self, *, timeout=None):
+            self.stop_calls += 1
+            self.running = False
+
+        def inspect(self):
+            return SimpleNamespace(running=self.running)
+
+    runtime = RecreatedRuntime()
+
+    def factory(record):
+        factory_calls.append(record.id)
+        worktree.mkdir(parents=True, exist_ok=True)
+        private_home.mkdir(parents=True, exist_ok=True)
+        return runtime
+
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        runtime_factory=factory,
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    result = daemon.shutdown(force=True)
+
+    assert result.state.value == "stopped"
+    assert daemon.lifecycle_state.value == "stopped"
+    assert factory_calls == []
+    assert runtime.stop_calls == 0
+    assert not worktree.exists()
+    assert not private_home.exists()
+
+
+def test_shutdown_discovers_terminal_container_without_cleanup_proof(config):
+    store = TaskStore(config.db_path)
+    task, _ = _task(store, "unproven terminal container")
+    store.finish_task(task.id, TaskStatus.failed, "terminal")
+    worktree = config.worktrees_dir / task.id
+    worktree.mkdir(parents=True)
+    task = store.get(task.id)
+    task.worktree_path = worktree
+    store.save(task)
+
+    factory_calls = []
+
+    class ExistingRuntime:
+        def __init__(self):
+            self.running = True
+            self.stop_calls = 0
+
+        def stop(self, *, timeout=None):
+            self.stop_calls += 1
+            self.running = False
+
+        def inspect(self):
+            return SimpleNamespace(running=self.running)
+
+    runtime = ExistingRuntime()
+
+    def factory(record):
+        factory_calls.append(record.id)
+        return runtime
+
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        runtime_factory=factory,
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    daemon = StewardDaemon(config, store, session_supervisor=supervisor)
+
+    result = daemon.shutdown(force=True)
+
+    assert result.state.value == "stopped"
+    assert factory_calls == [task.id]
+    assert runtime.stop_calls == 1
+
+
 def test_recovery_waits_for_live_wrapper_before_adoption(config, monkeypatch):
     store = TaskStore(config.db_path)
     task, _, predecessor = _interrupted_run(config, store)

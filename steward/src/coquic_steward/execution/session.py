@@ -1775,6 +1775,8 @@ class SessionSupervisor:
             task = self.store.get(task_id)
             if task.worktree_path is None:
                 return False
+            if self._container_cleanup_proven(task_id):
+                return False
             runtime = self.runtime_factory(task)
             self._runtimes[task_id] = runtime
         if runtime is None:
@@ -1787,6 +1789,23 @@ class SessionSupervisor:
                 "task container remained running after stop",
             )
         return True
+
+    def _container_cleanup_proven(self, task_id: str) -> bool:
+        """Return whether durable task events prove the container was removed."""
+
+        event_exists = getattr(self.store, "event_exists", None)
+        if callable(event_exists):
+            return bool(
+                event_exists(task_id, "cleanup.container_removed")
+                or event_exists(task_id, "cleanup_complete")
+            )
+        events = getattr(self.store, "events", None)
+        if not callable(events):
+            return False
+        return any(
+            event.kind in {"cleanup.container_removed", "cleanup_complete"}
+            for event in events(task_id)
+        )
 
     def reconcile_container(
         self,

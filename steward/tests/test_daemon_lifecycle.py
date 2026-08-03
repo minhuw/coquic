@@ -36,6 +36,7 @@ from coquic_steward.planning import (
 from coquic_steward.core.config import (
     StewardConfig,
     StewardContainerConfig,
+    StewardPublicationConfig,
 )
 from coquic_steward.execution.container import TaskContainerRuntime
 from coquic_steward.execution.container_config import TaskContainerConfig
@@ -61,6 +62,36 @@ from coquic_steward.storage import TaskStore
 
 
 IMAGE = "sha256:" + "a" * 64
+
+
+def _enabled_publication_config(
+    tmp_path: Path, credential: str
+) -> StewardPublicationConfig:
+    paths = []
+    for name, value in (
+        ("d1-token", credential),
+        ("r2-access-key", "worker-access-key"),
+        ("r2-secret-key", "worker-secret-key"),
+    ):
+        path = tmp_path / name
+        path.write_text(value + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        paths.append(path)
+    staging = tmp_path / "publication-staging"
+    staging.mkdir(mode=0o700)
+    return StewardPublicationConfig(
+        enabled=True,
+        account_id="a" * 32,
+        d1_database_id="00000000-0000-4000-8000-000000000000",
+        d1_token_path=paths[0],
+        r2_endpoint="https://example.r2.cloudflarestorage.com",
+        r2_access_key_id_path=paths[1],
+        r2_secret_access_key_path=paths[2],
+        public_bucket="publication-public",
+        private_bucket="publication-private",
+        public_base_url="https://publication.example.test",
+        staging_root=staging,
+    )
 
 
 def _task(store: TaskStore, title: str = "lifecycle"):
@@ -140,6 +171,113 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     assert callable(daemon.store.on_change)
     daemon.store.on_change()
     assert daemon._publication_wakeup.is_set()
+
+
+def test_publication_worker_reconciles_credential_free_staging_identity(
+    tmp_path: Path,
+) -> None:
+    config = _enabled_publication_config(tmp_path, "synthetic-worker-credential")
+    generation = SimpleNamespace(
+        publication_id="pub-credential-free-staging",
+        task_id="task-credential-staging",
+        state="queued",
+        reason=None,
+    )
+
+    class Store:
+        def list_publication_generations(self, **_kwargs):
+            return [generation]
+
+    class Publisher:
+        def __init__(self):
+            self.publish_calls: list[dict[str, object]] = []
+            self.retry_calls: list[dict[str, object]] = []
+
+        def publish(self, publication_id, *, source, compose_kwargs):
+            self.publish_calls.append(
+                {
+                    "publication_id": publication_id,
+                    "source": source,
+                    "compose_kwargs": compose_kwargs,
+                }
+            )
+            return SimpleNamespace(
+                status="blocked",
+                reason="integrity",
+                phase="authenticate",
+            )
+
+        def retry_publication(self, publication_id, source, *, compose_kwargs):
+            self.retry_calls.append(
+                {
+                    "publication_id": publication_id,
+                    "source": source,
+                    "compose_kwargs": compose_kwargs,
+                }
+            )
+            return SimpleNamespace(status="queued")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.config = SimpleNamespace(publication=config)
+    daemon.logger = None
+    daemon._publication_source = lambda _generation: {"canonical": True}
+    publisher = Publisher()
+
+    assert daemon._publish_next_generation(publisher) is True
+    assert len(publisher.publish_calls) == 1
+    assert len(publisher.retry_calls) == 1
+    expected_sources = (
+        config.d1_token_path,
+        config.r2_access_key_id_path,
+        config.r2_secret_access_key_path,
+    )
+    assert publisher.publish_calls[0]["compose_kwargs"] == {
+        "credential_sources": expected_sources
+    }
+    assert publisher.retry_calls[0]["compose_kwargs"] == {
+        "credential_sources": expected_sources
+    }
+
+
+def test_publication_worker_reconciles_blocked_identity_after_restart(
+    tmp_path: Path,
+) -> None:
+    config = _enabled_publication_config(tmp_path, "synthetic-restart-credential")
+    generation = SimpleNamespace(
+        publication_id="pub-credential-free-restart",
+        task_id="task-credential-restart",
+        state="blocked",
+        reason="integrity",
+    )
+
+    class Store:
+        def list_publication_generations(self, **_kwargs):
+            return [generation]
+
+    class Publisher:
+        def __init__(self):
+            self.publish_calls = 0
+            self.retry_calls: list[object] = []
+
+        def publish(self, *_args, **_kwargs):
+            self.publish_calls += 1
+            return SimpleNamespace(status="blocked")
+
+        def retry_publication(self, publication_id, source, *, compose_kwargs):
+            self.retry_calls.append((publication_id, source, compose_kwargs))
+            return SimpleNamespace(status="queued")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.config = SimpleNamespace(publication=config)
+    daemon.logger = None
+    daemon._publication_source = lambda _generation: {"canonical": True}
+    publisher = Publisher()
+
+    assert daemon._publish_next_generation(publisher) is True
+    assert publisher.publish_calls == 0
+    assert len(publisher.retry_calls) == 1
 
 
 def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):

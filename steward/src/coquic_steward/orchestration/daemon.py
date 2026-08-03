@@ -1000,6 +1000,59 @@ class StewardDaemon:
             value = PUBLICATION_RETRY_INTERVAL_SECONDS
         return max(0.05, min(PUBLICATION_RETRY_INTERVAL_SECONDS, value))
 
+    def _publication_compose_kwargs(self) -> dict[str, object]:
+        """Return daemon-only inputs for the canonical publication composer."""
+
+        publication = getattr(getattr(self, "config", None), "publication", None)
+        if publication is None:
+            return {"credential_sources": ()}
+        return {
+            "credential_sources": tuple(
+                path
+                for path in (
+                    getattr(publication, "d1_token_path", None),
+                    getattr(publication, "r2_access_key_id_path", None),
+                    getattr(publication, "r2_secret_access_key_path", None),
+                )
+                if path is not None
+            )
+        }
+
+    def _repair_staged_generation(
+        self,
+        publisher: CloudPublisher,
+        generation: object,
+        source: object | None,
+        compose_kwargs: Mapping[str, object],
+    ) -> bool:
+        """Replace a credential-free staging row before any provider request."""
+
+        publication_id = getattr(generation, "publication_id", None)
+        retry = getattr(publisher, "retry_publication", None)
+        if not isinstance(publication_id, str) or source is None or not callable(retry):
+            return False
+        try:
+            result = retry(
+                publication_id,
+                source,
+                compose_kwargs=compose_kwargs,
+            )
+        except Exception as exc:
+            self._log(
+                "publication generation reconciliation failed "
+                f"generation={publication_id} error={exc.__class__.__name__}"
+            )
+            return False
+        status = getattr(result, "status", None)
+        status = getattr(status, "value", status)
+        if status == "queued":
+            self._log(
+                "publication generation reconciled "
+                f"generation={publication_id}"
+            )
+            return True
+        return False
+
     def _publication_source(self, generation: object) -> object | None:
         task_id = getattr(generation, "task_id", None)
         run_id = getattr(generation, "run_id", None)
@@ -1045,25 +1098,39 @@ class StewardDaemon:
         except TypeError:
             generations = listing(limit=1)
         if not generations:
+            # A daemon can crash after the publisher fail-closes the old
+            # credential-free staging identity but before retry_publication
+            # replaces it.  Reconcile that bounded local state on restart.
+            try:
+                blocked = listing(states={"blocked"}, limit=1)
+            except TypeError:
+                blocked = listing(limit=1)
+            generations = [
+                item
+                for item in blocked
+                if getattr(item, "reason", None) == "integrity"
+            ]
+        if not generations:
             return False
         generation = generations[0]
         publication_id = getattr(generation, "publication_id", None)
         if not isinstance(publication_id, str):
             return True
         source = self._publication_source(generation)
+        compose_kwargs = self._publication_compose_kwargs()
+        state = getattr(
+            getattr(generation, "state", None),
+            "value",
+            getattr(generation, "state", None),
+        )
+        if state == "blocked":
+            return self._repair_staged_generation(
+                publisher,
+                generation,
+                source,
+                compose_kwargs,
+            )
         try:
-            publication = self.config.publication
-            compose_kwargs = {
-                "credential_sources": tuple(
-                    path
-                    for path in (
-                        getattr(publication, "d1_token_path", None),
-                        getattr(publication, "r2_access_key_id_path", None),
-                        getattr(publication, "r2_secret_access_key_path", None),
-                    )
-                    if path is not None
-                )
-            }
             result = publisher.publish(
                 publication_id,
                 source=source,
@@ -1074,6 +1141,18 @@ class StewardDaemon:
                 "publication worker processed "
                 f"generation={publication_id} status={status or 'unknown'}"
             )
+            status_value = getattr(status, "value", status)
+            if (
+                status_value == "blocked"
+                and getattr(result, "reason", None) == "integrity"
+                and getattr(result, "phase", None) == "authenticate"
+            ):
+                return self._repair_staged_generation(
+                    publisher,
+                    generation,
+                    source,
+                    compose_kwargs,
+                )
         except Exception as exc:
             # CloudPublisher reduces expected provider failures to durable retry
             # states.  This guard keeps an unexpected local failure from taking
@@ -2645,7 +2724,7 @@ class StewardDaemon:
             composed = compose_publication_generation(
                 source,
                 task_id=task.id,
-                credential_sources=(),
+                **self._publication_compose_kwargs(),
             )
         except Exception:
             return False, "composition_failed"

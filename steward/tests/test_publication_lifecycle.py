@@ -28,8 +28,10 @@ from coquic_steward.publication.outbox import (
     PublicationReceipt,
     ReceiptClass,
 )
+from coquic_steward.publication.publisher import CloudPublisher
 from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.publication.scanner import ScannerFinding, ScannerReport
+from coquic_steward.storage import TaskStore
 
 
 class _EventStore:
@@ -545,6 +547,199 @@ def test_terminal_publication_receipts_match_immutable_generation(
     assert daemon._terminal_publication_receipts_verified(task, durable) == (
         False,
         "receipt_mismatch",
+    )
+
+
+def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from coquic_steward.publication.generation import compose_publication_generation
+
+    credential = "synthetic-credential-value"
+    config = _publication_config(tmp_path, credential)
+    graph = _publication_graph("terminal-credential")
+    source = graph["runs"][0]
+    source.documents["codex.jsonl"] = source.documents["codex.jsonl"].replace(
+        b'"safe"', json.dumps(credential).encode("utf-8")
+    )
+    scanner = lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b"")
+    aware = compose_publication_generation(
+        graph,
+        scanner_runner=scanner,
+        credential_sources=(config.d1_token_path,),
+    )
+    free = compose_publication_generation(
+        graph,
+        scanner_runner=scanner,
+        credential_sources=(),
+    )
+    assert isinstance(aware, PublicationGeneration)
+    assert isinstance(free, PublicationGeneration)
+    assert len(aware.private_originals) == 1
+    assert credential not in repr(aware.payload)
+    assert aware.publication_id != free.publication_id
+
+    now = datetime.now(timezone.utc)
+    durable = replace(
+        aware.outbox_record,
+        state="exposed",
+        updated_at=now,
+        exposed_at=now,
+    )
+    receipts = [
+        PublicationReceipt.public_receipt(
+            item.sha256,
+            item.byte_size,
+            item.public_key,
+            now,
+            item.logical_path,
+        )
+        for item in aware.objects
+    ]
+    receipts.extend(
+        PublicationReceipt.private_receipt(
+            item.sha256,
+            item.byte_size,
+            private_original_key(item.task_id, item.run_id, item.sha256),
+            now,
+        )
+        for item in aware.private_originals
+    )
+
+    class Store:
+        def list_publication_receipts(self, _publication_id):
+            return list(receipts)
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.config = SimpleNamespace(publication=config)
+    daemon.store = Store()
+    daemon._publication_source = lambda _generation: graph
+    calls: list[object] = []
+
+    def compose(source: object, **kwargs: object) -> object:
+        calls.append(kwargs.get("credential_sources"))
+        kwargs["scanner_runner"] = scanner
+        return compose_publication_generation(source, **kwargs)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.compose_publication_generation",
+        compose,
+    )
+
+    assert daemon._terminal_publication_receipts_verified(
+        SimpleNamespace(id=aware.task_id), durable
+    ) == (True, "verified")
+    assert calls == [
+        (
+            config.d1_token_path,
+            config.r2_access_key_id_path,
+            config.r2_secret_access_key_path,
+        )
+    ]
+
+    free_durable = replace(
+        free.outbox_record,
+        state="exposed",
+        updated_at=now,
+        exposed_at=now,
+    )
+    assert daemon._terminal_publication_receipts_verified(
+        SimpleNamespace(id=free.task_id), free_durable
+    ) == (False, "generation_mismatch")
+
+
+def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> None:
+    from coquic_steward.publication.generation import compose_publication_generation
+
+    credential = "synthetic-worker-credential"
+    config = _publication_config(tmp_path, credential)
+    graph = _publication_graph("worker-credential")
+    graph["runs"][0].documents["codex.jsonl"] = graph["runs"][0].documents[
+        "codex.jsonl"
+    ].replace(b'"safe"', json.dumps(credential).encode("utf-8"))
+    scanner = lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b"")
+    free = compose_publication_generation(
+        graph,
+        scanner_runner=scanner,
+        credential_sources=(),
+    )
+    aware = compose_publication_generation(
+        graph,
+        scanner_runner=scanner,
+        credential_sources=(
+            config.d1_token_path,
+            config.r2_access_key_id_path,
+            config.r2_secret_access_key_path,
+        ),
+    )
+    assert isinstance(free, PublicationGeneration)
+    assert isinstance(aware, PublicationGeneration)
+    assert free.publication_id != aware.publication_id
+
+    store = TaskStore(tmp_path / "publication.sqlite")
+    store.enqueue_publication(free.to_outbox())
+
+    class R2:
+        def put_object(
+            self, key, _content, _object_class, *, expected_sha256, expected_size
+        ):
+            return SimpleNamespace(
+                key=key,
+                sha256=expected_sha256,
+                byte_size=expected_size,
+            )
+
+    class D1:
+        def __init__(self) -> None:
+            self.exposed_payload: object | None = None
+
+        def stage(self, payload):
+            return SimpleNamespace(
+                publication_id=payload["publicationId"],
+                task_id=payload["taskId"],
+            )
+
+        def expose(self, payload):
+            self.exposed_payload = payload
+            return SimpleNamespace(
+                state="visible",
+                publication_id=payload["publicationId"],
+                task_id=payload["taskId"],
+            )
+
+    d1 = D1()
+    publisher = CloudPublisher(
+        store,
+        R2(),
+        d1,
+        worker_id="publication-test",
+        compose=lambda source, **kwargs: compose_publication_generation(
+            source,
+            scanner_runner=scanner,
+            **kwargs,
+        ),
+    )
+    daemon = object.__new__(StewardDaemon)
+    daemon.config = SimpleNamespace(publication=config)
+    daemon.store = store
+    daemon.logger = None
+    daemon._publication_source = lambda _generation: graph
+
+    assert daemon._publish_next_generation(publisher) is True
+    queued = store.list_publication_generations()
+    assert len(queued) == 1
+    assert queued[0].publication_id == aware.publication_id
+    assert store.get_publication_generation(free.publication_id) is None
+
+    assert daemon._publish_next_generation(publisher) is True
+    exposed = store.get_publication_generation(aware.publication_id)
+    assert exposed is not None
+    assert exposed.state.value == "exposed"
+    assert d1.exposed_payload is not None
+    assert d1.exposed_payload["publicationId"] == aware.publication_id
+    assert d1.exposed_payload["headIntent"]["publicationId"] == aware.publication_id
+    assert len(store.list_publication_receipts(aware.publication_id)) == (
+        len(aware.objects) + len(aware.private_originals)
     )
 
 

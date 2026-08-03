@@ -25,6 +25,7 @@ from coquic_steward.execution.executor import (
     StewardExecutor,
     _validation_no_progress_fingerprint,
 )
+from coquic_steward.execution.session import publication_graph_for_task
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
 
@@ -531,6 +532,60 @@ def test_archive_write_preserves_parent_and_child_pipeline_refs(
     terminal_child = store.get_pipeline(child.id)
     executor._prepare_archive_task(archive, terminal_task, terminal_child)
     archive._validate_task_graph(task.id, "blocked")
+
+
+def test_publication_graph_builders_share_bounded_invocation_evidence(config) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="graph evidence",
+            prompt="preserve retries",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id)
+    run = store.create_run(
+        task.id,
+        pipeline.id,
+        session.id,
+        role="implementation",
+        role_ordinal=1,
+    )
+    archive = TaskArchiveWriter(config)
+    archive.ensure_epoch()
+    archive.create_task_from_record(task, pipeline=pipeline)
+    archive.materialize_pipeline(task.id, pipeline, runs=[run])
+    archive.materialize_run(task.id, pipeline.id, run)
+    unavailable = {"availability": "unavailable", "reason": "interrupted"}
+    archive.write_run_file(
+        task.id,
+        pipeline.id,
+        run.id,
+        "telemetry.retry-1.json",
+        unavailable,
+    )
+    archive.write_run_file(task.id, pipeline.id, run.id, "telemetry.json", unavailable)
+    store.transition_run(
+        run.id,
+        "interrupted",
+        expected_state="running",
+        exit_code=130,
+        exit_reason="interrupted",
+    )
+    terminal_run = store.get_run(run.id)
+    archive.materialize_run(task.id, pipeline.id, terminal_run)
+
+    session_graph = publication_graph_for_task(config, store, store.get(task.id))
+    integration_graph = StewardExecutor(
+        config, store, runner=FakeRunner(config)
+    )._integration_publication_graph(store.get(task.id))
+    session_source = session_graph["runs"][0]["source"]
+    integration_source = integration_graph["runs"][0]["source"]
+    assert session_source.run["invocations"] == integration_source.run["invocations"]
+    assert session_source.run["invocations"][0]["availability"] == "partial"
 
 
 def test_validation_conflict_and_phase_budgets_are_explicit(config) -> None:

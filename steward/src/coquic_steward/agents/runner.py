@@ -728,6 +728,16 @@ def _archive_retry_artifacts(
                     archived["telemetry_unavailable_mark_failed"] = True
             else:
                 archived["telemetry_preserved"] = True
+    else:
+        # A failed/interrupted attempt can finish without a sidecar at all.
+        # Keep a bounded availability descriptor so the sealed run still
+        # represents that explicitly owned attempt as partial evidence.
+        archived["telemetry_missing"] = True
+        archived_telemetry_path = _retry_artifact_path(telemetry_path, retry_number)
+        if _mark_telemetry_archive_unavailable(archived_telemetry_path):
+            archived["telemetry_unavailable_marked"] = True
+        else:
+            archived["telemetry_unavailable_mark_failed"] = True
     tool_changes = result.transcript_path.with_name("tool-changes")
     if archive_tool_changes and tool_changes.exists():
         archived_tool_changes = _retry_directory_path(tool_changes, retry_number)

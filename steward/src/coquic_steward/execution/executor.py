@@ -9,7 +9,7 @@ import shutil
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import timezone
@@ -4193,7 +4193,9 @@ class StewardExecutor:
                 "+00:00", "Z"
             )
 
-        def run_mapping(run: Any) -> dict[str, object]:
+        def run_mapping(
+            run: Any, invocations: Sequence[object]
+        ) -> dict[str, object]:
             started = run.started_at
             completed = run.completed_at
             duration = (
@@ -4215,6 +4217,10 @@ class StewardExecutor:
                 "parentRunId": run.parent_run_id,
                 "retryOfRunId": run.retry_of_run_id,
                 "resumeOfRunId": run.resume_of_run_id,
+                "invocations": [
+                    item.to_dict(include_telemetry=True)
+                    for item in invocations
+                ],
             }
 
         archive = TaskArchive(self.config)
@@ -4231,25 +4237,15 @@ class StewardExecutor:
             for run in self.store.list_runs(source.id, pipeline_id=pipeline.id):
                 if run.completed_at is None or str(run.state) == "running":
                     continue
-                documents: dict[str, bytes] = {}
-                for name in (
-                    "codex.jsonl",
-                    "activities.jsonl",
-                    "telemetry.json",
-                    "run.json",
-                ):
-                    path = archive.task_path(
-                        source.id,
-                        f"pipelines/{pipeline.id}/runs/{run.id}/{name}",
-                    )
-                    data = _read_publication_file(path, archive.root)
-                    if data is None:
-                        continue
-                    documents[name] = data
+                documents, invocations = archive.collect_run_publication_evidence(
+                    source.id,
+                    pipeline.id,
+                    run,
+                )
                 runs.append(
                     {
                         "source": AtifSource(
-                            run=run_mapping(run),
+                            run=run_mapping(run, invocations),
                             documents=documents,
                         ),
                         "pipeline": pipeline_value,

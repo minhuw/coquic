@@ -94,7 +94,9 @@ def publication_graph_for_task(
     pipelines: list[dict[str, object]] = []
     runs: list[dict[str, object]] = []
 
-    def run_mapping(run: TaskRun) -> dict[str, object]:
+    def run_mapping(
+        run: TaskRun, invocations: Sequence[object]
+    ) -> dict[str, object]:
         completed = run.completed_at
         duration = (
             max(0, int((completed - run.started_at).total_seconds() * 1000))
@@ -117,6 +119,10 @@ def publication_graph_for_task(
             "parentRunId": run.parent_run_id,
             "retryOfRunId": run.retry_of_run_id,
             "resumeOfRunId": run.resume_of_run_id,
+            "invocations": [
+                item.to_dict(include_telemetry=True)
+                for item in invocations
+            ],
         }
 
     for pipeline in store.list_pipelines(task.id):
@@ -130,23 +136,16 @@ def publication_graph_for_task(
         for run in store.list_runs(task.id, pipeline_id=pipeline.id):
             if run.completed_at is None or str(run.state) == "running":
                 continue
-            documents: dict[str, bytes] = {}
-            for name in ("codex.jsonl", "activities.jsonl", "telemetry.json", "run.json"):
-                path = archive.task_path(
-                    task.id,
-                    f"pipelines/{pipeline.id}/runs/{run.id}/{name}",
-                )
-                try:
-                    resolved = path.resolve(strict=True)
-                    resolved.relative_to(archive.root.resolve())
-                    if path.is_symlink() or not path.is_file():
-                        continue
-                    documents[name] = path.read_bytes()
-                except (OSError, RuntimeError, ValueError):
-                    continue
+            documents, invocations = archive.collect_run_publication_evidence(
+                task.id,
+                pipeline.id,
+                run,
+            )
             runs.append(
                 {
-                    "source": AtifSource(run=run_mapping(run), documents=documents),
+                    "source": AtifSource(
+                        run=run_mapping(run, invocations), documents=documents
+                    ),
                     "pipeline": pipeline_value,
                 }
             )

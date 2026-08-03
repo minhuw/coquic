@@ -10,11 +10,13 @@ from typing import Any
 import pytest
 
 from coquic_steward.execution.task_archive import (
+    ArchiveInvocation,
     ArchiveConflictError,
     ArchiveImmutableError,
     ArchiveSealError,
     ArchiveValidationError,
     TaskArchive,
+    MAX_ARCHIVE_INVOCATIONS,
 )
 from coquic_steward.core.config import StewardConfig
 from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
@@ -22,6 +24,61 @@ from coquic_steward.storage import TaskStore
 
 
 COMPLETED_AT = "2026-07-22T00:00:04Z"
+
+
+def _telemetry(
+    task_id: str,
+    invocation_id: str,
+    retry_ordinal: int,
+    *,
+    completeness: str = "complete",
+    process_outcome: str = "completed",
+) -> dict[str, object]:
+    turns = (
+        [
+            {
+                "ordinal": 1,
+                "input_tokens": 2,
+                "cached_input_tokens": 1,
+                "uncached_input_tokens": 1,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 3,
+            }
+        ]
+        if completeness == "complete"
+        else []
+    )
+    return {
+        "schema_version": 1,
+        "provenance": "codex_exec_jsonl",
+        "invocation_id": invocation_id,
+        "task_id": task_id,
+        "run_name": "worker",
+        "stage": "code",
+        "retry_ordinal": retry_ordinal,
+        "configured_model": "model",
+        "reasoning_effort": "low",
+        "billing_mode": "unknown",
+        "started_at": "2026-07-22T00:00:00.000Z",
+        "completed_at": "2026-07-22T00:00:00.001Z",
+        "duration_ms": 1,
+        "first_agent_message_completed_ms": None,
+        "process_outcome": process_outcome,
+        "turns": turns,
+        "aggregate": {
+            "completed_turns": len(turns),
+            "input_tokens": 2 if turns else 0,
+            "cached_input_tokens": 1 if turns else 0,
+            "uncached_input_tokens": 1 if turns else 0,
+            "output_tokens": 1 if turns else 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 3 if turns else 0,
+        },
+        "cost": {"status": "unavailable", "reason": "billing_mode_unknown"},
+        "completeness": completeness,
+        "issues": [],
+    }
 
 
 def _live_archive(tmp_path: Path) -> TaskArchive:
@@ -77,6 +134,211 @@ def test_paths_reject_traversal_and_hidden_components(tmp_path: Path) -> None:
         archive.path("pipelines/.tmp/file")
     with pytest.raises(ArchiveValidationError):
         archive.path("pipelines\\run.json")
+
+
+def _invocation_archive(tmp_path: Path) -> TaskArchive:
+    archive = TaskArchive(tmp_path / "tasks")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
+    archive.materialize_pipeline(
+        "task-safe",
+        {
+            "pipelineId": "pipeline-initial",
+            "taskId": "task-safe",
+            "runs": [
+                {
+                    "runId": "run-safe",
+                    "role": "implementation",
+                    "roleOrdinal": 1,
+                    "state": "running",
+                    "path": "pipelines/pipeline-initial/runs/run-safe/run.json",
+                }
+            ],
+        },
+    )
+    archive.materialize_run(
+        "task-safe",
+        "pipeline-initial",
+        {
+            "runId": "run-safe",
+            "taskId": "task-safe",
+            "pipelineId": "pipeline-initial",
+            "role": "implementation",
+            "roleOrdinal": 1,
+            "sessionId": "session-safe",
+            "state": "running",
+        },
+    )
+    return archive
+
+
+def test_collect_invocation_evidence_orders_retries_and_keeps_missing_partial(
+    tmp_path: Path,
+) -> None:
+    archive = _invocation_archive(tmp_path)
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.retry-1.json",
+        _telemetry("task-safe", "invocation-first", 0),
+    )
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.json",
+        _telemetry("task-safe", "invocation-final", 1),
+    )
+    values = archive.collect_invocation_evidence(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        expected_run={
+            "taskId": "task-safe",
+            "pipelineId": "pipeline-initial",
+            "runId": "run-safe",
+            "role": "implementation",
+        },
+    )
+    assert all(isinstance(item, ArchiveInvocation) for item in values)
+    assert [item.retry_ordinal for item in values] == [0, 1]
+    assert [item.invocation_id for item in values] == [
+        "invocation-first",
+        "invocation-final",
+    ]
+    assert all(item.aggregate is not None for item in values)
+
+    archive.task_path(
+        "task-safe",
+        "pipelines/pipeline-initial/runs/run-safe/telemetry.json",
+    ).unlink()
+    partial = archive.collect_invocation_evidence(
+        "task-safe", "pipeline-initial", "run-safe"
+    )
+    assert partial[-1].availability == "partial"
+    assert partial[-1].aggregate is None
+
+
+def test_collect_invocation_evidence_rejects_symlink_and_conflicting_identity(
+    tmp_path: Path,
+) -> None:
+    archive = _invocation_archive(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(_telemetry("task-safe", "outside", 0)))
+    sidecar = archive.task_path(
+        "task-safe",
+        "pipelines/pipeline-initial/runs/run-safe/telemetry.json",
+    )
+    sidecar.symlink_to(outside)
+    with pytest.raises(ArchiveValidationError):
+        archive.collect_invocation_evidence(
+            "task-safe", "pipeline-initial", "run-safe"
+        )
+    sidecar.unlink()
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.retry-1.json",
+        _telemetry("task-safe", "same-id", 0),
+    )
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.json",
+        _telemetry("task-safe", "same-id", 1),
+    )
+    with pytest.raises(ArchiveValidationError, match="conflicting"):
+        archive.collect_invocation_evidence(
+            "task-safe", "pipeline-initial", "run-safe"
+        )
+
+
+def test_run_invocation_count_is_bounded(tmp_path: Path) -> None:
+    archive = _invocation_archive(tmp_path)
+    run_dir = archive.run_dir("task-safe", "pipeline-initial", "run-safe")
+    for ordinal in range(1, MAX_ARCHIVE_INVOCATIONS + 2):
+        path = run_dir / f"telemetry.retry-{ordinal}.json"
+        path.write_text(
+            json.dumps(_telemetry("task-safe", f"invocation-{ordinal}", ordinal - 1)),
+            encoding="utf-8",
+        )
+    with pytest.raises(ArchiveValidationError, match="count exceeds bound"):
+        archive.collect_invocation_evidence(
+            "task-safe", "pipeline-initial", "run-safe"
+        )
+
+
+def test_manifest_round_trip_keeps_failed_interrupted_and_final_retry_sidecars(
+    tmp_path: Path,
+) -> None:
+    archive = _invocation_archive(tmp_path)
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.retry-1.json",
+        _telemetry("task-safe", "failed-retry", 0, process_outcome="failed"),
+    )
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.retry-2.json",
+        _telemetry(
+            "task-safe", "interrupted-retry", 1, process_outcome="interrupted"
+        ),
+    )
+    archive.write_run_file(
+        "task-safe",
+        "pipeline-initial",
+        "run-safe",
+        "telemetry.json",
+        _telemetry("task-safe", "successful-final", 2),
+    )
+    archive.materialize_run(
+        "task-safe",
+        "pipeline-initial",
+        {
+            "runId": "run-safe",
+            "taskId": "task-safe",
+            "pipelineId": "pipeline-initial",
+            "role": "implementation",
+            "roleOrdinal": 1,
+            "sessionId": "session-safe",
+            "state": "succeeded",
+            "completedAt": "2026-07-22T00:00:02Z",
+        },
+    )
+    pipeline_path = archive.task_path(
+        "task-safe", "pipelines/pipeline-initial/pipeline.json"
+    )
+    pipeline = json.loads(pipeline_path.read_text())
+    pipeline["state"] = "succeeded"
+    pipeline["phase"] = "complete"
+    pipeline["completedAt"] = "2026-07-22T00:00:03Z"
+    archive.write_json("task-safe", "pipelines/pipeline-initial/pipeline.json", pipeline)
+    task_path = archive.task_path("task-safe", "task.json")
+    task = json.loads(task_path.read_text())
+    task["status"] = "succeeded"
+    archive.write_json("task-safe", "task.json", task)
+    manifest = archive.seal(
+        "task-safe",
+        "succeeded",
+        completion_identity="completion-retries",
+        completed_at=COMPLETED_AT,
+        external_actions_complete=True,
+        writer_final=True,
+    )
+    assert archive.verify("task-safe")
+    manifest_value = json.loads(manifest.read_text())
+    paths = {item["path"] for item in manifest_value["files"]}
+    assert {
+        "task-safe/pipelines/pipeline-initial/runs/run-safe/telemetry.retry-1.json",
+        "task-safe/pipelines/pipeline-initial/runs/run-safe/telemetry.retry-2.json",
+        "task-safe/pipelines/pipeline-initial/runs/run-safe/telemetry.json",
+    }.issubset({f"task-safe/{path}" for path in paths})
 
 
 def test_atomic_materialization_and_exact_reconciliation(tmp_path: Path) -> None:

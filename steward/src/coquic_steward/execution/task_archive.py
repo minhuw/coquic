@@ -16,11 +16,17 @@ import secrets
 import shutil
 import stat
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from ..core.models import TaskPipeline, TaskRecord, TaskRun, TaskStatus
+from ..agents.telemetry import (
+    TELEMETRY_MAX_SIDECAR_BYTES,
+    TELEMETRY_MAX_TURNS,
+    load_sidecar,
+)
 
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_COMPONENT_RE = SAFE_ID_RE
@@ -111,7 +117,19 @@ RUN_KEYS = {
     "usage",
     "cost",
     "artifacts",
+    "invocations",
 }
+
+MAX_ARCHIVE_INVOCATIONS = 128
+MAX_ARCHIVE_INVOCATION_TURNS = TELEMETRY_MAX_TURNS * MAX_ARCHIVE_INVOCATIONS
+MAX_ARCHIVE_INVOCATION_BYTES = TELEMETRY_MAX_SIDECAR_BYTES
+MAX_ARCHIVE_TELEMETRY_BYTES = 4 * 1024 * 1024
+MAX_ARCHIVE_TOKEN_COUNT = 10**15
+MAX_ARCHIVE_TOTAL_TOKEN_COUNT = 10**16
+_INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_TELEMETRY_FILE_RE = re.compile(
+    r"^telemetry(?:\.retry-([1-9][0-9]*)(?:\.unavailable-([1-9][0-9]*))?)?\.json$"
+)
 
 
 class ArchiveError(RuntimeError):
@@ -132,6 +150,163 @@ class ArchiveValidationError(ArchiveError):
 
 class ArchiveSealError(ArchiveError):
     """A task is not ready to be sealed or has corrupt terminal evidence."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveInvocation:
+    """One bounded, archive-owned invocation and its optional telemetry."""
+
+    invocation_id: str | None
+    task_id: str
+    pipeline_id: str
+    run_id: str
+    retry_ordinal: int
+    path: str
+    availability: str
+    completeness: str
+    started_at: str | None
+    completed_at: str | None
+    byte_size: int | None
+    turn_count: int | None
+    aggregate: dict[str, int] | None
+    reason: str | None = None
+    telemetry: dict[str, object] | None = field(default=None, repr=False, compare=False)
+
+    def to_dict(self, *, include_telemetry: bool = False) -> dict[str, object]:
+        """Return detached camel-case data suitable for archive/publication input."""
+
+        value: dict[str, object] = {
+            "invocationId": self.invocation_id,
+            "taskId": self.task_id,
+            "pipelineId": self.pipeline_id,
+            "runId": self.run_id,
+            "retryOrdinal": self.retry_ordinal,
+            "path": self.path,
+            "availability": self.availability,
+            "completeness": self.completeness,
+            "startedAt": self.started_at,
+            "completedAt": self.completed_at,
+            "byteSize": self.byte_size,
+            "turnCount": self.turn_count,
+            "aggregate": (
+                dict(self.aggregate) if self.aggregate is not None else None
+            ),
+            "reason": self.reason,
+        }
+        if include_telemetry:
+            value["telemetry"] = (
+                json.loads(json.dumps(self.telemetry))
+                if self.telemetry is not None
+                else None
+            )
+        return value
+
+    @property
+    def descriptor(self) -> dict[str, object]:
+        """Return the bounded descriptor retained in ``run.json``."""
+
+        return self.to_dict()
+
+
+def _validate_invocation_descriptor(value: Any, label: str = "invocation") -> None:
+    keys = {
+        "invocationId",
+        "taskId",
+        "pipelineId",
+        "runId",
+        "retryOrdinal",
+        "path",
+        "availability",
+        "completeness",
+        "startedAt",
+        "completedAt",
+        "byteSize",
+        "turnCount",
+        "aggregate",
+        "reason",
+    }
+    value = _validate_shape(value, required=keys, allowed=keys, label=label)
+    invocation_id = value["invocationId"]
+    if invocation_id is not None and (
+        not isinstance(invocation_id, str)
+        or _INVOCATION_ID_RE.fullmatch(invocation_id) is None
+    ):
+        raise ArchiveValidationError(f"{label}.invocationId is invalid")
+    for key in ("taskId", "pipelineId", "runId"):
+        validate_opaque_id(value[key])
+    _validate_nonnegative_integer(value["retryOrdinal"], f"{label}.retryOrdinal")
+    if value["availability"] not in {"available", "partial"}:
+        raise ArchiveValidationError(f"{label}.availability is invalid")
+    if value["completeness"] not in {"complete", "partial", "unavailable"}:
+        raise ArchiveValidationError(f"{label}.completeness is invalid")
+    for key in ("startedAt", "completedAt"):
+        if value[key] is not None:
+            _validate_timestamp(value[key], f"{label}.{key}")
+    for key in ("byteSize", "turnCount"):
+        if value[key] is not None:
+            _validate_nonnegative_integer(value[key], f"{label}.{key}")
+    if value["byteSize"] is not None and value["byteSize"] > MAX_ARCHIVE_INVOCATION_BYTES:
+        raise ArchiveValidationError(f"{label}.byteSize exceeds bound")
+    if value["turnCount"] is not None and value["turnCount"] > TELEMETRY_MAX_TURNS:
+        raise ArchiveValidationError(f"{label}.turnCount exceeds bound")
+    validate_relative_path(value["path"])
+    if _TELEMETRY_FILE_RE.fullmatch(PurePosixPath(value["path"]).name) is None:
+        raise ArchiveValidationError(f"{label}.path has an unsafe telemetry filename")
+    aggregate = value["aggregate"]
+    if aggregate is not None:
+        aggregate_keys = {
+            "completed_turns",
+            "input_tokens",
+            "cached_input_tokens",
+            "uncached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "total_tokens",
+        }
+        aggregate = _validate_shape(
+            aggregate,
+            required=aggregate_keys,
+            allowed=aggregate_keys,
+            label=f"{label}.aggregate",
+        )
+        for key in aggregate_keys:
+            _validate_nonnegative_integer(aggregate[key], f"{label}.aggregate.{key}")
+            if aggregate[key] > MAX_ARCHIVE_TOKEN_COUNT:
+                raise ArchiveValidationError(
+                    f"{label}.aggregate.{key} exceeds bound"
+                )
+        if aggregate["cached_input_tokens"] > aggregate["input_tokens"]:
+            raise ArchiveValidationError(f"{label}.aggregate cached input exceeds input")
+        if aggregate["uncached_input_tokens"] != (
+            aggregate["input_tokens"] - aggregate["cached_input_tokens"]
+        ):
+            raise ArchiveValidationError(f"{label}.aggregate uncached input mismatch")
+        if aggregate["reasoning_output_tokens"] > aggregate["output_tokens"]:
+            raise ArchiveValidationError(f"{label}.aggregate reasoning exceeds output")
+        if aggregate["total_tokens"] != (
+            aggregate["input_tokens"] + aggregate["output_tokens"]
+        ):
+            raise ArchiveValidationError(f"{label}.aggregate total mismatch")
+    _validate_optional_text(value["reason"], f"{label}.reason")
+    if value["availability"] == "available":
+        if value["invocationId"] is None or value["aggregate"] is None:
+            raise ArchiveValidationError(f"{label} available evidence is incomplete")
+        if value["byteSize"] is None or value["turnCount"] is None:
+            raise ArchiveValidationError(f"{label} available bounds are missing")
+        if value["completeness"] != "complete" or value["reason"] is not None:
+            raise ArchiveValidationError(f"{label} available completeness is invalid")
+    elif value["reason"] is None:
+        raise ArchiveValidationError(f"{label} partial reason is required")
+
+
+def _is_unavailable_telemetry_marker(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"availability", "reason"}
+        and value.get("availability") == "unavailable"
+        and isinstance(value.get("reason"), str)
+        and bool(value.get("reason"))
+    )
 
 
 def validate_opaque_id(value: str) -> str:
@@ -591,6 +766,9 @@ def _validate_cost(value: Any) -> None:
 
 
 def _validate_run_document(value: Any) -> None:
+    if isinstance(value, Mapping) and "invocations" not in value:
+        value = dict(value)
+        value["invocations"] = []
     value = _validate_shape(value, required=RUN_KEYS, allowed=RUN_KEYS, label="run")
     for key in ("runId", "taskId", "pipelineId", "sessionId"):
         validate_opaque_id(value[key])
@@ -645,6 +823,28 @@ def _validate_run_document(value: Any) -> None:
         validate_relative_path(result["path"])
     _validate_usage(value["usage"])
     _validate_cost(value["cost"])
+    invocations = value["invocations"]
+    if not isinstance(invocations, list) or len(invocations) > MAX_ARCHIVE_INVOCATIONS:
+        raise ArchiveValidationError("run invocations exceed bound")
+    previous_ordinal: int | None = None
+    seen_ids: set[str] = set()
+    for index, descriptor in enumerate(invocations):
+        _validate_invocation_descriptor(descriptor, f"run invocation[{index}]")
+        if descriptor["taskId"] != value["taskId"]:
+            raise ArchiveValidationError("run invocation task identity mismatch")
+        if descriptor["pipelineId"] != value["pipelineId"]:
+            raise ArchiveValidationError("run invocation pipeline identity mismatch")
+        if descriptor["runId"] != value["runId"]:
+            raise ArchiveValidationError("run invocation identity mismatch")
+        invocation_id = descriptor["invocationId"]
+        if invocation_id is not None:
+            if invocation_id in seen_ids:
+                raise ArchiveValidationError("run invocation ids are not unique")
+            seen_ids.add(invocation_id)
+        ordinal = descriptor["retryOrdinal"]
+        if previous_ordinal is not None and ordinal <= previous_ordinal:
+            raise ArchiveValidationError("run invocation ordinals are not monotonic")
+        previous_ordinal = ordinal
     artifact_keys = {
         "codex",
         "activities",
@@ -817,6 +1017,421 @@ class TaskArchive:
         return self.pipeline_dir(task_id, pipeline_id) / "runs" / run_id
 
     run_path = run_dir
+
+    def collect_invocation_evidence(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        run_id: str,
+        *,
+        expected_run: Mapping[str, Any] | TaskRun | None = None,
+        strict: bool = True,
+    ) -> tuple[ArchiveInvocation, ...]:
+        """Collect only authenticated current/retry telemetry for one run.
+
+        The collector examines direct, allow-listed sidecar names only.  It
+        never recursively scans a task archive and never turns missing usage
+        into zero-valued counters.
+        """
+
+        task_id = validate_opaque_id(task_id)
+        pipeline_id = validate_opaque_id(pipeline_id)
+        run_id = validate_opaque_id(run_id)
+        self._authenticate_run_identity(
+            expected_run, task_id=task_id, pipeline_id=pipeline_id, run_id=run_id
+        )
+        run_dir = self.run_dir(task_id, pipeline_id, run_id)
+        try:
+            self._assert_safe_archive_path(run_dir, target="directory")
+        except ArchiveValidationError:
+            if strict:
+                raise
+            run_dir = self.run_dir(task_id, pipeline_id, run_id)
+
+        candidates: list[tuple[Path, int | None, bool]] = []
+        if run_dir.is_dir() and not run_dir.is_symlink():
+            try:
+                for path in sorted(run_dir.iterdir(), key=lambda item: item.name):
+                    match = _TELEMETRY_FILE_RE.fullmatch(path.name)
+                    if match is None:
+                        if path.name.startswith("telemetry") and path.name.endswith(
+                            ".json"
+                        ):
+                            self._invocation_collection_error(
+                                "telemetry filename is unsafe", strict
+                            )
+                        continue
+                    retry_text, unavailable_text = match.groups()
+                    if (
+                        (retry_text is not None and len(retry_text) > 9)
+                        or (unavailable_text is not None and len(unavailable_text) > 9)
+                    ):
+                        self._invocation_collection_error(
+                            "telemetry retry ordinal exceeds bound", strict
+                        )
+                        continue
+                    archive_ordinal = (
+                        int(retry_text) - 1 if retry_text is not None else None
+                    )
+                    candidates.append(
+                        (path, archive_ordinal, retry_text is not None)
+                    )
+                    if len(candidates) > MAX_ARCHIVE_INVOCATIONS:
+                        self._invocation_collection_error(
+                            "telemetry invocation count exceeds bound", strict
+                        )
+                        break
+            except OSError as exc:
+                self._invocation_collection_error(
+                    f"telemetry archive enumeration failed: {exc}", strict
+                )
+
+        selected: list[ArchiveInvocation] = []
+        by_id: dict[str, tuple[str, ArchiveInvocation]] = {}
+        unavailable_ordinals: dict[int, ArchiveInvocation] = {}
+        current_unavailable: tuple[str, str, int] | None = None
+        total_bytes = 0
+        current_seen = False
+        for path, archive_ordinal, is_retry in candidates:
+            if not is_retry:
+                current_seen = True
+            relative = path.relative_to(self.root).as_posix()
+            try:
+                info = path.lstat()
+                if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ArchiveValidationError(
+                        "telemetry sidecar is not a regular file"
+                    )
+                if info.st_size < 0 or info.st_size > MAX_ARCHIVE_INVOCATION_BYTES:
+                    raise ArchiveValidationError("telemetry sidecar exceeds bound")
+                total_bytes += info.st_size
+                if total_bytes > MAX_ARCHIVE_TELEMETRY_BYTES:
+                    raise ArchiveValidationError("telemetry archive exceeds bound")
+                raw = path.read_bytes()
+                try:
+                    marker = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ArchiveValidationError("telemetry sidecar is invalid JSON") from exc
+                if _is_unavailable_telemetry_marker(marker):
+                    reason = str(marker.get("reason") or "telemetry_unavailable")
+                    if archive_ordinal is None:
+                        current_unavailable = (relative, reason, info.st_size)
+                        continue
+                    ordinal = archive_ordinal
+                    evidence = self._missing_invocation(
+                        task_id,
+                        pipeline_id,
+                        run_id,
+                        ordinal=ordinal,
+                        path=relative,
+                        reason=reason,
+                        byte_size=info.st_size,
+                    )
+                    previous = unavailable_ordinals.get(ordinal)
+                    if previous is not None and previous.path != evidence.path:
+                        raise ArchiveValidationError(
+                            "conflicting unavailable telemetry ordinal"
+                        )
+                    unavailable_ordinals[ordinal] = evidence
+                    continue
+                payload = load_sidecar(path)
+                if payload.get("task_id") != task_id:
+                    raise ArchiveValidationError("telemetry task identity mismatch")
+                self._validate_sidecar_run_name(payload, expected_run)
+                payload_ordinal = payload.get("retry_ordinal")
+                if type(payload_ordinal) is not int or payload_ordinal < 0:
+                    raise ArchiveValidationError("telemetry retry ordinal is invalid")
+                if archive_ordinal is not None and payload_ordinal not in {
+                    archive_ordinal,
+                    archive_ordinal + 1,
+                }:
+                    raise ArchiveValidationError(
+                        "telemetry retry ordinal disagrees with archive filename"
+                    )
+                aggregate = payload.get("aggregate")
+                if not isinstance(aggregate, Mapping):
+                    raise ArchiveValidationError("telemetry aggregate is unavailable")
+                aggregate_value = {
+                    str(key): int(value)
+                    for key, value in aggregate.items()
+                    if isinstance(value, int) and not isinstance(value, bool)
+                }
+                if len(aggregate_value) != 7:
+                    raise ArchiveValidationError("telemetry aggregate is invalid")
+                for number in aggregate_value.values():
+                    if number < 0 or number > MAX_ARCHIVE_TOKEN_COUNT:
+                        raise ArchiveValidationError("telemetry aggregate exceeds bound")
+                turns = payload.get("turns")
+                if not isinstance(turns, list) or len(turns) > TELEMETRY_MAX_TURNS:
+                    raise ArchiveValidationError("telemetry turns exceed bound")
+                if not turns or payload.get("completeness") == "unavailable":
+                    aggregate_value = None
+                evidence = ArchiveInvocation(
+                    invocation_id=str(payload["invocation_id"]),
+                    task_id=task_id,
+                    pipeline_id=pipeline_id,
+                    run_id=run_id,
+                    retry_ordinal=payload_ordinal,
+                    path=relative,
+                    availability=(
+                        "available" if payload.get("completeness") == "complete" else "partial"
+                    ),
+                    completeness=str(payload.get("completeness")),
+                    started_at=str(payload.get("started_at")),
+                    completed_at=str(payload.get("completed_at")),
+                    byte_size=info.st_size,
+                    turn_count=len(turns),
+                    aggregate=aggregate_value,
+                    reason=(
+                        None
+                        if payload.get("completeness") == "complete"
+                        else "telemetry_incomplete"
+                    ),
+                    telemetry=payload,
+                )
+                previous = by_id.get(evidence.invocation_id or "")
+                if previous is not None:
+                    previous_digest, _ = previous
+                    digest = hashlib.sha256(
+                        json.dumps(
+                            payload,
+                            ensure_ascii=True,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if digest != previous_digest:
+                        raise ArchiveValidationError(
+                            "conflicting telemetry invocation id reuse"
+                        )
+                    continue
+                by_id[evidence.invocation_id or ""] = (
+                    hashlib.sha256(
+                        json.dumps(
+                            payload,
+                            ensure_ascii=True,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    evidence,
+                )
+                selected.append(evidence)
+            except (ArchiveError, OSError, ValueError, TypeError) as exc:
+                if strict:
+                    if isinstance(exc, ArchiveError):
+                        raise
+                    raise ArchiveValidationError(str(exc)) from exc
+                ordinal = (
+                    archive_ordinal
+                    if archive_ordinal is not None
+                    else self._next_invocation_ordinal(selected)
+                )
+                unavailable_ordinals[ordinal] = self._missing_invocation(
+                    task_id,
+                    pipeline_id,
+                    run_id,
+                    ordinal=ordinal,
+                    path=relative,
+                    reason="telemetry_unavailable",
+                    byte_size=None,
+                )
+
+        selected.extend(unavailable_ordinals.values())
+        if current_unavailable is not None:
+            relative, reason, byte_size = current_unavailable
+            selected.append(
+                self._missing_invocation(
+                    task_id,
+                    pipeline_id,
+                    run_id,
+                    ordinal=self._next_invocation_ordinal(selected),
+                    path=relative,
+                    reason=reason,
+                    byte_size=byte_size,
+                )
+            )
+        if not current_seen:
+            selected.append(
+                self._missing_invocation(
+                    task_id,
+                    pipeline_id,
+                    run_id,
+                    ordinal=self._next_invocation_ordinal(selected),
+                    path=self.run_dir(task_id, pipeline_id, run_id)
+                    .joinpath("telemetry.json")
+                    .relative_to(self.root)
+                    .as_posix(),
+                    reason="telemetry_missing",
+                    byte_size=None,
+                )
+            )
+        if len(selected) > MAX_ARCHIVE_INVOCATIONS:
+            self._invocation_collection_error(
+                "telemetry invocation count exceeds bound", strict
+            )
+        selected.sort(
+            key=lambda item: (
+                item.retry_ordinal,
+                item.started_at or "",
+                item.invocation_id or "",
+            )
+        )
+        previous_ordinal: int | None = None
+        total_tokens = 0
+        for item in selected:
+            if previous_ordinal is not None and item.retry_ordinal <= previous_ordinal:
+                self._invocation_collection_error(
+                    "telemetry retry ordinals are not monotonic", strict
+                )
+            previous_ordinal = item.retry_ordinal
+            if item.aggregate is not None:
+                total_tokens += item.aggregate.get("total_tokens", 0)
+        if total_tokens > MAX_ARCHIVE_TOTAL_TOKEN_COUNT:
+            self._invocation_collection_error(
+                "telemetry aggregate totals exceed bound", strict
+            )
+        if sum(item.turn_count or 0 for item in selected) > MAX_ARCHIVE_INVOCATION_TURNS:
+            self._invocation_collection_error(
+                "telemetry turn count exceeds bound", strict
+            )
+        return tuple(selected)
+
+    # Names used by publication and archive callers are intentionally aliases
+    # of the same bounded implementation.
+    collect_run_invocations = collect_invocation_evidence
+    collect_invocation_telemetry = collect_invocation_evidence
+
+    def collect_run_publication_evidence(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        run: Mapping[str, Any] | TaskRun,
+    ) -> tuple[dict[str, bytes], tuple[ArchiveInvocation, ...]]:
+        """Return stable source documents and authenticated retry evidence."""
+
+        run_id = self._run_identity_value(run, "runId", "id", "run_id")
+        if not isinstance(run_id, str):
+            raise ArchiveValidationError("publication run id is required")
+        invocations = self.collect_invocation_evidence(
+            task_id,
+            pipeline_id,
+            run_id,
+            expected_run=run,
+        )
+        documents: dict[str, bytes] = {}
+        for name in ("codex.jsonl", "activities.jsonl", "telemetry.json", "run.json"):
+            path = self.task_path(
+                task_id, f"pipelines/{pipeline_id}/runs/{run_id}/{name}"
+            )
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(self.root.resolve())
+                info = path.lstat()
+                if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    continue
+                documents[name] = path.read_bytes()
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return documents, invocations
+
+    @staticmethod
+    def _run_identity_value(
+        run: Mapping[str, Any] | TaskRun,
+        *names: str,
+    ) -> object:
+        if isinstance(run, Mapping):
+            for name in names:
+                if name in run:
+                    return run[name]
+            return None
+        for name in names:
+            value = getattr(run, name, None)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _authenticate_run_identity(
+        cls,
+        run: Mapping[str, Any] | TaskRun | None,
+        *,
+        task_id: str,
+        pipeline_id: str,
+        run_id: str,
+    ) -> None:
+        if run is None:
+            return
+        values = {
+            "task": cls._run_identity_value(run, "taskId", "task_id"),
+            "pipeline": cls._run_identity_value(run, "pipelineId", "pipeline_id"),
+            "run": cls._run_identity_value(run, "runId", "id", "run_id"),
+        }
+        if values != {"task": task_id, "pipeline": pipeline_id, "run": run_id}:
+            raise ArchiveValidationError("publication run identity mismatch")
+
+    @staticmethod
+    def _validate_sidecar_run_name(
+        payload: Mapping[str, Any], expected_run: Mapping[str, Any] | TaskRun | None
+    ) -> None:
+        if expected_run is None:
+            return
+        role = TaskArchive._run_identity_value(expected_run, "role")
+        run_name = payload.get("run_name")
+        if not isinstance(role, str) or not role or not isinstance(run_name, str):
+            return
+        role_key = role.lower().replace("-", "_")
+        run_key = run_name.lower().replace("-", "_")
+        aliases = {
+            "implementation": {"implementation", "worker", "code"},
+            "implementation_plan": {"implementation_plan", "planner", "planning"},
+            "planning": {"implementation_plan", "planner", "planning"},
+            "planner": {"implementation_plan", "planner", "planning"},
+            "validation": {"validation", "worker"},
+            "review": {"review", "reviewer"},
+            "reviewer": {"review", "reviewer"},
+            "formality": {"formality", "reviewer", "worker"},
+            "commit_message": {"commit_message", "commit-message", "commit", "worker"},
+        }
+        if run_key not in aliases.get(role_key, {role_key}):
+            raise ArchiveValidationError("telemetry run identity mismatch")
+
+    @staticmethod
+    def _next_invocation_ordinal(values: Sequence[ArchiveInvocation]) -> int:
+        return max((item.retry_ordinal for item in values), default=-1) + 1
+
+    @staticmethod
+    def _missing_invocation(
+        task_id: str,
+        pipeline_id: str,
+        run_id: str,
+        *,
+        ordinal: int,
+        path: str,
+        reason: str,
+        byte_size: int | None,
+    ) -> ArchiveInvocation:
+        return ArchiveInvocation(
+            invocation_id=None,
+            task_id=task_id,
+            pipeline_id=pipeline_id,
+            run_id=run_id,
+            retry_ordinal=ordinal,
+            path=path,
+            availability="partial",
+            completeness="unavailable",
+            started_at=None,
+            completed_at=None,
+            byte_size=byte_size,
+            turn_count=None,
+            aggregate=None,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _invocation_collection_error(message: str, strict: bool) -> None:
+        if strict:
+            raise ArchiveValidationError(message)
 
     @property
     def epoch_path(self) -> Path:
@@ -1362,6 +1977,30 @@ class TaskArchive:
         value.setdefault("artifacts", _empty_artifacts(task_id, pipeline_id, identifier))
         if value["taskId"] != task_id or value["pipelineId"] != pipeline_id:
             raise ArchiveConflictError("run identity does not match directory")
+        if "invocations" not in value:
+            try:
+                value["invocations"] = [
+                    item.descriptor
+                    for item in self.collect_invocation_evidence(
+                        task_id,
+                        pipeline_id,
+                        identifier,
+                        expected_run=value,
+                        strict=False,
+                    )
+                ]
+            except (ArchiveError, OSError, ValueError, TypeError):
+                value["invocations"] = [
+                    self._missing_invocation(
+                        task_id,
+                        pipeline_id,
+                        identifier,
+                        ordinal=0,
+                        path=f"pipelines/{pipeline_id}/runs/{identifier}/telemetry.json",
+                        reason="telemetry_unavailable",
+                        byte_size=None,
+                    ).descriptor
+                ]
         value = {key: item for key, item in value.items() if key in RUN_KEYS}
         _validate_run_document(value)
         path = self.write_json(task_id, f"pipelines/{validate_opaque_id(pipeline_id)}/runs/{identifier}/run.json", value)
@@ -2250,6 +2889,17 @@ class TaskArchive:
                     raise ArchiveSealError("run reference disagrees with run metadata")
                 if run.get("state") == "running":
                     raise ArchiveSealError("cannot seal while a run is running")
+                try:
+                    self.collect_invocation_evidence(
+                        task_id,
+                        pipeline_id,
+                        run_id,
+                        expected_run=run,
+                    )
+                except ArchiveError as exc:
+                    raise ArchiveSealError(
+                        f"run invocation evidence is invalid: {exc}"
+                    ) from exc
                 run_documents[run_id] = run
                 artifacts = run["artifacts"]
                 for descriptor in artifacts.values():
@@ -2460,6 +3110,26 @@ def verify_archive(config_or_root: Path | Any, task_id: str) -> bool:
     return TaskArchive(config_or_root).verify(task_id)
 
 
+def collect_invocation_evidence(
+    config_or_root: Path | Any,
+    task_id: str,
+    pipeline_id: str,
+    run_id: str,
+    *,
+    expected_run: Mapping[str, Any] | TaskRun | None = None,
+    strict: bool = True,
+) -> tuple[ArchiveInvocation, ...]:
+    """Collect one bounded run's invocation evidence from an archive root."""
+
+    return TaskArchive(config_or_root).collect_invocation_evidence(
+        task_id,
+        pipeline_id,
+        run_id,
+        expected_run=expected_run,
+        strict=strict,
+    )
+
+
 def _camelize(value: Mapping[str, Any]) -> dict[str, Any]:
     names = {
         "task_id": "taskId",
@@ -2530,6 +3200,7 @@ def _artifact_descriptor(path: str, media_type: str, available: bool) -> dict[st
 
 
 __all__ = [
+    "ArchiveInvocation",
     "ArchiveConflictError",
     "ArchiveError",
     "ArchiveImmutableError",
@@ -2541,6 +3212,12 @@ __all__ = [
     "verify_archive",
     "TaskArchive",
     "TaskArchiveWriter",
+    "MAX_ARCHIVE_INVOCATIONS",
+    "MAX_ARCHIVE_INVOCATION_TURNS",
+    "MAX_ARCHIVE_INVOCATION_BYTES",
+    "MAX_ARCHIVE_TELEMETRY_BYTES",
+    "MAX_ARCHIVE_TOTAL_TOKEN_COUNT",
+    "collect_invocation_evidence",
     "validate_opaque_id",
     "validate_relative_path",
 ]

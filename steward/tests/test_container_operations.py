@@ -1000,8 +1000,9 @@ def test_labeled_docker_reconciliation_retains_references_and_reclaims_exact_ima
     assert not any("prune" in value for call in calls for value in call)
 
 
+@pytest.mark.parametrize("selector_pending", ["previous", "current"])
 def test_pending_selector_journal_retains_before_and_after_releases(
-    tmp_path: Path,
+    tmp_path: Path, selector_pending: str
 ) -> None:
     deployment = _deployment(tmp_path)
     deployment_dir = deployment.deployment_dir
@@ -1046,7 +1047,7 @@ def test_pending_selector_journal_retains_before_and_after_releases(
                 "operation": "upgrade",
                 "fromRelease": before,
                 "toRelease": after,
-                "selectorPending": "previous",
+                "selectorPending": selector_pending,
                 "beforeCurrent": before,
                 "beforePrevious": prior,
                 "afterCurrent": after,
@@ -1075,6 +1076,50 @@ def test_pending_selector_journal_retains_before_and_after_releases(
         kwargs["current"] is (release_id == before)
         for release_id, kwargs in store.calls
     )
+
+
+@pytest.mark.parametrize("outcome", [None, "success", "unknown"])
+def test_reserved_selector_journal_requires_pending_outcome(
+    tmp_path: Path, outcome: str | None
+) -> None:
+    deployment = _deployment(tmp_path)
+    deployment_dir = deployment.deployment_dir
+    assert deployment_dir is not None
+    deployment_dir.mkdir(parents=True)
+    journal = {"phase": "selector"}
+    if outcome is not None:
+        journal["outcome"] = outcome
+    (deployment_dir / "operation.journal").write_text(
+        json.dumps(journal), encoding="utf-8"
+    )
+
+    class RecordingStore:
+        def record_image_release(self, _release_id: str, **_kwargs: object) -> None:
+            raise AssertionError("selector journal should fail before release recording")
+
+    with pytest.raises(ValueError, match="selector journal outcome"):
+        DockerResourceManager._record_deployment_releases(
+            RecordingStore(), deployment
+        )
+
+
+def test_non_selector_success_journal_remains_ignorable(tmp_path: Path) -> None:
+    deployment = _deployment(tmp_path)
+    deployment_dir = deployment.deployment_dir
+    assert deployment_dir is not None
+    deployment_dir.mkdir(parents=True)
+    (deployment_dir / "operation.journal").write_text(
+        json.dumps({"phase": "complete", "outcome": "success"}),
+        encoding="utf-8",
+    )
+
+    class RecordingStore:
+        def record_image_release(self, _release_id: str, **_kwargs: object) -> None:
+            raise AssertionError("there are no release records to record")
+
+    assert DockerResourceManager._record_deployment_releases(
+        RecordingStore(), deployment
+    ) == ({}, frozenset())
 
 
 def test_health_fails_closed_when_database_state_is_unavailable(

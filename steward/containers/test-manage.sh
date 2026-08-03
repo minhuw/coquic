@@ -171,6 +171,34 @@ interrupt_upgrade_and_restore_before() {
   [[ "$(cat "$home/private/deployment/current")" != "$candidate" ]]
 }
 
+selector_restore_checkpoint() {
+  local candidate
+  set_fake_pair e f
+  candidate="$(release_for_fake_pair)"
+  export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+  ! "$manage" upgrade >/dev/null 2>&1
+  unset STEWARD_FAKE_SELECTOR_INTERRUPT
+  [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
+  [[ "$(cat "$home/private/deployment/service.release")" == "$candidate" ]]
+  python - "$home/private/deployment/operation.journal" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["selectorPending"] = "current"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle)
+    handle.write("\n")
+PY
+  printf '%s\n' "$old" >"$home/private/deployment/service.release"
+  "$manage" start >/dev/null
+  "$manage" start >/dev/null
+  [[ "$(cat "$home/private/deployment/current")" == "$old" ]]
+  [[ ! -e "$home/private/deployment/previous" ]]
+  [[ "$(cat "$home/private/deployment/service.release")" == "$old" ]]
+}
+
 interrupt_rollback_and_recover() {
   local point="$1" candidate
   set_fake_pair e f
@@ -203,6 +231,32 @@ selector_recovery_negative_fixtures() {
   cp "$journal_backup" "$home/private/deployment/operation.journal"
   "$manage" start >/dev/null
   "$manage" rollback >/dev/null
+
+  local outcome
+  for outcome in success unknown missing; do
+    export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
+    ! "$manage" upgrade >/dev/null 2>&1
+    unset STEWARD_FAKE_SELECTOR_INTERRUPT
+    cp "$home/private/deployment/operation.journal" "$journal_backup"
+    python - "$home/private/deployment/operation.journal" "$outcome" <<'PY'
+import json
+import sys
+
+path, outcome = sys.argv[1:]
+value = json.loads(open(path, encoding="utf-8").read())
+if outcome == "missing":
+    value.pop("outcome", None)
+else:
+    value["outcome"] = outcome
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle)
+    handle.write("\n")
+PY
+    expect_manage_refusal start
+    cp "$journal_backup" "$home/private/deployment/operation.journal"
+    "$manage" start >/dev/null
+    "$manage" rollback >/dev/null
+  done
 
   export STEWARD_FAKE_SELECTOR_INTERRUPT=after-journal
   ! "$manage" upgrade >/dev/null 2>&1
@@ -312,6 +366,7 @@ PY
     "$manage" stop
     ! "$manage" status | rg 'state=running'
     "$manage" start
+    selector_restore_checkpoint
     export STEWARD_FAKE_DAEMON_ID=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
     export STEWARD_FAKE_TASK_ID=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
     "$manage" upgrade

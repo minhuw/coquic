@@ -445,19 +445,11 @@ class DockerResourceManager:
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
             if not isinstance(journal, dict):
                 raise ValueError("deployment operation journal is malformed")
-            if journal.get("outcome") == "pending" and journal.get("phase") in {
-                "build",
-                "recreate",
-            }:
-                candidate = journal.get("candidateRelease")
-                if candidate is not None and not isinstance(candidate, str):
-                    raise ValueError("deployment candidate release is malformed")
-                if candidate in release_images:
-                    in_flight.add(candidate)
-            elif journal.get("outcome") == "pending" and journal.get("phase") in {
-                "selector",
-                "selector-pair",
-            }:
+            phase = journal.get("phase")
+            outcome = journal.get("outcome")
+            if phase in {"selector", "selector-pair"}:
+                if outcome != "pending":
+                    raise ValueError("deployment selector journal outcome is invalid")
                 required = (
                     "operation",
                     "fromRelease",
@@ -498,6 +490,8 @@ class DockerResourceManager:
                     or _RELEASE_ID.fullmatch(before_previous) is None
                 ):
                     raise ValueError("deployment selector journal before identity is invalid")
+                if before_previous == from_release:
+                    raise ValueError("deployment selector journal pair is ambiguous")
                 if (
                     before_current != from_release
                     or after_current != to_release
@@ -517,13 +511,27 @@ class DockerResourceManager:
                 )
                 partial_match = current == before_current and previous == after_previous
                 after_match = current == after_current and previous == after_previous
-                if not (before_match or partial_match or after_match) or (
-                    selector_pending == "current" and before_match
-                ):
+                if selector_pending == "previous":
+                    state_valid = before_match or partial_match
+                else:
+                    # A before pair with pending=current is the checkpoint left
+                    # when recovery chose the verified fromRelease and stopped
+                    # after persisting the next journal transition.
+                    state_valid = partial_match or after_match or before_match
+                if not state_valid:
                     raise ValueError("deployment selector journal pair is ambiguous")
                 in_flight.update((from_release, to_release))
                 if before_previous is not None:
                     in_flight.add(before_previous)
+            elif outcome == "pending" and phase in {
+                "build",
+                "recreate",
+            }:
+                candidate = journal.get("candidateRelease")
+                if candidate is not None and not isinstance(candidate, str):
+                    raise ValueError("deployment candidate release is malformed")
+                if candidate in release_images:
+                    in_flight.add(candidate)
         return release_images, frozenset(in_flight)
 
 

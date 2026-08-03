@@ -150,6 +150,49 @@ selector_value() {
   read_release_file "$deployment/$name" "$name selector"
 }
 
+durable_replace() {
+  local source="$1" target="$2"
+  python - "$source" "$target" <<'PY'
+import os
+import sys
+
+source, target = sys.argv[1:]
+source_fd = os.open(source, os.O_RDONLY)
+try:
+    os.fsync(source_fd)
+finally:
+    os.close(source_fd)
+os.replace(source, target)
+directory_fd = os.open(
+    os.path.dirname(target) or ".",
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+}
+
+durable_unlink() {
+  local target="$1"
+  python - "$target" <<'PY'
+import os
+import sys
+
+target = sys.argv[1]
+os.unlink(target)
+directory_fd = os.open(
+    os.path.dirname(target) or ".",
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+}
+
 journal() {
   local phase="$1" outcome="${2:-pending}" candidate="${3:-}" clone_temp="${4:-}"
   mkdir -p -m 700 "$deployment"
@@ -165,7 +208,7 @@ journal() {
     printf '{"phase":"%s","outcome":"%s"}\n' "$phase" "$outcome" >"$deployment/operation.journal.tmp"
   fi
   chmod 600 "$deployment/operation.journal.tmp"
-  mv -f "$deployment/operation.journal.tmp" "$deployment/operation.journal"
+  durable_replace "$deployment/operation.journal.tmp" "$deployment/operation.journal"
 }
 
 selector_journal() {
@@ -180,13 +223,14 @@ selector_journal() {
   local before_previous_json='null'
   if [[ "$before_previous" != __NONE__ ]]; then
     release_token "$before_previous" || die 'selector journal before identity is invalid'
+    [[ "$before_previous" != "$from_release" ]] || die 'selector journal before pair is ambiguous'
     before_previous_json="\"$before_previous\""
   fi
   mkdir -p -m 700 "$deployment"
   printf '{"phase":"selector","outcome":"pending","operation":"%s","fromRelease":"%s","toRelease":"%s","selectorPending":"%s","beforeCurrent":"%s","beforePrevious":%s,"afterCurrent":"%s","afterPrevious":"%s"}\n' \
     "$operation" "$from_release" "$to_release" "$selector_pending" "$before_current" "$before_previous_json" "$after_current" "$after_previous" >"$deployment/operation.journal.tmp"
   chmod 600 "$deployment/operation.journal.tmp"
-  mv -f "$deployment/operation.journal.tmp" "$deployment/operation.journal"
+  durable_replace "$deployment/operation.journal.tmp" "$deployment/operation.journal"
 }
 
 selector_interrupt() {
@@ -247,9 +291,11 @@ release_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}\Z")
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 if not isinstance(value, dict):
     raise SystemExit(1)
-if value.get("phase") not in {"selector", "selector-pair"} or value.get("outcome") != "pending":
+if value.get("phase") not in {"selector", "selector-pair"}:
     print("none")
     raise SystemExit(0)
+if value.get("outcome") != "pending":
+    raise SystemExit(1)
 required = ("operation", "fromRelease", "toRelease", "selectorPending", "beforeCurrent", "beforePrevious", "afterCurrent", "afterPrevious")
 if any(key not in value for key in required):
     raise SystemExit(1)
@@ -263,6 +309,8 @@ for key in ("fromRelease", "toRelease", "beforeCurrent", "afterCurrent", "afterP
 before_previous = value["beforePrevious"]
 if before_previous is not None and (not isinstance(before_previous, str) or release_re.fullmatch(before_previous) is None):
     raise SystemExit(1)
+if before_previous == value["fromRelease"]:
+    raise SystemExit(1)
 if value["beforeCurrent"] != value["fromRelease"] or value["afterCurrent"] != value["toRelease"] or value["afterPrevious"] != value["fromRelease"]:
     raise SystemExit(1)
 print("\t".join((operation, value["fromRelease"], value["toRelease"], pending, value["beforeCurrent"], before_previous or "__NONE__", value["afterCurrent"], value["afterPrevious"])))
@@ -273,7 +321,7 @@ remove_selector() {
   local name="$1" path="$deployment/$1"
   [[ ! -e "$path" ]] && return 0
   [[ -f "$path" && ! -L "$path" ]] || die "$name selector is not removable"
-  rm -f -- "$path"
+  durable_unlink "$path"
 }
 
 recover_selector_commit() {
@@ -305,18 +353,23 @@ recover_selector_commit() {
   [[ "$current" == "$before_current" && "$previous" == "$before_previous" ]] && before_match=1
   [[ "$current" == "$before_current" && "$previous" == "$after_previous" ]] && partial_match=1
   [[ "$current" == "$after_current" && "$previous" == "$after_previous" ]] && after_match=1
-  (( before_match || partial_match || after_match )) || die 'selector recovery pair is ambiguous'
-  if [[ "$selector_pending" == previous && $after_match -eq 0 && $before_match -eq 0 && $partial_match -eq 0 ]]; then
-    die 'selector recovery pending selector is inconsistent'
-  fi
-  if [[ "$selector_pending" == current && $before_match -eq 1 ]]; then
-    die 'selector recovery pending selector is inconsistent'
-  fi
   local running
   select_release "$current"
   if ! running="$(running_release_identity)"; then
     die 'selector recovery running release is unverified'
   fi
+  case "$selector_pending" in
+    previous)
+      (( before_match || partial_match )) || die 'selector recovery pair is ambiguous'
+      ;;
+    current)
+      if (( before_match )); then
+        [[ "$running" == "$from_release" ]] || die 'selector recovery pending selector is inconsistent'
+      else
+        (( partial_match || after_match )) || die 'selector recovery pair is ambiguous'
+      fi
+      ;;
+  esac
   local target_current target_previous
   if [[ "$running" == "$to_release" ]]; then
     target_current="$after_current"
@@ -363,14 +416,14 @@ record_outcome() {
   local operation="$1" result="$2"
   printf '{"operation":"%s","result":"%s"}\n' "$operation" "$result" >"$deployment/last-outcome.tmp"
   chmod 600 "$deployment/last-outcome.tmp"
-  mv -f "$deployment/last-outcome.tmp" "$deployment/last-outcome.json"
+  durable_replace "$deployment/last-outcome.tmp" "$deployment/last-outcome.json"
 }
 
 write_selector() {
   local name="$1" release="$2"
   printf '%s\n' "$release" >"$deployment/$name.tmp"
   chmod 600 "$deployment/$name.tmp"
-  mv -f "$deployment/$name.tmp" "$deployment/$name"
+  durable_replace "$deployment/$name.tmp" "$deployment/$name"
 }
 
 commit_selector_pair() {

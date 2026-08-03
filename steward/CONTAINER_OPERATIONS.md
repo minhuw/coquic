@@ -186,7 +186,9 @@ or mismatched state remains for operator inspection. An interrupted selector
 move uses a selector-pair journal written after health verification and before
 the first selector write. It records the operation, the verified `fromRelease`
 and `toRelease`, the pending selector, and the complete before/after pair. The
-pair is written in this order:
+each temporary journal or selector file is fsynced before its atomic rename and
+the deployment directory is fsynced after the rename. The pair is written in
+this order:
 
 ```text
 operation.journal: selector pending, selectorPending=previous
@@ -201,11 +203,14 @@ the selector values, and the running daemon identity before changing anything.
 If the daemon is verified on `toRelease`, recovery finishes
 `previous=fromRelease` and `current=toRelease`; if it is verified on
 `fromRelease`, recovery restores the recorded before pair (including restoring
-an absent `previous` selector). Any unknown release, malformed or tampered
-journal, foreign selector, missing record, or running release outside the
-recorded pair refuses the operation. Repeating recovery after either exact
-pair is complete only revalidates it and marks the journal complete; it never
-guesses a release or performs Docker cleanup.
+an absent `previous` selector). A recovery checkpoint with the exact before
+pair and `selectorPending=current` is accepted only when the verified daemon is
+still `fromRelease`; it resumes the restore idempotently. Any unknown release,
+malformed or tampered journal, foreign selector, missing record, reserved
+selector phase with a non-pending outcome, or running release outside the
+recorded pair refuses the operation. Repeating recovery after either exact pair
+is complete only revalidates it and marks the journal complete; it never guesses
+a release or performs Docker cleanup.
 
 ## Pressure and cleanup
 

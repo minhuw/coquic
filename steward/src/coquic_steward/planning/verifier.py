@@ -402,11 +402,11 @@ def _task_spec_from_proposal(
         identity = (
             _feature_issue_identity(selected[0], signals.repository)
             if len(selected) == 1
+            and selected[0].get("kind") == "github-issues.feature-request"
             else None
         )
-        if identity is None:
-            raise ValueError("feature task is missing a verified issue identity")
-        title, prompt = _canonical_feature_task(identity)
+        if identity is not None:
+            title, prompt = _canonical_feature_task(identity)
     return TaskSpec(
         kind=proposed.kind,
         worker=proposed.worker,
@@ -441,7 +441,10 @@ def _feature_issue_identity(
     if isinstance(raw_number, int):
         number = raw_number
     elif isinstance(raw_number, str) and raw_number.isascii() and raw_number.isdigit():
-        number = int(raw_number)
+        try:
+            number = int(raw_number)
+        except ValueError:
+            return None
     else:
         return None
     if number < 1:
@@ -460,7 +463,10 @@ def _feature_issue_identity(
     raw_url = payload.get("issue_url")
     if not isinstance(raw_url, str) or not raw_url or raw_url != raw_url.strip():
         return None
-    parsed = urlparse(raw_url)
+    try:
+        parsed = urlparse(raw_url)
+    except ValueError:
+        return None
     expected_path = f"/{repository}/issues/{number}"
     if (
         parsed.scheme != "https"

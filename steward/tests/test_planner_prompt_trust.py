@@ -135,6 +135,7 @@ def test_feature_task_uses_canonical_instructions_and_retains_raw_evidence() -> 
         {"issue_number": None, "issue_url": ISSUE_URL},
         {"issue_number": "not-a-number", "issue_url": ISSUE_URL},
         {"issue_number": 42, "issue_url": "https://github.com/minhuw/coquic/issues/43"},
+        {"issue_number": 42, "issue_url": "https://[github.com/minhuw/coquic/issues/42"},
     ],
 )
 def test_invalid_feature_identity_stays_pending(payload: dict[str, object]) -> None:
@@ -157,6 +158,7 @@ def test_non_feature_proposal_keeps_planner_authored_fields() -> None:
         kind="code-scanning.alert",
         fingerprint="codeql-1",
         title="CodeQL finding",
+        payload={"issue_number": 42, "issue_url": ISSUE_URL},
     )
     title = "Planner-selected CodeQL title"
     prompt = "Fix this selected finding and run focused validation."
@@ -187,3 +189,5 @@ def test_non_feature_proposal_keeps_planner_authored_fields() -> None:
     spec, _ = verified.planned[0]
     assert spec.title == title
     assert spec.prompt == prompt
+    selected = spec.metadata["source_context"]["selected_signal_items"][0]
+    assert selected["payload"]["issue_url"] == ISSUE_URL

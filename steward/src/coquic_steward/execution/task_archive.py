@@ -128,7 +128,7 @@ MAX_ARCHIVE_TOKEN_COUNT = 10**15
 MAX_ARCHIVE_TOTAL_TOKEN_COUNT = 10**16
 _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _TELEMETRY_FILE_RE = re.compile(
-    r"^telemetry(?:\.retry-([1-9][0-9]*)(?:\.unavailable-([1-9][0-9]*))?)?\.json$"
+    r"^telemetry(?:\.retry-([1-9][0-9]*))?(?:\.unavailable-([1-9][0-9]*))?\.json$"
 )
 
 
@@ -1090,6 +1090,7 @@ class TaskArchive:
         by_id: dict[str, tuple[str, ArchiveInvocation]] = {}
         unavailable_ordinals: dict[int, ArchiveInvocation] = {}
         current_unavailable: tuple[str, str, int] | None = None
+        authenticated_ordinals: set[int] = set()
         total_bytes = 0
         current_seen = False
         for path, archive_ordinal, is_retry in candidates:
@@ -1118,6 +1119,7 @@ class TaskArchive:
                         current_unavailable = (relative, reason, info.st_size)
                         continue
                     ordinal = archive_ordinal
+                    authenticated_ordinals.add(ordinal)
                     evidence = self._missing_invocation(
                         task_id,
                         pipeline_id,
@@ -1141,13 +1143,11 @@ class TaskArchive:
                 payload_ordinal = payload.get("retry_ordinal")
                 if type(payload_ordinal) is not int or payload_ordinal < 0:
                     raise ArchiveValidationError("telemetry retry ordinal is invalid")
-                if archive_ordinal is not None and payload_ordinal not in {
-                    archive_ordinal,
-                    archive_ordinal + 1,
-                }:
+                if archive_ordinal is not None and payload_ordinal != archive_ordinal:
                     raise ArchiveValidationError(
                         "telemetry retry ordinal disagrees with archive filename"
                     )
+                authenticated_ordinals.add(payload_ordinal)
                 aggregate = payload.get("aggregate")
                 if not isinstance(aggregate, Mapping):
                     raise ArchiveValidationError("telemetry aggregate is unavailable")
@@ -1227,6 +1227,8 @@ class TaskArchive:
                     if archive_ordinal is not None
                     else self._next_invocation_ordinal(selected)
                 )
+                if archive_ordinal is not None:
+                    authenticated_ordinals.add(archive_ordinal)
                 unavailable_ordinals[ordinal] = self._missing_invocation(
                     task_id,
                     pipeline_id,
@@ -1279,7 +1281,13 @@ class TaskArchive:
         )
         previous_ordinal: int | None = None
         total_tokens = 0
+        observed_ordinals: set[int] = set()
         for item in selected:
+            if item.retry_ordinal in observed_ordinals:
+                self._invocation_collection_error(
+                    "telemetry retry ordinals are not unique", strict
+                )
+            observed_ordinals.add(item.retry_ordinal)
             if previous_ordinal is not None and item.retry_ordinal <= previous_ordinal:
                 self._invocation_collection_error(
                     "telemetry retry ordinals are not monotonic", strict
@@ -1287,6 +1295,16 @@ class TaskArchive:
             previous_ordinal = item.retry_ordinal
             if item.aggregate is not None:
                 total_tokens += item.aggregate.get("total_tokens", 0)
+        if authenticated_ordinals and not authenticated_ordinals.issubset(observed_ordinals):
+            self._invocation_collection_error(
+                "telemetry retry ordinal evidence is missing", strict
+            )
+        if observed_ordinals:
+            expected_ordinals = set(range(max(observed_ordinals) + 1))
+            if observed_ordinals != expected_ordinals:
+                self._invocation_collection_error(
+                    "telemetry retry ordinals have gaps", strict
+                )
         if total_tokens > MAX_ARCHIVE_TOTAL_TOKEN_COUNT:
             self._invocation_collection_error(
                 "telemetry aggregate totals exceed bound", strict
@@ -1399,6 +1417,31 @@ class TaskArchive:
     @staticmethod
     def _next_invocation_ordinal(values: Sequence[ArchiveInvocation]) -> int:
         return max((item.retry_ordinal for item in values), default=-1) + 1
+
+    @staticmethod
+    def _canonical_invocation_descriptors(
+        values: Sequence[Mapping[str, Any] | ArchiveInvocation],
+    ) -> tuple[str, ...]:
+        descriptors: list[dict[str, Any]] = []
+        for value in values:
+            descriptor = value.descriptor if isinstance(value, ArchiveInvocation) else dict(value)
+            descriptors.append(descriptor)
+        descriptors.sort(
+            key=lambda item: (
+                int(item["retryOrdinal"]),
+                item.get("startedAt") or "",
+                item.get("invocationId") or "",
+            )
+        )
+        return tuple(
+            json.dumps(
+                descriptor,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for descriptor in descriptors
+        )
 
     @staticmethod
     def _missing_invocation(
@@ -2890,7 +2933,7 @@ class TaskArchive:
                 if run.get("state") == "running":
                     raise ArchiveSealError("cannot seal while a run is running")
                 try:
-                    self.collect_invocation_evidence(
+                    collected_invocations = self.collect_invocation_evidence(
                         task_id,
                         pipeline_id,
                         run_id,
@@ -2900,6 +2943,12 @@ class TaskArchive:
                     raise ArchiveSealError(
                         f"run invocation evidence is invalid: {exc}"
                     ) from exc
+                if self._canonical_invocation_descriptors(
+                    run["invocations"]
+                ) != self._canonical_invocation_descriptors(collected_invocations):
+                    raise ArchiveSealError(
+                        "run invocation descriptors disagree with sidecars"
+                    )
                 run_documents[run_id] = run
                 artifacts = run["artifacts"]
                 for descriptor in artifacts.values():

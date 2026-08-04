@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import gc
 import json
 import signal
 import socket
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -190,6 +192,120 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     assert callable(daemon.store.on_change)
     daemon.store.on_change()
     assert daemon._publication_wakeup.is_set()
+
+
+def _publication_callback_daemon(store: object) -> StewardDaemon:
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+    daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    daemon._publication_stop = threading.Event()
+    daemon._publication_wakeup = threading.Event()
+    daemon._publication_thread = None
+    daemon._publication_cancel = None
+    daemon._publication_lock = threading.RLock()
+    daemon._publication_callback = None
+    daemon._publication_previous_callback = None
+    return daemon
+
+
+def test_publication_worker_stop_restores_callback_and_releases_daemon_reference():
+    class Store:
+        on_change = None
+
+    store = Store()
+    daemon = _publication_callback_daemon(store)
+    daemon._install_publication_change_callback()
+    installed = store.on_change
+    reference = weakref.ref(daemon)
+
+    assert callable(installed)
+    assert daemon._stop_publication_worker() is True
+    assert store.on_change is None
+    assert daemon._publication_callback is None
+    assert daemon._publication_previous_callback is None
+
+    installed = None
+    daemon = None
+    gc.collect()
+    assert reference() is None
+
+
+def test_publication_worker_stop_preserves_external_callback_replacement():
+    class Store:
+        on_change = None
+
+    store = Store()
+    daemon = _publication_callback_daemon(store)
+    daemon._install_publication_change_callback()
+
+    replacement = lambda: None
+    store.on_change = replacement
+
+    assert daemon._stop_publication_worker() is True
+    assert store.on_change is replacement
+    assert daemon._publication_callback is None
+    assert daemon._publication_previous_callback is None
+
+
+def test_sequential_publication_daemons_do_not_chain_stale_callbacks():
+    observed: list[str] = []
+
+    def previous() -> None:
+        observed.append("previous")
+
+    class Store:
+        def __init__(self):
+            self.on_change = previous
+
+    store = Store()
+    first = _publication_callback_daemon(store)
+    first._install_publication_change_callback()
+    first_callback = store.on_change
+    assert first._stop_publication_worker() is True
+    assert store.on_change is previous
+
+    second = _publication_callback_daemon(store)
+    second._install_publication_change_callback()
+    second_callback = store.on_change
+    assert second_callback is not first_callback
+    assert second._publication_previous_callback is previous
+    assert second._stop_publication_worker() is True
+    assert store.on_change is previous
+
+    store.on_change()
+    assert observed == ["previous"]
+
+
+def test_shutdown_keeps_stopping_while_publication_worker_is_live(config, tmp_path):
+    object.__setattr__(config, "publication", _enabled_publication_config(tmp_path, "stubborn"))
+    store = TaskStore(config.db_path)
+    daemon = StewardDaemon(config, store)
+    started = threading.Event()
+    release = threading.Event()
+
+    def stubborn_worker() -> None:
+        started.set()
+        release.wait()
+
+    worker = threading.Thread(target=stubborn_worker, daemon=True)
+    daemon._publication_thread = worker
+    daemon._install_publication_change_callback()
+    worker.start()
+    assert started.wait(timeout=1.0)
+
+    result = daemon.shutdown(force=True)
+
+    assert result.state.value == "stopping"
+    assert daemon.lifecycle_state.value == "stopping"
+    assert store.get_daemon_state()["publication_worker_stopped"] is False
+    assert store.get_daemon_state()["lifecycle"] == "stopping"
+    assert daemon._publication_thread is worker
+
+    release.set()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert daemon._stop_publication_worker(deadline=time.monotonic() + 1.0) is True
+    assert store.on_change is None
 
 
 def test_publication_worker_reconciles_credential_free_staging_identity(

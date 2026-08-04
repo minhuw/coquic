@@ -441,7 +441,7 @@ class StewardDaemon:
         self._publication_stop = threading.Event()
         self._publication_wakeup = threading.Event()
         self._publication_lock = threading.RLock()
-        self._publication_previous_callback: Callable[[], None] | None = None
+        self._publication_previous_callback: object | None = None
         self._publication_callback: Callable[[], None] | None = None
         self._publication_cancel: Callable[[], None] | None = None
         self._publication_deadline: float | None = None
@@ -976,8 +976,38 @@ class StewardDaemon:
                 # A narrow fake store may expose no callback slot.  The worker
                 # still makes progress through its bounded periodic retry.
                 return
-            self._publication_previous_callback = previous if callable(previous) else None
+            self._publication_previous_callback = previous
             self._publication_callback = on_change
+
+    def _uninstall_publication_change_callback(self) -> bool:
+        """Release this daemon's store callback without overwriting a replacement."""
+
+        # A few narrow worker tests construct the daemon without ``__init__``;
+        # retain the same locking contract for those lightweight doubles.
+        lock = getattr(self, "_publication_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._publication_lock = lock
+        with lock:
+            callback = getattr(self, "_publication_callback", None)
+            if callback is None:
+                self._publication_previous_callback = None
+                return True
+
+            current = getattr(self.store, "on_change", None)
+            if current is callback:
+                try:
+                    self.store.on_change = self._publication_previous_callback
+                except (AttributeError, TypeError):
+                    # Keep ownership recorded when the callback cannot be
+                    # restored; shutdown must not claim a complete teardown.
+                    return False
+
+            # Whether the callback was restored or superseded externally, the
+            # daemon must drop its retained callback and previous-callback refs.
+            self._publication_callback = None
+            self._publication_previous_callback = None
+            return True
 
     def _build_publication_publisher(self) -> CloudPublisher:
         """Construct transport clients on the publication worker thread only."""
@@ -1274,6 +1304,7 @@ class StewardDaemon:
         finally:
             close_clients()
             self._publication_cancel = None
+            self._uninstall_publication_change_callback()
 
     def _start_publication_worker(self) -> None:
         """Start the one daemon-owned publication worker when enabled."""
@@ -1302,7 +1333,9 @@ class StewardDaemon:
             )
             self._publication_thread.start()
 
-    def _stop_publication_worker(self, *, deadline: float | None = None) -> None:
+    def _stop_publication_worker(self, *, deadline: float | None = None) -> bool:
+        """Request bounded worker teardown and acknowledge released ownership."""
+
         self._publication_stop.set()
         self._publication_wakeup.set()
         self._publication_deadline = deadline
@@ -1315,15 +1348,26 @@ class StewardDaemon:
             except Exception:
                 pass
         thread = self._publication_thread
-        if thread is None or thread is threading.current_thread():
-            return
+        if thread is None:
+            self._publication_cancel = None
+            return self._uninstall_publication_change_callback()
+        if thread is threading.current_thread():
+            return False
+        if not thread.is_alive():
+            if self._publication_thread is thread:
+                self._publication_thread = None
+                self._publication_cancel = None
+            return self._uninstall_publication_change_callback()
         timeout = PUBLICATION_JOIN_TIMEOUT_SECONDS
         if deadline is not None:
             timeout = max(0.0, deadline - time.monotonic())
         thread.join(timeout=timeout)
-        if not thread.is_alive() and self._publication_thread is thread:
+        if thread.is_alive():
+            return False
+        if self._publication_thread is thread:
             self._publication_thread = None
             self._publication_cancel = None
+        return self._uninstall_publication_change_callback()
 
     start_publication_worker = _start_publication_worker
     stop_publication_worker = _stop_publication_worker
@@ -3566,7 +3610,7 @@ class StewardDaemon:
         self._stop_control_loop_writer()
         self._drain_control_loop_once()
         deadline = time.monotonic() if force else time.monotonic() + float(self.config.shutdown_grace_seconds)
-        self._stop_publication_worker(deadline=deadline)
+        publication_worker_stopped = self._stop_publication_worker(deadline=deadline)
         running_runs = [
             (run.task_id, run.id)
             for run in list(self.store.running_runs())
@@ -3693,7 +3737,7 @@ class StewardDaemon:
         self._stop_heartbeat_thread()
         lifecycle = (
             DaemonLifecycleState.stopping
-            if container_stop_failures
+            if container_stop_failures or not publication_worker_stopped
             else DaemonLifecycleState.stopped
         )
         with self._runtime_lock:
@@ -3708,6 +3752,7 @@ class StewardDaemon:
                     "forced": force,
                     "interrupted_runs": interrupted_runs,
                     "container_stop_failures": len(container_stop_failures),
+                    "publication_worker_stopped": publication_worker_stopped,
                 },
             )
         return ShutdownResult(

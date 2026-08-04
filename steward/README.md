@@ -99,6 +99,18 @@ raw archive transport or transcript fallback runs beside it. See
 [CLOUD_PUBLICATION.md](CLOUD_PUBLICATION.md) for eligibility, publication
 order, recovery, and terminal archive cleanup.
 
+## Python dependency policy
+
+`steward/uv.lock` is the sole authority for exact Python dependency versions in
+both development and production. The Nix flake consumes that lock through the
+uv2nix workspace; `flake.lock` pins uv2nix, pyproject.nix, and the build-system
+inputs used to construct the environment. `steward/pyproject.toml` remains the
+compatibility declaration and is not a second version authority.
+
+Dependency updates require a reviewed change to the manifest and lock files,
+followed by the complete CI suite. Builds and checks never update either lock
+automatically.
+
 ## Planner boundary
 
 The scheduler planner is one global Codex process per attempt. Every attempt

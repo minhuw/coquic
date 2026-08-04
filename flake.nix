@@ -4,6 +4,24 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     git-hooks.url = "github:cachix/git-hooks.nix";
+
+    pyproject-nix = {
+      url = "git+https://github.com/pyproject-nix/pyproject.nix.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "git+https://github.com/pyproject-nix/uv2nix.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+    };
+
+    pyproject-build-systems = {
+      url = "git+https://github.com/pyproject-nix/build-system-pkgs.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+    };
   };
 
   outputs =
@@ -11,6 +29,9 @@
       self,
       nixpkgs,
       git-hooks,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
       ...
     }:
     let
@@ -50,16 +71,31 @@
         sha256 = "sha256-i2UnYhKaM4jn0Xnmnd6R7JAyXYc/88npPNBsON4of3w=";
       };
       projectSrc = lib.cleanSource ./.;
-      stewardPython = pkgs.python3.withPackages (ps: [
-        ps.boto3
-        ps.httpx
-        ps.jsonschema
-        ps.pillow
-        ps.pydantic
-        ps.pytest
-        ps.sqlalchemy
-        ps.typer
-      ]);
+      stewardWorkspace = uv2nix.lib.workspace.loadWorkspace {
+        workspaceRoot = ./steward;
+      };
+      stewardOverlay = stewardWorkspace.mkPyprojectOverlay {
+        sourcePreference = "wheel";
+      };
+      stewardPythonSet = (pkgs.callPackage pyproject-nix.build.packages {
+        python = pkgs.python3;
+      }).overrideScope (
+        lib.composeManyExtensions [
+          pyproject-build-systems.overlays.wheel
+          stewardOverlay
+        ]
+      );
+      stewardPython = (stewardPythonSet.mkVirtualEnv "coquic-steward-env" stewardWorkspace.deps.all).overrideAttrs (
+        old: {
+          venvSkip = (old.venvSkip or [ ]) ++ [ "bin/coquic-steward" ];
+        }
+      );
+      stewardDependencyParity = pkgs.runCommand "coquic-steward-dependency-parity" { } ''
+        ${stewardPython}/bin/python ${projectSrc}/scripts/check-steward-dependency-parity.py \
+          --root ${projectSrc}
+        mkdir -p $out
+        touch $out/check-passed
+      '';
       stewardSource = pkgs.stdenvNoCC.mkDerivation {
         pname = "coquic-steward-source";
         version = "0.1.0";
@@ -2164,14 +2200,16 @@ EOF
         includePreCommit = true;
         includePreCommitPackages = false;
         banner = "coquic dev shell ready. Run: zig build";
+        # Keep uv's project environment independent from the production closure.
+        extraShellHook = "unset PYTHONPATH\n";
         extraPackages = [
+          stewardPython
           llvmPkgs.clang-tools
           pkgs.pre-commit
           pkgs.trufflehog
           pkgs.tesseract
           pkgs.pulumi
           pkgs.wrangler
-          stewardPython
           pkgs.uv
           duvetTool
           nodejs
@@ -2365,6 +2403,7 @@ EOF
         coquic-boringssl-musl = boringsslMuslPackage;
         coquic-tests-quictls = mkCoquicCheck quictlsProfile;
         coquic-tests-boringssl = mkCoquicCheck boringsslProfile;
+        steward-dependency-parity = stewardDependencyParity;
       };
 
       packages.${system} = {

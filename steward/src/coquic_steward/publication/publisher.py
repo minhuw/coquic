@@ -213,8 +213,9 @@ class PublicationResult:
     """A bounded, public-safe outcome from the coordinator.
 
     The composed generation and provider responses are intentionally absent.
-    Callers receive only the durable publication identity, a closed status, and
-    bounded categories that are safe for logs and health rows.
+    Callers receive only the durable publication identity, a closed status,
+    bounded categories, and (when retry reconciliation attempted a hide) the
+    typed hide outcome that is safe for logs and health rows.
     """
 
     status: PublicationStatus | str
@@ -222,6 +223,7 @@ class PublicationResult:
     reason: str | None = None
     reason_codes: tuple[ReasonCode, ...] = ()
     phase: str | None = None
+    hide_result: PublicationHideResult | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -241,6 +243,10 @@ class PublicationResult:
         if self.phase is not None:
             phase = self.phase if isinstance(self.phase, str) and len(self.phase) <= 64 else None
             object.__setattr__(self, "phase", phase)
+        hide_result = self.hide_result
+        if hide_result is not None and not isinstance(hide_result, PublicationHideResult):
+            hide_result = None
+        object.__setattr__(self, "hide_result", hide_result)
 
     @property
     def ok(self) -> bool:
@@ -278,6 +284,12 @@ class PublicationResult:
     def reasons(self) -> tuple[ReasonCode, ...]:
         return self.reason_codes
 
+    @property
+    def hide(self) -> PublicationHideResult | None:
+        """Return the hide reconciliation outcome, when retry attempted one."""
+
+        return self.hide_result
+
     def as_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
             "status": self.status.value,
@@ -287,6 +299,8 @@ class PublicationResult:
         }
         if self.phase is not None:
             value["phase"] = self.phase
+        if self.hide_result is not None:
+            value["hide"] = self.hide_result.as_dict()
         return value
 
 
@@ -348,6 +362,7 @@ def _result(
     reason: object | None = None,
     reason_codes: Sequence[object] = (),
     phase: str | None = None,
+    hide_result: PublicationHideResult | None = None,
 ) -> PublicationResult:
     return PublicationResult(
         status,
@@ -355,6 +370,7 @@ def _result(
         None if reason is None else _reason(reason),
         _reason_codes(reason_codes),
         phase,
+        hide_result,
     )
 
 
@@ -1038,12 +1054,13 @@ class CloudPublisher:
                 phase="retry",
             )
         if source is None:
-            self._retry_hide_head(current, "missing")
+            hide_result = self._retry_hide_head(current, "missing")
             return _result(
                 PublicationStatus.blocked,
                 publication_id,
                 reason="missing",
                 phase="retry",
+                hide_result=hide_result,
             )
         try:
             composed_value = _call_composer(
@@ -1073,13 +1090,14 @@ class CloudPublisher:
                 if composed_value.reason_codes
                 else ReasonCode.unsafe_content
             )
-            self._retry_hide_head(current, _reason(reason, "integrity"))
+            hide_result = self._retry_hide_head(current, _reason(reason, "integrity"))
             return _result(
                 PublicationStatus.blocked,
                 publication_id,
                 reason=reason,
                 reason_codes=composed_value.reason_codes,
                 phase="retry",
+                hide_result=hide_result,
             )
         if not _is_composed_generation(composed_value):
             return _result(
@@ -1095,9 +1113,16 @@ class CloudPublisher:
         if composed.publication_id == publication_id:
             if composed.metadata_digest == getattr(current, "metadata_digest", None):
                 existing_reason = getattr(current, "reason", None)
+                hide_result = None
                 if isinstance(existing_reason, str) and existing_reason in _HIDE_REASONS:
-                    self._retry_hide_head(current, existing_reason)
-                return _result(PublicationStatus.blocked, publication_id, reason="unchanged", phase="retry")
+                    hide_result = self._retry_hide_head(current, existing_reason)
+                return _result(
+                    PublicationStatus.blocked,
+                    publication_id,
+                    reason="unchanged",
+                    phase="retry",
+                    hide_result=hide_result,
+                )
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         record = getattr(composed, "outbox_record", None)
         if record is None:
@@ -1129,17 +1154,38 @@ class CloudPublisher:
     retry_generation = retry_publication
     rescan_retry = retry_publication
 
-    def _retry_hide_head(self, generation: object, reason: str) -> None:
+    def _retry_hide_head(self, generation: object, reason: str) -> PublicationHideResult:
         task_id = getattr(generation, "task_id", None)
         if not isinstance(task_id, str):
-            return
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                reason="integrity",
+            )
         selected = reason if reason in _HIDE_REASONS else "integrity"
         try:
-            self.hide_task(task_id, selected)
+            result = self.hide_task(task_id, selected)
+        except Exception as error:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason=_provider_category(error),
+            )
+        if isinstance(result, PublicationHideResult):
+            return result
+        try:
+            return PublicationHideResult(
+                getattr(result, "status", PublicationHideStatus.blocked),
+                task_id=getattr(result, "task_id", task_id),
+                publication_id=getattr(result, "publication_id", None),
+                reason=getattr(result, "reason", "integrity"),
+                changed=getattr(result, "changed", False),
+            )
         except Exception:
-            # The retry result remains fail-closed even when reconciliation
-            # cannot be completed during this invocation.
-            return
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason="integrity",
+            )
 
     def hide_task(
         self,

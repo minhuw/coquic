@@ -190,6 +190,25 @@ def _build_cli_hide_publisher(config, store: TaskStore) -> tuple[CloudPublisher,
         return None
 
 
+def _build_cli_retry_publisher(
+    config, store: TaskStore
+) -> tuple[CloudPublisher, object | None]:
+    """Build retry's local coordinator and optional configured D1 client.
+
+    A changed clean generation is a local outbox operation and must retain the
+    historical retry behavior when publication is disabled. Hide paths still
+    fail closed through ``CloudPublisher.hide_task`` when no D1 client exists.
+    """
+
+    built = _build_cli_hide_publisher(config, store)
+    if built is not None:
+        return built
+    return (
+        CloudPublisher(store, None, None, worker_id="publication-cli"),
+        None,
+    )
+
+
 def _emit_publication(value: object) -> None:
     typer.echo(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
 
@@ -206,6 +225,7 @@ def _publication_result_output(result: object) -> dict[str, object]:
         status = "blocked"
     publication_id = getattr(result, "publication_id", None)
     publication_id = _safe_publication_id(publication_id)
+    hide_result = getattr(result, "hide_result", None)
     reason = getattr(result, "reason", None)
     if not isinstance(reason, str) or reason not in _PUBLICATION_SAFE_REASONS:
         reason = None
@@ -218,12 +238,25 @@ def _publication_result_output(result: object) -> dict[str, object]:
             reason_codes.append(value)
     if reason is not None and reason not in reason_codes:
         reason_codes.insert(0, reason)
-    return {
+    hide_status = getattr(hide_result, "status", None)
+    if hasattr(hide_status, "value"):
+        hide_status = hide_status.value
+    hide_reason = getattr(hide_result, "reason", None)
+    if (
+        hide_status == PublicationHideStatus.blocked.value
+        and hide_reason == "precondition"
+    ):
+        reason = "precondition"
+        reason_codes = ["precondition"]
+    output = {
         "status": status,
         "publicationId": publication_id,
         "reason": reason,
         "reasonCodes": reason_codes,
     }
+    if hide_result is not None:
+        output["hide"] = _publication_hide_result_output(hide_result)
+    return output
 
 
 def _publication_hide_result_output(result: object) -> dict[str, object]:
@@ -235,11 +268,15 @@ def _publication_hide_result_output(result: object) -> dict[str, object]:
     reason = getattr(result, "reason", None)
     if not isinstance(reason, str) or reason not in _PUBLICATION_SAFE_REASONS:
         reason = None
+    changed = getattr(result, "changed", False)
+    if not isinstance(changed, bool):
+        changed = False
     return {
         "status": status,
         "taskId": _safe_publication_id(getattr(result, "task_id", None)),
         "publicationId": _safe_publication_id(getattr(result, "publication_id", None)),
         "reason": reason,
+        "changed": changed,
     }
 
 
@@ -312,12 +349,8 @@ def publication_retry(publication_id: str) -> None:
         )
         raise typer.Exit(1)
     source = _current_publication_source(config, store, generation)
-    publisher = CloudPublisher(
-        store,
-        object(),
-        object(),
-        worker_id="publication-cli",
-    )
+    built = _build_cli_retry_publisher(config, store)
+    publisher, client = built
     try:
         result = publisher.retry_publication(
             publication_id,
@@ -334,14 +367,33 @@ def publication_retry(publication_id: str) -> None:
             }
         )
         raise typer.Exit(1)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
     _emit_publication(_publication_result_output(result))
-    if getattr(result, "status", None) in {
-        PublicationStatus.blocked,
-        PublicationStatus.repair_required,
-    } or getattr(getattr(result, "status", None), "value", None) in {
-        PublicationStatus.blocked.value,
-        PublicationStatus.repair_required.value,
-    }:
+    hide_result = getattr(result, "hide_result", None)
+    hide_confirmed = getattr(hide_result, "status", None) in {
+        PublicationHideStatus.hidden,
+        PublicationHideStatus.unchanged,
+    } or getattr(getattr(hide_result, "status", None), "value", None) in {
+        PublicationHideStatus.hidden.value,
+        PublicationHideStatus.unchanged.value,
+    }
+    if (
+        getattr(result, "status", None) in {
+            PublicationStatus.blocked,
+            PublicationStatus.repair_required,
+        }
+        or getattr(getattr(result, "status", None), "value", None)
+        in {
+            PublicationStatus.blocked.value,
+            PublicationStatus.repair_required.value,
+        }
+    ) and not hide_confirmed:
         raise typer.Exit(1)
 
 

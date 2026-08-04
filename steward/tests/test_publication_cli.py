@@ -18,7 +18,9 @@ from coquic_steward.publication.outbox import (
 )
 from coquic_steward.publication.publisher import (
     CloudPublisher,
+    PublicationHideResult,
     PublicationHideStatus,
+    PublicationResult,
     PublicationStatus,
     publication_generation_views,
     publication_health_view,
@@ -48,6 +50,31 @@ def _generation(*, publication_id: str = "pub-current", state: str = "blocked"):
         updated_at=NOW - timedelta(minutes=2),
         lease_owner=None,
     )
+
+
+def _blocked_store(tmp_path):
+    store = TaskStore(tmp_path / "steward.sqlite")
+    identity = GenerationIdentity("task-retry-hide", "boundary-retry-hide")
+    generation = PublicationGeneration(
+        publication_id=identity.publication_id,
+        task_id="task-retry-hide",
+        run_id="run-retry-hide",
+        generation_boundary="boundary-retry-hide",
+        metadata_digest="a" * 64,
+        idempotency_key=identity.idempotency_key,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+    assert store.claim_publication("worker-1", publication_id=generation.publication_id, now=NOW).status is PublicationOperationStatus.claimed
+    assert store.block_publication(
+        generation.publication_id,
+        expected_state=PublicationState.claimed,
+        lease_owner="worker-1",
+        reason="unsafe_content",
+        now=NOW + timedelta(seconds=1),
+    ).status is PublicationOperationStatus.blocked
+    return store, generation
 
 
 def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
@@ -136,6 +163,140 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.blocked
     assert result.reason == "unchanged"
+
+
+def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(monkeypatch) -> None:
+    current = _generation()
+    closed: list[bool] = []
+    calls: list[tuple[str, object, object]] = []
+
+    class Store:
+        def get_publication_generation(self, publication_id):
+            return current if publication_id == current.publication_id else None
+
+    class Client:
+        def close(self):
+            closed.append(True)
+
+    hidden = PublicationHideResult(
+        PublicationHideStatus.hidden,
+        task_id=current.task_id,
+        publication_id=current.publication_id,
+        reason="unsafe_content",
+        changed=True,
+    )
+    publisher = SimpleNamespace(
+        retry_publication=lambda publication_id, source, *, compose_kwargs: (
+            calls.append((publication_id, source, compose_kwargs))
+            or PublicationResult(
+                PublicationStatus.blocked,
+                publication_id=publication_id,
+                reason="unsafe_content",
+                reason_codes=(ReasonCode.unsafe_content,),
+                hide_result=hidden,
+            )
+        )
+    )
+    config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
+    monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
+    monkeypatch.setattr(cli, "_build_cli_hide_publisher", lambda *_args: (publisher, Client()))
+
+    result = CliRunner().invoke(app, ["publication", "retry", current.publication_id])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["status"] == "blocked"
+    assert payload["hide"] == {
+        "status": "hidden",
+        "taskId": current.task_id,
+        "publicationId": current.publication_id,
+        "reason": "unsafe_content",
+        "changed": True,
+    }
+    assert calls and calls[0][0] == current.publication_id
+    assert closed == [True]
+
+
+def test_retry_hide_provider_failure_is_typed_and_pending(tmp_path) -> None:
+    store, generation = _blocked_store(tmp_path)
+
+    class D1:
+        def hide_task(self, _task_id, _reason):
+            raise RuntimeError("private provider detail")
+
+    publisher = CloudPublisher(
+        store,
+        object(),
+        D1(),
+        now=NOW + timedelta(seconds=2),
+        compose=lambda *_args, **_kwargs: FailClosed((ReasonCode.unsafe_content,)),
+    )
+    result = publisher.retry_publication(generation.publication_id, {"fresh": True})
+
+    assert result.status is PublicationStatus.blocked
+    assert result.hide_result is not None
+    assert result.hide_result.status is PublicationHideStatus.blocked
+    assert result.hide_result.reason == "provider"
+    assert store.get_publication_hide(generation.task_id).state.value == "pending"
+    assert "private provider detail" not in json.dumps(result.as_dict())
+
+
+def test_retry_hide_invalid_receipt_is_typed_and_pending(tmp_path) -> None:
+    store, generation = _blocked_store(tmp_path)
+
+    class D1:
+        def hide_task(self, task_id, _reason):
+            return SimpleNamespace(
+                task_id=task_id,
+                publication_id=generation.publication_id,
+                state="visible",
+                changed=True,
+            )
+
+    publisher = CloudPublisher(
+        store,
+        object(),
+        D1(),
+        now=NOW + timedelta(seconds=2),
+        compose=lambda *_args, **_kwargs: FailClosed((ReasonCode.unsafe_content,)),
+    )
+    result = publisher.retry_publication(generation.publication_id, {"fresh": True})
+
+    assert result.hide_result is not None
+    assert result.hide_result.status is PublicationHideStatus.blocked
+    assert result.hide_result.reason == "integrity"
+    assert store.get_publication_hide(generation.task_id).state.value == "pending"
+
+
+def test_retry_missing_publication_configuration_is_bounded(monkeypatch) -> None:
+    current = _generation()
+
+    class Store:
+        def get_publication_generation(self, publication_id):
+            return current if publication_id == current.publication_id else None
+
+    config = SimpleNamespace(publication=SimpleNamespace(enabled=False))
+    monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
+    monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
+
+    result = CliRunner().invoke(app, ["publication", "retry", current.publication_id])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload == {
+        "status": "blocked",
+        "publicationId": current.publication_id,
+        "reason": "precondition",
+        "reasonCodes": ["precondition"],
+        "hide": {
+            "status": "blocked",
+            "taskId": current.task_id,
+            "publicationId": None,
+            "reason": "precondition",
+            "changed": False,
+        },
+    }
 
 
 def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:

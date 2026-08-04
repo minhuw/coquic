@@ -31,6 +31,7 @@ from ..core.models import (
     DaemonCycleSummary,
     DaemonRuntime,
     DaemonRuntimeState,
+    OwnedDockerUsage,
     PipelineCursorPhase,
     ResourcePressureState,
     SignalFetchStatus,
@@ -569,18 +570,24 @@ class StewardDaemon:
         return bool(self._refresh_resource_pressure().get("admissionAllowed"))
 
     def _refresh_resource_pressure(self) -> dict[str, Any]:
-        self._reconcile_docker_resources()
-        report = self._resource_pressure.measure()
+        reconciled_usage = self._reconcile_docker_resources()
+        if reconciled_usage is None:
+            report = self._resource_pressure.measure()
+        else:
+            report = self._resource_pressure.measure(reconciled_usage)
         report_dict = report.as_dict()
         try:
-            pending = 0
-            for task in self.store.list_tasks(limit=10_000):
-                events = self.store.events(task.id, limit=200)
-                if any(event.kind == "cleanup_pending" for event in events) and not any(
-                    event.kind == "cleanup_complete" for event in events
-                ):
-                    pending += 1
-            report_dict["cleanupPending"] = pending
+            cleanup_count = None
+            for method_name in (
+                "cleanup_pending_count",
+                "count_cleanup_pending",
+                "pending_cleanup_count",
+            ):
+                candidate = getattr(self.store, method_name, None)
+                if callable(candidate):
+                    cleanup_count = int(candidate())
+                    break
+            report_dict["cleanupPending"] = cleanup_count
         except Exception:
             report_dict["cleanupPending"] = None
         publication_health = getattr(self.store, "get_publication_health", None)
@@ -646,15 +653,21 @@ class StewardDaemon:
                 self._log(f"resource pressure health write failed error={exc.__class__.__name__}")
         return report_dict
 
-    def _reconcile_docker_resources(self) -> None:
+    def _reconcile_docker_resources(self) -> OwnedDockerUsage | None:
         if self._docker_resources is None:
-            return
+            return None
         try:
-            self._docker_resources.reconcile(self.store, self.config.deployment)
+            result = self._docker_resources.reconcile(self.store, self.config.deployment)
             self._resource_reconciliation_failed = False
+            usage = result.get("usage") if isinstance(result, Mapping) else None
+            if isinstance(usage, OwnedDockerUsage):
+                return usage
+            self._resource_reconciliation_failed = True
+            self._log("owned Docker reconciliation returned no usage")
         except Exception as exc:
             self._resource_reconciliation_failed = True
             self._log(f"owned Docker reconciliation failed error={exc.__class__.__name__}")
+        return OwnedDockerUsage(ambiguous=True)
 
     def _retry_cleanup_pending_tasks(self) -> None:
         """Retry each durable terminal cleanup transaction once per cycle."""

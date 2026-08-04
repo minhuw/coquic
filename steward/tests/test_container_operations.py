@@ -32,7 +32,7 @@ from coquic_steward.execution.validation import (
     _docker_validation_runner,
     run_validation,
 )
-from coquic_steward.core.models import TaskKind, TaskSpec, WorkerKind
+from coquic_steward.core.models import OwnedDockerUsage, TaskKind, TaskSpec, WorkerKind
 from coquic_steward.storage import TaskStore
 
 
@@ -861,8 +861,9 @@ def test_release_and_pressure_facts_are_private(tmp_path: Path) -> None:
     assert "secret" not in json.dumps(store.get_resource_pressure())
 
 
+@pytest.mark.parametrize("delete_returncode", [0, 1])
 def test_labeled_docker_reconciliation_retains_references_and_reclaims_exact_image(
-    tmp_path: Path,
+    tmp_path: Path, delete_returncode: int
 ) -> None:
     daemon_image = "sha256:" + "a" * 64
     task_image = "sha256:" + "b" * 64
@@ -985,19 +986,58 @@ def test_labeled_docker_reconciliation_retains_references_and_reclaims_exact_ima
                 argv, 0, json.dumps(payload).encode(), b""
             )
         if command[:2] == ["image", "rm"]:
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
+            return subprocess.CompletedProcess(argv, delete_returncode, b"", b"")
         raise AssertionError(argv)
 
     store = TaskStore(tmp_path / "steward.sqlite")
-    result = DockerResourceManager(runner=runner).reconcile(store, deployment)
+    manager = DockerResourceManager(runner=runner)
+    snapshot_calls = 0
+    snapshot = manager._snapshot
+
+    def counted_snapshot(image_ids):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return snapshot(image_ids)
+
+    manager._snapshot = counted_snapshot
+    result = manager.reconcile(store, deployment)
 
     assert result["ambiguous"] is False
-    assert result["reclaimed"] == (unused_image,)
+    expected_reclaimed = (unused_image,) if delete_returncode == 0 else ()
+    assert result["reclaimed"] == expected_reclaimed
+    assert result["usage"].image_bytes == (160 if delete_returncode == 0 else 200)
+    assert result["usage"].image_count == (4 if delete_returncode == 0 else 5)
+    assert snapshot_calls == 1
     assert store.list_container_references()[0]["image_id"] == task_image
     assert store.referenced_image_ids() == frozenset({daemon_image, task_image})
     assert ["docker", "image", "rm", unused_image] in calls
     assert not any(call[1:3] == ["image", "ls"] for call in calls)
     assert not any("prune" in value for call in calls for value in call)
+
+
+def test_ambiguous_docker_snapshot_never_reclaims_images(tmp_path: Path) -> None:
+    deployment = _deployment(tmp_path)
+    manager = DockerResourceManager()
+    manager._snapshot = lambda _image_ids: (
+        OwnedDockerUsage(ambiguous=True),
+        [],
+        [{"image_id": "sha256:" + "a" * 64, "size_bytes": 40}],
+        frozenset(),
+        True,
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]):
+        calls.append(argv)
+        raise AssertionError("ambiguous snapshots must not reclaim images")
+
+    manager.runner = runner
+    result = manager.reconcile(TaskStore(tmp_path / "steward.sqlite"), deployment)
+
+    assert result["ambiguous"] is True
+    assert result["reclaimed"] == ()
+    assert result["usage"].ambiguous is True
+    assert calls == []
 
 
 @pytest.mark.parametrize("selector_pending", ["previous", "current"])

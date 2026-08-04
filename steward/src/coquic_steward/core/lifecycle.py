@@ -47,7 +47,12 @@ class ResourcePressureController:
             admission_allowed=initial_state is ResourcePressureState.normal,
         )
 
-    def measure(self) -> ResourcePressure:
+    def measure(
+        self,
+        owned_usage: OwnedDockerUsage | Mapping[str, Any] | None = None,
+    ) -> ResourcePressure:
+        """Measure pressure from one supplied snapshot or the injected provider."""
+
         deployment = getattr(self.config, "deployment", None)
         if deployment is None or not getattr(deployment, "enabled", False):
             self.last = ResourcePressure()
@@ -62,23 +67,38 @@ class ResourcePressureController:
             except OSError:
                 free_bytes = None
         owned = OwnedDockerUsage(ambiguous=True)
-        provider = self.usage_provider
-        if callable(provider):
-            try:
-                value = provider()
-                if isinstance(value, OwnedDockerUsage):
-                    owned = value
-                elif isinstance(value, Mapping):
-                    owned = OwnedDockerUsage(
-                        container_bytes=int(value.get("container_bytes", value.get("containerBytes", 0))),
-                        image_bytes=int(value.get("image_bytes", value.get("imageBytes", 0))),
-                        scratch_bytes=int(value.get("scratch_bytes", value.get("scratchBytes", 0))),
-                        container_count=int(value.get("container_count", value.get("containerCount", 0))),
-                        image_count=int(value.get("image_count", value.get("imageCount", 0))),
-                        ambiguous=bool(value.get("ambiguous", False)),
-                    )
-            except Exception:
-                owned = OwnedDockerUsage(ambiguous=True)
+        value = owned_usage
+        if value is None:
+            provider = self.usage_provider
+            if callable(provider):
+                try:
+                    value = provider()
+                except Exception:
+                    value = None
+        try:
+            if isinstance(value, OwnedDockerUsage):
+                owned = value
+            elif isinstance(value, Mapping):
+                owned = OwnedDockerUsage(
+                    container_bytes=int(
+                        value.get("container_bytes", value.get("containerBytes", 0))
+                    ),
+                    image_bytes=int(
+                        value.get("image_bytes", value.get("imageBytes", 0))
+                    ),
+                    scratch_bytes=int(
+                        value.get("scratch_bytes", value.get("scratchBytes", 0))
+                    ),
+                    container_count=int(
+                        value.get("container_count", value.get("containerCount", 0))
+                    ),
+                    image_count=int(
+                        value.get("image_count", value.get("imageCount", 0))
+                    ),
+                    ambiguous=bool(value.get("ambiguous", False)),
+                )
+        except Exception:
+            owned = OwnedDockerUsage(ambiguous=True)
         minimum = getattr(deployment, "min_free_bytes", None)
         maximum = getattr(deployment, "max_owned_docker_bytes", None)
         recovery_free = getattr(deployment, "recovery_free_bytes", None)
@@ -144,7 +164,7 @@ class DockerResourceManager:
         usage, references, images, active_releases, complete = self._snapshot(
             self._known_image_ids
         )
-        if not complete:
+        if not complete or usage.ambiguous:
             return {"usage": usage, "reclaimed": (), "ambiguous": True}
         replace = getattr(store, "replace_container_references", None)
         if callable(replace):
@@ -171,11 +191,26 @@ class DockerResourceManager:
             retained=retained,
             steward_owned=owned_ids,
         )
+        image_sizes = {
+            str(item["image_id"]): int(item["size_bytes"]) for item in images
+        }
         reclaimed: list[str] = []
         for image_id in sorted(candidates):
-            result = self._run(["image", "rm", image_id])
+            try:
+                result = self._run(["image", "rm", image_id])
+            except Exception:
+                continue
             if int(getattr(result, "returncode", 1)) == 0:
                 reclaimed.append(image_id)
+        reclaimed_bytes = sum(image_sizes[image_id] for image_id in reclaimed)
+        usage = OwnedDockerUsage(
+            container_bytes=usage.container_bytes,
+            image_bytes=max(0, usage.image_bytes - reclaimed_bytes),
+            scratch_bytes=usage.scratch_bytes,
+            container_count=usage.container_count,
+            image_count=max(0, usage.image_count - len(reclaimed)),
+            ambiguous=usage.ambiguous,
+        )
         return {
             "usage": usage,
             "reclaimed": tuple(reclaimed),

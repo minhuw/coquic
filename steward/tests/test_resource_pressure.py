@@ -11,6 +11,9 @@ from coquic_steward.core.lifecycle import (
 from coquic_steward.core.models import (
     OwnedDockerUsage,
     ResourcePressureState,
+    TaskKind,
+    TaskSpec,
+    WorkerKind,
     evaluate_resource_pressure,
 )
 from coquic_steward.orchestration.daemon import StewardDaemon
@@ -134,8 +137,10 @@ def test_production_daemon_wires_label_filtered_owned_usage(
     )
     monkeypatch.setattr(
         DockerResourceManager,
-        "owned_usage",
-        lambda _self: OwnedDockerUsage(container_bytes=1, image_bytes=1),
+        "reconcile",
+        lambda _self, _store, _deployment: {
+            "usage": OwnedDockerUsage(container_bytes=1, image_bytes=1)
+        },
     )
     daemon = StewardDaemon(config, TaskStore(config.db_path))
     report = daemon.resource_pressure
@@ -175,8 +180,10 @@ def test_production_daemon_restores_pressure_hysteresis_after_restart(
     )
     monkeypatch.setattr(
         DockerResourceManager,
-        "owned_usage",
-        lambda _self: OwnedDockerUsage(container_bytes=800),
+        "reconcile",
+        lambda _self, _store, _deployment: {
+            "usage": OwnedDockerUsage(container_bytes=800)
+        },
     )
     store = TaskStore(config.db_path)
     store.record_resource_pressure(
@@ -239,3 +246,91 @@ def test_daemon_projects_bounded_publication_health() -> None:
     assert projected["publicationRetainedBytes"] == 2**31 - 1
     assert projected["admissionAllowed"] is True
     assert recorded[-1]["cleanup_pending_count"] == 4
+
+
+def test_refresh_uses_one_reconciliation_snapshot_and_cleanup_aggregate(
+    tmp_path: Path,
+) -> None:
+    deployment = StewardDeploymentConfig(
+        enabled=True,
+        home=tmp_path,
+        repository=tmp_path / "repository",
+        min_free_bytes=1,
+        max_owned_docker_bytes=100,
+        recovery_free_bytes=2,
+        recovery_owned_docker_bytes=50,
+    )
+    config = SimpleNamespace(deployment=deployment, coquic_home=tmp_path)
+
+    class Docker:
+        snapshot_calls = 0
+
+        def reconcile(self, _store: object, _deployment: object) -> dict[str, object]:
+            self.snapshot_calls += 1
+            return {"usage": OwnedDockerUsage(container_bytes=3)}
+
+        def owned_usage(self) -> OwnedDockerUsage:
+            raise AssertionError("refresh must consume reconciliation usage directly")
+
+    class Store:
+        cleanup_calls = 0
+        recorded: list[dict[str, object]] = []
+
+        def cleanup_pending_count(self) -> int:
+            self.cleanup_calls += 1
+            return 3
+
+        def list_tasks(self, **_kwargs: object) -> list[object]:
+            raise AssertionError("resource pressure must not scan tasks")
+
+        def events(self, **_kwargs: object) -> list[object]:
+            raise AssertionError("resource pressure must not scan events")
+
+        def record_resource_pressure(self, **kwargs: object) -> None:
+            self.recorded.append(kwargs)
+
+    docker = Docker()
+    store = Store()
+    daemon = object.__new__(StewardDaemon)
+    daemon.config = config
+    daemon.store = store
+    daemon._docker_resources = docker
+    daemon._resource_pressure = ResourcePressureController(config)
+    daemon._resource_reconciliation_failed = False
+    daemon._log = lambda *_args, **_kwargs: None
+
+    report = daemon.resource_pressure
+
+    assert docker.snapshot_calls == 1
+    assert store.cleanup_calls == 1
+    assert report["ownedBytes"] == 3
+    assert report["cleanupPending"] == 3
+    assert store.recorded[-1]["cleanup_pending_count"] == 3
+
+
+def test_cleanup_aggregate_counts_latest_pending_obligation(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+
+    def task(title: str):
+        return store.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=title,
+                prompt="prompt",
+            )
+        )[0]
+
+    pending = task("pending")
+    complete = task("complete")
+    duplicate = task("duplicate")
+    zero = task("zero")
+    store.add_event(pending.id, "cleanup_pending", "pending")
+    store.add_event(complete.id, "cleanup_pending", "pending")
+    store.add_event(complete.id, "cleanup_complete", "complete")
+    store.add_event(duplicate.id, "cleanup_pending", "pending")
+    store.add_event(duplicate.id, "cleanup_pending", "duplicate")
+
+    assert store.cleanup_pending_count() == 2
+    assert not store.has_cleanup_pending(complete.id)
+    assert not store.has_cleanup_pending(zero.id)

@@ -1485,6 +1485,39 @@ def test_control_loop_epoch_conflict_blocks_planning_without_aborting_preflight(
     assert task.status == TaskStatus.queued
 
 
+def test_control_loop_writer_waits_when_idle_and_preserves_drain_wakeup(
+    monkeypatch,
+) -> None:
+    daemon = object.__new__(StewardDaemon)
+    daemon._control_loop_stop = threading.Event()
+    daemon._control_loop_wakeup = threading.Event()
+    daemon._planner_publication_queue = {}
+    drained = threading.Event()
+    calls: list[int] = []
+
+    def drain() -> dict[str, object]:
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            drained.set()
+        elif len(calls) == 2:
+            # This models a ledger mutation racing with the archive drain.
+            daemon._control_loop_wakeup.set()
+        else:
+            daemon._control_loop_stop.set()
+        return {"pending": False, "conflicts": 0}
+
+    monkeypatch.setattr(daemon, "_drain_control_loop_once", drain)
+    writer = threading.Thread(target=daemon._control_loop_writer_loop, daemon=True)
+    writer.start()
+    assert drained.wait(timeout=1)
+    assert calls == [1]
+    daemon._control_loop_wakeup.set()
+    writer.join(timeout=1)
+
+    assert not writer.is_alive()
+    assert calls == [1, 2, 3]
+
+
 def test_locked_daemon_routes_scheduler_planning_through_fresh_boundary(
     config, monkeypatch
 ) -> None:

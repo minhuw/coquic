@@ -345,3 +345,53 @@ def test_reconcile_invalidates_verified_file_when_accepted_bytes_change(
     assert result["conflicts"] == 1
     assert [row["sequence"] for row in ledger.outbox()] == [1, 2]
     assert json.loads(path.read_bytes().splitlines()[0])["payload"]["tampered"] is True
+
+
+def test_unchanged_reconcile_is_byte_idle_and_append_uses_cached_high_watermark(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        first = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+        second = ledger._event(
+            connection,
+            "synthetic.event",
+            {"ordinal": 1},
+            occurred_at=NOW.replace(day=25),
+        )
+    archive.append_event(first)
+    ledger.mark_materialized(first.sequence, event_id=first.event_id)
+    initial = archive.reconcile(ledger)
+    assert initial["verification"]["eventBytes"] > 0
+
+    monkeypatch.setattr(
+        archive,
+        "_assert_confirmed_event_file",
+        lambda *_args, **_kwargs: pytest.fail("unchanged event file was reverified"),
+    )
+    archive.reset_verification_counters()
+    idle = archive.reconcile(ledger)
+    assert idle["verification"] == {
+        "eventFiles": 0,
+        "eventBytes": 0,
+        "eventHashes": 0,
+        "plannerRuns": 0,
+        "plannerBytes": 0,
+        "plannerHashes": 0,
+    }
+
+    first_path = archive.events_root / "2026" / "07" / "24.jsonl"
+    original_read_bytes = Path.read_bytes
+
+    def reject_unrelated_file(path: Path) -> bytes:
+        if path == first_path:
+            raise AssertionError("append scanned an unrelated event file")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_unrelated_file)
+    archive.append_event(second)
+    second_path = archive.events_root / "2026" / "07" / "25.jsonl"
+    assert [json.loads(line)["sequence"] for line in second_path.read_bytes().splitlines()] == [1]

@@ -766,12 +766,22 @@ class StewardDaemon:
             if archive_epoch.epoch_id != self._control_loop_ledger.epoch_id:
                 raise ArchiveConflictError("control-loop and ledger epochs differ")
             self._reconcile_interrupted_planner_runs()
+            # Startup is the explicit fail-closed audit boundary.  It reads
+            # every retained event and planner artifact once, after which the
+            # archive can reuse identity-checked facts for recurring drains.
+            result = self._drain_control_loop_once(full_audit=True, publish=False)
+            if result is None:
+                return
+            visible_ids = set(result.get("visibleRunIds", ()))
+            invalid_ids = set(result.get("invalidRuns", ()))
             for run in self._control_loop_ledger.list_planner_runs():
-                if run.completed_at is not None and not self._control_loop_archive.verify_planner_run(
-                    run.planner_run_id
+                if run.completed_at is not None and (
+                    run.planner_run_id not in visible_ids
+                    or run.planner_run_id in invalid_ids
                 ):
                     self._planner_publication_queue[run.planner_run_id] = run
-            self._drain_control_loop_once()
+            with self._control_loop_lock:
+                self._publish_control_loop_runs(self._control_loop_ledger)
         except Exception as exc:
             self._control_loop_ledger.set_planning_blocked(
                 True, reason=f"control-loop startup reconciliation: {exc.__class__.__name__}"
@@ -891,7 +901,32 @@ class StewardDaemon:
         except Exception:
             return None
 
-    def _drain_control_loop_once(self) -> dict[str, Any] | None:
+    def _publish_control_loop_runs(self, ledger: object) -> bool:
+        """Publish queued terminal planner runs and report remaining lag."""
+
+        pending = False
+        for run_id, run in list(self._planner_publication_queue.items()):
+            try:
+                artifacts = self._planner_artifacts(run)
+                target = self._control_loop_archive.publish_planner_run(run, artifacts)
+                if self._control_loop_archive.verify_planner_run(run_id):
+                    self._planner_publication_queue.pop(run_id, None)
+                    self._log(f"planner archive sealed run={run_id} path={target}")
+                else:
+                    pending = True
+            except ArchiveConflictError as exc:
+                pending = True
+                if hasattr(ledger, "set_planning_blocked"):
+                    ledger.set_planning_blocked(True, reason="visible planner-run conflict")
+                self._log(f"planner archive blocked run={run_id} error={exc.__class__.__name__}")
+            except (OSError, ArchiveError) as exc:
+                pending = True
+                self._log(f"planner archive lag run={run_id} error={exc.__class__.__name__}")
+        return pending
+
+    def _drain_control_loop_once(
+        self, *, full_audit: bool = False, publish: bool = True
+    ) -> dict[str, Any] | None:
         ledger = self._control_loop_ledger
         if ledger is None:
             return None
@@ -900,25 +935,16 @@ class StewardDaemon:
                 result = self._control_loop_archive.reconcile(
                     ledger,
                     current=self._build_control_loop_current(),
+                    full_audit=full_audit,
                 )
             except Exception as exc:
                 # A temporary writer failure must not stop task dispatch.  The
                 # durable outbox remains pending for the next retry.
                 self._log(f"control-loop archive lag error={exc.__class__.__name__}")
                 return {"materialized": 0, "conflicts": 0, "error": exc.__class__.__name__}
-            for run_id, run in list(self._planner_publication_queue.items()):
-                try:
-                    artifacts = self._planner_artifacts(run)
-                    target = self._control_loop_archive.publish_planner_run(run, artifacts)
-                    if self._control_loop_archive.verify_planner_run(run_id):
-                        self._planner_publication_queue.pop(run_id, None)
-                        self._log(f"planner archive sealed run={run_id} path={target}")
-                except ArchiveConflictError as exc:
-                    ledger.set_planning_blocked(True, reason="visible planner-run conflict")
-                    self._log(f"planner archive blocked run={run_id} error={exc.__class__.__name__}")
-                except (OSError, ArchiveError) as exc:
-                    self._log(f"planner archive lag run={run_id} error={exc.__class__.__name__}")
-            self._control_loop_wakeup.clear()
+            if publish:
+                if self._publish_control_loop_runs(ledger):
+                    result["pending"] = True
             return result
 
     def _start_control_loop_writer(self) -> None:
@@ -937,8 +963,31 @@ class StewardDaemon:
 
     def _control_loop_writer_loop(self) -> None:
         while not self._control_loop_stop.is_set():
-            self._drain_control_loop_once()
-            self._control_loop_wakeup.wait(1.0)
+            # Clear before the drain.  A wakeup raised during the drain stays
+            # set and is observed by the following wait, avoiding a lost race.
+            self._control_loop_wakeup.clear()
+            result = self._drain_control_loop_once()
+            if self._control_loop_stop.is_set():
+                break
+            pending = bool(
+                result
+                and (
+                    result.get("pending")
+                    or result.get("error")
+                    or result.get("conflicts")
+                    or self._planner_publication_queue
+                )
+            )
+            timeout = self._control_loop_retry_interval() if pending else None
+            self._control_loop_wakeup.wait(timeout)
+
+    def _control_loop_retry_interval(self) -> float:
+        configured = getattr(self.config, "scheduler_wait_interval_sec", 1.0)
+        try:
+            value = float(configured)
+        except (TypeError, ValueError):
+            value = 1.0
+        return max(0.05, min(value, 5.0))
 
     def _stop_control_loop_writer(self) -> None:
         self._control_loop_stop.set()

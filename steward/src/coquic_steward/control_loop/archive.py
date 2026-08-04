@@ -6,7 +6,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -92,6 +94,80 @@ class ControlLoopArchive:
         self._epoch_id = validate_id(epoch_id) if epoch_id else None
         self._epoch: Epoch | None = None
         self._verified_append_context: dict[str, Any] | None = None
+        # This is deliberately process-local.  Archive bytes and the ledger
+        # remain authoritative; the snapshot is only a performance hint after
+        # a successful canonical verification pass.
+        self._verified_snapshot: dict[str, Any] | None = None
+        self._verification_counters: dict[str, int] = {
+            "eventFiles": 0,
+            "eventBytes": 0,
+            "eventHashes": 0,
+            "plannerRuns": 0,
+            "plannerBytes": 0,
+            "plannerHashes": 0,
+        }
+
+    @property
+    def verification_counters(self) -> dict[str, int]:
+        """Return cumulative structural verification counters."""
+
+        return dict(self._verification_counters)
+
+    @property
+    def verification_stats(self) -> dict[str, int]:
+        """Compatibility alias for callers inspecting verification work."""
+
+        return self.verification_counters
+
+    def reset_verification_counters(self) -> None:
+        for key in self._verification_counters:
+            self._verification_counters[key] = 0
+
+    @staticmethod
+    def _path_identity(path: Path) -> tuple[int, int, int, int, int] | None:
+        """Return an lstat identity that detects replacement and metadata edits."""
+
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_mode),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+        )
+
+    def _event_file_identities(self) -> dict[Path, tuple[int, int, int, int, int]]:
+        identities: dict[Path, tuple[int, int, int, int, int]] = {}
+        if not self.events_root.exists():
+            return identities
+        for path in self.events_root.rglob("*.jsonl"):
+            identity = self._path_identity(path)
+            if identity is None:
+                continue
+            mode = identity[2]
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                raise ArchiveValidationError("event archive contains a special path")
+            identities[path] = identity
+        return identities
+
+    def _planner_tree_identity(self, target: Path) -> dict[str, Any] | None:
+        """Stat a visible planner run without reading any artifact bytes."""
+
+        root_identity = self._path_identity(target)
+        if root_identity is None:
+            return None
+        if stat.S_ISLNK(root_identity[2]) or not stat.S_ISDIR(root_identity[2]):
+            return None
+        entries: dict[str, tuple[int, int, int, int, int]] = {"": root_identity}
+        for path in target.rglob("*"):
+            identity = self._path_identity(path)
+            if identity is None:
+                return None
+            entries[path.relative_to(target).as_posix()] = identity
+        return {"root": root_identity, "entries": entries}
 
     @property
     def epoch_path(self) -> Path:
@@ -227,10 +303,6 @@ class ControlLoopArchive:
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise ArchiveValidationError("event path must be a regular file")
         content = _json_bytes(item.model_dump(by_alias=True, mode="json"))
-        existing = path.read_bytes() if path.exists() else b""
-        # Complete records are the append boundary.  A torn final line may be
-        # discarded only when it is not a complete JSON record.
-        accepted = _accepted_prefix(existing)
         context = self._verified_append_context
         if context is not None:
             verified_files = context["files"]
@@ -239,6 +311,43 @@ class ControlLoopArchive:
                 facts = self._empty_verified_event_file(path)
                 verified_files[path] = facts
             return self._append_verified_event(item, path, content, facts, context)
+        # A caller may append between reconciles.  Reuse the last successful
+        # audit only when every event-file identity is still unchanged; an
+        # identity change must be repaired through reconcile with ledger
+        # authority instead of silently scanning unverified bytes.
+        snapshot = self._verified_snapshot
+        if snapshot is not None and snapshot.get("events") is not None:
+            try:
+                identities = self._event_file_identities()
+            except ArchiveValidationError:
+                self._verified_snapshot = None
+                raise
+            prior_events = snapshot["events"]
+            if set(identities) != set(prior_events) or any(
+                identities[path] != facts.get("identity")
+                for path, facts in prior_events.items()
+            ):
+                self._verified_snapshot = None
+                raise ArchiveConflictError("event archive changed after verification")
+            verified_files = deepcopy(prior_events)
+            facts = verified_files.get(path)
+            if facts is None:
+                facts = self._empty_verified_event_file(path)
+                verified_files[path] = facts
+            append_context = {
+                "files": verified_files,
+                "highWatermark": snapshot.get("highWatermark", -1),
+            }
+            result = self._append_verified_event(item, path, content, facts, append_context)
+            updated_snapshot = deepcopy(snapshot)
+            updated_snapshot["events"] = verified_files
+            updated_snapshot["highWatermark"] = append_context["highWatermark"]
+            self._verified_snapshot = updated_snapshot
+            return result
+        existing = path.read_bytes() if path.exists() else b""
+        # Complete records are the append boundary.  A torn final line may be
+        # discarded only when it is not a complete JSON record.
+        accepted = _accepted_prefix(existing)
         if accepted != existing:
             self._atomic_write(path, accepted)
         prior_sequences: list[int] = []
@@ -304,14 +413,31 @@ class ControlLoopArchive:
     ) -> int:
         """Append a row using a byte-verified in-memory file snapshot."""
 
-        existing = path.read_bytes() if path.exists() else b""
-        accepted = _accepted_prefix(existing)
-        if (
-            len(accepted) != facts.get("byteSize")
-            or sha256(accepted).hexdigest() != facts.get("sha256")
-        ):
+        expected_identity = facts.get("identity")
+        current_identity = self._path_identity(path)
+        if expected_identity is not None and current_identity != expected_identity:
             raise ArchiveConflictError("event file changed after verification")
-        if accepted != existing:
+        buffers = context.setdefault("_accepted_bytes", {})
+        if (
+            "_append_identity" in facts
+            and facts["_append_identity"] == current_identity
+            and path in buffers
+        ):
+            existing = None
+            accepted = buffers[path]
+            accepted_size = len(accepted)
+        else:
+            existing = path.read_bytes() if path.exists() else b""
+            accepted = _accepted_prefix(existing)
+            if (
+                len(accepted) != facts.get("byteSize")
+                or sha256(accepted).hexdigest() != facts.get("sha256")
+            ):
+                raise ArchiveConflictError("event file changed after verification")
+            accepted_size = len(accepted)
+            facts["_append_identity"] = current_identity
+            buffers[path] = accepted
+        if existing is not None and accepted != existing:
             self._atomic_write(path, accepted)
 
         context_high = context.get("highWatermark")
@@ -331,7 +457,7 @@ class ControlLoopArchive:
             sequences = facts.get("sequences", [])
             if index >= len(sequences) or sequences[index] != item.sequence:
                 raise ArchiveConflictError("event ID has conflicting visible bytes")
-            return len(accepted)
+            return accepted_size
         if item.sequence <= visible_max:
             raise ArchiveConflictError("event sequence is not monotonically increasing")
 
@@ -342,8 +468,9 @@ class ControlLoopArchive:
         _fsync_dir(path.parent)
 
         updated = accepted + content
+        updated_size = len(updated)
         facts["sha256"] = sha256(updated).hexdigest()
-        facts["byteSize"] = len(updated)
+        facts["byteSize"] = updated_size
         facts["eventCount"] = int(facts.get("eventCount", 0)) + 1
         facts.setdefault("sequences", []).append(item.sequence)
         facts.setdefault("eventIds", []).append(item.event_id)
@@ -352,7 +479,10 @@ class ControlLoopArchive:
         facts["sequenceEnd"] = item.sequence
         facts["highWatermark"] = item.sequence
         context["highWatermark"] = max(context.get("highWatermark", -1), item.sequence)
-        return len(updated)
+        facts["identity"] = self._path_identity(path)
+        facts["_append_identity"] = facts["identity"]
+        buffers[path] = updated
+        return updated_size
 
     def write_current(self, state: CurrentState | Mapping[str, Any]) -> Path:
         epoch = self._require_epoch()
@@ -432,34 +562,84 @@ class ControlLoopArchive:
                 shutil.rmtree(stage)
         return target
 
-    def verify_planner_run(self, planner_run_id: str) -> bool:
+    def _verify_planner_run_facts(self, planner_run_id: str) -> dict[str, Any] | None:
+        """Verify one sealed run and return byte/hash facts for reuse."""
+
         target = self._run_dir(planner_run_id)
+        identity = self._planner_tree_identity(target)
+        if identity is None:
+            return None
         manifest_path = target / "manifest.json"
-        if not target.is_dir() or target.is_symlink() or manifest_path.is_symlink() or not manifest_path.is_file():
-            return False
+        manifest_identity = self._path_identity(manifest_path)
+        if (
+            manifest_identity is None
+            or stat.S_ISLNK(manifest_identity[2])
+            or not stat.S_ISREG(manifest_identity[2])
+        ):
+            return None
         try:
-            manifest = Manifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+            manifest_bytes = manifest_path.read_bytes()
+            self._verification_counters["plannerBytes"] += len(manifest_bytes)
+            self._verification_counters["plannerHashes"] += 1
+            manifest = Manifest.model_validate(json.loads(manifest_bytes))
         except (OSError, json.JSONDecodeError, ValueError):
-            return False
+            return None
         if manifest.epoch_id != self._require_epoch().epoch_id or manifest.planner_run_id != planner_run_id:
-            return False
+            return None
         descriptors = {item.path: item for item in manifest.files}
         actual: dict[str, Path] = {}
         for path in target.rglob("*"):
-            if path.is_symlink():
-                return False
-            if path.is_file() and path.name != "manifest.json":
+            path_identity = self._path_identity(path)
+            if path_identity is None or stat.S_ISLNK(path_identity[2]):
+                return None
+            if stat.S_ISREG(path_identity[2]) and path.name != "manifest.json":
                 actual[path.relative_to(target).as_posix()] = path
-            elif not path.is_dir() and path.name != "manifest.json":
-                return False
+            elif not stat.S_ISDIR(path_identity[2]) and path.name != "manifest.json":
+                return None
         if set(actual) != set(descriptors):
-            return False
+            return None
+        artifacts: dict[str, dict[str, Any]] = {}
         for relative, path in actual.items():
             content = path.read_bytes()
+            self._verification_counters["plannerBytes"] += len(content)
+            self._verification_counters["plannerHashes"] += 1
             descriptor = descriptors[relative]
             if len(content) != descriptor.byte_size or sha256(content).hexdigest() != descriptor.sha256:
-                return False
-        return True
+                return None
+            artifacts[relative] = {
+                "identity": self._path_identity(path),
+                "byteSize": len(content),
+                "sha256": descriptor.sha256,
+            }
+        self._verification_counters["plannerRuns"] += 1
+        return {
+            "identity": identity,
+            "manifest": {
+                "identity": manifest_identity,
+                "byteSize": len(manifest_bytes),
+                "sha256": sha256(manifest_bytes).hexdigest(),
+            },
+            "artifacts": artifacts,
+        }
+
+    def verify_planner_run(self, planner_run_id: str) -> bool:
+        facts = self._verify_planner_run_facts(planner_run_id)
+        if facts is not None and self._verified_snapshot is not None:
+            self._verified_snapshot.setdefault("plannerRuns", {})[planner_run_id] = facts
+        return facts is not None
+
+    def planner_run_is_verified(self, planner_run_id: str) -> bool:
+        """Check cached planner-run trust using stat identities only."""
+
+        snapshot = self._verified_snapshot
+        if snapshot is None:
+            return False
+        facts = snapshot.get("plannerRuns", {}).get(planner_run_id)
+        if facts is None:
+            return False
+        return facts.get("identity") == self._planner_tree_identity(
+            self._run_dir(planner_run_id)
+        )
 
     def _visible_run_matches(
         self, target: Path, artifacts: Mapping[str, bytes], manifest_bytes: bytes
@@ -491,72 +671,189 @@ class ControlLoopArchive:
                 return False
         return actual == expected
 
-    def reconcile(self, ledger: ControlLoopLedger | None = None, *, current: CurrentState | Mapping[str, Any] | None = None, limit: int = 100) -> dict[str, Any]:
-        """Drain durable outbox records and adopt/verify visible run evidence."""
+    def _verified_event_snapshot(
+        self,
+        ledger: ControlLoopLedger,
+        *,
+        force_full_audit: bool,
+    ) -> tuple[dict[Path, dict[str, Any]], int]:
+        """Return verified event facts, rechecking only changed identities."""
+
+        identities = self._event_file_identities()
+        prior = self._verified_snapshot
+        if (
+            force_full_audit
+            or prior is None
+            or prior.get("epochId") != self._epoch_id
+            or prior.get("ledgerEpoch") != ledger.epoch_id
+        ):
+            prior_events: Mapping[Path, dict[str, Any]] = {}
+        else:
+            prior_events = prior.get("events", {})
+
+        if prior_events and set(prior_events) - set(identities):
+            raise ArchiveConflictError("verified event file disappeared")
+
+        verified: dict[Path, dict[str, Any]] = {}
+        for path, identity in identities.items():
+            facts = prior_events.get(path)
+            if facts is not None and facts.get("identity") == identity:
+                verified[path] = deepcopy(facts)
+                continue
+            facts = self._assert_confirmed_event_file(path, ledger)
+            if facts is not None and prior_events.get(path) is not None:
+                previous = prior_events[path]
+                if (
+                    facts.get("byteSize", 0) < previous.get("byteSize", 0)
+                    or facts.get("eventCount", 0) < previous.get("eventCount", 0)
+                ):
+                    raise ArchiveConflictError("verified event file was truncated")
+            facts["identity"] = identity
+            verified[path] = facts
+        high_watermark = max(
+            (
+                facts["highWatermark"]
+                if facts.get("highWatermark") is not None
+                else -1
+                for facts in verified.values()
+            ),
+            default=-1,
+        )
+        return verified, high_watermark
+
+    def _verified_planner_snapshot(
+        self, *, force_full_audit: bool
+    ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+        """Return verified planner facts and visible/invalid run IDs."""
+
+        hidden_stages = sorted(
+            path.name
+            for path in self.planner_runs_root.iterdir()
+            if path.name.startswith(".")
+        )
+        runs = sorted(
+            path.name
+            for path in self.planner_runs_root.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        )
+        prior = self._verified_snapshot
+        prior_runs: Mapping[str, dict[str, Any]] = {}
+        if not force_full_audit and prior is not None and prior.get("epochId") == self._epoch_id:
+            prior_runs = prior.get("plannerRuns", {})
+
+        verified: dict[str, dict[str, Any]] = {}
+        invalid: list[str] = []
+        for run_id in runs:
+            target = self._run_dir(run_id)
+            identity = self._planner_tree_identity(target)
+            facts = prior_runs.get(run_id)
+            if identity is not None and facts is not None and facts.get("identity") == identity:
+                verified[run_id] = deepcopy(facts)
+                continue
+            checked = self._verify_planner_run_facts(run_id)
+            if checked is None:
+                invalid.append(run_id)
+                continue
+            verified[run_id] = checked
+        return verified, runs, invalid
+
+    def reconcile(
+        self,
+        ledger: ControlLoopLedger | None = None,
+        *,
+        current: CurrentState | Mapping[str, Any] | None = None,
+        limit: int = 100,
+        full_audit: bool = False,
+        force_full_audit: bool = False,
+    ) -> dict[str, Any]:
+        """Drain durable outbox records and verify visible archive evidence.
+
+        Startup and callers that explicitly request ``full_audit`` rebuild all
+        facts from bytes and ledger rows.  Ordinary calls stat archive paths and
+        reuse facts whose identities are unchanged.
+        """
 
         self._require_epoch()
+        force = full_audit or force_full_audit
+        counters_before = self.verification_counters
         materialized = 0
         conflicts = 0
-        verified_files: dict[Path, dict[str, Any]] = {}
+        event_snapshot: dict[Path, dict[str, Any]] | None = None
+        high_watermark = -1
+        event_trust_lost = False
+        pending_outbox = False
+        outbox_error = False
+
         if ledger is not None:
             try:
-                for event_path in self.events_root.rglob("*.jsonl"):
-                    if event_path.is_symlink() or not event_path.is_file():
-                        raise ArchiveValidationError("event archive contains a special path")
-                    verified_files[event_path] = self._assert_confirmed_event_file(
-                        event_path, ledger
-                    )
+                event_snapshot, high_watermark = self._verified_event_snapshot(
+                    ledger, force_full_audit=force
+                )
             except (ArchiveConflictError, ArchiveValidationError):
                 conflicts += 1
+                event_trust_lost = True
+                self._verified_snapshot = None
                 ledger.set_planning_blocked(True, reason="visible event conflict")
             else:
                 verification_context = {
-                    "files": verified_files,
-                    "highWatermark": max(
-                        (
-                            facts["highWatermark"]
-                            if facts.get("highWatermark") is not None
-                            else -1
-                            for facts in verified_files.values()
-                        ),
-                        default=-1,
-                    ),
+                    "files": event_snapshot,
+                    "highWatermark": high_watermark,
                 }
                 self._verified_append_context = verification_context
                 try:
-                    for row in ledger.outbox(limit=limit):
+                    outbox_rows = ledger.outbox(limit=limit)
+                    for row in outbox_rows:
                         try:
                             self._assert_confirmed_event_prefix(
-                                row["event"], ledger, verified_files=verified_files
+                                row["event"], ledger, verified_files=event_snapshot
                             )
                             self.append_event(row["event"])
                         except ArchiveConflictError:
                             conflicts += 1
+                            event_trust_lost = True
+                            outbox_error = True
                             ledger.set_planning_blocked(True, reason="visible event conflict")
                             break
                         except OSError:
                             # A filesystem error is lag, not an epoch/identity
                             # conflict.  The daemon's asynchronous writer retries it
                             # on its next wakeup.
+                            outbox_error = True
                             break
                         except ArchiveValidationError:
                             conflicts += 1
+                            event_trust_lost = True
+                            outbox_error = True
                             ledger.set_planning_blocked(True, reason="visible event path conflict")
                             break
                         ledger.mark_materialized(row["sequence"], event_id=row["event_id"])
                         materialized += 1
+                    pending_outbox = outbox_error or len(outbox_rows) >= limit
                 finally:
                     self._verified_append_context = None
+
         if current is not None:
             try:
                 self.write_current(current)
             except ArchiveConflictError:
                 conflicts += 1
-        hidden_stages = [
+
+        planner_trust_lost = False
+        try:
+            planner_snapshot, runs, invalid_runs = self._verified_planner_snapshot(
+                force_full_audit=force
+            )
+        except (ArchiveConflictError, ArchiveValidationError, OSError):
+            planner_snapshot = None
+            runs = []
+            invalid_runs = []
+            planner_trust_lost = True
+
+        hidden_stages = sorted(
             path.name
             for path in self.planner_runs_root.iterdir()
             if path.name.startswith(".")
-        ]
+        )
         if hidden_stages:
             conflicts += len(hidden_stages)
             if ledger is not None:
@@ -564,19 +861,65 @@ class ControlLoopArchive:
                     True,
                     reason="hidden planner-run stage requires operator reconciliation",
                 )
-        runs = [path.name for path in self.planner_runs_root.iterdir() if path.is_dir() and not path.name.startswith(".")]
-        invalid_runs = [run_id for run_id in runs if not self.verify_planner_run(run_id)]
         if invalid_runs:
             conflicts += len(invalid_runs)
             if ledger is not None:
                 ledger.set_planning_blocked(True, reason="visible planner-run conflict")
+
+        if not event_trust_lost and not planner_trust_lost and (
+            ledger is not None or planner_snapshot is not None
+        ):
+            updated_snapshot = deepcopy(self._verified_snapshot or {})
+            updated_snapshot["epochId"] = self._epoch_id
+            updated_snapshot["plannerRuns"] = deepcopy(planner_snapshot or {})
+            if ledger is not None:
+                updated_snapshot.update(
+                    {
+                        "ledgerEpoch": ledger.epoch_id,
+                        "events": deepcopy(event_snapshot or {}),
+                        "highWatermark": high_watermark,
+                    }
+                )
+            self._verified_snapshot = updated_snapshot
+        elif event_trust_lost:
+            self._verified_snapshot = None
+        elif planner_trust_lost and self._verified_snapshot is not None:
+            # Keep event trust only when planner stat/read failure did not
+            # affect the event files; the affected planner facts are discarded.
+            self._verified_snapshot["plannerRuns"] = {}
+
+        counters_after = self.verification_counters
+        verification = {
+            key: counters_after[key] - counters_before[key]
+            for key in counters_after
+        }
         return {
             "materialized": materialized,
             "conflicts": conflicts,
             "visibleRuns": len(runs),
+            "visibleRunIds": runs,
             "invalidRuns": invalid_runs,
-            "hiddenStages": sorted(hidden_stages),
+            "hiddenStages": hidden_stages,
+            "highWatermark": high_watermark,
+            "pending": pending_outbox,
+            "verification": verification,
         }
+
+    def full_audit(
+        self,
+        ledger: ControlLoopLedger | None = None,
+        *,
+        current: CurrentState | Mapping[str, Any] | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Force one complete byte/ledger verification pass."""
+
+        return self.reconcile(
+            ledger,
+            current=current,
+            limit=limit,
+            full_audit=True,
+        )
 
     def _assert_confirmed_event_prefix(
         self,
@@ -600,11 +943,7 @@ class ControlLoopArchive:
             return None
         if verified_files is not None and path in verified_files:
             facts = verified_files[path]
-            accepted = _accepted_prefix(path.read_bytes())
-            if (
-                len(accepted) == facts.get("byteSize")
-                and sha256(accepted).hexdigest() == facts.get("sha256")
-            ):
+            if self._path_identity(path) == facts.get("identity"):
                 return facts
             verified_files.pop(path, None)
         facts = self._assert_confirmed_event_file(path, ledger)
@@ -624,7 +963,11 @@ class ControlLoopArchive:
         """
 
         epoch = self._require_epoch()
+        identity_before = self._path_identity(path)
+        if identity_before is None:
+            raise ArchiveConflictError("event file disappeared during verification")
         data = path.read_bytes()
+        self._verification_counters["eventBytes"] += len(data)
         accepted = _accepted_prefix(data)
         records: list[tuple[bytes, Event]] = []
         seen_sequences: set[int] = set()
@@ -669,10 +1012,16 @@ class ControlLoopArchive:
         except ValueError:
             relative_path = path.as_posix()
         digest = sha256(accepted).hexdigest()
+        self._verification_counters["eventHashes"] += 1
+        identity_after = self._path_identity(path)
+        if identity_after != identity_before:
+            raise ArchiveConflictError("event file changed during verification")
+        self._verification_counters["eventFiles"] += 1
         first_sequence = sequences[0] if sequences else None
         last_sequence = sequences[-1] if sequences else None
         return {
             "path": relative_path,
+            "identity": identity_after,
             "sha256": digest,
             "byteSize": len(accepted),
             "eventCount": len(records),

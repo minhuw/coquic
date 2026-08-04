@@ -64,12 +64,12 @@ daemon rejects new claims, cancels wrappers and subprocesses, waits the bounded
 grace, and stops (without removing) all owned containers. State is retained for
 restart and active tasks are not marked failed or sealed by shutdown.
 
-The raw task synchronizer runs immediately after reconciliation and on a
-monotonic 60-second cadence with no overlap. Its result is health-only. A
-terminal task is sealed only after `ready_to_seal`, writer quiescence, and
-external-action reconciliation. `cleanup_pending` is durable before container,
-worktree, or private-home cleanup; `cleanup_complete` is written only after
-every authorized action succeeds. The public archive remains intact.
+Startup verifies the private task and control-loop projections before dispatch.
+Later projection work is asynchronous and wakeup-driven; sanitized cloud
+publication is a separate daemon-owned operation. Raw task and control-loop
+archives remain private. Verified public objects remain, while an exact private
+terminal task archive is removed only through a durable, verified cleanup
+transaction.
 
 When operated through Docker Compose, this lifecycle remains the sole owner of
 shutdown, reconciliation, and terminal cleanup. Compose supervises only the

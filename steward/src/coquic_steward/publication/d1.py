@@ -508,7 +508,9 @@ _HIDE_UPSERT = (
     "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'hidden', ?) "
     "ON CONFLICT(task_id) DO UPDATE SET publication_id = excluded.publication_id, state = 'hidden', updated_at = excluded.updated_at"
 )
+_HIDE_STAGED = "UPDATE publication_generations SET state = 'superseded' WHERE task_id = ? AND state = 'staged'"
 _VISIBLE_HEAD_SELECT = "SELECT publication_id, state FROM task_heads WHERE task_id = ?"
+_STAGED_GENERATION_SELECT = "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'staged'"
 
 
 def _row_values(row: object) -> Mapping[str, Any]:
@@ -744,6 +746,8 @@ class D1PublicationClient:
         row = rows[0]
         actual = tuple(row.get(key) for key in ("task_id", "run_id", "metadata_digest", "idempotency_key", "state", "expected_task_count", "expected_pipeline_count", "expected_run_count", "expected_event_count", "expected_artifact_count", "created_at"))
         expected = self._generation_expected(payload)
+        if actual[4] == "superseded":
+            _invalid(D1ErrorCode.generation_state)
         if actual != expected and not (actual[:4] == expected[:4] and actual[5:] == expected[5:] and actual[4] == "visible"):
             _invalid(D1ErrorCode.generation_conflict)
         if actual[4] not in {"staged", "visible"}:
@@ -910,15 +914,32 @@ class D1PublicationClient:
             rows = self._query(_statement(_VISIBLE_GENERATION_SELECT, task_id))
             if rows:
                 publication_id = _id(rows[0].get("publication_id"))
-        if publication_id is None:
+        staged = self._query(_statement(_STAGED_GENERATION_SELECT, task_id))
+        if publication_id is None and not staged:
             return HideReceipt(task_id, None, changed=False)
-        if state == "hidden":
+        statements: list[Statement] = []
+        # Keep the head mutation and staged-generation retirement in one D1
+        # transaction.  Whichever transaction wins the expose/hide race owns
+        # the complete remote visibility decision.
+        if staged:
+            statements.append(_statement(_HIDE_STAGED, task_id))
+        if publication_id is not None and state != "hidden":
+            statements.append(_statement(_HIDE_UPSERT, task_id, publication_id, _timestamp_now()))
+        if not statements:
             return HideReceipt(task_id, publication_id, changed=False)
-        self._batch((_statement(_HIDE_UPSERT, task_id, publication_id, _timestamp_now()),))
+        self._batch(tuple(statements))
         head = self._query(_statement(_HEAD_SELECT, task_id))
-        if len(head) != 1 or head[0].get("publication_id") != publication_id or head[0].get("state") != "hidden":
+        if publication_id is not None and (
+            len(head) != 1
+            or head[0].get("publication_id") != publication_id
+            or head[0].get("state") != "hidden"
+        ):
             _invalid(D1ErrorCode.generation_state)
-        return HideReceipt(task_id, publication_id)
+        remaining = self._query(_statement(_STAGED_GENERATION_SELECT, task_id))
+        if remaining:
+            _invalid(D1ErrorCode.generation_state)
+        changed = bool(staged) or (publication_id is not None and state != "hidden")
+        return HideReceipt(task_id, publication_id, changed=changed)
 
 
 D1Client = D1PublicationClient

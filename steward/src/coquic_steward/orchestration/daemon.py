@@ -1150,7 +1150,64 @@ class StewardDaemon:
             self._log(f"publication source unavailable error={exc.__class__.__name__}")
             return None
 
+    def _drain_pending_publication_hides(self, publisher: CloudPublisher) -> tuple[bool, bool]:
+        """Reconcile local hide fences before claiming any exposure work.
+
+        The first value reports progress; the second reports that a pending
+        listing was available.  A listing or provider failure is fail-closed:
+        queued generations remain untouched until the next bounded worker
+        cycle can retry the hide.
+        """
+
+        listing = getattr(self.store, "list_pending_publication_hides", None)
+        if not callable(listing):
+            listing = getattr(self.store, "pending_publication_hides", None)
+        if not callable(listing):
+            return False, False
+        try:
+            pending = list(listing())
+        except Exception as exc:
+            self._log(
+                "publication hide reconciliation listing failed "
+                f"error={exc.__class__.__name__}"
+            )
+            return False, True
+        if not pending:
+            return False, False
+        progressed = False
+        for fence in pending:
+            task_id = getattr(fence, "task_id", None)
+            reason = getattr(fence, "reason", None)
+            if not isinstance(task_id, str) or not isinstance(reason, str):
+                self._log("publication hide reconciliation rejected malformed fence")
+                return False, True
+            try:
+                result = publisher.hide_task(task_id, reason)
+            except Exception as exc:
+                self._log(
+                    "publication hide reconciliation failed "
+                    f"task={task_id} error={exc.__class__.__name__}"
+                )
+                return False, True
+            status = getattr(result, "status", None)
+            status_value = getattr(status, "value", status)
+            if status_value in {"hidden", "unchanged"}:
+                progressed = True
+                continue
+            self._log(
+                "publication hide reconciliation pending "
+                f"task={task_id} status={status_value or 'unknown'}"
+            )
+            return False, True
+        return progressed, True
+
     def _publish_next_generation(self, publisher: CloudPublisher) -> bool:
+        hide_progress, hides_seen = self._drain_pending_publication_hides(publisher)
+        if hides_seen:
+            # Do not claim or expose a queued generation while any pending hide
+            # remains unresolved.  Successful hides immediately re-run the
+            # cycle so another pending fence is drained before exposure work.
+            return hide_progress
         listing = getattr(self.store, "list_publication_generations", None)
         if not callable(listing):
             listing = getattr(self.store, "list_generations", None)

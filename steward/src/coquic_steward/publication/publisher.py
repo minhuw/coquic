@@ -801,7 +801,14 @@ class CloudPublisher:
         *,
         phase: str,
     ) -> tuple[object | None, PublicationResult | None]:
-        """Hide the task head under a current lease, or durably replay it."""
+        """Hide the task head under a current lease, or durably replay it.
+
+        ``begin_publication_hide`` is the local half of the cross-boundary
+        protocol.  It retires the generation before the provider call, so a
+        transient provider failure leaves a pending hide fence rather than a
+        claimable publication row.  Narrow test doubles from before the fence
+        API retain the previous direct-provider behavior.
+        """
 
         renewed, lost = self._renew(generation)
         if lost is not None:
@@ -813,9 +820,41 @@ class CloudPublisher:
                 reason="lease_expired",
                 phase=phase,
             )
-        hide_task = getattr(self.d1, "hide_task", None)
         task_id = getattr(renewed, "task_id", None)
-        if hide_task is None or not isinstance(task_id, str):
+        if not isinstance(task_id, str):
+            return None, self._retry(
+                renewed,
+                "provider",
+                phase=phase,
+                hide_pending=True,
+                durable_reason=category,
+            )
+
+        begin = getattr(self.store, "begin_publication_hide", None)
+        if callable(begin):
+            hide_reason = category if category in _HIDE_REASONS else "integrity"
+            hidden = self.hide_task(task_id, hide_reason)
+            if hidden.ok:
+                return renewed, None
+            result_reason = _reason(hidden.reason, "integrity")
+            if _is_transient(result_reason):
+                return None, _result(
+                    PublicationStatus.retry_wait,
+                    getattr(renewed, "publication_id", None),
+                    reason=result_reason,
+                    phase=phase,
+                )
+            return None, _result(
+                PublicationStatus.blocked,
+                getattr(renewed, "publication_id", None),
+                reason=result_reason,
+                phase=phase,
+            )
+
+        # Compatibility path for small pre-fence test doubles.  Production
+        # TaskStore instances always expose begin_publication_hide.
+        hide_task = getattr(self.d1, "hide_task", None)
+        if hide_task is None:
             return None, self._retry(
                 renewed,
                 "provider",
@@ -864,6 +903,14 @@ class CloudPublisher:
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         if _is_lost(block_result):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+        if _operation_is(block_result, PublicationOperationStatus.existing):
+            # A local hide fence retires the generation before the provider
+            # call.  ``block_publication`` therefore reports an idempotent
+            # existing result after a successful hide.
+            blocked_generation = _generation_from(block_result)
+            if blocked_generation is None or _status(getattr(blocked_generation, "state", "")) != PublicationState.blocked.value:
+                return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+            return _result(PublicationStatus.blocked, publication_id, reason=category, phase=phase)
         if not _operation_is(block_result, PublicationOperationStatus.blocked):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         codes = (ReasonCode(category),) if category in {item.value for item in ReasonCode} else ()
@@ -1099,11 +1146,21 @@ class CloudPublisher:
         task_id: str,
         reason: str = "operator_blocked",
     ) -> PublicationHideResult:
-        """Hide a task head through typed D1 and reconcile local generations."""
+        """Fence locally, hide atomically in D1, then confirm the fence.
+
+        The local fence is committed before the provider request and remains
+        pending when that request fails.  This gives restart reconciliation a
+        durable obligation without holding SQLite across the D1 boundary.
+        """
 
         try:
             task_id = _identifier(task_id)
         except Exception:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                reason="invalid_metadata",
+            )
+        if task_id is None:
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 reason="invalid_metadata",
@@ -1114,6 +1171,63 @@ class CloudPublisher:
                 task_id=task_id,
                 reason="invalid_metadata",
             )
+        begin = getattr(self.store, "begin_publication_hide", None)
+        fenced = callable(begin)
+        if fenced:
+            try:
+                try:
+                    started = begin(task_id, reason, now=self._time())
+                except TypeError:
+                    started = begin(task_id, reason)
+            except Exception as error:
+                return PublicationHideResult(
+                    PublicationHideStatus.blocked,
+                    task_id=task_id,
+                    reason=_provider_category(error),
+                )
+            started_status = _status(getattr(started, "status", started))
+            if started_status not in {
+                PublicationOperationStatus.enqueued.value,
+                PublicationOperationStatus.existing.value,
+            }:
+                return PublicationHideResult(
+                    PublicationHideStatus.blocked,
+                    task_id=task_id,
+                    reason=_reason(getattr(started, "reason", None), "integrity"),
+                )
+            fence = getattr(started, "fence", None)
+            fence_state = _status(getattr(fence, "state", ""))
+            if fence_state == "confirmed":
+                # The durable confirmation is already the validated receipt
+                # boundary.  Do not issue an unnecessary provider request.
+                publication_id: str | None = None
+                listing = getattr(self.store, "list_publication_generations", None) or getattr(
+                    self.store, "list_generations", None
+                )
+                if callable(listing):
+                    try:
+                        try:
+                            generations = listing(task_id=task_id, limit=None)
+                        except TypeError:
+                            generations = listing(task_id=task_id)
+                        for generation in generations:
+                            state = _status(getattr(generation, "state", ""))
+                            candidate = getattr(generation, "publication_id", None)
+                            if state in {
+                                PublicationState.exposed.value,
+                                PublicationState.terminal_cleaned.value,
+                            } and isinstance(candidate, str):
+                                publication_id = candidate
+                    except Exception:
+                        publication_id = None
+                return PublicationHideResult(
+                    PublicationHideStatus.unchanged,
+                    task_id=task_id,
+                    publication_id=publication_id,
+                    reason=reason,
+                    changed=False,
+                )
+
         hide = getattr(self.d1, "hide_task", None)
         if not callable(hide):
             return PublicationHideResult(
@@ -1129,8 +1243,24 @@ class CloudPublisher:
                 task_id=task_id,
                 reason=_provider_category(error),
             )
+        # A real provider must return a typed receipt.  The compatibility path
+        # accepts the historical no-return test double only when no local
+        # fence API is present.
+        if fenced and receipt is None:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason="integrity",
+            )
         receipt_task = getattr(receipt, "task_id", task_id)
-        if receipt_task != task_id or getattr(receipt, "state", "hidden") != "hidden":
+        receipt_state = getattr(receipt, "state", "hidden")
+        if fenced and (not hasattr(receipt, "task_id") or not hasattr(receipt, "state")):
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason="integrity",
+            )
+        if receipt_task != task_id or receipt_state != "hidden":
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 task_id=task_id,
@@ -1146,6 +1276,63 @@ class CloudPublisher:
                     task_id=task_id,
                     reason="integrity",
                 )
+            if publication_id is None:
+                return PublicationHideResult(
+                    PublicationHideStatus.blocked,
+                    task_id=task_id,
+                    reason="integrity",
+                )
+        changed = getattr(receipt, "changed", True)
+        if fenced and not isinstance(changed, bool):
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                publication_id=publication_id,
+                reason="integrity",
+            )
+        if fenced:
+            confirm = getattr(self.store, "confirm_publication_hide", None)
+            if not callable(confirm):
+                return PublicationHideResult(
+                    PublicationHideStatus.blocked,
+                    task_id=task_id,
+                    publication_id=publication_id,
+                    reason="precondition",
+                )
+            try:
+                try:
+                    confirmed = confirm(
+                        task_id,
+                        reason=reason,
+                        confirmed_at=self._time(),
+                    )
+                except TypeError:
+                    confirmed = confirm(task_id, reason=reason)
+            except Exception:
+                return PublicationHideResult(
+                    PublicationHideStatus.blocked,
+                    task_id=task_id,
+                    publication_id=publication_id,
+                    reason="integrity",
+                )
+            confirmed_status = _status(getattr(confirmed, "status", confirmed))
+            if confirmed_status not in {
+                PublicationOperationStatus.verified.value,
+                PublicationOperationStatus.existing.value,
+            }:
+                return PublicationHideResult(
+                    PublicationHideStatus.blocked,
+                    task_id=task_id,
+                    publication_id=publication_id,
+                    reason=_reason(getattr(confirmed, "reason", None), "integrity"),
+                )
+            return PublicationHideResult(
+                PublicationHideStatus.hidden if changed else PublicationHideStatus.unchanged,
+                task_id=task_id,
+                publication_id=publication_id,
+                reason=reason,
+                changed=changed,
+            )
         listing = getattr(self.store, "list_publication_generations", None) or getattr(
             self.store, "list_generations", None
         )

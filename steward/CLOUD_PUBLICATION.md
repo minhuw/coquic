@@ -42,26 +42,32 @@ one begins, and provider calls occur outside local SQLite transactions.
    conditionally upload the private original and verify its receipt the same
    way. It is never referenced by D1, ATIF, a public URL, or a public locator;
    provider expiry follows the cloud contract.
-4. Stage the D1 envelope in bounded, parameterized batches. D1 verifies the
+4. Before any hide request crosses the provider boundary, commit the task's
+   local hide fence. The fence retires every pre-exposure generation and
+   remains pending until the remote receipt is verified; SQLite is never held
+   across the provider call.
+5. Stage the D1 envelope in bounded, parameterized batches. D1 verifies the
    generation identity, foreign-key relationships, expected counts, canonical
    metadata digest, and every staged row. Staged data has no visible task head.
-5. Expose only after staging succeeds. D1 atomically supersedes the previous
-   visible generation, marks the new generation `visible`, and upserts the
-   task head. The client verifies both the visible generation and head. Child
-   rows and object bytes are immutable after exposure.
+6. Expose only after staging succeeds and a mandatory local lease renewal still
+   observes no hide fence. D1 atomically supersedes the previous visible
+   generation, marks the new generation `visible`, and upserts the task head.
+   The client verifies both the visible generation and head. Child rows and
+   object bytes are immutable after exposure.
 
 ## Durable recovery
 
 The SQLite publication outbox is the durable operation record. It stores the
 deterministic generation identity, bounded counts and digests, lease state,
 verified public/private receipts, retry timing, and a safe failure category.
-Workers claim one generation with a bounded lease and renew it around each
-remote operation. Restart reconciliation reclaims expired leases and resumes
-from receipts; retries reuse the same identity and never overwrite an R2 object
-or expose a partial D1 generation. Network, quota, timeout, and other
-transient provider failures use bounded retry. Conflicting identity, digest,
-count, schema, permission, or other permanent failures stop publication and
-retain local evidence.
+Workers reconcile pending local hide fences before claiming any exposure work,
+then claim one generation with a bounded lease and renew it around each remote
+operation. Restart reconciliation reclaims expired leases and resumes from
+receipts; retries reuse the same identity and never overwrite an R2 object or
+expose a partial D1 generation. Network, quota, timeout, and other transient
+provider failures leave the hide fence pending for the next worker cycle.
+Conflicting identity, digest, count, schema, permission, or other permanent
+failures stop publication and retain local evidence.
 
 The bounded local recovery surface is available without exposing provider
 responses or private paths:
@@ -75,19 +81,24 @@ uv run --project steward coquic-steward publication hide <task-id> --reason oper
 
 `status` reports queue, blocked, cleanup, age, and category facts. `list`
 reports bounded generation summaries. `retry` rescans current local evidence
-and enqueues only a changed deterministic generation. `hide` requests a D1
-head hide and reconciles the local record; it does not delete evidence.
+and enqueues only a changed deterministic generation. `hide` commits the local
+fence, requests an atomic D1 head hide that also supersedes every currently
+staged generation, verifies the hidden receipt, and confirms the fence; it does
+not delete evidence. A pending hide is always serviced before a queued
+generation can be claimed, including after restart.
 
 ## Failure and hiding
 
 Unsupported or unsafe content, scanner/OCR failure, irreparable findings, and
-other disclosure failures hide any existing public task head before the
-generation is blocked. Invalid identity, count, or schema state blocks without
-exposing a new generation. A transient failure leaves a retryable outbox state;
-an interrupted hide is a durable obligation that is retried on the next
-reconciliation. A successful no-op hide is still proof that no visible head
-remains. Blocked generations and their local archives are evidence, never
-eviction candidates. There is no raw transcript fallback, partial publication,
+other disclosure failures commit a local hide fence before hiding any existing
+public task head. Invalid identity, count, or schema state blocks without
+exposing a new generation. A transient provider failure leaves the fence
+pending; restart reconciliation retries it before any queued exposure work. D1
+hide atomically hides the current head and supersedes all staged generations,
+so a stage that races after hide cannot be exposed. A successful no-op hide is
+still proof that no visible head remains. Blocked generations and their local
+archives are evidence, never eviction candidates. There is no raw transcript
+fallback, partial publication,
 global control-loop publication, scheduled live monitor, or dedicated canary.
 
 ## Terminal archive cleanup

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import threading
 from types import SimpleNamespace
 
 from coquic_steward.publication import (
@@ -247,11 +248,18 @@ class _SQLitePublicationProvider:
         self.put_attempts = 0
         self.head_visible = True
 
-    def hide_task(self, task_id: str, reason: str) -> None:
+    def hide_task(self, task_id: str, reason: str) -> object:
         self.hide_attempts += 1
         if self.hide_attempts <= self.hide_failures:
             raise D1Error(D1ErrorCode.transient)
+        changed = self.head_visible
         self.head_visible = False
+        return SimpleNamespace(
+            task_id=task_id,
+            publication_id=None,
+            state="hidden",
+            changed=changed,
+        )
 
     def put_object(self, key: str, content: bytes, object_class: R2ObjectClass, **kwargs: object):
         self.put_attempts += 1
@@ -272,6 +280,23 @@ class _SQLitePublicationProvider:
             publication_id=IDENTITY.publication_id,
             task_id="task-1",
         )
+
+
+class _StageBarrierProvider(_SQLitePublicationProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stage_entered = threading.Event()
+        self.release_stage = threading.Event()
+        self.expose_calls = 0
+
+    def stage(self, payload: object):
+        self.stage_entered.set()
+        assert self.release_stage.wait(timeout=2.0)
+        return super().stage(payload)
+
+    def expose(self, payload: object):
+        self.expose_calls += 1
+        return super().expose(payload)
 
 
 def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> CloudPublisher:
@@ -519,30 +544,34 @@ def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> No
         now=lambda: clock[0],
     )
 
-    for attempt in range(MAX_ATTEMPTS):
-        clock[0] = NOW + timedelta(seconds=attempt * 2)
-        result = publisher.publish(IDENTITY.publication_id, source={"task": {}})
-        current = store.get_publication_generation(IDENTITY.publication_id)
-        assert result.status is PublicationStatus.retry_wait
-        assert current is not None
-        assert current.state is PublicationState.retry_wait
-        assert current.reason == "unsafe_content"
-        assert current.attempt == min(attempt + 1, MAX_ATTEMPTS)
-
+    first = publisher.publish(IDENTITY.publication_id, source={"task": {}})
     current = store.get_publication_generation(IDENTITY.publication_id)
+    assert first.status is PublicationStatus.retry_wait
     assert current is not None
-    assert current.state is PublicationState.retry_wait
+    assert current.state is PublicationState.blocked
+    assert current.reason == "unsafe_content"
+    assert store.get_publication_hide("task-1").state.value == "pending"
+
+    for attempt in range(1, MAX_ATTEMPTS):
+        clock[0] = NOW + timedelta(seconds=attempt * 2)
+        replay = publisher.hide_task("task-1", "unsafe_content")
+        assert replay.status.value == "blocked"
+        current = store.get_publication_generation(IDENTITY.publication_id)
+        assert current is not None
+        assert current.state is PublicationState.blocked
+
     assert provider.head_visible is True
     assert provider.hide_attempts == MAX_ATTEMPTS
 
     clock[0] = NOW + timedelta(seconds=MAX_ATTEMPTS * 2 + 2)
-    replay = publisher.publish(IDENTITY.publication_id, source={"task": {}})
+    replay = publisher.hide_task("task-1", "unsafe_content")
     current = store.get_publication_generation(IDENTITY.publication_id)
-    assert replay.status is PublicationStatus.blocked
+    assert replay.status.value == "hidden"
     assert current is not None
     assert current.state is PublicationState.blocked
     assert provider.head_visible is False
     assert provider.hide_attempts == MAX_ATTEMPTS + 1
+    assert store.get_publication_hide("task-1").state.value == "confirmed"
 
 
 def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
@@ -568,19 +597,19 @@ def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
     assert first.status is PublicationStatus.retry_wait
     assert first.reason == "network"
     assert current is not None
-    assert current.state is PublicationState.retry_wait
+    assert current.state is PublicationState.blocked
     assert current.reason == "integrity"
     assert current.lease_owner is None
+    assert store.get_publication_hide("task-1").state.value == "pending"
     assert provider.put_attempts == 1
     assert provider.hide_attempts == 1
     assert provider.head_visible is True
 
     clock[0] = NOW + timedelta(seconds=2)
-    replay = publisher.publish(IDENTITY.publication_id, source={"stable": True})
+    replay = publisher.hide_task("task-1", "integrity")
     current = store.get_publication_generation(IDENTITY.publication_id)
 
-    assert replay.status is PublicationStatus.blocked
-    assert replay.reason == "integrity"
+    assert replay.status.value == "hidden"
     assert current is not None
     assert current.state is PublicationState.blocked
     assert current.reason == "integrity"
@@ -588,6 +617,74 @@ def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
     assert provider.put_attempts == 1
     assert provider.hide_attempts == 2
     assert provider.head_visible is False
+
+
+def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    store.enqueue_publication(_sqlite_generation())
+    provider = _StageBarrierProvider()
+    publisher = CloudPublisher(
+        store,
+        provider,
+        provider,
+        "worker-1",
+        compose=lambda _source, **_kwargs: _composed(),
+        now=lambda: NOW,
+    )
+    results: list[object] = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            publisher.publish(IDENTITY.publication_id, source={"stable": True})
+        )
+    )
+    worker.start()
+    assert provider.stage_entered.wait(timeout=2.0)
+
+    hidden = publisher.hide_task("task-1", "unsafe_content")
+    provider.release_stage.set()
+    worker.join(timeout=2.0)
+
+    assert hidden.ok
+    assert results and getattr(results[0], "status", None) is PublicationStatus.lost_claim
+    assert provider.expose_calls == 0
+    current = store.get_publication_generation(IDENTITY.publication_id)
+    assert current is not None
+    assert current.state is PublicationState.blocked
+    fence = store.get_publication_hide("task-1")
+    assert fence is not None
+    assert fence.state.value == "confirmed"
+
+
+def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
+    path = tmp_path / "steward.sqlite"
+    store = TaskStore(path)
+    store.enqueue_publication(_sqlite_generation())
+    failing = _SQLitePublicationProvider(hide_failures=1)
+    first = CloudPublisher(
+        store,
+        failing,
+        failing,
+        "worker-1",
+        now=lambda: NOW,
+    ).hide_task("task-1", "unsafe_content")
+
+    assert first.status.value == "blocked"
+    assert first.reason == "network"
+    assert store.get_publication_hide("task-1").state.value == "pending"
+    store.engine.dispose()
+
+    restarted = TaskStore(path)
+    healthy = _SQLitePublicationProvider()
+    second = CloudPublisher(
+        restarted,
+        healthy,
+        healthy,
+        "worker-2",
+        now=lambda: NOW + timedelta(seconds=1),
+    ).hide_task("task-1", "unsafe_content")
+
+    assert second.status.value == "hidden"
+    assert restarted.get_publication_hide("task-1").state.value == "confirmed"
 
 
 def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> None:

@@ -194,6 +194,56 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     assert daemon._publication_wakeup.is_set()
 
 
+def test_publication_worker_drains_pending_hides_before_exposure_claim():
+    events: list[str] = []
+
+    class Store:
+        def list_pending_publication_hides(self):
+            events.append("list-hides")
+            return [SimpleNamespace(task_id="task-hidden", reason="unsafe_content")]
+
+        def list_publication_generations(self, **_kwargs):
+            events.append("list-generations")
+            return [SimpleNamespace(publication_id="pub-queued", task_id="task-queued")]
+
+    class Publisher:
+        def hide_task(self, task_id: str, reason: str):
+            events.append(f"hide:{task_id}:{reason}")
+            return SimpleNamespace(status="hidden")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.logger = None
+
+    assert daemon._publish_next_generation(Publisher()) is True
+    assert events == ["list-hides", "hide:task-hidden:unsafe_content"]
+
+
+def test_publication_worker_keeps_exposure_queued_when_hide_reconciliation_fails():
+    events: list[str] = []
+
+    class Store:
+        def list_pending_publication_hides(self):
+            events.append("list-hides")
+            return [SimpleNamespace(task_id="task-hidden", reason="unsafe_content")]
+
+        def list_publication_generations(self, **_kwargs):
+            events.append("list-generations")
+            return [SimpleNamespace(publication_id="pub-queued", task_id="task-queued")]
+
+    class Publisher:
+        def hide_task(self, task_id: str, reason: str):
+            events.append(f"hide:{task_id}:{reason}")
+            return SimpleNamespace(status="blocked", reason="network")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon.logger = None
+
+    assert daemon._publish_next_generation(Publisher()) is False
+    assert events == ["list-hides", "hide:task-hidden:unsafe_content"]
+
+
 def _publication_callback_daemon(store: object) -> StewardDaemon:
     daemon = object.__new__(StewardDaemon)
     daemon.store = store

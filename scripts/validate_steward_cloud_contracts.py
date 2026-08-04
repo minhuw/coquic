@@ -1072,6 +1072,44 @@ def _d1_expose(
         raise
 
 
+def _d1_hide(connection: sqlite3.Connection, task_id: str) -> None:
+    """Apply the atomic remote hide/supersession batch used by D1 client."""
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        head = connection.execute(
+            "SELECT publication_id, state FROM task_heads WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if head is None:
+            visible = connection.execute(
+                "SELECT publication_id FROM publication_generations "
+                "WHERE task_id = ? AND state = 'visible' ORDER BY exposed_at DESC, publication_id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            head = None if visible is None else (visible[0], None)
+        staged = connection.execute(
+            "SELECT count(*) FROM publication_generations WHERE task_id = ? AND state = 'staged'",
+            (task_id,),
+        ).fetchone()[0]
+        if staged:
+            connection.execute(
+                "UPDATE publication_generations SET state = 'superseded' "
+                "WHERE task_id = ? AND state = 'staged'",
+                (task_id,),
+            )
+        if head is not None and head[0] is not None and head[1] != "hidden":
+            connection.execute(
+                "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'hidden', ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET publication_id = excluded.publication_id, state = 'hidden', updated_at = excluded.updated_at",
+                (task_id, head[0], "2026-07-28T00:00:03Z"),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def _d1_rejected(connection: sqlite3.Connection, statement: str, parameters: tuple[Any, ...]) -> bool:
     connection.execute("BEGIN")
     try:
@@ -1173,10 +1211,25 @@ def _run_d1_cases() -> tuple[int, int]:
         record("invalid-digest-denial", _d1_rejected(connection, "UPDATE artifacts SET sha256 = ? WHERE publication_id = ?", ("A" * 64, "pub-2")))
         record("invalid-key-denial", _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("private://object", "pub-2")) and _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("v1/tasks/not-task/objects/sha256/bb/" + "b" * 64, "pub-2")) and _d1_rejected(connection, "UPDATE artifacts SET public_key = ? WHERE publication_id = ?", ("v1/tasks/TASK-1/objects/sha256/00/" + "0" * 64, "pub-2")))
         record("private-name-denial", _private_d1_column("private_locator") and _private_d1_column("credential_url") and _d1_rejected(connection, "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'visible', ?)", ("other-task", "pub-2", "2026-07-28T00:00:00Z")))
-        connection.execute("BEGIN")
-        connection.execute("UPDATE task_heads SET state = 'hidden' WHERE task_id = ?", ("task-1",))
-        connection.commit()
-        record("hide-task", _d1_public_rows(connection) == [])
+        _d1_hide(connection, "task-1")
+        record(
+            "hide-atomic-supersession",
+            connection.execute(
+                "SELECT state FROM task_heads WHERE task_id = ?", ("task-1",)
+            ).fetchone()[0] == "hidden"
+            and connection.execute(
+                "SELECT count(*) FROM publication_generations WHERE task_id = ? AND state = 'staged'",
+                ("task-1",),
+            ).fetchone()[0] == 0
+            and connection.execute(
+                "SELECT state FROM publication_generations WHERE publication_id = ?",
+                ("pub-bad",),
+            ).fetchone()[0] == "superseded",
+        )
+        record(
+            "hide-task",
+            _d1_public_rows(connection) == [],
+        )
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
         record("d1-execution", False)
         print(f"FAIL d1 execution: {type(error).__name__}", file=sys.stderr)

@@ -156,6 +156,53 @@ def test_supersession_and_hide_are_atomic_and_idempotent() -> None:
     assert server.connection.execute("SELECT state FROM task_heads").fetchone()[0] == "hidden"
 
 
+def test_hide_supersedes_staged_generations_and_wins_expose_race() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-hide-head", run_id="run-hide-head")
+    d1.publish(first)
+    staged = publication("publication-hide-staged", run_id="run-hide-staged")
+    d1.stage(staged)
+
+    hidden = d1.hide_task(first["taskId"], "unsafe_content")
+
+    assert hidden.changed is True
+    hide_batches = [
+        item
+        for item in server.requests
+        if "batch" in item
+        and any(
+            "UPDATE publication_generations SET state = 'superseded' WHERE task_id = ? AND state = 'staged'"
+            in statement["sql"]
+            for statement in item["batch"]
+        )
+    ]
+    assert len(hide_batches) == 1
+    assert any(
+        "ON CONFLICT(task_id) DO UPDATE SET publication_id = excluded.publication_id, state = 'hidden'"
+        in statement["sql"]
+        for statement in hide_batches[0]["batch"]
+    )
+    states = dict(
+        server.connection.execute(
+            "SELECT publication_id, state FROM publication_generations WHERE task_id = ?",
+            (first["taskId"],),
+        )
+    )
+    assert states == {
+        first["publicationId"]: "visible",
+        staged["publicationId"]: "superseded",
+    }
+    assert server.connection.execute(
+        "SELECT state FROM task_heads WHERE task_id = ?", (first["taskId"],)
+    ).fetchone()[0] == "hidden"
+
+    with pytest.raises(D1Error) as error:
+        d1.expose(staged)
+    assert error.value.code == D1ErrorCode.generation_state
+    assert d1.hide_task(first["taskId"], "unsafe_content").changed is False
+
+
 def test_interrupted_visibility_batch_rolls_back_without_changing_head() -> None:
     server = ScriptedD1()
     d1 = client(server)

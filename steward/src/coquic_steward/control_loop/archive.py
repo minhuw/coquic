@@ -98,6 +98,10 @@ class ControlLoopArchive:
         # remain authoritative; the snapshot is only a performance hint after
         # a successful canonical verification pass.
         self._verified_snapshot: dict[str, Any] | None = None
+        # Direct appends that occur before a ledger-backed audit still retain a
+        # process-local watermark. It is discarded whenever verified trust is
+        # invalidated and is never persisted.
+        self._append_high_watermark: int | None = None
         self._verification_counters: dict[str, int] = {
             "eventFiles": 0,
             "eventBytes": 0,
@@ -317,23 +321,24 @@ class ControlLoopArchive:
         # authority instead of silently scanning unverified bytes.
         snapshot = self._verified_snapshot
         if snapshot is not None and snapshot.get("events") is not None:
-            try:
-                identities = self._event_file_identities()
-            except ArchiveValidationError:
-                self._verified_snapshot = None
-                raise
             prior_events = snapshot["events"]
-            if set(identities) != set(prior_events) or any(
-                identities[path] != facts.get("identity")
-                for path, facts in prior_events.items()
-            ):
+            facts = prior_events.get(path)
+            current_identity = self._path_identity(path)
+            if facts is None:
+                # A new target is safe only while it is still absent. Existing
+                # bytes have not been ledger-verified and require reconcile.
+                if current_identity is not None:
+                    self._verified_snapshot = None
+                    self._append_high_watermark = None
+                    raise ArchiveConflictError("event file appeared after verification")
+                facts = self._empty_verified_event_file(path)
+            elif current_identity != facts.get("identity"):
                 self._verified_snapshot = None
+                self._append_high_watermark = None
                 raise ArchiveConflictError("event archive changed after verification")
             verified_files = deepcopy(prior_events)
-            facts = verified_files.get(path)
-            if facts is None:
-                facts = self._empty_verified_event_file(path)
-                verified_files[path] = facts
+            verified_files[path] = deepcopy(facts)
+            facts = verified_files[path]
             append_context = {
                 "files": verified_files,
                 "highWatermark": snapshot.get("highWatermark", -1),
@@ -343,6 +348,7 @@ class ControlLoopArchive:
             updated_snapshot["events"] = verified_files
             updated_snapshot["highWatermark"] = append_context["highWatermark"]
             self._verified_snapshot = updated_snapshot
+            self._append_high_watermark = append_context["highWatermark"]
             return result
         existing = path.read_bytes() if path.exists() else b""
         # Complete records are the append boundary.  A torn final line may be
@@ -365,18 +371,20 @@ class ControlLoopArchive:
             if prior.get("eventId") == item.event_id:
                 if line != content.rstrip(b"\n"):
                     raise ArchiveConflictError("event ID has conflicting visible bytes")
+                self._append_high_watermark = max(
+                    self._append_high_watermark
+                    if self._append_high_watermark is not None
+                    else -1,
+                    max(prior_sequences, default=-1),
+                )
                 return len(accepted)
-        visible_max = max(prior_sequences, default=-1)
-        for candidate in self.events_root.rglob("*.jsonl"):
-            if candidate == path or candidate.is_symlink() or not candidate.is_file():
-                continue
-            data = candidate.read_bytes()
-            complete = data if data.endswith(b"\n") else data[: data.rfind(b"\n") + 1]
-            for line in complete.splitlines():
-                try:
-                    visible_max = max(visible_max, int(json.loads(line)["sequence"]))
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise ArchiveConflictError("event archive contains an invalid sequence") from exc
+        visible_max = max(
+            max(prior_sequences, default=-1),
+            self._append_high_watermark
+            if self._append_high_watermark is not None
+            else -1,
+        )
+        self._append_high_watermark = visible_max
         if visible_max >= 0 and item.sequence <= visible_max:
             raise ArchiveConflictError("event sequence is not monotonically increasing")
         with path.open("ab") as handle:
@@ -384,6 +392,7 @@ class ControlLoopArchive:
             handle.flush()
             os.fsync(handle.fileno())
         _fsync_dir(path.parent)
+        self._append_high_watermark = item.sequence
         return len(accepted) + len(content)
 
     def _empty_verified_event_file(self, path: Path) -> dict[str, Any]:
@@ -445,12 +454,12 @@ class ControlLoopArchive:
         visible_max = max(
             context_high if context_high is not None else -1,
             facts_high if facts_high is not None else -1,
+            self._append_high_watermark
+            if self._append_high_watermark is not None
+            else -1,
         )
-        if facts_high is not None:
-            context["highWatermark"] = max(
-                context_high if context_high is not None else -1,
-                facts_high,
-            )
+        context["highWatermark"] = visible_max
+        self._append_high_watermark = visible_max
         event_ids = facts.get("eventIds", [])
         if item.event_id in event_ids:
             index = event_ids.index(item.event_id)
@@ -479,6 +488,7 @@ class ControlLoopArchive:
         facts["sequenceEnd"] = item.sequence
         facts["highWatermark"] = item.sequence
         context["highWatermark"] = max(context.get("highWatermark", -1), item.sequence)
+        self._append_high_watermark = context["highWatermark"]
         facts["identity"] = self._path_identity(path)
         facts["_append_identity"] = facts["identity"]
         buffers[path] = updated
@@ -582,7 +592,7 @@ class ControlLoopArchive:
             self._verification_counters["plannerBytes"] += len(manifest_bytes)
             self._verification_counters["plannerHashes"] += 1
             manifest = Manifest.model_validate(json.loads(manifest_bytes))
-        except (OSError, json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError):
             return None
         if manifest.epoch_id != self._require_epoch().epoch_id or manifest.planner_run_id != planner_run_id:
             return None
@@ -623,7 +633,10 @@ class ControlLoopArchive:
         }
 
     def verify_planner_run(self, planner_run_id: str) -> bool:
-        facts = self._verify_planner_run_facts(planner_run_id)
+        try:
+            facts = self._verify_planner_run_facts(planner_run_id)
+        except (OSError, ArchiveValidationError):
+            return False
         if facts is not None and self._verified_snapshot is not None:
             self._verified_snapshot.setdefault("plannerRuns", {})[planner_run_id] = facts
         return facts is not None
@@ -740,6 +753,11 @@ class ControlLoopArchive:
         prior_runs: Mapping[str, dict[str, Any]] = {}
         if not force_full_audit and prior is not None and prior.get("epochId") == self._epoch_id:
             prior_runs = prior.get("plannerRuns", {})
+            disappeared = sorted(set(prior_runs) - set(runs))
+            if disappeared:
+                raise ArchiveConflictError(
+                    "verified planner run disappeared: " + ", ".join(disappeared)
+                )
 
         verified: dict[str, dict[str, Any]] = {}
         invalid: list[str] = []
@@ -773,14 +791,22 @@ class ControlLoopArchive:
         reuse facts whose identities are unchanged.
         """
 
-        self._require_epoch()
         force = full_audit or force_full_audit
+        self._require_epoch()
+        if force and ledger is None:
+            # Event bytes can only be trusted when they are compared with the
+            # authoritative ledger. Reject a ledgerless full audit and drop
+            # any process-local trust that might otherwise be reused.
+            self._verified_snapshot = None
+            self._append_high_watermark = None
+            raise ArchiveValidationError("full archive audit requires ledger authority")
         counters_before = self.verification_counters
         materialized = 0
         conflicts = 0
         event_snapshot: dict[Path, dict[str, Any]] | None = None
         high_watermark = -1
         event_trust_lost = False
+        event_audit_incomplete = False
         pending_outbox = False
         outbox_error = False
 
@@ -789,6 +815,7 @@ class ControlLoopArchive:
                 event_snapshot, high_watermark = self._verified_event_snapshot(
                     ledger, force_full_audit=force
                 )
+                self._append_high_watermark = high_watermark
             except (ArchiveConflictError, ArchiveValidationError):
                 conflicts += 1
                 event_trust_lost = True
@@ -829,6 +856,20 @@ class ControlLoopArchive:
                         ledger.mark_materialized(row["sequence"], event_id=row["event_id"])
                         materialized += 1
                     pending_outbox = outbox_error or len(outbox_rows) >= limit
+                    # Appends mutate the context in place. Carry its final
+                    # watermark into the snapshot and returned result rather
+                    # than retaining the pre-drain audit value.
+                    high_watermark = max(
+                        high_watermark,
+                        int(verification_context.get("highWatermark", -1)),
+                    )
+                    if force and outbox_error:
+                        event_audit_incomplete = True
+                        self._verified_snapshot = None
+                        self._append_high_watermark = None
+                        ledger.set_planning_blocked(
+                            True, reason="control-loop event audit incomplete"
+                        )
                 finally:
                     self._verified_append_context = None
 
@@ -839,15 +880,24 @@ class ControlLoopArchive:
                 conflicts += 1
 
         planner_trust_lost = False
+        planner_audit_incomplete = False
+        planner_audit_error: Exception | None = None
         try:
             planner_snapshot, runs, invalid_runs = self._verified_planner_snapshot(
                 force_full_audit=force
             )
-        except (ArchiveConflictError, ArchiveValidationError, OSError):
+        except (ArchiveConflictError, ArchiveValidationError, OSError) as exc:
+            conflicts += 1
             planner_snapshot = None
             runs = []
             invalid_runs = []
             planner_trust_lost = True
+            planner_audit_incomplete = True
+            planner_audit_error = exc
+            if ledger is not None:
+                ledger.set_planning_blocked(
+                    True, reason="control-loop planner audit incomplete"
+                )
 
         hidden_stages = sorted(
             path.name
@@ -866,8 +916,14 @@ class ControlLoopArchive:
             if ledger is not None:
                 ledger.set_planning_blocked(True, reason="visible planner-run conflict")
 
-        if not event_trust_lost and not planner_trust_lost and (
-            ledger is not None or planner_snapshot is not None
+        if (
+            not event_trust_lost
+            and not event_audit_incomplete
+            and not planner_trust_lost
+            and not planner_audit_incomplete
+            and (
+                ledger is not None or planner_snapshot is not None
+            )
         ):
             updated_snapshot = deepcopy(self._verified_snapshot or {})
             updated_snapshot["epochId"] = self._epoch_id
@@ -881,19 +937,21 @@ class ControlLoopArchive:
                     }
                 )
             self._verified_snapshot = updated_snapshot
-        elif event_trust_lost:
+        elif event_trust_lost or event_audit_incomplete:
             self._verified_snapshot = None
         elif planner_trust_lost and self._verified_snapshot is not None:
             # Keep event trust only when planner stat/read failure did not
             # affect the event files; the affected planner facts are discarded.
             self._verified_snapshot["plannerRuns"] = {}
+        if event_trust_lost:
+            self._append_high_watermark = None
 
         counters_after = self.verification_counters
         verification = {
             key: counters_after[key] - counters_before[key]
             for key in counters_after
         }
-        return {
+        result = {
             "materialized": materialized,
             "conflicts": conflicts,
             "visibleRuns": len(runs),
@@ -903,7 +961,13 @@ class ControlLoopArchive:
             "highWatermark": high_watermark,
             "pending": pending_outbox,
             "verification": verification,
+            "auditIncomplete": event_audit_incomplete or planner_audit_incomplete,
+            "eventAuditIncomplete": event_audit_incomplete,
+            "plannerAuditIncomplete": planner_audit_incomplete,
         }
+        if planner_audit_error is not None:
+            result["error"] = planner_audit_error.__class__.__name__
+        return result
 
     def full_audit(
         self,
@@ -913,6 +977,11 @@ class ControlLoopArchive:
         limit: int = 100,
     ) -> dict[str, Any]:
         """Force one complete byte/ledger verification pass."""
+
+        if ledger is None:
+            self._verified_snapshot = None
+            self._append_high_watermark = None
+            raise ArchiveValidationError("full archive audit requires ledger authority")
 
         return self.reconcile(
             ledger,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 from coquic_steward.control_loop import (
     ArchiveConflictError,
+    ArchiveValidationError,
     ControlLoopArchive,
     CurrentState,
     Event,
@@ -395,3 +397,120 @@ def test_unchanged_reconcile_is_byte_idle_and_append_uses_cached_high_watermark(
     archive.append_event(second)
     second_path = archive.events_root / "2026" / "07" / "25.jsonl"
     assert [json.loads(line)["sequence"] for line in second_path.read_bytes().splitlines()] == [1]
+
+
+def test_reconcile_carries_materialized_watermark_into_snapshot_and_append(
+    tmp_path: Path,
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        first = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+
+    result = archive.reconcile(ledger)
+
+    assert result["materialized"] == 1
+    assert result["highWatermark"] == 0
+    assert archive._verified_snapshot is not None
+    assert archive._verified_snapshot["highWatermark"] == 0
+
+    lower = first.model_copy(
+        update={
+            "event_id": "event-lower-day",
+            "occurred_at": NOW.replace(day=25),
+        }
+    )
+    with pytest.raises(ArchiveConflictError):
+        archive.append_event(lower)
+
+
+def test_verified_append_does_not_walk_unrelated_event_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        first = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+        second = ledger._event(
+            connection,
+            "synthetic.event",
+            {"ordinal": 1},
+            occurred_at=NOW.replace(day=25),
+        )
+    archive.append_event(first)
+    ledger.mark_materialized(first.sequence, event_id=first.event_id)
+    archive.reconcile(ledger)
+
+    monkeypatch.setattr(
+        archive,
+        "_event_file_identities",
+        lambda: pytest.fail("verified append performed a global event walk"),
+    )
+    archive.append_event(second)
+
+
+def test_disappearing_verified_planner_run_blocks_and_discards_trust(
+    tmp_path: Path,
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    run = PlannerRun(
+        plannerRunId="planner-run-disappearing",
+        epochId="epoch-archive-test",
+        state="failed",
+        startedAt=NOW,
+        completedAt=NOW,
+    )
+    archive.publish_planner_run(run, {"result.json": b"{}\n"})
+    archive.reconcile(ledger)
+    shutil.rmtree(archive.planner_runs_root / run.planner_run_id)
+
+    result = archive.reconcile(ledger)
+
+    assert result["plannerAuditIncomplete"] is True
+    assert result["error"] == "ArchiveConflictError"
+    assert ledger.planning_blocked
+    assert archive._verified_snapshot is not None
+    assert archive._verified_snapshot["plannerRuns"] == {}
+
+
+def test_planner_audit_oserror_is_incomplete_and_blocks_planning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    run = PlannerRun(
+        plannerRunId="planner-run-audit-error",
+        epochId="epoch-archive-test",
+        state="failed",
+        startedAt=NOW,
+        completedAt=NOW,
+    )
+    archive.publish_planner_run(run, {"result.json": b"{}\n"})
+    archive.reconcile(ledger)
+
+    def fail_audit(*_args, **_kwargs):
+        raise OSError("planner bytes unavailable")
+
+    monkeypatch.setattr(archive, "_verify_planner_run_facts", fail_audit)
+    result = archive.full_audit(ledger)
+
+    assert result["plannerAuditIncomplete"] is True
+    assert result["auditIncomplete"] is True
+    assert result["error"] == "OSError"
+    assert ledger.planning_blocked
+
+
+def test_full_audit_requires_ledger_authority(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+
+    with pytest.raises(ArchiveValidationError):
+        archive.full_audit()

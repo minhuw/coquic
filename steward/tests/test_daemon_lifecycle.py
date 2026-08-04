@@ -1485,6 +1485,37 @@ def test_control_loop_epoch_conflict_blocks_planning_without_aborting_preflight(
     assert task.status == TaskStatus.queued
 
 
+def test_startup_blocks_planning_when_required_archive_audit_errors(
+    config, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(
+        daemon,
+        "_drain_control_loop_once",
+        lambda **_kwargs: {
+            "materialized": 0,
+            "conflicts": 0,
+            "error": "OSError",
+            "auditIncomplete": True,
+        },
+    )
+
+    daemon._startup_reconcile_control_loop()
+
+    assert store.control_loop.planning_blocked
+    task, created = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="Task pipeline remains available after audit failure",
+            prompt="Run independently from control-loop planning.",
+        )
+    )
+    assert created
+    assert task.status == TaskStatus.queued
+
+
 def test_control_loop_writer_waits_when_idle_and_preserves_drain_wakeup(
     monkeypatch,
 ) -> None:

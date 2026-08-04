@@ -771,6 +771,24 @@ class StewardDaemon:
             # archive can reuse identity-checked facts for recurring drains.
             result = self._drain_control_loop_once(full_audit=True, publish=False)
             if result is None:
+                self._control_loop_ledger.set_planning_blocked(
+                    True, reason="control-loop startup audit incomplete"
+                )
+                self._log("control-loop reconciliation blocked error=missing-result")
+                return
+            if (
+                result.get("error")
+                or result.get("auditIncomplete")
+                or result.get("eventAuditIncomplete")
+                or result.get("plannerAuditIncomplete")
+            ):
+                self._control_loop_ledger.set_planning_blocked(
+                    True, reason="control-loop startup audit incomplete"
+                )
+                self._log(
+                    "control-loop reconciliation blocked "
+                    f"error={result.get('error', 'incomplete')}"
+                )
                 return
             visible_ids = set(result.get("visibleRunIds", ()))
             invalid_ids = set(result.get("invalidRuns", ()))
@@ -941,7 +959,12 @@ class StewardDaemon:
                 # A temporary writer failure must not stop task dispatch.  The
                 # durable outbox remains pending for the next retry.
                 self._log(f"control-loop archive lag error={exc.__class__.__name__}")
-                return {"materialized": 0, "conflicts": 0, "error": exc.__class__.__name__}
+                return {
+                    "materialized": 0,
+                    "conflicts": 0,
+                    "error": exc.__class__.__name__,
+                    "auditIncomplete": full_audit,
+                }
             if publish:
                 if self._publish_control_loop_runs(ledger):
                     result["pending"] = True

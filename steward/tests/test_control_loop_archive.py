@@ -426,6 +426,47 @@ def test_reconcile_carries_materialized_watermark_into_snapshot_and_append(
         archive.append_event(lower)
 
 
+def test_verified_duplicate_requires_exact_canonical_bytes(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    from coquic_steward.control_loop import ControlLoopLedger
+
+    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    with ledger.transaction() as connection:
+        event = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
+
+    archive.reconcile(ledger)
+    path = archive.events_root / "2026" / "07" / "24.jsonl"
+    original = path.read_bytes()
+    conflicting = event.model_copy(update={"payload": {"ordinal": 99}})
+
+    with pytest.raises(ArchiveConflictError):
+        archive.append_event(conflicting)
+
+    assert path.read_bytes() == original
+    assert archive.append_event(event) == len(original)
+
+
+def test_fresh_archive_process_fails_closed_without_verified_watermark(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    retained = _event(archive, 10, "event-retained")
+    archive.append_event(retained)
+
+    fresh = ControlLoopArchive(archive.root, task_root=archive.task_root)
+    fresh.ensure_epoch()
+    candidate = _event(fresh, 1, "event-unverified").model_copy(
+        update={"occurred_at": NOW.replace(day=25)}
+    )
+
+    with pytest.raises(ArchiveConflictError):
+        fresh.append_event(candidate)
+
+    retained_path = fresh.events_root / "2026" / "07" / "24.jsonl"
+    assert [json.loads(line) for line in retained_path.read_bytes().splitlines()] == [
+        retained.model_dump(by_alias=True, mode="json")
+    ]
+    assert not (fresh.events_root / "2026" / "07" / "25.jsonl").exists()
+
+
 def test_verified_append_does_not_walk_unrelated_event_files(
     tmp_path: Path, monkeypatch
 ) -> None:

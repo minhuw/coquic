@@ -297,12 +297,26 @@ class ControlLoopArchive:
         value = value.astimezone(timezone.utc)
         return self.events_root / f"{value:%Y}" / f"{value:%m}" / f"{value:%d}.jsonl"
 
+    def _event_archive_has_retained_paths(self) -> bool:
+        """Detect retained archive structure without reading unrelated bytes."""
+
+        try:
+            return next(self.events_root.iterdir(), None) is not None
+        except OSError as exc:
+            raise ArchiveValidationError("event archive cannot be inspected") from exc
+
     def append_event(self, event: Event | Mapping[str, Any]) -> int:
         self._require_epoch()
         item = event if isinstance(event, Event) else Event.model_validate(event)
         if item.epoch_id != self._epoch_id:
             raise ArchiveConflictError("event epoch does not match archive")
         path = self._event_path(item.occurred_at)
+        if (
+            self._verified_snapshot is None
+            and self._append_high_watermark is None
+            and self._event_archive_has_retained_paths()
+        ):
+            raise ArchiveConflictError("event archive watermark is unverified")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise ArchiveValidationError("event path must be a regular file")
@@ -464,6 +478,9 @@ class ControlLoopArchive:
         if item.event_id in event_ids:
             index = event_ids.index(item.event_id)
             sequences = facts.get("sequences", [])
+            lines = accepted.splitlines()
+            if index >= len(lines) or lines[index] != content.rstrip(b"\n"):
+                raise ArchiveConflictError("event ID has conflicting visible bytes")
             if index >= len(sequences) or sequences[index] != item.sequence:
                 raise ArchiveConflictError("event ID has conflicting visible bytes")
             return accepted_size

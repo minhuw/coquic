@@ -132,6 +132,8 @@ from ..publication.outbox import (
     OutboxValidationError,
     PublicationGeneration,
     PublicationHealth,
+    PublicationHideFence,
+    PublicationHideState,
     PublicationOperationResult,
     PublicationOperationStatus,
     PublicationReceipt,
@@ -232,6 +234,9 @@ _PUBLICATION_RECEIPT_COLUMNS = (
 _PUBLICATION_CLEANUP_COLUMNS = (
     "intent_id,publication_id,task_id,manifest_digest,exact_path,state,requested_at,"
     "verified_at,completed_at,reason"
+)
+_PUBLICATION_HIDE_FENCE_COLUMNS = (
+    "task_id,reason,state,generation_boundary,requested_at,confirmed_at"
 )
 
 
@@ -2046,6 +2051,318 @@ class SQLiteTaskStore:
     # ------------------------------------------------------------------
     # Durable publication outbox
 
+    def begin_publication_hide(
+        self,
+        task_id: str,
+        reason: str = "operator_blocked",
+        *,
+        now: datetime | None = None,
+        generation_boundary: str | None = None,
+    ) -> PublicationOperationResult:
+        """Fence one task and retire every local pre-exposure generation.
+
+        This is the local half of a hide operation.  It deliberately performs
+        no provider call; callers may only cross that boundary after this
+        transaction commits.
+        """
+
+        task = _publication_identifier(task_id)
+        safe_reason = _publication_reason(reason)
+        assert safe_reason is not None
+        timestamp = _publication_now(now)
+        boundary = None
+        if generation_boundary is not None:
+            boundary = GenerationIdentity(task, generation_boundary).stable_boundary
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            existing_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                "WHERE task_id=:task_id",
+                {"task_id": task},
+            ).mappings().first()
+            if existing_row is not None:
+                existing = _publication_hide_from_row(existing_row)
+                if existing.state is PublicationHideState.released:
+                    # A repaired generation has reopened the task.  A new hide
+                    # starts a fresh durable request in the same task row.
+                    pass
+                elif existing.reason != safe_reason or (
+                    boundary is not None
+                    and existing.generation_boundary != boundary
+                ):
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.conflict,
+                        reason="integrity",
+                        fence=existing,
+                    )
+                else:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.existing,
+                        reason=existing.reason,
+                        fence=existing,
+                    )
+
+            generation_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE task_id=:task_id AND state NOT IN ('exposed','terminal_cleaned') "
+                "ORDER BY updated_at DESC,created_at DESC,publication_id DESC LIMIT 1",
+                {"task_id": task},
+            ).mappings().first()
+            latest_boundary = (
+                None
+                if generation_row is None
+                else str(generation_row["generation_boundary"])
+            )
+            if boundary is None:
+                boundary = latest_boundary
+            elif latest_boundary is not None and boundary != latest_boundary:
+                # A caller may name the exact boundary only when it is still
+                # the current local pre-exposure head.
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    reason="integrity",
+                )
+            generation_rows = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
+                "WHERE task_id=:task_id AND state NOT IN ('exposed','terminal_cleaned') "
+                "ORDER BY created_at,publication_id",
+                {"task_id": task},
+            ).mappings().all()
+            for row in generation_rows:
+                if timestamp < _publication_datetime(row["updated_at"]):
+                    raise OutboxValidationError("invalid_metadata")
+
+            fence = PublicationHideFence(
+                task_id=task,
+                reason=safe_reason,
+                state=PublicationHideState.pending,
+                generation_boundary=boundary,
+                requested_at=timestamp,
+            )
+            if existing_row is None:
+                connection.exec_driver_sql(
+                    "INSERT INTO publication_hide_fences "
+                    "(task_id,reason,state,generation_boundary,requested_at,confirmed_at) "
+                    "VALUES (:task_id,:reason,'pending',:generation_boundary,:requested_at,NULL)",
+                    {
+                        "task_id": fence.task_id,
+                        "reason": fence.reason,
+                        "generation_boundary": fence.generation_boundary,
+                        "requested_at": _publication_timestamp(fence.requested_at),
+                    },
+                )
+            else:
+                connection.exec_driver_sql(
+                    "UPDATE publication_hide_fences SET reason=:reason,state='pending',"
+                    "generation_boundary=:generation_boundary,requested_at=:requested_at,"
+                    "confirmed_at=NULL WHERE task_id=:task_id AND state='released'",
+                    {
+                        "task_id": fence.task_id,
+                        "reason": fence.reason,
+                        "generation_boundary": fence.generation_boundary,
+                        "requested_at": _publication_timestamp(fence.requested_at),
+                    },
+                )
+            retired = connection.exec_driver_sql(
+                "UPDATE publication_generations SET state='blocked',lease_owner=NULL,"
+                "lease_expires_at=NULL,retry_at=NULL,reason=:reason,updated_at=:updated_at "
+                "WHERE task_id=:task_id AND state NOT IN ('exposed','terminal_cleaned')",
+                {
+                    "task_id": task,
+                    "reason": safe_reason,
+                    "updated_at": _publication_timestamp(timestamp),
+                },
+            )
+            refreshed_row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                "WHERE task_id=:task_id",
+                {"task_id": task},
+            ).mappings().first()
+            assert refreshed_row is not None
+            saved = _publication_hide_from_row(refreshed_row)
+            self._refresh_publication_health(
+                connection, updated_at=timestamp, reason=safe_reason
+            )
+            connection.commit()
+            changed = existing_row is None or retired.rowcount > 0
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.enqueued,
+            reason=saved.reason,
+            fence=saved,
+        )
+
+    begin_hide = begin_publication_hide
+    begin_publication_hide_fence = begin_publication_hide
+    create_publication_hide = begin_publication_hide
+    create_publication_hide_fence = begin_publication_hide
+
+    def confirm_publication_hide(
+        self,
+        task_id: str,
+        *,
+        reason: str | None = None,
+        confirmed_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> PublicationOperationResult:
+        """Confirm a previously committed local hide fence."""
+
+        task = _publication_identifier(task_id)
+        safe_reason = None if reason is None else _publication_reason(reason)
+        timestamp = _publication_now(confirmed_at if confirmed_at is not None else now)
+        connection = self.engine.connect()
+        changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                "WHERE task_id=:task_id",
+                {"task_id": task},
+            ).mappings().first()
+            if row is None:
+                connection.commit()
+                return PublicationOperationResult(PublicationOperationStatus.missing)
+            current = _publication_hide_from_row(row)
+            if safe_reason is not None and safe_reason != current.reason:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.conflict,
+                    reason="integrity",
+                    fence=current,
+                )
+            if timestamp < current.requested_at:
+                raise OutboxValidationError("invalid_metadata")
+            if current.state is PublicationHideState.released:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    reason=current.reason,
+                    fence=current,
+                )
+            if current.state is PublicationHideState.confirmed:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.existing,
+                    reason=current.reason,
+                    fence=current,
+                )
+            update = connection.exec_driver_sql(
+                "UPDATE publication_hide_fences SET state='confirmed',confirmed_at=:confirmed_at "
+                "WHERE task_id=:task_id AND state='pending' AND confirmed_at IS NULL",
+                {
+                    "task_id": task,
+                    "confirmed_at": _publication_timestamp(timestamp),
+                },
+            )
+            if update.rowcount != 1:
+                row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                    "WHERE task_id=:task_id",
+                    {"task_id": task},
+                ).mappings().first()
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.lost_claim,
+                    reason="integrity",
+                    fence=None if row is None else _publication_hide_from_row(row),
+                )
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                "WHERE task_id=:task_id",
+                {"task_id": task},
+            ).mappings().first()
+            assert row is not None
+            saved = _publication_hide_from_row(row)
+            connection.commit()
+            changed = True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        if changed:
+            self._notify_change()
+        return PublicationOperationResult(
+            PublicationOperationStatus.verified,
+            reason=saved.reason,
+            fence=saved,
+        )
+
+    confirm_hide = confirm_publication_hide
+    confirm_publication_hide_fence = confirm_publication_hide
+    verify_publication_hide = confirm_publication_hide
+
+    def get_publication_hide(self, task_id: str) -> PublicationHideFence | None:
+        task = _publication_identifier(task_id)
+        with self.engine.begin() as connection:
+            row = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                "WHERE task_id=:task_id",
+                {"task_id": task},
+            ).mappings().first()
+        return None if row is None else _publication_hide_from_row(row)
+
+    get_publication_hide_fence = get_publication_hide
+    get_hide_fence = get_publication_hide
+    get_publication_hide_intent = get_publication_hide
+    get_hide_intent = get_publication_hide
+
+    def list_publication_hides(
+        self,
+        *,
+        task_id: str | None = None,
+        states: set[PublicationHideState | str] | None = None,
+        pending_only: bool = False,
+    ) -> list[PublicationHideFence]:
+        parameters: dict[str, object] = {}
+        clauses: list[str] = []
+        if task_id is not None:
+            clauses.append("task_id=:task_id")
+            parameters["task_id"] = _publication_identifier(task_id)
+        if pending_only:
+            clauses.append("state='pending'")
+        elif states:
+            normalized = [PublicationHideState(item).value for item in states]
+            placeholders = ",".join(f":hide_state_{index}" for index in range(len(normalized)))
+            clauses.append(f"state IN ({placeholders})")
+            parameters.update(
+                {f"hide_state_{index}": value for index, value in enumerate(normalized)}
+            )
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences"
+                f"{where} ORDER BY requested_at,task_id",
+                parameters,
+            ).mappings().all()
+        return [_publication_hide_from_row(row) for row in rows]
+
+    list_publication_hide_fences = list_publication_hides
+    list_hide_fences = list_publication_hides
+    list_publication_hide_intents = list_publication_hides
+    list_hide_intents = list_publication_hides
+    publication_hides = list_publication_hides
+    publication_hide_intents = list_publication_hides
+
+    def list_pending_publication_hides(
+        self, *, task_id: str | None = None
+    ) -> list[PublicationHideFence]:
+        return self.list_publication_hides(task_id=task_id, pending_only=True)
+
+    pending_publication_hides = list_pending_publication_hides
+    pending_publication_hide_fences = list_pending_publication_hides
+
     def enqueue_publication(
         self,
         generation: PublicationGeneration | None = None,
@@ -2106,6 +2423,14 @@ class SQLiteTaskStore:
         saved = value
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
+            fence = _publication_hide_fence_from_connection(connection, value.task_id)
+            if fence is not None:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    reason=fence.reason,
+                    fence=fence,
+                )
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
                 "WHERE publication_id=:publication_id OR (task_id=:task_id AND run_id=:run_id) "
@@ -2228,6 +2553,19 @@ class SQLiteTaskStore:
                 "WHERE publication_id=:publication_id",
                 {"publication_id": generation.publication_id},
             ).mappings().first()
+            fence = None
+            if old_row is not None:
+                fence = _publication_hide_fence_from_connection(
+                    connection, str(old_row["task_id"])
+                )
+                if fence is not None and fence.state is not PublicationHideState.confirmed:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        generation=_publication_generation_from_row(old_row),
+                        reason=fence.reason,
+                        fence=fence,
+                    )
 
             # Once the old row has been replaced, an exact replay is the new
             # row.  Do not emit another wakeup or touch its health timestamp.
@@ -2279,6 +2617,18 @@ class SQLiteTaskStore:
                     generation=old,
                     reason="integrity",
                 )
+            if fence is not None:
+                if (
+                    fence.generation_boundary is not None
+                    and old.generation_boundary != fence.generation_boundary
+                ) or old.generation_boundary == generation.generation_boundary:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        generation=old,
+                        reason="integrity",
+                        fence=fence,
+                    )
 
             receipt_count = connection.exec_driver_sql(
                 "SELECT COUNT(*) FROM publication_receipts "
@@ -2334,6 +2684,18 @@ class SQLiteTaskStore:
             ).mappings().first()
             assert saved_row is not None
             saved = _publication_generation_from_row(saved_row)
+            if fence is not None:
+                connection.exec_driver_sql(
+                    "UPDATE publication_hide_fences SET state='released' "
+                    "WHERE task_id=:task_id AND state='confirmed'",
+                    {"task_id": old.task_id},
+                )
+                released_row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                    "WHERE task_id=:task_id",
+                    {"task_id": old.task_id},
+                ).mappings().first()
+                fence = None if released_row is None else _publication_hide_from_row(released_row)
             self._refresh_publication_health(connection, updated_at=saved.updated_at)
             connection.commit()
             changed = True
@@ -2347,6 +2709,7 @@ class SQLiteTaskStore:
         return PublicationOperationResult(
             PublicationOperationStatus.enqueued,
             generation=saved,
+            fence=fence,
         )
 
     replace_blocked_generation = replace_blocked_publication
@@ -2436,6 +2799,10 @@ class SQLiteTaskStore:
                 "SELECT 1 FROM publication_generations active "
                 "WHERE active.task_id=publication_generations.task_id "
                 "AND active.lease_expires_at IS NOT NULL) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM publication_hide_fences AS fence "
+                "WHERE fence.task_id=publication_generations.task_id "
+                "AND fence.state IN ('pending','confirmed')) "
                 "AND (attempt < :max_attempts OR ("
                 + _PUBLICATION_HIDE_RETRY_SQL
                 + "))"
@@ -2633,6 +3000,15 @@ class SQLiteTaskStore:
                 connection.commit()
                 return PublicationOperationResult(PublicationOperationStatus.missing)
             current = _publication_generation_from_row(row)
+            fence = _publication_hide_fence_from_connection(connection, current.task_id)
+            if fence is not None:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=current,
+                    reason=fence.reason,
+                    fence=fence,
+                )
             if current.state not in {
                 PublicationState.claimed,
                 PublicationState.building,
@@ -2749,6 +3125,15 @@ class SQLiteTaskStore:
                 connection.commit()
                 return PublicationOperationResult(PublicationOperationStatus.missing)
             current = _publication_generation_from_row(row)
+            fence = _publication_hide_fence_from_connection(connection, current.task_id)
+            if fence is not None:
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=current,
+                    reason=fence.reason,
+                    fence=fence,
+                )
             try:
                 expected = PublicationState(expected_state)
                 target = transition_state(expected, target_state)
@@ -5957,6 +6342,21 @@ def _publication_cleanup_from_row(row: Mapping[str, object]) -> CleanupIntent:
     return value
 
 
+def _publication_hide_from_row(row: Mapping[str, object]) -> PublicationHideFence:
+    return PublicationHideFence(
+        task_id=str(row["task_id"]),
+        reason=str(row["reason"]),
+        state=str(row["state"]),
+        generation_boundary=(
+            None
+            if row["generation_boundary"] is None
+            else str(row["generation_boundary"])
+        ),
+        requested_at=row["requested_at"],
+        confirmed_at=row["confirmed_at"],
+    )
+
+
 def _publication_counts_values(
     counts: object | None,
     *,
@@ -6185,6 +6585,18 @@ def _same_cleanup_input(existing: CleanupIntent, candidate: CleanupIntent) -> bo
     )
 
 
+def _publication_hide_fence_from_connection(
+    connection: Connection, task_id: str, *, active_only: bool = True
+) -> PublicationHideFence | None:
+    state_clause = " AND state IN ('pending','confirmed')" if active_only else ""
+    row = connection.exec_driver_sql(
+        f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+        "WHERE task_id=:task_id" + state_clause,
+        {"task_id": task_id},
+    ).mappings().first()
+    return None if row is None else _publication_hide_from_row(row)
+
+
 def _publication_exists(connection: Connection, publication_id: str) -> bool:
     row = connection.exec_driver_sql(
         "SELECT 1 FROM publication_generations WHERE publication_id=:publication_id",
@@ -6202,7 +6614,10 @@ def _expire_publication_leases_in_connection(
         "SET state='retry_wait',lease_owner=NULL,lease_expires_at=NULL,retry_at=:retry_at,"
         "reason=CASE WHEN reason IN (" + _PUBLICATION_HIDE_REASON_SQL + ") "
         "THEN reason ELSE 'lease_expired' END,updated_at=:updated_at "
-        "WHERE state IN ('claimed','building','uploading','d1_staged') AND lease_expires_at<=:now",
+        "WHERE state IN ('claimed','building','uploading','d1_staged') AND lease_expires_at<=:now "
+        "AND NOT EXISTS (SELECT 1 FROM publication_hide_fences AS fence "
+        "WHERE fence.task_id=publication_generations.task_id "
+        "AND fence.state IN ('pending','confirmed'))",
         {"retry_at": now_text, "updated_at": now_text, "now": now_text},
     )
     return result.rowcount > 0

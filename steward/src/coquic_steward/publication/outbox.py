@@ -99,6 +99,21 @@ class CleanupState(StrEnum):
     blocked = "blocked"
 
 
+class PublicationHideState(StrEnum):
+    """Durable lifecycle for a task publication hide fence."""
+
+    pending = "pending"
+    confirmed = "confirmed"
+    released = "released"
+
+
+# Descriptive aliases keep the hide vocabulary discoverable to callers that
+# name the fence, intent, or task operation differently.
+HideFenceState = PublicationHideState
+HideState = PublicationHideState
+PublicationHideIntentState = PublicationHideState
+
+
 class PublicationOperationStatus(StrEnum):
     """Bounded outcomes returned by local outbox mutations.
 
@@ -886,6 +901,93 @@ CleanupIntentValue = CleanupIntent
 
 
 @dataclass(frozen=True, slots=True)
+class PublicationHideFence:
+    """Task-scoped local fence which precedes any remote hide request."""
+
+    task_id: str
+    reason: str
+    requested_at: datetime = field(default_factory=_now)
+    state: PublicationHideState | str = PublicationHideState.pending
+    confirmed_at: datetime | None = None
+    generation_boundary: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _identifier(self.task_id))
+        reason = _reason(self.reason)
+        if reason is None:
+            _fail()
+        object.__setattr__(self, "reason", reason)
+        requested = _timestamp(self.requested_at)
+        object.__setattr__(self, "requested_at", requested)
+        try:
+            state = PublicationHideState(self.state)
+        except (TypeError, ValueError):
+            _fail()
+        object.__setattr__(self, "state", state)
+        boundary = self.generation_boundary
+        if boundary is not None:
+            boundary = _bounded_text(boundary, maximum=MAX_IDENTIFIER_LENGTH)
+            if "/" in boundary or "\\" in boundary:
+                _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "generation_boundary", boundary)
+        confirmed = None if self.confirmed_at is None else _timestamp(self.confirmed_at)
+        if state is PublicationHideState.pending and confirmed is not None:
+            _fail(ReasonCode.invalid_metadata)
+        if state in {PublicationHideState.confirmed, PublicationHideState.released}:
+            if confirmed is None or confirmed < requested:
+                _fail(ReasonCode.invalid_metadata)
+        elif confirmed is not None:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "confirmed_at", confirmed)
+
+    @property
+    def fence_id(self) -> str:
+        seed = f"publication-hide-v1\0{self.task_id}".encode()
+        return f"hide-{hashlib.sha256(seed).hexdigest()}"
+
+    @property
+    def intent_id(self) -> str:
+        return self.fence_id
+
+    @property
+    def hide_id(self) -> str:
+        return self.fence_id
+
+    @property
+    def pending(self) -> bool:
+        return self.state is PublicationHideState.pending
+
+    @property
+    def confirmed(self) -> bool:
+        return self.state is PublicationHideState.confirmed
+
+    @property
+    def released(self) -> bool:
+        return self.state is PublicationHideState.released
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "fenceId": self.fence_id,
+            "intentId": self.intent_id,
+            "taskId": self.task_id,
+            "reason": self.reason,
+            "state": self.state.value,
+            "requestedAt": _timestamp_text(self.requested_at),
+            "confirmedAt": _timestamp_text(self.confirmed_at) if self.confirmed_at else None,
+            "generationBoundary": self.generation_boundary,
+        }
+
+    def as_public_dict(self) -> dict[str, object]:
+        return self.as_dict()
+
+
+PublicationHideIntent = PublicationHideFence
+TaskPublicationHideFence = PublicationHideFence
+HideFence = PublicationHideFence
+HideIntent = PublicationHideFence
+
+
+@dataclass(frozen=True, slots=True)
 class PublicationOperationResult:
     """A bounded result for one transactional outbox operation."""
 
@@ -894,6 +996,7 @@ class PublicationOperationResult:
     receipt: PublicationReceipt | None = None
     cleanup: CleanupIntent | None = None
     reason: str | None = None
+    fence: PublicationHideFence | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -979,7 +1082,22 @@ class PublicationOperationResult:
         cleanup = object.__getattribute__(self, "cleanup")
         if cleanup is not None and hasattr(cleanup, name):
             return getattr(cleanup, name)
+        fence = object.__getattribute__(self, "fence")
+        if fence is not None and hasattr(fence, name):
+            return getattr(fence, name)
         raise AttributeError(name)
+
+    @property
+    def hide(self) -> PublicationHideFence | None:
+        return self.fence
+
+    @property
+    def hide_fence(self) -> PublicationHideFence | None:
+        return self.fence
+
+    @property
+    def hide_intent(self) -> PublicationHideFence | None:
+        return self.fence
 
     def as_dict(self) -> dict[str, object]:
         value: dict[str, object] = {"status": self.status.value, "reason": self.reason}
@@ -989,6 +1107,8 @@ class PublicationOperationResult:
             value["receipt"] = self.receipt.as_public_dict()
         if self.cleanup is not None:
             value["cleanup"] = self.cleanup.as_public_dict()
+        if self.fence is not None:
+            value["fence"] = self.fence.as_public_dict()
         return value
 
 
@@ -1008,6 +1128,10 @@ OutboxOperationResult = PublicationOperationResult
 __all__ = [
     "CleanupIntent",
     "CleanupState",
+    "HideFence",
+    "HideFenceState",
+    "HideIntent",
+    "HideState",
     "ExpectedCounts",
     "Generation",
     "GenerationIdentity",
@@ -1034,6 +1158,11 @@ __all__ = [
     "PublicationCounts",
     "PublicationGeneration",
     "PublicationHealth",
+    "PublicationHideFence",
+    "PublicationHideIntent",
+    "PublicationHideIntentState",
+    "PublicationHideState",
+    "TaskPublicationHideFence",
     "PublicationOperationResult",
     "PublicationOperationStatus",
     "PublicationMutationResult",

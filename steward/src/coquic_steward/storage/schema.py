@@ -902,6 +902,56 @@ class PublicationHealthRow(Base):
     )
 
 
+class PublicationHideFenceRow(Base):
+    """Task-scoped local fence recorded before a remote publication hide."""
+
+    __tablename__ = "publication_hide_fences"
+
+    task_id: Mapped[str] = mapped_column(String, primary_key=True)
+    reason: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    generation_boundary: Mapped[str | None] = mapped_column(String, nullable=True)
+    requested_at: Mapped[str] = mapped_column(String, nullable=False)
+    confirmed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(task_id) BETWEEN 1 AND 128 AND "
+            "substr(task_id, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "task_id NOT GLOB '*[^A-Za-z0-9._-]*'",
+            name="ck_publication_hide_fence_task_id",
+        ),
+        CheckConstraint(
+            "reason IN (" + _PUBLICATION_SAFE_REASON_SQL + ")",
+            name="ck_publication_hide_fence_reason",
+        ),
+        CheckConstraint(
+            "state IN ('pending','confirmed','released')",
+            name="ck_publication_hide_fence_state",
+        ),
+        CheckConstraint(
+            "generation_boundary IS NULL OR (length(generation_boundary) BETWEEN 1 AND 128 AND "
+            "substr(generation_boundary, 1, 1) GLOB '[A-Za-z0-9]' AND "
+            "generation_boundary NOT GLOB '*[^A-Za-z0-9._-]*')",
+            name="ck_publication_hide_fence_boundary",
+        ),
+        CheckConstraint(
+            _publication_timestamp_check("requested_at"),
+            name="ck_publication_hide_fence_requested_at",
+        ),
+        CheckConstraint(
+            "((state = 'pending' AND confirmed_at IS NULL) OR "
+            "(state IN ('confirmed','released') AND confirmed_at IS NOT NULL))",
+            name="ck_publication_hide_fence_confirmation_state",
+        ),
+        CheckConstraint(
+            "confirmed_at IS NULL OR (" + _publication_timestamp_check("confirmed_at") +
+            " AND julianday(confirmed_at) >= julianday(requested_at))",
+            name="ck_publication_hide_fence_confirmed_at",
+        ),
+    )
+
+
 class PublicationCleanupIntentRow(Base):
     """Exact-path cleanup authority retained until terminal deletion converges."""
 
@@ -1320,6 +1370,11 @@ Index(
     PublicationCleanupIntentRow.state,
     PublicationCleanupIntentRow.requested_at,
 )
+Index(
+    "ix_publication_hide_fences_state_requested",
+    PublicationHideFenceRow.state,
+    PublicationHideFenceRow.requested_at,
+)
 
 # Readable aliases for callers that inspect the normalized SQL schema directly.
 TaskExecution = TaskExecutionRow
@@ -1336,9 +1391,11 @@ PublicationGeneration = PublicationGenerationRow
 PublicationReceipt = PublicationReceiptRow
 PublicationHealth = PublicationHealthRow
 PublicationCleanupIntent = PublicationCleanupIntentRow
+PublicationHideFence = PublicationHideFenceRow
 OutboxGenerationRow = PublicationGenerationRow
 OutboxReceiptRow = PublicationReceiptRow
 PublicationOutboxGenerationRow = PublicationGenerationRow
 PublicationOutboxReceiptRow = PublicationReceiptRow
 PublicationOutboxHealthRow = PublicationHealthRow
 PublicationOutboxCleanupIntentRow = PublicationCleanupIntentRow
+PublicationOutboxHideFenceRow = PublicationHideFenceRow

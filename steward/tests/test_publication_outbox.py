@@ -17,6 +17,7 @@ from coquic_steward.publication.outbox import (
     MAX_LEASE_SECONDS,
     OutboxValidationError,
     PublicationGeneration,
+    PublicationHideState,
     PublicationOperationStatus,
     PublicationReceipt,
     PublicationState,
@@ -334,6 +335,7 @@ def test_clean_schema_has_constrained_publication_tables_and_indexes() -> None:
         "publication_receipts",
         "publication_health",
         "publication_cleanup_intents",
+        "publication_hide_fences",
     } <= tables
     indexes = {
         index["name"]
@@ -341,6 +343,9 @@ def test_clean_schema_has_constrained_publication_tables_and_indexes() -> None:
     }
     assert "ix_publication_generations_task_state_created" in indexes
     assert "ix_publication_generations_active_lease" in indexes
+    assert "ix_publication_hide_fences_state_requested" in {
+        index["name"] for index in inspect(engine).get_indexes("publication_hide_fences")
+    }
 
     with engine.connect() as connection:
         connection.execute(text("PRAGMA foreign_keys=ON"))
@@ -1879,3 +1884,152 @@ def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> N
     assert resumed.generation is not None
     assert resumed.generation.state is PublicationState.building
     assert resumed.generation.attempt == MAX_ATTEMPTS
+
+
+def test_store_begin_publication_hide_fences_pre_exposure_states_and_preserves_evidence(
+    tmp_path,
+) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    pre_exposure = (
+        ("queued", {}),
+        (
+            "claimed",
+            {"lease_owner": "worker-1", "lease_expires_at": "2026-07-28T13:00:00.000Z"},
+        ),
+        (
+            "building",
+            {"lease_owner": "worker-1", "lease_expires_at": "2026-07-28T13:00:00.000Z"},
+        ),
+        (
+            "uploading",
+            {"lease_owner": "worker-1", "lease_expires_at": "2026-07-28T13:00:00.000Z"},
+        ),
+        (
+            "d1_staged",
+            {"lease_owner": "worker-1", "lease_expires_at": "2026-07-28T13:00:00.000Z"},
+        ),
+        ("retry_wait", {"retry_at": "2026-07-28T12:00:10.000Z", "reason": "network"}),
+        ("blocked", {"reason": "scanner_failure"}),
+    )
+    with store.engine.begin() as connection:
+        for index, (state, overrides) in enumerate(pre_exposure):
+            _insert_generation_row(
+                connection,
+                task_id=f"task-hide-{index}",
+                run_id=f"run-hide-{index}",
+                generation_boundary=f"boundary-hide-{index}",
+                state=state,
+                updated_at="2026-07-28T12:00:00.000Z",
+                **overrides,
+            )
+        _insert_generation_row(
+            connection,
+            task_id="task-hide-exposed",
+            run_id="run-hide-exposed",
+            generation_boundary="boundary-hide-exposed",
+            state="exposed",
+            exposed_at="2026-07-28T12:00:00.000Z",
+        )
+        _insert_generation_row(
+            connection,
+            task_id="task-hide-terminal",
+            run_id="run-hide-terminal",
+            generation_boundary="boundary-hide-terminal",
+            state="terminal_cleaned",
+            exposed_at="2026-07-28T12:00:00.000Z",
+        )
+
+    for index, (state, _) in enumerate(pre_exposure):
+        result = store.begin_publication_hide(
+            f"task-hide-{index}",
+            "unsafe_content",
+            now=NOW + timedelta(seconds=1),
+        )
+        assert result.status is PublicationOperationStatus.enqueued
+        assert result.fence is not None
+        assert result.fence.state is PublicationHideState.pending
+        generation = store.list_publication_generations(task_id=f"task-hide-{index}")[0]
+        assert generation.state is PublicationState.blocked
+        assert generation.reason == "unsafe_content"
+        assert generation.lease_owner is None
+        assert generation.retry_at is None
+        replay = store.begin_publication_hide(
+            f"task-hide-{index}",
+            "unsafe_content",
+            now=NOW + timedelta(seconds=2),
+        )
+        assert replay.status is PublicationOperationStatus.existing
+        assert replay.fence == result.fence
+
+    exposed = store.list_publication_generations(task_id="task-hide-exposed")[0]
+    terminal = store.list_publication_generations(task_id="task-hide-terminal")[0]
+    assert exposed.state is PublicationState.exposed
+    assert exposed.exposed_at == NOW
+    assert terminal.state is PublicationState.terminal_cleaned
+    assert terminal.exposed_at == NOW
+    assert len(store.list_pending_publication_hides()) == len(pre_exposure)
+
+
+def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repair(
+    tmp_path,
+) -> None:
+    path = tmp_path / "steward.sqlite"
+    store = TaskStore(path)
+    original = _generation()
+    store.enqueue_publication(original)
+    started = store.begin_publication_hide(
+        original.task_id, "unsafe_content", now=NOW + timedelta(seconds=1)
+    )
+    assert started.status is PublicationOperationStatus.enqueued
+    store.engine.dispose()
+
+    restarted = TaskStore(path)
+    pending = restarted.get_publication_hide(original.task_id)
+    assert pending is not None
+    assert pending.state is PublicationHideState.pending
+    assert restarted.list_pending_publication_hides(task_id=original.task_id) == [pending]
+    assert (
+        restarted.claim_publication("worker-1", now=NOW + timedelta(seconds=2)).status
+        is PublicationOperationStatus.empty
+    )
+
+    repaired = _repaired_generation()
+    assert (
+        restarted.replace_blocked_publication(original.publication_id, repaired).status
+        is PublicationOperationStatus.precondition
+    )
+    confirmed = restarted.confirm_publication_hide(
+        original.task_id, confirmed_at=NOW + timedelta(seconds=3)
+    )
+    assert confirmed.status is PublicationOperationStatus.verified
+    assert confirmed.fence is not None
+    assert confirmed.fence.state is PublicationHideState.confirmed
+    assert (
+        restarted.confirm_publication_hide(
+            original.task_id, confirmed_at=NOW + timedelta(seconds=4)
+        ).status
+        is PublicationOperationStatus.existing
+    )
+
+    same_boundary = replace(
+        repaired,
+        publication_id=original.publication_id,
+        generation_boundary=original.generation_boundary,
+        idempotency_key=original.idempotency_key,
+    )
+    assert (
+        restarted.replace_blocked_publication(original.publication_id, same_boundary).status
+        is PublicationOperationStatus.conflict
+    )
+    reopened = restarted.replace_blocked_publication(original.publication_id, repaired)
+    assert reopened.status is PublicationOperationStatus.enqueued
+    assert reopened.fence is not None
+    assert reopened.fence.state is PublicationHideState.released
+    assert restarted.get_publication_hide(original.task_id).state is PublicationHideState.released
+    assert restarted.get_publication_generation(repaired.publication_id).state is PublicationState.queued
+    assert (
+        restarted.claim_publication(
+            "worker-1", publication_id=repaired.publication_id, now=NOW + timedelta(seconds=5)
+        ).status
+        is PublicationOperationStatus.claimed
+    )

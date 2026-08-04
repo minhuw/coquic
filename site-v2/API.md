@@ -10,7 +10,7 @@
 - Dataset and raw transcript downloads include safe `Content-Disposition`.
 - `HEAD` on dataset archives returns the same metadata headers as `GET` without a body.
 - Unrelated V2 responses retain their documented schema headers and versions.
-  Steward cloud JSON bodies use `schemaVersion: "3.0"`; cloud routes do not
+  Steward cloud JSON bodies use `schemaVersion: "4.0"`; cloud routes do not
   expose a live credential or a private locator.
 
 ## Status codes
@@ -100,7 +100,7 @@ fallback.
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "4.0",
   "generatedAt": "2026-07-28T00:00:02Z",
   "data": {
     "state": "available",
@@ -113,7 +113,7 @@ fallback.
 `state` is `available`, `empty`, or `unavailable`; an empty visible publication
 is a valid response and is not fake success. `GET /api/steward/tasks` accepts
 `scope=active|history` (default `history`), `limit` (default 50, bounded to
-1-50), and an opaque scope/publication-bound `cursor`. It returns a `3.0`
+1-50), and an opaque scope/publication-bound `cursor`. It returns a `4.0`
 `taskPageResponse` whose `data.items` are complete task summaries and whose
 `data.pagination` has `page`, `pageSize`, `total`, and `hasNextPage`. Cursor
 continuations are also exposed in `X-Steward-Next-Cursor` and
@@ -127,7 +127,7 @@ an active task that already has a completed planning run.
 
 ### Task detail and trajectory
 
-`GET /api/steward/tasks/{taskId}` returns a no-store `3.0` `taskDetailResponse`.
+`GET /api/steward/tasks/{taskId}` returns a no-store `4.0` `taskDetailResponse`.
 Its `data` is an all-or-nothing graph of `task`, `pipelines`, `runs`, ordered
 `events`, `artifacts`, and nullable `trajectory`. The reader validates exact
 publication counts, ownership, contiguous event sequence, run duration, artifact
@@ -144,12 +144,39 @@ key, private-original locator, partial records, prefixes, cursors, or a lossy
 fallback. An omitted `run` selects the visible completed trajectory; an
 explicit run must be completed and publicly available.
 
-Transcript failures are value-free no-store `3.0` problem envelopes: invalid
+Transcript failures are value-free no-store `4.0` problem envelopes: invalid
 selectors are `400`, absent/hidden/unavailable selections are `404`, bounded
 resource rejection is `413`, D1/R2 integrity, schema, or ownership rejection is
 `422`, and transient D1/R2/network/timeout/5xx failures are `503`. Only `503`
 is retryable by the reader; none of these cases exposes upstream diagnostics or
 accepts a caller-supplied URL.
+
+### Usage projection
+
+The task list and detail `data` include a precomputed `usage` object from the
+same visible usage head. `usage.schemaVersion` is `1.0`; the outer cloud
+envelope remains `4.0`. The object contains task/run `summaries`, exact-model
+`globals` for `lifetime` and UTC-daily periods, and bounded invocation rows.
+Every summary, invocation, turn, and global row carries six Token totals:
+`promptTokens`, `cachedTokens`, `uncachedTokens`, `completionTokens`,
+`reasoningTokens`, and `totalTokens`. Four cost totals are integer micro-USD:
+`uncachedInputCostMicroUsd`, `cachedInputCostMicroUsd`, `outputCostMicroUsd`,
+and `totalCostMicroUsd`.
+
+`coverage` is `complete`, `partial`, or `unavailable`, rendered as `Complete`,
+`Partial`, or `N.A.`. A summary also exposes `knownTokenSubtotal`,
+`knownCostSubtotalMicroUsd`, and `coveredInvocations`/`expectedInvocations`.
+Null cost fields mean `N.A.` and are never converted to numeric zero; a known
+zero-token result remains zero. The invocation UTC start and immutable
+`priceEntryDigest` provide exact model-price provenance. `steward-overhead`
+global rows are aggregate-only and have no invocation or turn drill-down.
+
+`GET /api/steward/tasks/{taskId}/usage/turns?invocation={invocationId}&cursor={opaque}&limit={1..200}`
+returns one bounded `usageTurnPageResponse`. The cursor is opaque, scoped to
+the visible publication and usage generation, and ordered by
+`(invocationId, ordinal, turnId)`. Reusing a cursor is idempotent; an invalid or
+stale cursor is `400`/`409`. A usage backend failure leaves the task response
+available with `Usage unavailable`; Site never parses R2 or recomputes usage.
 
 ### Artifact action
 
@@ -179,7 +206,7 @@ never reads D1 or R2:
 - `GET /api/steward/planner-runs/{plannerRunId}/transcript`
 - `GET /api/steward/planner-runs/{plannerRunId}/artifacts/{artifact}`
 
-The body is a `schemaVersion: "3.0"` `problemResponse` with
+The body is a `schemaVersion: "4.0"` `problemResponse` with
 `code: "UNAVAILABLE"`, message `The global archive domain is unavailable in the
 cloud contract.`, `retryable: false`, `status: 410`, and `type: null`. Route
 parameters, query strings, credentials, and private values are never reflected.

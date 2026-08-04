@@ -10,6 +10,10 @@ from pathlib import Path
 
 import pytest
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from steward.schema.validate import (
     FIXTURE_DIR,
     SCHEMA_PATH,
@@ -19,9 +23,11 @@ from steward.schema.validate import (
 )
 from coquic_steward.public_schema import PUBLIC_STEWARD_SCHEMA_VERSION
 
-ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = ROOT / "steward" / "schema" / "generate_types.py"
 COMPATIBILITY_FIXTURE = ROOT / "steward" / "schema" / "fixtures" / "public-monitor-compatibility.json"
+CLOUD_VALIDATOR = ROOT / "scripts" / "validate_steward_cloud_contracts.py"
+CLOUD_FIXTURE_DIR = ROOT / "contracts" / "steward-cloud" / "fixtures"
+CLOUD_PUBLICATION_SCHEMA = ROOT / "contracts" / "steward-cloud" / "publication.schema.json"
 
 
 @pytest.mark.parametrize("fixture", sorted(FIXTURE_DIR.glob("*.json")))
@@ -154,3 +160,30 @@ def test_version_bump_fails_until_generated_contract_outputs_are_refreshed() -> 
             text=True,
         )
         assert result.returncode == 1
+
+
+def test_clean_usage_contract_gate() -> None:
+    subprocess.run([sys.executable, str(CLOUD_VALIDATOR), "--publication-only"], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(CLOUD_VALIDATOR), "--d1-only"], cwd=ROOT, check=True)
+
+
+def test_clean_usage_rows_carry_closed_totals_and_provenance() -> None:
+    schema = json.loads(CLOUD_PUBLICATION_SCHEMA.read_text(encoding="utf-8"))
+    assert schema["properties"]["schemaVersion"]["const"] == "2.0"
+    usage = schema["$defs"]["usage"]["properties"]
+    assert set(usage) >= {"generation", "summaries", "invocations", "turns", "prices", "globals"}
+    fixture_paths = sorted(CLOUD_FIXTURE_DIR.glob("*-publication.json")) + [CLOUD_FIXTURE_DIR / "active-after-planning.json"]
+    for fixture_path in fixture_paths:
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        publication = fixture["publication"]
+        usage_rows = publication["usage"]
+        assert publication["schemaVersion"] == "2.0"
+        assert usage_rows["generation"]["schemaVersion"] == "1.0"
+        assert usage_rows["summaries"]
+        for row in usage_rows["summaries"] + usage_rows["globals"]:
+            assert {"promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens"} <= row.keys()
+            assert {"uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"} <= row.keys()
+        for row in usage_rows["invocations"]:
+            assert row["ownershipClass"] == "task-owned"
+            assert row["taskId"] == publication["taskId"]
+        assert all(row["aggregateOnly"] for row in usage_rows["globals"] if row["ownershipClass"] == "steward-overhead")

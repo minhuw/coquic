@@ -264,7 +264,7 @@ announced without replacing retained valid evidence with an error message.
   ordered events, artifacts, and optional trajectory. Validate ownership,
   counts, sequence, timing, hashes, public keys, and disclosure before display;
   do not substitute partial or stale data. See [the cloud reader API](API.md#steward-cloud-reader)
-  for the version-3 envelope and route contracts.
+  for the version-4 envelope and route contracts.
 - The trajectory route returns one complete `schemaVersion: "4.0"` display
   model for the immutable sanitized JSON artifact. The browser fetch is one
   cancellable request after the task shell renders; it validates the response
@@ -287,3 +287,20 @@ announced without replacing retained valid evidence with an error message.
   terminal unavailable, malformed, and integrity failure. Only transient
   network, timeout, rate-limit, or server failures offer a manual retry; no route
   polls, retries automatically, caches, or falls back to partial data.
+- Task and run views consume the precomputed Steward `usage projection` from
+  the visible usage head. They show lifetime and UTC-daily global aggregates,
+  exact-model breakdowns, task/run summaries, and bounded invocation/turn
+  drill-down without parsing R2 or recomputing totals during a request.
+- Usage rows carry six Token totals and four nullable micro-USD cost totals.
+  Summaries expose known subtotals and covered/expected invocation counts.
+  `complete`, `partial`, and `unavailable` coverage is rendered as `Complete`,
+  `Partial`, and `N.A.`; null is never fabricated as zero. A usage read failure
+  preserves the visible task and reports `Usage unavailable`.
+- Invocation UTC start selects one exact price entry. Numeric costs retain price
+  provenance and are never repriced; missing rates remain `N.A.`. Calls without
+  an authenticated task relationship contribute only to aggregate
+  `Steward overhead` rows and never receive public invocation or turn detail.
+- Usage turn cursors are opaque, bounded, and scoped to the visible publication
+  and usage generation. Cursor order is `(invocationId, ordinal, turnId)` and
+  stale cursors are terminal. Hidden tasks contribute to neither task nor
+  global aggregates.

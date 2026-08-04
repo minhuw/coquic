@@ -335,8 +335,8 @@ identity. Local filesystem archives are not a reader input.
   stays server-only, and every queried row must be public-safe. D1 reads join a
   `visible` task head to its referenced `visible` publication; staged,
   superseded, hidden, malformed, dangling, or private-shaped data fails closed.
-- Cloud responses use `schemaVersion: "3.0"` for status, task pages, task
-  detail, complete trajectory descriptors, and problems. A trajectory response
+- Cloud responses use `schemaVersion: "4.0"` for status, task pages, task
+  detail, complete trajectory descriptors, usage summaries, and problems. A trajectory response
   is a complete descriptor for one immutable sanitized JSON artifact, not a
   partial transcript or an unvalidated content fallback.
 - Artifact actions accept a validated logical path, derive the content-addressed
@@ -405,3 +405,53 @@ when the user prefers reduced motion. The exception carries the accepted
 residual WCAG 2.2.2 risk. Site-authored transitions and other nonessential
 motion continue to honor the general reduced-motion contract; revisit this
 decision if reliable browser controls for published animation become available.
+
+## D-026: Usage is a clean, precomputed Steward projection
+
+On 2026-08-04, Site V2 adopts the clean usage projection published by Steward
+alongside each visible task generation. This is a breaking cloud response
+revision; it does not add a compatibility reader, historical R2 scan, or
+request-time calculation.
+
+### Context
+
+Private Steward telemetry contains provider and process details that cannot
+cross the public boundary. Sanitized ATIF is the evidence source for each
+task-owned invocation, retry, and turn, while calls without an authenticated
+task relationship are only `Steward overhead` aggregate evidence. D1 must be
+query-ready for lifetime totals, UTC-daily totals, model breakdowns, and
+bounded drill-down without parsing R2 during ordinary requests.
+
+### Choice
+
+- Steward owns a versioned `usage projection`: a staged usage generation,
+  task/run summaries, invocation/retry rows, bounded turn rows, price-entry
+  provenance, and precomputed daily/lifetime global rows. Each level carries
+  six Token totals (`prompt`, `cached`, `uncached`, `completion`, `reasoning`,
+  `total`) and four integer micro-USD cost totals.
+- A task publication and its first usage head become visible in one D1
+  transaction. Later usage-only generations may swap the usage head while the
+  visible task head remains stable. All child rows are immutable after
+  exposure; failed swaps leave the previous heads and rows untouched.
+- The invocation UTC start selects one exact effective-dated catalog entry.
+  Numeric costs retain an immutable price-entry digest and are never repriced.
+  Missing rates leave all four cost fields `null` and display `N.A.`. Token
+  evidence remains distinct from cost availability, including zero-token,
+  `Partial`, and `N.A.` states.
+- Site remains the D-023 stateless, read-only server-side D1/R2 reader. It
+  selects visible heads, validates ownership/counts/rollups and bounded cursor
+  order, and renders cached summaries. It never writes D1, caches locally,
+  calls a provider, or recomputes usage from R2. A usage read failure leaves
+  the task reachable with `Usage unavailable`.
+- Public usage responses use `schemaVersion: "4.0"`; fixed limits and opaque
+  publication/generation-scoped turn cursors prevent unbounded responses.
+  Overhead rows expose aggregates only, never individual invocation or turn
+  drill-down. Hidden tasks contribute to neither task nor global totals.
+
+### Rejected alternatives
+
+The contract rejects a dual-write or compatibility envelope, old-D1 migration,
+historical R2 backfill, request-time pricing, fuzzy model matching, a Site
+cache/write path, actual catalog rates in public rows, and individual overhead
+detail. Direction 1 stages this contract on a new D1 database; live Cloudflare
+mutation and credential installation remain outside this decision.

@@ -95,26 +95,33 @@ in-memory clean, redacted, and malformed examples.
 
 `d1.sql` is a clean-launch, public-safe schema. It is intentionally not a copy
 of Steward's private SQLite database and has no history migration or compatibility
-read path. The seven concepts are `publication_generations`, `task_heads`,
-`tasks`, `pipelines`, `runs`, `task_events`, and `artifacts`. Every generation
-child has a `publication_id` foreign key. A task head is the only pointer used
-by public reads; its `visible` state must join a `visible` generation. Staged,
-superseded, hidden, dangling, or malformed rows are therefore absent from the
-public query.
+read path. The metadata concepts are `publication_generations`, `task_heads`,
+`tasks`, `pipelines`, `runs`, `task_events`, and `artifacts`. Usage is a
+separate, versioned projection with `usage_generations`, `usage_heads`,
+`usage_summaries`, `usage_invocations`, `usage_turns`, `usage_prices`,
+`usage_globals`, and `usage_global_heads`. Every child carries its generation
+identity and publication/task ownership. A public read joins a visible task
+head to its visible metadata and usage heads; staged, superseded, hidden,
+dangling, or malformed rows are therefore absent from the response.
 
 Publication follows one crash-resumable order:
 
 1. Build and validate one complete terminal run and canonical metadata digest.
 2. Upload and verify immutable public objects, then optionally upload and verify
    the private original.
-3. Insert bounded, parameterized D1 batches and verify every expected row count.
-4. In one transaction, supersede the prior generation, mark the new generation
-   `visible`, and upsert the task head. A failure rolls back the whole swap.
+3. Insert bounded, parameterized metadata and usage batches and verify every
+   expected row count and canonical digest.
+4. In one transaction, supersede the prior metadata and usage generations, mark
+   both new generations `visible`, and upsert the task and usage heads. A
+   failure rolls back the whole swap; the first task head and first usage head
+   are exposed together.
 
-The generation has a stable idempotency key, expected task/pipeline/run/event/
-artifact counts, and a metadata digest. Retries reuse those values and converge;
-conflicting metadata, counts, or digests fail closed; no partial generation is
-exposed. Child rows are immutable after exposure.
+The metadata generation has a stable idempotency key, expected
+task/pipeline/run/event/artifact counts, and a metadata digest. The usage
+generation has expected summary/invocation/turn/price/global counts and its own
+digest. Retries reuse those values and converge; conflicting metadata, counts,
+or digests fail closed; no partial generation is exposed. Child rows are
+immutable after exposure.
 
 ## R2 keys and disclosure
 
@@ -140,11 +147,11 @@ counts, key and digest checks, object-key reuse, and private-locator denial.
 
 ## Staged publication payload
 
-`publication.schema.json` is the producer-side Draft 2020-12 envelope. It is
-staging input, not a public response: `generation.state` is always `staged`,
-and `headIntent` records the desired task-head action without asserting that
-any row is visible. The final D1 transaction verifies all rows and performs the
-visible-generation/task-head swap atomically.
+`publication.schema.json` is the producer-side Draft 2020-12 envelope, revision
+`2.0`. It is staging input, not a public response: both generation states are
+always `staged`, and `headIntent` records the desired task-head action without
+asserting that any row is visible. The final D1 transaction verifies all rows
+and performs the visible-generation/task-head swap atomically.
 
 The envelope maps directly to the clean D1 tables:
 
@@ -158,6 +165,18 @@ The envelope maps directly to the clean D1 tables:
   Every relationship is within the one publication and task, and every run is
   terminal and immutable. `runs.atifArtifactId` binds each run's ATIF digest to
   its public artifact.
+- `usage.generation` supplies a versioned usage generation and expected counts.
+  The `summaries` list has task/run rollups, `invocations` has every
+  task-owned retry, `turns` is the bounded cursor leaf, `prices` records only
+  catalog/entry provenance, and `globals` contains precomputed UTC-daily and
+  lifetime rows. Every usage row carries six Token totals
+  (`promptTokens`, `cachedTokens`, `uncachedTokens`, `completionTokens`,
+  `reasoningTokens`, `totalTokens`) and four nullable micro-USD cost totals.
+- `coverage` is `complete`, `partial`, or `unavailable` (rendered as
+  `Complete`, `Partial`, or `N.A.`). Null is unknown; a known zero-token result
+  remains numeric zero. Summaries expose known subtotals and covered/expected
+  invocation counts. `steward-overhead` rows are aggregate-only and have no
+  task, run, invocation, or turn drill-down.
 
 Artifacts carry only logical relative paths, content-addressed public keys,
 media types, sizes, lower-case digests, availability, and disclosure booleans.
@@ -167,5 +186,41 @@ When descriptors reuse one immutable public key, their digest and byte size must
 also agree; exact content reuse remains allowed. The schema rejects unknown
 fields and the validator rejects private locators, credentials, noncanonical
 keys, dangling references, partial runs, count or digest mismatches, conflicting
-artifact facts, and fabricated zero timestamps. A task may remain `active` when
-its completed planning run is published; no incomplete run is represented.
+artifact facts, fabricated zero timestamps, unsafe integers, turn
+ownership/order failures, wrong rollups, and unproven price provenance. A task
+may remain `active` when its completed planning run is published; no incomplete
+run is represented.
+
+## Usage projection
+
+Usage is precomputed by Steward and read as ordinary D1 rows. Site never parses
+R2, calls a provider, recomputes a total, writes a cache, or writes D1 during a
+request. A task/run summary contains the six Token totals, four cost totals,
+known subtotals, coverage, and covered/expected invocation counts. Invocation
+rows preserve retry order and model/billing/process provenance. Turn rows are
+ordered by `(invocationId, ordinal, turnId)` and are returned through bounded,
+generation-scoped cursors.
+
+Costs are integer micro-USD values. A cost is numeric only when all four
+components have a matching immutable `priceEntryDigest`; otherwise all four
+costs are `null` and the response reports `N.A.`. Invocation UTC start selects
+the exact effective-dated catalog entry. Later catalog entries can fill only an
+N.A. projection; a numeric estimate is never repriced. The public schema stores
+the catalog and entry digests, effective interval, and model, but no actual
+catalog rates.
+
+Global rows are keyed by exact `model`, `ownershipClass` (`task-owned` or
+`steward-overhead`), and either `lifetime` or one UTC `YYYY-MM-DD` day. Overhead
+is one aggregate row per key; individual unauthenticated calls never become
+public invocation or turn rows. Hidden tasks contribute to neither task nor
+global aggregates.
+
+## Public response revision
+
+The clean Site cloud response is revision `4.0`. Status, task-page, task-detail,
+and usage responses expose a `schemaVersion: "4.0"` envelope with precomputed
+usage summaries, global lifetime/daily rows, exact-model breakdown, and bounded
+turn cursors. The response distinguishes `Complete`, `Partial`, `N.A.`, and
+`Usage unavailable`; a later usage read failure does not remove an already
+visible task. This is a clean launch contract and has no compatibility reader,
+dual write, historical R2 scan, or request-time recomputation.

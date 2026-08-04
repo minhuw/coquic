@@ -2,8 +2,8 @@
 
 Cloud publication is an optional, daemon-only boundary. SQLite and the local
 task and control-loop archives remain private operational truth. Site V2 sees
-only validated public metadata in D1 and immutable sanitized objects in R2.
-The field-level payload, D1, R2, and ATIF rules live in
+only validated public metadata and precomputed usage projections in D1 plus
+immutable sanitized objects in R2. The field-level payload, D1, R2, and ATIF rules live in
 [contracts/steward-cloud](../contracts/steward-cloud/README.md); this document
 describes the lifecycle and recovery boundary without repeating those tables.
 
@@ -31,8 +31,10 @@ integration; inspection output and matched values never enter public data.
 One generation follows this order. Each boundary is verified before the next
 one begins, and provider calls occur outside local SQLite transactions.
 
-1. Build and validate one complete terminal payload and its expected row,
-   object, idempotency, and metadata-digest counts.
+1. Build and validate one complete terminal payload and its expected metadata
+   row, object, idempotency, and digest counts. Steward derives immutable usage
+   summaries, task-owned invocation/retry rows, bounded turns, price-entry
+   provenance, and daily/lifetime global rows from sanitized ATIF evidence.
 2. Upload each public object to R2 with its content-addressed key using a
    single-part conditional put, `Content-MD5`, and a follow-up `HeadObject`.
    A matching existing object is a successful replay; a conflicting object or
@@ -47,13 +49,15 @@ one begins, and provider calls occur outside local SQLite transactions.
    remains pending until the remote receipt is verified; SQLite is never held
    across the provider call.
 5. Stage the D1 envelope in bounded, parameterized batches. D1 verifies the
-   generation identity, foreign-key relationships, expected counts, canonical
-   metadata digest, and every staged row. Staged data has no visible task head.
+   metadata and usage generation identities, foreign-key relationships,
+   expected counts, canonical digests, six Token totals, nullable cost states,
+   coverage, turn cursor order, exact rollups, and price provenance. Staged data
+   has no visible task or usage head.
 6. Expose only after staging succeeds and a mandatory local lease renewal still
    observes no hide fence. D1 atomically supersedes the previous visible
-   generation, marks the new generation `visible`, and upserts the task head.
-   The client verifies both the visible generation and head. Child rows and
-   object bytes are immutable after exposure.
+   metadata and usage generations, marks both new generations `visible`, and
+   upserts the task and usage heads in one transaction. The client verifies both
+   heads. Child rows and object bytes are immutable after exposure.
 
 ## Durable recovery
 
@@ -80,12 +84,13 @@ uv run --project steward coquic-steward publication hide <task-id> --reason oper
 ```
 
 `status` reports queue, blocked, cleanup, age, and category facts. `list`
-reports bounded generation summaries. `retry` rescans current local evidence
-and enqueues only a changed deterministic generation. `hide` commits the local
-fence, requests an atomic D1 head hide that also supersedes every currently
-staged generation, verifies the hidden receipt, and confirms the fence; it does
-not delete evidence. A pending hide is always serviced before a queued
-generation can be claimed, including after restart.
+reports bounded metadata/usage generation summaries. `retry` rescans current
+local evidence and enqueues only a changed deterministic generation. `hide`
+commits the local fence, requests an atomic D1 metadata-and-usage head hide
+that also supersedes every currently staged generation, verifies both hidden
+receipts, and confirms the fence; it does not delete evidence. A pending hide
+is always serviced before a queued generation can be claimed, including after
+restart.
 
 ## Failure and hiding
 

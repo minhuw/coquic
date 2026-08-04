@@ -79,6 +79,13 @@
 - D1 responses and R2 object descriptors, including trajectory descriptors, MUST
   pass strict schema, ownership, disclosure, size, and SHA-256 validation before
   rendering. Validation failures are terminal and retain no unsafe payload.
+- D1 usage rows MUST come from the visible usage head paired with the visible
+  task head. Validate the usage generation digest, task/run/invocation/turn
+  foreign-key ownership, exact six-Token rollups, four-cost nullability,
+  `Complete`/`Partial`/`N.A.` coverage, immutable price-entry provenance,
+  bounded cursor order, and exact-model/ownership global keys before rendering.
+  The first task and usage heads are exposed atomically; later usage-only swaps
+  MUST leave the metadata head unchanged on failure.
 - Artifact URLs MUST be derived only from validated task identity and
   content-addressed public keys below the configured R2 base. The same-origin
   action returns one `307 Temporary Redirect`, never proxies bytes, and ignores
@@ -90,6 +97,9 @@
   Worker, sidecar, compatibility reader, history migration, automatic polling,
   or raw fallback. Public output contains no private locator, credential,
   matched secret, scanner record, or filesystem path.
+- `steward-overhead` is aggregate-only. Public rows MUST NOT expose individual
+  overhead invocations, turns, provider/session identifiers, or raw sidecar
+  fields. Hidden tasks contribute to neither task nor global totals.
 
 ## Performance budgets
 
@@ -123,6 +133,11 @@
   relational task ownership/count/sequence checks; complete trajectory
   validation; one same-origin `307` redirect; R2 base/key containment; and the
   absence of raw, partial, private, cached, or compatibility fallback data.
+- Usage contract tests MUST cover complete, Partial, all-N.A., zero-token, and
+  mixed-price projections; reject dangling turns, wrong rollups, overlapping or
+  mismatched price provenance, unsafe integers, overhead detail, and stale turn
+  cursors; and prove staged, hidden, superseded, and failed usage swaps remain
+  absent from public selection.
 - The mocked suites MUST prove account-scoped credentials stay server-only, D1
   statements remain fixed and parameterized, and D1 transport/result limits
   bound timeout, response bytes, result sets, and rows. They MUST exercise

@@ -2033,3 +2033,84 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
         ).status
         is PublicationOperationStatus.claimed
     )
+
+
+def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_evidence(
+    tmp_path,
+) -> None:
+    store = TaskStore(tmp_path / "enqueue-repair.sqlite")
+    original = _generation()
+    store.enqueue_publication(original)
+    store.claim_publication("worker-1", now=NOW)
+    for source, target, offset in (
+        (PublicationState.claimed, PublicationState.building, 1),
+        (PublicationState.building, PublicationState.uploading, 2),
+        (PublicationState.uploading, PublicationState.d1_staged, 3),
+        (PublicationState.d1_staged, PublicationState.exposed, 4),
+    ):
+        assert (
+            store.advance_publication(
+                original.publication_id,
+                source,
+                target,
+                lease_owner="worker-1",
+                now=NOW + timedelta(seconds=offset),
+            ).status
+            is PublicationOperationStatus.advanced
+        )
+
+    started = store.begin_publication_hide(
+        original.task_id, "unsafe_content", now=NOW + timedelta(seconds=5)
+    )
+    assert started.fence is not None
+    assert started.fence.generation_boundary == original.generation_boundary
+    assert (
+        store.confirm_publication_hide(
+            original.task_id, confirmed_at=NOW + timedelta(seconds=6)
+        ).status
+        is PublicationOperationStatus.verified
+    )
+
+    repaired = replace(_repaired_generation(), run_id="run-2")
+    reopened = store.enqueue_publication(repaired)
+    assert reopened.status is PublicationOperationStatus.enqueued
+    assert reopened.fence is not None
+    assert reopened.fence.state is PublicationHideState.released
+    assert store.get_publication_generation(original.publication_id).state is PublicationState.exposed
+    assert store.get_publication_generation(repaired.publication_id).state is PublicationState.queued
+    assert store.get_publication_hide(original.task_id).state is PublicationHideState.released
+
+
+def test_store_confirmed_hide_replaces_exposed_generation_without_deleting_evidence(
+    tmp_path,
+) -> None:
+    store = TaskStore(tmp_path / "replace-repair.sqlite")
+    original = _generation()
+    store.enqueue_publication(original)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_generations SET state='exposed',exposed_at=:exposed_at,"
+            "updated_at=:updated_at WHERE publication_id=:publication_id",
+            {
+                "exposed_at": "2026-07-28T12:00:04.000Z",
+                "updated_at": "2026-07-28T12:00:04.000Z",
+                "publication_id": original.publication_id,
+            },
+        )
+    store.begin_publication_hide(
+        original.task_id, "unsafe_content", now=NOW + timedelta(seconds=5)
+    )
+    store.confirm_publication_hide(
+        original.task_id, confirmed_at=NOW + timedelta(seconds=6)
+    )
+
+    repaired = replace(_repaired_generation(), run_id="run-2")
+    reopened = store.replace_blocked_publication(original.publication_id, repaired)
+    assert reopened.status is PublicationOperationStatus.enqueued
+    assert reopened.fence is not None
+    assert reopened.fence.state is PublicationHideState.released
+    exposed = store.get_publication_generation(original.publication_id)
+    assert exposed is not None
+    assert exposed.state is PublicationState.exposed
+    assert exposed.exposed_at == NOW + timedelta(seconds=4)
+    assert store.get_publication_generation(repaired.publication_id).state is PublicationState.queued

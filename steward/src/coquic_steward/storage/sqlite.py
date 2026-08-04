@@ -2108,7 +2108,7 @@ class SQLiteTaskStore:
 
             generation_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
-                "WHERE task_id=:task_id AND state NOT IN ('exposed','terminal_cleaned') "
+                "WHERE task_id=:task_id "
                 "ORDER BY updated_at DESC,created_at DESC,publication_id DESC LIMIT 1",
                 {"task_id": task},
             ).mappings().first()
@@ -2424,13 +2424,26 @@ class SQLiteTaskStore:
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             fence = _publication_hide_fence_from_connection(connection, value.task_id)
+            reopening = False
             if fence is not None:
-                connection.commit()
-                return PublicationOperationResult(
-                    PublicationOperationStatus.precondition,
-                    reason=fence.reason,
-                    fence=fence,
-                )
+                if fence.state is not PublicationHideState.confirmed:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        reason=fence.reason,
+                        fence=fence,
+                    )
+                if (
+                    fence.generation_boundary is not None
+                    and value.generation_boundary == fence.generation_boundary
+                ):
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        reason=fence.reason,
+                        fence=fence,
+                    )
+                reopening = True
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
                 "WHERE publication_id=:publication_id OR (task_id=:task_id AND run_id=:run_id) "
@@ -2443,6 +2456,14 @@ class SQLiteTaskStore:
             ).mappings().first()
             if existing_row is not None:
                 existing = _publication_generation_from_row(existing_row)
+                if reopening:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.conflict,
+                        generation=existing,
+                        reason="integrity",
+                        fence=fence,
+                    )
                 if not _same_generation_input(existing, value):
                     connection.commit()
                     return PublicationOperationResult(
@@ -2479,6 +2500,26 @@ class SQLiteTaskStore:
             ).mappings().first()
             assert saved_row is not None
             saved = _publication_generation_from_row(saved_row)
+            if reopening:
+                released = connection.exec_driver_sql(
+                    "UPDATE publication_hide_fences SET state='released' "
+                    "WHERE task_id=:task_id AND state='confirmed'",
+                    {"task_id": value.task_id},
+                )
+                if released.rowcount != 1:
+                    connection.rollback()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.lost_claim,
+                        generation=saved,
+                        reason="integrity",
+                        fence=fence,
+                    )
+                released_row = connection.exec_driver_sql(
+                    f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
+                    "WHERE task_id=:task_id",
+                    {"task_id": value.task_id},
+                ).mappings().first()
+                fence = None if released_row is None else _publication_hide_from_row(released_row)
             self._refresh_publication_health(connection, updated_at=value.updated_at)
             connection.commit()
             inserted = True
@@ -2492,6 +2533,7 @@ class SQLiteTaskStore:
         return PublicationOperationResult(
             PublicationOperationStatus.enqueued,
             generation=saved,
+            fence=fence,
         )
 
     enqueue_generation = enqueue_publication
@@ -2504,12 +2546,12 @@ class SQLiteTaskStore:
         old_publication_id: str,
         generation: PublicationGeneration,
     ) -> PublicationOperationResult:
-        """Atomically replace one blocked, unpublished generation.
+        """Atomically install one repaired generation.
 
-        A repaired generation keeps the original task/run uniqueness boundary,
-        so the old row must be removed in the same transaction as the new
-        queued row.  Receipts and cleanup intents are durable publication
-        proof; refusing when either exists prevents a cascade from erasing it.
+        Blocked rows are replaced in place, while exposed and terminal-cleaned
+        rows remain as immutable evidence under a confirmed hide fence.  A
+        repaired generation and fence release commit together; receipts and
+        cleanup intents therefore cannot be erased as part of the repair.
         """
 
         try:
@@ -2591,12 +2633,38 @@ class SQLiteTaskStore:
                 )
 
             old = _publication_generation_from_row(old_row)
-            if old.task_id != generation.task_id or old.run_id != generation.run_id:
+            preserve_evidence = old.state in {
+                PublicationState.exposed,
+                PublicationState.terminal_cleaned,
+            }
+            if preserve_evidence and (
+                fence is None or fence.state is not PublicationHideState.confirmed
+            ):
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    generation=old,
+                    reason="integrity",
+                    fence=fence,
+                )
+            if old.task_id != generation.task_id or (
+                not preserve_evidence and old.run_id != generation.run_id
+            ):
                 connection.commit()
                 return PublicationOperationResult(
                     PublicationOperationStatus.conflict,
                     generation=old,
                     reason="integrity",
+                )
+            if preserve_evidence and old.run_id == generation.run_id:
+                # Keep the historical row and the task/run uniqueness boundary;
+                # a repaired exposed generation must use a new run identity.
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.conflict,
+                    generation=old,
+                    reason="integrity",
+                    fence=fence,
                 )
             if old.publication_id == generation.publication_id:
                 connection.commit()
@@ -2605,12 +2673,11 @@ class SQLiteTaskStore:
                     generation=old,
                     reason="integrity",
                 )
-            if (
-                old.state is not PublicationState.blocked
-                or old.lease_owner is not None
-                or old.lease_expires_at is not None
-                or old.exposed_at is not None
-            ):
+            if old.state not in {
+                PublicationState.blocked,
+                PublicationState.exposed,
+                PublicationState.terminal_cleaned,
+            } or old.lease_owner is not None or old.lease_expires_at is not None:
                 connection.commit()
                 return PublicationOperationResult(
                     PublicationOperationStatus.precondition,
@@ -2630,23 +2697,24 @@ class SQLiteTaskStore:
                         fence=fence,
                     )
 
-            receipt_count = connection.exec_driver_sql(
-                "SELECT COUNT(*) FROM publication_receipts "
-                "WHERE publication_id=:publication_id",
-                {"publication_id": old.publication_id},
-            ).scalar_one()
-            cleanup_count = connection.exec_driver_sql(
-                "SELECT COUNT(*) FROM publication_cleanup_intents "
-                "WHERE publication_id=:publication_id",
-                {"publication_id": old.publication_id},
-            ).scalar_one()
-            if receipt_count or cleanup_count:
-                connection.commit()
-                return PublicationOperationResult(
-                    PublicationOperationStatus.precondition,
-                    generation=old,
-                    reason="integrity",
-                )
+            if not preserve_evidence:
+                receipt_count = connection.exec_driver_sql(
+                    "SELECT COUNT(*) FROM publication_receipts "
+                    "WHERE publication_id=:publication_id",
+                    {"publication_id": old.publication_id},
+                ).scalar_one()
+                cleanup_count = connection.exec_driver_sql(
+                    "SELECT COUNT(*) FROM publication_cleanup_intents "
+                    "WHERE publication_id=:publication_id",
+                    {"publication_id": old.publication_id},
+                ).scalar_one()
+                if receipt_count or cleanup_count:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                        generation=old,
+                        reason="integrity",
+                    )
             if candidate_row is not None:
                 existing = _publication_generation_from_row(candidate_row)
                 connection.commit()
@@ -2656,10 +2724,11 @@ class SQLiteTaskStore:
                     reason="integrity",
                 )
 
-            connection.exec_driver_sql(
-                "DELETE FROM publication_generations WHERE publication_id=:publication_id",
-                {"publication_id": old.publication_id},
-            )
+            if not preserve_evidence:
+                connection.exec_driver_sql(
+                    "DELETE FROM publication_generations WHERE publication_id=:publication_id",
+                    {"publication_id": old.publication_id},
+                )
             connection.exec_driver_sql(
                 """
                 INSERT INTO publication_generations

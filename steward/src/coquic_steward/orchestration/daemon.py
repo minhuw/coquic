@@ -79,7 +79,6 @@ from ..control_loop import (
     ControlLoopArchive,
     CurrentState,
     Cycle as ControlLoopCycle,
-    Epoch,
     PlannerRun as ControlPlannerRun,
     ProposalDisposition as ControlProposalDisposition,
     Wakeup as ControlWakeup,
@@ -970,7 +969,13 @@ class StewardDaemon:
     def _reconcile_control_loop_usage(self) -> dict[str, Any]:
         reducer = self._control_loop_usage
         if reducer.ledger is None:
-            return {"processed": 0, "skipped": 0, "errors": [], "watermark": None}
+            return {
+                "processed": 0,
+                "skipped": 0,
+                "errors": [],
+                "pending": False,
+                "watermark": None,
+            }
         return reducer.reconcile()
 
     def _drain_control_loop_once(
@@ -1012,14 +1017,18 @@ class StewardDaemon:
                         "processed": int(usage.get("processed", 0)),
                         "skipped": int(usage.get("skipped", 0)),
                         "errors": list(usage.get("errors", ()))[:32],
+                        "pending": bool(usage.get("pending")),
                         "watermark": usage.get("watermark"),
                         "rowCount": len(usage.get("rows", ())),
                     }
+                    if usage.get("pending"):
+                        result["pending"] = True
                 except Exception as exc:
                     result["usage"] = {
                         "processed": 0,
                         "skipped": 0,
                         "errors": [exc.__class__.__name__],
+                        "pending": False,
                         "watermark": ledger.overhead_usage_watermark(),
                         "rowCount": len(ledger.list_overhead_usage()),
                     }

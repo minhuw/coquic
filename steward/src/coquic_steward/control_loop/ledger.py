@@ -13,7 +13,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -258,7 +258,9 @@ class ControlLoopLedger:
                 CREATE TABLE IF NOT EXISTS control_loop_overhead_usage_runs (
                   planner_run_id TEXT PRIMARY KEY REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
                   archive_digest TEXT NOT NULL,
-                  processed_at TEXT NOT NULL
+                  processed_at TEXT NOT NULL,
+                  rows_json TEXT NOT NULL DEFAULT '[]',
+                  cost_pending INTEGER NOT NULL DEFAULT 1 CHECK(cost_pending IN (0,1))
                 );
                 CREATE INDEX IF NOT EXISTS ix_control_loop_observations_signal
                   ON control_loop_observations(signal_id, observed_at);
@@ -266,7 +268,32 @@ class ControlLoopLedger:
                   ON control_loop_events(epoch_id, sequence);
                 CREATE INDEX IF NOT EXISTS ix_control_loop_outbox_pending
                   ON control_loop_outbox(materialized_at, sequence);
+                CREATE INDEX IF NOT EXISTS ix_control_loop_planner_terminal_order
+                  ON control_loop_planner_runs(epoch_id, state, completed_at, planner_run_id);
                 """
+            )
+            # Plan 030 originally shipped the marker table without private
+            # contribution state.  Keep existing local ledgers readable while
+            # ensuring every new marker can be rebuilt exactly on catalog fill.
+            columns = {
+                row[1]
+                for row in db.execute(
+                    "PRAGMA table_info(control_loop_overhead_usage_runs)"
+                ).fetchall()
+            }
+            if "rows_json" not in columns:
+                db.execute(
+                    "ALTER TABLE control_loop_overhead_usage_runs "
+                    "ADD COLUMN rows_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "cost_pending" not in columns:
+                db.execute(
+                    "ALTER TABLE control_loop_overhead_usage_runs "
+                    "ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 1"
+                )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS ix_control_loop_overhead_pending "
+                "ON control_loop_overhead_usage_runs(cost_pending, processed_at, planner_run_id)"
             )
             existing = db.execute(
                 "SELECT value FROM control_loop_meta WHERE key='epoch_id'"
@@ -878,36 +905,69 @@ class ControlLoopLedger:
             row if isinstance(row, StewardOverheadUsage) else StewardOverheadUsage.model_validate(row)
             for row in rows
         ]
+        rows_json = _json(
+            [value.model_dump(by_alias=True, mode="json") for value in values]
+        )
+        cost_pending = int(any(value.cost.status == "N.A." for value in values))
         with self.transaction(connection) as db:
             marker = db.execute(
-                "SELECT archive_digest FROM control_loop_overhead_usage_runs WHERE planner_run_id=?",
+                "SELECT archive_digest,rows_json,cost_pending "
+                "FROM control_loop_overhead_usage_runs WHERE planner_run_id=?",
                 (run_id,),
             ).fetchone()
             if marker is not None:
                 if marker[0] != archive_digest:
                     raise LedgerConflictError("overhead usage run bytes conflict with prior reduction")
                 if fill_missing_costs:
-                    for value in values:
-                        existing = db.execute(
-                            "SELECT costs_json FROM control_loop_overhead_usage "
-                            "WHERE usage_date=? AND model=? AND owner_class=?",
-                            (value.date, value.model, value.owner_class),
-                        ).fetchone()
-                        if existing is None:
-                            continue
-                        merged_cost = _fill_usage_costs(
-                            UsageCosts.model_validate(_loads(existing[0], {})), value.cost
+                    prior_payload = _loads(marker[1], [])
+                    if not isinstance(prior_payload, list):
+                        raise LedgerConflictError(
+                            "overhead usage contribution state is invalid"
                         )
+                    if prior_payload:
+                        prior_values = [
+                            StewardOverheadUsage.model_validate(item)
+                            for item in prior_payload
+                        ]
+                        replacement = _fill_contribution_rows(prior_values, values)
+                        replacement_json = _json(
+                            [
+                                item.model_dump(by_alias=True, mode="json")
+                                for item in replacement
+                            ]
+                        )
+                        pending = int(any(item.cost.status == "N.A." for item in replacement))
                         db.execute(
-                            "UPDATE control_loop_overhead_usage SET costs_json=? "
-                            "WHERE usage_date=? AND model=? AND owner_class=?",
-                            (
-                                _json(merged_cost.model_dump(by_alias=True, mode="json")),
-                                value.date,
-                                value.model,
-                                value.owner_class,
-                            ),
+                            "UPDATE control_loop_overhead_usage_runs "
+                            "SET rows_json=?,cost_pending=? WHERE planner_run_id=?",
+                            (replacement_json, pending, run_id),
                         )
+                        self._rebuild_overhead_usage(db)
+                    else:
+                        # Ledgers created by the original Plan 030 schema have
+                        # no per-run contribution bytes.  Preserve their
+                        # aggregate while allowing a one-time cost fill.
+                        for value in values:
+                            existing = db.execute(
+                                "SELECT costs_json FROM control_loop_overhead_usage "
+                                "WHERE usage_date=? AND model=? AND owner_class=?",
+                                (value.date, value.model, value.owner_class),
+                            ).fetchone()
+                            if existing is None:
+                                continue
+                            merged_cost = _fill_usage_costs(
+                                UsageCosts.model_validate(_loads(existing[0], {})), value.cost
+                            )
+                            db.execute(
+                                "UPDATE control_loop_overhead_usage SET costs_json=? "
+                                "WHERE usage_date=? AND model=? AND owner_class=?",
+                                (
+                                    _json(merged_cost.model_dump(by_alias=True, mode="json")),
+                                    value.date,
+                                    value.model,
+                                    value.owner_class,
+                                ),
+                            )
                 return False
             run_exists = db.execute(
                 "SELECT 1 FROM control_loop_planner_runs WHERE planner_run_id=? AND epoch_id=?",
@@ -951,10 +1011,63 @@ class ControlLoopLedger:
                     ),
                 )
             db.execute(
-                "INSERT INTO control_loop_overhead_usage_runs(planner_run_id,archive_digest,processed_at) VALUES(?,?,?)",
-                (run_id, archive_digest, _dt()),
+                "INSERT INTO control_loop_overhead_usage_runs "
+                "(planner_run_id,archive_digest,processed_at,rows_json,cost_pending) "
+                "VALUES(?,?,?,?,?)",
+                (run_id, archive_digest, _dt(), rows_json, cost_pending),
             )
+            if values and self._all_overhead_contributions_available(db):
+                self._rebuild_overhead_usage(db)
         return True
+
+    def _all_overhead_contributions_available(self, db: sqlite3.Connection) -> bool:
+        rows = db.execute(
+            "SELECT rows_json FROM control_loop_overhead_usage_runs"
+        ).fetchall()
+        return bool(rows) and all(bool(_loads(row[0], [])) for row in rows)
+
+    def _rebuild_overhead_usage(self, db: sqlite3.Connection) -> None:
+        """Rebuild aggregate rows from immutable per-run contribution bytes."""
+
+        grouped: dict[tuple[str, str, str], StewardOverheadUsage] = {}
+        marker_rows = db.execute(
+            "SELECT rows_json FROM control_loop_overhead_usage_runs ORDER BY processed_at,planner_run_id"
+        ).fetchall()
+        for marker in marker_rows:
+            payload = _loads(marker[0], [])
+            if not isinstance(payload, list):
+                raise LedgerConflictError("overhead usage contribution state is invalid")
+            for item in payload:
+                value = StewardOverheadUsage.model_validate(item)
+                key = (value.date, value.model, value.owner_class)
+                previous = grouped.get(key)
+                grouped[key] = (
+                    value
+                    if previous is None
+                    else StewardOverheadUsage(
+                        date=value.date,
+                        model=value.model,
+                        ownerClass=value.owner_class,
+                        tokens=_merge_usage_tokens(previous.tokens, value.tokens),
+                        cost=_merge_usage_costs(previous.cost, value.cost),
+                        coverage=_merge_usage_coverage(previous.coverage, value.coverage),
+                    )
+                )
+        db.execute("DELETE FROM control_loop_overhead_usage")
+        for value in grouped.values():
+            db.execute(
+                "INSERT INTO control_loop_overhead_usage "
+                "(usage_date,model,owner_class,tokens_json,costs_json,coverage_json) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    value.date,
+                    value.model,
+                    value.owner_class,
+                    _json(value.tokens.model_dump(by_alias=True, mode="json")),
+                    _json(value.cost.model_dump(by_alias=True, mode="json")),
+                    _json(value.coverage.model_dump(by_alias=True, mode="json")),
+                ),
+            )
 
     # Reducer-facing aliases use the terminology from the plan while keeping
     # one transactional implementation.
@@ -1114,6 +1227,50 @@ class ControlLoopLedger:
         query += " ORDER BY started_at"
         with self._connect() as db:
             rows = db.execute(query).fetchall()
+        return [_planner_from_row(row) for row in rows]
+
+    def list_unprocessed_planner_runs(self, *, limit: int = 128) -> list[PlannerRun]:
+        """Return a bounded stable-ordered page of newly sealed planner runs.
+
+        The per-run overhead marker is the durable cursor.  A left join keeps
+        late terminal transitions visible even when their completion timestamp
+        predates the previous drain, while the deterministic timestamp/ID
+        ordering makes restart replay stable.
+        """
+
+        if type(limit) is not int or limit < 1 or limit > 4096:
+            raise ValueError("planner run page limit is invalid")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT p.* FROM control_loop_planner_runs AS p "
+                "LEFT JOIN control_loop_overhead_usage_runs AS u "
+                "ON u.planner_run_id=p.planner_run_id "
+                "WHERE p.epoch_id=? AND p.state IN "
+                "('succeeded','failed','interrupted','cancelled') "
+                "AND p.completed_at IS NOT NULL AND u.planner_run_id IS NULL "
+                "ORDER BY p.completed_at,p.planner_run_id LIMIT ?",
+                (self.epoch_id, limit),
+            ).fetchall()
+        return [_planner_from_row(row) for row in rows]
+
+    def list_overhead_usage_runs_needing_cost(
+        self, *, limit: int = 128
+    ) -> list[PlannerRun]:
+        """Return a bounded page of previously reduced runs with N.A. costs."""
+
+        if type(limit) is not int or limit < 1 or limit > 4096:
+            raise ValueError("planner run page limit is invalid")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT p.* FROM control_loop_planner_runs AS p "
+                "JOIN control_loop_overhead_usage_runs AS u "
+                "ON u.planner_run_id=p.planner_run_id "
+                "WHERE p.epoch_id=? AND u.cost_pending=1 AND p.state IN "
+                "('succeeded','failed','interrupted','cancelled') "
+                "AND p.completed_at IS NOT NULL "
+                "ORDER BY p.completed_at,p.planner_run_id LIMIT ?",
+                (self.epoch_id, limit),
+            ).fetchall()
         return [_planner_from_row(row) for row in rows]
 
     def canonical_signal_id(self, provider: str, fingerprint: str) -> str | None:
@@ -1295,8 +1452,57 @@ def _fill_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
         if values["totalMicroUsd"] != sum(item for item in components if item is not None):
             values["totalMicroUsd"] = None
     present = [item is not None for item in values.values()]
-    status = "Complete" if all(present) else ("Partial" if any(present) else "N.A.")
+    if all(present):
+        # A catalog can fill an unavailable contribution without turning a
+        # partial capture into complete evidence.  Existing numeric costs are
+        # otherwise immutable and retain their original coverage status.
+        status = (
+            "Partial"
+            if left.status == "Partial" or right.status == "Partial"
+            else "Complete"
+        )
+    else:
+        status = "Partial" if any(present) else "N.A."
     return UsageCosts(status=status, **values)
+
+
+def _fill_contribution_rows(
+    previous: Iterable[StewardOverheadUsage],
+    replacement: Iterable[StewardOverheadUsage],
+) -> list[StewardOverheadUsage]:
+    """Fill only N.A. costs in one run's private contribution state."""
+
+    incoming = {
+        (value.date, value.model, value.owner_class): value for value in replacement
+    }
+    result: list[StewardOverheadUsage] = []
+    seen: set[tuple[str, str, str]] = set()
+    for old in previous:
+        key = (old.date, old.model, old.owner_class)
+        new = incoming.get(key)
+        if new is None:
+            result.append(old)
+        else:
+            result.append(
+                StewardOverheadUsage(
+                    date=old.date,
+                    model=old.model,
+                    ownerClass=old.owner_class,
+                    tokens=old.tokens,
+                    cost=_fill_usage_costs(old.cost, new.cost),
+                    coverage=old.coverage,
+                )
+            )
+            seen.add(key)
+    result.extend(
+        value
+        for key, value in incoming.items()
+        if key not in seen
+        and not any(
+            (old.date, old.model, old.owner_class) == key for old in previous
+        )
+    )
+    return result
 
 
 def _merge_usage_coverage(left: UsageCoverage, right: UsageCoverage) -> UsageCoverage:

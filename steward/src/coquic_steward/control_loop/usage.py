@@ -232,33 +232,9 @@ def _cost_from_sidecar(
                 ),
             )
         return UsageCosts()
-    if raw_cost.get("status") != "estimated":
-        # A later catalog may fill an N.A. sidecar without repricing a numeric
-        # estimate.  Missing prices therefore remain N.A. until that catalog is
-        # explicitly supplied to the reducer.
-        if catalog is None:
-            return UsageCosts()
-    else:
-        component_keys = (
-            "uncached_input_micro_usd",
-            "cached_input_micro_usd",
-            "output_micro_usd",
-        )
-        if all(type(raw_cost.get(key)) is int and raw_cost.get(key) >= 0 for key in component_keys):
-            components = [int(raw_cost[key]) for key in component_keys]
-            total = raw_cost.get("micro_usd")
-            if type(total) is int and total >= 0 and total == sum(components):
-                return UsageCosts(
-                    uncachedInputMicroUsd=components[0],
-                    cachedInputMicroUsd=components[1],
-                    outputMicroUsd=components[2],
-                    totalMicroUsd=total,
-                    status=(
-                        "Complete"
-                        if payload.get("completeness") == "complete"
-                        else "Partial"
-                    ),
-                )
+    # The private aggregate amount is not a billing authority.  It may be
+    # retained for diagnostics, but public costs are emitted only when every
+    # validated turn succeeds against the exact effective-dated catalog above.
     return UsageCosts()
 
 
@@ -351,7 +327,7 @@ class StewardOverheadReducer:
         item = run if isinstance(run, PlannerRun) else PlannerRun.model_validate(run)
         if item.state not in TERMINAL_PLANNER_STATES or item.completed_at is None:
             raise UsageReductionError("only terminal planner runs may be reduced")
-        manifest, artifacts, digest = self.archive.read_verified_planner_run(
+        manifest, artifacts, manifest_digest = self.archive.read_verified_planner_run(
             item.planner_run_id,
             expected_run=item,
         )
@@ -377,13 +353,13 @@ class StewardOverheadReducer:
                     expected_epoch_started_at=self.archive._require_epoch().started_at,
                     catalog=self.catalog,
                 )
-                digest = sha256(artifacts[name]).hexdigest()
+                sidecar_digest = sha256(artifacts[name]).hexdigest()
                 previous = seen_invocations.get(current.invocation_id)
                 if previous is not None:
-                    if previous != digest:
+                    if previous != sidecar_digest:
                         invalid += 1
                     continue
-                seen_invocations[current.invocation_id] = digest
+                seen_invocations[current.invocation_id] = sidecar_digest
                 evidence.append(current)
             except UsageReductionError:
                 invalid += 1
@@ -444,7 +420,7 @@ class StewardOverheadReducer:
                 )
         return UsageReduction(
             rows=tuple(grouped[key] for key in sorted(grouped)),
-            archive_digest=digest,
+            archive_digest=manifest_digest,
         )
 
     # Short aliases make the reducer convenient for focused archive tests.
@@ -460,27 +436,36 @@ class StewardOverheadReducer:
         selected_ledger = ledger or self.ledger
         if selected_ledger is None:
             raise UsageReductionError("usage reconciliation requires a ledger")
-        selected_runs = list(runs) if runs is not None else selected_ledger.list_planner_runs()
+        page_size = 128
+        bounded_page = runs is None
+        if runs is not None:
+            selected_runs = list(runs)
+        else:
+            # Marker rows form a durable per-run cursor.  A bounded query keeps
+            # normal drains incremental while still admitting late terminal
+            # transitions whose completion time falls before the last page.
+            selected_runs = selected_ledger.list_unprocessed_planner_runs(limit=page_size)
+            if self.catalog is not None:
+                selected_runs.extend(
+                    selected_ledger.list_overhead_usage_runs_needing_cost(limit=page_size)
+                )
+        selected_runs = list({run.planner_run_id: run for run in selected_runs}.values())
         selected_runs.sort(key=lambda value: (value.completed_at or value.started_at, value.planner_run_id))
         processed = 0
         skipped = 0
         errors: list[str] = []
-        existing_rows = selected_ledger.list_overhead_usage()
-        needs_cost_fill = self.catalog is not None and any(
-            row.cost.status != "Complete" for row in existing_rows
-        )
         for run in selected_runs:
             if run.state not in TERMINAL_PLANNER_STATES or run.completed_at is None:
                 continue
             existing = selected_ledger.overhead_usage_processed(run.planner_run_id)
             if existing is not None:
-                if needs_cost_fill:
+                if self.catalog is not None:
                     try:
                         reduced = self.reduce_run(run)
                         selected_ledger.record_overhead_usage(
                             run.planner_run_id,
                             reduced.rows,
-                            archive_digest=existing,
+                            archive_digest=reduced.archive_digest,
                             fill_missing_costs=True,
                         )
                     except Exception as exc:
@@ -501,6 +486,7 @@ class StewardOverheadReducer:
             "processed": processed,
             "skipped": skipped,
             "errors": errors,
+            "pending": bounded_page and len(selected_runs) >= page_size,
             "watermark": selected_ledger.overhead_usage_watermark(),
             "rows": selected_ledger.list_overhead_usage(),
         }

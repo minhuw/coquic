@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,27 @@ from coquic_steward.control_loop.usage import (
 
 
 UTC = timezone.utc
+
+
+def _catalog(*models: str) -> PriceCatalog:
+    if not models:
+        models = ("gpt-overhead",)
+    return PriceCatalog(
+        entries=tuple(
+            PriceEntry(
+                entry_id=f"fixture-price-{model}",
+                model=model,
+                effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+                effective_until=None,
+                input_micro_usd_per_million=500_000,
+                cached_input_micro_usd_per_million=500_000,
+                output_micro_usd_per_million=500_000,
+                source_label="fixture",
+                source_url="https://example.test/price",
+            )
+            for model in models
+        )
+    )
 
 
 def _archive(tmp_path: Path) -> tuple[ControlLoopArchive, ControlLoopLedger]:
@@ -117,7 +139,7 @@ def _run(
     *,
     state: str = "succeeded",
 ) -> PlannerRun:
-    claimed = ledger.claim_planner_run(run_id, [])
+    ledger.claim_planner_run(run_id, [])
     completed = ledger.complete_planner_run(run_id, [], state=state)
     archive.publish_planner_run(completed, artifacts)
     return completed
@@ -147,7 +169,7 @@ def test_reducer_groups_exact_utc_date_and_model_and_replays_idempotently(tmp_pa
             )
         },
     )
-    reducer = StewardOverheadReducer(archive, ledger)
+    reducer = StewardOverheadReducer(archive, ledger, catalog=_catalog())
     assert reducer.reconcile()["processed"] == 2
     rows = ledger.list_overhead_usage()
     assert [(row.date, row.model) for row in rows] == [
@@ -158,8 +180,99 @@ def test_reducer_groups_exact_utc_date_and_model_and_replays_idempotently(tmp_pa
     assert rows[1].cost.total_micro_usd == 7
     assert rows[0].owner_class == STEWARD_OVERHEAD_OWNER
     assert reducer.reconcile()["processed"] == 0
-    assert reducer.reconcile()["skipped"] == 2
+    assert reducer.reconcile()["skipped"] == 0
     assert first.planner_run_id != second.planner_run_id
+
+
+def test_sidecar_aggregate_cost_is_not_public_without_catalog(tmp_path: Path) -> None:
+    archive, ledger = _archive(tmp_path)
+    run = _run(
+        archive,
+        ledger,
+        "planner-usage-raw-cost",
+        {"telemetry.json": _sidecar(invocation_id="inv-raw-cost", started_at="2026-07-24T01:00:00Z")},
+    )
+
+    reduced = StewardOverheadReducer(archive, ledger).reduce_run(run)
+
+    assert reduced.rows[0].cost.status == "N.A."
+    assert reduced.rows[0].cost.total_micro_usd is None
+
+
+def test_catalog_fill_sums_each_delayed_run_contribution(tmp_path: Path) -> None:
+    archive, ledger = _archive(tmp_path)
+    _run(
+        archive,
+        ledger,
+        "planner-usage-delayed-one",
+        {"telemetry.json": _sidecar(invocation_id="inv-delayed-one", started_at="2026-07-24T01:00:00Z")},
+    )
+    _run(
+        archive,
+        ledger,
+        "planner-usage-delayed-two",
+        {"telemetry.json": _sidecar(invocation_id="inv-delayed-two", started_at="2026-07-24T02:00:00Z", input_tokens=3, cached_tokens=1, output_tokens=2)},
+    )
+    StewardOverheadReducer(archive, ledger).reconcile()
+
+    result = StewardOverheadReducer(archive, ledger, catalog=_catalog()).reconcile()
+
+    assert result["processed"] == 0
+    row = ledger.list_overhead_usage()[0]
+    assert row.cost.status == "Complete"
+    assert row.cost.total_micro_usd == 10
+
+
+def test_catalog_fill_rejects_changed_manifest_digest(tmp_path: Path) -> None:
+    archive, ledger = _archive(tmp_path)
+    run = _run(
+        archive,
+        ledger,
+        "planner-usage-digest",
+        {"telemetry.json": _sidecar(invocation_id="inv-digest", started_at="2026-07-24T01:00:00Z")},
+    )
+    StewardOverheadReducer(archive, ledger).reconcile()
+    marker_before = ledger.overhead_usage_processed(run.planner_run_id)
+    assert marker_before is not None
+
+    target = archive.planner_runs_root / run.planner_run_id
+    sidecar_path = target / "telemetry.json"
+    changed = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    changed["turns"][0]["output_tokens"] += 1
+    changed["turns"][0]["total_tokens"] += 1
+    changed["aggregate"]["output_tokens"] += 1
+    changed["aggregate"]["total_tokens"] += 1
+    changed_bytes = json.dumps(changed, sort_keys=True).encode("utf-8")
+    sidecar_path.write_bytes(changed_bytes)
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][0]["byteSize"] = len(changed_bytes)
+    manifest["files"][0]["sha256"] = hashlib.sha256(changed_bytes).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+    result = StewardOverheadReducer(archive, ledger, catalog=_catalog()).reconcile()
+
+    assert result["errors"] == [f"{run.planner_run_id}:LedgerConflictError"]
+    assert ledger.overhead_usage_processed(run.planner_run_id) == marker_before
+
+
+def test_reconcile_uses_incremental_unprocessed_query(tmp_path: Path, monkeypatch) -> None:
+    archive, ledger = _archive(tmp_path)
+    _run(
+        archive,
+        ledger,
+        "planner-usage-incremental",
+        {"telemetry.json": _sidecar(invocation_id="inv-incremental", started_at="2026-07-24T01:00:00Z")},
+    )
+    reducer = StewardOverheadReducer(archive, ledger)
+    reducer.reconcile()
+    monkeypatch.setattr(
+        ledger,
+        "list_planner_runs",
+        lambda **_: pytest.fail("normal usage drain scanned all planner runs"),
+    )
+
+    assert reducer.reconcile()["processed"] == 0
 
 
 def test_reducer_merges_same_date_and_model_and_keeps_private_ids_out(tmp_path: Path) -> None:

@@ -297,6 +297,8 @@ def _check_invocations(
         coverage = invocation.get("coverage")
         if coverage not in {"complete", "partial", "unavailable"}:
             _add(issues, "invocation-coverage", path + ("coverage",))
+        if invocation_id is None and coverage != "unavailable":
+            _add(issues, "invocation-id", path + ("invocationId",))
 
         raw_issues = invocation.get("issues")
         if not isinstance(raw_issues, list) or len(raw_issues) > MAX_PUBLIC_INVOCATION_ISSUES:
@@ -314,6 +316,7 @@ def _check_invocations(
                     or issue["category"] in categories
                     or type(issue.get("count")) is not int
                     or issue["count"] < 1
+                    or issue["count"] > MAX_PUBLIC_INVOCATION_TOKENS
                 ):
                     _add(issues, "invocation-issues", issue_path)
                 elif isinstance(issue.get("category"), str):
@@ -447,6 +450,8 @@ def _check_trajectory(document: Any, issues: set[Issue], *, embedded: bool = Fal
         source = coqui.get("source")
         if isinstance(source, dict) and "invocations" in source:
             _check_invocations(source, coqui, issues)
+        elif not embedded:
+            _add(issues, "invocation-shape", ("extra", "coquic", "source", "invocations"))
     children = document.get("subagent_trajectories")
     child_ids: set[str] = set()
     if isinstance(children, list):
@@ -1488,7 +1493,7 @@ def _run_cases(validator: Draft202012Validator) -> tuple[int, int]:
     partial_invocation = copy.deepcopy(clean["extra"]["coquic"]["source"]["invocations"][0])
     partial_invocation.update(
         {
-            "invocationId": None,
+            "invocationId": "invocation-partial",
             "retryOrdinal": 1,
             "startedAt": None,
             "completedAt": None,
@@ -1526,6 +1531,10 @@ def _run_cases(validator: Draft202012Validator) -> tuple[int, int]:
     mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["turns"][0]["total"] = 19; negatives["invocation-turn-math"] = (mutated, "invocation-math")
     mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["path"] = "private://telemetry"; negatives["invocation-private-shape"] = (mutated, "invocation-shape")
     mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["aggregate"]["usage"]["total"] = 19; negatives["invocation-aggregate-math"] = (mutated, "invocation-math")
+    mutated = copy.deepcopy(clean); del mutated["extra"]["coquic"]["source"]["invocations"]; negatives["invocation-missing"] = (mutated, "invocation-shape")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"] = []; negatives["invocation-empty"] = (mutated, "invocation-bound")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["invocationId"] = None; negatives["invocation-null-identity"] = (mutated, "invocation-id")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["issues"] = [{"category": "too_many", "count": MAX_PUBLIC_INVOCATION_TOKENS + 1}]; negatives["invocation-issue-bound"] = (mutated, "invocation-issues")
     oversized = copy.deepcopy(clean)
     oversized_rows = []
     for index in range(MAX_PUBLIC_INVOCATIONS + 1):

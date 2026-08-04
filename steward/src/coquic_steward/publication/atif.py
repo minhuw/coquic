@@ -1792,6 +1792,7 @@ def _validate_telemetry(value: Mapping[str, Any]) -> Mapping[str, Any]:
                 or not issue["category"]
                 or len(issue["category"]) > 80
                 or _metric(issue.get("count")) is None
+                or issue["count"] > _MAX_INVOCATION_TOKENS
             ):
                 _fail(ReasonCode.invalid_metadata)
     return value
@@ -1982,7 +1983,7 @@ def _invocation_issues(value: object, reason: object = None) -> list[dict[str, A
                 _fail(ReasonCode.invalid_metadata)
             category = _bounded_public_text(issue.get("category"), allow_none=False, maximum=80)
             count = _metric(issue.get("count"))
-            if category is None or count is None or count < 1:
+            if category is None or count is None or count < 1 or count > _MAX_INVOCATION_TOKENS:
                 _fail(ReasonCode.invalid_metadata)
             selected[category] = selected.get(category, 0) + count
     if reason is not None:
@@ -2006,7 +2007,10 @@ def _invocation_telemetry_identity(
     ):
         expected = descriptor.get(descriptor_key)
         actual = telemetry.get(telemetry_key)
-        if actual is not None and expected is not None and actual != expected:
+        if descriptor_key == "invocationId" and telemetry.get("availability") != "unavailable":
+            if expected is None or actual is None or actual != expected:
+                _fail(ReasonCode.invalid_metadata)
+        elif actual is not None and expected is not None and actual != expected:
             _fail(ReasonCode.invalid_metadata)
 
 
@@ -2148,6 +2152,15 @@ def _normalize_invocations(
             coverage = "partial"
         else:
             coverage = "complete"
+        # A run-level fallback sidecar has no authenticated invocation
+        # descriptor. Preserve its evidence only as unavailable invocation
+        # coverage rather than attributing tokens to a null identity.
+        if synthetic_values and invocation_id is None and telemetry_value is not None and telemetry_value.get("availability") != "unavailable":
+            coverage = "unavailable"
+            usage = None
+            turns = []
+        if invocation_id is None and coverage != "unavailable":
+            _fail(ReasonCode.invalid_metadata)
         if coverage == "complete" and usage is None:
             _fail(ReasonCode.invalid_metadata)
         public = {
@@ -2347,7 +2360,9 @@ def _semantic_issues(document: Mapping[str, Any]) -> list[str]:
         issues.append("provenance-shape")
         return issues
     source = coqui.get("source")
-    if isinstance(source, Mapping) and "invocations" in source:
+    if not isinstance(source, Mapping) or "invocations" not in source:
+        issues.append("invocation-shape")
+    else:
         _semantic_invocation_issues(source.get("invocations"), coqui, issues)
     required = {"taskId", "pipelineId", "runId", "role", "startedAt", "completedAt", "durationMs", "disclosure", "artifacts"}
     issues.extend(f"provenance-field:{field}" for field in sorted(required - set(coqui)))
@@ -2423,7 +2438,7 @@ def _semantic_invocation_issues(
         "aggregate",
         "turns",
     }
-    if not isinstance(value, list) or len(value) > _MAX_INVOCATIONS:
+    if not isinstance(value, list) or not value or len(value) > _MAX_INVOCATIONS:
         issues.append("invocation-shape")
         return
     seen_ids: set[str] = set()
@@ -2449,6 +2464,8 @@ def _semantic_invocation_issues(
         coverage = invocation.get("coverage")
         if coverage not in {"complete", "partial", "unavailable"}:
             issues.append(f"{prefix}-coverage")
+        if invocation_id is None and coverage != "unavailable":
+            issues.append(f"{prefix}-id")
         timestamps: dict[str, str | None] = {}
         for key in ("startedAt", "completedAt"):
             timestamp = invocation.get(key)

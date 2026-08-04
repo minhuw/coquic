@@ -501,6 +501,54 @@ def test_partial_invocation_keeps_known_turn_usage_without_fabricating_zero() ->
     ]
 
 
+def test_runtime_requires_nonempty_top_level_invocation_evidence() -> None:
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}]),
+    ).as_dict()
+    source = document["extra"]["coquic"]["source"]
+    source.pop("invocations")
+    with pytest.raises(AtifConversionError):
+        validate_atif_document(document)
+
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}]),
+    ).as_dict()
+    document["extra"]["coquic"]["source"]["invocations"] = []
+    with pytest.raises(AtifConversionError):
+        validate_atif_document(document)
+
+
+def test_available_invocation_telemetry_requires_authenticated_identity() -> None:
+    telemetry = _telemetry_sidecar("invocation-one", 0)
+    descriptor = _invocation_descriptor("invocation-one", 0, telemetry=telemetry)
+    descriptor["invocationId"] = None
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents([{"type": "agent_message", "text": "complete"}]),
+            invocations=[descriptor],
+        )
+    assert error.value.code == ReasonCode.invalid_metadata
+
+
+def test_runtime_rejects_oversized_invocation_issue_counts() -> None:
+    telemetry = _telemetry_sidecar("invocation-one", 0)
+    descriptor = _invocation_descriptor("invocation-one", 0, telemetry=telemetry)
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}]),
+        invocations=[descriptor],
+    ).as_dict()
+    document["extra"]["coquic"]["source"]["invocations"][0]["issues"] = [
+        {"category": "oversized", "count": 10**15 + 1}
+    ]
+    with pytest.raises(AtifConversionError) as error:
+        validate_atif_document(document)
+    assert error.value.code == ReasonCode.invalid_metadata
+
+
 @pytest.mark.parametrize("mutation", ["duplicate", "cross-task", "private-model", "bad-turn-math"])
 def test_invalid_invocation_evidence_fails_closed(mutation: str) -> None:
     telemetry = _telemetry_sidecar("invocation-one", 0)

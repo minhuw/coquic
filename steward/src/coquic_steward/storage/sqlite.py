@@ -16,6 +16,7 @@ from sqlalchemy import (
     Select,
     and_,
     create_engine,
+    delete,
     event,
     func,
     or_,
@@ -4680,22 +4681,25 @@ class SQLiteTaskStore:
                 row.consumed_at = now
             consumed = len(rows)
         if consumed:
-            self._notify_change()
+            try:
+                self.prune_consumed_wakeups(_notify=False)
+            finally:
+                self._notify_change()
         return consumed
 
-    def prune_consumed_wakeups(self, *, older_than_days: int = 7) -> int:
+    def prune_consumed_wakeups(
+        self, *, older_than_days: int = 7, _notify: bool = True
+    ) -> int:
         cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat()
         with Session(self.engine) as session, session.begin():
-            rows = session.scalars(
-                select(SchedulerWakeupRow).where(
+            result = session.execute(
+                delete(SchedulerWakeupRow).where(
                     SchedulerWakeupRow.status == SchedulerWakeupStatus.consumed.value,
                     SchedulerWakeupRow.consumed_at < cutoff,
                 )
-            ).all()
-            for row in rows:
-                session.delete(row)
-            deleted = len(rows)
-        if deleted:
+            )
+            deleted = int(result.rowcount or 0)
+        if deleted and _notify:
             self._notify_change()
         return deleted
 

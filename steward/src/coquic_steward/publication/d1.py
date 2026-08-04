@@ -498,17 +498,38 @@ _EVENT_SELECT = "SELECT task_id, sequence, event_type, occurred_at, summary FROM
 _ARTIFACT_SELECT = "SELECT artifact_id, task_id, run_id, logical_path, public_key, media_type, byte_size, sha256, availability, redaction_applied, original_retained FROM artifacts WHERE publication_id = ? ORDER BY artifact_id"
 _HEAD_SELECT = "SELECT publication_id, state FROM task_heads WHERE task_id = ?"
 _VISIBLE_GENERATION_SELECT = "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'visible' ORDER BY exposed_at DESC, publication_id DESC LIMIT 1"
-_EXPOSE_OLD = "UPDATE publication_generations SET state = 'superseded' WHERE task_id = ? AND state = 'visible' AND publication_id <> ?"
+_EXPOSE_OLD = (
+    "UPDATE publication_generations SET state = 'superseded' "
+    "WHERE task_id = ? AND state = 'visible' AND publication_id <> ? "
+    "AND EXISTS (SELECT 1 FROM publication_generations "
+    "WHERE publication_id = ? AND task_id = ? AND state IN ('staged', 'visible'))"
+)
 _EXPOSE_NEW = "UPDATE publication_generations SET state = 'visible', exposed_at = ? WHERE publication_id = ? AND task_id = ? AND state = 'staged'"
 _HEAD_UPSERT = (
-    "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'visible', ?) "
+    "INSERT INTO task_heads (task_id, publication_id, state, updated_at) "
+    "SELECT task_id, publication_id, 'visible', ? FROM publication_generations "
+    "WHERE publication_id = ? AND task_id = ? AND state = 'visible' "
     "ON CONFLICT(task_id) DO UPDATE SET publication_id = excluded.publication_id, state = 'visible', updated_at = excluded.updated_at"
 )
 _HIDE_UPSERT = (
-    "INSERT INTO task_heads (task_id, publication_id, state, updated_at) VALUES (?, ?, 'hidden', ?) "
+    "INSERT INTO task_heads (task_id, publication_id, state, updated_at) "
+    "SELECT task_id, publication_id, 'hidden', ? FROM publication_generations "
+    "WHERE task_id = ? AND state = 'visible' ORDER BY exposed_at DESC, publication_id DESC LIMIT 1 "
     "ON CONFLICT(task_id) DO UPDATE SET publication_id = excluded.publication_id, state = 'hidden', updated_at = excluded.updated_at"
 )
 _HIDE_STAGED = "UPDATE publication_generations SET state = 'superseded' WHERE task_id = ? AND state = 'staged'"
+_HIDE_RACED_VISIBLE_WITH_HEAD = (
+    "UPDATE publication_generations SET state = 'superseded' "
+    "WHERE task_id = ? AND state = 'visible' "
+    "AND NOT EXISTS (SELECT 1 FROM task_heads "
+    "WHERE task_id = ? AND state = 'visible' AND publication_id = ?)"
+)
+_HIDE_RACED_VISIBLE_WITHOUT_HEAD = (
+    "UPDATE publication_generations SET state = 'superseded' "
+    "WHERE task_id = ? AND state = 'visible' "
+    "AND EXISTS (SELECT 1 FROM task_heads WHERE task_id = ? AND state = 'visible')"
+)
+_HIDE_HEAD = "UPDATE task_heads SET state = 'hidden', updated_at = ? WHERE task_id = ? AND state = 'visible'"
 _VISIBLE_HEAD_SELECT = "SELECT publication_id, state FROM task_heads WHERE task_id = ?"
 _STAGED_GENERATION_SELECT = "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'staged'"
 
@@ -884,9 +905,15 @@ class D1PublicationClient:
         updated_at = payload["headIntent"]["updatedAt"]
         self._batch(
             (
-                _statement(_EXPOSE_OLD, payload["taskId"], payload["publicationId"]),
+                _statement(
+                    _EXPOSE_OLD,
+                    payload["taskId"],
+                    payload["publicationId"],
+                    payload["publicationId"],
+                    payload["taskId"],
+                ),
                 _statement(_EXPOSE_NEW, updated_at, payload["publicationId"], payload["taskId"]),
-                _statement(_HEAD_UPSERT, payload["taskId"], payload["publicationId"], updated_at),
+                _statement(_HEAD_UPSERT, updated_at, payload["publicationId"], payload["taskId"]),
             )
         )
         visible = self._query(_statement(_VERIFY_COUNTS, payload["publicationId"], payload["taskId"]))
@@ -905,6 +932,7 @@ class D1PublicationClient:
         if not isinstance(reason_code, str) or _REASON.fullmatch(reason_code) is None or _PRIVATE_LOCATOR.search(reason_code):
             _invalid()
         current = self._query(_statement(_HEAD_SELECT, task_id))
+        head_present = bool(current)
         publication_id: str | None = None
         state: str | None = None
         if current:
@@ -915,31 +943,49 @@ class D1PublicationClient:
             if rows:
                 publication_id = _id(rows[0].get("publication_id"))
         staged = self._query(_statement(_STAGED_GENERATION_SELECT, task_id))
+        staged_ids = tuple(_id(row.get("publication_id")) for row in staged)
         if publication_id is None and not staged:
             return HideReceipt(task_id, None, changed=False)
         statements: list[Statement] = []
-        # Keep the head mutation and staged-generation retirement in one D1
-        # transaction.  Whichever transaction wins the expose/hide race owns
-        # the complete remote visibility decision.
+        # Keep every visibility decision in one D1 transaction. The race
+        # statements re-check the head inside that transaction so a generation
+        # exposed after the pre-batch reads is retired with its head.
         if staged:
             statements.append(_statement(_HIDE_STAGED, task_id))
-        if publication_id is not None and state != "hidden":
-            statements.append(_statement(_HIDE_UPSERT, task_id, publication_id, _timestamp_now()))
-        if not statements:
-            return HideReceipt(task_id, publication_id, changed=False)
+        if head_present:
+            statements.append(
+                _statement(
+                    _HIDE_RACED_VISIBLE_WITH_HEAD,
+                    task_id,
+                    task_id,
+                    publication_id,
+                )
+            )
+        else:
+            statements.append(_statement(_HIDE_RACED_VISIBLE_WITHOUT_HEAD, task_id, task_id))
+        statements.extend(
+            (
+                _statement(_HIDE_UPSERT, _timestamp_now(), task_id),
+                _statement(_HIDE_HEAD, _timestamp_now(), task_id),
+            )
+        )
         self._batch(tuple(statements))
         head = self._query(_statement(_HEAD_SELECT, task_id))
-        if publication_id is not None and (
-            len(head) != 1
-            or head[0].get("publication_id") != publication_id
-            or head[0].get("state") != "hidden"
-        ):
+        if head_present and (len(head) != 1 or head[0].get("state") != "hidden"):
             _invalid(D1ErrorCode.generation_state)
         remaining = self._query(_statement(_STAGED_GENERATION_SELECT, task_id))
         if remaining:
             _invalid(D1ErrorCode.generation_state)
+        visible = self._query(_statement(_VISIBLE_GENERATION_SELECT, task_id))
+        if staged_ids and any(row.get("publication_id") in staged_ids for row in visible):
+            _invalid(D1ErrorCode.generation_state)
+        effective_publication_id: str | None = publication_id
+        if head:
+            effective_publication_id = _id(head[0].get("publication_id"))
+            if head[0].get("state") != "hidden":
+                _invalid(D1ErrorCode.generation_state)
         changed = bool(staged) or (publication_id is not None and state != "hidden")
-        return HideReceipt(task_id, publication_id, changed=changed)
+        return HideReceipt(task_id, effective_publication_id, changed=changed)
 
 
 D1Client = D1PublicationClient

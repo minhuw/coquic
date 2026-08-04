@@ -68,6 +68,32 @@ class ScriptedD1:
         return httpx.Response(200, json={"success": True, "errors": [], "result": results}, request=request)
 
 
+class HideExposureInterposer(ScriptedD1):
+    """Commit an exposure after hide's staged-generation read returns."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.after_staged_query: Any = None
+        self.interposed = False
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        statements = body.get("batch")
+        if statements is None:
+            statements = [{"sql": body["sql"], "params": body.get("params", [])}]
+        is_staged_query = any(
+            item["sql"] == "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'staged'"
+            for item in statements
+        )
+        response = super().__call__(request)
+        if is_staged_query and not self.interposed:
+            self.interposed = True
+            callback = self.after_staged_query
+            assert callable(callback)
+            callback()
+        return response
+
+
 def client(server: ScriptedD1) -> D1PublicationClient:
     return D1PublicationClient(
         account_id=ACCOUNT,
@@ -201,6 +227,32 @@ def test_hide_supersedes_staged_generations_and_wins_expose_race() -> None:
         d1.expose(staged)
     assert error.value.code == D1ErrorCode.generation_state
     assert d1.hide_task(first["taskId"], "unsafe_content").changed is False
+
+
+def test_hide_supersedes_exposure_committed_after_staged_read() -> None:
+    server = HideExposureInterposer()
+    d1 = client(server)
+    staged = publication("publication-hide-interposed", run_id="run-hide-interposed")
+    d1.stage(staged)
+    server.after_staged_query = lambda: d1.expose(staged)
+
+    hidden = d1.hide_task(staged["taskId"], "unsafe_content")
+
+    assert server.interposed is True
+    assert hidden.state == "hidden"
+    assert hidden.changed is True
+    assert hidden.publication_id == staged["publicationId"]
+    assert server.connection.execute(
+        "SELECT state FROM publication_generations WHERE publication_id = ?",
+        (staged["publicationId"],),
+    ).fetchone()[0] == "superseded"
+    assert server.connection.execute(
+        "SELECT state FROM task_heads WHERE task_id = ?", (staged["taskId"],)
+    ).fetchone()[0] == "hidden"
+    assert server.connection.execute(
+        "SELECT count(*) FROM publication_generations WHERE task_id = ? AND state = 'visible'",
+        (staged["taskId"],),
+    ).fetchone()[0] == 0
 
 
 def test_interrupted_visibility_batch_rolls_back_without_changing_head() -> None:

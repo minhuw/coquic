@@ -2283,6 +2283,128 @@ def test_shutdown_interrupted_implementation_preserves_restart_state(config):
     assert finalized == []
 
 
+def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config):
+    store = TaskStore(config.db_path)
+    first, _ = _task(store, "once progress")
+    second, _ = _task(store, "once max dispatch")
+    daemon = StewardDaemon(config, store)
+    outcomes = {
+        first.id: iter(
+            [
+                SimpleNamespace(
+                    status="in_progress",
+                    progressed=True,
+                    next_phase=None,
+                ),
+                SimpleNamespace(
+                    status="ready_to_seal",
+                    progressed=True,
+                    next_phase=None,
+                ),
+            ]
+        ),
+        second.id: iter(
+            [SimpleNamespace(status="terminal", progressed=True, next_phase=None)]
+        ),
+    }
+    calls: list[str] = []
+    serialized_calls: list[str] = []
+    finalized: list[str] = []
+    planned: list[TickResult] = []
+
+    def advance(task_id: str) -> SimpleNamespace:
+        calls.append(task_id)
+        if daemon._integration_lock.locked():
+            serialized_calls.append(task_id)
+        return next(outcomes[task_id])
+
+    daemon.executor = SimpleNamespace(advance_once=advance)
+    daemon.finalize_terminal_task = lambda task_id: finalized.append(task_id) or True
+    daemon._plan_until_idle = planned.append
+    daemon._task_phase_requires_serialization = lambda _task_id: True
+    daemon.executor.run_task = lambda *_args, **_kwargs: pytest.fail(
+        "daemon once dispatch called run_task"
+    )
+
+    result = TickResult()
+    daemon._dispatch_queued(result, plan=True, max_dispatch=1)
+
+    assert result.dispatched == 1
+    assert result.skipped == 0
+    assert calls == [first.id, first.id]
+    assert serialized_calls == calls
+    assert finalized == [first.id]
+    assert planned == [result]
+    assert store.get(second.id).status == TaskStatus.queued
+    assert daemon._worker_pool is None
+    assert daemon._active_futures == {}
+
+
+def test_once_dispatch_counts_terminal_and_nonprogress_outcomes(config):
+    store = TaskStore(config.db_path)
+    terminal, _ = _task(store, "once terminal")
+    blocked, _ = _task(store, "once blocked")
+    interrupted, _ = _task(store, "once interrupted")
+    stalled, _ = _task(store, "once stalled")
+    daemon = StewardDaemon(config, store)
+    statuses = {
+        terminal.id: "terminal",
+        blocked.id: "blocked",
+        interrupted.id: "interrupted",
+        stalled.id: "stalled",
+    }
+    calls: list[str] = []
+    finalized: list[str] = []
+
+    def advance(task_id: str) -> SimpleNamespace:
+        calls.append(task_id)
+        return SimpleNamespace(
+            status=statuses[task_id],
+            progressed=False,
+            next_phase=None,
+        )
+
+    daemon.executor = SimpleNamespace(advance_once=advance)
+    daemon.finalize_terminal_task = lambda task_id: finalized.append(task_id) or True
+    daemon.executor.run_task = lambda *_args, **_kwargs: pytest.fail(
+        "daemon once dispatch called run_task"
+    )
+
+    result = TickResult()
+    daemon._dispatch_queued(result, plan=False, max_dispatch=None)
+
+    assert result.dispatched == 1
+    assert result.skipped == 3
+    assert calls == [terminal.id, blocked.id, interrupted.id, stalled.id]
+    assert finalized == [blocked.id]
+
+
+def test_once_dispatch_stops_without_counting_shutdown_interruption(config):
+    store = TaskStore(config.db_path)
+    task, _ = _task(store, "once shutdown")
+    daemon = StewardDaemon(config, store)
+    calls: list[str] = []
+
+    def advance(task_id: str) -> SimpleNamespace:
+        calls.append(task_id)
+        daemon.request_shutdown()
+        return SimpleNamespace(status="interrupted", progressed=False, next_phase=None)
+
+    daemon.executor = SimpleNamespace(advance_once=advance)
+    daemon.executor.run_task = lambda *_args, **_kwargs: pytest.fail(
+        "daemon once dispatch called run_task"
+    )
+
+    result = TickResult()
+    daemon._dispatch_queued(result, plan=False, max_dispatch=1)
+
+    assert calls == [task.id]
+    assert result.dispatched == 0
+    assert result.skipped == 0
+    assert store.get(task.id).status == TaskStatus.queued
+    assert daemon._active_futures == {}
+
+
 def test_session_runner_preserves_interrupted_run_identity(config):
     store = TaskStore(config.db_path)
     task, pipeline = _task(store, "session interruption")

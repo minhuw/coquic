@@ -3920,8 +3920,7 @@ class StewardDaemon:
             seen.add(task.id)
             self._log(f"dispatch start {task.id} {_task_label(task)}")
             try:
-                with use_subprocess_owner(self._subprocess_owner):
-                    task_ok = self.executor.run_task(task.id)
+                task_ok = self.drive_selected_task(task.id)
             except Exception as exc:  # pragma: no cover - daemon boundary guard.
                 if self._shutdown_event.is_set():
                     self.store.add_event(
@@ -3939,6 +3938,8 @@ class StewardDaemon:
                     f"error={exc.__class__.__name__}"
                 )
                 continue
+            if self._shutdown_event.is_set():
+                return
             if task_ok:
                 result.dispatched += 1
                 finished = self.store.get(task.id)
@@ -4025,8 +4026,8 @@ class StewardDaemon:
             ),
         )
 
-    def _run_task_worker(self, task_id: str) -> bool:
-        """Advance one task until a terminal/blocked cursor or shutdown."""
+    def drive_selected_task(self, task_id: str) -> bool:
+        """Advance one selected task until a durable stopping point or shutdown."""
 
         integration = False
         try:
@@ -4073,6 +4074,11 @@ class StewardDaemon:
             if not getattr(outcome, "progressed", False) and getattr(outcome, "next_phase", None) is None:
                 return False
         return False
+
+    def _run_task_worker(self, task_id: str) -> bool:
+        """Run the durable selected-task driver in a worker-pool future."""
+
+        return self.drive_selected_task(task_id)
 
     def _start_heartbeat_thread(self) -> None:
         with self._runtime_lock:

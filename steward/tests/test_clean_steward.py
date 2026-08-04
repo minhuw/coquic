@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.request import (
     BaseHandler,
     HTTPDefaultErrorHandler,
@@ -652,7 +653,12 @@ def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypat
         self.store.start_worker(task_id, "worker started")
         raise RuntimeError("codex stream crashed")
 
-    monkeypatch.setattr(StewardExecutor, "run_task", fail_after_start)
+    monkeypatch.setattr(StewardExecutor, "advance_once", fail_after_start)
+    monkeypatch.setattr(
+        StewardExecutor,
+        "run_task",
+        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
+    )
 
     result = StewardDaemon(config, store).tick(plan=False, max_dispatch=1)
 
@@ -678,7 +684,12 @@ def test_daemon_marks_early_dispatch_exception_failed(
     def fail_before_start(self, _task_id: str) -> bool:
         raise RuntimeError("codex failed before start")
 
-    monkeypatch.setattr(StewardExecutor, "run_task", fail_before_start)
+    monkeypatch.setattr(StewardExecutor, "advance_once", fail_before_start)
+    monkeypatch.setattr(
+        StewardExecutor,
+        "run_task",
+        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
+    )
 
     result = StewardDaemon(config, store).tick(plan=False, max_dispatch=1)
 
@@ -2093,9 +2104,9 @@ def test_daemon_replans_after_successful_dispatch(
             thread_id=None,
         )
 
-    def fake_run(task_id: str) -> bool:
+    def fake_advance(task_id: str) -> SimpleNamespace:
         store.update_status(task_id, TaskStatus.succeeded, "done")
-        return True
+        return SimpleNamespace(status="terminal", progressed=True, next_phase=None)
 
     monkeypatch.setattr(
         "coquic_steward.orchestration.daemon.collect_signal_items",
@@ -2113,7 +2124,12 @@ def test_daemon_replans_after_successful_dispatch(
     )
     monkeypatch.setattr("coquic_steward.orchestration.daemon.run_planner", fake_plan)
     daemon = StewardDaemon(config, store)
-    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+    monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
+    monkeypatch.setattr(
+        daemon.executor,
+        "run_task",
+        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
+    )
 
     result = daemon.tick(plan=True, dispatch=True, max_dispatch=1)
 
@@ -2138,12 +2154,12 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    def fake_run(task_id: str) -> bool:
+    def fake_advance(task_id: str) -> SimpleNamespace:
         task = store.get(task_id)
         if task.spec.worker == WorkerKind.integration_manager:
             store.finish_task(task.id, TaskStatus.succeeded, "integrated")
             store.finish_task(source.id, TaskStatus.succeeded, "integrated")
-            return True
+            return SimpleNamespace(status="terminal", progressed=True, next_phase=None)
         integration, _ = store.add_task(
             TaskSpec(
                 kind=TaskKind.integration,
@@ -2155,10 +2171,15 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
             dedupe_key=f"integration:{source.id}",
         )
         store.start_integration(source.id, f"integration queued: {integration.id}")
-        return True
+        return SimpleNamespace(status="terminal", progressed=True, next_phase=None)
 
     daemon = StewardDaemon(config, store)
-    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+    monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
+    monkeypatch.setattr(
+        daemon.executor,
+        "run_task",
+        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
+    )
 
     result = daemon.tick(plan=False, dispatch=True)
 
@@ -2181,12 +2202,17 @@ def test_daemon_dispatch_exception_preserves_terminal_task_status(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    def fake_run(task_id: str) -> bool:
+    def fake_advance(task_id: str) -> SimpleNamespace:
         store.finish_task(task_id, TaskStatus.blocked, "blocked before crash")
         raise RuntimeError("after terminal update")
 
     daemon = StewardDaemon(config, store)
-    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+    monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
+    monkeypatch.setattr(
+        daemon.executor,
+        "run_task",
+        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
+    )
 
     result = daemon.tick(plan=False, dispatch=True)
     saved = store.get(task.id)
@@ -2230,13 +2256,18 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
     )
     ran: list[str] = []
 
-    def fake_run(task_id: str) -> bool:
+    def fake_advance(task_id: str) -> SimpleNamespace:
         ran.append(task_id)
         store.update_status(task_id, TaskStatus.succeeded, "done")
-        return True
+        return SimpleNamespace(status="terminal", progressed=True, next_phase=None)
 
     daemon = StewardDaemon(config, store)
-    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+    monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
+    monkeypatch.setattr(
+        daemon.executor,
+        "run_task",
+        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
+    )
 
     result = daemon.tick(plan=False, dispatch=True)
 

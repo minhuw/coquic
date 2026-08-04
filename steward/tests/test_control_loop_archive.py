@@ -467,6 +467,45 @@ def test_fresh_archive_process_fails_closed_without_verified_watermark(tmp_path:
     assert not (fresh.events_root / "2026" / "07" / "25.jsonl").exists()
 
 
+def test_fresh_archive_accepts_exact_duplicate_before_watermark_check(tmp_path: Path) -> None:
+    archive = _archive(tmp_path)
+    retained = _event(archive, 10, "event-retained")
+    archive.append_event(retained)
+    archive.append_event(
+        retained.model_copy(
+            update={
+                "event_id": "event-later",
+                "sequence": 20,
+                "occurred_at": NOW.replace(day=25),
+            }
+        )
+    )
+    retained_path = archive.events_root / "2026" / "07" / "24.jsonl"
+    original = retained_path.read_bytes()
+
+    fresh = ControlLoopArchive(archive.root, task_root=archive.task_root)
+    fresh.ensure_epoch()
+
+    assert fresh.append_event(retained) == len(original)
+
+    conflicting = retained.model_copy(update={"payload": {"raw": "changed"}})
+    with pytest.raises(ArchiveConflictError):
+        fresh.append_event(conflicting)
+
+    lower = retained.model_copy(
+        update={
+            "event_id": "event-lower",
+            "sequence": 11,
+            "occurred_at": NOW.replace(day=26),
+        }
+    )
+    with pytest.raises(ArchiveConflictError):
+        fresh.append_event(lower)
+
+    assert retained_path.read_bytes() == original
+    assert not (fresh.events_root / "2026" / "07" / "26.jsonl").exists()
+
+
 def test_verified_append_does_not_walk_unrelated_event_files(
     tmp_path: Path, monkeypatch
 ) -> None:

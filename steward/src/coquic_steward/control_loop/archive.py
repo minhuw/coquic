@@ -311,11 +311,13 @@ class ControlLoopArchive:
         if item.epoch_id != self._epoch_id:
             raise ArchiveConflictError("event epoch does not match archive")
         path = self._event_path(item.occurred_at)
-        if (
-            self._verified_snapshot is None
-            and self._append_high_watermark is None
-            and self._event_archive_has_retained_paths()
-        ):
+        watermark_unverified = (
+            self._verified_snapshot is None and self._append_high_watermark is None
+        )
+        retained_paths = (
+            self._event_archive_has_retained_paths() if watermark_unverified else False
+        )
+        if watermark_unverified and retained_paths and not path.exists():
             raise ArchiveConflictError("event archive watermark is unverified")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if path.is_symlink() or (path.exists() and not path.is_file()):
@@ -385,13 +387,20 @@ class ControlLoopArchive:
             if prior.get("eventId") == item.event_id:
                 if line != content.rstrip(b"\n"):
                     raise ArchiveConflictError("event ID has conflicting visible bytes")
-                self._append_high_watermark = max(
-                    self._append_high_watermark
-                    if self._append_high_watermark is not None
-                    else -1,
-                    max(prior_sequences, default=-1),
-                )
+                # A duplicate from a fresh process does not establish the
+                # global watermark from one file's local sequence range.
+                if not (watermark_unverified and retained_paths):
+                    self._append_high_watermark = max(
+                        self._append_high_watermark
+                        if self._append_high_watermark is not None
+                        else -1,
+                        max(prior_sequences, default=-1),
+                    )
                 return len(accepted)
+        if watermark_unverified and retained_paths:
+            # An exact duplicate can be safely acknowledged from its target
+            # file, but new events still require a ledger-backed watermark.
+            raise ArchiveConflictError("event archive watermark is unverified")
         visible_max = max(
             max(prior_sequences, default=-1),
             self._append_high_watermark

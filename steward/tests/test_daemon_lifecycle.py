@@ -949,6 +949,10 @@ def test_planner_context_keeps_all_active_tasks_and_bounds_terminal_history(
     oldest_active, _ = _task(store, "oldest active planner context")
     store.start_worker(oldest_active.id, "running")
     queued_active, _ = _task(store, "queued active planner context")
+    active_tasks = [oldest_active, queued_active]
+    for index in range(13):
+        active_task, _ = _task(store, f"additional active planner context {index}")
+        active_tasks.append(active_task)
     terminal_tasks = []
     for index in range(205):
         terminal, _ = _task(store, f"terminal planner context {index}")
@@ -985,8 +989,9 @@ def test_planner_context_keeps_all_active_tasks_and_bounds_terminal_history(
 
     assert len(captured) == 1
     context = captured[0]
-    active_ids = [oldest_active.id, queued_active.id]
-    assert {task.id for task in context[:2]} == set(active_ids)
+    active_ids = {task.id for task in active_tasks}
+    assert {task.id for task in context[: len(active_tasks)]} == active_ids
+    assert len(context) == len(active_tasks) + 200
     terminal_context = [
         task for task in context if TaskStatus(task.status).terminal
     ]
@@ -1001,9 +1006,88 @@ def test_planner_context_keeps_all_active_tasks_and_bounds_terminal_history(
     ]
 
     planner_run = store.control_loop.list_planner_runs()[-1]
-    assert planner_run.active_task_ids == [task.id for task in context[:2]]
+    assert planner_run.active_task_ids == [
+        task.id for task in context[: len(active_tasks)]
+    ]
     assert planner_run.prompt is not None
     assert planner_run.prompt["activeTaskCount"] == len(active_ids)
+
+
+def test_planner_admission_cap_blocks_new_work_at_boundary(config, monkeypatch) -> None:
+    config = replace(config, limits=replace(config.limits, max_active_tasks=32))
+    store = TaskStore(config.db_path)
+    for index in range(16):
+        _task(store, f"admission boundary active {index}")
+    item = _planner_signal(store, "admission-boundary")
+    calls: list[object] = []
+
+    def fake_run_planner(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.private_dir / "admission-boundary.jsonl",
+            thread_id=None,
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", fake_run_planner
+    )
+    monkeypatch.setattr(
+        store,
+        "iter_tasks",
+        lambda **_kwargs: pytest.fail("over-cap planning rendered active context"),
+    )
+    daemon = StewardDaemon(config, store)
+
+    daemon._plan(TickResult(), [item])
+
+    assert calls == []
+    assert store.pending_signal_items(limit=1)[0].id == item.id
+
+
+def test_planner_admission_resumes_after_active_task_drains(config, monkeypatch) -> None:
+    config = replace(config, limits=replace(config.limits, max_active_tasks=32))
+    store = TaskStore(config.db_path)
+    active = []
+    for index in range(16):
+        task, _ = _task(store, f"admission drain active {index}")
+        store.start_worker(task.id, "running")
+        active.append(task)
+    item = _planner_signal(store, "admission-drain")
+    calls: list[object] = []
+
+    def fake_run_planner(planner_config, *_args, **_kwargs):
+        calls.append(planner_config)
+        return SchedulerPlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.private_dir / "admission-drain.jsonl",
+            thread_id=None,
+            consumed_item_ids=[item.id],
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner", fake_run_planner
+    )
+    daemon = StewardDaemon(config, store)
+
+    daemon._plan_until_idle(TickResult())
+    assert calls == []
+
+    store.finish_task(active[0].id, TaskStatus.succeeded, "drained")
+    daemon._plan_until_idle(TickResult())
+
+    assert len(calls) == 1
+    assert calls[0].limits.max_active_tasks == 16
 
 
 def test_startup_reconstructs_terminal_planner_publication(config) -> None:

@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -105,6 +105,7 @@ DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
 PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
 PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
 PLANNER_TERMINAL_CONTEXT_LIMIT = 200
+GLOBAL_ACTIVE_TASK_ADMISSION_CAP = 16
 
 _ACTIVE_TASK_STATUSES = tuple(ACTIVE_STATUSES)
 _RESUMABLE_TASK_STATUSES = tuple(
@@ -4010,6 +4011,20 @@ class StewardDaemon:
             context.append(task)
         return active, context
 
+    def _planner_config_with_admission_cap(self) -> StewardConfig:
+        """Keep planner verifier capacity within the global active-task cap."""
+
+        configured_limit = self.config.limits.max_active_tasks
+        if configured_limit <= GLOBAL_ACTIVE_TASK_ADMISSION_CAP:
+            return self.config
+        return replace(
+            self.config,
+            limits=replace(
+                self.config.limits,
+                max_active_tasks=GLOBAL_ACTIVE_TASK_ADMISSION_CAP,
+            ),
+        )
+
     def _run_task_worker(self, task_id: str) -> bool:
         """Advance one task until a terminal/blocked cursor or shutdown."""
 
@@ -4278,10 +4293,21 @@ class StewardDaemon:
             return
         turns = 0
         while turns < self.config.limits.max_active_tasks:
-            if self.store.source_active_count() >= self.config.limits.max_active_tasks:
+            global_active_count = self.store.active_count()
+            if global_active_count >= GLOBAL_ACTIVE_TASK_ADMISSION_CAP:
+                self._log(
+                    "planner skipped global active task admission limit reached "
+                    f"count={global_active_count}"
+                )
+                return
+            source_active_count = self.store.source_active_count()
+            if source_active_count >= self.config.limits.max_active_tasks:
                 self._log("planner skipped active task limit reached")
                 return
-            available = self.config.limits.max_active_tasks - self.store.source_active_count()
+            available = min(
+                self.config.limits.max_active_tasks - source_active_count,
+                GLOBAL_ACTIVE_TASK_ADMISSION_CAP - global_active_count,
+            )
             pending = self.store.pending_signal_items(
                 limit=max(1, available)
             )
@@ -4328,9 +4354,17 @@ class StewardDaemon:
                 return
 
     def _plan(self, result: TickResult, inbox_items: list[SignalItem]) -> None:
+        global_active_count = self.store.active_count()
+        if global_active_count >= GLOBAL_ACTIVE_TASK_ADMISSION_CAP:
+            self._log(
+                "planner skipped global active task admission limit reached "
+                f"count={global_active_count}"
+            )
+            return
         active_tasks, task_context = self._planner_task_context()
         signals = project_signals_from_items(self.config, inbox_items)
         active_count = self.store.source_active_count()
+        planner_config = self._planner_config_with_admission_cap()
         self._log(
             "planner start "
             f"source_active={active_count} "
@@ -4373,7 +4407,7 @@ class StewardDaemon:
         try:
             try:
                 planner_run = run_planner(
-                    self.config,
+                    planner_config,
                     signals,
                     task_context,
                     invocation=self.planner_session,
@@ -4385,7 +4419,7 @@ class StewardDaemon:
                 if "invocation" not in str(exc) and "run_id" not in str(exc):
                     raise
                 planner_run = run_planner(
-                    self.config,
+                    planner_config,
                     signals,
                     task_context,
                     run_id=control_run_id,

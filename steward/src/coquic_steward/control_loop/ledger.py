@@ -10,6 +10,7 @@ holding ``BEGIN IMMEDIATE``.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,10 @@ from .models import (
     PlannerRun,
     ProposalDisposition,
     SignalFetch,
+    StewardOverheadUsage,
+    UsageCosts,
+    UsageCoverage,
+    UsageTokens,
     Wakeup,
     new_id,
     timestamp,
@@ -240,6 +245,20 @@ class ControlLoopLedger:
                   eligible_at TEXT,
                   updated_at TEXT NOT NULL,
                   CHECK((attempt = 0 AND eligible_at IS NULL) OR (attempt > 0 AND eligible_at IS NOT NULL))
+                );
+                CREATE TABLE IF NOT EXISTS control_loop_overhead_usage (
+                  usage_date TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  owner_class TEXT NOT NULL,
+                  tokens_json TEXT NOT NULL,
+                  costs_json TEXT NOT NULL,
+                  coverage_json TEXT NOT NULL,
+                  PRIMARY KEY(usage_date, model, owner_class)
+                );
+                CREATE TABLE IF NOT EXISTS control_loop_overhead_usage_runs (
+                  planner_run_id TEXT PRIMARY KEY REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
+                  archive_digest TEXT NOT NULL,
+                  processed_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_control_loop_observations_signal
                   ON control_loop_observations(signal_id, observed_at);
@@ -805,6 +824,164 @@ class ControlLoopLedger:
             ).fetchall()
         return {row[0]: (Path(row[1]), bool(row[2])) for row in rows}
 
+    def overhead_usage_watermark(self) -> str | None:
+        """Return the latest sealed planner run consumed by the reducer.
+
+        Per-run markers remain authoritative for replay safety; this compact
+        value is an operational watermark for callers that need to avoid a
+        full historical walk during a normal daemon drain.
+        """
+
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT planner_run_id FROM control_loop_overhead_usage_runs "
+                "ORDER BY processed_at DESC, planner_run_id DESC LIMIT 1"
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    # Plan-019 terminology used by archive/reducer callers.
+    usage_watermark = overhead_usage_watermark
+
+    def overhead_usage_processed_at(self) -> str | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT processed_at FROM control_loop_overhead_usage_runs "
+                "ORDER BY processed_at DESC, planner_run_id DESC LIMIT 1"
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def overhead_usage_processed(self, planner_run_id: str) -> str | None:
+        run_id = validate_id(planner_run_id)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT archive_digest FROM control_loop_overhead_usage_runs "
+                "WHERE planner_run_id=?",
+                (run_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def record_overhead_usage(
+        self,
+        planner_run_id: str,
+        rows: Iterable[StewardOverheadUsage | Mapping[str, Any]],
+        *,
+        archive_digest: str,
+        connection: sqlite3.Connection | None = None,
+        fill_missing_costs: bool = False,
+    ) -> bool:
+        """Merge one verified planner run's aggregate rows exactly once."""
+
+        run_id = validate_id(planner_run_id)
+        if not isinstance(archive_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", archive_digest):
+            raise ValueError("overhead usage archive digest is invalid")
+        values = [
+            row if isinstance(row, StewardOverheadUsage) else StewardOverheadUsage.model_validate(row)
+            for row in rows
+        ]
+        with self.transaction(connection) as db:
+            marker = db.execute(
+                "SELECT archive_digest FROM control_loop_overhead_usage_runs WHERE planner_run_id=?",
+                (run_id,),
+            ).fetchone()
+            if marker is not None:
+                if marker[0] != archive_digest:
+                    raise LedgerConflictError("overhead usage run bytes conflict with prior reduction")
+                if fill_missing_costs:
+                    for value in values:
+                        existing = db.execute(
+                            "SELECT costs_json FROM control_loop_overhead_usage "
+                            "WHERE usage_date=? AND model=? AND owner_class=?",
+                            (value.date, value.model, value.owner_class),
+                        ).fetchone()
+                        if existing is None:
+                            continue
+                        merged_cost = _fill_usage_costs(
+                            UsageCosts.model_validate(_loads(existing[0], {})), value.cost
+                        )
+                        db.execute(
+                            "UPDATE control_loop_overhead_usage SET costs_json=? "
+                            "WHERE usage_date=? AND model=? AND owner_class=?",
+                            (
+                                _json(merged_cost.model_dump(by_alias=True, mode="json")),
+                                value.date,
+                                value.model,
+                                value.owner_class,
+                            ),
+                        )
+                return False
+            run_exists = db.execute(
+                "SELECT 1 FROM control_loop_planner_runs WHERE planner_run_id=? AND epoch_id=?",
+                (run_id, self.epoch_id),
+            ).fetchone()
+            if run_exists is None:
+                raise LedgerConflictError("overhead usage run is not ledger-owned")
+
+            for value in values:
+                existing = db.execute(
+                    "SELECT tokens_json,costs_json,coverage_json FROM control_loop_overhead_usage "
+                    "WHERE usage_date=? AND model=? AND owner_class=?",
+                    (value.date, value.model, value.owner_class),
+                ).fetchone()
+                if existing is None:
+                    merged = value
+                else:
+                    old_tokens = UsageTokens.model_validate(_loads(existing[0], {}))
+                    old_costs = UsageCosts.model_validate(_loads(existing[1], {}))
+                    old_coverage = UsageCoverage.model_validate(_loads(existing[2], {}))
+                    merged = StewardOverheadUsage(
+                        date=value.date,
+                        model=value.model,
+                        ownerClass=value.owner_class,
+                        tokens=_merge_usage_tokens(old_tokens, value.tokens),
+                        cost=_merge_usage_costs(old_costs, value.cost),
+                        coverage=_merge_usage_coverage(old_coverage, value.coverage),
+                    )
+                db.execute(
+                    "INSERT INTO control_loop_overhead_usage(usage_date,model,owner_class,tokens_json,costs_json,coverage_json) "
+                    "VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(usage_date,model,owner_class) DO UPDATE SET "
+                    "tokens_json=excluded.tokens_json,costs_json=excluded.costs_json,coverage_json=excluded.coverage_json",
+                    (
+                        merged.date,
+                        merged.model,
+                        merged.owner_class,
+                        _json(merged.tokens.model_dump(by_alias=True, mode="json")),
+                        _json(merged.cost.model_dump(by_alias=True, mode="json")),
+                        _json(merged.coverage.model_dump(by_alias=True, mode="json")),
+                    ),
+                )
+            db.execute(
+                "INSERT INTO control_loop_overhead_usage_runs(planner_run_id,archive_digest,processed_at) VALUES(?,?,?)",
+                (run_id, archive_digest, _dt()),
+            )
+        return True
+
+    # Reducer-facing aliases use the terminology from the plan while keeping
+    # one transactional implementation.
+    apply_overhead_usage = record_overhead_usage
+    record_usage_rows = record_overhead_usage
+
+    def list_overhead_usage(self) -> list[StewardOverheadUsage]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT usage_date,model,owner_class,tokens_json,costs_json,coverage_json "
+                "FROM control_loop_overhead_usage ORDER BY usage_date,model,owner_class"
+            ).fetchall()
+        return [
+            StewardOverheadUsage(
+                date=row[0],
+                model=row[1],
+                ownerClass=row[2],
+                tokens=UsageTokens.model_validate(_loads(row[3], {})),
+                cost=UsageCosts.model_validate(_loads(row[4], {})),
+                coverage=UsageCoverage.model_validate(_loads(row[5], {})),
+            )
+            for row in rows
+        ]
+
+    overhead_usage_rows = list_overhead_usage
+    usage_rows = list_overhead_usage
+
     def list_events(self, *, after_sequence: int = -1, limit: int | None = None) -> list[Event]:
         sql = "SELECT * FROM control_loop_events WHERE sequence>? ORDER BY sequence"
         params: list[Any] = [after_sequence]
@@ -1029,6 +1206,113 @@ class ControlLoopLedger:
             return self.events_at([sequence])[sequence]
         except LedgerConflictError:
             return None
+
+
+def _merge_optional_numbers(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _merge_usage_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
+    return UsageTokens(
+        inputTokens=_merge_optional_numbers(left.input_tokens, right.input_tokens),
+        cachedInputTokens=_merge_optional_numbers(
+            left.cached_input_tokens, right.cached_input_tokens
+        ),
+        uncachedInputTokens=_merge_optional_numbers(
+            left.uncached_input_tokens, right.uncached_input_tokens
+        ),
+        outputTokens=_merge_optional_numbers(left.output_tokens, right.output_tokens),
+        reasoningOutputTokens=_merge_optional_numbers(
+            left.reasoning_output_tokens, right.reasoning_output_tokens
+        ),
+        totalTokens=_merge_optional_numbers(left.total_tokens, right.total_tokens),
+    )
+
+
+def _merge_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
+    components = {
+        "uncachedInputMicroUsd": _merge_optional_numbers(
+            left.uncached_input_micro_usd, right.uncached_input_micro_usd
+        ),
+        "cachedInputMicroUsd": _merge_optional_numbers(
+            left.cached_input_micro_usd, right.cached_input_micro_usd
+        ),
+        "outputMicroUsd": _merge_optional_numbers(
+            left.output_micro_usd, right.output_micro_usd
+        ),
+        "totalMicroUsd": _merge_optional_numbers(
+            left.total_micro_usd, right.total_micro_usd
+        ),
+    }
+    present = [components[key] is not None for key in (
+        "uncachedInputMicroUsd",
+        "cachedInputMicroUsd",
+        "outputMicroUsd",
+        "totalMicroUsd",
+    )]
+    if all(present) and left.status == right.status == "Complete":
+        status = "Complete"
+    elif any(present):
+        status = "Partial"
+    else:
+        status = "N.A."
+    return UsageCosts(status=status, **components)
+
+
+def _fill_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
+    values = {
+        "uncachedInputMicroUsd": (
+            left.uncached_input_micro_usd
+            if left.uncached_input_micro_usd is not None
+            else right.uncached_input_micro_usd
+        ),
+        "cachedInputMicroUsd": (
+            left.cached_input_micro_usd
+            if left.cached_input_micro_usd is not None
+            else right.cached_input_micro_usd
+        ),
+        "outputMicroUsd": (
+            left.output_micro_usd
+            if left.output_micro_usd is not None
+            else right.output_micro_usd
+        ),
+        "totalMicroUsd": (
+            left.total_micro_usd
+            if left.total_micro_usd is not None
+            else right.total_micro_usd
+        ),
+    }
+    components = (
+        values["uncachedInputMicroUsd"],
+        values["cachedInputMicroUsd"],
+        values["outputMicroUsd"],
+    )
+    if values["totalMicroUsd"] is not None and all(item is not None for item in components):
+        if values["totalMicroUsd"] != sum(item for item in components if item is not None):
+            values["totalMicroUsd"] = None
+    present = [item is not None for item in values.values()]
+    status = "Complete" if all(present) else ("Partial" if any(present) else "N.A.")
+    return UsageCosts(status=status, **values)
+
+
+def _merge_usage_coverage(left: UsageCoverage, right: UsageCoverage) -> UsageCoverage:
+    covered = left.covered_invocations + right.covered_invocations
+    expected = left.expected_invocations + right.expected_invocations
+    if expected == 0 or covered == 0:
+        status = "N.A."
+    elif covered == expected and left.status == right.status == "Complete":
+        status = "Complete"
+    else:
+        status = "Partial"
+    return UsageCoverage(
+        coveredInvocations=covered,
+        expectedInvocations=expected,
+        status=status,
+    )
 
 
 def _signal_fetch(value: SignalFetch | SignalFetchRun) -> SignalFetch:

@@ -667,6 +667,90 @@ class ControlLoopArchive:
             self._verified_snapshot.setdefault("plannerRuns", {})[planner_run_id] = facts
         return facts is not None
 
+    def read_verified_planner_run(
+        self,
+        planner_run_id: str,
+        *,
+        expected_run: PlannerRun | Mapping[str, Any] | None = None,
+    ) -> tuple[Manifest, dict[str, bytes], str]:
+        """Read artifacts only after authenticating a sealed terminal manifest.
+
+        The usage reducer consumes this method instead of walking the archive
+        tree.  A caller may provide the ledger row so an archive directory
+        cannot be reclassified across epochs or terminal states.
+        """
+
+        run_id = validate_id(planner_run_id)
+        expected: PlannerRun | None = None
+        if expected_run is not None:
+            expected = (
+                expected_run
+                if isinstance(expected_run, PlannerRun)
+                else PlannerRun.model_validate(expected_run)
+            )
+            if expected.planner_run_id != run_id:
+                raise ArchiveConflictError("planner run identity mismatch")
+            if expected.state not in {
+                "succeeded",
+                "failed",
+                "interrupted",
+                "cancelled",
+            } or expected.completed_at is None:
+                raise ArchiveValidationError("planner run is not terminal")
+            if expected.epoch_id != self._require_epoch().epoch_id:
+                raise ArchiveConflictError("planner run epoch mismatch")
+
+        facts = None
+        if self.planner_run_is_verified(run_id):
+            snapshot = self._verified_snapshot or {}
+            facts = snapshot.get("plannerRuns", {}).get(run_id)
+        if facts is None:
+            try:
+                facts = self._verify_planner_run_facts(run_id)
+            except (OSError, ValueError) as exc:
+                raise ArchiveValidationError("planner run manifest is invalid") from exc
+        if facts is None:
+            raise ArchiveValidationError("planner run manifest is not verified")
+        target = self._run_dir(run_id)
+        manifest_path = target / "manifest.json"
+        try:
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = Manifest.model_validate(json.loads(manifest_bytes))
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise ArchiveValidationError("planner run manifest is invalid") from exc
+        if manifest.epoch_id != self._require_epoch().epoch_id:
+            raise ArchiveConflictError("planner run manifest epoch mismatch")
+        if expected is not None and manifest.terminal_state != expected.state:
+            raise ArchiveConflictError("planner run terminal state conflicts with manifest")
+
+        artifacts: dict[str, bytes] = {}
+        for descriptor in manifest.files:
+            path = target / descriptor.path
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise ArchiveValidationError("planner artifact is unavailable") from exc
+            if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ArchiveValidationError("planner artifact is not a regular file")
+            try:
+                content = path.read_bytes()
+            except OSError as exc:
+                raise ArchiveValidationError("planner artifact is unavailable") from exc
+            if len(content) != descriptor.byte_size or sha256(content).hexdigest() != descriptor.sha256:
+                raise ArchiveConflictError("planner artifact bytes conflict with manifest")
+            artifacts[descriptor.path] = content
+        digest = sha256(manifest_bytes).hexdigest()
+        if facts.get("manifest", {}).get("sha256") != digest:
+            raise ArchiveConflictError("planner manifest changed during verification")
+        if self._verified_snapshot is not None:
+            self._verified_snapshot.setdefault("plannerRuns", {})[run_id] = facts
+        return manifest, artifacts, digest
+
+    # Explicit aliases keep the authentication boundary discoverable to
+    # reducers and future private consumers without exposing archive internals.
+    verified_planner_artifacts = read_verified_planner_run
+    read_verified_planner_artifacts = read_verified_planner_run
+
     def planner_run_is_verified(self, planner_run_id: str) -> bool:
         """Check cached planner-run trust using stat identities only."""
 

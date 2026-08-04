@@ -8,7 +8,7 @@ objects, credentials, and private session paths are never accepted as fields.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import PurePosixPath
@@ -313,7 +313,150 @@ class Manifest(ControlLoopModel):
         paths = [item.path for item in self.files]
         if len(paths) != len(set(paths)):
             raise ValueError("manifest files must have unique paths")
+        if self.terminal_state not in {
+            "succeeded",
+            "failed",
+            "interrupted",
+            "cancelled",
+        }:
+            raise ValueError("manifest terminalState must be terminal")
         return self
+
+
+class UsageTokens(ControlLoopModel):
+    """Bounded six-category token totals used by local usage projections."""
+
+    input_tokens: int | None = Field(default=None, alias="inputTokens", ge=0)
+    cached_input_tokens: int | None = Field(
+        default=None, alias="cachedInputTokens", ge=0
+    )
+    uncached_input_tokens: int | None = Field(
+        default=None, alias="uncachedInputTokens", ge=0
+    )
+    output_tokens: int | None = Field(default=None, alias="outputTokens", ge=0)
+    reasoning_output_tokens: int | None = Field(
+        default=None, alias="reasoningOutputTokens", ge=0
+    )
+    total_tokens: int | None = Field(default=None, alias="totalTokens", ge=0)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "UsageTokens":
+        if self.input_tokens is not None and self.cached_input_tokens is not None:
+            if self.cached_input_tokens > self.input_tokens:
+                raise ValueError("cached input tokens exceed input tokens")
+        if self.input_tokens is not None and self.uncached_input_tokens is not None:
+            if self.cached_input_tokens is not None and self.uncached_input_tokens != (
+                self.input_tokens - self.cached_input_tokens
+            ):
+                raise ValueError("uncached input tokens do not reconcile")
+        if self.output_tokens is not None and self.reasoning_output_tokens is not None:
+            if self.reasoning_output_tokens > self.output_tokens:
+                raise ValueError("reasoning output tokens exceed output tokens")
+        if (
+            self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens is not None
+            and self.total_tokens != self.input_tokens + self.output_tokens
+        ):
+            raise ValueError("total tokens do not reconcile")
+        return self
+
+
+class UsageCosts(ControlLoopModel):
+    """Integer micro-USD cost components with an explicit unavailable state."""
+
+    uncached_input_micro_usd: int | None = Field(
+        default=None, alias="uncachedInputMicroUsd", ge=0
+    )
+    cached_input_micro_usd: int | None = Field(
+        default=None, alias="cachedInputMicroUsd", ge=0
+    )
+    output_micro_usd: int | None = Field(default=None, alias="outputMicroUsd", ge=0)
+    total_micro_usd: int | None = Field(default=None, alias="totalMicroUsd", ge=0)
+    status: str = "N.A."
+
+    @field_validator("status")
+    @classmethod
+    def _status(cls, value: str) -> str:
+        if value not in {"Complete", "Partial", "N.A."}:
+            raise ValueError("usage cost status must be Complete, Partial, or N.A.")
+        return value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "UsageCosts":
+        components = (
+            self.uncached_input_micro_usd,
+            self.cached_input_micro_usd,
+            self.output_micro_usd,
+        )
+        if self.total_micro_usd is not None and all(item is not None for item in components):
+            if self.total_micro_usd != sum(item for item in components if item is not None):
+                raise ValueError("usage cost total does not reconcile")
+        return self
+
+
+class UsageCoverage(ControlLoopModel):
+    """Coverage denominator kept beside aggregates instead of fabricating zeroes."""
+
+    covered_invocations: int = Field(default=0, alias="coveredInvocations", ge=0)
+    expected_invocations: int = Field(default=0, alias="expectedInvocations", ge=0)
+    status: str = "N.A."
+
+    @field_validator("status")
+    @classmethod
+    def _status(cls, value: str) -> str:
+        if value not in {"Complete", "Partial", "N.A."}:
+            raise ValueError("usage coverage status must be Complete, Partial, or N.A.")
+        return value
+
+    @model_validator(mode="after")
+    def _bounds(self) -> "UsageCoverage":
+        if self.covered_invocations > self.expected_invocations:
+            raise ValueError("covered invocations exceed expected invocations")
+        return self
+
+
+class StewardOverheadUsage(ControlLoopModel):
+    """Public-safe aggregate row for non-task Steward planner overhead."""
+
+    date: str
+    model: str
+    owner_class: str = Field(default="Steward overhead", alias="ownerClass")
+    tokens: UsageTokens = Field(default_factory=UsageTokens)
+    cost: UsageCosts = Field(default_factory=UsageCosts)
+    coverage: UsageCoverage = Field(default_factory=UsageCoverage)
+
+    @field_validator("date")
+    @classmethod
+    def _date(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("usage date must be an ISO UTC date")
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("usage date must be an ISO UTC date") from exc
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, value: str) -> str:
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValueError("usage model is invalid")
+        if any(char in value for char in "\x00\r\n"):
+            raise ValueError("usage model is invalid")
+        return value
+
+    @field_validator("owner_class")
+    @classmethod
+    def _owner(cls, value: str) -> str:
+        if value != "Steward overhead":
+            raise ValueError("usage ownerClass is fixed")
+        return value
+
+    def public_dict(self) -> dict[str, Any]:
+        """Serialize the strict aggregate allowlist without private identity."""
+
+        return self.model_dump(by_alias=True, mode="json")
 
 
 class CurrentState(ControlLoopModel):
@@ -355,6 +498,10 @@ __all__ = [
     "ProposalDisposition",
     "SAFE_ID",
     "SignalFetch",
+    "StewardOverheadUsage",
+    "UsageCosts",
+    "UsageCoverage",
+    "UsageTokens",
     "Wakeup",
     "artifact_from_bytes",
     "new_id",

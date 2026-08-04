@@ -72,6 +72,7 @@ from ..core.subprocesses import (
     run_command,
     use_subprocess_owner,
 )
+from ..agents.telemetry import PriceCatalog
 from ..control_loop import (
     ArchiveConflictError,
     ArchiveError,
@@ -85,6 +86,7 @@ from ..control_loop import (
     new_id as new_control_loop_id,
     timestamp as control_timestamp,
 )
+from ..control_loop.usage import StewardOverheadReducer
 from ..planning import PlannerRun as PlanningPlannerRun, run_planner
 from ..planning.planner import render_planner_prompt
 from ..planning.verifier import summarize_active_tasks
@@ -450,6 +452,21 @@ class StewardDaemon:
         self._heartbeat_thread: threading.Thread | None = None
         self._control_loop_ledger = getattr(store, "control_loop_ledger", None)
         self._control_loop_archive = ControlLoopArchive(config, task_root=config)
+        usage_catalog = None
+        try:
+            usage_catalog = PriceCatalog.from_path(
+                config.repo_root / "steward" / "model-prices.json"
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            # Cost remains N.A. when the repository has no committed catalog;
+            # token evidence and coverage are still reduced.
+            usage_catalog = None
+        self._control_loop_usage = StewardOverheadReducer(
+            self._control_loop_archive,
+            self._control_loop_ledger,
+            catalog=usage_catalog,
+        )
+        self._overhead_usage = self._control_loop_usage
         self._control_loop_stop = threading.Event()
         self._control_loop_wakeup = threading.Event()
         self._control_loop_thread: threading.Thread | None = None
@@ -942,6 +959,20 @@ class StewardDaemon:
                 self._log(f"planner archive lag run={run_id} error={exc.__class__.__name__}")
         return pending
 
+    def overhead_usage_rows(self) -> tuple[object, ...]:
+        """Return local aggregate rows without reading planner artifacts."""
+
+        ledger = self._control_loop_ledger
+        if ledger is None:
+            return ()
+        return tuple(ledger.list_overhead_usage())
+
+    def _reconcile_control_loop_usage(self) -> dict[str, Any]:
+        reducer = self._control_loop_usage
+        if reducer.ledger is None:
+            return {"processed": 0, "skipped": 0, "errors": [], "watermark": None}
+        return reducer.reconcile()
+
     def _drain_control_loop_once(
         self, *, full_audit: bool = False, publish: bool = True
     ) -> dict[str, Any] | None:
@@ -968,6 +999,30 @@ class StewardDaemon:
             if publish:
                 if self._publish_control_loop_runs(ledger):
                     result["pending"] = True
+            usage_allowed = not any(
+                result.get(key)
+                for key in ("auditIncomplete", "eventAuditIncomplete", "plannerAuditIncomplete")
+            )
+            if usage_allowed:
+                try:
+                    usage = self._reconcile_control_loop_usage()
+                    # Keep the daemon result bounded; aggregate rows remain in
+                    # the private ledger and are never emitted here.
+                    result["usage"] = {
+                        "processed": int(usage.get("processed", 0)),
+                        "skipped": int(usage.get("skipped", 0)),
+                        "errors": list(usage.get("errors", ()))[:32],
+                        "watermark": usage.get("watermark"),
+                        "rowCount": len(usage.get("rows", ())),
+                    }
+                except Exception as exc:
+                    result["usage"] = {
+                        "processed": 0,
+                        "skipped": 0,
+                        "errors": [exc.__class__.__name__],
+                        "watermark": ledger.overhead_usage_watermark(),
+                        "rowCount": len(ledger.list_overhead_usage()),
+                    }
             return result
 
     def _start_control_loop_writer(self) -> None:

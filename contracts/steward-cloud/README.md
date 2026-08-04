@@ -68,6 +68,15 @@ public transcript contract layered on top of that upstream structure.
   `redactionApplied` and `originalRetained`. Both values are booleans. No
   private bucket name, object key, URL, credential path, token identifier, or
   private-shaped extension name/value may occur anywhere in a public document.
+- `extra.coquic.source.invocations` is the immutable usage evidence list. It is
+  ordered by contiguous `retryOrdinal` values and repeats the parent task,
+  pipeline, and run identity for ownership checks. Each row records bounded
+  invocation timing, model, billing mode, process outcome, `complete`,
+  `partial`, or `unavailable` coverage, issue counts, a six-component aggregate
+  when known, and complete turn rows. Missing usage is represented by coverage
+  and issue state; it is never converted to numeric zero. Archive paths,
+  provider/session identifiers, raw sidecar fields, and captured cost arithmetic
+  are not public evidence.
 - Published bytes are UTF-8 JSON serialized with lexicographically sorted
   object keys, compact separators, and exactly one trailing newline. Duplicate
   object keys, alternate whitespace, missing/newline bytes, and non-UTF-8 input

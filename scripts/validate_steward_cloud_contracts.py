@@ -19,6 +19,11 @@ PUBLICATION_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "publication.sc
 D1_SCHEMA_PATH = ROOT / "contracts" / "steward-cloud" / "d1.sql"
 FIXTURE_DIR = ROOT / "contracts" / "steward-cloud" / "fixtures"
 SUPPORTED_IMAGES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+MAX_PUBLIC_INVOCATIONS = 128
+MAX_PUBLIC_INVOCATION_TURNS = 4_096
+MAX_PUBLIC_INVOCATION_ISSUES = 32
+MAX_PUBLIC_INVOCATION_TOKENS = 10**15
+PUBLIC_USAGE_KEYS = {"prompt", "cached", "uncached", "completion", "reasoning", "total"}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PUBLIC_KEY_PATTERN = re.compile(
@@ -219,6 +224,150 @@ def _check_artifacts(
     for artifact_id, (_, item_path) in artifacts.items():
         if artifact_id not in referenced:
             _add(issues, "artifact-unreferenced", item_path)
+
+
+def _check_invocations(
+    source: dict[str, Any], coqui: dict[str, Any], issues: set[Issue]
+) -> None:
+    raw_invocations = source.get("invocations")
+    base_path = ("extra", "coquic", "source", "invocations")
+    if not isinstance(raw_invocations, list):
+        _add(issues, "invocation-shape", base_path)
+        return
+    if not raw_invocations or len(raw_invocations) > MAX_PUBLIC_INVOCATIONS:
+        _add(issues, "invocation-bound", base_path)
+        return
+    required = {
+        "invocationId",
+        "taskId",
+        "pipelineId",
+        "runId",
+        "retryOrdinal",
+        "startedAt",
+        "completedAt",
+        "model",
+        "billingMode",
+        "processOutcome",
+        "coverage",
+        "issues",
+        "aggregate",
+        "turns",
+    }
+    seen_ids: set[str] = set()
+    for index, invocation in enumerate(raw_invocations):
+        path = base_path + (index,)
+        if not isinstance(invocation, dict) or set(invocation) != required:
+            _add(issues, "invocation-shape", path)
+            continue
+        for key in ("taskId", "pipelineId", "runId"):
+            if invocation.get(key) != coqui.get(key):
+                _add(issues, "invocation-ownership", path + (key,))
+        invocation_id = invocation.get("invocationId")
+        if invocation_id is not None:
+            if not _nonempty_id(invocation_id):
+                _add(issues, "invocation-id", path + ("invocationId",))
+            elif invocation_id in seen_ids:
+                _add(issues, "invocation-unique", path + ("invocationId",))
+            else:
+                seen_ids.add(invocation_id)
+        ordinal = invocation.get("retryOrdinal")
+        if type(ordinal) is not int or ordinal != index or ordinal < 0:
+            _add(issues, "invocation-ordinal", path + ("retryOrdinal",))
+        started = invocation.get("startedAt")
+        completed = invocation.get("completedAt")
+        if (started is None) != (completed is None):
+            _add(issues, "invocation-timing", path)
+        started_value = _timestamp(started) if started is not None else None
+        completed_value = _timestamp(completed) if completed is not None else None
+        if started is not None and started_value is None:
+            _add(issues, "invocation-timing", path + ("startedAt",))
+        if completed is not None and completed_value is None:
+            _add(issues, "invocation-timing", path + ("completedAt",))
+        if started_value is not None and completed_value is not None and completed_value < started_value:
+            _add(issues, "invocation-timing-order", path + ("completedAt",))
+        model = invocation.get("model")
+        if model is not None and (not isinstance(model, str) or not model or len(model) > 256):
+            _add(issues, "invocation-model", path + ("model",))
+        billing_mode = invocation.get("billingMode")
+        if billing_mode not in {None, "unknown", "chatgpt", "api"}:
+            _add(issues, "invocation-billing", path + ("billingMode",))
+        outcome = invocation.get("processOutcome")
+        if outcome is not None and (not isinstance(outcome, str) or not outcome or len(outcome) > 48):
+            _add(issues, "invocation-outcome", path + ("processOutcome",))
+        coverage = invocation.get("coverage")
+        if coverage not in {"complete", "partial", "unavailable"}:
+            _add(issues, "invocation-coverage", path + ("coverage",))
+
+        raw_issues = invocation.get("issues")
+        if not isinstance(raw_issues, list) or len(raw_issues) > MAX_PUBLIC_INVOCATION_ISSUES:
+            _add(issues, "invocation-issues", path + ("issues",))
+        else:
+            categories: set[str] = set()
+            for issue_index, issue in enumerate(raw_issues):
+                issue_path = path + ("issues", issue_index)
+                if (
+                    not isinstance(issue, dict)
+                    or set(issue) != {"category", "count"}
+                    or not isinstance(issue.get("category"), str)
+                    or not issue.get("category")
+                    or len(issue["category"]) > 96
+                    or issue["category"] in categories
+                    or type(issue.get("count")) is not int
+                    or issue["count"] < 1
+                ):
+                    _add(issues, "invocation-issues", issue_path)
+                elif isinstance(issue.get("category"), str):
+                    categories.add(issue["category"])
+
+        turns = invocation.get("turns")
+        if not isinstance(turns, list) or len(turns) > MAX_PUBLIC_INVOCATION_TURNS:
+            _add(issues, "invocation-turns", path + ("turns",))
+            turns = []
+        sums = {key: 0 for key in PUBLIC_USAGE_KEYS}
+        turn_keys = {"ordinal", *PUBLIC_USAGE_KEYS}
+        for turn_index, turn in enumerate(turns, start=1):
+            turn_path = path + ("turns", turn_index - 1)
+            if not isinstance(turn, dict) or set(turn) != turn_keys or turn.get("ordinal") != turn_index:
+                _add(issues, "invocation-turn", turn_path)
+                continue
+            if any(type(turn.get(key)) is not int or turn[key] < 0 or turn[key] > MAX_PUBLIC_INVOCATION_TOKENS for key in PUBLIC_USAGE_KEYS):
+                _add(issues, "invocation-turn", turn_path)
+                continue
+            if turn["cached"] > turn["prompt"] or turn["uncached"] != turn["prompt"] - turn["cached"] or turn["reasoning"] > turn["completion"] or turn["total"] != turn["prompt"] + turn["completion"]:
+                _add(issues, "invocation-math", turn_path)
+            for key in sums:
+                sums[key] += turn[key]
+
+        aggregate = invocation.get("aggregate")
+        usage = aggregate.get("usage") if isinstance(aggregate, dict) else None
+        if aggregate is not None and (not isinstance(aggregate, dict) or set(aggregate) != {"usage"} or not isinstance(usage, dict)):
+            _add(issues, "invocation-aggregate", path + ("aggregate",))
+            usage = None
+        if isinstance(usage, dict):
+            if set(usage) - PUBLIC_USAGE_KEYS or any(type(number) is not int or number < 0 or number > MAX_PUBLIC_INVOCATION_TOKENS for number in usage.values()):
+                _add(issues, "invocation-aggregate", path + ("aggregate", "usage"))
+            prompt = usage.get("prompt")
+            cached = usage.get("cached")
+            uncached = usage.get("uncached")
+            completion = usage.get("completion")
+            reasoning = usage.get("reasoning")
+            total = usage.get("total")
+            if prompt is not None and cached is not None and cached > prompt:
+                _add(issues, "invocation-math", path + ("aggregate", "usage"))
+            if prompt is not None and cached is not None and uncached is not None and uncached != prompt - cached:
+                _add(issues, "invocation-math", path + ("aggregate", "usage"))
+            if completion is not None and reasoning is not None and reasoning > completion:
+                _add(issues, "invocation-math", path + ("aggregate", "usage"))
+            if prompt is not None and completion is not None and total is not None and total != prompt + completion:
+                _add(issues, "invocation-math", path + ("aggregate", "usage"))
+            if turns and set(usage) == PUBLIC_USAGE_KEYS and any(usage[key] != sums[key] for key in PUBLIC_USAGE_KEYS):
+                _add(issues, "invocation-aggregate", path + ("aggregate", "usage"))
+        if coverage == "complete" and (not turns or not isinstance(usage, dict) or set(usage) != PUBLIC_USAGE_KEYS):
+            _add(issues, "invocation-coverage", path + ("coverage",))
+        if coverage == "unavailable" and (turns or aggregate is not None):
+            _add(issues, "invocation-coverage", path + ("coverage",))
+
+
 def _check_trajectory(document: Any, issues: set[Issue], *, embedded: bool = False) -> None:
     if not isinstance(document, dict):
         return
@@ -295,6 +444,9 @@ def _check_trajectory(document: Any, issues: set[Issue], *, embedded: bool = Fal
         ):
             _add(issues, "disclosure", ("extra", "coquic", "disclosure"))
         _check_artifacts(coqui, steps, issues)
+        source = coqui.get("source")
+        if isinstance(source, dict) and "invocations" in source:
+            _check_invocations(source, coqui, issues)
     children = document.get("subagent_trajectories")
     child_ids: set[str] = set()
     if isinstance(children, list):
@@ -1242,6 +1394,41 @@ def _run_d1_cases() -> tuple[int, int]:
     print(f"D1 checks: {summary}")
     return passed, failed
 def _example() -> dict[str, Any]:
+    invocation = {
+        "invocationId": "invocation-example",
+        "taskId": "task-example",
+        "pipelineId": "pipeline-example",
+        "runId": "run-example",
+        "retryOrdinal": 0,
+        "startedAt": "2026-07-28T00:00:00Z",
+        "completedAt": "2026-07-28T00:00:01Z",
+        "model": "gpt-example",
+        "billingMode": "unknown",
+        "processOutcome": "success",
+        "coverage": "complete",
+        "issues": [],
+        "aggregate": {
+            "usage": {
+                "prompt": 11,
+                "cached": 2,
+                "uncached": 9,
+                "completion": 7,
+                "reasoning": 3,
+                "total": 18,
+            }
+        },
+        "turns": [
+            {
+                "ordinal": 1,
+                "prompt": 11,
+                "cached": 2,
+                "uncached": 9,
+                "completion": 7,
+                "reasoning": 3,
+                "total": 18,
+            }
+        ],
+    }
     return {
         "schema_version": "ATIF-v1.7",
         "agent": {"name": "codex", "version": "1"},
@@ -1289,6 +1476,7 @@ def _example() -> dict[str, Any]:
                         "ownerStepId": 2,
                     },
                 ],
+                "source": {"invocations": [invocation]},
             }
         },
     }
@@ -1296,7 +1484,31 @@ def _run_cases(validator: Draft202012Validator) -> tuple[int, int]:
     clean = _example()
     redacted = copy.deepcopy(clean)
     redacted["extra"]["coquic"]["disclosure"] = {"redactionApplied": True, "originalRetained": True}
-    positives = {"clean": clean, "redacted": redacted}
+    partial = copy.deepcopy(clean)
+    partial_invocation = copy.deepcopy(clean["extra"]["coquic"]["source"]["invocations"][0])
+    partial_invocation.update(
+        {
+            "invocationId": None,
+            "retryOrdinal": 1,
+            "startedAt": None,
+            "completedAt": None,
+            "model": None,
+            "billingMode": None,
+            "processOutcome": "interrupted",
+            "coverage": "partial",
+            "issues": [{"category": "telemetry_incomplete", "count": 1}],
+            "aggregate": None,
+            "turns": [],
+        }
+    )
+    partial["extra"]["coquic"]["source"]["invocations"].append(partial_invocation)
+    unavailable = copy.deepcopy(clean)
+    unavailable_invocation = copy.deepcopy(partial_invocation)
+    unavailable_invocation.update(
+        {"retryOrdinal": 0, "coverage": "unavailable", "processOutcome": None, "issues": [{"category": "telemetry_missing", "count": 1}]}
+    )
+    unavailable["extra"]["coquic"]["source"]["invocations"] = [unavailable_invocation]
+    positives = {"clean": clean, "redacted": redacted, "partial": partial, "unavailable": unavailable}
     negatives: dict[str, tuple[dict[str, Any], str]] = {}
     mutated = copy.deepcopy(clean); mutated["schema_version"] = "ATIF-v1.6"; negatives["schema-version"] = (mutated, "root-schema-version")
     mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["completedAt"] = None; negatives["partial-run"] = (mutated, "timing")
@@ -1308,6 +1520,21 @@ def _run_cases(validator: Draft202012Validator) -> tuple[int, int]:
     mutated = copy.deepcopy(clean); mutated["steps"][1]["message"][1]["source"]["path"] = "https://private.example/object"; negatives["private-locator"] = (mutated, "private-locator")
     mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["accessToken"] = "not printed"; negatives["token-metadata"] = (mutated, "private-field")
     mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["disclosure"]["redactionApplied"] = "false"; negatives["disclosure-type"] = (mutated, "disclosure")
+    mutated = copy.deepcopy(clean); duplicate = copy.deepcopy(mutated["extra"]["coquic"]["source"]["invocations"][0]); duplicate["retryOrdinal"] = 1; mutated["extra"]["coquic"]["source"]["invocations"].append(duplicate); negatives["invocation-duplicate"] = (mutated, "invocation-unique")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["taskId"] = "other-task"; negatives["invocation-ownership"] = (mutated, "invocation-ownership")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["model"] = "https://provider.example/model"; negatives["invocation-private-model"] = (mutated, "private-locator")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["turns"][0]["total"] = 19; negatives["invocation-turn-math"] = (mutated, "invocation-math")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["path"] = "private://telemetry"; negatives["invocation-private-shape"] = (mutated, "invocation-shape")
+    mutated = copy.deepcopy(clean); mutated["extra"]["coquic"]["source"]["invocations"][0]["aggregate"]["usage"]["total"] = 19; negatives["invocation-aggregate-math"] = (mutated, "invocation-math")
+    oversized = copy.deepcopy(clean)
+    oversized_rows = []
+    for index in range(MAX_PUBLIC_INVOCATIONS + 1):
+        row = copy.deepcopy(clean["extra"]["coquic"]["source"]["invocations"][0])
+        row["invocationId"] = f"invocation-{index}"
+        row["retryOrdinal"] = index
+        oversized_rows.append(row)
+    oversized["extra"]["coquic"]["source"]["invocations"] = oversized_rows
+    negatives["invocation-bound"] = (oversized, "invocation-bound")
     passed = 0
     failed = 0
     for name, document in positives.items():

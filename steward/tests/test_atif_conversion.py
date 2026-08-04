@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -91,6 +92,97 @@ def _documents(codex: list[dict[str, object]], *, telemetry: dict[str, object] |
         separators=(",", ":"),
     ).encode()
     return values
+
+
+def _telemetry_sidecar(
+    invocation_id: str,
+    retry_ordinal: int,
+    *,
+    outcome: str = "success",
+    completeness: str = "complete",
+    issues: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    turn = {
+        "ordinal": 1,
+        "input_tokens": 11,
+        "cached_input_tokens": 2,
+        "uncached_input_tokens": 9,
+        "output_tokens": 7,
+        "reasoning_output_tokens": 3,
+        "total_tokens": 18,
+    }
+    return {
+        "schema_version": 1,
+        "provenance": "codex_exec_jsonl",
+        "invocation_id": invocation_id,
+        "task_id": "task-convert",
+        "run_name": "run-convert",
+        "stage": "implementation",
+        "retry_ordinal": retry_ordinal,
+        "configured_model": "gpt-test",
+        "reasoning_effort": "medium",
+        "billing_mode": "unknown",
+        "started_at": "2026-07-28T12:00:00.123Z",
+        "completed_at": "2026-07-28T12:00:01.123Z",
+        "duration_ms": 1000,
+        "first_agent_message_completed_ms": 400,
+        "process_outcome": outcome,
+        "turns": [turn],
+        "aggregate": {
+            "completed_turns": 1,
+            "input_tokens": 11,
+            "cached_input_tokens": 2,
+            "uncached_input_tokens": 9,
+            "output_tokens": 7,
+            "reasoning_output_tokens": 3,
+            "total_tokens": 18,
+        },
+        "cost": {"status": "unavailable", "reason": "price unavailable"},
+        "completeness": completeness,
+        "issues": issues or [],
+    }
+
+
+def _invocation_descriptor(
+    invocation_id: str,
+    retry_ordinal: int,
+    *,
+    outcome: str = "success",
+    completeness: str = "complete",
+    availability: str = "available",
+    reason: str | None = None,
+    telemetry: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "invocationId": invocation_id,
+        "taskId": "task-convert",
+        "pipelineId": "pipeline-convert",
+        "runId": "run-convert",
+        "retryOrdinal": retry_ordinal,
+        "path": f"pipelines/pipeline-convert/runs/run-convert/telemetry{retry_ordinal}.json",
+        "availability": availability,
+        "completeness": completeness,
+        "startedAt": "2026-07-28T12:00:00.123Z" if telemetry else None,
+        "completedAt": "2026-07-28T12:00:01.123Z" if telemetry else None,
+        "byteSize": 100 if telemetry else None,
+        "contentDigest": "0" * 64 if telemetry else None,
+        "turnCount": 1 if telemetry else None,
+        "aggregate": (
+            {
+                "completed_turns": 1,
+                "input_tokens": 11,
+                "cached_input_tokens": 2,
+                "uncached_input_tokens": 9,
+                "output_tokens": 7,
+                "reasoning_output_tokens": 3,
+                "total_tokens": 18,
+            }
+            if telemetry
+            else None
+        ),
+        "reason": reason,
+        "telemetry": telemetry,
+    }
 
 
 def test_messages_tools_reasoning_and_order_are_structured() -> None:
@@ -281,6 +373,8 @@ def test_telemetry_availability_and_full_sidecar_evidence_are_preserved() -> Non
         run=_run(), documents=documents | {"telemetry.json": b'{"availability":"unavailable"}'}
     ).as_dict()
     assert unavailable["extra"]["coquic"]["source"]["telemetry"] == {"availability": "unavailable"}
+    assert unavailable["extra"]["coquic"]["source"]["invocations"][0]["coverage"] == "unavailable"
+    assert unavailable["extra"]["coquic"]["source"]["invocations"][0]["aggregate"] is None
 
     turn = {
         "ordinal": 1,
@@ -330,6 +424,118 @@ def test_telemetry_availability_and_full_sidecar_evidence_are_preserved() -> Non
     assert telemetry["duration_ms"] == 1000
     assert telemetry["cost"] == {"status": "unavailable", "reason": "no price"}
     assert "private-invocation" not in result.content.decode()
+
+
+def test_invocations_publish_ordered_retries_and_keep_missing_usage_explicit() -> None:
+    failed = _telemetry_sidecar("invocation-failed", 0, outcome="failed")
+    successful = _telemetry_sidecar("invocation-success", 2)
+    invocations: list[dict[str, object]] = [
+        _invocation_descriptor("invocation-failed", 0, outcome="failed", telemetry=failed),
+        {
+            "invocationId": None,
+            "taskId": "task-convert",
+            "pipelineId": "pipeline-convert",
+            "runId": "run-convert",
+            "retryOrdinal": 1,
+            "path": "pipelines/pipeline-convert/runs/run-convert/telemetry-unavailable-2.json",
+            "availability": "partial",
+            "completeness": "unavailable",
+            "startedAt": None,
+            "completedAt": None,
+            "byteSize": None,
+            "contentDigest": None,
+            "turnCount": None,
+            "aggregate": None,
+            "reason": "telemetry_unavailable",
+            "telemetry": None,
+        },
+        _invocation_descriptor("invocation-success", 2, telemetry=successful),
+    ]
+    document = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}]),
+        invocations=invocations,
+    ).as_dict()
+    public = document["extra"]["coquic"]["source"]["invocations"]
+    assert [item["retryOrdinal"] for item in public] == [0, 1, 2]
+    assert [item["coverage"] for item in public] == ["complete", "unavailable", "complete"]
+    assert [item["processOutcome"] for item in public] == ["failed", None, "success"]
+    assert public[1]["aggregate"] is None
+    assert public[0]["aggregate"] == {
+        "usage": {"cached": 2, "completion": 7, "prompt": 11, "reasoning": 3, "total": 18, "uncached": 9}
+    }
+    assert "path" not in public[0]
+    assert "telemetry" not in public[0]
+    assert "extra" not in document["final_metrics"]
+    assert "telemetry_unavailable" in document["extra"]["coquic"]["source"]["invocations"][1]["issues"][0]["category"]
+
+
+def test_partial_invocation_keeps_known_turn_usage_without_fabricating_zero() -> None:
+    partial = _telemetry_sidecar(
+        "invocation-partial",
+        0,
+        outcome="interrupted",
+        completeness="partial",
+        issues=[{"category": "capture_incomplete", "count": 1}],
+    )
+    descriptor = _invocation_descriptor(
+        "invocation-partial",
+        0,
+        outcome="interrupted",
+        completeness="partial",
+        availability="partial",
+        reason="telemetry_incomplete",
+        telemetry=partial,
+    )
+    public = convert_completed_run(
+        run=_run(),
+        documents=_documents([{"type": "agent_message", "text": "complete"}]),
+        invocations=[descriptor],
+    ).as_dict()["extra"]["coquic"]["source"]["invocations"][0]
+    assert public["coverage"] == "partial"
+    assert public["aggregate"] == {
+        "usage": {"cached": 2, "completion": 7, "prompt": 11, "reasoning": 3, "total": 18, "uncached": 9}
+    }
+    assert public["turns"] == [
+        {"ordinal": 1, "prompt": 11, "cached": 2, "uncached": 9, "completion": 7, "reasoning": 3, "total": 18}
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "cross-task", "private-model", "bad-turn-math"])
+def test_invalid_invocation_evidence_fails_closed(mutation: str) -> None:
+    telemetry = _telemetry_sidecar("invocation-one", 0)
+    descriptor = _invocation_descriptor("invocation-one", 0, telemetry=telemetry)
+    values: list[dict[str, object]] = [descriptor]
+    if mutation == "duplicate":
+        second = copy.deepcopy(descriptor)
+        second["retryOrdinal"] = 1
+        second["telemetry"] = _telemetry_sidecar("invocation-one", 1)
+        values.append(second)
+    elif mutation == "cross-task":
+        descriptor["taskId"] = "other-task"
+    elif mutation == "private-model":
+        telemetry["configured_model"] = "https://provider.example/model"
+    elif mutation == "bad-turn-math":
+        turns = telemetry["turns"]
+        assert isinstance(turns, list)
+        turns[0]["total_tokens"] = 19
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents([{"type": "agent_message", "text": "complete"}]),
+            invocations=values,
+        )
+    assert error.value.code in {ReasonCode.invalid_metadata, ReasonCode.unsafe_content}
+
+
+def test_oversized_invocation_evidence_fails_closed() -> None:
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents([{"type": "agent_message", "text": "complete"}]),
+            invocations=[{}] * 129,
+        )
+    assert error.value.code == ReasonCode.oversized
 
 
 def test_runtime_semantics_reject_artifact_reference_in_wrong_step() -> None:

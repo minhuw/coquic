@@ -45,6 +45,10 @@ SUPPORTED_IMAGE_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
 _MAX_RECORDS = 100_000
 _MAX_TEXT = 64 * 1024 * 1024
 _MAX_SOURCE_FACTS = 4_096
+_MAX_INVOCATIONS = 128
+_MAX_INVOCATION_TURNS = 4_096
+_MAX_INVOCATION_TOKENS = 10**15
+_MAX_INVOCATION_ISSUES = 32
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_NAME_RE = re.compile(
@@ -100,12 +104,17 @@ class AtifSource:
     run: RunMetadata | Mapping[str, Any] | None = None
     documents: Mapping[str, Any] | Sequence[Any] = field(default_factory=dict)
     artifacts: tuple[LogicalArtifact, ...] = ()
+    invocations: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         values = tuple(self.artifacts)
         if any(not isinstance(item, LogicalArtifact) for item in values):
             raise AtifConversionError(ReasonCode.invalid_metadata)
         object.__setattr__(self, "artifacts", values)
+        invocations = tuple(self.invocations)
+        if len(invocations) > _MAX_INVOCATIONS:
+            raise AtifConversionError(ReasonCode.oversized)
+        object.__setattr__(self, "invocations", invocations)
 
 
 # Names used by different publication callers all describe the same source
@@ -1400,9 +1409,11 @@ def _coerce_source(
     telemetry: Any = _MISSING,
     run_document: Any = _MISSING,
     artifacts: Any = None,
-) -> tuple[RunMetadata, dict[str, Any], tuple[LogicalArtifact, ...]]:
+    invocations: Any = _MISSING,
+) -> tuple[RunMetadata, dict[str, Any], tuple[LogicalArtifact, ...], tuple[Any, ...]]:
     selected = snapshot if snapshot is not None else source
     source_artifacts: tuple[LogicalArtifact, ...] = ()
+    source_invocations: tuple[Any, ...] = ()
     if isinstance(selected, PublicationSnapshot):
         selected_run: Any = selected.run
         selected_documents = _documents_from(selected)
@@ -1411,10 +1422,16 @@ def _coerce_source(
         selected_run = selected.run
         selected_documents = _documents_from(selected.documents)
         source_artifacts = tuple(selected.artifacts)
+        source_invocations = tuple(selected.invocations)
     elif isinstance(selected, Mapping) and any(key in selected for key in ("run", "documents", "codex", "activities", "telemetry", "run_document")):
         selected_run = selected.get("run")
         selected_documents = _documents_from(selected.get("documents"))
         source_artifacts = tuple(selected.get("artifacts") or ())
+        raw_invocations = selected.get("invocations", _MISSING)
+        if raw_invocations is not _MISSING and raw_invocations is not None:
+            if isinstance(raw_invocations, (str, bytes, bytearray)) or not isinstance(raw_invocations, Sequence):
+                _fail(ReasonCode.invalid_metadata)
+            source_invocations = tuple(raw_invocations)
         if codex is _MISSING:
             codex = selected.get("codex", _MISSING)
         if activities is _MISSING:
@@ -1435,6 +1452,18 @@ def _coerce_source(
             selected_documents[name] = value
     if artifacts is not None:
         source_artifacts = tuple(artifacts)
+    if invocations is not _MISSING and invocations is not None:
+        if isinstance(invocations, (str, bytes, bytearray)) or not isinstance(invocations, Sequence):
+            _fail(ReasonCode.invalid_metadata)
+        source_invocations = tuple(invocations)
+    if not source_invocations and isinstance(selected_run, Mapping):
+        raw_invocations = selected_run.get("invocations")
+        if raw_invocations is not None:
+            if isinstance(raw_invocations, (str, bytes, bytearray)) or not isinstance(raw_invocations, Sequence):
+                _fail(ReasonCode.invalid_metadata)
+            source_invocations = tuple(raw_invocations)
+    if len(source_invocations) > _MAX_INVOCATIONS:
+        _fail(ReasonCode.oversized)
     if any(not isinstance(item, LogicalArtifact) for item in source_artifacts):
         _fail(ReasonCode.invalid_metadata)
     run_value = selected_run
@@ -1452,7 +1481,7 @@ def _coerce_source(
         _fail(ReasonCode.invalid_metadata)
     if metadata.state == "running":
         _fail(ReasonCode.partial)
-    return metadata, selected_documents, source_artifacts
+    return metadata, selected_documents, source_artifacts, source_invocations
 
 
 def _artifact_states(
@@ -1545,6 +1574,7 @@ def _source_facts(
     activities: Sequence[Mapping[str, Any]],
     telemetry: Mapping[str, Any] | None,
     run_document: Mapping[str, Any] | None,
+    invocations: Sequence[Mapping[str, Any]],
     *,
     activity_state: str = "available",
 ) -> dict[str, Any]:
@@ -1578,6 +1608,7 @@ def _source_facts(
     else:
         facts["activities"] = {"availability": "available", "recordCount": 0, "events": []}
     facts["telemetry"] = _telemetry_public(telemetry)
+    facts["invocations"] = [dict(item) for item in invocations]
     if run_document is not None:
         selected = {key: run_document[key] for key in ("role", "state", "roleOrdinal", "result", "exit") if key in run_document}
         # Exit reasons and result summaries are evidence, but not private paths.
@@ -1650,8 +1681,8 @@ def _validate_telemetry(value: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(provenance, str) or not provenance or len(provenance) > 128:
         _fail(ReasonCode.invalid_metadata)
     completeness = value.get("completeness")
-    if completeness != "complete":
-        _fail(ReasonCode.partial if completeness == "partial" else ReasonCode.invalid_metadata)
+    if completeness not in {"complete", "partial"}:
+        _fail(ReasonCode.invalid_metadata)
 
     full_sidecar = any(
         key in value
@@ -1840,6 +1871,305 @@ def _telemetry_public(value: Mapping[str, Any] | None) -> dict[str, Any]:
     return _safe_source(result)
 
 
+_PUBLIC_USAGE_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("input_tokens", "prompt"),
+    ("cached_input_tokens", "cached"),
+    ("uncached_input_tokens", "uncached"),
+    ("output_tokens", "completion"),
+    ("reasoning_output_tokens", "reasoning"),
+    ("total_tokens", "total"),
+)
+_INVOCATION_DESCRIPTOR_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "invocationId",
+        "taskId",
+        "pipelineId",
+        "runId",
+        "retryOrdinal",
+        "path",
+        "availability",
+        "completeness",
+        "startedAt",
+        "completedAt",
+        "byteSize",
+        "contentDigest",
+        "turnCount",
+        "aggregate",
+        "reason",
+        "telemetry",
+    }
+)
+
+
+def _invocation_mapping(value: object) -> dict[str, Any]:
+    """Detach one archive-owned invocation without importing archive code."""
+
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items()}
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            mapped = to_dict(include_telemetry=True)
+        except (TypeError, ValueError, AttributeError):
+            _fail(ReasonCode.invalid_metadata)
+        if isinstance(mapped, Mapping):
+            return {str(key): item for key, item in mapped.items()}
+    _fail(ReasonCode.invalid_metadata)
+
+
+def _bounded_public_text(value: object, *, allow_none: bool = True, maximum: int = 256) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        _fail(ReasonCode.invalid_metadata)
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        _fail(ReasonCode.invalid_metadata)
+    if _PRIVATE_VALUE_RE.search(value):
+        _fail(ReasonCode.unsafe_content)
+    return value
+
+
+def _invocation_usage_public(value: Mapping[str, Any] | None) -> dict[str, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    usage: dict[str, int] = {}
+    for source_key, public_key in _PUBLIC_USAGE_FIELDS:
+        if source_key not in value or value[source_key] is None:
+            continue
+        number = _metric(value[source_key])
+        if number is None or number > _MAX_INVOCATION_TOKENS:
+            _fail(ReasonCode.oversized if number is not None else ReasonCode.invalid_metadata)
+        usage[public_key] = number
+    if usage:
+        prompt = usage.get("prompt")
+        cached = usage.get("cached")
+        uncached = usage.get("uncached")
+        completion = usage.get("completion")
+        reasoning = usage.get("reasoning")
+        total = usage.get("total")
+        if prompt is not None and cached is not None and cached > prompt:
+            _fail(ReasonCode.invalid_metadata)
+        if prompt is not None and cached is not None and uncached is not None and uncached != prompt - cached:
+            _fail(ReasonCode.invalid_metadata)
+        if completion is not None and reasoning is not None and reasoning > completion:
+            _fail(ReasonCode.invalid_metadata)
+        if prompt is not None and completion is not None and total is not None and total != prompt + completion:
+            _fail(ReasonCode.invalid_metadata)
+        return usage
+    return None
+
+
+def _invocation_turn_public(value: Mapping[str, Any]) -> dict[str, int]:
+    required = {"ordinal", *(source_key for source_key, _ in _PUBLIC_USAGE_FIELDS)}
+    if set(value) != required:
+        _fail(ReasonCode.invalid_metadata)
+    ordinal = value.get("ordinal")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 1 or ordinal > _MAX_INVOCATION_TURNS:
+        _fail(ReasonCode.invalid_metadata)
+    usage = _invocation_usage_public(value)
+    if usage is None or set(usage) != {public_key for _, public_key in _PUBLIC_USAGE_FIELDS}:
+        _fail(ReasonCode.invalid_metadata)
+    return {"ordinal": ordinal, **usage}
+
+
+def _invocation_issues(value: object, reason: object = None) -> list[dict[str, Any]]:
+    selected: dict[str, int] = {}
+    if value is not None:
+        if not isinstance(value, list) or len(value) > _MAX_INVOCATION_ISSUES:
+            _fail(ReasonCode.invalid_metadata)
+        for issue in value:
+            if not isinstance(issue, Mapping) or set(issue) != {"category", "count"}:
+                _fail(ReasonCode.invalid_metadata)
+            category = _bounded_public_text(issue.get("category"), allow_none=False, maximum=80)
+            count = _metric(issue.get("count"))
+            if category is None or count is None or count < 1:
+                _fail(ReasonCode.invalid_metadata)
+            selected[category] = selected.get(category, 0) + count
+    if reason is not None:
+        category = _bounded_public_text(reason, allow_none=False, maximum=96)
+        if category is None:
+            _fail(ReasonCode.invalid_metadata)
+        selected[category] = selected.get(category, 0) + 1
+    if len(selected) > _MAX_INVOCATION_ISSUES:
+        _fail(ReasonCode.oversized)
+    return [{"category": key, "count": selected[key]} for key in sorted(selected)]
+
+
+def _invocation_telemetry_identity(
+    descriptor: Mapping[str, Any], telemetry: Mapping[str, Any]
+) -> None:
+    for descriptor_key, telemetry_key in (
+        ("invocationId", "invocation_id"),
+        ("taskId", "task_id"),
+        ("retryOrdinal", "retry_ordinal"),
+        ("runId", "run_name"),
+    ):
+        expected = descriptor.get(descriptor_key)
+        actual = telemetry.get(telemetry_key)
+        if actual is not None and expected is not None and actual != expected:
+            _fail(ReasonCode.invalid_metadata)
+
+
+def _normalize_invocations(
+    metadata: RunMetadata,
+    values: Sequence[Any],
+    *,
+    fallback_telemetry: Mapping[str, Any] | None,
+) -> tuple[tuple[dict[str, Any], ...], bool]:
+    """Validate authenticated archive descriptors and emit public evidence."""
+
+    explicit = bool(values)
+    selected_values = tuple(values)
+    synthetic_values = not selected_values
+    if not selected_values:
+        synthetic: dict[str, Any] = {
+            "invocationId": None,
+            "taskId": metadata.identity.task_id,
+            "pipelineId": metadata.identity.pipeline_id,
+            "runId": metadata.identity.run_id,
+            "retryOrdinal": 0,
+            "availability": "partial" if fallback_telemetry is None else "available",
+            "completeness": "unavailable" if fallback_telemetry is None else "complete",
+            "startedAt": None,
+            "completedAt": None,
+            "aggregate": None,
+            "reason": "telemetry_missing" if fallback_telemetry is None else None,
+            "telemetry": fallback_telemetry,
+        }
+        selected_values = (synthetic,)
+
+    if len(selected_values) > _MAX_INVOCATIONS:
+        _fail(ReasonCode.oversized)
+    result: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    previous_ordinal: int | None = None
+    for raw_value in selected_values:
+        descriptor = _invocation_mapping(raw_value)
+        # A raw sidecar is accepted only at this private boundary.  It is
+        # wrapped in a descriptor and never copied into the public document.
+        if "invocationId" not in descriptor and "invocation_id" in descriptor:
+            telemetry_value = descriptor
+            descriptor = {
+                "invocationId": telemetry_value.get("invocation_id"),
+                "taskId": telemetry_value.get("task_id", metadata.identity.task_id),
+                "pipelineId": metadata.identity.pipeline_id,
+                "runId": metadata.identity.run_id,
+                "retryOrdinal": telemetry_value.get("retry_ordinal", 0),
+                "availability": "available",
+                "completeness": telemetry_value.get("completeness", "complete"),
+                "startedAt": telemetry_value.get("started_at"),
+                "completedAt": telemetry_value.get("completed_at"),
+                "aggregate": telemetry_value.get("aggregate"),
+                "reason": None,
+                "telemetry": telemetry_value,
+            }
+        if set(descriptor) - _INVOCATION_DESCRIPTOR_KEYS:
+            _fail(ReasonCode.invalid_metadata)
+        task_id = descriptor.get("taskId")
+        pipeline_id = descriptor.get("pipelineId")
+        run_id = descriptor.get("runId")
+        if task_id != metadata.identity.task_id or pipeline_id != metadata.identity.pipeline_id or run_id != metadata.identity.run_id:
+            _fail(ReasonCode.invalid_metadata)
+        invocation_id = descriptor.get("invocationId")
+        if invocation_id is not None:
+            invocation_id = _safe_id(invocation_id)
+            if invocation_id in seen_ids:
+                _fail(ReasonCode.invalid_metadata)
+            seen_ids.add(invocation_id)
+        retry_ordinal = descriptor.get("retryOrdinal")
+        if isinstance(retry_ordinal, bool) or not isinstance(retry_ordinal, int) or retry_ordinal < 0 or retry_ordinal >= _MAX_INVOCATIONS:
+            _fail(ReasonCode.invalid_metadata)
+        if previous_ordinal is not None and retry_ordinal <= previous_ordinal:
+            _fail(ReasonCode.invalid_metadata)
+        if retry_ordinal != len(result):
+            _fail(ReasonCode.invalid_metadata)
+        previous_ordinal = retry_ordinal
+        availability = descriptor.get("availability")
+        completeness = descriptor.get("completeness")
+        if availability not in {"available", "partial"} or completeness not in {"complete", "partial", "unavailable"}:
+            _fail(ReasonCode.invalid_metadata)
+        for key in ("startedAt", "completedAt"):
+            if descriptor.get(key) is not None:
+                _timestamp(descriptor[key])
+        if (descriptor.get("startedAt") is None) != (descriptor.get("completedAt") is None):
+            _fail(ReasonCode.invalid_metadata)
+        raw_aggregate = descriptor.get("aggregate")
+        descriptor_aggregate: dict[str, int | None] | None = None
+        if raw_aggregate is not None:
+            descriptor_aggregate = _validate_telemetry_aggregate(raw_aggregate, turns_present=False)
+        raw_telemetry = descriptor.get("telemetry")
+        telemetry_value: Mapping[str, Any] | None = None
+        if raw_telemetry is not None:
+            if not isinstance(raw_telemetry, Mapping):
+                _fail(ReasonCode.invalid_metadata)
+            telemetry_value = _validate_telemetry(dict(raw_telemetry))
+            if not synthetic_values:
+                _invocation_telemetry_identity(descriptor, telemetry_value)
+        turns: list[dict[str, int]] = []
+        usage: dict[str, int] | None = None
+        model: str | None = None
+        billing_mode: str | None = None
+        process_outcome: str | None = None
+        issues_value: object = None
+        if telemetry_value is not None and telemetry_value.get("availability") != "unavailable":
+            raw_turns = telemetry_value.get("turns")
+            if isinstance(raw_turns, list):
+                if len(raw_turns) > _MAX_INVOCATION_TURNS:
+                    _fail(ReasonCode.oversized)
+                turns = [_invocation_turn_public(turn) for turn in raw_turns if isinstance(turn, Mapping)]
+                if len(turns) != len(raw_turns):
+                    _fail(ReasonCode.invalid_metadata)
+            aggregate_value = telemetry_value.get("aggregate")
+            if isinstance(aggregate_value, Mapping):
+                usage = _invocation_usage_public(aggregate_value)
+            model = _bounded_public_text(telemetry_value.get("configured_model"))
+            billing_mode = _bounded_public_text(telemetry_value.get("billing_mode"), maximum=32)
+            process_outcome = _bounded_public_text(telemetry_value.get("process_outcome"), maximum=48)
+            issues_value = telemetry_value.get("issues")
+        if usage is None and descriptor_aggregate is not None:
+            usage = _invocation_usage_public(descriptor_aggregate)
+        if usage is not None and turns:
+            expected = {key: sum(turn[key] for turn in turns) for key in ("prompt", "cached", "uncached", "completion", "reasoning", "total")}
+            if usage != expected:
+                _fail(ReasonCode.invalid_metadata)
+        if descriptor_aggregate is not None and usage is not None:
+            descriptor_public = _invocation_usage_public(descriptor_aggregate)
+            if descriptor_public is not None and any(descriptor_public.get(key) != value for key, value in usage.items() if key in descriptor_public):
+                _fail(ReasonCode.invalid_metadata)
+        if telemetry_value is not None and telemetry_value.get("availability") == "unavailable":
+            coverage = "unavailable"
+        elif completeness == "unavailable":
+            coverage = "unavailable"
+        elif completeness == "partial" or availability == "partial":
+            coverage = "partial"
+        elif telemetry_value is None:
+            coverage = "unavailable"
+        elif not turns:
+            coverage = "partial"
+        else:
+            coverage = "complete"
+        if coverage == "complete" and usage is None:
+            _fail(ReasonCode.invalid_metadata)
+        public = {
+            "invocationId": invocation_id,
+            "taskId": task_id,
+            "pipelineId": pipeline_id,
+            "runId": run_id,
+            "retryOrdinal": retry_ordinal,
+            "startedAt": descriptor.get("startedAt"),
+            "completedAt": descriptor.get("completedAt"),
+            "model": model,
+            "billingMode": billing_mode,
+            "processOutcome": process_outcome,
+            "coverage": coverage,
+            "issues": _invocation_issues(issues_value, descriptor.get("reason")),
+            "aggregate": {"usage": usage} if usage else None,
+            "turns": turns,
+        }
+        result.append(_safe_source(public))
+    return tuple(result), explicit
+
+
 def _validate_telemetry_against_run(metadata: RunMetadata, telemetry: Mapping[str, Any]) -> None:
     if telemetry.get("availability") == "unavailable":
         return
@@ -1861,10 +2191,17 @@ def _validate_telemetry_against_run(metadata: RunMetadata, telemetry: Mapping[st
                 break
 
 
-def _final_metrics(metadata: RunMetadata, telemetry: Mapping[str, Any] | None, step_count: int) -> dict[str, Any] | None:
+def _final_metrics(
+    metadata: RunMetadata,
+    telemetry: Mapping[str, Any] | None,
+    step_count: int,
+    invocations: Sequence[Mapping[str, Any]] = (),
+    *,
+    invocations_explicit: bool = False,
+) -> dict[str, Any] | None:
     usage = metadata.usage
     aggregate = telemetry.get("aggregate") if isinstance(telemetry, Mapping) else None
-    if usage is None and isinstance(aggregate, Mapping):
+    if usage is None and isinstance(aggregate, Mapping) and not invocations_explicit:
         usage = UsageSummary(
             prompt_tokens=_optional_counter(aggregate, "input_tokens", "prompt_tokens"),
             completion_tokens=_optional_counter(aggregate, "output_tokens", "completion_tokens"),
@@ -1887,10 +2224,24 @@ def _final_metrics(metadata: RunMetadata, telemetry: Mapping[str, Any] | None, s
             usage_values["reasoning"] = usage.reasoning_output_tokens
         if usage.total_tokens is not None:
             usage_values["total"] = usage.total_tokens
-    if isinstance(telemetry, Mapping):
-        cost = telemetry.get("cost")
-        if isinstance(cost, Mapping) and cost.get("status") == "estimated" and isinstance(cost.get("micro_usd"), int):
-            usage_values["costUsd"] = cost["micro_usd"] / 1_000_000
+    if invocations_explicit:
+        complete_usage = []
+        for invocation in invocations:
+            aggregate_value = invocation.get("aggregate")
+            usage_value = aggregate_value.get("usage") if isinstance(aggregate_value, Mapping) else None
+            if not isinstance(usage_value, Mapping) or set(usage_value) != {"prompt", "cached", "uncached", "completion", "reasoning", "total"}:
+                complete_usage = []
+                break
+            complete_usage.append(usage_value)
+        if complete_usage:
+            usage_values = {
+                key: sum(int(item[key]) for item in complete_usage)
+                for key in ("prompt", "cached", "completion", "reasoning", "total")
+            }
+        else:
+            usage_values = {}
+    # Captured sidecar cost is provenance only.  The price projection owns
+    # estimated cost and must never be copied into immutable ATIF metrics.
     if usage_values:
         values["extra"] = {"usage": usage_values}
     return values or None
@@ -1902,6 +2253,9 @@ def _root_document(
     artifacts: Mapping[str, _ArtifactState],
     source_facts: Mapping[str, Any],
     telemetry: Mapping[str, Any] | None,
+    invocations: Sequence[Mapping[str, Any]] = (),
+    *,
+    invocations_explicit: bool = False,
 ) -> dict[str, Any]:
     if any(not item.referenced for item in artifacts.values()):
         # Every logical descriptor must have an owning step reference.  Attach
@@ -1947,7 +2301,13 @@ def _root_document(
         "steps": steps,
         "extra": {"coquic": provenance},
     }
-    metrics = _final_metrics(metadata, telemetry, len(steps))
+    metrics = _final_metrics(
+        metadata,
+        telemetry,
+        len(steps),
+        invocations,
+        invocations_explicit=invocations_explicit,
+    )
     if metrics:
         document["final_metrics"] = metrics
     return document
@@ -1986,6 +2346,9 @@ def _semantic_issues(document: Mapping[str, Any]) -> list[str]:
     if not isinstance(coqui, Mapping):
         issues.append("provenance-shape")
         return issues
+    source = coqui.get("source")
+    if isinstance(source, Mapping) and "invocations" in source:
+        _semantic_invocation_issues(source.get("invocations"), coqui, issues)
     required = {"taskId", "pipelineId", "runId", "role", "startedAt", "completedAt", "durationMs", "disclosure", "artifacts"}
     issues.extend(f"provenance-field:{field}" for field in sorted(required - set(coqui)))
     disclosure = coqui.get("disclosure")
@@ -2039,6 +2402,152 @@ def _semantic_issues(document: Mapping[str, Any]) -> list[str]:
         issues.extend("artifact-unreferenced" for artifact_id in artifact_map if artifact_id not in referenced)
     _semantic_private_scan(document, issues)
     return issues
+
+
+def _semantic_invocation_issues(
+    value: object, provenance: Mapping[str, Any], issues: list[str]
+) -> None:
+    required = {
+        "invocationId",
+        "taskId",
+        "pipelineId",
+        "runId",
+        "retryOrdinal",
+        "startedAt",
+        "completedAt",
+        "model",
+        "billingMode",
+        "processOutcome",
+        "coverage",
+        "issues",
+        "aggregate",
+        "turns",
+    }
+    if not isinstance(value, list) or len(value) > _MAX_INVOCATIONS:
+        issues.append("invocation-shape")
+        return
+    seen_ids: set[str] = set()
+    for index, invocation in enumerate(value):
+        prefix = f"invocation:{index}"
+        if not isinstance(invocation, Mapping) or set(invocation) != required:
+            issues.append(f"{prefix}-shape")
+            continue
+        for key in ("taskId", "pipelineId", "runId"):
+            if invocation.get(key) != provenance.get(key):
+                issues.append(f"{prefix}-ownership")
+        invocation_id = invocation.get("invocationId")
+        if invocation_id is not None:
+            if not isinstance(invocation_id, str) or not _ID_RE.fullmatch(invocation_id):
+                issues.append(f"{prefix}-id")
+            elif invocation_id in seen_ids:
+                issues.append(f"{prefix}-duplicate")
+            else:
+                seen_ids.add(invocation_id)
+        ordinal = invocation.get("retryOrdinal")
+        if type(ordinal) is not int or ordinal != index or ordinal < 0:
+            issues.append(f"{prefix}-ordinal")
+        coverage = invocation.get("coverage")
+        if coverage not in {"complete", "partial", "unavailable"}:
+            issues.append(f"{prefix}-coverage")
+        timestamps: dict[str, str | None] = {}
+        for key in ("startedAt", "completedAt"):
+            timestamp = invocation.get(key)
+            timestamps[key] = _timestamp(timestamp) if timestamp is not None else None
+            if timestamp is not None and timestamps[key] is None:
+                issues.append(f"{prefix}-timing")
+        if (invocation.get("startedAt") is None) != (invocation.get("completedAt") is None):
+            issues.append(f"{prefix}-timing")
+        if (
+            timestamps["startedAt"] is not None
+            and timestamps["completedAt"] is not None
+            and timestamps["completedAt"] < timestamps["startedAt"]
+        ):
+            issues.append(f"{prefix}-timing-order")
+        billing_mode = invocation.get("billingMode")
+        if billing_mode is not None and billing_mode not in {"unknown", "chatgpt", "api"}:
+            issues.append(f"{prefix}-billing")
+        for key in ("model", "processOutcome"):
+            item = invocation.get(key)
+            maximum = 256 if key == "model" else 48
+            if item is not None and (not isinstance(item, str) or not item or len(item) > maximum):
+                issues.append(f"{prefix}-{key}")
+        raw_issues = invocation.get("issues")
+        if not isinstance(raw_issues, list) or len(raw_issues) > _MAX_INVOCATION_ISSUES:
+            issues.append(f"{prefix}-issues")
+        else:
+            categories: set[str] = set()
+            for issue in raw_issues:
+                if (
+                    not isinstance(issue, Mapping)
+                    or set(issue) != {"category", "count"}
+                    or not isinstance(issue.get("category"), str)
+                    or not issue.get("category")
+                    or len(issue.get("category", "")) > 96
+                    or issue.get("category") in categories
+                    or type(issue.get("count")) is not int
+                    or issue.get("count", 0) < 1
+                    or issue.get("count", 0) > _MAX_INVOCATION_TOKENS
+                ):
+                    issues.append(f"{prefix}-issues")
+                else:
+                    categories.add(issue["category"])
+        turns = invocation.get("turns")
+        if not isinstance(turns, list) or len(turns) > _MAX_INVOCATION_TURNS:
+            issues.append(f"{prefix}-turns")
+            turns = []
+        aggregate = invocation.get("aggregate")
+        usage = aggregate.get("usage") if isinstance(aggregate, Mapping) else None
+        if aggregate is not None and (not isinstance(aggregate, Mapping) or set(aggregate) != {"usage"} or not isinstance(usage, Mapping)):
+            issues.append(f"{prefix}-aggregate")
+            usage = None
+        if isinstance(usage, Mapping):
+            allowed = {"prompt", "cached", "uncached", "completion", "reasoning", "total"}
+            if set(usage) - allowed or any(
+                type(item) is not int or item < 0 or item > _MAX_INVOCATION_TOKENS
+                for item in usage.values()
+            ):
+                issues.append(f"{prefix}-aggregate")
+            prompt = usage.get("prompt")
+            cached = usage.get("cached")
+            uncached = usage.get("uncached")
+            completion = usage.get("completion")
+            reasoning = usage.get("reasoning")
+            total = usage.get("total")
+            if prompt is not None and cached is not None and cached > prompt:
+                issues.append(f"{prefix}-math")
+            if prompt is not None and cached is not None and uncached is not None and uncached != prompt - cached:
+                issues.append(f"{prefix}-math")
+            if completion is not None and reasoning is not None and reasoning > completion:
+                issues.append(f"{prefix}-math")
+            if prompt is not None and completion is not None and total is not None and total != prompt + completion:
+                issues.append(f"{prefix}-math")
+        if turns:
+            sums = {key: 0 for key in ("prompt", "cached", "uncached", "completion", "reasoning", "total")}
+            turn_keys = {"ordinal", *sums}
+            for turn_index, turn in enumerate(turns, start=1):
+                if (
+                    not isinstance(turn, Mapping)
+                    or set(turn) != turn_keys
+                    or turn.get("ordinal") != turn_index
+                    or any(
+                        type(turn.get(key)) is not int
+                        or turn.get(key) < 0
+                        or turn.get(key) > _MAX_INVOCATION_TOKENS
+                        for key in sums
+                    )
+                ):
+                    issues.append(f"{prefix}-turn")
+                    continue
+                if turn["cached"] > turn["prompt"] or turn["uncached"] != turn["prompt"] - turn["cached"] or turn["reasoning"] > turn["completion"] or turn["total"] != turn["prompt"] + turn["completion"]:
+                    issues.append(f"{prefix}-math")
+                for key in sums:
+                    sums[key] += turn[key]
+            if isinstance(usage, Mapping) and all(key in usage for key in sums) and any(usage[key] != sums[key] for key in sums):
+                issues.append(f"{prefix}-aggregate")
+        if coverage == "complete" and (not turns or not isinstance(usage, Mapping) or set(usage) != {"prompt", "cached", "uncached", "completion", "reasoning", "total"}):
+            issues.append(f"{prefix}-coverage")
+        if coverage == "unavailable" and (turns or aggregate is not None):
+            issues.append(f"{prefix}-coverage")
 
 
 def _collect_image_refs(
@@ -2113,10 +2622,11 @@ def convert_completed_run(
     telemetry: Any = _MISSING,
     run_document: Any = _MISSING,
     artifacts: Any = None,
+    invocations: Any = _MISSING,
 ) -> AtifDocument:
     """Convert one complete terminal run into validated canonical ATIF bytes."""
 
-    metadata, source_documents, source_artifacts = _coerce_source(
+    metadata, source_documents, source_artifacts, source_invocations = _coerce_source(
         source,
         snapshot=snapshot,
         run=run,
@@ -2126,6 +2636,7 @@ def convert_completed_run(
         telemetry=telemetry,
         run_document=run_document,
         artifacts=artifacts,
+        invocations=invocations,
     )
     required_documents = ("codex.jsonl", "activities.jsonl", "telemetry.json", "run.json")
     selected_values = {name: _pick_document(source_documents, name) for name in required_documents}
@@ -2156,7 +2667,7 @@ def convert_completed_run(
         if run_document is not _MISSING
         else None
     )
-    if any(value is _MISSING for value in selected_values.values()) or telemetry_value is None or run_doc is None:
+    if any(value is _MISSING for name, value in selected_values.items() if name != "telemetry.json") or run_doc is None:
         _fail(ReasonCode.partial)
     # A supplied run.json is a second immutable identity witness.  It may add
     # evidence, but cannot turn a partial/running source into a completed one.
@@ -2183,7 +2694,13 @@ def convert_completed_run(
             _fail(ReasonCode.invalid_metadata)
         if "durationMs" in run_doc and run_doc["durationMs"] != metadata.duration_ms:
             _fail(ReasonCode.invalid_metadata)
-    _validate_telemetry_against_run(metadata, telemetry_value)
+    if telemetry_value is not None:
+        _validate_telemetry_against_run(metadata, telemetry_value)
+    public_invocations, invocations_explicit = _normalize_invocations(
+        metadata,
+        source_invocations,
+        fallback_telemetry=telemetry_value,
+    )
     states = _artifact_states(source_artifacts, step_count=1)
     steps, _calls, _unpaired, mapped_steps = _map_steps(records, artifacts=states)
     # Resolve source identities after mapping, when contiguous step IDs are final.
@@ -2200,9 +2717,18 @@ def convert_completed_run(
         activity_records,
         telemetry_value,
         run_doc,
+        public_invocations,
         activity_state=activity_state,
     )
-    document = _root_document(metadata, steps, states, source_facts, telemetry_value)
+    document = _root_document(
+        metadata,
+        steps,
+        states,
+        source_facts,
+        telemetry_value,
+        public_invocations,
+        invocations_explicit=invocations_explicit,
+    )
     validate_atif_document(document)
     content = canonical_atif_bytes(document)
     # Validate the exact bytes as a final guard against a non-canonical custom

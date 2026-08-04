@@ -2072,11 +2072,18 @@ def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_e
     )
 
     repaired = replace(_repaired_generation(), run_id="run-2")
-    reopened = store.enqueue_publication(repaired)
+    ordinary = store.enqueue_publication(repaired)
+    assert ordinary.status is PublicationOperationStatus.precondition
+    assert ordinary.fence is not None
+    assert ordinary.fence.state is PublicationHideState.confirmed
+    assert store.get_publication_generation(original.publication_id).state is PublicationState.exposed
+    assert store.get_publication_generation(repaired.publication_id) is None
+    assert store.get_publication_hide(original.task_id).state is PublicationHideState.confirmed
+
+    reopened = store.replace_blocked_publication(original.publication_id, repaired)
     assert reopened.status is PublicationOperationStatus.enqueued
     assert reopened.fence is not None
     assert reopened.fence.state is PublicationHideState.released
-    assert store.get_publication_generation(original.publication_id).state is PublicationState.exposed
     assert store.get_publication_generation(repaired.publication_id).state is PublicationState.queued
     assert store.get_publication_hide(original.task_id).state is PublicationHideState.released
 

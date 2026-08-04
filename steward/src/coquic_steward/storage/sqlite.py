@@ -2424,26 +2424,16 @@ class SQLiteTaskStore:
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             fence = _publication_hide_fence_from_connection(connection, value.task_id)
-            reopening = False
             if fence is not None:
-                if fence.state is not PublicationHideState.confirmed:
-                    connection.commit()
-                    return PublicationOperationResult(
-                        PublicationOperationStatus.precondition,
-                        reason=fence.reason,
-                        fence=fence,
-                    )
-                if (
-                    fence.generation_boundary is not None
-                    and value.generation_boundary == fence.generation_boundary
-                ):
-                    connection.commit()
-                    return PublicationOperationResult(
-                        PublicationOperationStatus.precondition,
-                        reason=fence.reason,
-                        fence=fence,
-                    )
-                reopening = True
+                # A confirmed remote hide remains a local fence until the
+                # explicit repair transition installs a distinct generation.
+                # Ordinary enqueue must never reopen the task implicitly.
+                connection.commit()
+                return PublicationOperationResult(
+                    PublicationOperationStatus.precondition,
+                    reason=fence.reason,
+                    fence=fence,
+                )
             existing_row = connection.exec_driver_sql(
                 f"SELECT {_PUBLICATION_GENERATION_COLUMNS} FROM publication_generations "
                 "WHERE publication_id=:publication_id OR (task_id=:task_id AND run_id=:run_id) "
@@ -2456,14 +2446,6 @@ class SQLiteTaskStore:
             ).mappings().first()
             if existing_row is not None:
                 existing = _publication_generation_from_row(existing_row)
-                if reopening:
-                    connection.commit()
-                    return PublicationOperationResult(
-                        PublicationOperationStatus.conflict,
-                        generation=existing,
-                        reason="integrity",
-                        fence=fence,
-                    )
                 if not _same_generation_input(existing, value):
                     connection.commit()
                     return PublicationOperationResult(
@@ -2500,26 +2482,6 @@ class SQLiteTaskStore:
             ).mappings().first()
             assert saved_row is not None
             saved = _publication_generation_from_row(saved_row)
-            if reopening:
-                released = connection.exec_driver_sql(
-                    "UPDATE publication_hide_fences SET state='released' "
-                    "WHERE task_id=:task_id AND state='confirmed'",
-                    {"task_id": value.task_id},
-                )
-                if released.rowcount != 1:
-                    connection.rollback()
-                    return PublicationOperationResult(
-                        PublicationOperationStatus.lost_claim,
-                        generation=saved,
-                        reason="integrity",
-                        fence=fence,
-                    )
-                released_row = connection.exec_driver_sql(
-                    f"SELECT {_PUBLICATION_HIDE_FENCE_COLUMNS} FROM publication_hide_fences "
-                    "WHERE task_id=:task_id",
-                    {"task_id": value.task_id},
-                ).mappings().first()
-                fence = None if released_row is None else _publication_hide_from_row(released_row)
             self._refresh_publication_health(connection, updated_at=value.updated_at)
             connection.commit()
             inserted = True

@@ -24,10 +24,27 @@ ACCOUNT = "a" * 32
 DATABASE = "12345678-1234-4abc-8def-1234567890ab"
 TOKEN = "test-token"
 TS = "2026-07-28T00:00:00Z"
-METADATA_FIELDS = ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")
+METADATA_FIELDS = ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts", "usage")
 
 
 def refresh_metadata_digest(payload: dict[str, Any]) -> None:
+    usage = payload["usage"]
+    usage_generation = dict(usage["generation"])
+    usage_generation["metadataDigest"] = ""
+    usage_metadata = {
+        "publicationId": payload["publicationId"],
+        "taskId": payload["taskId"],
+        "generation": usage_generation,
+        "summaries": usage["summaries"],
+        "invocations": usage["invocations"],
+        "turns": usage["turns"],
+        "prices": usage["prices"],
+        "globals": usage["globals"],
+    }
+    usage_canonical = (
+        json.dumps(usage_metadata, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    payload["usage"]["generation"]["metadataDigest"] = hashlib.sha256(usage_canonical).hexdigest()
     metadata = {key: payload[key] for key in METADATA_FIELDS}
     canonical = (
         json.dumps(metadata, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
@@ -124,8 +141,25 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
                 "disclosure": {"redactionApplied": False, "originalRetained": True},
             }
         )
+    usage_generation_id = f"usage-{publication_id}"
+    price_digest = hashlib.sha256(f"price-{publication_id}".encode()).hexdigest()
+    token_values = {
+        "promptTokens": 11,
+        "cachedTokens": 2,
+        "uncachedTokens": 9,
+        "completionTokens": 7,
+        "reasoningTokens": 3,
+        "totalTokens": 18,
+    }
+    cost_values = {
+        "uncachedInputCostMicroUsd": 10,
+        "cachedInputCostMicroUsd": 20,
+        "outputCostMicroUsd": 30,
+        "totalCostMicroUsd": 60,
+    }
+    invocation_id = f"invocation-{publication_id}"
     payload = {
-        "schemaVersion": "1.0",
+        "schemaVersion": "2.0",
         "publicationId": publication_id,
         "taskId": task_id,
         "generation": {
@@ -144,6 +178,145 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
         "runs": [{"runId": run_id, "taskId": task_id, "pipelineId": pipeline_id, "role": "planning", "runState": "completed", "startedAt": TS, "completedAt": "2026-07-28T00:00:01Z", "durationMs": 1000, "atifDigest": artifacts[0]["sha256"], "atifArtifactId": artifacts[0]["artifactId"]}],
         "events": [{"taskId": task_id, "sequence": 1, "eventType": "completed", "occurredAt": "2026-07-28T00:00:01Z", "summary": "Run completed"}],
         "artifacts": artifacts,
+        "usage": {
+            "schemaVersion": "1.0",
+            "generation": {
+                "usageGenerationId": usage_generation_id,
+                "publicationId": publication_id,
+                "taskId": task_id,
+                "schemaVersion": "1.0",
+                "metadataDigest": "0" * 64,
+                "state": "staged",
+                "expectedCounts": {"summaries": 2, "invocations": 1, "turns": 1, "prices": 1, "globals": 2},
+                "createdAt": TS,
+            },
+            "summaries": [
+                {
+                    "summaryId": f"summary-task-{publication_id}",
+                    "usageGenerationId": usage_generation_id,
+                    "publicationId": publication_id,
+                    "taskId": task_id,
+                    "runId": None,
+                    "scope": "task",
+                    "coverage": "complete",
+                    "coveredInvocations": 1,
+                    "expectedInvocations": 1,
+                    "knownTokenSubtotal": 18,
+                    "knownCostSubtotalMicroUsd": 60,
+                    **token_values,
+                    **cost_values,
+                    "priceProvenanceDigest": price_digest,
+                },
+                {
+                    "summaryId": f"summary-run-{publication_id}",
+                    "usageGenerationId": usage_generation_id,
+                    "publicationId": publication_id,
+                    "taskId": task_id,
+                    "runId": run_id,
+                    "scope": "run",
+                    "coverage": "complete",
+                    "coveredInvocations": 1,
+                    "expectedInvocations": 1,
+                    "knownTokenSubtotal": 18,
+                    "knownCostSubtotalMicroUsd": 60,
+                    **token_values,
+                    **cost_values,
+                    "priceProvenanceDigest": price_digest,
+                },
+            ],
+            "invocations": [
+                {
+                    "invocationId": invocation_id,
+                    "usageGenerationId": usage_generation_id,
+                    "publicationId": publication_id,
+                    "taskId": task_id,
+                    "pipelineId": pipeline_id,
+                    "runId": run_id,
+                    "ownershipClass": "task-owned",
+                    "retryOrdinal": 0,
+                    "startedAt": TS,
+                    "completedAt": "2026-07-28T00:00:01Z",
+                    "model": "gpt-fixture",
+                    "billingMode": "api",
+                    "processOutcome": "success",
+                    "coverage": "complete",
+                    "issueCount": 0,
+                    "coveredTurns": 1,
+                    "expectedTurns": 1,
+                    **token_values,
+                    **cost_values,
+                    "priceEntryDigest": price_digest,
+                }
+            ],
+            "turns": [
+                {
+                    "turnId": f"turn-{publication_id}",
+                    "usageGenerationId": usage_generation_id,
+                    "invocationId": invocation_id,
+                    "publicationId": publication_id,
+                    "taskId": task_id,
+                    "runId": run_id,
+                    "ordinal": 1,
+                    **token_values,
+                    **cost_values,
+                    "priceEntryDigest": price_digest,
+                }
+            ],
+            "prices": [
+                {
+                    "priceEntryDigest": price_digest,
+                    "usageGenerationId": usage_generation_id,
+                    "catalogDigest": "d" * 64,
+                    "model": "gpt-fixture",
+                    "effectiveAt": "2026-01-01T00:00:00Z",
+                    "effectiveUntil": None,
+                }
+            ],
+            "globals": [
+                {
+                    "globalId": f"global-{publication_id}",
+                    "usageGenerationId": usage_generation_id,
+                    "periodKind": "lifetime",
+                    "periodKey": "lifetime",
+                    "model": "gpt-fixture",
+                    "ownershipClass": "task-owned",
+                    "coverage": "complete",
+                    "coveredInvocations": 1,
+                    "expectedInvocations": 1,
+                    "knownTokenSubtotal": 18,
+                    "knownCostSubtotalMicroUsd": 60,
+                    **token_values,
+                    **cost_values,
+                    "priceProvenanceDigest": price_digest,
+                    "aggregateOnly": True,
+                },
+                {
+                    "globalId": f"global-overhead-{publication_id}",
+                    "usageGenerationId": usage_generation_id,
+                    "periodKind": "daily",
+                    "periodKey": "2026-07-28",
+                    "model": "gpt-overhead",
+                    "ownershipClass": "steward-overhead",
+                    "coverage": "unavailable",
+                    "coveredInvocations": 0,
+                    "expectedInvocations": 0,
+                    "knownTokenSubtotal": None,
+                    "knownCostSubtotalMicroUsd": None,
+                    "promptTokens": None,
+                    "cachedTokens": None,
+                    "uncachedTokens": None,
+                    "completionTokens": None,
+                    "reasoningTokens": None,
+                    "totalTokens": None,
+                    "uncachedInputCostMicroUsd": None,
+                    "cachedInputCostMicroUsd": None,
+                    "outputCostMicroUsd": None,
+                    "totalCostMicroUsd": None,
+                    "priceProvenanceDigest": None,
+                    "aggregateOnly": True,
+                },
+            ],
+        },
     }
     refresh_metadata_digest(payload)
     return payload
@@ -267,7 +440,9 @@ def test_interrupted_visibility_batch_rolls_back_without_changing_head() -> None
         d1.expose(second)
     assert error.value.code == D1ErrorCode.transient
     assert server.connection.execute("SELECT publication_id FROM task_heads").fetchone()[0] == first["publicationId"]
+    assert server.connection.execute("SELECT usage_generation_id FROM task_heads").fetchone()[0] == first["usage"]["generation"]["usageGenerationId"]
     assert server.connection.execute("SELECT state FROM publication_generations WHERE publication_id = ?", (second["publicationId"],)).fetchone()[0] == "staged"
+    assert server.connection.execute("SELECT state FROM usage_generations WHERE usage_generation_id = ?", (second["usage"]["generation"]["usageGenerationId"],)).fetchone()[0] == "staged"
 
 
 def test_conflict_private_locator_and_bounds_fail_closed() -> None:
@@ -318,6 +493,33 @@ def test_false_metadata_digest_is_rejected_before_staging() -> None:
     assert error.value.code == D1ErrorCode.digest_mismatch
     assert server.requests == []
     assert server.connection.execute("SELECT count(*) FROM publication_generations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("mutation", ["identity", "count", "digest", "owner", "rollup", "private"])
+def test_usage_contract_failures_are_rejected_before_transport(mutation: str) -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication(f"publication-usage-{mutation}")
+    if mutation == "identity":
+        payload["usage"]["summaries"][0]["usageGenerationId"] = "usage-other"
+    elif mutation == "count":
+        payload["usage"]["generation"]["expectedCounts"]["turns"] = 2
+        refresh_metadata_digest(payload)
+    elif mutation == "digest":
+        payload["usage"]["generation"]["metadataDigest"] = "0" * 64
+    elif mutation == "owner":
+        payload["usage"]["summaries"][0]["taskId"] = "task-other"
+        refresh_metadata_digest(payload)
+    elif mutation == "rollup":
+        payload["usage"]["summaries"][0]["totalTokens"] = 19
+        refresh_metadata_digest(payload)
+    else:
+        payload["usage"]["invocations"][0]["model"] = "private://model"
+        refresh_metadata_digest(payload)
+
+    with pytest.raises(D1Error):
+        d1.stage(payload)
+    assert server.requests == []
 
 
 @pytest.mark.parametrize("locator", ["~/work/coquic", r"~\work\coquic", r"\\server\share", "internal_object_key"])

@@ -17,7 +17,7 @@ from .orchestration import (
     StewardPreflightError,
     acquire_daemon_lock,
 )
-from .execution.executor import StewardExecutor, default_worker_for_kind
+from .execution.executor import default_worker_for_kind
 from .execution.container import bind_deployment_identity, deployment_runtime_factory
 from .execution.session import (
     FreshPlannerSession,
@@ -425,13 +425,54 @@ def run(task_id: str) -> None:
     store, config = _context()
     try:
         with acquire_daemon_lock(config):
-            ok = StewardExecutor(
+            daemon_ = StewardDaemon(
                 config,
                 store,
                 session_supervisor=_configured_supervisor(config, store),
-            ).run_task(task_id)
-            task = store.get(task_id)
-            typer.echo(f"{'ran' if ok else 'failed'} {task.id} status={task.status}")
+            )
+            shutdown_result: object | None = None
+            shutdown_error: BaseException | None = None
+            shutdown_incomplete = False
+            output: str | None = None
+            ok = False
+            try:
+                daemon_.startup_reconcile()
+                ok = daemon_.drive_selected_task(task_id)
+                task = store.get(task_id)
+                output = f"{'ran' if ok else 'failed'} {task.id} status={task.status}"
+            finally:
+                try:
+                    shutdown_result = daemon_.shutdown()
+                except BaseException as exc:
+                    shutdown_error = exc
+                    typer.echo(
+                        "Steward daemon shutdown incomplete; owned containers may still be running.",
+                        err=True,
+                    )
+                else:
+                    state = getattr(shutdown_result, "state", None)
+                    if hasattr(state, "value"):
+                        state = state.value
+                    if state is None:
+                        try:
+                            state = daemon_.lifecycle_state
+                        except BaseException:
+                            state = None
+                        if hasattr(state, "value"):
+                            state = state.value
+                    shutdown_incomplete = state != "stopped"
+                    if shutdown_incomplete:
+                        typer.echo(
+                            "Steward daemon shutdown incomplete; owned containers may still be running.",
+                            err=True,
+                        )
+
+            if shutdown_error is not None:
+                raise typer.Exit(1) from shutdown_error
+            if shutdown_incomplete:
+                raise typer.Exit(1)
+            assert output is not None
+            typer.echo(output)
             if not ok and TaskStatus(task.status) != TaskStatus.blocked:
                 raise typer.Exit(1)
     except DaemonAlreadyRunning as exc:

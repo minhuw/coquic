@@ -10,7 +10,9 @@ import {
 } from "./cloudflare";
 import {
   decodePublicationCursor,
+  decodeUsageCursor,
   encodePublicationCursor,
+  encodeUsageCursor,
   PublicationCursorError,
   resolvePublicObjectUrl,
   validatePublicArtifact,
@@ -32,11 +34,28 @@ import {
   validateCloudTaskDetailData,
   validateCloudTaskSummary,
   validateCloudTrajectoryDescriptorData,
+  validateCloudUsageData,
+  validateCloudUsageGlobal,
+  validateCloudUsageGlobalGroup,
+  validateCloudUsageInvocation,
+  validateCloudUsageSummary,
+  validateCloudUsageTurn,
+  validateCloudUsageTurnPageData,
+  validateCloudUsageUnavailable,
   type CloudArtifact,
   type CloudStatus,
   type CloudTaskDetail,
   type CloudTaskSummary,
   type CloudTrajectoryDescriptor,
+  type CloudUsage,
+  type CloudUsageGlobal,
+  type CloudUsageGlobalGroup,
+  type CloudUsageInvocation,
+  type CloudUsageReadResult,
+  type CloudUsageSummary,
+  type CloudUsageTurn,
+  type CloudUsageTurnPage,
+  type CloudUsageUnavailable,
 } from "./cloud-schema";
 
 export type CloudTaskScope = "active" | "history";
@@ -82,6 +101,11 @@ const MAX_DETAIL_PIPELINES = 1_000;
 const MAX_DETAIL_RUNS = 10_000;
 const MAX_DETAIL_EVENTS = 100_000;
 const MAX_DETAIL_ARTIFACTS = 10_000;
+const MAX_USAGE_SUMMARIES = 4_096;
+const MAX_USAGE_INVOCATIONS = 128;
+const MAX_USAGE_GLOBALS = 4_096;
+const MAX_USAGE_TURNS = 4_096;
+const MAX_USAGE_TURN_PAGE_SIZE = 200;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/;
 
@@ -524,6 +548,332 @@ ${DETAIL_VISIBLE_FROM}
  LIMIT 2
 `;
 
+const USAGE_CONTEXT_FROM = `
+  FROM task_heads AS th
+  JOIN publication_generations AS p
+    ON p.publication_id = th.publication_id
+   AND p.task_id = th.task_id
+   AND p.state = 'visible'
+   AND p.exposed_at IS NOT NULL
+  JOIN tasks AS t
+    ON t.publication_id = p.publication_id
+   AND t.task_id = p.task_id
+  LEFT JOIN usage_heads AS uh
+    ON uh.task_id = th.task_id
+  LEFT JOIN usage_generations AS ug
+    ON ug.usage_generation_id = uh.usage_generation_id
+   AND ug.publication_id = p.publication_id
+   AND ug.task_id = p.task_id
+   AND ug.state = 'visible'
+   AND ug.exposed_at IS NOT NULL
+ WHERE th.state = 'visible'
+   AND th.task_id = ?
+`;
+
+const USAGE_CONTEXT_COLUMNS = `
+  th.task_id AS task_id,
+  th.publication_id AS publication_id,
+  th.state AS task_head_state,
+  th.updated_at AS task_head_updated_at,
+  th.usage_generation_id AS task_head_usage_generation_id,
+  p.publication_id AS generation_publication_id,
+  p.state AS generation_state,
+  p.exposed_at AS generation_exposed_at,
+  uh.usage_generation_id AS usage_head_generation_id,
+  uh.state AS usage_head_state,
+  uh.updated_at AS usage_head_updated_at,
+  ug.usage_generation_id AS usage_generation_id,
+  ug.publication_id AS usage_publication_id,
+  ug.task_id AS usage_task_id,
+  ug.schema_version AS usage_schema_version,
+  ug.metadata_digest AS usage_metadata_digest,
+  ug.state AS usage_generation_state,
+  ug.exposed_at AS usage_generation_exposed_at
+`;
+
+/** Visible task and usage heads are the only usage ownership boundary. */
+export const USAGE_CONTEXT_STATEMENT = `
+SELECT${USAGE_CONTEXT_COLUMNS}
+${USAGE_CONTEXT_FROM}
+ LIMIT 1
+`;
+
+const USAGE_VISIBLE_FROM = `
+  FROM usage_summaries AS s
+  JOIN usage_generations AS ug
+    ON ug.usage_generation_id = s.usage_generation_id
+   AND ug.publication_id = s.publication_id
+   AND ug.task_id = s.task_id
+   AND ug.state = 'visible'
+   AND ug.exposed_at IS NOT NULL
+  JOIN usage_heads AS uh
+    ON uh.task_id = ug.task_id
+   AND uh.usage_generation_id = ug.usage_generation_id
+   AND uh.state = 'visible'
+  JOIN task_heads AS th
+    ON th.task_id = ug.task_id
+   AND th.usage_generation_id = ug.usage_generation_id
+   AND th.state = 'visible'
+  JOIN publication_generations AS p
+    ON p.publication_id = ug.publication_id
+   AND p.task_id = ug.task_id
+   AND p.state = 'visible'
+   AND p.exposed_at IS NOT NULL
+ WHERE s.task_id = ?
+`;
+
+const USAGE_SUMMARY_COLUMNS = `
+  s.summary_id AS summary_id,
+  s.usage_generation_id AS usage_generation_id,
+  s.publication_id AS publication_id,
+  s.task_id AS task_id,
+  s.run_id AS run_id,
+  s.scope AS scope,
+  s.coverage AS coverage,
+  s.covered_invocations AS covered_invocations,
+  s.expected_invocations AS expected_invocations,
+  s.known_token_subtotal AS known_token_subtotal,
+  s.known_cost_subtotal_micro_usd AS known_cost_subtotal_micro_usd,
+  s.prompt_tokens AS prompt_tokens,
+  s.cached_tokens AS cached_tokens,
+  s.uncached_tokens AS uncached_tokens,
+  s.completion_tokens AS completion_tokens,
+  s.reasoning_tokens AS reasoning_tokens,
+  s.total_tokens AS total_tokens,
+  s.uncached_input_cost_micro_usd AS uncached_input_cost_micro_usd,
+  s.cached_input_cost_micro_usd AS cached_input_cost_micro_usd,
+  s.output_cost_micro_usd AS output_cost_micro_usd,
+  s.total_cost_micro_usd AS total_cost_micro_usd,
+  s.price_provenance_digest AS price_provenance_digest
+`;
+
+export const USAGE_SUMMARY_STATEMENT = `
+SELECT${USAGE_SUMMARY_COLUMNS}
+${USAGE_VISIBLE_FROM}
+ ORDER BY s.scope ASC, s.run_id ASC, s.summary_id ASC
+ LIMIT ?
+`;
+
+const USAGE_INVOCATION_COLUMNS = `
+  i.invocation_id AS invocation_id,
+  i.usage_generation_id AS usage_generation_id,
+  i.publication_id AS publication_id,
+  i.task_id AS task_id,
+  i.pipeline_id AS pipeline_id,
+  i.run_id AS run_id,
+  i.ownership_class AS ownership_class,
+  i.retry_ordinal AS retry_ordinal,
+  i.started_at AS started_at,
+  i.completed_at AS completed_at,
+  i.model AS model,
+  i.billing_mode AS billing_mode,
+  i.process_outcome AS process_outcome,
+  i.coverage AS coverage,
+  i.issue_count AS issue_count,
+  i.covered_turns AS covered_turns,
+  i.expected_turns AS expected_turns,
+  i.prompt_tokens AS prompt_tokens,
+  i.cached_tokens AS cached_tokens,
+  i.uncached_tokens AS uncached_tokens,
+  i.completion_tokens AS completion_tokens,
+  i.reasoning_tokens AS reasoning_tokens,
+  i.total_tokens AS total_tokens,
+  i.uncached_input_cost_micro_usd AS uncached_input_cost_micro_usd,
+  i.cached_input_cost_micro_usd AS cached_input_cost_micro_usd,
+  i.output_cost_micro_usd AS output_cost_micro_usd,
+  i.total_cost_micro_usd AS total_cost_micro_usd,
+  i.price_entry_digest AS price_entry_digest
+`;
+
+const USAGE_INVOCATION_FROM = `
+  FROM usage_invocations AS i
+  JOIN usage_generations AS ug
+    ON ug.usage_generation_id = i.usage_generation_id
+   AND ug.publication_id = i.publication_id
+   AND ug.task_id = i.task_id
+   AND ug.state = 'visible'
+   AND ug.exposed_at IS NOT NULL
+  JOIN usage_heads AS uh
+    ON uh.task_id = ug.task_id
+   AND uh.usage_generation_id = ug.usage_generation_id
+   AND uh.state = 'visible'
+  JOIN task_heads AS th
+    ON th.task_id = ug.task_id
+   AND th.usage_generation_id = ug.usage_generation_id
+   AND th.state = 'visible'
+  JOIN publication_generations AS p
+    ON p.publication_id = ug.publication_id
+   AND p.task_id = ug.task_id
+   AND p.state = 'visible'
+   AND p.exposed_at IS NOT NULL
+ WHERE i.task_id = ?
+   AND i.ownership_class = 'task-owned'
+`;
+
+export const USAGE_INVOCATION_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+ ORDER BY i.run_id ASC, i.retry_ordinal ASC, i.invocation_id ASC
+ LIMIT ?
+`;
+
+export const USAGE_INVOCATION_CONTEXT_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND i.invocation_id = ?
+ LIMIT 1
+`;
+
+const USAGE_GLOBAL_VISIBLE_FROM = `
+  FROM usage_global_heads AS gh
+  JOIN usage_globals AS g
+    ON g.global_id = gh.global_id
+   AND g.usage_generation_id = gh.usage_generation_id
+   AND g.period_kind = gh.period_kind
+   AND g.period_key = gh.period_key
+   AND g.model = gh.model
+   AND g.ownership_class = gh.ownership_class
+  JOIN usage_generations AS ug
+    ON ug.usage_generation_id = gh.usage_generation_id
+   AND ug.state = 'visible'
+   AND ug.exposed_at IS NOT NULL
+  JOIN usage_heads AS uh
+    ON uh.task_id = ug.task_id
+   AND uh.usage_generation_id = ug.usage_generation_id
+   AND uh.state = 'visible'
+  JOIN task_heads AS th
+    ON th.task_id = ug.task_id
+   AND th.usage_generation_id = ug.usage_generation_id
+   AND th.state = 'visible'
+  JOIN publication_generations AS p
+    ON p.publication_id = ug.publication_id
+   AND p.task_id = ug.task_id
+   AND p.state = 'visible'
+   AND p.exposed_at IS NOT NULL
+ WHERE gh.state = 'visible'
+`;
+
+const USAGE_GLOBAL_COLUMNS = `
+  g.global_id AS global_id,
+  g.usage_generation_id AS usage_generation_id,
+  g.period_kind AS period_kind,
+  g.period_key AS period_key,
+  g.model AS model,
+  g.ownership_class AS ownership_class,
+  g.coverage AS coverage,
+  g.covered_invocations AS covered_invocations,
+  g.expected_invocations AS expected_invocations,
+  g.known_token_subtotal AS known_token_subtotal,
+  g.known_cost_subtotal_micro_usd AS known_cost_subtotal_micro_usd,
+  g.prompt_tokens AS prompt_tokens,
+  g.cached_tokens AS cached_tokens,
+  g.uncached_tokens AS uncached_tokens,
+  g.completion_tokens AS completion_tokens,
+  g.reasoning_tokens AS reasoning_tokens,
+  g.total_tokens AS total_tokens,
+  g.uncached_input_cost_micro_usd AS uncached_input_cost_micro_usd,
+  g.cached_input_cost_micro_usd AS cached_input_cost_micro_usd,
+  g.output_cost_micro_usd AS output_cost_micro_usd,
+  g.total_cost_micro_usd AS total_cost_micro_usd,
+  g.price_provenance_digest AS price_provenance_digest,
+  g.aggregate_only AS aggregate_only
+`;
+
+export const USAGE_GLOBAL_STATEMENT = `
+SELECT${USAGE_GLOBAL_COLUMNS}
+${USAGE_GLOBAL_VISIBLE_FROM}
+ ORDER BY g.model ASC, g.ownership_class ASC, g.period_kind ASC, g.period_key ASC, g.global_id ASC
+ LIMIT ?
+`;
+export const USAGE_GLOBALS_STATEMENT = USAGE_GLOBAL_STATEMENT;
+
+const USAGE_TURN_COLUMNS = `
+  u.turn_id AS turn_id,
+  u.usage_generation_id AS usage_generation_id,
+  u.invocation_id AS invocation_id,
+  u.publication_id AS publication_id,
+  u.task_id AS task_id,
+  u.run_id AS run_id,
+  u.ordinal AS ordinal,
+  u.prompt_tokens AS prompt_tokens,
+  u.cached_tokens AS cached_tokens,
+  u.uncached_tokens AS uncached_tokens,
+  u.completion_tokens AS completion_tokens,
+  u.reasoning_tokens AS reasoning_tokens,
+  u.total_tokens AS total_tokens,
+  u.uncached_input_cost_micro_usd AS uncached_input_cost_micro_usd,
+  u.cached_input_cost_micro_usd AS cached_input_cost_micro_usd,
+  u.output_cost_micro_usd AS output_cost_micro_usd,
+  u.total_cost_micro_usd AS total_cost_micro_usd,
+  u.price_entry_digest AS price_entry_digest
+`;
+
+const USAGE_TURN_FROM = `
+  FROM usage_turns AS u
+  JOIN usage_invocations AS i
+    ON i.invocation_id = u.invocation_id
+   AND i.usage_generation_id = u.usage_generation_id
+   AND i.ownership_class = 'task-owned'
+   AND i.task_id = u.task_id
+   AND i.run_id = u.run_id
+  JOIN usage_generations AS ug
+    ON ug.usage_generation_id = u.usage_generation_id
+   AND ug.publication_id = u.publication_id
+   AND ug.task_id = u.task_id
+   AND ug.state = 'visible'
+   AND ug.exposed_at IS NOT NULL
+  JOIN usage_heads AS uh
+    ON uh.task_id = u.task_id
+   AND uh.usage_generation_id = u.usage_generation_id
+   AND uh.state = 'visible'
+  JOIN task_heads AS th
+    ON th.task_id = u.task_id
+   AND th.usage_generation_id = u.usage_generation_id
+   AND th.state = 'visible'
+  JOIN publication_generations AS p
+    ON p.publication_id = u.publication_id
+   AND p.task_id = u.task_id
+   AND p.state = 'visible'
+   AND p.exposed_at IS NOT NULL
+ WHERE u.task_id = ?
+   AND u.invocation_id = ?
+`;
+
+export const USAGE_TURN_FIRST_STATEMENT = `
+SELECT${USAGE_TURN_COLUMNS}
+${USAGE_TURN_FROM}
+ ORDER BY u.ordinal ASC, u.turn_id ASC
+ LIMIT ?
+`;
+export const USAGE_TURN_NEXT_STATEMENT = `
+SELECT${USAGE_TURN_COLUMNS}
+${USAGE_TURN_FROM}
+  AND (u.ordinal > ? OR (u.ordinal = ? AND u.turn_id > ?))
+ ORDER BY u.ordinal ASC, u.turn_id ASC
+ LIMIT ?
+`;
+export const USAGE_TURN_PREVIOUS_STATEMENT = `
+SELECT${USAGE_TURN_COLUMNS}
+${USAGE_TURN_FROM}
+  AND (u.ordinal < ? OR (u.ordinal = ? AND u.turn_id < ?))
+ ORDER BY u.ordinal DESC, u.turn_id DESC
+ LIMIT ?
+`;
+export const USAGE_TURN_BOUNDARY_STATEMENT = `
+SELECT${USAGE_TURN_COLUMNS}
+${USAGE_TURN_FROM}
+  AND u.ordinal = ?
+  AND u.turn_id = ?
+ LIMIT 1
+`;
+export const USAGE_TURN_COUNT_STATEMENT = `
+SELECT COUNT(*) AS turn_count
+${USAGE_TURN_FROM}
+`;
+export const USAGE_TURNS_FIRST_STATEMENT = USAGE_TURN_FIRST_STATEMENT;
+export const USAGE_TURNS_NEXT_STATEMENT = USAGE_TURN_NEXT_STATEMENT;
+export const USAGE_TURNS_PREVIOUS_STATEMENT = USAGE_TURN_PREVIOUS_STATEMENT;
+
 const SCOPE_QUERY: Record<CloudTaskScope, string> = {
   active: "tasks-active",
   history: "tasks-history",
@@ -575,6 +925,31 @@ const ARTIFACT_KEYS = [
   "publication_id", "artifact_id", "task_id", "run_id", "logical_path", "public_key", "media_type", "byte_size", "sha256", "availability",
   "redaction_applied", "original_retained",
 ] as const;
+const USAGE_CONTEXT_KEYS = [
+  "task_id", "publication_id", "task_head_state", "task_head_updated_at", "task_head_usage_generation_id",
+  "generation_publication_id", "generation_state", "generation_exposed_at", "usage_head_generation_id", "usage_head_state",
+  "usage_head_updated_at", "usage_generation_id", "usage_publication_id", "usage_task_id", "usage_schema_version",
+  "usage_metadata_digest", "usage_generation_state", "usage_generation_exposed_at",
+] as const;
+const USAGE_SUMMARY_ROW_KEYS = [
+  "summary_id", "usage_generation_id", "publication_id", "task_id", "run_id", "scope", "coverage", "covered_invocations",
+  "expected_invocations", "known_token_subtotal", "known_cost_subtotal_micro_usd", "prompt_tokens", "cached_tokens", "uncached_tokens",
+  "completion_tokens", "reasoning_tokens", "total_tokens", "uncached_input_cost_micro_usd", "cached_input_cost_micro_usd",
+  "output_cost_micro_usd", "total_cost_micro_usd", "price_provenance_digest"] as const;
+const USAGE_INVOCATION_ROW_KEYS = [
+  "invocation_id", "usage_generation_id", "publication_id", "task_id", "pipeline_id", "run_id", "ownership_class", "retry_ordinal",
+  "started_at", "completed_at", "model", "billing_mode", "process_outcome", "coverage", "issue_count", "covered_turns", "expected_turns",
+  "prompt_tokens", "cached_tokens", "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens",
+  "uncached_input_cost_micro_usd", "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd", "price_entry_digest"] as const;
+const USAGE_GLOBAL_ROW_KEYS = [
+  "global_id", "usage_generation_id", "period_kind", "period_key", "model", "ownership_class", "coverage", "covered_invocations",
+  "expected_invocations", "known_token_subtotal", "known_cost_subtotal_micro_usd", "prompt_tokens", "cached_tokens", "uncached_tokens",
+  "completion_tokens", "reasoning_tokens", "total_tokens", "uncached_input_cost_micro_usd", "cached_input_cost_micro_usd",
+  "output_cost_micro_usd", "total_cost_micro_usd", "price_provenance_digest", "aggregate_only"] as const;
+const USAGE_TURN_ROW_KEYS = [
+  "turn_id", "usage_generation_id", "invocation_id", "publication_id", "task_id", "run_id", "ordinal", "prompt_tokens", "cached_tokens",
+  "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "uncached_input_cost_micro_usd",
+  "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd", "price_entry_digest"] as const;
 
 function invalidData(): never {
   throw new CloudRepositoryDataError();
@@ -694,6 +1069,262 @@ function safeValidate<T>(validate: () => T): T {
   } catch {
     invalidData();
   }
+}
+
+function isUsageUnavailable(value: unknown): value is CloudUsageUnavailable {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && (value as { kind?: unknown }).kind === "unavailable";
+}
+
+type UsageRowsResult = readonly Record<string, unknown>[] | CloudUsageUnavailable;
+
+async function queryUsageRows(
+  client: CloudD1QueryClient,
+  statement: string,
+  params: readonly D1Scalar[],
+): Promise<UsageRowsResult> {
+  let response: D1QueryResponse;
+  try {
+    response = await client.query(statement, params);
+  } catch {
+    return usageUnavailable("unavailable");
+  }
+  try {
+    return rowsFromResponse(response);
+  } catch {
+    return usageUnavailable("invalid");
+  }
+}
+
+type UsageContext = {
+  readonly taskId: string;
+  readonly publicationId: string;
+  readonly usageGenerationId: string | null;
+  readonly generationExposedAt: string;
+};
+
+function usageUnavailable(reason: "missing" | "invalid" | "unavailable"): CloudUsageUnavailable {
+  return validateCloudUsageUnavailable({ kind: "unavailable", reason });
+}
+
+function exactUsageRow(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  const row = record(value);
+  const actual = Object.keys(row);
+  if (actual.length !== keys.length || actual.some((key) => !keys.includes(key))) invalidData();
+  return row;
+}
+
+function usageId(value: unknown, nullable = false): string | null {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || !ID.test(value)) invalidData();
+  return value;
+}
+
+function usageTimestamp(value: unknown, nullable = false): string | null {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || !TIMESTAMP.test(value)) invalidData();
+  try {
+    validateCloudStatusData({ state: "empty", taskCount: 0, latestPublicationAt: value });
+  } catch {
+    invalidData();
+  }
+  return value;
+}
+
+function parseUsageContext(value: unknown): UsageContext {
+  const row = exactUsageRow(value, USAGE_CONTEXT_KEYS);
+  const taskId = usageId(row.task_id)!;
+  const publicationId = usageId(row.publication_id)!;
+  if (row.task_head_state !== "visible" || row.generation_publication_id !== publicationId || row.generation_state !== "visible") invalidData();
+  const generationExposedAt = usageTimestamp(row.generation_exposed_at)!;
+  usageTimestamp(row.task_head_updated_at);
+  const taskHeadGenerationId = usageId(row.task_head_usage_generation_id)!;
+  const usageHeadGenerationId = usageId(row.usage_head_generation_id, true);
+  const usageGenerationId = usageId(row.usage_generation_id, true);
+  const usageHeadState = row.usage_head_state;
+  const hasUsage = usageGenerationId !== null;
+  if (!hasUsage) {
+    if (usageHeadGenerationId !== null || usageHeadState !== null || row.usage_head_updated_at !== null || row.usage_publication_id !== null || row.usage_task_id !== null || row.usage_schema_version !== null || row.usage_metadata_digest !== null || row.usage_generation_state !== null || row.usage_generation_exposed_at !== null) {
+      invalidData();
+    }
+    return { taskId, publicationId, usageGenerationId: null, generationExposedAt };
+  }
+  if (usageHeadGenerationId !== usageGenerationId || usageHeadState !== "visible" || row.usage_publication_id !== publicationId || row.usage_task_id !== taskId || row.usage_schema_version !== "1.0" || row.usage_generation_state !== "visible" || usageTimestamp(row.usage_generation_exposed_at) === null || usageTimestamp(row.usage_head_updated_at) === null || taskHeadGenerationId !== usageGenerationId) invalidData();
+  if (typeof row.usage_metadata_digest !== "string" || !/^[0-9a-f]{64}$/.test(row.usage_metadata_digest)) invalidData();
+  return { taskId, publicationId, usageGenerationId, generationExposedAt };
+}
+
+function parseUsageSummaryRow(value: unknown): CloudUsageSummary {
+  const row = exactUsageRow(value, USAGE_SUMMARY_ROW_KEYS);
+  return safeValidate(() => validateCloudUsageSummary({
+    summaryId: row.summary_id,
+    usageGenerationId: row.usage_generation_id,
+    publicationId: row.publication_id,
+    taskId: row.task_id,
+    runId: row.run_id,
+    scope: row.scope,
+    coverage: row.coverage,
+    coveredInvocations: row.covered_invocations,
+    expectedInvocations: row.expected_invocations,
+    knownTokenSubtotal: row.known_token_subtotal,
+    knownCostSubtotalMicroUsd: row.known_cost_subtotal_micro_usd,
+    promptTokens: row.prompt_tokens,
+    cachedTokens: row.cached_tokens,
+    uncachedTokens: row.uncached_tokens,
+    completionTokens: row.completion_tokens,
+    reasoningTokens: row.reasoning_tokens,
+    totalTokens: row.total_tokens,
+    uncachedInputCostMicroUsd: row.uncached_input_cost_micro_usd,
+    cachedInputCostMicroUsd: row.cached_input_cost_micro_usd,
+    outputCostMicroUsd: row.output_cost_micro_usd,
+    totalCostMicroUsd: row.total_cost_micro_usd,
+    priceProvenanceDigest: row.price_provenance_digest,
+  }));
+}
+
+function parseUsageInvocationRow(value: unknown): CloudUsageInvocation {
+  const row = exactUsageRow(value, USAGE_INVOCATION_ROW_KEYS);
+  return safeValidate(() => validateCloudUsageInvocation({
+    invocationId: row.invocation_id,
+    usageGenerationId: row.usage_generation_id,
+    publicationId: row.publication_id,
+    taskId: row.task_id,
+    pipelineId: row.pipeline_id,
+    runId: row.run_id,
+    ownershipClass: row.ownership_class,
+    retryOrdinal: row.retry_ordinal,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    model: row.model,
+    billingMode: row.billing_mode,
+    processOutcome: row.process_outcome,
+    coverage: row.coverage,
+    issueCount: row.issue_count,
+    coveredTurns: row.covered_turns,
+    expectedTurns: row.expected_turns,
+    promptTokens: row.prompt_tokens,
+    cachedTokens: row.cached_tokens,
+    uncachedTokens: row.uncached_tokens,
+    completionTokens: row.completion_tokens,
+    reasoningTokens: row.reasoning_tokens,
+    totalTokens: row.total_tokens,
+    uncachedInputCostMicroUsd: row.uncached_input_cost_micro_usd,
+    cachedInputCostMicroUsd: row.cached_input_cost_micro_usd,
+    outputCostMicroUsd: row.output_cost_micro_usd,
+    totalCostMicroUsd: row.total_cost_micro_usd,
+    priceEntryDigest: row.price_entry_digest,
+  }));
+}
+
+function parseUsageGlobalRow(value: unknown): CloudUsageGlobal {
+  const row = exactUsageRow(value, USAGE_GLOBAL_ROW_KEYS);
+  return safeValidate(() => validateCloudUsageGlobal({
+    globalId: row.global_id,
+    usageGenerationId: row.usage_generation_id,
+    periodKind: row.period_kind,
+    periodKey: row.period_key,
+    model: row.model,
+    ownershipClass: row.ownership_class,
+    coverage: row.coverage,
+    coveredInvocations: row.covered_invocations,
+    expectedInvocations: row.expected_invocations,
+    knownTokenSubtotal: row.known_token_subtotal,
+    knownCostSubtotalMicroUsd: row.known_cost_subtotal_micro_usd,
+    promptTokens: row.prompt_tokens,
+    cachedTokens: row.cached_tokens,
+    uncachedTokens: row.uncached_tokens,
+    completionTokens: row.completion_tokens,
+    reasoningTokens: row.reasoning_tokens,
+    totalTokens: row.total_tokens,
+    uncachedInputCostMicroUsd: row.uncached_input_cost_micro_usd,
+    cachedInputCostMicroUsd: row.cached_input_cost_micro_usd,
+    outputCostMicroUsd: row.output_cost_micro_usd,
+    totalCostMicroUsd: row.total_cost_micro_usd,
+    priceProvenanceDigest: row.price_provenance_digest,
+    aggregateOnly: row.aggregate_only,
+  }));
+}
+
+function parseUsageTurnRow(value: unknown): CloudUsageTurn {
+  const row = exactUsageRow(value, USAGE_TURN_ROW_KEYS);
+  return safeValidate(() => validateCloudUsageTurn({
+    turnId: row.turn_id,
+    usageGenerationId: row.usage_generation_id,
+    invocationId: row.invocation_id,
+    publicationId: row.publication_id,
+    taskId: row.task_id,
+    runId: row.run_id,
+    ordinal: row.ordinal,
+    promptTokens: row.prompt_tokens,
+    cachedTokens: row.cached_tokens,
+    uncachedTokens: row.uncached_tokens,
+    completionTokens: row.completion_tokens,
+    reasoningTokens: row.reasoning_tokens,
+    totalTokens: row.total_tokens,
+    uncachedInputCostMicroUsd: row.uncached_input_cost_micro_usd,
+    cachedInputCostMicroUsd: row.cached_input_cost_micro_usd,
+    outputCostMicroUsd: row.output_cost_micro_usd,
+    totalCostMicroUsd: row.total_cost_micro_usd,
+    priceEntryDigest: row.price_entry_digest,
+  }));
+}
+
+function groupUsageGlobals(rows: readonly CloudUsageGlobal[]): CloudUsageGlobalGroup[] {
+  const groups = new Map<string, { model: string; ownershipClass: CloudUsageGlobal["ownershipClass"]; lifetime: CloudUsageGlobal | null; daily: CloudUsageGlobal[] }>();
+  for (const row of rows) {
+    const key = `${row.model}\u0000${row.ownershipClass}`;
+    const group = groups.get(key) ?? { model: row.model, ownershipClass: row.ownershipClass, lifetime: null, daily: [] };
+    if (row.periodKind === "lifetime") {
+      if (group.lifetime !== null) invalidData();
+      group.lifetime = row;
+    } else {
+      if (group.daily.some((item) => item.periodKey === row.periodKey)) invalidData();
+      group.daily.push(row);
+    }
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => safeValidate(() => validateCloudUsageGlobalGroup(group)));
+}
+
+function usageLimit(value: unknown, maximum: number, fallback = maximum): number {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value)) return value === Infinity ? maximum : 1;
+  if (!Number.isSafeInteger(value)) return value > 0 ? maximum : 1;
+  return Math.min(maximum, Math.max(1, value));
+}
+
+function usageCount(value: unknown): number {
+  const row = exactUsageRow(value, ["turn_count"]);
+  if (typeof row.turn_count !== "number" || !Number.isSafeInteger(row.turn_count) || row.turn_count < 0 || row.turn_count > MAX_USAGE_TURNS) invalidData();
+  return row.turn_count;
+}
+
+function usageTurnSort(left: CloudUsageTurn, right: CloudUsageTurn): number {
+  if (left.invocationId !== right.invocationId) return left.invocationId < right.invocationId ? -1 : 1;
+  if (left.ordinal !== right.ordinal) return left.ordinal < right.ordinal ? -1 : 1;
+  if (left.turnId !== right.turnId) return left.turnId < right.turnId ? -1 : 1;
+  return 0;
+}
+
+type DecodedUsageTurnCursor = {
+  readonly direction: "next" | "previous";
+  readonly invocationId: string;
+  readonly ordinal: number;
+  readonly turnId: string;
+};
+
+function decodeTurnPageCursor(value: unknown, context: UsageContext, invocationId: string, runId: string): DecodedUsageTurnCursor {
+  if (!context.usageGenerationId) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+  const cursor = decodeUsageCursor(value, {
+    query: "usage-turns",
+    publicationId: context.publicationId,
+    usageGenerationId: context.usageGenerationId,
+    taskId: context.taskId,
+    runId,
+    invocationId,
+  });
+  if (cursor.sort[0] !== invocationId) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+  return { direction: cursor.direction, invocationId: cursor.invocationId, ordinal: cursor.sort[1], turnId: cursor.sort[2] };
 }
 
 function detailLimit(expected: unknown, maximum: number): number {
@@ -1117,6 +1748,226 @@ export class CloudRepository {
     return summary;
   }
 
+  private async readUsageContext(taskId: string): Promise<UsageContext | null | CloudUsageUnavailable> {
+    try {
+      const response = await this.client().query(USAGE_CONTEXT_STATEMENT, [taskId]);
+      const rows = rowsFromResponse(response);
+      if (rows.length === 0) return null;
+      if (rows.length !== 1) return usageUnavailable("invalid");
+      try {
+        return parseUsageContext(rows[0]);
+      } catch {
+        return usageUnavailable("invalid");
+      }
+    } catch {
+      return usageUnavailable("unavailable");
+    }
+  }
+
+  /** Read precomputed global groups only; no task or request-time rollup is performed. */
+  async getGlobalUsage(): Promise<CloudUsageGlobalGroup[] | CloudUsageUnavailable> {
+    const rows = await queryUsageRows(this.client(), USAGE_GLOBAL_STATEMENT, [MAX_USAGE_GLOBALS + 1]);
+    if (isUsageUnavailable(rows)) return rows;
+    if (rows.length > MAX_USAGE_GLOBALS) return usageUnavailable("invalid");
+    try {
+      return groupUsageGlobals(rows.map(parseUsageGlobalRow));
+    } catch {
+      return usageUnavailable("invalid");
+    }
+  }
+
+  async readGlobalUsage(): Promise<CloudUsageGlobalGroup[] | CloudUsageUnavailable> {
+    return this.getGlobalUsage();
+  }
+
+  async getTaskUsage(taskId: string): Promise<CloudUsage | null | CloudUsageUnavailable> {
+    if (!validIdentifier(taskId)) return null;
+    const context = await this.readUsageContext(taskId);
+    if (context === null || isUsageUnavailable(context)) return context;
+    if (!context.usageGenerationId) return usageUnavailable("missing");
+    const summaryRows = await queryUsageRows(this.client(), USAGE_SUMMARY_STATEMENT, [taskId, MAX_USAGE_SUMMARIES + 1]);
+    if (isUsageUnavailable(summaryRows)) return summaryRows;
+    if (summaryRows.length === 0 || summaryRows.length > MAX_USAGE_SUMMARIES) return usageUnavailable("invalid");
+    let summaries: CloudUsageSummary[];
+    try {
+      summaries = summaryRows.map(parseUsageSummaryRow);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+    if (!summaries.some((summary) => summary.scope === "task" && summary.runId === null)) return usageUnavailable("invalid");
+
+    const invocationRows = await queryUsageRows(this.client(), USAGE_INVOCATION_STATEMENT, [taskId, MAX_USAGE_INVOCATIONS + 1]);
+    if (isUsageUnavailable(invocationRows)) return invocationRows;
+    if (invocationRows.length > MAX_USAGE_INVOCATIONS) return usageUnavailable("invalid");
+    let invocations: CloudUsageInvocation[];
+    try {
+      invocations = invocationRows.map(parseUsageInvocationRow);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+    const globals = await this.getGlobalUsage();
+    if (isUsageUnavailable(globals)) return globals;
+    try {
+      return safeValidate(() => validateCloudUsageData({
+        schemaVersion: "1.0",
+        usageGenerationId: context.usageGenerationId,
+        publicationId: context.publicationId,
+        taskId: context.taskId,
+        summaries,
+        invocations,
+        globals,
+      }));
+    } catch {
+      return usageUnavailable("invalid");
+    }
+  }
+
+  async readTaskUsage(taskId: string): Promise<CloudUsage | null | CloudUsageUnavailable> {
+    return this.getTaskUsage(taskId);
+  }
+
+  async getUsage(taskId: string): Promise<CloudUsage | null | CloudUsageUnavailable> {
+    return this.getTaskUsage(taskId);
+  }
+
+  async getTaskUsageSummary(taskId: string, runId?: string): Promise<CloudUsageSummary | null | CloudUsageUnavailable> {
+    if (!validIdentifier(taskId) || (runId !== undefined && !validIdentifier(runId))) return null;
+    const context = await this.readUsageContext(taskId);
+    if (context === null || isUsageUnavailable(context)) return context;
+    if (!context.usageGenerationId) return usageUnavailable("missing");
+    const rows = await queryUsageRows(this.client(), USAGE_SUMMARY_STATEMENT, [taskId, MAX_USAGE_SUMMARIES + 1]);
+    if (isUsageUnavailable(rows)) return rows;
+    if (rows.length === 0 || rows.length > MAX_USAGE_SUMMARIES) return usageUnavailable("invalid");
+    try {
+      const summaries = rows.map(parseUsageSummaryRow);
+      if (summaries.some((summary) => summary.usageGenerationId !== context.usageGenerationId || summary.publicationId !== context.publicationId || summary.taskId !== context.taskId)) return usageUnavailable("invalid");
+      if (!summaries.some((summary) => summary.scope === "task" && summary.runId === null)) return usageUnavailable("invalid");
+      const selected = summaries.filter((summary) => runId === undefined ? summary.scope === "task" : summary.scope === "run" && summary.runId === runId);
+      if (selected.length > 1) return usageUnavailable("invalid");
+      return selected[0] ?? null;
+    } catch {
+      return usageUnavailable("invalid");
+    }
+  }
+
+  async readTaskUsageSummary(taskId: string, runId?: string): Promise<CloudUsageSummary | null | CloudUsageUnavailable> {
+    return this.getTaskUsageSummary(taskId, runId);
+  }
+
+  async getUsageInvocations(taskId: string, runId?: string): Promise<CloudUsageInvocation[] | null | CloudUsageUnavailable> {
+    if (!validIdentifier(taskId) || (runId !== undefined && !validIdentifier(runId))) return null;
+    const context = await this.readUsageContext(taskId);
+    if (context === null || isUsageUnavailable(context)) return context;
+    if (!context.usageGenerationId) return usageUnavailable("missing");
+    const rows = await queryUsageRows(this.client(), USAGE_INVOCATION_STATEMENT, [taskId, MAX_USAGE_INVOCATIONS + 1]);
+    if (isUsageUnavailable(rows)) return rows;
+    if (rows.length > MAX_USAGE_INVOCATIONS) return usageUnavailable("invalid");
+    try {
+      const invocations = rows.map(parseUsageInvocationRow);
+      if (invocations.some((invocation) => invocation.usageGenerationId !== context.usageGenerationId || invocation.publicationId !== context.publicationId || invocation.taskId !== context.taskId || invocation.ownershipClass !== "task-owned")) return usageUnavailable("invalid");
+      return invocations.filter((invocation) => runId === undefined || invocation.runId === runId);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+  }
+
+  async listUsageInvocations(taskId: string, runId?: string): Promise<CloudUsageInvocation[] | null | CloudUsageUnavailable> {
+    return this.getUsageInvocations(taskId, runId);
+  }
+
+  async getUsageTurnPage(taskId: string, invocationId: string, options: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageTurnPage | null | CloudUsageUnavailable> {
+    if (!validIdentifier(taskId) || !validIdentifier(invocationId)) return null;
+    const context = await this.readUsageContext(taskId);
+    if (context === null || (context && "kind" in context)) return context;
+    if (!context.usageGenerationId) return usageUnavailable("missing");
+    const limit = usageLimit(options.limit, MAX_USAGE_TURN_PAGE_SIZE, 50);
+    const invocationRows = await queryUsageRows(this.client(), USAGE_INVOCATION_CONTEXT_STATEMENT, [taskId, invocationId]);
+    if (isUsageUnavailable(invocationRows)) return invocationRows;
+    if (invocationRows.length === 0) return null;
+    if (invocationRows.length !== 1) return usageUnavailable("invalid");
+    let invocation: CloudUsageInvocation;
+    try {
+      invocation = parseUsageInvocationRow(invocationRows[0]);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+    if (invocation.usageGenerationId !== context.usageGenerationId || invocation.publicationId !== context.publicationId || invocation.taskId !== taskId || invocation.ownershipClass !== "task-owned" || invocation.runId === null || invocation.pipelineId === null) return usageUnavailable("invalid");
+
+    const countRows = await queryUsageRows(this.client(), USAGE_TURN_COUNT_STATEMENT, [taskId, invocationId]);
+    if (isUsageUnavailable(countRows)) return countRows;
+    if (countRows.length !== 1) return usageUnavailable("invalid");
+    let total: number;
+    try {
+      total = usageCount(countRows[0]);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+    let decoded: DecodedUsageTurnCursor | null;
+    try {
+      decoded = options.cursor == null ? null : decodeTurnPageCursor(options.cursor, context, invocationId, invocation.runId);
+    } catch (error) {
+      if (error instanceof PublicationCursorError) throw error;
+      return usageUnavailable("invalid");
+    }
+    if (decoded) {
+      const boundaryRows = await queryUsageRows(this.client(), USAGE_TURN_BOUNDARY_STATEMENT, [taskId, invocationId, decoded.ordinal, decoded.turnId]);
+      if (isUsageUnavailable(boundaryRows)) return boundaryRows;
+      if (boundaryRows.length !== 1) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+      let boundary: CloudUsageTurn;
+      try {
+        boundary = parseUsageTurnRow(boundaryRows[0]);
+      } catch {
+        throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+      }
+      if (boundary.usageGenerationId !== context.usageGenerationId || boundary.publicationId !== context.publicationId || boundary.taskId !== taskId || boundary.runId !== invocation.runId || boundary.invocationId !== invocationId || boundary.ordinal !== decoded.ordinal || boundary.turnId !== decoded.turnId) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+    }
+
+    const statement = decoded?.direction === "next"
+      ? USAGE_TURN_NEXT_STATEMENT
+      : decoded?.direction === "previous" ? USAGE_TURN_PREVIOUS_STATEMENT : USAGE_TURN_FIRST_STATEMENT;
+    const params: D1Scalar[] = decoded?.direction === "next" || decoded?.direction === "previous"
+      ? [taskId, invocationId, decoded.ordinal, decoded.ordinal, decoded.turnId, limit + 1]
+      : [taskId, invocationId, limit + 1];
+    const pageRows = await queryUsageRows(this.client(), statement, params);
+    if (isUsageUnavailable(pageRows)) return pageRows;
+    if (pageRows.length > limit + 1) return usageUnavailable("invalid");
+    let parsed: CloudUsageTurn[];
+    try {
+      parsed = pageRows.map(parseUsageTurnRow);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+    for (const turn of parsed) {
+      if (turn.usageGenerationId !== context.usageGenerationId || turn.publicationId !== context.publicationId || turn.taskId !== taskId || turn.runId !== invocation.runId || turn.invocationId !== invocationId) return usageUnavailable("invalid");
+    }
+    const hasExtra = parsed.length > limit;
+    const output = decoded?.direction === "previous" ? parsed.slice(0, limit).reverse() : parsed.slice(0, limit);
+    const first = output[0];
+    const last = output.at(-1);
+    let nextCursor: string | null = null;
+    let previousCursor: string | null = null;
+    const cursorFor = (turn: CloudUsageTurn, direction: "next" | "previous") => encodeUsageCursor({
+      query: "usage-turns", publicationId: context.publicationId, usageGenerationId: context.usageGenerationId!, taskId,
+      runId: invocation.runId!, invocationId, sort: [invocationId, turn.ordinal, turn.turnId], direction,
+    });
+    if (first && (decoded?.direction === "previous" ? hasExtra : decoded?.direction === "next")) previousCursor = cursorFor(first, "previous");
+    if (last && (decoded?.direction === "next" || !decoded ? hasExtra : false)) nextCursor = cursorFor(last, "next");
+    if (last && decoded?.direction === "previous") nextCursor = cursorFor(last, "next");
+    try {
+      return safeValidate(() => validateCloudUsageTurnPageData({ turns: output, nextCursor, previousCursor, total }));
+    } catch {
+      return usageUnavailable("invalid");
+    }
+  }
+
+  async listUsageTurns(taskId: string, invocationId: string, options: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageTurnPage | null | CloudUsageUnavailable> {
+    return this.getUsageTurnPage(taskId, invocationId, options);
+  }
+
+  async getTurnPage(taskId: string, invocationId: string, options: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageTurnPage | null | CloudUsageUnavailable> {
+    return this.getUsageTurnPage(taskId, invocationId, options);
+  }
+
   async getStatus(): Promise<CloudStatus> {
     return (await this.readStatus()).status;
   }
@@ -1302,6 +2153,8 @@ export {
   createCloudRepository as createCloudStewardArchiveRepository,
   getCloudRepository as getCloudStewardArchiveRepository,
   decodePublicationCursor,
+  decodeUsageCursor,
   encodePublicationCursor,
+  encodeUsageCursor,
   PublicationCursorError,
 };

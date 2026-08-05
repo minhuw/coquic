@@ -18,6 +18,18 @@ import {
   validateCloudTaskDetail,
   validateCloudTaskPage,
   validateCloudTrajectoryDescriptor,
+  validateCloudUsage,
+  validateCloudUsageCostTotals,
+  validateCloudUsageData,
+  validateCloudUsageGlobal,
+  validateCloudUsageGlobalGroup,
+  validateCloudUsageInvocation,
+  validateCloudUsagePrice,
+  validateCloudUsageSummary,
+  validateCloudUsageTokenTotals,
+  validateCloudUsageTurn,
+  validateCloudUsageTurnPage,
+  validateCloudUsageUnavailable,
   type CloudArtifact,
   type CloudTaskDetail,
 } from "@/lib/steward-archive/cloud-schema";
@@ -48,6 +60,65 @@ function copy<T>(value: T): T { return structuredClone(value); }
 function rejects(value: unknown) { assert.throws(() => validateCloudTaskDetail(value), /invalid Steward cloud response/); }
 function rejectsComplete(value: unknown) { assert.throws(() => validateCloudCompleteTrajectory(value), /invalid Steward cloud response/); }
 
+const usageGenerationId = "usage-generation";
+const usagePublicationId = "publication-usage";
+const usageTaskId = "task-usage";
+const usagePipelineId = "pipeline-usage";
+const usageRunId = "run-usage";
+const usageInvocationId = "invocation-usage";
+const usageDigest = "c".repeat(64);
+const usageTokens = { promptTokens: 11, cachedTokens: 2, uncachedTokens: 9, completionTokens: 7, reasoningTokens: 3, totalTokens: 18 };
+const usageCosts = { uncachedInputCostMicroUsd: 10, cachedInputCostMicroUsd: 20, outputCostMicroUsd: 30, totalCostMicroUsd: 60 };
+
+function usageSummary(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    summaryId: "summary-task", usageGenerationId, publicationId: usagePublicationId, taskId: usageTaskId, runId: null,
+    scope: "task", coverage: "complete", coveredInvocations: 1, expectedInvocations: 1,
+    knownTokenSubtotal: 18, knownCostSubtotalMicroUsd: 60, ...usageTokens, ...usageCosts, priceProvenanceDigest: usageDigest,
+    ...overrides,
+  };
+}
+
+function usageInvocation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    invocationId: usageInvocationId, usageGenerationId, publicationId: usagePublicationId, taskId: usageTaskId,
+    pipelineId: usagePipelineId, runId: usageRunId, ownershipClass: "task-owned", retryOrdinal: 0,
+    startedAt: generatedAt, completedAt: "2026-07-28T00:00:01Z", model: "gpt-fixture", billingMode: "api",
+    processOutcome: "success", coverage: "complete", issueCount: 0, coveredTurns: 1, expectedTurns: 1,
+    ...usageTokens, ...usageCosts, priceEntryDigest: usageDigest,
+    ...overrides,
+  };
+}
+
+function usageTurn(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    turnId: "turn-usage", usageGenerationId, invocationId: usageInvocationId, publicationId: usagePublicationId,
+    taskId: usageTaskId, runId: usageRunId, ordinal: 1, ...usageTokens, ...usageCosts, priceEntryDigest: usageDigest,
+    ...overrides,
+  };
+}
+
+function usageGlobal(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    globalId: "global-usage", usageGenerationId, periodKind: "lifetime", periodKey: "lifetime", model: "gpt-fixture",
+    ownershipClass: "task-owned", coverage: "complete", coveredInvocations: 1, expectedInvocations: 1,
+    knownTokenSubtotal: 18, knownCostSubtotalMicroUsd: 60, ...usageTokens, ...usageCosts, priceProvenanceDigest: usageDigest,
+    aggregateOnly: true, ...overrides,
+  };
+}
+
+function completeUsage() {
+  return {
+    schemaVersion: "1.0",
+    usageGenerationId,
+    publicationId: usagePublicationId,
+    taskId: usageTaskId,
+    summaries: [usageSummary()],
+    invocations: [usageInvocation()],
+    globals: [{ model: "gpt-fixture", ownershipClass: "task-owned", lifetime: usageGlobal(), daily: [] }],
+  };
+}
+
 test("accepts version-3 status, page, detail, descriptor, artifact, and problem envelopes", () => {
   const graph = detail();
   const task = graph.task;
@@ -59,6 +130,80 @@ test("accepts version-3 status, page, detail, descriptor, artifact, and problem 
   assert.equal(validateCloudTrajectoryDescriptor(response(descriptor)).data.sha256, digest);
   assert.equal(validateCloudArtifact(graph.artifacts[0]).artifactId, "artifact-atif");
   assert.equal(validateCloudProblem({ schemaVersion: "3.0", generatedAt, problem: { code: "UNAVAILABLE", message: "Cloud data is unavailable", retryable: true, status: 503, type: null } }).problem.retryable, true);
+});
+
+test("validates complete, partial, unavailable, and zero-token usage rows", () => {
+  assert.deepEqual(validateCloudUsageTokenTotals(usageTokens), usageTokens);
+  assert.deepEqual(validateCloudUsageCostTotals(usageCosts), usageCosts);
+  assert.equal(validateCloudUsageSummary(usageSummary()).totalTokens, 18);
+  assert.equal(validateCloudUsageInvocation(usageInvocation()).totalCostMicroUsd, 60);
+  assert.equal(validateCloudUsageTurn(usageTurn()).ordinal, 1);
+
+  const partialSummary = usageSummary({
+    summaryId: "summary-partial", coverage: "partial", coveredInvocations: 0, expectedInvocations: 1,
+    knownTokenSubtotal: null, knownCostSubtotalMicroUsd: null,
+    promptTokens: 11, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null,
+    uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null,
+    priceProvenanceDigest: null,
+  });
+  assert.equal(validateCloudUsageSummary(partialSummary).coverage, "partial");
+
+  const unavailableSummary = usageSummary({
+    summaryId: "summary-unavailable", coverage: "unavailable", coveredInvocations: 0, expectedInvocations: 1,
+    knownTokenSubtotal: null, knownCostSubtotalMicroUsd: null,
+    promptTokens: null, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null,
+    uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null,
+    priceProvenanceDigest: null,
+  });
+  assert.equal(validateCloudUsageSummary(unavailableSummary).totalTokens, null);
+
+  const unavailableInvocation = usageInvocation({
+    invocationId: null, coverage: "unavailable", coveredTurns: 0, expectedTurns: 0, startedAt: null, completedAt: null,
+    model: null, billingMode: null, processOutcome: "missing", issueCount: 1,
+    promptTokens: null, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null,
+    uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null,
+    priceEntryDigest: null,
+  });
+  assert.equal(validateCloudUsageInvocation(unavailableInvocation).invocationId, null);
+
+  const zero = usageTurn({
+    turnId: "turn-zero", promptTokens: 0, cachedTokens: 0, uncachedTokens: 0, completionTokens: 0, reasoningTokens: 0,
+    totalTokens: 0, uncachedInputCostMicroUsd: 0, cachedInputCostMicroUsd: 0, outputCostMicroUsd: 0, totalCostMicroUsd: 0,
+  });
+  assert.equal(validateCloudUsageTurn(zero).totalTokens, 0);
+});
+
+test("validates global groups, prices, complete usage, and bounded turn pages", () => {
+  const daily = usageGlobal({ globalId: "global-daily", periodKind: "daily", periodKey: "2026-07-28" });
+  const group = validateCloudUsageGlobalGroup({ model: "gpt-fixture", ownershipClass: "task-owned", lifetime: usageGlobal(), daily: [daily] });
+  assert.equal(group.daily[0]!.periodKey, "2026-07-28");
+  assert.equal(validateCloudUsageGlobal(usageGlobal()).aggregateOnly, true);
+  assert.equal(validateCloudUsagePrice({
+    priceEntryDigest: usageDigest, usageGenerationId, catalogDigest: "d".repeat(64), model: "gpt-fixture",
+    effectiveAt: "2026-01-01T00:00:00Z", effectiveUntil: null,
+  }).model, "gpt-fixture");
+  assert.equal(validateCloudUsageData(completeUsage()).invocations[0]!.invocationId, usageInvocationId);
+  const page = validateCloudUsageTurnPage({ turns: [usageTurn()], nextCursor: "opaque-next", previousCursor: null, total: 1 });
+  assert.equal(page.total, 1);
+  assert.deepEqual(validateCloudUsageUnavailable({ kind: "unavailable", reason: "missing" }), { kind: "unavailable", reason: "missing" });
+});
+
+test("rejects private keys, unsafe integers, malformed coverage, ownership, and cursor rows", () => {
+  assert.throws(() => validateCloudUsageSummary({ ...usageSummary(), extra: true }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageSummary({ ...usageSummary(), credentialPath: "hidden" }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageInvocation({ ...usageInvocation(), totalTokens: Number.MAX_SAFE_INTEGER + 1 }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageSummary({ ...usageSummary(), coverage: "unknown" }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageGlobal({ ...usageGlobal(), aggregateOnly: false }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageGlobalGroup({ model: "gpt-fixture", ownershipClass: "task-owned", lifetime: usageGlobal(), daily: [usageGlobal({ globalId: "global-daily", periodKind: "daily", periodKey: "2026-07-28" }), usageGlobal({ globalId: "global-daily-2", periodKind: "daily", periodKey: "2026-07-28" })] }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsagePrice({
+    priceEntryDigest: usageDigest, usageGenerationId, catalogDigest: "d".repeat(64), model: null,
+    effectiveAt: generatedAt, effectiveUntil: null,
+  }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageTurnPage({ turns: [usageTurn({ ordinal: 0 })], nextCursor: null, previousCursor: null, total: 1 }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageData({ ...completeUsage(), summaries: [usageSummary(), usageSummary({ summaryId: "summary-task" })] }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageData({
+    ...completeUsage(), summaries: [usageSummary({ totalTokens: 19, knownTokenSubtotal: 19 })],
+  }), /invalid Steward cloud response/);
 });
 
 test("serializes only validated closed envelopes and parses them back", () => {

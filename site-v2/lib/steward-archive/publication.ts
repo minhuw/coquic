@@ -251,6 +251,131 @@ export function decodePublicationCursor(value: unknown, expected: { query: strin
 export const encodeCursor = encodePublicationCursor;
 export const decodeCursor = decodePublicationCursor;
 
+/**
+ * Usage cursors are deliberately separate from publication cursors.  A task
+ * cursor only identifies a publication snapshot; a turn cursor must also
+ * identify the usage generation and every owner in the invocation chain.
+ */
+export type UsageCursorDirection = "next" | "previous";
+export interface UsageCursor {
+  version: 1;
+  query: string;
+  publicationId: string;
+  usageGenerationId: string;
+  taskId: string;
+  runId: string;
+  invocationId: string;
+  sort: readonly [string, number, string];
+  direction: UsageCursorDirection;
+}
+
+const USAGE_CURSOR_KEYS = [
+  "version", "query", "publicationId", "usageGenerationId", "taskId", "runId",
+  "invocationId", "sort", "direction",
+] as const;
+
+function usageCursorId(value: unknown): string {
+  if (typeof value !== "string" || !ID.test(value)) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  return value;
+}
+
+function usageCursorQuery(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-z][A-Za-z0-9._-]{0,63}$/.test(value)) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  return value;
+}
+
+function usageCursorSort(value: unknown): readonly [string, number, string] {
+  if (!Array.isArray(value) || value.length !== 3) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  const invocationId = usageCursorId(value[0]);
+  if (typeof value[1] !== "number" || !Number.isSafeInteger(value[1]) || value[1] < 1 || value[1] > 4096) {
+    throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  }
+  const turnId = usageCursorId(value[2]);
+  return [invocationId, value[1], turnId];
+}
+
+function usageCursorPayload(value: unknown): UsageCursor {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  const row = value as Record<string, unknown>;
+  const keys = Object.keys(row);
+  if (keys.length !== USAGE_CURSOR_KEYS.length || keys.some((key) => !USAGE_CURSOR_KEYS.includes(key as (typeof USAGE_CURSOR_KEYS)[number]))) {
+    throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  }
+  if (row.version !== 1 || row.direction !== "next" && row.direction !== "previous") {
+    throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  }
+  return {
+    version: 1,
+    query: usageCursorQuery(row.query),
+    publicationId: usageCursorId(row.publicationId),
+    usageGenerationId: usageCursorId(row.usageGenerationId),
+    taskId: usageCursorId(row.taskId),
+    runId: usageCursorId(row.runId),
+    invocationId: usageCursorId(row.invocationId),
+    sort: usageCursorSort(row.sort),
+    direction: row.direction,
+  };
+}
+
+export function encodeUsageCursor(input: {
+  query: string;
+  publicationId: string;
+  usageGenerationId: string;
+  taskId: string;
+  runId: string;
+  invocationId: string;
+  sort: readonly [string, number, string];
+  direction: UsageCursorDirection;
+}): string {
+  const payload: UsageCursor = {
+    version: 1,
+    query: usageCursorQuery(input.query),
+    publicationId: usageCursorId(input.publicationId),
+    usageGenerationId: usageCursorId(input.usageGenerationId),
+    taskId: usageCursorId(input.taskId),
+    runId: usageCursorId(input.runId),
+    invocationId: usageCursorId(input.invocationId),
+    sort: usageCursorSort(input.sort),
+    direction: input.direction,
+  };
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+export function decodeUsageCursor(
+  value: unknown,
+  expected: {
+    query: string;
+    publicationId: string;
+    usageGenerationId: string;
+    taskId: string;
+    runId: string;
+    invocationId: string;
+  },
+): UsageCursor {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  let payload: unknown;
+  try {
+    const raw = Buffer.from(value, "base64url");
+    if (raw.length === 0 || raw.toString("base64url") !== value) throw new Error();
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+  } catch {
+    throw new PublicationCursorError("INVALID_CURSOR", "invalid cursor");
+  }
+  const cursor = usageCursorPayload(payload);
+  const stale = cursor.query !== usageCursorQuery(expected.query)
+    || cursor.publicationId !== usageCursorId(expected.publicationId)
+    || cursor.usageGenerationId !== usageCursorId(expected.usageGenerationId)
+    || cursor.taskId !== usageCursorId(expected.taskId)
+    || cursor.runId !== usageCursorId(expected.runId)
+    || cursor.invocationId !== usageCursorId(expected.invocationId)
+    || cursor.sort[0] !== cursor.invocationId;
+  if (stale) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+  return cursor;
+}
+
+export const encodeTurnCursor = encodeUsageCursor;
+export const decodeTurnCursor = decodeUsageCursor;
+
 export function resolvePublicObjectUrl(base: string, publicKey: string): string {
   validatePublicKey(publicKey);
   let root: URL;

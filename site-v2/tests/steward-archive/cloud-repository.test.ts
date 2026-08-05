@@ -31,8 +31,18 @@ const {
   TASK_DETAIL_PIPELINES_STATEMENT,
   TASK_DETAIL_RUNS_STATEMENT,
   TASK_DETAIL_STATEMENT,
+  USAGE_CONTEXT_STATEMENT,
+  USAGE_GLOBAL_STATEMENT,
+  USAGE_INVOCATION_CONTEXT_STATEMENT,
+  USAGE_INVOCATION_STATEMENT,
+  USAGE_SUMMARY_STATEMENT,
+  USAGE_TURN_BOUNDARY_STATEMENT,
+  USAGE_TURN_COUNT_STATEMENT,
+  USAGE_TURN_FIRST_STATEMENT,
+  USAGE_TURN_NEXT_STATEMENT,
+  USAGE_TURN_PREVIOUS_STATEMENT,
 } = repositoryModule;
-const { decodePublicationCursor } = requireForTest(resolve(process.cwd(), "lib/steward-archive/publication.ts")) as typeof import("../../lib/steward-archive/publication");
+const { decodePublicationCursor, encodeUsageCursor } = requireForTest(resolve(process.cwd(), "lib/steward-archive/publication.ts")) as typeof import("../../lib/steward-archive/publication");
 
 const latestPublication = "publication-latest";
 
@@ -179,6 +189,77 @@ function detailResponses(options: { lifecycleState?: "active" | "completed"; ava
   ];
 }
 
+const usageGenerationId = "usage-generation";
+const usageTaskId = "task-usage";
+const usagePublicationId = "publication-usage";
+const usagePipelineId = "pipeline-usage";
+const usageRunId = "run-usage";
+const usageInvocationId = "invocation-usage";
+const usageDigest = "c".repeat(64);
+
+function usageContextRow(overrides: RawRow = {}): RawRow {
+  return {
+    task_id: usageTaskId, publication_id: usagePublicationId, task_head_state: "visible", task_head_updated_at: "2026-07-28T00:00:03Z",
+    task_head_usage_generation_id: usageGenerationId, generation_publication_id: usagePublicationId, generation_state: "visible",
+    generation_exposed_at: "2026-07-28T00:00:02Z", usage_head_generation_id: usageGenerationId, usage_head_state: "visible",
+    usage_head_updated_at: "2026-07-28T00:00:03Z", usage_generation_id: usageGenerationId, usage_publication_id: usagePublicationId,
+    usage_task_id: usageTaskId, usage_schema_version: "1.0", usage_metadata_digest: "e".repeat(64), usage_generation_state: "visible",
+    usage_generation_exposed_at: "2026-07-28T00:00:02Z", ...overrides,
+  };
+}
+
+function missingUsageContextRow(): RawRow {
+  return usageContextRow({
+    usage_head_generation_id: null, usage_head_state: null, usage_head_updated_at: null, usage_generation_id: null,
+    usage_publication_id: null, usage_task_id: null, usage_schema_version: null, usage_metadata_digest: null,
+    usage_generation_state: null, usage_generation_exposed_at: null,
+  });
+}
+
+function usageSummaryRow(overrides: RawRow = {}): RawRow {
+  return {
+    summary_id: "summary-task", usage_generation_id: usageGenerationId, publication_id: usagePublicationId, task_id: usageTaskId,
+    run_id: null, scope: "task", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
+    completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10,
+    cached_input_cost_micro_usd: 20, output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: usageDigest,
+    ...overrides,
+  };
+}
+
+function usageInvocationRow(overrides: RawRow = {}): RawRow {
+  return {
+    invocation_id: usageInvocationId, usage_generation_id: usageGenerationId, publication_id: usagePublicationId, task_id: usageTaskId,
+    pipeline_id: usagePipelineId, run_id: usageRunId, ownership_class: "task-owned", retry_ordinal: 0,
+    started_at: "2026-07-28T00:00:00Z", completed_at: "2026-07-28T00:00:01Z", model: "gpt-fixture", billing_mode: "api",
+    process_outcome: "success", coverage: "complete", issue_count: 0, covered_turns: 2, expected_turns: 2,
+    prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9, completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18,
+    uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20, output_cost_micro_usd: 30, total_cost_micro_usd: 60,
+    price_entry_digest: usageDigest, ...overrides,
+  };
+}
+
+function usageGlobalRow(overrides: RawRow = {}): RawRow {
+  return {
+    global_id: "global-usage", usage_generation_id: usageGenerationId, period_kind: "lifetime", period_key: "lifetime",
+    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
+    completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10,
+    cached_input_cost_micro_usd: 20, output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: usageDigest,
+    aggregate_only: 1, ...overrides,
+  };
+}
+
+function usageTurnRow(ordinal: number, turnId = `turn-${ordinal}`, overrides: RawRow = {}): RawRow {
+  return {
+    turn_id: turnId, usage_generation_id: usageGenerationId, invocation_id: usageInvocationId, publication_id: usagePublicationId,
+    task_id: usageTaskId, run_id: usageRunId, ordinal, prompt_tokens: 5, cached_tokens: 1, uncached_tokens: 4,
+    completion_tokens: 2, reasoning_tokens: 1, total_tokens: 7, uncached_input_cost_micro_usd: 4,
+    cached_input_cost_micro_usd: 5, output_cost_micro_usd: 6, total_cost_micro_usd: 15, price_entry_digest: usageDigest,
+    ...overrides,
+  };
+}
+
 class FakeClient {
   readonly calls: { statement: string; params: readonly unknown[] }[] = [];
   private readonly pending: (unknown | Error)[];
@@ -195,6 +276,128 @@ class FakeClient {
     return result as ReturnType<typeof response>;
   }
 }
+
+test("reads only visible cached usage and preserves D1 numeric values", async () => {
+  const runSummary = usageSummaryRow({ summary_id: "summary-run", run_id: usageRunId, scope: "run" });
+  const client = new FakeClient(
+    response([usageContextRow()]),
+    response([usageSummaryRow(), runSummary]),
+    response([usageInvocationRow()]),
+    response([usageGlobalRow(), usageGlobalRow({ global_id: "global-daily", period_kind: "daily", period_key: "2026-07-28" })]),
+  );
+  const usage = await new CloudRepository({ client }).getTaskUsage(usageTaskId);
+  assert(usage && !Array.isArray(usage) && !('kind' in usage));
+  assert.equal(usage.summaries[0]!.totalTokens, 18);
+  assert.equal(usage.summaries[0]!.totalCostMicroUsd, 60);
+  assert.equal(usage.invocations[0]!.cachedTokens, 2);
+  assert.equal(usage.globals[0]!.daily[0]!.totalCostMicroUsd, 60);
+  assert.deepEqual(client.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_SUMMARY_STATEMENT, USAGE_INVOCATION_STATEMENT, USAGE_GLOBAL_STATEMENT]);
+  assert.equal(client.calls[1]!.params.at(-1), 4_097);
+  assert.equal(client.calls[2]!.params.at(-1), 129);
+  assert.equal(client.calls[3]!.params.at(-1), 4_097);
+  for (const call of client.calls) assert.match(call.statement, /SELECT/);
+  assert(client.calls.every((call) => /^\s*SELECT/i.test(call.statement)));
+});
+
+test("distinguishes an absent task, missing usage head, corrupt usage, and D1 outage", async () => {
+  const absent = await new CloudRepository({ client: new FakeClient(response([])) }).getTaskUsage(usageTaskId);
+  assert.equal(absent, null);
+
+  const missing = await new CloudRepository({ client: new FakeClient(response([missingUsageContextRow()])) }).getTaskUsage(usageTaskId);
+  assert.deepEqual(missing, { kind: "unavailable", reason: "missing" });
+
+  const corrupt = await new CloudRepository({ client: new FakeClient(response([usageContextRow({ usage_metadata_digest: "bad" })])) }).getTaskUsage(usageTaskId);
+  assert.deepEqual(corrupt, { kind: "unavailable", reason: "invalid" });
+
+  const outage = await new CloudRepository({ client: new FakeClient(new Error("D1 timeout")) }).getTaskUsage(usageTaskId);
+  assert.deepEqual(outage, { kind: "unavailable", reason: "unavailable" });
+
+  const summaryOutage = await new CloudRepository({ client: new FakeClient(response([usageContextRow()]), new Error("rate limit")) }).getTaskUsageSummary(usageTaskId);
+  assert.deepEqual(summaryOutage, { kind: "unavailable", reason: "unavailable" });
+  const invocationOutage = await new CloudRepository({ client: new FakeClient(response([usageContextRow()]), new Error("rate limit")) }).getUsageInvocations(usageTaskId);
+  assert.deepEqual(invocationOutage, { kind: "unavailable", reason: "unavailable" });
+  const globalOutage = await new CloudRepository({ client: new FakeClient(new Error("rate limit")) }).getGlobalUsage();
+  assert.deepEqual(globalOutage, { kind: "unavailable", reason: "unavailable" });
+});
+
+test("rejects malformed and cross-owner usage rows while retaining fixed visibility joins", async () => {
+  const malformed = usageSummaryRow({ private_path: "hidden" });
+  const client = new FakeClient(response([usageContextRow()]), response([malformed]));
+  const result = await new CloudRepository({ client }).getTaskUsageSummary(usageTaskId);
+  assert.deepEqual(result, { kind: "unavailable", reason: "invalid" });
+  assert.match(client.calls[0]!.statement, /task_heads/);
+  assert.match(client.calls[0]!.statement, /publication_generations/);
+  assert.match(client.calls[0]!.statement, /usage_heads/);
+  assert.match(client.calls[1]!.statement, /state = 'visible'/);
+  assert.match(client.calls[1]!.statement, /exposed_at IS NOT NULL/);
+
+  const wrongOwner = usageInvocationRow({ task_id: "task-other" });
+  const invocationResult = await new CloudRepository({ client: new FakeClient(response([usageContextRow()]), response([wrongOwner])) }).getUsageInvocations(usageTaskId);
+  assert.deepEqual(invocationResult, { kind: "unavailable", reason: "invalid" });
+});
+
+test("pages turns with generation-bound forward and backward cursors", async () => {
+  const firstClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 3 }]),
+    response([usageTurnRow(1), usageTurnRow(2), usageTurnRow(3)]),
+  );
+  const repository = new CloudRepository({ client: firstClient });
+  const first = await repository.getUsageTurnPage(usageTaskId, usageInvocationId, { limit: 2 });
+  assert(first && !Array.isArray(first) && !('kind' in first));
+  assert.deepEqual(first.turns.map((turn) => turn.ordinal), [1, 2]);
+  assert(first.nextCursor);
+  assert.equal(first.previousCursor, null);
+  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_CONTEXT_STATEMENT, USAGE_TURN_COUNT_STATEMENT, USAGE_TURN_FIRST_STATEMENT]);
+
+  const nextClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 3 }]), response([usageTurnRow(2)]),
+    response([usageTurnRow(3)]),
+  );
+  const next = await new CloudRepository({ client: nextClient }).getUsageTurnPage(usageTaskId, usageInvocationId, { cursor: first.nextCursor, limit: 2 });
+  assert(next && !Array.isArray(next) && !('kind' in next));
+  assert.deepEqual(next.turns.map((turn) => turn.ordinal), [3]);
+  assert(next.previousCursor);
+  assert.equal(next.nextCursor, null);
+  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_CONTEXT_STATEMENT, USAGE_TURN_COUNT_STATEMENT, USAGE_TURN_BOUNDARY_STATEMENT, USAGE_TURN_NEXT_STATEMENT]);
+
+  const previousClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 3 }]),
+    response([usageTurnRow(3)]), response([usageTurnRow(1)]),
+  );
+  const previous = await new CloudRepository({ client: previousClient }).getUsageTurnPage(usageTaskId, usageInvocationId, { cursor: next.previousCursor, limit: 2 });
+  assert(previous && !Array.isArray(previous) && !('kind' in previous));
+  assert.deepEqual(previous.turns.map((turn) => turn.ordinal), [1]);
+  assert.equal(previous.nextCursor !== null, true);
+  assert.deepEqual(previousClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_CONTEXT_STATEMENT, USAGE_TURN_COUNT_STATEMENT, USAGE_TURN_BOUNDARY_STATEMENT, USAGE_TURN_PREVIOUS_STATEMENT]);
+});
+
+test("fails closed for stale, cross-owner, malformed, empty, and clamped turn pages", async () => {
+  const stale = encodeUsageCursor({ query: "usage-turns", publicationId: usagePublicationId, usageGenerationId: "usage-old", taskId: usageTaskId, runId: usageRunId, invocationId: usageInvocationId, sort: [usageInvocationId, 1, "turn-1"], direction: "next" });
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 1 }])) }).getUsageTurnPage(usageTaskId, usageInvocationId, { cursor: stale }),
+    (error: unknown) => error instanceof repositoryModule.PublicationCursorError && error.code === "STALE_CURSOR",
+  );
+
+  const crossTask = encodeUsageCursor({ query: "usage-turns", publicationId: usagePublicationId, usageGenerationId, taskId: "task-other", runId: usageRunId, invocationId: usageInvocationId, sort: [usageInvocationId, 1, "turn-1"], direction: "next" });
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 1 }])) }).getUsageTurnPage(usageTaskId, usageInvocationId, { cursor: crossTask }),
+    (error: unknown) => error instanceof repositoryModule.PublicationCursorError && error.code === "STALE_CURSOR",
+  );
+
+  const malformed = "not-a-cursor";
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 1 }])) }).getUsageTurnPage(usageTaskId, usageInvocationId, { cursor: malformed }),
+    (error: unknown) => error instanceof repositoryModule.PublicationCursorError && error.code === "INVALID_CURSOR",
+  );
+
+  const empty = await new CloudRepository({ client: new FakeClient(response([usageContextRow()]), response([])) }).getUsageTurnPage(usageTaskId, usageInvocationId);
+  assert.equal(empty, null);
+
+  const clampedClient = new FakeClient(response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 1 }]), response([usageTurnRow(1)]));
+  const clamped = await new CloudRepository({ client: clampedClient }).getUsageTurnPage(usageTaskId, usageInvocationId, { limit: 999 });
+  assert(clamped && !Array.isArray(clamped) && !('kind' in clamped));
+  assert.equal(clampedClient.calls.at(-1)!.params.at(-1), 201);
+});
 
 function statusKey(row: RawRow): [string, string, string] {
   return [String(row.generation_exposed_at), String(row.publication_id), String(row.task_id)];

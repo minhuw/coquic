@@ -51,7 +51,10 @@ const OBJECT_KEY_VALUE = /v1\/(?:tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/object
 
 const SAME_ORIGIN_HREF = /^\/api\/steward\/tasks\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/artifact\?path=(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9._~!$'()*+,;=@-])+$/;
 const IMAGE_MEDIA_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
-const PUBLIC_FIELD_NAMES = new Set(["cachedTokens", "promptTokens", "completionTokens", "promptTokenIds", "completionTokenIds", "totalPromptTokens", "totalCompletionTokens", "totalCachedTokens"]);
+const PUBLIC_FIELD_NAMES = new Set([
+  "cachedTokens", "promptTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens", "knownTokenSubtotal",
+  "promptTokenIds", "completionTokenIds", "totalPromptTokens", "totalCompletionTokens", "totalCachedTokens",
+]);
 
 function invalid(): never { throw new Error(INVALID_MESSAGE); }
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
@@ -318,3 +321,507 @@ export function serializeCloudTaskDetail(value: unknown): string { return JSON.s
 export function serializeCloudTrajectoryDescriptor(value: unknown): string { return JSON.stringify(validateCloudTrajectoryDescriptorResponse(value)); }
 export function serializeCloudCompleteTrajectory(value: unknown): string { return JSON.stringify(validateCloudCompleteTrajectoryResponse(value)); }
 export function serializeCloudProblem(value: unknown): string { return JSON.stringify(validateCloudProblemResponse(value)); }
+
+/*
+ * Usage is a separate clean-launch projection.  The producer-side contract is
+ * intentionally not added to the legacy AJV response schema above: usage rows
+ * are read from D1 and validated here before they can reach a route.  Keeping
+ * the validators closed also means a future response cannot accidentally leak a
+ * private sidecar field by merely selecting another column.
+ */
+export type CloudUsageCoverage = "complete" | "partial" | "unavailable";
+export type CloudUsageOwnership = "task-owned" | "steward-overhead";
+export type CloudUsageTokenTotals = {
+  promptTokens: number | null;
+  cachedTokens: number | null;
+  uncachedTokens: number | null;
+  completionTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+};
+export type CloudUsageCostTotals = {
+  uncachedInputCostMicroUsd: number | null;
+  cachedInputCostMicroUsd: number | null;
+  outputCostMicroUsd: number | null;
+  totalCostMicroUsd: number | null;
+};
+export type CloudUsageSummary = CloudUsageTokenTotals & CloudUsageCostTotals & {
+  summaryId: string;
+  usageGenerationId: string;
+  publicationId: string;
+  taskId: string;
+  runId: string | null;
+  scope: "task" | "run";
+  coverage: CloudUsageCoverage;
+  coveredInvocations: number;
+  expectedInvocations: number;
+  knownTokenSubtotal: number | null;
+  knownCostSubtotalMicroUsd: number | null;
+  priceProvenanceDigest: string | null;
+};
+export type CloudUsageInvocation = CloudUsageTokenTotals & CloudUsageCostTotals & {
+  invocationId: string | null;
+  usageGenerationId: string;
+  publicationId: string | null;
+  taskId: string | null;
+  pipelineId: string | null;
+  runId: string | null;
+  ownershipClass: CloudUsageOwnership;
+  retryOrdinal: number;
+  startedAt: CloudTimestamp | null;
+  completedAt: CloudTimestamp | null;
+  model: string | null;
+  billingMode: "unknown" | "chatgpt" | "api" | null;
+  processOutcome: string | null;
+  coverage: CloudUsageCoverage;
+  issueCount: number;
+  coveredTurns: number;
+  expectedTurns: number;
+  priceEntryDigest: string | null;
+};
+export type CloudUsageTurn = CloudUsageTokenTotals & CloudUsageCostTotals & {
+  turnId: string;
+  usageGenerationId: string;
+  invocationId: string;
+  publicationId: string;
+  taskId: string;
+  runId: string;
+  ordinal: number;
+  priceEntryDigest: string | null;
+};
+export type CloudUsagePrice = {
+  priceEntryDigest: string;
+  usageGenerationId: string;
+  catalogDigest: string;
+  model: string;
+  effectiveAt: CloudTimestamp;
+  effectiveUntil: CloudTimestamp | null;
+};
+export type CloudUsageGlobal = CloudUsageTokenTotals & CloudUsageCostTotals & {
+  globalId: string;
+  usageGenerationId: string;
+  periodKind: "lifetime" | "daily";
+  periodKey: string;
+  model: string;
+  ownershipClass: CloudUsageOwnership;
+  coverage: CloudUsageCoverage;
+  coveredInvocations: number;
+  expectedInvocations: number;
+  knownTokenSubtotal: number | null;
+  knownCostSubtotalMicroUsd: number | null;
+  priceProvenanceDigest: string | null;
+  aggregateOnly: boolean;
+};
+export type CloudUsageGlobalGroup = {
+  model: string;
+  ownershipClass: CloudUsageOwnership;
+  lifetime: CloudUsageGlobal | null;
+  daily: CloudUsageGlobal[];
+};
+export type CloudUsage = {
+  schemaVersion: "1.0";
+  usageGenerationId: string;
+  publicationId: string;
+  taskId: string;
+  summaries: CloudUsageSummary[];
+  invocations: CloudUsageInvocation[];
+  globals: CloudUsageGlobalGroup[];
+};
+export type CloudUsageTurnPage = {
+  turns: CloudUsageTurn[];
+  nextCursor: string | null;
+  previousCursor: string | null;
+  total: number;
+};
+export type CloudUsageUnavailableReason = "missing" | "invalid" | "unavailable";
+export type CloudUsageUnavailable = { kind: "unavailable"; reason: CloudUsageUnavailableReason };
+export type CloudUsageReadResult<T> = T | CloudUsageUnavailable;
+
+const USAGE_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER;
+const USAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const USAGE_DIGEST = /^[0-9a-f]{64}$/;
+const USAGE_TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z$/;
+const USAGE_SUMMARY_KEYS = [
+  "summaryId", "usageGenerationId", "publicationId", "taskId", "runId", "scope", "coverage",
+  "coveredInvocations", "expectedInvocations", "knownTokenSubtotal", "knownCostSubtotalMicroUsd",
+  "promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens",
+  "uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd",
+  "priceProvenanceDigest",
+] as const;
+const USAGE_INVOCATION_KEYS = [
+  "invocationId", "usageGenerationId", "publicationId", "taskId", "pipelineId", "runId", "ownershipClass",
+  "retryOrdinal", "startedAt", "completedAt", "model", "billingMode", "processOutcome", "coverage", "issueCount",
+  "coveredTurns", "expectedTurns", "promptTokens", "cachedTokens", "uncachedTokens", "completionTokens",
+  "reasoningTokens", "totalTokens", "uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd",
+  "totalCostMicroUsd", "priceEntryDigest",
+] as const;
+const USAGE_TURN_KEYS = [
+  "turnId", "usageGenerationId", "invocationId", "publicationId", "taskId", "runId", "ordinal", "promptTokens",
+  "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens", "uncachedInputCostMicroUsd",
+  "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd", "priceEntryDigest",
+] as const;
+const USAGE_PRICE_KEYS = ["priceEntryDigest", "usageGenerationId", "catalogDigest", "model", "effectiveAt", "effectiveUntil"] as const;
+const USAGE_GLOBAL_KEYS = [
+  "globalId", "usageGenerationId", "periodKind", "periodKey", "model", "ownershipClass", "coverage",
+  "coveredInvocations", "expectedInvocations", "knownTokenSubtotal", "knownCostSubtotalMicroUsd", "promptTokens",
+  "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens", "uncachedInputCostMicroUsd",
+  "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd", "priceProvenanceDigest", "aggregateOnly",
+] as const;
+
+function usageInvalid(): never { invalid(); }
+function usageRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) usageInvalid();
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) usageInvalid();
+  return value;
+}
+function usageExact(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  const row = usageRecord(value);
+  const actual = Object.keys(row);
+  if (actual.length !== keys.length || actual.some((key) => !keys.includes(key))) usageInvalid();
+  publicScan(row);
+  return row;
+}
+function usageId(value: unknown): string {
+  if (typeof value !== "string" || !USAGE_ID.test(value)) usageInvalid();
+  return value;
+}
+function usageDigest(value: unknown): string {
+  if (typeof value !== "string" || !USAGE_DIGEST.test(value)) usageInvalid();
+  return value;
+}
+function usageTimestamp(value: unknown): string {
+  if (typeof value !== "string" || !USAGE_TIMESTAMP.test(value) || !Number.isFinite(Date.parse(value))) usageInvalid();
+  try {
+    validateCloudStatusData({ state: "empty", taskCount: 0, latestPublicationAt: value });
+  } catch {
+    usageInvalid();
+  }
+  return value;
+}
+function usageNullableTimestamp(value: unknown): string | null {
+  return value === null ? null : usageTimestamp(value);
+}
+function usageInteger(value: unknown, maximum = USAGE_SAFE_INTEGER_MAX): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > maximum) usageInvalid();
+  return value;
+}
+function usageNullableInteger(value: unknown): number | null {
+  return value === null ? null : usageInteger(value);
+}
+function usageOptionalId(value: unknown): string | null {
+  return value === null ? null : usageId(value);
+}
+function usageOptionalText(value: unknown, maximum: number): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || [...value].length < 1 || [...value].length > maximum || [...value].some((character) => character.charCodeAt(0) < 0x20)) usageInvalid();
+  return value;
+}
+function usageText(value: unknown, maximum: number): string {
+  const result = usageOptionalText(value, maximum);
+  if (result === null) usageInvalid();
+  return result;
+}
+function usageFlag(value: unknown): boolean {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  usageInvalid();
+}
+function usageOrdered(startedAt: string | null, completedAt: string | null): void {
+  if ((startedAt === null) !== (completedAt === null)) usageInvalid();
+  if (startedAt !== null && Date.parse(completedAt!) < Date.parse(startedAt)) usageInvalid();
+}
+function usageTokens(value: unknown, nullable: boolean): CloudUsageTokenTotals {
+  const row = usageExact(value, ["promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens"]);
+  const result = {
+    promptTokens: nullable ? usageNullableInteger(row.promptTokens) : usageInteger(row.promptTokens),
+    cachedTokens: nullable ? usageNullableInteger(row.cachedTokens) : usageInteger(row.cachedTokens),
+    uncachedTokens: nullable ? usageNullableInteger(row.uncachedTokens) : usageInteger(row.uncachedTokens),
+    completionTokens: nullable ? usageNullableInteger(row.completionTokens) : usageInteger(row.completionTokens),
+    reasoningTokens: nullable ? usageNullableInteger(row.reasoningTokens) : usageInteger(row.reasoningTokens),
+    totalTokens: nullable ? usageNullableInteger(row.totalTokens) : usageInteger(row.totalTokens),
+  };
+  const values = Object.values(result);
+  if (values.every((item) => item !== null)) {
+    if (result.cachedTokens! > result.promptTokens! || result.uncachedTokens !== result.promptTokens! - result.cachedTokens! || result.reasoningTokens! > result.completionTokens! || result.totalTokens !== result.promptTokens! + result.completionTokens!) usageInvalid();
+  }
+  return result;
+}
+function usageCosts(value: unknown): CloudUsageCostTotals {
+  const row = usageExact(value, ["uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"]);
+  const result = {
+    uncachedInputCostMicroUsd: usageNullableInteger(row.uncachedInputCostMicroUsd),
+    cachedInputCostMicroUsd: usageNullableInteger(row.cachedInputCostMicroUsd),
+    outputCostMicroUsd: usageNullableInteger(row.outputCostMicroUsd),
+    totalCostMicroUsd: usageNullableInteger(row.totalCostMicroUsd),
+  };
+  const known = Object.values(result).filter((item) => item !== null).length;
+  if (known !== 0 && known !== 4) usageInvalid();
+  return result;
+}
+function usageDigestOrNull(value: unknown): string | null {
+  return value === null ? null : usageDigest(value);
+}
+
+export function validateCloudUsageTokenTotals(value: unknown): CloudUsageTokenTotals { return usageTokens(value, true); }
+export function validateCloudUsageCostTotals(value: unknown): CloudUsageCostTotals { return usageCosts(value); }
+export function validateCloudUsageSummary(value: unknown): CloudUsageSummary {
+  const row = usageExact(value, USAGE_SUMMARY_KEYS);
+  const tokens = usageTokens({
+    promptTokens: row.promptTokens, cachedTokens: row.cachedTokens, uncachedTokens: row.uncachedTokens,
+    completionTokens: row.completionTokens, reasoningTokens: row.reasoningTokens, totalTokens: row.totalTokens,
+  }, true);
+  const costs = usageCosts({
+    uncachedInputCostMicroUsd: row.uncachedInputCostMicroUsd, cachedInputCostMicroUsd: row.cachedInputCostMicroUsd,
+    outputCostMicroUsd: row.outputCostMicroUsd, totalCostMicroUsd: row.totalCostMicroUsd,
+  });
+  const scope = row.scope;
+  const coverage = row.coverage;
+  if (scope !== "task" && scope !== "run") usageInvalid();
+  if (coverage !== "complete" && coverage !== "partial" && coverage !== "unavailable") usageInvalid();
+  const coveredInvocations = usageInteger(row.coveredInvocations);
+  const expectedInvocations = usageInteger(row.expectedInvocations);
+  if (coveredInvocations > expectedInvocations || (coverage === "complete" && coveredInvocations !== expectedInvocations)) usageInvalid();
+  if (scope === "task" && row.runId !== null) usageInvalid();
+  if (scope === "run" && row.runId === null) usageInvalid();
+  if (coverage === "unavailable" && (row.knownTokenSubtotal !== null || row.knownCostSubtotalMicroUsd !== null)) usageInvalid();
+  const knownTokenSubtotal = usageNullableInteger(row.knownTokenSubtotal);
+  const knownCostSubtotalMicroUsd = usageNullableInteger(row.knownCostSubtotalMicroUsd);
+  if (tokens.totalTokens !== null && knownTokenSubtotal !== null && tokens.totalTokens !== knownTokenSubtotal) usageInvalid();
+  if (costs.totalCostMicroUsd !== null && knownCostSubtotalMicroUsd !== null && costs.totalCostMicroUsd !== knownCostSubtotalMicroUsd) usageInvalid();
+  return {
+    summaryId: usageId(row.summaryId), usageGenerationId: usageId(row.usageGenerationId), publicationId: usageId(row.publicationId), taskId: usageId(row.taskId),
+    runId: usageOptionalId(row.runId), scope, coverage, coveredInvocations, expectedInvocations, knownTokenSubtotal, knownCostSubtotalMicroUsd,
+    ...tokens, ...costs, priceProvenanceDigest: usageDigestOrNull(row.priceProvenanceDigest),
+  };
+}
+
+export function validateCloudUsageInvocation(value: unknown): CloudUsageInvocation {
+  const row = usageExact(value, USAGE_INVOCATION_KEYS);
+  const tokens = usageTokens({
+    promptTokens: row.promptTokens, cachedTokens: row.cachedTokens, uncachedTokens: row.uncachedTokens,
+    completionTokens: row.completionTokens, reasoningTokens: row.reasoningTokens, totalTokens: row.totalTokens,
+  }, true);
+  const costs = usageCosts({
+    uncachedInputCostMicroUsd: row.uncachedInputCostMicroUsd, cachedInputCostMicroUsd: row.cachedInputCostMicroUsd,
+    outputCostMicroUsd: row.outputCostMicroUsd, totalCostMicroUsd: row.totalCostMicroUsd,
+  });
+  const ownershipClass = row.ownershipClass;
+  if (ownershipClass !== "task-owned" && ownershipClass !== "steward-overhead") usageInvalid();
+  const coverage = row.coverage;
+  if (coverage !== "complete" && coverage !== "partial" && coverage !== "unavailable") usageInvalid();
+  const coveredTurns = usageInteger(row.coveredTurns, 4096);
+  const expectedTurns = usageInteger(row.expectedTurns, 4096);
+  if (coveredTurns > expectedTurns || (coverage === "complete" && coveredTurns !== expectedTurns)) usageInvalid();
+  if (ownershipClass === "task-owned") {
+    if (row.publicationId === null || row.taskId === null || row.pipelineId === null || row.runId === null) usageInvalid();
+  } else if (row.publicationId !== null || row.taskId !== null || row.pipelineId !== null || row.runId !== null || coveredTurns !== 0 || expectedTurns !== 0) usageInvalid();
+  if (row.invocationId === null && coverage !== "unavailable") usageInvalid();
+  if (coverage === "unavailable" && [...Object.values(tokens), ...Object.values(costs)].some((item) => item !== null)) usageInvalid();
+  const priceEntryDigest = usageDigestOrNull(row.priceEntryDigest);
+  const knownCosts = Object.values(costs).every((item) => item !== null);
+  if (knownCosts !== (priceEntryDigest !== null)) usageInvalid();
+  const startedAt = usageNullableTimestamp(row.startedAt);
+  const completedAt = usageNullableTimestamp(row.completedAt);
+  usageOrdered(startedAt, completedAt);
+  return {
+    invocationId: usageOptionalId(row.invocationId), usageGenerationId: usageId(row.usageGenerationId), publicationId: usageOptionalId(row.publicationId),
+    taskId: usageOptionalId(row.taskId), pipelineId: usageOptionalId(row.pipelineId), runId: usageOptionalId(row.runId), ownershipClass,
+    retryOrdinal: usageInteger(row.retryOrdinal), startedAt, completedAt, model: usageOptionalText(row.model, 256),
+    billingMode: row.billingMode === null || row.billingMode === "unknown" || row.billingMode === "chatgpt" || row.billingMode === "api" ? row.billingMode : usageInvalid(),
+    processOutcome: usageOptionalText(row.processOutcome, 48), coverage, issueCount: usageInteger(row.issueCount), coveredTurns, expectedTurns,
+    ...tokens, ...costs, priceEntryDigest,
+  };
+}
+
+export function validateCloudUsageTurn(value: unknown): CloudUsageTurn {
+  const row = usageExact(value, USAGE_TURN_KEYS);
+  const tokens = usageTokens({
+    promptTokens: row.promptTokens, cachedTokens: row.cachedTokens, uncachedTokens: row.uncachedTokens,
+    completionTokens: row.completionTokens, reasoningTokens: row.reasoningTokens, totalTokens: row.totalTokens,
+  }, false);
+  const costs = usageCosts({
+    uncachedInputCostMicroUsd: row.uncachedInputCostMicroUsd, cachedInputCostMicroUsd: row.cachedInputCostMicroUsd,
+    outputCostMicroUsd: row.outputCostMicroUsd, totalCostMicroUsd: row.totalCostMicroUsd,
+  });
+  const priceEntryDigest = usageDigestOrNull(row.priceEntryDigest);
+  const knownCosts = Object.values(costs).every((item) => item !== null);
+  if (knownCosts !== (priceEntryDigest !== null)) usageInvalid();
+  const ordinal = usageInteger(row.ordinal, 4096);
+  if (ordinal < 1) usageInvalid();
+  return {
+    turnId: usageId(row.turnId), usageGenerationId: usageId(row.usageGenerationId), invocationId: usageId(row.invocationId),
+    publicationId: usageId(row.publicationId), taskId: usageId(row.taskId), runId: usageId(row.runId), ordinal,
+    ...tokens, ...costs, priceEntryDigest,
+  };
+}
+
+export function validateCloudUsagePrice(value: unknown): CloudUsagePrice {
+  const row = usageExact(value, USAGE_PRICE_KEYS);
+  const effectiveAt = usageTimestamp(row.effectiveAt);
+  const effectiveUntil = usageNullableTimestamp(row.effectiveUntil);
+  if (effectiveUntil !== null && Date.parse(effectiveUntil) <= Date.parse(effectiveAt)) usageInvalid();
+  return {
+    priceEntryDigest: usageDigest(row.priceEntryDigest), usageGenerationId: usageId(row.usageGenerationId), catalogDigest: usageDigest(row.catalogDigest),
+    model: usageText(row.model, 256), effectiveAt, effectiveUntil,
+  };
+}
+
+export function validateCloudUsageGlobal(value: unknown): CloudUsageGlobal {
+  const row = usageExact(value, USAGE_GLOBAL_KEYS);
+  const tokens = usageTokens({
+    promptTokens: row.promptTokens, cachedTokens: row.cachedTokens, uncachedTokens: row.uncachedTokens,
+    completionTokens: row.completionTokens, reasoningTokens: row.reasoningTokens, totalTokens: row.totalTokens,
+  }, true);
+  const costs = usageCosts({
+    uncachedInputCostMicroUsd: row.uncachedInputCostMicroUsd, cachedInputCostMicroUsd: row.cachedInputCostMicroUsd,
+    outputCostMicroUsd: row.outputCostMicroUsd, totalCostMicroUsd: row.totalCostMicroUsd,
+  });
+  const periodKind = row.periodKind;
+  if (periodKind !== "lifetime" && periodKind !== "daily") usageInvalid();
+  if (typeof row.periodKey !== "string" || (periodKind === "lifetime" ? row.periodKey !== "lifetime" : !/^20[0-9]{2}-[0-9]{2}-[0-9]{2}$/.test(row.periodKey))) usageInvalid();
+  const ownershipClass = row.ownershipClass;
+  if (ownershipClass !== "task-owned" && ownershipClass !== "steward-overhead") usageInvalid();
+  const coverage = row.coverage;
+  if (coverage !== "complete" && coverage !== "partial" && coverage !== "unavailable") usageInvalid();
+  const coveredInvocations = usageInteger(row.coveredInvocations);
+  const expectedInvocations = usageInteger(row.expectedInvocations);
+  if (coveredInvocations > expectedInvocations || (coverage === "complete" && coveredInvocations !== expectedInvocations)) usageInvalid();
+  if (coverage === "unavailable" && (row.knownTokenSubtotal !== null || row.knownCostSubtotalMicroUsd !== null)) usageInvalid();
+  const knownTokenSubtotal = usageNullableInteger(row.knownTokenSubtotal);
+  const knownCostSubtotalMicroUsd = usageNullableInteger(row.knownCostSubtotalMicroUsd);
+  if (tokens.totalTokens !== null && knownTokenSubtotal !== null && tokens.totalTokens !== knownTokenSubtotal) usageInvalid();
+  if (costs.totalCostMicroUsd !== null && knownCostSubtotalMicroUsd !== null && costs.totalCostMicroUsd !== knownCostSubtotalMicroUsd) usageInvalid();
+  const aggregateOnly = usageFlag(row.aggregateOnly);
+  if (!aggregateOnly) usageInvalid();
+  return {
+    globalId: usageId(row.globalId), usageGenerationId: usageId(row.usageGenerationId), periodKind, periodKey: row.periodKey,
+    model: usageText(row.model, 256), ownershipClass, coverage, coveredInvocations, expectedInvocations,
+    knownTokenSubtotal, knownCostSubtotalMicroUsd, ...tokens, ...costs, priceProvenanceDigest: usageDigestOrNull(row.priceProvenanceDigest), aggregateOnly,
+  };
+}
+
+export function validateCloudUsageGlobalGroup(value: unknown): CloudUsageGlobalGroup {
+  const row = usageExact(value, ["model", "ownershipClass", "lifetime", "daily"]);
+  const model = usageText(row.model, 256);
+  const ownershipClass = row.ownershipClass;
+  if (ownershipClass !== "task-owned" && ownershipClass !== "steward-overhead") usageInvalid();
+  const lifetime = row.lifetime === null ? null : validateCloudUsageGlobal(row.lifetime);
+  if (lifetime !== null && (lifetime.model !== model || lifetime.ownershipClass !== ownershipClass || lifetime.periodKind !== "lifetime")) usageInvalid();
+  if (!Array.isArray(row.daily) || row.daily.length > 4096) usageInvalid();
+  const daily = row.daily.map((item) => validateCloudUsageGlobal(item));
+  if (daily.some((item) => item.model !== model || item.ownershipClass !== ownershipClass || item.periodKind !== "daily")) usageInvalid();
+  if (new Set(daily.map((item) => item.periodKey)).size !== daily.length) usageInvalid();
+  return { model, ownershipClass, lifetime, daily };
+}
+
+export function validateCloudUsageUnavailable(value: unknown): CloudUsageUnavailable {
+  const row = usageExact(value, ["kind", "reason"]);
+  if (row.kind !== "unavailable" || row.reason !== "missing" && row.reason !== "invalid" && row.reason !== "unavailable") usageInvalid();
+  return { kind: "unavailable", reason: row.reason };
+}
+
+function checkUsageRelations(
+  summaries: readonly CloudUsageSummary[],
+  invocations: readonly CloudUsageInvocation[],
+  generationId: string,
+  publicationId: string,
+  taskId: string,
+): void {
+  const summaryIds = new Set<string>();
+  for (const summary of summaries) {
+    if (summaryIds.has(summary.summaryId) || summary.usageGenerationId !== generationId || summary.publicationId !== publicationId || summary.taskId !== taskId) usageInvalid();
+    summaryIds.add(summary.summaryId);
+  }
+  const invocationIds = new Set<string>();
+  const retryGroups = new Map<string, number[]>();
+  for (const invocation of invocations) {
+    if (invocation.usageGenerationId !== generationId) usageInvalid();
+    if (invocation.invocationId !== null) {
+      if (invocationIds.has(invocation.invocationId)) usageInvalid();
+      invocationIds.add(invocation.invocationId);
+    }
+    if (invocation.ownershipClass === "task-owned") {
+      if (invocation.publicationId !== publicationId || invocation.taskId !== taskId || invocation.runId === null || invocation.pipelineId === null) usageInvalid();
+      const group = `${invocation.runId}\u0000${invocation.ownershipClass}`;
+      const values = retryGroups.get(group) ?? [];
+      values.push(invocation.retryOrdinal);
+      retryGroups.set(group, values);
+    }
+  }
+  for (const values of retryGroups.values()) {
+    values.sort((left, right) => left - right);
+    if (values.some((value, index) => value !== index)) usageInvalid();
+  }
+
+  const sum = (rows: readonly CloudUsageInvocation[], field: keyof CloudUsageTokenTotals | keyof CloudUsageCostTotals): number | null => {
+    let total = 0;
+    let known = false;
+    for (const row of rows) {
+      const value = row[field];
+      if (value === null) continue;
+      known = true;
+      total += value;
+      if (!Number.isSafeInteger(total)) usageInvalid();
+    }
+    return known ? total : null;
+  };
+  const fields: readonly (keyof CloudUsageTokenTotals | keyof CloudUsageCostTotals)[] = [
+    "promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens",
+    "uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd",
+  ];
+  for (const summary of summaries) {
+    const selected = invocations.filter((invocation) => invocation.ownershipClass === "task-owned"
+      && (summary.scope === "task" || invocation.runId === summary.runId));
+    if (summary.coveredInvocations !== selected.length || summary.expectedInvocations !== selected.length) usageInvalid();
+    if (summary.coverage === "complete" || fields.some((field) => summary[field] !== null)) {
+      for (const field of fields) {
+        const value = summary[field];
+        if (value !== null && value !== sum(selected, field)) usageInvalid();
+      }
+    }
+  }
+}
+
+export function validateCloudUsageData(value: unknown): CloudUsage {
+  const row = usageExact(value, ["schemaVersion", "usageGenerationId", "publicationId", "taskId", "summaries", "invocations", "globals"]);
+  if (row.schemaVersion !== "1.0") usageInvalid();
+  const generationId = usageId(row.usageGenerationId);
+  const publicationId = usageId(row.publicationId);
+  const taskId = usageId(row.taskId);
+  if (!Array.isArray(row.summaries) || row.summaries.length < 1 || row.summaries.length > 4096) usageInvalid();
+  if (!Array.isArray(row.invocations) || row.invocations.length > 128) usageInvalid();
+  if (!Array.isArray(row.globals) || row.globals.length > 4096) usageInvalid();
+  const summaries = row.summaries.map((item) => validateCloudUsageSummary(item));
+  const invocations = row.invocations.map((item) => validateCloudUsageInvocation(item));
+  const globals = row.globals.map((item) => validateCloudUsageGlobalGroup(item));
+  checkUsageRelations(summaries, invocations, generationId, publicationId, taskId);
+  return { schemaVersion: "1.0", usageGenerationId: generationId, publicationId, taskId, summaries, invocations, globals };
+}
+
+export function validateCloudUsageTurnPageData(value: unknown): CloudUsageTurnPage {
+  const row = usageExact(value, ["turns", "nextCursor", "previousCursor", "total"]);
+  if (!Array.isArray(row.turns) || row.turns.length > 200) usageInvalid();
+  if (row.nextCursor !== null && typeof row.nextCursor !== "string") usageInvalid();
+  if (row.previousCursor !== null && typeof row.previousCursor !== "string") usageInvalid();
+  const turns = row.turns.map((item) => validateCloudUsageTurn(item));
+  const total = usageInteger(row.total, 4096);
+  if (total < turns.length) usageInvalid();
+  for (let index = 1; index < turns.length; index += 1) {
+    const left = turns[index - 1]!;
+    const right = turns[index]!;
+    if (left.invocationId > right.invocationId || left.invocationId === right.invocationId && (left.ordinal > right.ordinal || left.ordinal === right.ordinal && left.turnId >= right.turnId)) usageInvalid();
+  }
+  return { turns, nextCursor: row.nextCursor, previousCursor: row.previousCursor, total };
+}
+
+export const validateCloudUsageTokens = validateCloudUsageTokenTotals;
+export const validateCloudUsageCosts = validateCloudUsageCostTotals;
+export const validateCloudTokenTotals = validateCloudUsageTokenTotals;
+export const validateCloudCostTotals = validateCloudUsageCostTotals;
+export const validateCloudUsage = validateCloudUsageData;
+export const validateCloudUsageGlobalGroups = (value: unknown): CloudUsageGlobalGroup[] => {
+  if (!Array.isArray(value) || value.length > 4096) usageInvalid();
+  return value.map((item) => validateCloudUsageGlobalGroup(item));
+};
+export const validateCloudUsageTurnPage = validateCloudUsageTurnPageData;

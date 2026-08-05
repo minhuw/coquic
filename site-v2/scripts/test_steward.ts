@@ -127,6 +127,12 @@ type DetailScenario = {
   readonly artifacts: readonly TaskRow[];
   readonly trajectoryFixture: TrajectoryFixture;
 };
+type UsageScenario = {
+  readonly contextRows: readonly TaskRow[];
+  readonly summaryRows: readonly TaskRow[];
+  readonly invocationRows: readonly TaskRow[];
+  readonly globalRows: readonly TaskRow[];
+};
 type Scenario = {
   readonly rows: readonly TaskRow[];
   readonly statusRows: readonly TaskRow[];
@@ -135,6 +141,7 @@ type Scenario = {
   readonly mode?: "rate-limited" | "outage" | "malformed" | "integrity" | "unauthorized" | "server-error" | "timeout";
   readonly detail?: DetailScenario;
   readonly details?: Readonly<Record<string, DetailScenario>>;
+  readonly usage?: UsageScenario;
   readonly object?: { readonly status?: number; readonly body?: Uint8Array; readonly headers?: Record<string, string>; readonly error?: "timeout" | "network" };
 };
 
@@ -203,6 +210,48 @@ const SCHEMA_FAILURE_DETAIL_TRAJECTORY = trajectoryFixture(cleanPublication, {
   delete document.steps;
 });
 const DETAIL_PUBLIC_KEY = DEFAULT_DETAIL_TRAJECTORY.artifacts.find((artifact) => artifact.artifactId === "artifact-atif")!.publicKey;
+
+const USAGE_TASK_ID = "task-usage";
+const USAGE_PUBLICATION_ID = "publication-usage";
+const USAGE_GENERATION_ID = "usage-generation";
+const USAGE_INVOCATION_ID = "invocation-usage";
+const USAGE_RUN_ID = "run-usage";
+const USAGE_DIGEST = "c".repeat(64);
+
+function usageScenarioRows(): UsageScenario {
+  const contextRows: TaskRow[] = [{
+    task_id: USAGE_TASK_ID, publication_id: USAGE_PUBLICATION_ID, task_head_state: "visible", task_head_updated_at: "2026-07-28T00:00:03Z",
+    task_head_usage_generation_id: USAGE_GENERATION_ID, generation_publication_id: USAGE_PUBLICATION_ID, generation_state: "visible",
+    generation_exposed_at: EXPOSED_AT, usage_head_generation_id: USAGE_GENERATION_ID, usage_head_state: "visible",
+    usage_head_updated_at: "2026-07-28T00:00:03Z", usage_generation_id: USAGE_GENERATION_ID, usage_publication_id: USAGE_PUBLICATION_ID,
+    usage_task_id: USAGE_TASK_ID, usage_schema_version: "1.0", usage_metadata_digest: "e".repeat(64), usage_generation_state: "visible",
+    usage_generation_exposed_at: EXPOSED_AT,
+  }];
+  const summaryRows: TaskRow[] = [{
+    summary_id: "summary-task", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: USAGE_TASK_ID,
+    run_id: null, scope: "task", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
+    completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
+    output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST,
+  }];
+  const invocationRows: TaskRow[] = [{
+    invocation_id: USAGE_INVOCATION_ID, usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID,
+    task_id: USAGE_TASK_ID, pipeline_id: "pipeline-usage", run_id: USAGE_RUN_ID, ownership_class: "task-owned", retry_ordinal: 0,
+    started_at: "2026-07-28T00:00:00Z", completed_at: "2026-07-28T00:00:01Z", model: "gpt-fixture", billing_mode: "api",
+    process_outcome: "success", coverage: "complete", issue_count: 0, covered_turns: 0, expected_turns: 0,
+    prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9, completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18,
+    uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20, output_cost_micro_usd: 30, total_cost_micro_usd: 60,
+    price_entry_digest: USAGE_DIGEST,
+  }];
+  const globalRows: TaskRow[] = [{
+    global_id: "global-usage", usage_generation_id: USAGE_GENERATION_ID, period_kind: "lifetime", period_key: "lifetime",
+    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
+    completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
+    output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, aggregate_only: 1,
+  }];
+  return { contextRows, summaryRows, invocationRows, globalRows };
+}
 
 function d1Envelope(rows: readonly TaskRow[]): Response {
   return new Response(JSON.stringify({
@@ -479,6 +528,12 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     if (scenarioValue.mode === "integrity" && statement === cloudRepository.STATUS_VALIDATION_STATEMENT) {
       const malformed = { ...scenarioValue.statusRows[0], credential_path: "route-harness-secret" };
       return d1Envelope([malformed]);
+    }
+    if (scenarioValue.usage) {
+      if (statement === cloudRepository.USAGE_CONTEXT_STATEMENT) return d1Envelope(scenarioValue.usage.contextRows);
+      if (statement === cloudRepository.USAGE_SUMMARY_STATEMENT) return d1Envelope(scenarioValue.usage.summaryRows);
+      if (statement === cloudRepository.USAGE_INVOCATION_STATEMENT || statement === cloudRepository.USAGE_INVOCATION_CONTEXT_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows);
+      if (statement === cloudRepository.USAGE_GLOBAL_STATEMENT) return d1Envelope(scenarioValue.usage.globalRows);
     }
     if (statement === cloudRepository.STATUS_STATEMENT) {
       if (scenarioValue.statusRows.length === 0) return d1Envelope([]);
@@ -1463,6 +1518,21 @@ async function main() {
     const payload = problemResponse(parseCloudResponse(await response.text()));
     assert.equal(payload.problem.code, "STALE_CURSOR");
   });
+
+  await runCase("cached usage reader stays bounded and read-only", { ...scenario([], []), usage: usageScenarioRows() }, async () => {
+    const usage = await cloudRepository.getCloudRepository().getTaskUsage(USAGE_TASK_ID);
+    assert(usage && !Array.isArray(usage) && !("kind" in usage));
+    assert.equal(usage.summaries[0]!.totalTokens, 18);
+    assert.equal(usage.invocations[0]!.totalCostMicroUsd, 60);
+    assert.equal(usage.globals[0]!.lifetime?.totalTokens, 18);
+  }, VALID_ENV, 4, (urls) => {
+    assert.equal(urls.every((url) => url.startsWith("https://api.cloudflare.com/client/v4/")), true);
+  });
+
+  await runCase("usage outage is typed without exposing provider details", { ...scenario([], [], "rate-limited"), usage: usageScenarioRows() }, async () => {
+    const usage = await cloudRepository.getCloudRepository().getTaskUsage(USAGE_TASK_ID);
+    assert.deepEqual(usage, { kind: "unavailable", reason: "unavailable" });
+  }, VALID_ENV, 1);
 
   await runCase("status unauthorized", scenario([], [], "unauthorized"), async () => {
     const response = await getStatus();

@@ -193,7 +193,7 @@ export function UsageEvidence({
       <section className="mt-8 border-y border-line py-7" aria-labelledby="usage-evidence-title" data-usage-state="unavailable">
         <div className="grid gap-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-10">
           <p className="text-sm font-medium text-muted">Cached usage</p>
-          <div>
+          <div className="min-w-0">
             <h2 id="usage-evidence-title" className="text-xl font-semibold text-ink">Usage unavailable</h2>
             <p className="mt-2 text-sm leading-6 text-muted">Cached usage evidence could not be read. Task status and navigation remain available.</p>
           </div>
@@ -208,7 +208,7 @@ export function UsageEvidence({
     <section className="mt-8 border-y border-line py-7" aria-labelledby="usage-evidence-title" data-usage-state={usage.length ? "ready" : "missing"}>
       <div className="grid gap-3 lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-10">
         <p className="text-sm font-medium text-muted">Cached usage</p>
-        <div>
+        <div className="min-w-0">
           <h2 id="usage-evidence-title" className="text-xl font-semibold text-ink">Token and estimated-cost evidence</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">Validated lifetime and UTC-daily summaries are shown exactly as cached. Missing prices remain N.A.</p>
           {usage.length === 0 ? <p className="mt-6 border-t border-line pt-6 text-sm text-muted">No cached usage evidence is published yet.</p> : null}

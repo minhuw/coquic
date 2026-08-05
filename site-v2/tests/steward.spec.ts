@@ -233,6 +233,35 @@ test("Steward cached usage keeps exact totals, coverage, and task links", async 
   await expect(cleanTask.getByText("Prompt tokens", { exact: true })).toBeVisible();
 });
 
+test("Steward usage tables keep horizontal scrolling inside their containers at 200% scale", async ({ page }) => {
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 320, height: 900 },
+    { width: 640, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/steward?view=tasks");
+    const session = await page.context().newCDPSession(page);
+    await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+    const dimensions = await page.evaluate(() => {
+      const table = document.querySelector<HTMLTableElement>('[data-usage-state="ready"] table');
+      const container = table?.parentElement;
+      return {
+        client: document.documentElement.clientWidth,
+        scroll: document.documentElement.scrollWidth,
+        tableScroll: table?.scrollWidth ?? 0,
+        containerClient: container?.clientWidth ?? 0,
+        containerScroll: container?.scrollWidth ?? 0,
+        containerOverflow: container ? getComputedStyle(container).overflowX : "visible",
+      };
+    });
+    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client);
+    expect(dimensions.containerOverflow).toBe("auto");
+    expect(dimensions.tableScroll).toBeGreaterThan(dimensions.containerClient);
+    expect(dimensions.containerScroll).toBe(dimensions.tableScroll);
+  }
+});
+
 test("global Signals and Planning remain explicit terminal unavailable states", async ({ page, request }) => {
   for (const [view, heading] of [["signals", "Signals unavailable"], ["planning", "Planning unavailable"]] as const) {
     await page.goto(`/steward?view=${view}`);

@@ -727,10 +727,11 @@ const USAGE_INVOCATION_FROM = `
     ON r.publication_id = i.publication_id
    AND r.task_id = i.task_id
    AND r.run_id = i.run_id
+   AND r.pipeline_id = i.pipeline_id
   LEFT JOIN pipelines AS pl
     ON pl.publication_id = r.publication_id
    AND pl.task_id = r.task_id
-   AND pl.pipeline_id = i.pipeline_id
+   AND pl.pipeline_id = r.pipeline_id
  WHERE i.task_id = ?
    AND i.ownership_class = 'task-owned'
 `;
@@ -803,15 +804,28 @@ ${USAGE_INVOCATION_FROM}
   AND i.invocation_id = ?
  LIMIT 1
 `;
-export const USAGE_INVOCATION_COUNT_STATEMENT = `
-SELECT COUNT(*) AS invocation_count
-${USAGE_INVOCATION_FROM}
+/**
+ * Invocation totals are cached on the task/run summary rows.  Keep the
+ * lookup bounded to one visible summary rather than scanning child rows at
+ * request time.  The legacy COUNT names remain aliases for callers that
+ * already dispatch on the exported statement identity.
+ */
+export const USAGE_INVOCATION_TOTAL_STATEMENT = `
+SELECT s.expected_invocations AS invocation_count
+${USAGE_VISIBLE_FROM}
+  AND s.scope = 'task'
+  AND s.run_id IS NULL
+ LIMIT 1
 `;
-export const USAGE_INVOCATION_RUN_COUNT_STATEMENT = `
-SELECT COUNT(*) AS invocation_count
-${USAGE_INVOCATION_FROM}
-  AND i.run_id = ?
+export const USAGE_INVOCATION_RUN_TOTAL_STATEMENT = `
+SELECT s.expected_invocations AS invocation_count
+${USAGE_VISIBLE_FROM}
+  AND s.scope = 'run'
+  AND s.run_id = ?
+ LIMIT 1
 `;
+export const USAGE_INVOCATION_COUNT_STATEMENT = USAGE_INVOCATION_TOTAL_STATEMENT;
+export const USAGE_INVOCATION_RUN_COUNT_STATEMENT = USAGE_INVOCATION_RUN_TOTAL_STATEMENT;
 
 const USAGE_GLOBAL_VISIBLE_FROM = `
   FROM usage_global_heads AS gh

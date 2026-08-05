@@ -233,6 +233,12 @@ function usageScenarioRows(): UsageScenario {
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST,
+  }, {
+    summary_id: "summary-run", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: USAGE_TASK_ID,
+    run_id: USAGE_RUN_ID, scope: "run", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
+    completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
+    output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST,
   }];
   const invocationRows: TaskRow[] = [{
     invocation_id: USAGE_INVOCATION_ID, usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID,
@@ -540,7 +546,15 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
         || statement === cloudRepository.USAGE_INVOCATION_RUN_NEXT_STATEMENT
         || statement === cloudRepository.USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows);
       if (statement === cloudRepository.USAGE_INVOCATION_BOUNDARY_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows.slice(0, 1));
-      if (statement === cloudRepository.USAGE_INVOCATION_COUNT_STATEMENT || statement === cloudRepository.USAGE_INVOCATION_RUN_COUNT_STATEMENT) return d1Envelope([{ invocation_count: scenarioValue.usage.invocationRows.length }]);
+      if (statement === cloudRepository.USAGE_INVOCATION_TOTAL_STATEMENT) {
+        const summary = scenarioValue.usage.summaryRows.find((row) => row.scope === "task" && row.run_id === null);
+        return d1Envelope(summary ? [{ invocation_count: summary.expected_invocations }] : []);
+      }
+      if (statement === cloudRepository.USAGE_INVOCATION_RUN_TOTAL_STATEMENT) {
+        const runId = String(params[1]);
+        const summary = scenarioValue.usage.summaryRows.find((row) => row.scope === "run" && row.run_id === runId);
+        return d1Envelope(summary ? [{ invocation_count: summary.expected_invocations }] : []);
+      }
       if (statement === cloudRepository.USAGE_GLOBAL_STATEMENT) return d1Envelope(scenarioValue.usage.globalRows);
     }
     if (statement === cloudRepository.STATUS_STATEMENT) {

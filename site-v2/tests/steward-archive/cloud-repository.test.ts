@@ -36,8 +36,10 @@ const {
   USAGE_INVOCATION_CONTEXT_STATEMENT,
   USAGE_INVOCATION_BOUNDARY_STATEMENT,
   USAGE_INVOCATION_COUNT_STATEMENT,
+  USAGE_INVOCATION_TOTAL_STATEMENT,
   USAGE_INVOCATION_RUN_STATEMENT,
   USAGE_INVOCATION_RUN_COUNT_STATEMENT,
+  USAGE_INVOCATION_RUN_TOTAL_STATEMENT,
   USAGE_INVOCATION_RUN_NEXT_STATEMENT,
   USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT,
   USAGE_INVOCATION_NEXT_STATEMENT,
@@ -350,6 +352,31 @@ test("rejects malformed and cross-owner usage rows while retaining fixed visibil
   assert.deepEqual(invocationResult, { kind: "unavailable", reason: "invalid" });
 });
 
+test("fails closed for mismatched run and pipeline ownership", async () => {
+  const mismatchedOwner = usageInvocationRow({ pipeline_id: null, run_id: null });
+  const client = new FakeClient(response([usageContextRow()]), response([mismatchedOwner]));
+  const result = await new CloudRepository({ client }).getUsageInvocations(usageTaskId);
+  assert.deepEqual(result, { kind: "unavailable", reason: "invalid" });
+  assert.match(client.calls[1]!.statement, /r\.pipeline_id = i\.pipeline_id/);
+  assert.match(client.calls[1]!.statement, /pl\.pipeline_id = r\.pipeline_id/);
+});
+
+test("uses a bounded cached summary for invocation totals", async () => {
+  const client = new FakeClient(
+    response([usageContextRow()]),
+    response([usageInvocationRow()]),
+    response([{ invocation_count: 129 }]),
+  );
+  const page = await new CloudRepository({ client }).getUsageInvocationPage(usageTaskId, { limit: 1 });
+  assert(page && !Array.isArray(page) && !("kind" in page));
+  assert.equal(page.total, 129);
+  assert.equal(client.calls[2]!.statement, USAGE_INVOCATION_TOTAL_STATEMENT);
+  assert.equal(client.calls[2]!.statement, USAGE_INVOCATION_COUNT_STATEMENT);
+  assert.match(client.calls[2]!.statement, /expected_invocations/);
+  assert.match(client.calls[2]!.statement, /LIMIT 1/);
+  assert.doesNotMatch(client.calls[2]!.statement, /COUNT\s*\(/i);
+});
+
 test("pages turns with generation-bound forward and backward cursors", async () => {
   const firstClient = new FakeClient(
     response([usageContextRow()]), response([usageInvocationRow()]), response([{ turn_count: 3 }]),
@@ -448,6 +475,8 @@ test("pages run-scoped invocations backward and rejects generation or run drift"
   assert.deepEqual(first.invocations.map((invocation) => invocation.invocationId), ["invocation-a"]);
   assert(first.nextCursor);
   assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_RUN_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+  assert.equal(firstClient.calls[2]!.statement, USAGE_INVOCATION_RUN_TOTAL_STATEMENT);
+  assert.deepEqual(firstClient.calls[2]!.params, [usageTaskId, usageRunId]);
 
   const nextClient = new FakeClient(
     response([usageContextRow()]), response([usageInvocationAt(usageRunId, 0, "invocation-a")]), response([usageInvocationAt(usageRunId, 1, "invocation-b")]), response([{ invocation_count: 3 }]),

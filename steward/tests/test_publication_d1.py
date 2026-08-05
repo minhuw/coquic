@@ -481,6 +481,92 @@ def test_row_verification_normalizes_fixed_query_order() -> None:
     d1.stage(payload)
 
 
+def test_unavailable_invocation_coverage_preserves_represented_denominator() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-unavailable", run_id="run-unavailable")
+    usage = payload["usage"]
+    nullable_fields = (
+        "promptTokens",
+        "cachedTokens",
+        "uncachedTokens",
+        "completionTokens",
+        "reasoningTokens",
+        "totalTokens",
+        "uncachedInputCostMicroUsd",
+        "cachedInputCostMicroUsd",
+        "outputCostMicroUsd",
+        "totalCostMicroUsd",
+    )
+
+    invocation = usage["invocations"][0]
+    invocation.update(
+        {
+            "invocationId": None,
+            "startedAt": None,
+            "completedAt": None,
+            "model": None,
+            "billingMode": None,
+            "processOutcome": None,
+            "coverage": "unavailable",
+            "coveredTurns": 0,
+            "expectedTurns": 0,
+            "priceEntryDigest": None,
+        }
+    )
+    for field in nullable_fields:
+        invocation[field] = None
+
+    usage["turns"] = []
+    usage["prices"] = []
+    usage["generation"]["expectedCounts"]["turns"] = 0
+    usage["generation"]["expectedCounts"]["prices"] = 0
+    for summary in usage["summaries"]:
+        summary.update(
+            {
+                "coverage": "unavailable",
+                "coveredInvocations": 0,
+                "expectedInvocations": 1,
+                "knownTokenSubtotal": None,
+                "knownCostSubtotalMicroUsd": None,
+                "priceProvenanceDigest": None,
+            }
+        )
+        for field in nullable_fields:
+            summary[field] = None
+
+    task_global = next(row for row in usage["globals"] if row["ownershipClass"] == "task-owned")
+    task_global.update(
+        {
+            "coverage": "unavailable",
+            "coveredInvocations": 0,
+            "expectedInvocations": 1,
+            "knownTokenSubtotal": None,
+            "knownCostSubtotalMicroUsd": None,
+            "priceProvenanceDigest": None,
+        }
+    )
+    for field in nullable_fields:
+        task_global[field] = None
+    refresh_metadata_digest(payload)
+
+    d1.stage(payload)
+
+    summaries = server.connection.execute(
+        "SELECT scope, covered_invocations, expected_invocations, coverage "
+        "FROM usage_summaries ORDER BY scope"
+    ).fetchall()
+    assert [tuple(row) for row in summaries] == [
+        ("run", 0, 1, "unavailable"),
+        ("task", 0, 1, "unavailable"),
+    ]
+    stored_invocation = server.connection.execute(
+        "SELECT invocation_id, total_tokens, total_cost_micro_usd, coverage "
+        "FROM usage_invocations"
+    ).fetchone()
+    assert tuple(stored_invocation) == (None, None, None, "unavailable")
+
+
 def test_false_metadata_digest_is_rejected_before_staging() -> None:
     server = ScriptedD1()
     d1 = client(server)

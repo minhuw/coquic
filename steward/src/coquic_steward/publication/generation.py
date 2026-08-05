@@ -1253,6 +1253,10 @@ def _usage_summary_row(
         raise PublicationError(ReasonCode.invalid_metadata) from None
     token_values = _usage_tokens(tokens)
     cost_values = _usage_costs(costs)
+    covered_invocations = coverage.covered_invocations
+    expected_invocations = coverage.expected_invocations
+    if expected_invocations != len(values) or covered_invocations > expected_invocations:
+        raise PublicationError(ReasonCode.invalid_metadata)
     return {
         "summaryId": summary_id,
         "usageGenerationId": usage_generation_id,
@@ -1261,11 +1265,8 @@ def _usage_summary_row(
         "runId": run_id,
         "scope": "task" if run_id is None else "run",
         "coverage": _usage_status(coverage.status),
-        # D1 counts every authenticated row in the summary denominator.  The
-        # coverage status and null values retain whether its evidence was
-        # complete, partial, or unavailable.
-        "coveredInvocations": len(values),
-        "expectedInvocations": len(values),
+        "coveredInvocations": covered_invocations,
+        "expectedInvocations": expected_invocations,
         "knownTokenSubtotal": token_values["totalTokens"],
         "knownCostSubtotalMicroUsd": cost_values["totalCostMicroUsd"],
         **token_values,

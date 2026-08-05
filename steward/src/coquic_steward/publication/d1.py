@@ -705,7 +705,10 @@ def _validate_usage(
             for invocation in invocation_rows
             if invocation["ownershipClass"] == "task-owned" and (row["scope"] == "task" or invocation["runId"] == row["runId"])
         ]
-        if row["coveredInvocations"] != len(selected):
+        # The expected denominator counts represented task-owned rows.  The
+        # covered count is detached evidence coverage and may be lower when a
+        # represented invocation is unavailable.
+        if row["expectedInvocations"] != len(selected):
             _invalid(D1ErrorCode.generation_conflict)
         totals = {field: sum(invocation[field] for invocation in selected if invocation[field] is not None) if any(invocation[field] is not None for invocation in selected) else None for field in _USAGE_FIELDS}
         if row["coverage"] == "complete" or any(row[field] is not None for field in _TOKEN_FIELDS):

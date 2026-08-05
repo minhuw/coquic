@@ -20,6 +20,7 @@ from coquic_steward.publication.generation import (
     PublicationGeneration,
     compose_publication_generation,
 )
+import coquic_steward.publication.generation as generation_module
 from coquic_steward.publication.pipeline import build_publication_bundle
 
 
@@ -205,6 +206,47 @@ def test_generation_boundary_and_outbox_mapping_are_canonical() -> None:
     assert record.rows == sum(result.generation["expectedCounts"].values())
     assert record.objects == len(result.objects) + len(result.private_originals)
     assert "generationBoundary" not in json.dumps(result.as_dict(), sort_keys=True)
+
+
+def test_usage_summary_preserves_projection_coverage_and_unavailable_evidence(monkeypatch) -> None:
+    captured = {}
+    build_projection = generation_module.build_task_usage_projection
+
+    def capture_projection(*args: object, **kwargs: object):
+        projection = build_projection(*args, **kwargs)
+        captured["projection"] = projection
+        return projection
+
+    monkeypatch.setattr(generation_module, "build_task_usage_projection", capture_projection)
+    result = _compose(_graph(_source()))
+
+    assert isinstance(result, PublicationGeneration)
+    projection = captured["projection"]
+    assert projection.summary.coverage.as_dict() == {
+        "coveredInvocations": 0,
+        "expectedInvocations": 1,
+        "status": "N.A.",
+    }
+    summaries = result.payload["usage"]["summaries"]
+    assert [(row["scope"], row["coveredInvocations"], row["expectedInvocations"], row["coverage"]) for row in summaries] == [
+        ("task", 0, 1, "unavailable"),
+        ("run", 0, 1, "unavailable"),
+    ]
+    invocation = result.payload["usage"]["invocations"][0]
+    assert invocation["invocationId"] is None
+    assert invocation["coverage"] == "unavailable"
+    assert all(invocation[field] is None for field in (
+        "promptTokens",
+        "cachedTokens",
+        "uncachedTokens",
+        "completionTokens",
+        "reasoningTokens",
+        "totalTokens",
+        "uncachedInputCostMicroUsd",
+        "cachedInputCostMicroUsd",
+        "outputCostMicroUsd",
+        "totalCostMicroUsd",
+    ))
 
 
 def test_generation_rejects_caller_supplied_identity() -> None:

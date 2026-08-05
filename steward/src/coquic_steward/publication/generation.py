@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Final, TypeAlias
 
-from .d1 import D1Error, _validate_payload
+from .d1 import D1Error, _usage_metadata_digest, _validate_payload
 from .atif import AtifSource
 from .media import inspect_media
 from .models import (
@@ -35,17 +35,19 @@ from .models import (
     ReasonCode,
     RepairRequired,
     RunMetadata,
+    TaskUsageProjection,
 )
 from .pipeline import build_publication_bundle
 from .redaction import discover_secrets
 from .scanner import CorpusEntry, run_trufflehog
+from .usage import build_task_usage_projection
 from .outbox import (
     GenerationIdentity as OutboxGenerationIdentity,
     PublicationGeneration as OutboxGenerationRecord,
 )
 
 
-PUBLICATION_SCHEMA_VERSION: Final[str] = "1.0"
+PUBLICATION_SCHEMA_VERSION: Final[str] = "2.0"
 MAX_GENERATION_RUNS: Final[int] = 4_096
 MAX_GENERATION_EVENTS: Final[int] = 4_096
 MAX_GENERATION_ARTIFACTS: Final[int] = 16_384
@@ -70,6 +72,10 @@ def _freeze_graph(value: Any) -> Any:
                 run=_freeze_graph(value.run),
                 documents=_freeze_graph(value.documents),
                 artifacts=tuple(_freeze_graph(item) for item in value.artifacts),
+                # ATIF validates invocation telemetry as JSON-native lists;
+                # keep the detached copy while restoring those container
+                # types after the generic graph freeze.
+                invocations=tuple(_thaw(_freeze_graph(item)) for item in value.invocations),
             )
         except (TypeError, ValueError, RecursionError):
             raise PublicationError(ReasonCode.invalid_metadata) from None
@@ -113,6 +119,7 @@ def _graph_serial(value: Any, budget: list[int]) -> Any:
             "run": _graph_serial(value.run, budget),
             "documents": _graph_serial(value.documents, budget),
             "artifacts": _graph_serial(value.artifacts, budget),
+            "invocations": _graph_serial(value.invocations, budget),
         }
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
@@ -1097,6 +1104,401 @@ def _component_items(snapshot: PublicationSnapshot, *, task_id: str, run_id: str
     return values
 
 
+_USAGE_TOKEN_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("promptTokens", "input_tokens"),
+    ("cachedTokens", "cached_input_tokens"),
+    ("uncachedTokens", "uncached_input_tokens"),
+    ("completionTokens", "output_tokens"),
+    ("reasoningTokens", "reasoning_output_tokens"),
+    ("totalTokens", "total_tokens"),
+)
+_USAGE_COST_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("uncachedInputCostMicroUsd", "uncached_input_micro_usd"),
+    ("cachedInputCostMicroUsd", "cached_input_micro_usd"),
+    ("outputCostMicroUsd", "output_micro_usd"),
+    ("totalCostMicroUsd", "total_micro_usd"),
+)
+
+
+def _usage_trajectory(snapshot: PublicationSnapshot) -> Mapping[str, Any]:
+    """Read the already inspected, canonical ATIF evidence for one run."""
+
+    documents = [
+        item
+        for item in snapshot.documents
+        if item.logical_path.rsplit("/", 1)[-1] == "trajectory.json"
+    ]
+    if len(documents) != 1:
+        raise PublicationError(ReasonCode.invalid_metadata)
+    try:
+        value = json.loads(documents[0].content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    if not isinstance(value, Mapping):
+        raise PublicationError(ReasonCode.invalid_metadata)
+    return value
+
+
+def _usage_witnesses(
+    evidence: Sequence[Mapping[str, Any]],
+) -> tuple[dict[tuple[str, int], int], dict[tuple[str, int], str | None]]:
+    counts: dict[tuple[str, int], int] = {}
+    billing_modes: dict[tuple[str, int], str | None] = {}
+    for document in evidence:
+        extra = document.get("extra")
+        coquic = extra.get("coquic") if isinstance(extra, Mapping) else None
+        source = coquic.get("source") if isinstance(coquic, Mapping) else None
+        invocations = source.get("invocations") if isinstance(source, Mapping) else None
+        if not isinstance(invocations, Sequence) or isinstance(invocations, (str, bytes)):
+            continue
+        for invocation in invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            run_id = invocation.get("runId")
+            retry = invocation.get("retryOrdinal")
+            if not isinstance(run_id, str) or isinstance(retry, bool) or not isinstance(retry, int) or retry < 0:
+                continue
+            key = (run_id, retry)
+            billing_mode = invocation.get("billingMode")
+            if billing_mode is None or billing_mode in {"unknown", "chatgpt", "api"}:
+                billing_modes[key] = billing_mode
+            issues = invocation.get("issues")
+            total = 0
+            if isinstance(issues, Sequence) and not isinstance(issues, (str, bytes)):
+                for issue in issues:
+                    if isinstance(issue, Mapping) and isinstance(issue.get("count"), int) and not isinstance(issue.get("count"), bool) and issue["count"] >= 0:
+                        total += issue["count"]
+            counts[key] = total
+    return counts, billing_modes
+
+
+def _usage_status(value: object) -> str:
+    if value == "Complete":
+        return "complete"
+    if value == "Partial":
+        return "partial"
+    if value == "N.A.":
+        return "unavailable"
+    raise PublicationError(ReasonCode.invalid_metadata)
+
+
+def _usage_tokens(value: object) -> dict[str, int | None]:
+    try:
+        return {public: getattr(value, private) for public, private in _USAGE_TOKEN_FIELDS}
+    except (AttributeError, TypeError):
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+
+
+def _usage_costs(value: object) -> dict[str, int | None]:
+    try:
+        return {public: getattr(value, private) for public, private in _USAGE_COST_FIELDS}
+    except (AttributeError, TypeError):
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+
+
+def _usage_price_digest(value: object | None) -> str | None:
+    if value is None:
+        return None
+    as_dict = getattr(value, "as_dict", None)
+    if not callable(as_dict):
+        raise PublicationError(ReasonCode.invalid_metadata)
+    try:
+        return hashlib.sha256(_canonical(as_dict())).hexdigest()
+    except (PublicationError, TypeError, ValueError, RecursionError):
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+
+
+def _usage_price_row(value: object, usage_generation_id: str) -> dict[str, Any]:
+    try:
+        entry_digest = _usage_price_digest(value)
+        model = value.model
+        effective_from = value.effective_from
+        effective_until = value.effective_until
+        catalog_digest = value.catalog_digest
+    except AttributeError:
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    if entry_digest is None:
+        raise PublicationError(ReasonCode.invalid_metadata)
+    return {
+        "priceEntryDigest": entry_digest,
+        "usageGenerationId": usage_generation_id,
+        "catalogDigest": catalog_digest,
+        "model": model,
+        "effectiveAt": _timestamp(effective_from),
+        "effectiveUntil": _timestamp(effective_until) if effective_until is not None else None,
+    }
+
+
+def _usage_shared_price_digest(values: Sequence[object]) -> str | None:
+    digests = {_usage_price_digest(getattr(value, "price", None)) for value in values}
+    digests.discard(None)
+    return next(iter(digests)) if len(digests) == 1 else None
+
+
+def _usage_summary_row(
+    *,
+    summary_id: str,
+    usage_generation_id: str,
+    publication_id: str,
+    task_id: str,
+    run_id: str | None,
+    values: Sequence[object],
+    summary: object,
+) -> dict[str, Any]:
+    try:
+        tokens = summary.tokens
+        costs = summary.cost
+        coverage = summary.coverage
+    except AttributeError:
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    token_values = _usage_tokens(tokens)
+    cost_values = _usage_costs(costs)
+    return {
+        "summaryId": summary_id,
+        "usageGenerationId": usage_generation_id,
+        "publicationId": publication_id,
+        "taskId": task_id,
+        "runId": run_id,
+        "scope": "task" if run_id is None else "run",
+        "coverage": _usage_status(coverage.status),
+        # D1 counts every authenticated row in the summary denominator.  The
+        # coverage status and null values retain whether its evidence was
+        # complete, partial, or unavailable.
+        "coveredInvocations": len(values),
+        "expectedInvocations": len(values),
+        "knownTokenSubtotal": token_values["totalTokens"],
+        "knownCostSubtotalMicroUsd": cost_values["totalCostMicroUsd"],
+        **token_values,
+        **cost_values,
+        "priceProvenanceDigest": _usage_shared_price_digest(values),
+    }
+
+
+def _usage_global_row(
+    *,
+    row: object,
+    period_kind: str,
+    period_key: str,
+    usage_generation_id: str,
+    matching_invocations: Sequence[object],
+) -> dict[str, Any]:
+    try:
+        tokens = row.tokens
+        costs = row.cost
+        coverage = row.coverage
+        model = row.model or "unknown"
+    except AttributeError:
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    token_values = _usage_tokens(tokens)
+    cost_values = _usage_costs(costs)
+    global_id = _usage_row_id("global", (usage_generation_id, period_kind, period_key, model, "task-owned"))
+    return {
+        "globalId": global_id,
+        "usageGenerationId": usage_generation_id,
+        "periodKind": period_kind,
+        "periodKey": period_key,
+        "model": model,
+        "ownershipClass": "task-owned",
+        "coverage": _usage_status(coverage.status),
+        "coveredInvocations": coverage.covered_invocations,
+        "expectedInvocations": coverage.expected_invocations,
+        "knownTokenSubtotal": token_values["totalTokens"],
+        "knownCostSubtotalMicroUsd": cost_values["totalCostMicroUsd"],
+        **token_values,
+        **cost_values,
+        "priceProvenanceDigest": _usage_shared_price_digest(matching_invocations),
+        "aggregateOnly": True,
+    }
+
+
+def _usage_row_id(prefix: str, identity: object) -> str:
+    return f"{prefix}-{hashlib.sha256(_canonical(identity)).hexdigest()}"
+
+
+def _usage_payload(
+    projection: TaskUsageProjection,
+    *,
+    publication_id: str,
+    task_id: str,
+    run_rows: Sequence[Mapping[str, Any]],
+    evidence: Sequence[Mapping[str, Any]],
+    created_at: str,
+) -> dict[str, Any]:
+    """Flatten one typed projection into the closed D1 usage envelope."""
+
+    if not isinstance(projection, TaskUsageProjection) or projection.task_id != task_id:
+        raise PublicationError(ReasonCode.invalid_metadata)
+    run_by_id = {row["runId"]: row for row in run_rows}
+    projection_runs = {run.run_id: run for run in projection.runs}
+    if set(run_by_id) != set(projection_runs):
+        raise PublicationError(ReasonCode.invalid_metadata)
+    usage_generation_id = projection.usage_generation_id
+    issue_counts, billing_modes = _usage_witnesses(evidence)
+    invocations = sorted(
+        projection.invocations,
+        key=lambda item: (item.run_id, item.retry_ordinal, item.invocation_id or ""),
+    )
+    invocation_ids: set[str] = set()
+    invocation_rows: list[dict[str, Any]] = []
+    for invocation in invocations:
+        if invocation.task_id != task_id or invocation.run_id not in run_by_id:
+            raise PublicationError(ReasonCode.invalid_metadata)
+        if invocation.invocation_id is not None:
+            if invocation.invocation_id in invocation_ids:
+                raise PublicationError(ReasonCode.invalid_metadata)
+            invocation_ids.add(invocation.invocation_id)
+        token_values = _usage_tokens(invocation.tokens)
+        cost_values = _usage_costs(invocation.cost)
+        price_digest = _usage_price_digest(invocation.price)
+        row = {
+            "invocationId": invocation.invocation_id,
+            "usageGenerationId": usage_generation_id,
+            "publicationId": publication_id,
+            "taskId": task_id,
+            "pipelineId": invocation.pipeline_id,
+            "runId": invocation.run_id,
+            "ownershipClass": "task-owned",
+            "retryOrdinal": invocation.retry_ordinal,
+            "startedAt": _timestamp(invocation.started_at) if invocation.started_at is not None else None,
+            "completedAt": _timestamp(invocation.completed_at) if invocation.completed_at is not None else None,
+            "model": invocation.model,
+            "billingMode": billing_modes.get((invocation.run_id, invocation.retry_ordinal)),
+            "processOutcome": invocation.process_outcome,
+            "coverage": _usage_status(invocation.coverage.status),
+            "issueCount": issue_counts.get((invocation.run_id, invocation.retry_ordinal), 0),
+            "coveredTurns": len(invocation.turns),
+            "expectedTurns": len(invocation.turns),
+            **token_values,
+            **cost_values,
+            "priceEntryDigest": price_digest,
+        }
+        invocation_rows.append(row)
+
+    turns: list[dict[str, Any]] = []
+    prices_by_digest: dict[str, dict[str, Any]] = {}
+    for invocation in invocations:
+        if invocation.price is not None:
+            price_digest = _usage_price_digest(invocation.price)
+            if price_digest is not None:
+                prices_by_digest.setdefault(price_digest, _usage_price_row(invocation.price, usage_generation_id))
+        if invocation.invocation_id is None:
+            if invocation.turns:
+                raise PublicationError(ReasonCode.invalid_metadata)
+            continue
+        for turn in sorted(invocation.turns, key=lambda item: item.turn_ordinal):
+            if turn.invocation_id != invocation.invocation_id:
+                raise PublicationError(ReasonCode.invalid_metadata)
+            token_values = _usage_tokens(turn.tokens)
+            cost_values = _usage_costs(turn.cost)
+            price_digest = _usage_price_digest(turn.price)
+            if turn.price is not None and price_digest is not None:
+                prices_by_digest.setdefault(price_digest, _usage_price_row(turn.price, usage_generation_id))
+            turns.append(
+                {
+                    "turnId": _usage_row_id(
+                        "turn",
+                        (usage_generation_id, turn.invocation_id, turn.retry_ordinal, turn.turn_ordinal),
+                    ),
+                    "usageGenerationId": usage_generation_id,
+                    "invocationId": turn.invocation_id,
+                    "publicationId": publication_id,
+                    "taskId": task_id,
+                    "runId": turn.run_id,
+                    "ordinal": turn.turn_ordinal,
+                    **token_values,
+                    **cost_values,
+                    "priceEntryDigest": price_digest,
+                }
+            )
+
+    summaries: list[dict[str, Any]] = []
+    summaries.append(
+        _usage_summary_row(
+            summary_id=_usage_row_id("summary", (usage_generation_id, "task")),
+            usage_generation_id=usage_generation_id,
+            publication_id=publication_id,
+            task_id=task_id,
+            run_id=None,
+            values=invocations,
+            summary=projection.summary,
+        )
+    )
+    for run_id in sorted(projection_runs):
+        run = projection_runs[run_id]
+        run_invocations = tuple(run.invocations)
+        summaries.append(
+            _usage_summary_row(
+                summary_id=_usage_row_id("summary", (usage_generation_id, "run", run_id)),
+                usage_generation_id=usage_generation_id,
+                publication_id=publication_id,
+                task_id=task_id,
+                run_id=run_id,
+                values=run_invocations,
+                summary=run,
+            )
+        )
+
+    global_rows: list[dict[str, Any]] = []
+    for row in projection.lifetime:
+        model = row.model or "unknown"
+        matching = tuple(item for item in invocations if (item.model or "unknown") == model)
+        global_rows.append(
+            _usage_global_row(
+                row=row,
+                period_kind="lifetime",
+                period_key="lifetime",
+                usage_generation_id=usage_generation_id,
+                matching_invocations=matching,
+            )
+        )
+    for row in projection.daily:
+        model = row.model or "unknown"
+        matching = tuple(
+            item
+            for item in invocations
+            if (item.model or "unknown") == model
+            and item.started_at is not None
+            and item.started_at.astimezone(timezone.utc).date().isoformat() == row.date
+        )
+        global_rows.append(
+            _usage_global_row(
+                row=row,
+                period_kind="daily",
+                period_key=row.date,
+                usage_generation_id=usage_generation_id,
+                matching_invocations=matching,
+            )
+        )
+    usage = {
+        "schemaVersion": "1.0",
+        "generation": {
+            "usageGenerationId": usage_generation_id,
+            "publicationId": publication_id,
+            "taskId": task_id,
+            "schemaVersion": projection.schema_version,
+            "metadataDigest": "0" * 64,
+            "state": "staged",
+            "expectedCounts": {
+                "summaries": len(summaries),
+                "invocations": len(invocation_rows),
+                "turns": len(turns),
+                "prices": len(prices_by_digest),
+                "globals": len(global_rows),
+            },
+            "createdAt": created_at,
+        },
+        "summaries": summaries,
+        "invocations": invocation_rows,
+        "turns": sorted(turns, key=lambda item: (item["invocationId"], item["ordinal"], item["turnId"])),
+        "prices": [prices_by_digest[key] for key in sorted(prices_by_digest)],
+        "globals": sorted(global_rows, key=lambda item: item["globalId"]),
+    }
+    usage["generation"]["metadataDigest"] = _usage_metadata_digest(
+        {"publicationId": publication_id, "taskId": task_id, "usage": usage}
+    )
+    return usage
+
+
 def _build_generation(
     *,
     task_value: object,
@@ -1114,6 +1516,7 @@ def _build_generation(
     known_secrets: Sequence[str] | str | None,
     scanner_runner: Any,
     scanner_timeout: float,
+    price_catalog: Any,
 ) -> GenerationOutcome:
     def source_changed() -> bool:
         try:
@@ -1307,6 +1710,18 @@ def _build_generation(
             return _failure(ReasonCode.invalid_metadata)
     latest_run = max(run_rows, key=lambda row: (_timestamp_value(row["completedAt"]), row["runId"]))
 
+    try:
+        usage_evidence = tuple(_usage_trajectory(snapshot) for snapshot in snapshots)
+        usage_projection = build_task_usage_projection(
+            usage_evidence,
+            catalog=price_catalog,
+            task_id=task_id,
+        )
+        if not isinstance(usage_projection, TaskUsageProjection):
+            return _failure(ReasonCode.invalid_metadata)
+    except (PublicationError, MemoryError, OSError, TypeError, ValueError, KeyError, RecursionError):
+        return _failure(ReasonCode.invalid_metadata)
+
     seed_metadata = {
         "taskId": task_id,
         "task": task_row,
@@ -1319,6 +1734,17 @@ def _build_generation(
     identity = OutboxGenerationIdentity(task_id, seed)
     publication_id = identity.publication_id
     idempotency_key = identity.idempotency_key
+    try:
+        usage_payload = _usage_payload(
+            usage_projection,
+            publication_id=publication_id,
+            task_id=task_id,
+            run_rows=run_rows,
+            evidence=usage_evidence,
+            created_at=task_row["createdAt"],
+        )
+    except (PublicationError, MemoryError, OSError, TypeError, ValueError, KeyError, RecursionError):
+        return _failure(ReasonCode.invalid_metadata)
     payload: dict[str, Any] = {
         "schemaVersion": PUBLICATION_SCHEMA_VERSION,
         "publicationId": publication_id,
@@ -1345,8 +1771,9 @@ def _build_generation(
         "runs": sorted(run_rows, key=lambda row: row["runId"]),
         "events": event_rows,
         "artifacts": sorted(artifact_rows, key=lambda row: (row["runId"], row["logicalPath"], row["artifactId"])),
+        "usage": usage_payload,
     }
-    metadata = {key: payload[key] for key in ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts")}
+    metadata = {key: payload[key] for key in ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts", "usage")}
     payload["generation"]["metadataDigest"] = hashlib.sha256(_canonical(metadata)).hexdigest()
     string_failure = _inspect_public_strings(
         payload,
@@ -1394,6 +1821,7 @@ def compose_publication_generation(
     ocr_runner: Any = None,
     ocr_timeout: float = 30.0,
     run_scanner: bool = True,
+    price_catalog: Any = None,
     generation_boundary: str | None = None,
     publication_id: str | None = None,
     idempotency_key: str | None = None,
@@ -1483,6 +1911,7 @@ def compose_publication_generation(
             known_secrets=selected_secrets,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
+            price_catalog=price_catalog,
         )
     except PublicationError as error:
         return _failure(error.code)

@@ -21,6 +21,7 @@ from .generation import (
     GenerationOutcome,
     GenerationObject,
     GenerationOriginal,
+    PUBLICATION_SCHEMA_VERSION,
     PublicationGeneration as ComposedGeneration,
     compose_publication_generation,
 )
@@ -1562,7 +1563,7 @@ class CloudPublisher:
         if not isinstance(payload, Mapping) or not isinstance(generation_payload, Mapping):
             return "integrity"
         schema_version = payload.get("schemaVersion")
-        if schema_version is not None and schema_version != "1.0":
+        if schema_version is not None and schema_version != PUBLICATION_SCHEMA_VERSION:
             return "integrity"
         if (
             payload.get("publicationId") != composed.publication_id

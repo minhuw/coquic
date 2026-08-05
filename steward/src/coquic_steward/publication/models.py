@@ -16,7 +16,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -2359,28 +2359,8 @@ def _merge_usage_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
 
 
 def _merge_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
-    left_present = any(
-        item is not None
-        for item in (
-            left.uncached_input_micro_usd,
-            left.cached_input_micro_usd,
-            left.output_micro_usd,
-            left.total_micro_usd,
-        )
-    )
-    right_present = any(
-        item is not None
-        for item in (
-            right.uncached_input_micro_usd,
-            right.cached_input_micro_usd,
-            right.output_micro_usd,
-            right.total_micro_usd,
-        )
-    )
-    if not left_present:
-        return right
-    if not right_present:
-        return left
+    if not isinstance(left, UsageCosts) or not isinstance(right, UsageCosts):
+        _fail(ReasonCode.invalid_metadata)
     values = {
         "uncached_input_micro_usd": _usage_optional_sum(
             left.uncached_input_micro_usd, right.uncached_input_micro_usd
@@ -2412,7 +2392,22 @@ def _merge_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
         status = "Complete"
     else:
         status = "Partial"
-    return UsageCosts(**values, status=status)
+    reason = None if status == "Complete" else next(
+        (item.reason for item in (left, right) if item.reason is not None),
+        None,
+    )
+    return UsageCosts(**values, status=status, reason=reason)
+
+
+def _fold_usage_costs(values: Iterable[UsageCosts]) -> UsageCosts:
+    """Fold real children without treating the first N.A. child as empty state."""
+
+    result: UsageCosts | None = None
+    for value in values:
+        if not isinstance(value, UsageCosts):
+            _fail(ReasonCode.invalid_metadata)
+        result = value if result is None else _merge_usage_costs(result, value)
+    return UsageCosts() if result is None else result
 
 
 def _merge_usage_coverage(left: UsageCoverage, right: UsageCoverage) -> UsageCoverage:
@@ -2557,10 +2552,9 @@ class UsageInvocation:
             _fail(ReasonCode.invalid_metadata)
         if turns:
             aggregate = UsageTokens()
-            aggregate_cost = UsageCosts()
+            aggregate_cost = _fold_usage_costs(item.cost for item in turns)
             for item in turns:
                 aggregate = _merge_usage_tokens(aggregate, item.tokens)
-                aggregate_cost = _merge_usage_costs(aggregate_cost, item.cost)
             if aggregate != self.tokens:
                 _fail(ReasonCode.invalid_metadata)
             if aggregate_cost != self.cost:
@@ -2634,11 +2628,10 @@ class UsageRun:
                 _fail(ReasonCode.invalid_metadata)
         object.__setattr__(self, "invocations", invocations)
         expected_tokens = UsageTokens()
-        expected_cost = UsageCosts()
+        expected_cost = _fold_usage_costs(item.cost for item in invocations)
         expected_coverage = UsageCoverage()
         for item in invocations:
             expected_tokens = _merge_usage_tokens(expected_tokens, item.tokens)
-            expected_cost = _merge_usage_costs(expected_cost, item.cost)
             expected_coverage = _merge_usage_coverage(expected_coverage, item.coverage)
         if expected_tokens != self.tokens or expected_cost != self.cost or expected_coverage != self.coverage:
             _fail(ReasonCode.invalid_metadata)
@@ -2847,11 +2840,10 @@ class TaskUsageProjection:
         ):
             _fail(ReasonCode.invalid_metadata)
         expected_tokens = UsageTokens()
-        expected_cost = UsageCosts()
+        expected_cost = _fold_usage_costs(run.cost for run in runs)
         expected_coverage = UsageCoverage()
         for run in runs:
             expected_tokens = _merge_usage_tokens(expected_tokens, run.tokens)
-            expected_cost = _merge_usage_costs(expected_cost, run.cost)
             expected_coverage = _merge_usage_coverage(expected_coverage, run.coverage)
         if (
             expected_tokens != self.summary.tokens

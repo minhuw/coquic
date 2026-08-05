@@ -201,3 +201,56 @@ def test_projection_rejects_cross_owner_and_duplicate_identity() -> None:
     cross_owner["extra"]["coquic"]["source"]["invocations"][0]["taskId"] = "other-task"  # type: ignore[index]
     with pytest.raises(UsageProjectionError):
         build_task_usage_projection(cross_owner, _catalog())
+
+
+def test_projection_accepts_nullable_billing_mode_for_unavailable_invocation() -> None:
+    document = _run(
+        "run-unavailable",
+        [_invocation("run-unavailable", None, 0, coverage="unavailable", with_turn=False)],
+    )
+    invocation = document["extra"]["coquic"]["source"]["invocations"][0]  # type: ignore[index]
+    invocation["billingMode"] = None  # type: ignore[index]
+
+    projection = build_task_usage_projection(document, _catalog())
+
+    row = projection.invocations[0]
+    assert row.coverage == UsageCoverage(0, 1, "N.A.")
+    assert row.tokens == UsageTokens()
+    assert row.cost == UsageCosts(reason="turn_evidence_missing")
+    assert row.turns == ()
+
+
+def test_projection_marks_priced_and_unpriced_children_partial() -> None:
+    catalog = PriceCatalog(
+        (
+            PriceEntry(
+                "priced",
+                "gpt-priced",
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                None,
+                1_000_000,
+                500_000,
+                2_000_000,
+                "committed test authority",
+                "https://example.test/priced",
+            ),
+        )
+    )
+    document = _run(
+        "run-mixed",
+        [
+            _invocation("run-mixed", "inv-priced", 0, model="gpt-priced"),
+            _invocation("run-mixed", "inv-unpriced", 1, model="gpt-unpriced"),
+        ],
+    )
+
+    projection = build_task_usage_projection(document, catalog)
+
+    assert projection.runs[0].invocations[0].cost.status == "Complete"
+    assert projection.runs[0].invocations[1].cost.status == "N.A."
+    assert projection.runs[0].cost.status == "Partial"
+    assert projection.runs[0].cost.uncached_input_micro_usd == 9
+    assert projection.runs[0].cost.cached_input_micro_usd == 1
+    assert projection.runs[0].cost.output_micro_usd == 14
+    assert projection.runs[0].cost.total_micro_usd == 24
+    assert projection.summary.cost.status == "Partial"

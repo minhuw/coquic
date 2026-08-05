@@ -36,6 +36,7 @@ from .models import (
     _merge_usage_costs,
     _merge_usage_coverage,
     _merge_usage_tokens,
+    _fold_usage_costs,
     _usage_counter,
     _usage_identifier,
     _usage_model,
@@ -371,7 +372,10 @@ def _run_source(
         except Exception:
             _fail("invocation model is invalid")
         billing_mode = raw.get("billingMode", "unknown")
-        if billing_mode not in {item.value for item in BillingMode}:
+        if billing_mode is None:
+            if coverage != "N.A." or raw.get("turns") or raw.get("aggregate") is not None:
+                _fail("billing mode is invalid")
+        elif billing_mode not in {item.value for item in BillingMode}:
             _fail("billing mode is invalid")
         process_outcome = raw.get("processOutcome")
         if process_outcome is not None:
@@ -406,7 +410,7 @@ def _run_source(
             if invocation_id is None or model is None or started_at is None:
                 _fail("priced turn ownership is incomplete")
             turn_rows: list[UsageTurn] = []
-            invocation_cost = UsageCosts()
+            turn_costs: list[UsageCosts] = []
             provenance: PriceProvenance | None = None
             for ordinal, tokens in turn_values:
                 cost, current_provenance = _cost_for_turn(
@@ -417,7 +421,7 @@ def _run_source(
                     catalog=catalog,
                     coverage=coverage,
                 )
-                invocation_cost = _merge_usage_costs(invocation_cost, cost)
+                turn_costs.append(cost)
                 if current_provenance is not None:
                     if provenance is not None and provenance != current_provenance:
                         _fail("invocation price provenance is mixed")
@@ -438,7 +442,7 @@ def _run_source(
                     )
                 )
             invocation_tokens = aggregate
-            cost = invocation_cost
+            cost = _fold_usage_costs(turn_costs)
         else:
             turn_rows = []
             invocation_tokens = aggregate
@@ -478,11 +482,10 @@ def _run_source(
     if {item.retry_ordinal for item in invocations} != set(range(max(item.retry_ordinal for item in invocations) + 1)):
         _fail("retry ordinals have gaps")
     tokens = UsageTokens()
-    costs = UsageCosts()
     coverage = UsageCoverage()
+    costs = _fold_usage_costs(item.cost for item in invocations)
     for item in invocations:
         tokens = _merge_usage_tokens(tokens, item.tokens)
-        costs = _merge_usage_costs(costs, item.cost)
         coverage = _merge_usage_coverage(coverage, item.coverage)
     return UsageRun(
         task_id=task_id,
@@ -614,11 +617,10 @@ def build_task_usage_projection(
     )
     turns = tuple(item for invocation in invocations for item in invocation.turns)
     summary_tokens = UsageTokens()
-    summary_cost = UsageCosts()
     summary_coverage = UsageCoverage()
+    summary_cost = _fold_usage_costs(run.cost for run in runs)
     for run in runs:
         summary_tokens = _merge_usage_tokens(summary_tokens, run.tokens)
-        summary_cost = _merge_usage_costs(summary_cost, run.cost)
         summary_coverage = _merge_usage_coverage(summary_coverage, run.coverage)
     summary = TaskUsageSummary(
         task_id=resolved_task,

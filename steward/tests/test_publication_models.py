@@ -25,6 +25,9 @@ from coquic_steward.publication import (
     RunMetadata,
     SourceDocument,
     UsageSummary,
+    UsageCoverage,
+    UsageCosts,
+    UsageTokens,
     private_staging,
     read_stable_file,
     read_stable_jsonl,
@@ -66,6 +69,17 @@ def test_models_round_trip_as_bounded_dicts() -> None:
     assert b"private original" not in repr(rendered).encode()
     with pytest.raises((AttributeError, TypeError)):
         snapshot.documents += (document,)  # type: ignore[misc]
+
+
+def test_usage_values_are_frozen_and_preserve_unknown_as_none() -> None:
+    tokens = UsageTokens(inputTokens=0, cachedInputTokens=0, uncachedInputTokens=0, outputTokens=0, reasoningOutputTokens=0, totalTokens=0)
+    costs = UsageCosts()
+    coverage = UsageCoverage()
+    assert tokens.total_tokens == 0
+    assert costs.total_micro_usd is None
+    assert coverage.status == "N.A."
+    with pytest.raises((AttributeError, TypeError)):
+        tokens.total_tokens = 1  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(

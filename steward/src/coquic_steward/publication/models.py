@@ -19,7 +19,7 @@ import stat
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -47,6 +47,12 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MEDIA_RE = re.compile(r"^[^\s\x00-\x1f\x7f]{1,128}$")
 _COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_USAGE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
+_USAGE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_USAGE_MODEL_RE = re.compile(r"^[^\x00\r\n]{1,256}$")
+MAX_USAGE_COUNTER: Final[int] = 2**53 - 1
+MAX_USAGE_INVOCATIONS: Final[int] = 4_096
+MAX_USAGE_TURNS: Final[int] = 16_384
 
 
 class ReasonCode(StrEnum):
@@ -1815,6 +1821,1145 @@ def private_staging(root: Path) -> Iterator[PrivateStaging]:
         _close_fds(descriptors)
 
 
+def _usage_identifier(value: object, *, allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value.encode("utf-8")) > 160
+        or _USAGE_IDENTIFIER_RE.fullmatch(value) is None
+    ):
+        _fail(ReasonCode.invalid_metadata)
+    return value
+
+
+def _usage_counter(value: object, *, allow_none: bool = True) -> int | None:
+    if value is None and allow_none:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAX_USAGE_COUNTER
+    ):
+        _fail(ReasonCode.invalid_metadata)
+    return value
+
+
+def _usage_model(value: object, *, allow_none: bool = True) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or _USAGE_MODEL_RE.fullmatch(value) is None:
+        _fail(ReasonCode.invalid_metadata)
+    if value.startswith(("http://", "https://")):
+        _fail(ReasonCode.unsafe_content)
+    return value
+
+
+def _usage_digest(value: object) -> str:
+    if not isinstance(value, str) or _USAGE_DIGEST_RE.fullmatch(value) is None:
+        _fail(ReasonCode.invalid_digest)
+    return value
+
+
+def _usage_timestamp(value: object, *, allow_none: bool = False) -> datetime | None:
+    if value is None and allow_none:
+        return None
+    return _timestamp(value)
+
+
+def _usage_timestamp_text(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _usage_date(value: object) -> str:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    if not isinstance(value, str):
+        _fail(ReasonCode.invalid_metadata)
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        _fail(ReasonCode.invalid_metadata)
+    return parsed.isoformat()
+
+
+def _usage_tuple(value: object, *, maximum: int) -> tuple[Any, ...]:
+    selected = _tuple(value, code=ReasonCode.invalid_metadata)
+    if len(selected) > maximum:
+        _fail(ReasonCode.oversized)
+    return selected
+
+
+def _usage_optional_sum(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    result = left + right
+    return _usage_counter(result)
+
+
+def _usage_thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _usage_thaw(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_usage_thaw(item) for item in value]
+    return value
+
+
+_USAGE_MISSING = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class UsageTokens:
+    """Immutable six-category token totals.
+
+    ``None`` means that a category was not present in sanitized evidence; it
+    is deliberately different from a measured zero.
+    """
+
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+    total_tokens: int | None = None
+
+    def __init__(
+        self,
+        input_tokens: object = _USAGE_MISSING,
+        cached_input_tokens: object = _USAGE_MISSING,
+        uncached_input_tokens: object = _USAGE_MISSING,
+        output_tokens: object = _USAGE_MISSING,
+        reasoning_output_tokens: object = _USAGE_MISSING,
+        total_tokens: object = _USAGE_MISSING,
+        **aliases: object,
+    ) -> None:
+        values = {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "uncached_input_tokens": uncached_input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_output_tokens,
+            "total_tokens": total_tokens,
+        }
+        names = {
+            "inputTokens": "input_tokens",
+            "cachedInputTokens": "cached_input_tokens",
+            "uncachedInputTokens": "uncached_input_tokens",
+            "outputTokens": "output_tokens",
+            "reasoningOutputTokens": "reasoning_output_tokens",
+            "totalTokens": "total_tokens",
+        }
+        for alias, name in names.items():
+            if alias in aliases:
+                if values[name] is not _USAGE_MISSING:
+                    _fail(ReasonCode.invalid_metadata)
+                values[name] = aliases.pop(alias)
+        if aliases:
+            _fail(ReasonCode.invalid_metadata)
+        for name, value in values.items():
+            object.__setattr__(
+                self,
+                name,
+                _usage_counter(None if value is _USAGE_MISSING else value),
+            )
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        if (
+            self.input_tokens is not None
+            and self.cached_input_tokens is not None
+            and self.cached_input_tokens > self.input_tokens
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if (
+            self.input_tokens is not None
+            and self.cached_input_tokens is not None
+            and self.uncached_input_tokens is not None
+            and self.uncached_input_tokens
+            != self.input_tokens - self.cached_input_tokens
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if (
+            self.output_tokens is not None
+            and self.reasoning_output_tokens is not None
+            and self.reasoning_output_tokens > self.output_tokens
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if (
+            self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens is not None
+            and self.total_tokens != self.input_tokens + self.output_tokens
+        ):
+            _fail(ReasonCode.invalid_metadata)
+
+    @property
+    def prompt_tokens(self) -> int | None:
+        return self.input_tokens
+
+    @property
+    def completion_tokens(self) -> int | None:
+        return self.output_tokens
+
+    @property
+    def cached_tokens(self) -> int | None:
+        return self.cached_input_tokens
+
+    @property
+    def inputTokens(self) -> int | None:  # noqa: N802 - public JSON vocabulary
+        return self.input_tokens
+
+    @property
+    def cachedInputTokens(self) -> int | None:  # noqa: N802
+        return self.cached_input_tokens
+
+    @property
+    def uncachedInputTokens(self) -> int | None:  # noqa: N802
+        return self.uncached_input_tokens
+
+    @property
+    def outputTokens(self) -> int | None:  # noqa: N802
+        return self.output_tokens
+
+    @property
+    def reasoningOutputTokens(self) -> int | None:  # noqa: N802
+        return self.reasoning_output_tokens
+
+    @property
+    def totalTokens(self) -> int | None:  # noqa: N802
+        return self.total_tokens
+
+    def as_dict(self) -> dict[str, int | None]:
+        return {
+            "inputTokens": self.input_tokens,
+            "cachedInputTokens": self.cached_input_tokens,
+            "uncachedInputTokens": self.uncached_input_tokens,
+            "outputTokens": self.output_tokens,
+            "reasoningOutputTokens": self.reasoning_output_tokens,
+            "totalTokens": self.total_tokens,
+        }
+
+    to_dict = as_dict
+
+    @classmethod
+    def from_dict(cls, value: object) -> "UsageTokens":
+        if not isinstance(value, Mapping):
+            _fail(ReasonCode.invalid_metadata)
+        allowed = {
+            "inputTokens",
+            "cachedInputTokens",
+            "uncachedInputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens",
+        }
+        if set(value) != allowed:
+            _fail(ReasonCode.invalid_metadata)
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class UsageCosts:
+    """Immutable integer micro-USD components with explicit N.A. state."""
+
+    uncached_input_micro_usd: int | None = None
+    cached_input_micro_usd: int | None = None
+    output_micro_usd: int | None = None
+    total_micro_usd: int | None = None
+    status: str = "N.A."
+    reason: str | None = None
+
+    def __init__(
+        self,
+        uncached_input_micro_usd: object = _USAGE_MISSING,
+        cached_input_micro_usd: object = _USAGE_MISSING,
+        output_micro_usd: object = _USAGE_MISSING,
+        total_micro_usd: object = _USAGE_MISSING,
+        status: object = _USAGE_MISSING,
+        reason: object = _USAGE_MISSING,
+        **aliases: object,
+    ) -> None:
+        values = {
+            "uncached_input_micro_usd": uncached_input_micro_usd,
+            "cached_input_micro_usd": cached_input_micro_usd,
+            "output_micro_usd": output_micro_usd,
+            "total_micro_usd": total_micro_usd,
+            "status": status,
+            "reason": reason,
+        }
+        names = {
+            "uncachedInputMicroUsd": "uncached_input_micro_usd",
+            "cachedInputMicroUsd": "cached_input_micro_usd",
+            "outputMicroUsd": "output_micro_usd",
+            "totalMicroUsd": "total_micro_usd",
+            "micro_usd": "total_micro_usd",
+            "microUsd": "total_micro_usd",
+        }
+        for alias, name in names.items():
+            if alias in aliases:
+                if values[name] is not _USAGE_MISSING:
+                    _fail(ReasonCode.invalid_metadata)
+                values[name] = aliases.pop(alias)
+        if aliases:
+            _fail(ReasonCode.invalid_metadata)
+        for name in (
+            "uncached_input_micro_usd",
+            "cached_input_micro_usd",
+            "output_micro_usd",
+            "total_micro_usd",
+        ):
+            value = values[name]
+            object.__setattr__(
+                self,
+                name,
+                _usage_counter(None if value is _USAGE_MISSING else value),
+            )
+        selected_status = "N.A." if values["status"] is _USAGE_MISSING else values["status"]
+        if selected_status not in {"Complete", "Partial", "N.A."}:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "status", selected_status)
+        selected_reason = None if values["reason"] is _USAGE_MISSING else values["reason"]
+        if selected_reason is not None:
+            _bounded_text(selected_reason, code=ReasonCode.invalid_metadata, maximum=128)
+        object.__setattr__(self, "reason", selected_reason)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        components = (
+            self.uncached_input_micro_usd,
+            self.cached_input_micro_usd,
+            self.output_micro_usd,
+        )
+        present = tuple(item is not None for item in components)
+        if self.total_micro_usd is not None and all(present):
+            if self.total_micro_usd != sum(item for item in components if item is not None):
+                _fail(ReasonCode.invalid_metadata)
+        if self.status == "Complete" and (
+            not all(present) or self.total_micro_usd is None
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "N.A." and any(item is not None for item in (*components, self.total_micro_usd)):
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "Partial" and not any(item is not None for item in (*components, self.total_micro_usd)):
+            _fail(ReasonCode.invalid_metadata)
+
+    @property
+    def micro_usd(self) -> int | None:
+        return self.total_micro_usd
+
+    @property
+    def totalMicroUsd(self) -> int | None:  # noqa: N802
+        return self.total_micro_usd
+
+    def as_dict(self) -> dict[str, int | str | None]:
+        return {
+            "uncachedInputMicroUsd": self.uncached_input_micro_usd,
+            "cachedInputMicroUsd": self.cached_input_micro_usd,
+            "outputMicroUsd": self.output_micro_usd,
+            "totalMicroUsd": self.total_micro_usd,
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+    to_dict = as_dict
+
+    @classmethod
+    def from_dict(cls, value: object) -> "UsageCosts":
+        if not isinstance(value, Mapping):
+            _fail(ReasonCode.invalid_metadata)
+        allowed = {
+            "uncachedInputMicroUsd",
+            "cachedInputMicroUsd",
+            "outputMicroUsd",
+            "totalMicroUsd",
+            "status",
+            "reason",
+        }
+        if set(value) != allowed:
+            _fail(ReasonCode.invalid_metadata)
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class UsageCoverage:
+    """Evidence denominator carried beside every aggregate."""
+
+    covered_invocations: int = 0
+    expected_invocations: int = 0
+    status: str = "N.A."
+
+    def __init__(
+        self,
+        covered_invocations: object = _USAGE_MISSING,
+        expected_invocations: object = _USAGE_MISSING,
+        status: object = _USAGE_MISSING,
+        **aliases: object,
+    ) -> None:
+        values = {
+            "covered_invocations": covered_invocations,
+            "expected_invocations": expected_invocations,
+            "status": status,
+        }
+        names = {
+            "coveredInvocations": "covered_invocations",
+            "expectedInvocations": "expected_invocations",
+        }
+        for alias, name in names.items():
+            if alias in aliases:
+                if values[name] is not _USAGE_MISSING:
+                    _fail(ReasonCode.invalid_metadata)
+                values[name] = aliases.pop(alias)
+        if aliases:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(
+            self,
+            "covered_invocations",
+            _usage_counter(0 if values["covered_invocations"] is _USAGE_MISSING else values["covered_invocations"], allow_none=False),
+        )
+        object.__setattr__(
+            self,
+            "expected_invocations",
+            _usage_counter(0 if values["expected_invocations"] is _USAGE_MISSING else values["expected_invocations"], allow_none=False),
+        )
+        selected_status = "N.A." if values["status"] is _USAGE_MISSING else values["status"]
+        if selected_status not in {"Complete", "Partial", "N.A."}:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "status", selected_status)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        if self.covered_invocations > self.expected_invocations:
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "Complete" and (
+            self.expected_invocations == 0
+            or self.covered_invocations != self.expected_invocations
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "N.A." and self.covered_invocations != 0:
+            _fail(ReasonCode.invalid_metadata)
+        if self.status == "Partial" and self.expected_invocations == 0:
+            _fail(ReasonCode.invalid_metadata)
+
+    @property
+    def coveredInvocations(self) -> int:  # noqa: N802
+        return self.covered_invocations
+
+    @property
+    def expectedInvocations(self) -> int:  # noqa: N802
+        return self.expected_invocations
+
+    def as_dict(self) -> dict[str, int | str]:
+        return {
+            "coveredInvocations": self.covered_invocations,
+            "expectedInvocations": self.expected_invocations,
+            "status": self.status,
+        }
+
+    to_dict = as_dict
+
+    @classmethod
+    def from_dict(cls, value: object) -> "UsageCoverage":
+        if not isinstance(value, Mapping) or set(value) != {
+            "coveredInvocations",
+            "expectedInvocations",
+            "status",
+        }:
+            _fail(ReasonCode.invalid_metadata)
+        return cls(**dict(value))
+
+
+@dataclass(frozen=True, slots=True)
+class PriceProvenance:
+    """The exact committed catalog entry used for one priced invocation."""
+
+    entry_id: str
+    model: str
+    effective_from: datetime
+    effective_until: datetime | None
+    source_label: str
+    source_url: str
+    catalog_digest: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "entry_id", _usage_identifier(self.entry_id))
+        object.__setattr__(self, "model", _usage_model(self.model, allow_none=False))
+        object.__setattr__(self, "effective_from", _usage_timestamp(self.effective_from))
+        object.__setattr__(self, "effective_until", _usage_timestamp(self.effective_until, allow_none=True))
+        if self.effective_until is not None and self.effective_until <= self.effective_from:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "source_label", _bounded_text(self.source_label, code=ReasonCode.invalid_metadata, maximum=160))
+        source_url = _bounded_text(self.source_url, code=ReasonCode.invalid_metadata, maximum=512)
+        if not source_url.startswith("https://") or any(char.isspace() for char in source_url):
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "source_url", source_url)
+        object.__setattr__(self, "catalog_digest", _usage_digest(self.catalog_digest))
+
+    @classmethod
+    def from_entry(cls, entry: Any, catalog_digest: str) -> "PriceProvenance":
+        return cls(
+            entry_id=entry.entry_id,
+            model=entry.model,
+            effective_from=entry.effective_from,
+            effective_until=entry.effective_until,
+            source_label=entry.source_label,
+            source_url=entry.source_url,
+            catalog_digest=catalog_digest,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "entryId": self.entry_id,
+            "model": self.model,
+            "effectiveFrom": _usage_timestamp_text(self.effective_from),
+            "effectiveUntil": _usage_timestamp_text(self.effective_until),
+            "source": {"label": self.source_label, "url": self.source_url},
+            "catalogDigest": self.catalog_digest,
+        }
+
+    to_dict = as_dict
+
+
+def _merge_usage_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
+    values = {
+        "input_tokens": _usage_optional_sum(left.input_tokens, right.input_tokens),
+        "cached_input_tokens": _usage_optional_sum(
+            left.cached_input_tokens, right.cached_input_tokens
+        ),
+        "uncached_input_tokens": _usage_optional_sum(
+            left.uncached_input_tokens, right.uncached_input_tokens
+        ),
+        "output_tokens": _usage_optional_sum(left.output_tokens, right.output_tokens),
+        "reasoning_output_tokens": _usage_optional_sum(
+            left.reasoning_output_tokens, right.reasoning_output_tokens
+        ),
+        "total_tokens": _usage_optional_sum(left.total_tokens, right.total_tokens),
+    }
+    if values["input_tokens"] is not None and values["cached_input_tokens"] is not None:
+        expected = values["input_tokens"] - values["cached_input_tokens"]
+        if values["uncached_input_tokens"] != expected:
+            values["uncached_input_tokens"] = None
+    if values["output_tokens"] is not None and values["reasoning_output_tokens"] is not None:
+        if values["reasoning_output_tokens"] > values["output_tokens"]:
+            values["reasoning_output_tokens"] = None
+    if (
+        values["input_tokens"] is not None
+        and values["output_tokens"] is not None
+        and values["total_tokens"] is not None
+        and values["total_tokens"] != values["input_tokens"] + values["output_tokens"]
+    ):
+        values["total_tokens"] = None
+    return UsageTokens(**values)
+
+
+def _merge_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
+    left_present = any(
+        item is not None
+        for item in (
+            left.uncached_input_micro_usd,
+            left.cached_input_micro_usd,
+            left.output_micro_usd,
+            left.total_micro_usd,
+        )
+    )
+    right_present = any(
+        item is not None
+        for item in (
+            right.uncached_input_micro_usd,
+            right.cached_input_micro_usd,
+            right.output_micro_usd,
+            right.total_micro_usd,
+        )
+    )
+    if not left_present:
+        return right
+    if not right_present:
+        return left
+    values = {
+        "uncached_input_micro_usd": _usage_optional_sum(
+            left.uncached_input_micro_usd, right.uncached_input_micro_usd
+        ),
+        "cached_input_micro_usd": _usage_optional_sum(
+            left.cached_input_micro_usd, right.cached_input_micro_usd
+        ),
+        "output_micro_usd": _usage_optional_sum(
+            left.output_micro_usd, right.output_micro_usd
+        ),
+        "total_micro_usd": _usage_optional_sum(
+            left.total_micro_usd, right.total_micro_usd
+        ),
+    }
+    components = (
+        values["uncached_input_micro_usd"],
+        values["cached_input_micro_usd"],
+        values["output_micro_usd"],
+    )
+    if values["total_micro_usd"] is not None and all(item is not None for item in components):
+        if values["total_micro_usd"] != sum(item for item in components if item is not None):
+            values["total_micro_usd"] = None
+    present = any(item is not None for item in (*components, values["total_micro_usd"]))
+    if not present:
+        status = "N.A."
+    elif left.status == right.status == "Complete" and all(
+        item is not None for item in (*components, values["total_micro_usd"])
+    ):
+        status = "Complete"
+    else:
+        status = "Partial"
+    return UsageCosts(**values, status=status)
+
+
+def _merge_usage_coverage(left: UsageCoverage, right: UsageCoverage) -> UsageCoverage:
+    if left.expected_invocations == 0:
+        return right
+    if right.expected_invocations == 0:
+        return left
+    covered = left.covered_invocations + right.covered_invocations
+    expected = left.expected_invocations + right.expected_invocations
+    if expected == 0 or covered == 0:
+        status = "N.A."
+    elif left.status == right.status == "Complete" and covered == expected:
+        status = "Complete"
+    else:
+        status = "Partial"
+    return UsageCoverage(covered, expected, status)
+
+
+@dataclass(frozen=True, slots=True)
+class UsageTurn:
+    task_id: str
+    pipeline_id: str
+    run_id: str
+    invocation_id: str
+    retry_ordinal: int
+    turn_ordinal: int
+    model: str
+    started_at: datetime
+    tokens: UsageTokens
+    cost: UsageCosts = field(default_factory=UsageCosts)
+    price: PriceProvenance | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        object.__setattr__(self, "pipeline_id", _usage_identifier(self.pipeline_id))
+        object.__setattr__(self, "run_id", _usage_identifier(self.run_id))
+        object.__setattr__(self, "invocation_id", _usage_identifier(self.invocation_id))
+        object.__setattr__(self, "retry_ordinal", _usage_counter(self.retry_ordinal, allow_none=False))
+        object.__setattr__(self, "turn_ordinal", _usage_counter(self.turn_ordinal, allow_none=False))
+        if self.turn_ordinal < 1 or self.retry_ordinal < 0:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "model", _usage_model(self.model, allow_none=False))
+        object.__setattr__(self, "started_at", _usage_timestamp(self.started_at))
+        if not isinstance(self.tokens, UsageTokens) or not isinstance(self.cost, UsageCosts):
+            _fail(ReasonCode.invalid_metadata)
+        if any(value is None for value in self.tokens.as_dict().values()):
+            _fail(ReasonCode.partial)
+        if self.price is not None and not isinstance(self.price, PriceProvenance):
+            _fail(ReasonCode.invalid_metadata)
+        if self.cost.status == "Complete" and self.price is None:
+            _fail(ReasonCode.invalid_metadata)
+
+    @property
+    def ordinal(self) -> int:
+        return self.turn_ordinal
+
+    @property
+    def token_usage(self) -> UsageTokens:
+        return self.tokens
+
+    @property
+    def costs(self) -> UsageCosts:
+        return self.cost
+
+    @property
+    def provenance(self) -> PriceProvenance | None:
+        return self.price
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "taskId": self.task_id,
+            "pipelineId": self.pipeline_id,
+            "runId": self.run_id,
+            "invocationId": self.invocation_id,
+            "retryOrdinal": self.retry_ordinal,
+            "turnOrdinal": self.turn_ordinal,
+            "model": self.model,
+            "startedAt": _usage_timestamp_text(self.started_at),
+            "tokens": self.tokens.as_dict(),
+            "cost": self.cost.as_dict(),
+            "price": self.price.as_dict() if self.price is not None else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UsageInvocation:
+    task_id: str
+    pipeline_id: str
+    run_id: str
+    invocation_id: str | None
+    retry_ordinal: int
+    model: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    coverage: UsageCoverage
+    tokens: UsageTokens = field(default_factory=UsageTokens)
+    cost: UsageCosts = field(default_factory=UsageCosts)
+    turns: tuple[UsageTurn, ...] = ()
+    process_outcome: str | None = None
+    price: PriceProvenance | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        object.__setattr__(self, "pipeline_id", _usage_identifier(self.pipeline_id))
+        object.__setattr__(self, "run_id", _usage_identifier(self.run_id))
+        object.__setattr__(self, "invocation_id", _usage_identifier(self.invocation_id, allow_none=True))
+        object.__setattr__(self, "retry_ordinal", _usage_counter(self.retry_ordinal, allow_none=False))
+        if self.retry_ordinal < 0:
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "model", _usage_model(self.model))
+        object.__setattr__(self, "started_at", _usage_timestamp(self.started_at, allow_none=True))
+        object.__setattr__(self, "completed_at", _usage_timestamp(self.completed_at, allow_none=True))
+        if (self.started_at is None) != (self.completed_at is None):
+            _fail(ReasonCode.invalid_metadata)
+        if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
+            _fail(ReasonCode.invalid_metadata)
+        if self.process_outcome is not None:
+            object.__setattr__(self, "process_outcome", _bounded_text(self.process_outcome, code=ReasonCode.invalid_metadata, maximum=64))
+        if not isinstance(self.coverage, UsageCoverage) or not isinstance(self.tokens, UsageTokens) or not isinstance(self.cost, UsageCosts):
+            _fail(ReasonCode.invalid_metadata)
+        turns = _usage_tuple(self.turns, maximum=MAX_USAGE_TURNS)
+        if any(not isinstance(item, UsageTurn) for item in turns):
+            _fail(ReasonCode.invalid_metadata)
+        turns = tuple(sorted(turns, key=lambda item: item.turn_ordinal))
+        if len({item.turn_ordinal for item in turns}) != len(turns):
+            _fail(ReasonCode.invalid_metadata)
+        for item in turns:
+            if (
+                item.task_id != self.task_id
+                or item.pipeline_id != self.pipeline_id
+                or item.run_id != self.run_id
+                or item.invocation_id != self.invocation_id
+                or item.retry_ordinal != self.retry_ordinal
+            ):
+                _fail(ReasonCode.invalid_metadata)
+            if self.model is not None and item.model != self.model:
+                _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "turns", turns)
+        if self.price is not None and not isinstance(self.price, PriceProvenance):
+            _fail(ReasonCode.invalid_metadata)
+        if self.cost.status == "Complete" and self.price is None:
+            _fail(ReasonCode.invalid_metadata)
+        if turns:
+            aggregate = UsageTokens()
+            aggregate_cost = UsageCosts()
+            for item in turns:
+                aggregate = _merge_usage_tokens(aggregate, item.tokens)
+                aggregate_cost = _merge_usage_costs(aggregate_cost, item.cost)
+            if aggregate != self.tokens:
+                _fail(ReasonCode.invalid_metadata)
+            if aggregate_cost != self.cost:
+                _fail(ReasonCode.invalid_metadata)
+        if self.invocation_id is None and turns:
+            _fail(ReasonCode.invalid_metadata)
+        if self.invocation_id is None and self.coverage.status != "N.A.":
+            _fail(ReasonCode.invalid_metadata)
+        if turns and (self.model is None or self.started_at is None):
+            _fail(ReasonCode.invalid_metadata)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "taskId": self.task_id,
+            "pipelineId": self.pipeline_id,
+            "runId": self.run_id,
+            "invocationId": self.invocation_id,
+            "retryOrdinal": self.retry_ordinal,
+            "model": self.model,
+            "startedAt": _usage_timestamp_text(self.started_at),
+            "completedAt": _usage_timestamp_text(self.completed_at),
+            "processOutcome": self.process_outcome,
+            "coverage": self.coverage.as_dict(),
+            "tokens": self.tokens.as_dict(),
+            "cost": self.cost.as_dict(),
+            "price": self.price.as_dict() if self.price is not None else None,
+            "turns": [item.as_dict() for item in self.turns],
+        }
+
+    @property
+    def covered_invocations(self) -> int:
+        return self.coverage.covered_invocations
+
+    @property
+    def expected_invocations(self) -> int:
+        return self.coverage.expected_invocations
+
+    @property
+    def provenance(self) -> PriceProvenance | None:
+        return self.price
+
+
+@dataclass(frozen=True, slots=True)
+class UsageRun:
+    task_id: str
+    pipeline_id: str
+    run_id: str
+    role: str | None
+    invocations: tuple[UsageInvocation, ...]
+    tokens: UsageTokens
+    cost: UsageCosts
+    coverage: UsageCoverage
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        object.__setattr__(self, "pipeline_id", _usage_identifier(self.pipeline_id))
+        object.__setattr__(self, "run_id", _usage_identifier(self.run_id))
+        if self.role is not None:
+            object.__setattr__(self, "role", _bounded_text(self.role, code=ReasonCode.invalid_metadata, maximum=128))
+        if not isinstance(self.tokens, UsageTokens) or not isinstance(self.cost, UsageCosts) or not isinstance(self.coverage, UsageCoverage):
+            _fail(ReasonCode.invalid_metadata)
+        invocations = _usage_tuple(self.invocations, maximum=MAX_USAGE_INVOCATIONS)
+        if any(not isinstance(item, UsageInvocation) for item in invocations):
+            _fail(ReasonCode.invalid_metadata)
+        invocations = tuple(sorted(invocations, key=lambda item: (item.retry_ordinal, item.invocation_id or "")))
+        identities = {(item.retry_ordinal, item.invocation_id) for item in invocations}
+        if len(identities) != len(invocations):
+            _fail(ReasonCode.invalid_metadata)
+        for item in invocations:
+            if item.task_id != self.task_id or item.pipeline_id != self.pipeline_id or item.run_id != self.run_id:
+                _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "invocations", invocations)
+        expected_tokens = UsageTokens()
+        expected_cost = UsageCosts()
+        expected_coverage = UsageCoverage()
+        for item in invocations:
+            expected_tokens = _merge_usage_tokens(expected_tokens, item.tokens)
+            expected_cost = _merge_usage_costs(expected_cost, item.cost)
+            expected_coverage = _merge_usage_coverage(expected_coverage, item.coverage)
+        if expected_tokens != self.tokens or expected_cost != self.cost or expected_coverage != self.coverage:
+            _fail(ReasonCode.invalid_metadata)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "taskId": self.task_id,
+            "pipelineId": self.pipeline_id,
+            "runId": self.run_id,
+            "role": self.role,
+            "tokens": self.tokens.as_dict(),
+            "cost": self.cost.as_dict(),
+            "coverage": self.coverage.as_dict(),
+            "invocations": [item.as_dict() for item in self.invocations],
+        }
+
+    @property
+    def covered_invocations(self) -> int:
+        return self.coverage.covered_invocations
+
+    @property
+    def expected_invocations(self) -> int:
+        return self.coverage.expected_invocations
+
+
+@dataclass(frozen=True, slots=True)
+class TaskUsageSummary:
+    task_id: str
+    tokens: UsageTokens
+    cost: UsageCosts
+    coverage: UsageCoverage
+    run_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        if not isinstance(self.tokens, UsageTokens) or not isinstance(self.cost, UsageCosts) or not isinstance(self.coverage, UsageCoverage):
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "run_count", _usage_counter(self.run_count, allow_none=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "taskId": self.task_id,
+            "runCount": self.run_count,
+            "tokens": self.tokens.as_dict(),
+            "cost": self.cost.as_dict(),
+            "coverage": self.coverage.as_dict(),
+        }
+
+    @property
+    def covered_invocations(self) -> int:
+        return self.coverage.covered_invocations
+
+    @property
+    def expected_invocations(self) -> int:
+        return self.coverage.expected_invocations
+
+
+@dataclass(frozen=True, slots=True)
+class TaskUsageDaily:
+    task_id: str
+    date: str
+    model: str | None
+    tokens: UsageTokens
+    cost: UsageCosts
+    coverage: UsageCoverage
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        object.__setattr__(self, "date", _usage_date(self.date))
+        object.__setattr__(self, "model", _usage_model(self.model))
+        if not isinstance(self.tokens, UsageTokens) or not isinstance(self.cost, UsageCosts) or not isinstance(self.coverage, UsageCoverage):
+            _fail(ReasonCode.invalid_metadata)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "taskId": self.task_id,
+            "date": self.date,
+            "model": self.model,
+            "tokens": self.tokens.as_dict(),
+            "cost": self.cost.as_dict(),
+            "coverage": self.coverage.as_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskUsageLifetime:
+    task_id: str
+    model: str | None
+    tokens: UsageTokens
+    cost: UsageCosts
+    coverage: UsageCoverage
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        object.__setattr__(self, "model", _usage_model(self.model))
+        if not isinstance(self.tokens, UsageTokens) or not isinstance(self.cost, UsageCosts) or not isinstance(self.coverage, UsageCoverage):
+            _fail(ReasonCode.invalid_metadata)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "taskId": self.task_id,
+            "model": self.model,
+            "tokens": self.tokens.as_dict(),
+            "cost": self.cost.as_dict(),
+            "coverage": self.coverage.as_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UsageGenerationMetadata:
+    evidence_digest: str
+    catalog_digest: str
+    projection_digest: str
+    usage_generation_id: str
+    schema_version: str = "1.0"
+
+    def __post_init__(self) -> None:
+        for name in ("evidence_digest", "catalog_digest", "projection_digest"):
+            object.__setattr__(self, name, _usage_digest(getattr(self, name)))
+        object.__setattr__(self, "usage_generation_id", _usage_digest(self.usage_generation_id))
+        object.__setattr__(self, "schema_version", _bounded_text(self.schema_version, code=ReasonCode.invalid_metadata, maximum=16))
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "schemaVersion": self.schema_version,
+            "evidenceDigest": self.evidence_digest,
+            "catalogDigest": self.catalog_digest,
+            "projectionDigest": self.projection_digest,
+            "usageGenerationId": self.usage_generation_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskUsageProjection:
+    """Detached, deterministic task usage projection returned by the builder."""
+
+    task_id: str
+    summary: TaskUsageSummary
+    runs: tuple[UsageRun, ...]
+    invocations: tuple[UsageInvocation, ...]
+    turns: tuple[UsageTurn, ...]
+    daily: tuple[TaskUsageDaily, ...]
+    lifetime: tuple[TaskUsageLifetime, ...]
+    evidence_digest: str
+    catalog_digest: str
+    projection_digest: str
+    usage_generation_id: str
+    schema_version: str = "1.0"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "task_id", _usage_identifier(self.task_id))
+        if not isinstance(self.summary, TaskUsageSummary) or self.summary.task_id != self.task_id:
+            _fail(ReasonCode.invalid_metadata)
+        runs = _usage_tuple(self.runs, maximum=MAX_USAGE_INVOCATIONS)
+        invocations = _usage_tuple(self.invocations, maximum=MAX_USAGE_INVOCATIONS * 2)
+        turns = _usage_tuple(self.turns, maximum=MAX_USAGE_TURNS)
+        daily = _usage_tuple(self.daily, maximum=MAX_USAGE_INVOCATIONS * 2)
+        lifetime = _usage_tuple(self.lifetime, maximum=MAX_USAGE_INVOCATIONS * 2)
+        if any(not isinstance(item, UsageRun) for item in runs) or any(
+            item.task_id != self.task_id for item in runs
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if any(not isinstance(item, UsageInvocation) for item in invocations) or any(
+            item.task_id != self.task_id for item in invocations
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if any(not isinstance(item, UsageTurn) for item in turns) or any(
+            item.task_id != self.task_id for item in turns
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if any(not isinstance(item, TaskUsageDaily) for item in daily) or any(
+            item.task_id != self.task_id for item in daily
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if any(not isinstance(item, TaskUsageLifetime) for item in lifetime) or any(
+            item.task_id != self.task_id for item in lifetime
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        run_keys = {(item.pipeline_id, item.run_id) for item in runs}
+        if len(run_keys) != len(runs):
+            _fail(ReasonCode.invalid_metadata)
+        invocation_keys = {
+            (item.pipeline_id, item.run_id, item.retry_ordinal, item.invocation_id)
+            for item in invocations
+        }
+        if len(invocation_keys) != len(invocations):
+            _fail(ReasonCode.invalid_metadata)
+        turn_keys = {
+            (item.pipeline_id, item.run_id, item.retry_ordinal, item.invocation_id, item.turn_ordinal)
+            for item in turns
+        }
+        if len(turn_keys) != len(turns):
+            _fail(ReasonCode.invalid_metadata)
+        flattened_invocations = tuple(
+            invocation for run in runs for invocation in run.invocations
+        )
+        flattened_turns = tuple(
+            turn for invocation in flattened_invocations for turn in invocation.turns
+        )
+        if tuple(sorted(flattened_invocations, key=lambda item: (item.run_id, item.retry_ordinal, item.invocation_id or ""))) != tuple(
+            sorted(invocations, key=lambda item: (item.run_id, item.retry_ordinal, item.invocation_id or ""))
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        if tuple(sorted(flattened_turns, key=lambda item: (item.run_id, item.invocation_id, item.retry_ordinal, item.turn_ordinal))) != tuple(
+            sorted(turns, key=lambda item: (item.run_id, item.invocation_id, item.retry_ordinal, item.turn_ordinal))
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        expected_tokens = UsageTokens()
+        expected_cost = UsageCosts()
+        expected_coverage = UsageCoverage()
+        for run in runs:
+            expected_tokens = _merge_usage_tokens(expected_tokens, run.tokens)
+            expected_cost = _merge_usage_costs(expected_cost, run.cost)
+            expected_coverage = _merge_usage_coverage(expected_coverage, run.coverage)
+        if (
+            expected_tokens != self.summary.tokens
+            or expected_cost != self.summary.cost
+            or expected_coverage != self.summary.coverage
+            or self.summary.run_count != len(runs)
+        ):
+            _fail(ReasonCode.invalid_metadata)
+        object.__setattr__(self, "runs", tuple(sorted(runs, key=lambda item: (item.pipeline_id, item.run_id))))
+        object.__setattr__(self, "invocations", tuple(sorted(invocations, key=lambda item: (item.run_id, item.retry_ordinal, item.invocation_id or ""))))
+        object.__setattr__(self, "turns", tuple(sorted(turns, key=lambda item: (item.run_id, item.invocation_id, item.retry_ordinal, item.turn_ordinal))))
+        object.__setattr__(self, "daily", tuple(sorted(daily, key=lambda item: (item.date, item.model or ""))))
+        object.__setattr__(self, "lifetime", tuple(sorted(lifetime, key=lambda item: item.model or "")))
+        for name in ("evidence_digest", "catalog_digest", "projection_digest", "usage_generation_id"):
+            object.__setattr__(self, name, _usage_digest(getattr(self, name)))
+        object.__setattr__(self, "schema_version", _bounded_text(self.schema_version, code=ReasonCode.invalid_metadata, maximum=16))
+
+    @property
+    def generation(self) -> UsageGenerationMetadata:
+        return UsageGenerationMetadata(
+            evidence_digest=self.evidence_digest,
+            catalog_digest=self.catalog_digest,
+            projection_digest=self.projection_digest,
+            usage_generation_id=self.usage_generation_id,
+            schema_version=self.schema_version,
+        )
+
+    @property
+    def metadata(self) -> UsageGenerationMetadata:
+        return self.generation
+
+    @property
+    def generation_id(self) -> str:
+        return self.usage_generation_id
+
+    @property
+    def canonical_dict(self) -> dict[str, Any]:
+        value = self.as_dict()
+        value.pop("projectionDigest", None)
+        value.pop("usageGenerationId", None)
+        return value
+
+    @property
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.canonical_dict,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @property
+    def canonical_json(self) -> str:
+        return self.canonical_bytes.decode("utf-8")
+
+    @property
+    def digest(self) -> str:
+        return self.projection_digest
+
+    @property
+    def covered_invocations(self) -> int:
+        return self.summary.coverage.covered_invocations
+
+    @property
+    def expected_invocations(self) -> int:
+        return self.summary.coverage.expected_invocations
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": self.schema_version,
+            "taskId": self.task_id,
+            "usageGenerationId": self.usage_generation_id,
+            "evidenceDigest": self.evidence_digest,
+            "catalogDigest": self.catalog_digest,
+            "projectionDigest": self.projection_digest,
+            "summary": self.summary.as_dict(),
+            "runs": [item.as_dict() for item in self.runs],
+            "invocations": [item.as_dict() for item in self.invocations],
+            "turns": [item.as_dict() for item in self.turns],
+            "daily": [item.as_dict() for item in self.daily],
+            "lifetime": [item.as_dict() for item in self.lifetime],
+        }
+
+    to_dict = as_dict
+
+
+# Names used by downstream publication work are intentionally small aliases;
+# they refer to the same frozen values and do not create a second contract.
+TokenUsage = UsageTokens
+CostSummary = UsageCosts
+Coverage = UsageCoverage
+UsageCost = UsageCosts
+UsageTurnRow = UsageTurn
+TurnUsage = UsageTurn
+UsageInvocationRow = UsageInvocation
+InvocationUsage = UsageInvocation
+UsageRunSummary = UsageRun
+RunUsage = UsageRun
+UsageTaskSummary = TaskUsageSummary
+UsageTask = TaskUsageSummary
+DailyUsageInput = TaskUsageDaily
+LifetimeUsageInput = TaskUsageLifetime
+GenerationMetadata = UsageGenerationMetadata
+UsagePrice = PriceProvenance
+UsageProjection = TaskUsageProjection
+TaskUsage = TaskUsageProjection
+
+
 __all__ = [
     "FailClosed",
     "FileIdentity",
@@ -1846,6 +2991,39 @@ __all__ = [
     "SourceDocument",
     "StableRead",
     "UsageSummary",
+    "MAX_USAGE_COUNTER",
+    "MAX_USAGE_INVOCATIONS",
+    "MAX_USAGE_TURNS",
+    "UsageTokens",
+    "TokenUsage",
+    "UsageCosts",
+    "CostSummary",
+    "UsageCost",
+    "UsageCoverage",
+    "Coverage",
+    "PriceProvenance",
+    "UsageTurn",
+    "UsageTurnRow",
+    "TurnUsage",
+    "UsageInvocation",
+    "UsageInvocationRow",
+    "InvocationUsage",
+    "UsageRun",
+    "UsageRunSummary",
+    "RunUsage",
+    "TaskUsageSummary",
+    "UsageTaskSummary",
+    "UsageTask",
+    "TaskUsageDaily",
+    "DailyUsageInput",
+    "TaskUsageLifetime",
+    "LifetimeUsageInput",
+    "UsageGenerationMetadata",
+    "GenerationMetadata",
+    "UsagePrice",
+    "TaskUsageProjection",
+    "UsageProjection",
+    "TaskUsage",
     "private_staging",
     "read_stable_file",
     "read_stable_jsonl",

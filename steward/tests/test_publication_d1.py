@@ -124,8 +124,13 @@ def client(server: ScriptedD1) -> D1PublicationClient:
     )
 
 
-def publication(publication_id: str = "publication-clean", *, run_id: str = "run-clean", artifact_count: int = 2) -> dict[str, Any]:
-    task_id = "task-clean"
+def publication(
+    publication_id: str = "publication-clean",
+    *,
+    run_id: str = "run-clean",
+    artifact_count: int = 2,
+    task_id: str = "task-clean",
+) -> dict[str, Any]:
     pipeline_id = f"pipeline-{publication_id}"
     artifacts: list[dict[str, Any]] = []
     for index in range(artifact_count):
@@ -146,7 +151,9 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
             }
         )
     usage_generation_id = f"usage-{publication_id}"
-    price_digest = hashlib.sha256(f"price-{publication_id}".encode()).hexdigest()
+    # The catalog entry is shared across task publications; distinct facts
+    # use distinct digests in the dedicated provenance tests below.
+    price_digest = hashlib.sha256(b"price-gpt-fixture").hexdigest()
     token_values = {
         "promptTokens": 11,
         "cachedTokens": 2,
@@ -351,6 +358,139 @@ def usage_replacement(source: dict[str, Any], suffix: str) -> dict[str, Any]:
     refresh_metadata_digest(replacement)
     replacement["generation"]["metadataDigest"] = previous_metadata_digest
     return replacement
+
+
+def add_daily_task_global(payload: dict[str, Any]) -> None:
+    usage = payload["usage"]
+    source = next(row for row in usage["globals"] if row["ownershipClass"] == "task-owned")
+    daily = copy.deepcopy(source)
+    daily["globalId"] = f"{source['globalId']}-daily"
+    daily["periodKind"] = "daily"
+    daily["periodKey"] = "2026-07-28"
+    usage["globals"].append(daily)
+    usage["generation"]["expectedCounts"]["globals"] = len(usage["globals"])
+    refresh_metadata_digest(payload)
+
+
+def test_task_owned_globals_match_verified_invocation_rollups() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-global-mismatch")
+    global_row = next(row for row in payload["usage"]["globals"] if row["ownershipClass"] == "task-owned")
+    global_row.update(
+        {
+            "promptTokens": 100,
+            "cachedTokens": 0,
+            "uncachedTokens": 100,
+            "completionTokens": 18,
+            "reasoningTokens": 0,
+            "totalTokens": 118,
+            "knownTokenSubtotal": 118,
+        }
+    )
+    refresh_metadata_digest(payload)
+
+    with pytest.raises(D1Error) as error:
+        d1.stage(payload)
+
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert server.requests == []
+
+
+def test_hide_subtracts_only_the_hidden_task_global_contribution() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    d1.publish(publication("publication-global-one", run_id="run-global-one", task_id="task-one"))
+    d1.publish(publication("publication-global-two", run_id="run-global-two", task_id="task-two"))
+
+    before = server.connection.execute(
+        "SELECT g.total_tokens, g.expected_invocations FROM usage_global_heads AS h "
+        "JOIN usage_globals AS g ON g.global_id = h.global_id "
+        "WHERE h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
+    ).fetchone()
+    assert tuple(before) == (36, 2)
+
+    d1.hide_task("task-two", "unsafe_content")
+
+    after = server.connection.execute(
+        "SELECT g.total_tokens, g.expected_invocations, h.state FROM usage_global_heads AS h "
+        "JOIN usage_globals AS g ON g.global_id = h.global_id "
+        "WHERE h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
+    ).fetchone()
+    assert tuple(after) == (18, 1, "visible")
+
+
+def test_usage_replacement_with_daily_and_lifetime_keys_stays_below_batch_limit() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-global-replace", run_id="run-global-replace", task_id="task-replace")
+    add_daily_task_global(first)
+    d1.publish(first)
+    replacement = usage_replacement(first, "refresh")
+    old_usage_id = first["usage"]["generation"]["usageGenerationId"]
+    before = len(server.requests)
+
+    d1.replace_usage(replacement, base_usage_generation_id=old_usage_id)
+
+    replacement_batches = [
+        request
+        for request in server.requests[before:]
+        if "batch" in request
+        and any("UPDATE usage_generations SET state = 'superseded'" in item["sql"] for item in request["batch"])
+    ]
+    assert len(replacement_batches) == 1
+    assert sum(len(item["params"]) for item in replacement_batches[0]["batch"]) <= MAX_BATCH_PARAMETERS
+
+
+def test_price_overlap_with_distinct_digest_is_rejected_before_staging() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-price-one", run_id="run-price-one")
+    d1.publish(first)
+    second = publication("publication-price-two", run_id="run-price-two")
+    price_digest = "e" * 64
+    second["usage"]["prices"][0]["priceEntryDigest"] = price_digest
+    for collection in ("invocations", "turns"):
+        second["usage"][collection][0]["priceEntryDigest"] = price_digest
+    for collection in ("summaries", "globals"):
+        for row in second["usage"][collection]:
+            if row["priceProvenanceDigest"] is not None:
+                row["priceProvenanceDigest"] = price_digest
+    refresh_metadata_digest(second)
+
+    with pytest.raises(D1Error) as error:
+        d1.stage(second)
+
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert server.connection.execute("SELECT count(*) FROM usage_generations").fetchone()[0] == 1
+
+
+def test_price_verification_is_bounded_by_indexed_lookups() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-price-large", run_id="run-price-large")
+    d1.publish(first)
+    for index in range(4097):
+        digest = hashlib.sha256(f"unrelated-price-{index}".encode()).hexdigest()
+        server.connection.execute(
+            "INSERT INTO usage_prices "
+            "(price_entry_digest, usage_generation_id, catalog_digest, model, effective_at, effective_until) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                digest,
+                first["usage"]["generation"]["usageGenerationId"],
+                "a" * 64,
+                f"unrelated-model-{index}",
+                "2020-01-01T00:00:00Z",
+                None,
+            ),
+        )
+    server.connection.commit()
+
+    second = publication("publication-price-large-two", run_id="run-price-large-two")
+    d1.stage(second)
+
+    assert server.connection.execute("SELECT count(*) FROM usage_generations").fetchone()[0] == 2
 
 
 def test_stage_is_hidden_until_verified_exposure_and_replays() -> None:

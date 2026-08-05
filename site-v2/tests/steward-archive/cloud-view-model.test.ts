@@ -171,6 +171,10 @@ test("attaches only authenticated task and run summaries", () => {
   assert.equal(model.task.usage?.totalTokens, 18);
   assert.equal(model.runs.find((run) => run.runId === workerRunId)?.usage?.coverage, "partial");
   assert.equal(model.runs.find((run) => run.runId === planningRunId)?.usage, null);
+
+  const independentlyRead = buildCloudTaskViewModel(detail(), usage.summaries);
+  assert.equal(independentlyRead.task.usage?.totalTokens, 18);
+  assert.equal(independentlyRead.runs.find((run) => run.runId === workerRunId)?.usage?.coverage, "partial");
 });
 
 test("keeps an active task distinct while exposing its completed trajectory", () => {

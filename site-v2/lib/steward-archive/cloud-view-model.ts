@@ -17,6 +17,7 @@ import type {
  * recreate archive heuristics while rendering.
  */
 export type CloudTaskViewInput = CloudTaskDetail;
+export type CloudTaskUsageInput = CloudUsage | readonly CloudUsageSummary[];
 
 export interface CloudTaskViewTask {
   readonly id: string;
@@ -275,12 +276,15 @@ function trajectoryArtifact(detail: CloudTaskDetail, descriptor: CloudTrajectory
 }
 
 /** Project one validated cloud detail graph into a page-ready, byte-free model. */
-export function buildCloudTaskViewModel(detail: CloudTaskViewInput, usage: CloudUsage | null = null): CloudTaskViewModel {
+export function buildCloudTaskViewModel(detail: CloudTaskViewInput, usage: CloudTaskUsageInput | null = null): CloudTaskViewModel {
   const summariesByRun = new Map<string, CloudUsageSummary>();
-  for (const summary of usage?.summaries ?? []) {
+  const summaries: readonly CloudUsageSummary[] = usage === null
+    ? []
+    : Array.isArray(usage) ? usage : (usage as CloudUsage).summaries;
+  for (const summary of summaries) {
     if (summary.scope === "run" && summary.runId !== null) summariesByRun.set(summary.runId, summary);
   }
-  const taskUsage = usage?.summaries.find((summary) => summary.scope === "task" && summary.runId === null) ?? null;
+  const taskUsage = summaries.find((summary) => summary.scope === "task" && summary.runId === null) ?? null;
   const runs = detail.runs.map((run) => mapRun(run, summariesByRun.get(run.runId) ?? null));
   const runsByPipeline = new Map<string, CloudRunView[]>();
   for (const run of runs) {

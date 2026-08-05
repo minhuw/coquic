@@ -9,9 +9,7 @@ import {
 } from "@/lib/steward-archive/cloud-repository";
 import type {
   CloudTaskDetail,
-  CloudUsage,
   CloudUsageInvocationPage,
-  CloudUsageReadResult,
   CloudUsageSummary,
   CloudUsageTurnPage,
   CloudUsageUnavailable,
@@ -81,16 +79,7 @@ function usageFailure(reason: CloudUsageUnavailable["reason"] = "unavailable"): 
   return { kind: "unavailable", reason };
 }
 
-function usageData(value: CloudUsageReadResult<CloudUsage> | null): CloudUsage | null {
-  return value !== null && !isUsageUnavailableResult(value) ? value : null;
-}
-
-function summaryResult(
-  usage: CloudUsageReadResult<CloudUsage> | null,
-  summary: CloudUsageSummary | null,
-): CloudUsageReadResult<CloudUsageSummary> | null {
-  return isUsageUnavailableResult(usage) ? usage : summary;
-}
+type UsageSummaryResult = CloudUsageSummary | null | CloudUsageUnavailable;
 
 function taskHref(taskId: string, query: Record<string, string | undefined> = {}) {
   const params = new URLSearchParams();
@@ -145,7 +134,7 @@ function TaskUnavailable({ taskId, githubStars }: { taskId: string; githubStars:
   );
 }
 
-function TaskHeader({ model, usage }: { model: CloudTaskViewModel; usage: CloudUsageReadResult<CloudUsage> | null }) {
+function TaskHeader({ model, usage }: { model: CloudTaskViewModel; usage: UsageSummaryResult }) {
   const { task } = model;
   return (
     <header className="py-10 sm:py-12">
@@ -161,7 +150,7 @@ function TaskHeader({ model, usage }: { model: CloudTaskViewModel; usage: CloudU
           <div className="mt-4"><Disclosure {...task.disclosure} /></div>
           <div className="mt-5 max-w-3xl">
             <p className="text-sm font-medium text-muted">Task usage</p>
-            <TaskUsageSummary usage={summaryResult(usage, task.usage)} />
+            <TaskUsageSummary usage={usage} />
           </div>
         </div>
         <dl className="border-t border-line text-xs">
@@ -201,22 +190,22 @@ function Pipelines({ model, taskId, selectedPipelineId, selectedRunId }: { model
   );
 }
 
-function RunEvidence({ taskId, run, selected, usageUnavailable }: { taskId: string; run: CloudRunView; selected: boolean; usageUnavailable: CloudUsageUnavailable | null }) {
+function RunEvidence({ taskId, run, selected, usage }: { taskId: string; run: CloudRunView; selected: boolean; usage: UsageSummaryResult }) {
   return (
     <article id={`run-${encodeURIComponent(run.runId)}`} className={`scroll-mt-20 border-b border-line py-5 last:border-b-0 ${selected ? "border-l-2 border-l-accent pl-4" : ""}`}>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between"><Link href={runHref(taskId, run.pipelineId, run.runId)} aria-current={selected ? "page" : undefined} className={`break-all text-sm font-semibold no-underline ${selected ? "text-accent" : "text-ink hover:text-accent"}`}>{run.runId}</Link><Status value={run.status} /></div>
       <dl className="mt-3 grid gap-x-6 gap-y-2 text-xs text-muted sm:grid-cols-2 lg:grid-cols-4"><div><dt className="inline">Role </dt><dd className="inline text-ink">{titleCase(run.role)}</dd></div><div><dt className="inline">Pipeline </dt><dd className="inline break-all text-ink data-text">{run.pipelineId}</dd></div><div><dt className="inline">Started </dt><dd className="inline text-ink data-text">{formatDateTime(run.timing?.startedAt ?? null)}</dd></div><div><dt className="inline">Completed </dt><dd className="inline text-ink data-text">{formatDateTime(run.timing?.completedAt ?? null)}</dd></div><div><dt className="inline">Duration </dt><dd className="inline text-ink data-text">{formatDuration(run.timing?.durationMs ?? null)}</dd></div><div><dt className="inline">ATIF digest </dt><dd className="inline break-all text-ink data-text">{run.atifDigest}</dd></div><div><dt className="inline">Trajectory artifact </dt><dd className="inline break-all text-ink data-text">{run.atifArtifactId ?? "Unavailable"}</dd></div></dl>
-      <TaskUsageSummary usage={usageUnavailable ?? run.usage} />
+      <TaskUsageSummary usage={usage ?? run.usage} />
     </article>
   );
 }
 
-function Runs({ model, taskId, selectedRunId, usageUnavailable }: { model: CloudTaskViewModel; taskId: string; selectedRunId: string | null; usageUnavailable: CloudUsageUnavailable | null }) {
+function Runs({ model, taskId, selectedRunId, usageByRun }: { model: CloudTaskViewModel; taskId: string; selectedRunId: string | null; usageByRun: ReadonlyMap<string, UsageSummaryResult> }) {
   return (
     <section id="runs" aria-labelledby="runs-title" className="border-b border-line py-8 sm:py-10">
       <div className="flex items-baseline justify-between gap-4"><h2 id="runs-title" className="text-lg font-semibold text-ink">Runs</h2><span className="text-xs text-muted data-text">{model.runs.length}</span></div>
       <p className="mt-3 max-w-3xl text-sm leading-6 text-muted">Run state, timing, role, and content digests are the complete public run evidence. Private usage and raw event bytes are not part of this graph.</p>
-      <div className="mt-5 border-t border-line">{model.runs.length ? model.runs.map((run) => <RunEvidence key={run.runId} taskId={taskId} run={run} selected={run.runId === selectedRunId} usageUnavailable={usageUnavailable} />) : <p className="py-6 text-sm text-muted">No runs are published for this task.</p>}</div>
+      <div className="mt-5 border-t border-line">{model.runs.length ? model.runs.map((run) => <RunEvidence key={run.runId} taskId={taskId} run={run} selected={run.runId === selectedRunId} usage={usageByRun.get(run.runId) ?? run.usage} />) : <p className="py-6 text-sm text-muted">No runs are published for this task.</p>}</div>
     </section>
   );
 }
@@ -260,19 +249,30 @@ interface PageProps {
 export default async function StewardTaskPage({ params, searchParams }: PageProps) {
   const [{ taskId }, query] = await Promise.all([params, searchParams]);
   const repository = getCloudRepository();
-  let detail: CloudTaskDetail | null = null;
-  let usageResult: CloudUsageReadResult<CloudUsage> | null = null;
   let unavailable = false;
-  await Promise.all([
-    repository.getTaskDetail(taskId).then((value) => { detail = value; }).catch(() => { unavailable = true; }),
-    repository.getTaskUsage(taskId).then((value) => { usageResult = value; }).catch(() => { usageResult = usageFailure(); }),
+  const [detailResult, taskUsageResult] = await Promise.all([
+    repository.getTaskDetail(taskId).catch(() => { unavailable = true; return null; }),
+    repository.getTaskUsageSummary(taskId).catch(() => usageFailure()),
   ]);
-  if (!unavailable && detail === null) notFound();
+  if (!unavailable && detailResult === null) notFound();
 
   const githubStars = await getGitHubStars();
-  if (unavailable || !detail) return <TaskUnavailable taskId={taskId} githubStars={githubStars} />;
+  if (unavailable || detailResult === null) return <TaskUnavailable taskId={taskId} githubStars={githubStars} />;
+  const detail: CloudTaskDetail = detailResult;
 
-  const model = buildCloudTaskViewModel(detail, usageData(usageResult));
+  const runUsageEntries = await Promise.all(detail.runs.map(async (run) => {
+    try {
+      return [run.runId, await repository.getTaskUsageSummary(taskId, run.runId)] as const;
+    } catch {
+      return [run.runId, usageFailure()] as const;
+    }
+  }));
+  const usageByRun = new Map(runUsageEntries);
+  const usageSummaries = [
+    ...(taskUsageResult !== null && !isUsageUnavailableResult(taskUsageResult) ? [taskUsageResult] : []),
+    ...runUsageEntries.map(([, usage]) => usage).filter((usage): usage is CloudUsageSummary => usage !== null && !isUsageUnavailableResult(usage)),
+  ];
+  const model = buildCloudTaskViewModel(detail, usageSummaries);
 
   const requestedRunId = typeof query.run === "string" ? query.run : null;
   const requestedPipelineId = typeof query.pipeline === "string" ? query.pipeline : null;
@@ -288,10 +288,10 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
 
   let invocationPage: CloudUsageInvocationPage | null | CloudUsageUnavailable = null;
   let turnPage: CloudUsageTurnPage | null | CloudUsageUnavailable = null;
-  const usageReady = usageResult !== null && !isUsageUnavailableResult(usageResult);
-  if (usageReady && selectedRunId) {
+  const requestedInvocationCursor = typeof query.invocationCursor === "string" ? query.invocationCursor : null;
+  if (selectedRunId) {
     try {
-      invocationPage = await repository.getUsageInvocationPage(taskId, selectedRunId, { limit: 128 });
+      invocationPage = await repository.getUsageInvocationPage(taskId, selectedRunId, { cursor: requestedInvocationCursor, limit: 128 });
     } catch {
       invocationPage = usageFailure("invalid");
     }
@@ -307,24 +307,25 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
     : ownedInvocations[0] ?? null;
   const selectedInvocationId = selectedInvocation?.invocationId ?? null;
   const requestedTurnCursor = typeof query.cursor === "string" ? query.cursor : null;
-  if (usageReady && selectedInvocationId) {
+  if (selectedInvocationId) {
     try {
       turnPage = await repository.getUsageTurnPage(taskId, selectedInvocationId, { cursor: requestedTurnCursor, limit: 50 });
     } catch {
       turnPage = usageFailure("invalid");
     }
   }
-  const usageState: "ready" | "missing" | "unavailable" = isUsageUnavailableResult(usageResult)
-    ? "unavailable"
-    : usageResult === null ? "missing" : "ready";
-  const usageUnavailable = isUsageUnavailableResult(usageResult) ? usageResult : null;
+  const usageState: "ready" | "missing" | "unavailable" = (
+    (taskUsageResult !== null && !isUsageUnavailableResult(taskUsageResult))
+    || (invocationPage !== null && !isUsageUnavailableResult(invocationPage))
+  ) ? "ready"
+    : isUsageUnavailableResult(taskUsageResult) || isUsageUnavailableResult(invocationPage) ? "unavailable" : "missing";
 
   return <>
     <SiteHeader githubStars={githubStars} />
     <main id="content"><div className="mx-auto max-w-shell px-4 sm:px-8 lg:px-12">
-      <TaskHeader model={model} usage={usageResult} />
+      <TaskHeader model={model} usage={taskUsageResult} />
       <Pipelines model={model} taskId={taskId} selectedPipelineId={selectedPipelineId} selectedRunId={selectedRunId} />
-      <Runs model={model} taskId={taskId} selectedRunId={selectedRunId} usageUnavailable={usageUnavailable} />
+      <Runs model={model} taskId={taskId} selectedRunId={selectedRunId} usageByRun={usageByRun} />
       <UsageDetail
         taskId={taskId}
         pipelineId={model.runs.find((run) => run.runId === selectedRunId)?.pipelineId ?? selectedPipelineId}
@@ -334,6 +335,7 @@ export default async function StewardTaskPage({ params, searchParams }: PageProp
         invocationPage={invocationPage}
         turnPage={turnPage}
         selectedInvocationId={selectedInvocationId}
+        invocationCursor={requestedInvocationCursor}
       />
       <TrajectorySurface model={model} taskId={taskId} selectedRunId={selectedRunId} />
       <Artifacts model={model} taskId={taskId} selectedRunId={selectedRunId} />

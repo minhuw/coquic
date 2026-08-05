@@ -142,6 +142,8 @@ type UsageScenarioOptions = {
   readonly summary?: Partial<TaskRow>;
   readonly global?: Partial<TaskRow>;
   readonly turnRows?: readonly TaskRow[];
+  readonly invocationRows?: readonly TaskRow[];
+  readonly expectedInvocations?: number;
 };
 type Scenario = {
   readonly rows: readonly TaskRow[];
@@ -241,6 +243,7 @@ function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
   const runId = options.runId ?? USAGE_RUN_ID;
   const invocationId = options.invocationId ?? USAGE_INVOCATION_ID;
   const turnRows = options.turnRows ?? [];
+  const expectedInvocations = options.expectedInvocations ?? options.invocationRows?.length ?? 1;
   const contextRows: TaskRow[] = [{
     task_id: taskId, publication_id: USAGE_PUBLICATION_ID, task_head_state: "visible", task_head_updated_at: "2026-07-28T00:00:03Z",
     task_head_usage_generation_id: USAGE_GENERATION_ID, generation_publication_id: USAGE_PUBLICATION_ID, generation_state: "visible",
@@ -251,18 +254,18 @@ function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
   }];
   const summaryRows: TaskRow[] = [{
     summary_id: "summary-task", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: taskId,
-    run_id: null, scope: "task", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    run_id: null, scope: "task", coverage: "complete", covered_invocations: expectedInvocations, expected_invocations: expectedInvocations,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, ...options.summary,
   }, {
     summary_id: "summary-run", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: taskId,
-    run_id: runId, scope: "run", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    run_id: runId, scope: "run", coverage: "complete", covered_invocations: expectedInvocations, expected_invocations: expectedInvocations,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST,
   }];
-  const invocationRows: TaskRow[] = [{
+  const defaultInvocationRows: TaskRow[] = [{
     invocation_id: invocationId, usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID,
     task_id: taskId, pipeline_id: pipelineId, run_id: runId, ownership_class: "task-owned", retry_ordinal: 0,
     started_at: "2026-07-28T00:00:00Z", completed_at: "2026-07-28T00:00:01Z", model: "gpt-fixture", billing_mode: "api",
@@ -271,15 +274,16 @@ function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
     uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20, output_cost_micro_usd: 30, total_cost_micro_usd: 60,
     price_entry_digest: USAGE_DIGEST,
   }];
+  const invocationRows = options.invocationRows ?? defaultInvocationRows;
   const globalRows: TaskRow[] = [{
     global_id: "global-usage", usage_generation_id: USAGE_GENERATION_ID, period_kind: "lifetime", period_key: "lifetime",
-    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: expectedInvocations, expected_invocations: expectedInvocations,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, aggregate_only: 1, ...options.global,
   }, {
     global_id: "global-daily", usage_generation_id: USAGE_GENERATION_ID, period_kind: "daily", period_key: "2026-07-28",
-    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: expectedInvocations, expected_invocations: expectedInvocations,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, aggregate_only: 1,
@@ -528,6 +532,40 @@ function pageRows(rows: readonly TaskRow[], statement: string, params: readonly 
     .slice(0, limit);
 }
 
+function usageInvocationRows(rows: readonly TaskRow[], statement: string, params: readonly unknown[]): readonly TaskRow[] {
+  const compare = (left: TaskRow, right: TaskRow): number => {
+    const runCompared = String(left.run_id).localeCompare(String(right.run_id));
+    if (runCompared !== 0) return runCompared;
+    const retryCompared = Number(left.retry_ordinal) - Number(right.retry_ordinal);
+    return retryCompared !== 0 ? retryCompared : String(left.invocation_id).localeCompare(String(right.invocation_id));
+  };
+  if (statement === cloudRepository.USAGE_INVOCATION_CONTEXT_STATEMENT) {
+    return rows.filter((row) => String(row.invocation_id) === String(params[1])).slice(0, 1);
+  }
+  if (statement === cloudRepository.USAGE_INVOCATION_BOUNDARY_STATEMENT) {
+    return rows.filter((row) => String(row.run_id) === String(params[1])
+      && Number(row.retry_ordinal) === Number(params[2])
+      && String(row.invocation_id) === String(params[3])).slice(0, 1);
+  }
+  const runScoped = statement === cloudRepository.USAGE_INVOCATION_RUN_STATEMENT
+    || statement === cloudRepository.USAGE_INVOCATION_RUN_NEXT_STATEMENT
+    || statement === cloudRepository.USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT;
+  const scoped = runScoped ? rows.filter((row) => String(row.run_id) === String(params[1])) : rows;
+  const sorted = [...scoped].sort(compare);
+  const limit = Number(params.at(-1));
+  if (statement === cloudRepository.USAGE_INVOCATION_STATEMENT || statement === cloudRepository.USAGE_INVOCATION_RUN_STATEMENT) return sorted.slice(0, limit);
+  const previous = statement === cloudRepository.USAGE_INVOCATION_PREVIOUS_STATEMENT
+    || statement === cloudRepository.USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT;
+  const retryIndex = runScoped ? 2 : 3;
+  const invocationIndex = runScoped ? 4 : 5;
+  const runId = String(params[1]);
+  const retryOrdinal = Number(params[retryIndex]);
+  const invocationId = String(params[invocationIndex]);
+  const boundary = { run_id: runId, retry_ordinal: retryOrdinal, invocation_id: invocationId };
+  const filtered = sorted.filter((row) => (previous ? compare(row, boundary) < 0 : compare(row, boundary) > 0));
+  return (previous ? filtered.reverse() : filtered).slice(0, limit);
+}
+
 function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string[] }) {
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     calls.count += 1;
@@ -572,8 +610,8 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
         || statement === cloudRepository.USAGE_INVOCATION_NEXT_STATEMENT
         || statement === cloudRepository.USAGE_INVOCATION_PREVIOUS_STATEMENT
         || statement === cloudRepository.USAGE_INVOCATION_RUN_NEXT_STATEMENT
-        || statement === cloudRepository.USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows);
-      if (statement === cloudRepository.USAGE_INVOCATION_BOUNDARY_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows.slice(0, 1));
+        || statement === cloudRepository.USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT) return d1Envelope(usageInvocationRows(scenarioValue.usage.invocationRows, statement, params));
+      if (statement === cloudRepository.USAGE_INVOCATION_BOUNDARY_STATEMENT) return d1Envelope(usageInvocationRows(scenarioValue.usage.invocationRows, statement, params));
       if (statement === cloudRepository.USAGE_INVOCATION_TOTAL_STATEMENT) {
         const summary = scenarioValue.usage.summaryRows.find((row) => row.scope === "task" && row.run_id === null);
         return d1Envelope(summary ? [{ invocation_count: summary.expected_invocations }] : []);
@@ -741,7 +779,12 @@ async function startPlaywrightFixtureServer(): Promise<void> {
       [activeRow],
       [browserTaskRow(cleanTask, "2026-07-28T00:00:03Z"), browserTaskRow(toolHeavyTask, "2026-07-28T00:00:02Z"), browserTaskRow(redactedTask, "2026-07-28T00:00:01Z")],
     ),
-    usage: usageScenarioRows({ taskId: "task-clean", pipelineId: "pipeline-clean", runId: "run-clean" }),
+    usage: usageScenarioRows({
+      taskId: "task-clean",
+      pipelineId: "pipeline-clean",
+      runId: "run-clean",
+      turnRows: [{ ...USAGE_TURN_ROWS[0]!, task_id: "task-clean", run_id: "run-clean" }],
+    }),
     details: {
       "task-clean": cleanDetail,
       "task-redacted": redactedDetail,
@@ -1147,7 +1190,40 @@ async function main() {
     assert.match(html, /gpt-fixture/);
     assert.match(html, /Turns/);
     assert.match(html, /turn-1/);
+    assert((html.match(/>UTC start</g) ?? []).length >= 2);
+    assert((html.match(/>Model</g) ?? []).length >= 2);
+    assert((html.match(/>Coverage</g) ?? []).length >= 2);
     assert(!html.includes("attacker-invocation"));
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  const manyInvocationBase = usageScenarioRows({
+    taskId: USAGE_TASK_ID,
+    pipelineId: "pipeline-usage",
+    runId: USAGE_RUN_ID,
+    turnRows: USAGE_TURN_ROWS,
+  }).invocationRows[0]!;
+  const manyInvocations = Array.from({ length: 129 }, (_, index) => ({
+    ...manyInvocationBase,
+    invocation_id: index === 0 ? USAGE_INVOCATION_ID : `invocation-${index + 1}`,
+    retry_ordinal: index,
+    covered_turns: index === 0 ? 1 : 0,
+    expected_turns: index === 0 ? 1 : 0,
+  }));
+  await runCase("task usage pagination survives the aggregate cap", {
+    ...scenario([], [], undefined, [], usageDetail),
+    usage: usageScenarioRows({
+      taskId: USAGE_TASK_ID,
+      pipelineId: "pipeline-usage",
+      runId: USAGE_RUN_ID,
+      turnRows: USAGE_TURN_ROWS,
+      invocationRows: manyInvocations,
+    }),
+  }, async () => {
+    const html = await renderTask(USAGE_TASK_ID, { pipeline: "pipeline-usage", run: USAGE_RUN_ID });
+    assert.match(html, /Showing 128 of 129 invocations/);
+    assert.match(html, /Next invocations/);
+    assert(!html.includes("Usage unavailable"));
     assertTaskHasNoLegacyOutput(html);
   });
 

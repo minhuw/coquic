@@ -240,6 +240,12 @@ test("Steward task usage keeps the selected run and bounded drill-down", async (
   await expect(page.getByText("invocation-usage", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("gpt-fixture", { exact: true }).last()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Turns" })).toBeVisible();
+  const turnTable = page.locator("#usage-turns table");
+  await expect(turnTable.getByRole("columnheader", { name: "UTC start" })).toBeVisible();
+  await expect(turnTable.getByRole("columnheader", { name: "Model" })).toBeVisible();
+  await expect(turnTable.getByRole("columnheader", { name: "Coverage" })).toBeVisible();
+  await expect(turnTable.getByRole("cell", { name: "gpt-fixture" })).toBeVisible();
+  await expect(turnTable.getByRole("cell", { name: /Complete - 1\/1 turns/ })).toBeVisible();
   await expect(page).toHaveURL(/pipeline=pipeline-clean/);
   await expect(page).toHaveURL(/run=run-clean/);
 });

@@ -233,6 +233,17 @@ test("Steward cached usage keeps exact totals, coverage, and task links", async 
   await expect(cleanTask.getByText("Prompt tokens", { exact: true })).toBeVisible();
 });
 
+test("Steward task usage keeps the selected run and bounded drill-down", async ({ page }) => {
+  await page.goto("/steward/tasks/task-clean?pipeline=pipeline-clean&run=run-clean");
+  await expect(page.getByRole("heading", { name: "Run, invocation, and turn usage" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Invocations and retries" })).toBeVisible();
+  await expect(page.getByText("invocation-usage", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("gpt-fixture", { exact: true }).last()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Turns" })).toBeVisible();
+  await expect(page).toHaveURL(/pipeline=pipeline-clean/);
+  await expect(page).toHaveURL(/run=run-clean/);
+});
+
 test("Steward usage tables keep horizontal scrolling inside their containers at 200% scale", async ({ page }) => {
   for (const viewport of [
     { width: 390, height: 844 },

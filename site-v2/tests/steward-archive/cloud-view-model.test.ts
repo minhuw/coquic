@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { CloudTaskDetail } from "../../lib/steward-archive/cloud-schema";
+import type { CloudTaskDetail, CloudUsage } from "../../lib/steward-archive/cloud-schema";
 import { buildCloudTaskViewModel, type CloudTaskViewModel } from "../../lib/steward-archive/cloud-view-model";
 
 const taskId = "task-cloud-view";
@@ -131,6 +131,46 @@ test("preserves redaction disclosure and keeps unavailable usage explicit", () =
   assert.deepEqual(model.artifacts[0]!.disclosure, { redactionApplied: true, originalRetained: false });
   assert.equal(model.runs[0]!.usage, null);
   assert.equal(model.runs[0]!.timing?.durationSeconds, 1);
+});
+
+test("attaches only authenticated task and run summaries", () => {
+  const taskSummary = {
+    summaryId: "summary-task",
+    usageGenerationId: "usage-generation",
+    publicationId: "publication-cloud-view",
+    taskId,
+    runId: null,
+    scope: "task" as const,
+    coverage: "complete" as const,
+    coveredInvocations: 1,
+    expectedInvocations: 1,
+    knownTokenSubtotal: 18,
+    knownCostSubtotalMicroUsd: 60,
+    promptTokens: 11,
+    cachedTokens: 2,
+    uncachedTokens: 9,
+    completionTokens: 7,
+    reasoningTokens: 3,
+    totalTokens: 18,
+    uncachedInputCostMicroUsd: 10,
+    cachedInputCostMicroUsd: 20,
+    outputCostMicroUsd: 30,
+    totalCostMicroUsd: 60,
+    priceProvenanceDigest: "d".repeat(64),
+  };
+  const usage: CloudUsage = {
+    schemaVersion: "1.0",
+    usageGenerationId: "usage-generation",
+    publicationId: "publication-cloud-view",
+    taskId,
+    summaries: [taskSummary, { ...taskSummary, summaryId: "summary-run", runId: workerRunId, scope: "run", coverage: "partial", expectedInvocations: 2, knownCostSubtotalMicroUsd: null, totalTokens: null, uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null, priceProvenanceDigest: null }],
+    invocations: [],
+    globals: [],
+  };
+  const model = buildCloudTaskViewModel(detail(), usage);
+  assert.equal(model.task.usage?.totalTokens, 18);
+  assert.equal(model.runs.find((run) => run.runId === workerRunId)?.usage?.coverage, "partial");
+  assert.equal(model.runs.find((run) => run.runId === planningRunId)?.usage, null);
 });
 
 test("keeps an active task distinct while exposing its completed trajectory", () => {

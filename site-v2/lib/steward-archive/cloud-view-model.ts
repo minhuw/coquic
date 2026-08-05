@@ -7,6 +7,8 @@ import type {
   CloudTaskDetail,
   CloudTaskSummary,
   CloudTrajectoryDescriptor,
+  CloudUsage,
+  CloudUsageSummary,
 } from "./cloud-schema";
 
 /**
@@ -27,6 +29,7 @@ export interface CloudTaskViewTask {
   readonly eventCount: number;
   readonly artifactCount: number;
   readonly disclosure: CloudDisclosure;
+  readonly usage: CloudUsageSummary | null;
 }
 
 export interface CloudPipelineView extends CloudPipeline {
@@ -50,8 +53,8 @@ export interface CloudRunView {
   readonly timing: CloudRunTiming | null;
   readonly atifDigest: string;
   readonly atifArtifactId: string | null;
-  /** Usage is not part of the public cloud graph and must not be invented. */
-  readonly usage: null;
+  /** Cached usage is joined only after the independently validated usage read. */
+  readonly usage: CloudUsageSummary | null;
 }
 
 export interface CloudEventView {
@@ -163,7 +166,7 @@ function runTiming(run: CloudRun): CloudRunTiming | null {
   return { startedAt: run.startedAt, completedAt: run.completedAt, durationMs, durationSeconds };
 }
 
-function mapTask(task: CloudTaskSummary): CloudTaskViewTask {
+function mapTask(task: CloudTaskSummary, usage: CloudUsageSummary | null): CloudTaskViewTask {
   return {
     id: task.taskId,
     title: task.title,
@@ -175,10 +178,11 @@ function mapTask(task: CloudTaskSummary): CloudTaskViewTask {
     eventCount: task.eventCount,
     artifactCount: task.artifactCount,
     disclosure: task.disclosure,
+    usage,
   };
 }
 
-function mapRun(run: CloudRun): CloudRunView {
+function mapRun(run: CloudRun, usage: CloudUsageSummary | null): CloudRunView {
   return {
     runId: run.runId,
     taskId: run.taskId,
@@ -189,7 +193,7 @@ function mapRun(run: CloudRun): CloudRunView {
     timing: runTiming(run),
     atifDigest: run.atifDigest,
     atifArtifactId: run.atifArtifactId ?? null,
-    usage: null,
+    usage,
   };
 }
 
@@ -271,8 +275,13 @@ function trajectoryArtifact(detail: CloudTaskDetail, descriptor: CloudTrajectory
 }
 
 /** Project one validated cloud detail graph into a page-ready, byte-free model. */
-export function buildCloudTaskViewModel(detail: CloudTaskViewInput): CloudTaskViewModel {
-  const runs = detail.runs.map(mapRun);
+export function buildCloudTaskViewModel(detail: CloudTaskViewInput, usage: CloudUsage | null = null): CloudTaskViewModel {
+  const summariesByRun = new Map<string, CloudUsageSummary>();
+  for (const summary of usage?.summaries ?? []) {
+    if (summary.scope === "run" && summary.runId !== null) summariesByRun.set(summary.runId, summary);
+  }
+  const taskUsage = usage?.summaries.find((summary) => summary.scope === "task" && summary.runId === null) ?? null;
+  const runs = detail.runs.map((run) => mapRun(run, summariesByRun.get(run.runId) ?? null));
   const runsByPipeline = new Map<string, CloudRunView[]>();
   for (const run of runs) {
     const pipelineRuns = runsByPipeline.get(run.pipelineId) ?? [];
@@ -304,7 +313,7 @@ export function buildCloudTaskViewModel(detail: CloudTaskViewInput): CloudTaskVi
     ? [trajectory.reason === "no-completed-run" ? "No completed run has a public trajectory descriptor." : "The completed run trajectory artifact is unavailable."]
     : [];
   return {
-    task: mapTask(detail.task),
+    task: mapTask(detail.task, taskUsage),
     pipelines,
     runs,
     attempts,

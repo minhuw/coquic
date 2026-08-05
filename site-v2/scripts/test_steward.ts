@@ -131,12 +131,17 @@ type UsageScenario = {
   readonly contextRows: readonly TaskRow[];
   readonly summaryRows: readonly TaskRow[];
   readonly invocationRows: readonly TaskRow[];
+  readonly turnRows: readonly TaskRow[];
   readonly globalRows: readonly TaskRow[];
 };
 type UsageScenarioOptions = {
   readonly taskId?: string;
+  readonly pipelineId?: string;
+  readonly runId?: string;
+  readonly invocationId?: string;
   readonly summary?: Partial<TaskRow>;
   readonly global?: Partial<TaskRow>;
+  readonly turnRows?: readonly TaskRow[];
 };
 type Scenario = {
   readonly rows: readonly TaskRow[];
@@ -222,9 +227,20 @@ const USAGE_GENERATION_ID = "usage-generation";
 const USAGE_INVOCATION_ID = "invocation-usage";
 const USAGE_RUN_ID = "run-usage";
 const USAGE_DIGEST = "c".repeat(64);
+const USAGE_TURN_ROWS: readonly TaskRow[] = [{
+  turn_id: "turn-1", usage_generation_id: USAGE_GENERATION_ID, invocation_id: USAGE_INVOCATION_ID,
+  publication_id: USAGE_PUBLICATION_ID, task_id: USAGE_TASK_ID, run_id: USAGE_RUN_ID, ordinal: 1,
+  prompt_tokens: 5, cached_tokens: 1, uncached_tokens: 4, completion_tokens: 2, reasoning_tokens: 1, total_tokens: 7,
+  uncached_input_cost_micro_usd: 4, cached_input_cost_micro_usd: 5, output_cost_micro_usd: 6, total_cost_micro_usd: 15,
+  price_entry_digest: USAGE_DIGEST,
+}];
 
 function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
   const taskId = options.taskId ?? USAGE_TASK_ID;
+  const pipelineId = options.pipelineId ?? "pipeline-usage";
+  const runId = options.runId ?? USAGE_RUN_ID;
+  const invocationId = options.invocationId ?? USAGE_INVOCATION_ID;
+  const turnRows = options.turnRows ?? [];
   const contextRows: TaskRow[] = [{
     task_id: taskId, publication_id: USAGE_PUBLICATION_ID, task_head_state: "visible", task_head_updated_at: "2026-07-28T00:00:03Z",
     task_head_usage_generation_id: USAGE_GENERATION_ID, generation_publication_id: USAGE_PUBLICATION_ID, generation_state: "visible",
@@ -241,16 +257,16 @@ function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, ...options.summary,
   }, {
     summary_id: "summary-run", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: taskId,
-    run_id: USAGE_RUN_ID, scope: "run", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    run_id: runId, scope: "run", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST,
   }];
   const invocationRows: TaskRow[] = [{
-    invocation_id: USAGE_INVOCATION_ID, usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID,
-    task_id: taskId, pipeline_id: "pipeline-usage", run_id: USAGE_RUN_ID, ownership_class: "task-owned", retry_ordinal: 0,
+    invocation_id: invocationId, usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID,
+    task_id: taskId, pipeline_id: pipelineId, run_id: runId, ownership_class: "task-owned", retry_ordinal: 0,
     started_at: "2026-07-28T00:00:00Z", completed_at: "2026-07-28T00:00:01Z", model: "gpt-fixture", billing_mode: "api",
-    process_outcome: "success", coverage: "complete", issue_count: 0, covered_turns: 0, expected_turns: 0,
+    process_outcome: "success", coverage: "complete", issue_count: 0, covered_turns: turnRows.length, expected_turns: turnRows.length,
     prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9, completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18,
     uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20, output_cost_micro_usd: 30, total_cost_micro_usd: 60,
     price_entry_digest: USAGE_DIGEST,
@@ -268,7 +284,7 @@ function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
     output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, aggregate_only: 1,
   }];
-  return { contextRows, summaryRows, invocationRows, globalRows };
+  return { contextRows, summaryRows, invocationRows, turnRows, globalRows };
 }
 
 function d1Envelope(rows: readonly TaskRow[]): Response {
@@ -567,8 +583,14 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
         const summary = scenarioValue.usage.summaryRows.find((row) => row.scope === "run" && row.run_id === runId);
         return d1Envelope(summary ? [{ invocation_count: summary.expected_invocations }] : []);
       }
+      if (statement === cloudRepository.USAGE_TURN_FIRST_STATEMENT
+        || statement === cloudRepository.USAGE_TURN_NEXT_STATEMENT
+        || statement === cloudRepository.USAGE_TURN_PREVIOUS_STATEMENT
+        || statement === cloudRepository.USAGE_TURN_BOUNDARY_STATEMENT) return d1Envelope(scenarioValue.usage.turnRows);
+      if (statement === cloudRepository.USAGE_TURN_COUNT_STATEMENT) return d1Envelope([{ turn_count: scenarioValue.usage.turnRows.length }]);
       if (statement === cloudRepository.USAGE_GLOBAL_STATEMENT) return d1Envelope(scenarioValue.usage.globalRows);
     }
+    if (statement === cloudRepository.USAGE_CONTEXT_STATEMENT) return d1Envelope([]);
     if (statement === cloudRepository.STATUS_STATEMENT) {
       if (scenarioValue.statusRows.length === 0) return d1Envelope([]);
       return d1Envelope([{ task_count: scenarioValue.statusRows.length, latest_publication_at: EXPOSED_AT, latest_publication_id: PUBLICATION_ID }]);
@@ -719,7 +741,7 @@ async function startPlaywrightFixtureServer(): Promise<void> {
       [activeRow],
       [browserTaskRow(cleanTask, "2026-07-28T00:00:03Z"), browserTaskRow(toolHeavyTask, "2026-07-28T00:00:02Z"), browserTaskRow(redactedTask, "2026-07-28T00:00:01Z")],
     ),
-    usage: usageScenarioRows({ taskId: "task-clean" }),
+    usage: usageScenarioRows({ taskId: "task-clean", pipelineId: "pipeline-clean", runId: "run-clean" }),
     details: {
       "task-clean": cleanDetail,
       "task-redacted": redactedDetail,
@@ -1098,6 +1120,34 @@ async function main() {
     assert.match(html, /data-trajectory-state="loading"/);
     assert.match(html, /Download trajectory artifact/);
     assert.match(html, /Timeline/);
+    assertTaskHasNoLegacyOutput(html);
+  });
+
+  const usageDetailTrajectory = trajectoryFixture(cleanPublication, {
+    taskId: USAGE_TASK_ID,
+    pipelineId: "pipeline-usage",
+    runId: USAGE_RUN_ID,
+  });
+  const usageDetail = detailScenario({
+    taskId: USAGE_TASK_ID,
+    pipelineId: "pipeline-usage",
+    runId: USAGE_RUN_ID,
+    publicationId: USAGE_PUBLICATION_ID,
+    title: "Usage detail fixture",
+  }, usageDetailTrajectory);
+  await runCase("task usage drill-down preserves ownership and turns", {
+    ...scenario([], [], undefined, [], usageDetail),
+    usage: usageScenarioRows({ taskId: USAGE_TASK_ID, pipelineId: "pipeline-usage", runId: USAGE_RUN_ID, turnRows: USAGE_TURN_ROWS }),
+  }, async () => {
+    const html = await renderTask(USAGE_TASK_ID, { pipeline: "pipeline-usage", run: USAGE_RUN_ID, invocation: "attacker-invocation" });
+    assert.match(html, /Task usage/);
+    assert.match(html, /18/);
+    assert.match(html, /Invocations and retries/);
+    assert.match(html, /Role/);
+    assert.match(html, /gpt-fixture/);
+    assert.match(html, /Turns/);
+    assert.match(html, /turn-1/);
+    assert(!html.includes("attacker-invocation"));
     assertTaskHasNoLegacyOutput(html);
   });
 

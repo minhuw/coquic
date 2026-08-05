@@ -130,6 +130,7 @@ class ExposureReceipt:
     publication_id: str
     task_id: str
     state: str = "visible"
+    usage_generation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +330,17 @@ _USAGE_FIELDS = _TOKEN_FIELDS + _COST_FIELDS
 _TOKEN_DB_FIELDS = ("prompt_tokens", "cached_tokens", "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens")
 _COST_DB_FIELDS = ("uncached_input_cost_micro_usd", "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd")
 _SAFE_INTEGER_MAX = 9_007_199_254_740_991
+_GLOBAL_KEY_FIELDS = ("periodKind", "periodKey", "model", "ownershipClass")
+_GLOBAL_VALUE_FIELDS = (
+    "coverage",
+    "coveredInvocations",
+    "expectedInvocations",
+    "knownTokenSubtotal",
+    "knownCostSubtotalMicroUsd",
+    *_USAGE_FIELDS,
+    "priceProvenanceDigest",
+    "aggregateOnly",
+)
 
 
 def _invalid(code: D1ErrorCode = D1ErrorCode.invalid_request) -> None:
@@ -761,7 +773,7 @@ def _validate_usage(
             _digest(row["priceProvenanceDigest"])
 
 
-def _validate_payload(source: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_payload(source: Mapping[str, Any], *, allow_usage_replacement: bool = False) -> dict[str, Any]:
     payload = _mapping(source)
     _keys(payload, _TOP_LEVEL)
     _safe_value(payload)
@@ -904,7 +916,7 @@ def _validate_payload(source: Mapping[str, Any]) -> dict[str, Any]:
     if generation_run_id not in run_ids:
         _invalid(D1ErrorCode.generation_conflict)
     _validate_usage(payload, pipeline_ids, run_ids)
-    if generation["metadataDigest"] != _metadata_digest(payload):
+    if not allow_usage_replacement and generation["metadataDigest"] != _metadata_digest(payload):
         _invalid(D1ErrorCode.digest_mismatch)
     # Keep the returned object detached from mutable caller containers.
     return json.loads(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
@@ -1024,7 +1036,12 @@ _VERIFY_USAGE_COUNTS = (
     "(SELECT count(*) FROM usage_summaries WHERE usage_generation_id = u.usage_generation_id) AS summary_count, "
     "(SELECT count(*) FROM usage_invocations WHERE usage_generation_id = u.usage_generation_id) AS invocation_count, "
     "(SELECT count(*) FROM usage_turns WHERE usage_generation_id = u.usage_generation_id) AS turn_count, "
-    "(SELECT count(*) FROM usage_prices WHERE usage_generation_id = u.usage_generation_id) AS price_count, "
+    "(SELECT count(*) FROM usage_prices AS p WHERE p.price_entry_digest IN ("
+    "SELECT price_entry_digest FROM usage_invocations WHERE usage_generation_id = u.usage_generation_id AND price_entry_digest IS NOT NULL "
+    "UNION SELECT price_entry_digest FROM usage_turns WHERE usage_generation_id = u.usage_generation_id AND price_entry_digest IS NOT NULL "
+    "UNION SELECT price_provenance_digest FROM usage_summaries WHERE usage_generation_id = u.usage_generation_id AND price_provenance_digest IS NOT NULL "
+    "UNION SELECT price_provenance_digest FROM usage_globals WHERE usage_generation_id = u.usage_generation_id AND price_provenance_digest IS NOT NULL"
+    ")) AS price_count, "
     "(SELECT count(*) FROM usage_globals WHERE usage_generation_id = u.usage_generation_id) AS global_count "
     "FROM usage_generations AS u WHERE u.usage_generation_id = ? AND u.publication_id = ? AND u.task_id = ?"
 )
@@ -1036,9 +1053,72 @@ _ARTIFACT_SELECT = "SELECT artifact_id, task_id, run_id, logical_path, public_ke
 _USAGE_SUMMARY_SELECT = "SELECT summary_id, usage_generation_id, publication_id, task_id, run_id, scope, coverage, covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest FROM usage_summaries WHERE usage_generation_id = ? ORDER BY summary_id"
 _USAGE_INVOCATION_SELECT = "SELECT invocation_id, usage_generation_id, publication_id, task_id, pipeline_id, run_id, ownership_class, retry_ordinal, started_at, completed_at, model, billing_mode, process_outcome, coverage, issue_count, covered_turns, expected_turns, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_entry_digest FROM usage_invocations WHERE usage_generation_id = ? ORDER BY invocation_id"
 _USAGE_TURN_SELECT = "SELECT turn_id, usage_generation_id, invocation_id, publication_id, task_id, run_id, ordinal, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_entry_digest FROM usage_turns WHERE usage_generation_id = ? ORDER BY turn_id"
-_USAGE_PRICE_SELECT = "SELECT price_entry_digest, usage_generation_id, catalog_digest, model, effective_at, effective_until FROM usage_prices WHERE usage_generation_id = ? ORDER BY price_entry_digest"
+_USAGE_PRICE_SELECT = (
+    "SELECT price_entry_digest, usage_generation_id, catalog_digest, model, effective_at, effective_until "
+    "FROM usage_prices WHERE price_entry_digest IN ("
+    "SELECT price_entry_digest FROM usage_invocations WHERE usage_generation_id = ? AND price_entry_digest IS NOT NULL "
+    "UNION SELECT price_entry_digest FROM usage_turns WHERE usage_generation_id = ? AND price_entry_digest IS NOT NULL "
+    "UNION SELECT price_provenance_digest FROM usage_summaries WHERE usage_generation_id = ? AND price_provenance_digest IS NOT NULL "
+    "UNION SELECT price_provenance_digest FROM usage_globals WHERE usage_generation_id = ? AND price_provenance_digest IS NOT NULL"
+    ") ORDER BY price_entry_digest"
+)
+_PRICE_LEDGER_SELECT = "SELECT price_entry_digest, usage_generation_id, catalog_digest, model, effective_at, effective_until FROM usage_prices ORDER BY model, effective_at, price_entry_digest"
 _USAGE_GLOBAL_SELECT = "SELECT global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest, aggregate_only FROM usage_globals WHERE usage_generation_id = ? ORDER BY global_id"
 _HEAD_SELECT = "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?"
+_GLOBAL_HEAD_SELECT = (
+    "SELECT h.period_kind, h.period_key, h.model, h.ownership_class, h.usage_generation_id, h.global_id, h.state, "
+    "g.coverage, g.covered_invocations, g.expected_invocations, g.known_token_subtotal, "
+    "g.known_cost_subtotal_micro_usd, g.prompt_tokens, g.cached_tokens, g.uncached_tokens, "
+    "g.completion_tokens, g.reasoning_tokens, g.total_tokens, g.uncached_input_cost_micro_usd, "
+    "g.cached_input_cost_micro_usd, g.output_cost_micro_usd, g.total_cost_micro_usd, "
+    "g.price_provenance_digest, g.aggregate_only "
+    "FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id "
+    "WHERE h.state = 'visible' ORDER BY h.period_kind, h.period_key, h.model, h.ownership_class"
+)
+_GLOBAL_UPDATE = (
+    "UPDATE usage_globals SET coverage = ?, covered_invocations = ?, expected_invocations = ?, "
+    "known_token_subtotal = ?, known_cost_subtotal_micro_usd = ?, prompt_tokens = ?, cached_tokens = ?, "
+    "uncached_tokens = ?, completion_tokens = ?, reasoning_tokens = ?, total_tokens = ?, "
+    "uncached_input_cost_micro_usd = ?, cached_input_cost_micro_usd = ?, output_cost_micro_usd = ?, "
+    "total_cost_micro_usd = ?, price_provenance_digest = ?, aggregate_only = ? "
+    "WHERE global_id = ? AND usage_generation_id = ? "
+    "AND EXISTS (SELECT 1 FROM task_heads WHERE task_id = ? AND publication_id = ? "
+    "AND usage_generation_id = ? AND state = 'visible') "
+    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible')"
+)
+_GLOBAL_UPDATE_EXPOSURE = (
+    "UPDATE usage_globals SET coverage = ?, covered_invocations = ?, expected_invocations = ?, "
+    "known_token_subtotal = ?, known_cost_subtotal_micro_usd = ?, prompt_tokens = ?, cached_tokens = ?, "
+    "uncached_tokens = ?, completion_tokens = ?, reasoning_tokens = ?, total_tokens = ?, "
+    "uncached_input_cost_micro_usd = ?, cached_input_cost_micro_usd = ?, output_cost_micro_usd = ?, "
+    "total_cost_micro_usd = ?, price_provenance_digest = ?, aggregate_only = ? "
+    "WHERE global_id = ? AND usage_generation_id = ? "
+    "AND EXISTS (SELECT 1 FROM usage_generations WHERE usage_generation_id = ? "
+    "AND publication_id = ? AND task_id = ? AND state IN ('staged', 'visible'))"
+)
+_GLOBAL_HEAD_UPSERT = (
+    "INSERT INTO usage_global_heads "
+    "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, 'visible', ?) "
+    "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
+    "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
+    "state = 'visible', updated_at = excluded.updated_at"
+)
+_GLOBAL_HEAD_UPSERT_GUARDED = (
+    "INSERT INTO usage_global_heads "
+    "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
+    "SELECT ?, ?, ?, ?, ?, ?, 'visible', ? FROM task_heads "
+    "WHERE task_id = ? AND publication_id = ? AND usage_generation_id = ? AND state = 'visible' "
+    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible') "
+    "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
+    "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
+    "state = 'visible', updated_at = excluded.updated_at"
+)
+_GLOBAL_HEAD_HIDE = (
+    "UPDATE usage_global_heads SET state = 'hidden', updated_at = ? "
+    "WHERE period_kind = ? AND period_key = ? AND model = ? AND ownership_class = ? "
+    "AND usage_generation_id = ? AND global_id = ? AND state = 'visible'"
+)
 _VISIBLE_GENERATION_SELECT = "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'visible' ORDER BY exposed_at DESC, publication_id DESC LIMIT 1"
 _VISIBLE_USAGE_GENERATION_SELECT = "SELECT usage_generation_id FROM usage_generations WHERE task_id = ? AND state = 'visible' ORDER BY exposed_at DESC, usage_generation_id DESC LIMIT 1"
 _EXPOSE_OLD = (
@@ -1104,6 +1184,33 @@ _HIDE_HEAD = "UPDATE task_heads SET state = 'hidden', updated_at = ? WHERE task_
 _HIDE_USAGE_HEAD = "UPDATE usage_heads SET state = 'hidden', updated_at = ? WHERE task_id = ? AND state = 'visible'"
 _VISIBLE_HEAD_SELECT = "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?"
 _USAGE_HEAD_SELECT = "SELECT usage_generation_id, state FROM usage_heads WHERE task_id = ?"
+_USAGE_SWAP_OLD = (
+    "UPDATE usage_generations SET state = 'superseded' WHERE usage_generation_id = ? AND task_id = ? AND state = 'visible' "
+    "AND EXISTS (SELECT 1 FROM task_heads WHERE task_id = ? AND publication_id = ? "
+    "AND usage_generation_id = ? AND state = 'visible') "
+    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible')"
+)
+_USAGE_SWAP_NEW = (
+    "UPDATE usage_generations SET state = 'visible', exposed_at = ? "
+    "WHERE usage_generation_id = ? AND task_id = ? AND state = 'staged' "
+    "AND EXISTS (SELECT 1 FROM task_heads WHERE task_id = ? AND publication_id = ? "
+    "AND usage_generation_id = ? AND state = 'visible') "
+    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible')"
+)
+_USAGE_SWAP_HEAD = (
+    "INSERT INTO usage_heads (task_id, usage_generation_id, state, updated_at) "
+    "SELECT task_id, ?, 'visible', ? FROM task_heads WHERE task_id = ? AND publication_id = ? "
+    "AND usage_generation_id = ? AND state = 'visible' "
+    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible') "
+    "ON CONFLICT(task_id) DO UPDATE SET usage_generation_id = excluded.usage_generation_id, "
+    "state = 'visible', updated_at = excluded.updated_at "
+    "WHERE usage_heads.state = 'visible' AND usage_heads.usage_generation_id = ?"
+)
+_TASK_USAGE_SWAP = (
+    "UPDATE task_heads SET usage_generation_id = ?, updated_at = ? WHERE task_id = ? "
+    "AND publication_id = ? AND usage_generation_id = ? AND state = 'visible' "
+    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible')"
+)
 _STAGED_GENERATION_SELECT = "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'staged'"
 _STAGED_USAGE_GENERATION_SELECT = "SELECT usage_generation_id FROM usage_generations WHERE task_id = ? AND state = 'staged'"
 
@@ -1407,6 +1514,127 @@ class D1PublicationClient:
             _invalid(D1ErrorCode.generation_state)
         return actual[5]
 
+    def _usage_stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
+        """Build only the bounded rows belonging to a detached usage generation."""
+
+        publication_id = payload["publicationId"]
+        task_id = payload["taskId"]
+        usage = payload["usage"]
+        usage_generation = usage["generation"]
+        counts = usage_generation["expectedCounts"]
+        statements: list[Statement] = [
+            _statement(
+                _USAGE_GENERATION_INSERT,
+                usage_generation["usageGenerationId"],
+                publication_id,
+                task_id,
+                usage_generation["schemaVersion"],
+                usage_generation["metadataDigest"],
+                counts["summaries"],
+                counts["invocations"],
+                counts["turns"],
+                counts["prices"],
+                counts["globals"],
+                usage_generation["createdAt"],
+            )
+        ]
+        for item in usage["prices"]:
+            statements.append(
+                _statement(
+                    _USAGE_PRICE_INSERT,
+                    item["priceEntryDigest"],
+                    item["usageGenerationId"],
+                    item["catalogDigest"],
+                    item["model"],
+                    item["effectiveAt"],
+                    item["effectiveUntil"],
+                )
+            )
+        for item in usage["summaries"]:
+            statements.append(
+                _statement(
+                    _USAGE_SUMMARY_INSERT,
+                    item["summaryId"],
+                    item["usageGenerationId"],
+                    item["publicationId"],
+                    item["taskId"],
+                    item["runId"],
+                    item["scope"],
+                    item["coverage"],
+                    item["coveredInvocations"],
+                    item["expectedInvocations"],
+                    item["knownTokenSubtotal"],
+                    item["knownCostSubtotalMicroUsd"],
+                    *(item[field] for field in _TOKEN_FIELDS),
+                    *(item[field] for field in _COST_FIELDS),
+                    item["priceProvenanceDigest"],
+                )
+            )
+        for item in usage["invocations"]:
+            statements.append(
+                _statement(
+                    _USAGE_INVOCATION_INSERT,
+                    item["invocationId"],
+                    item["usageGenerationId"],
+                    item["publicationId"],
+                    item["taskId"],
+                    item["pipelineId"],
+                    item["runId"],
+                    item["ownershipClass"],
+                    item["retryOrdinal"],
+                    item["startedAt"],
+                    item["completedAt"],
+                    item["model"],
+                    item["billingMode"],
+                    item["processOutcome"],
+                    item["coverage"],
+                    item["issueCount"],
+                    item["coveredTurns"],
+                    item["expectedTurns"],
+                    *(item[field] for field in _TOKEN_FIELDS),
+                    *(item[field] for field in _COST_FIELDS),
+                    item["priceEntryDigest"],
+                )
+            )
+        for item in usage["turns"]:
+            statements.append(
+                _statement(
+                    _USAGE_TURN_INSERT,
+                    item["turnId"],
+                    item["usageGenerationId"],
+                    item["invocationId"],
+                    item["publicationId"],
+                    item["taskId"],
+                    item["runId"],
+                    item["ordinal"],
+                    *(item[field] for field in _TOKEN_FIELDS),
+                    *(item[field] for field in _COST_FIELDS),
+                    item["priceEntryDigest"],
+                )
+            )
+        for item in usage["globals"]:
+            statements.append(
+                _statement(
+                    _USAGE_GLOBAL_INSERT,
+                    item["globalId"],
+                    item["usageGenerationId"],
+                    item["periodKind"],
+                    item["periodKey"],
+                    item["model"],
+                    item["ownershipClass"],
+                    item["coverage"],
+                    item["coveredInvocations"],
+                    item["expectedInvocations"],
+                    item["knownTokenSubtotal"],
+                    item["knownCostSubtotalMicroUsd"],
+                    *(item[field] for field in _TOKEN_FIELDS),
+                    *(item[field] for field in _COST_FIELDS),
+                    item["priceProvenanceDigest"],
+                    int(item["aggregateOnly"]),
+                )
+            )
+        return tuple(statements)
+
     def _stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
         publication_id = payload["publicationId"]
         generation = payload["generation"]
@@ -1687,18 +1915,8 @@ class D1PublicationClient:
             ),
             (
                 "prices",
-                _statement(_USAGE_PRICE_SELECT, usage_id),
-                tuple(
-                    (
-                        item["priceEntryDigest"],
-                        item["usageGenerationId"],
-                        item["catalogDigest"],
-                        item["model"],
-                        item["effectiveAt"],
-                        item["effectiveUntil"],
-                    )
-                    for item in usage["prices"]
-                ),
+                _statement(_USAGE_PRICE_SELECT, usage_id, usage_id, usage_id, usage_id),
+                tuple(),
             ),
             (
                 "globals",
@@ -1728,10 +1946,29 @@ class D1PublicationClient:
         for name, statement, expected_rows in checks:
             actual_rows = self._query(statement)
             actual = tuple(tuple(item.get(column) for column in self._columns(statement[0])) for item in actual_rows)
+            if name == "prices":
+                expected_by_digest = {
+                    item["priceEntryDigest"]: (
+                        item["catalogDigest"],
+                        item["model"],
+                        item["effectiveAt"],
+                        item["effectiveUntil"],
+                    )
+                    for item in usage["prices"]
+                }
+                actual_by_digest = {
+                    value[0]: (value[2], value[3], value[4], value[5])
+                    for value in actual
+                }
+                if actual_by_digest != expected_by_digest:
+                    _invalid(D1ErrorCode.generation_conflict)
+                continue
             if name == "invocations":
-                sort_key = lambda value: (value[0] is not None, value[0] or "")
+                def sort_key(value: tuple[Any, ...]) -> tuple[bool, Any]:
+                    return value[0] is not None, value[0] or ""
             else:
-                sort_key = lambda value: value[0]
+                def sort_key(value: tuple[Any, ...]) -> Any:
+                    return value[0]
             if tuple(sorted(actual, key=sort_key)) != tuple(sorted(expected_rows, key=sort_key)):
                 _invalid(D1ErrorCode.generation_conflict)
 
@@ -1757,8 +1994,438 @@ class D1PublicationClient:
             return ("global_id", "usage_generation_id", "period_kind", "period_key", "model", "ownership_class", "coverage", "covered_invocations", "expected_invocations", "known_token_subtotal", "known_cost_subtotal_micro_usd", *_TOKEN_DB_FIELDS, *_COST_DB_FIELDS, "price_provenance_digest", "aggregate_only")
         return ("artifact_id", "task_id", "run_id", "logical_path", "public_key", "media_type", "byte_size", "sha256", "availability", "redaction_applied", "original_retained")
 
+    def _verify_price_ledger(self, payload: Mapping[str, Any], *, check_overlap: bool = False) -> None:
+        """Reject price-entry mutation and overlapping effective intervals."""
+
+        existing_rows = self._query(_statement(_PRICE_LEDGER_SELECT))
+        by_digest: dict[str, Mapping[str, Any]] = {
+            str(row.get("price_entry_digest")): row for row in existing_rows
+        }
+        candidates: list[tuple[str, str, str, str, str | None]] = []
+        new_price_entry = False
+        for item in payload["usage"]["prices"]:
+            digest = item["priceEntryDigest"]
+            existing = by_digest.get(digest)
+            facts = (item["catalogDigest"], item["model"], item["effectiveAt"], item["effectiveUntil"])
+            if existing is not None:
+                actual = (
+                    existing.get("catalog_digest"),
+                    existing.get("model"),
+                    existing.get("effective_at"),
+                    existing.get("effective_until"),
+                )
+                if actual != facts:
+                    _invalid(D1ErrorCode.generation_conflict)
+            else:
+                new_price_entry = True
+            candidates.append((digest, *facts))
+        if not new_price_entry:
+            return
+        for row in existing_rows:
+            digest = row.get("price_entry_digest")
+            if not isinstance(digest, str) or digest in {item[0] for item in candidates}:
+                continue
+            candidates.append(
+                (
+                    digest,
+                    row.get("catalog_digest"),
+                    row.get("model"),
+                    row.get("effective_at"),
+                    row.get("effective_until"),
+                )
+            )
+        if not check_overlap:
+            return
+        grouped: dict[str, list[tuple[str, datetime, datetime | None]]] = {}
+        for digest, _catalog, model, effective_at, effective_until in candidates:
+            if not isinstance(model, str) or not isinstance(effective_at, str):
+                _invalid(D1ErrorCode.generation_conflict)
+            try:
+                start = datetime.fromisoformat(effective_at.replace("Z", "+00:00"))
+                end = (
+                    datetime.fromisoformat(effective_until.replace("Z", "+00:00"))
+                    if effective_until is not None
+                    else None
+                )
+            except (AttributeError, TypeError, ValueError):
+                _invalid(D1ErrorCode.generation_conflict)
+            grouped.setdefault(model, []).append((digest, start, end))
+        for entries in grouped.values():
+            entries.sort(key=lambda value: (value[1], value[0]))
+            for previous, current in zip(entries, entries[1:]):
+                previous_digest, _previous_start, previous_end = previous
+                current_digest, current_start, _current_end = current
+                if previous_digest != current_digest and (previous_end is None or current_start < previous_end):
+                    _invalid(D1ErrorCode.generation_conflict)
+
+    @staticmethod
+    def _numeric_cost(row: Mapping[str, Any]) -> bool:
+        return all(row.get(field) is not None for field in _COST_FIELDS)
+
+    @staticmethod
+    def _normalize_usage_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = dict(row)
+        for public, database in zip(_TOKEN_FIELDS, _TOKEN_DB_FIELDS):
+            normalized[public] = row.get(database)
+        for public, database in zip(_COST_FIELDS, _COST_DB_FIELDS):
+            normalized[public] = row.get(database)
+        normalized["priceEntryDigest"] = row.get("price_entry_digest")
+        normalized["priceProvenanceDigest"] = row.get("price_provenance_digest")
+        for public, database in (
+            ("usageGenerationId", "usage_generation_id"),
+            ("publicationId", "publication_id"),
+            ("taskId", "task_id"),
+            ("pipelineId", "pipeline_id"),
+            ("runId", "run_id"),
+            ("invocationId", "invocation_id"),
+            ("retryOrdinal", "retry_ordinal"),
+            ("periodKind", "period_kind"),
+            ("periodKey", "period_key"),
+            ("ownershipClass", "ownership_class"),
+        ):
+            normalized[public] = row.get(database)
+        return normalized
+
+    def _verify_monotonic_usage(self, old_usage_id: str, payload: Mapping[str, Any]) -> None:
+        """Keep every already numeric leaf and its price provenance unchanged."""
+
+        usage = payload["usage"]
+        old_rows = {
+            name: [self._normalize_usage_row(row) for row in rows]
+            for name, rows in (
+                ("summaries", self._query(_statement(_USAGE_SUMMARY_SELECT, old_usage_id))),
+                ("invocations", self._query(_statement(_USAGE_INVOCATION_SELECT, old_usage_id))),
+                ("turns", self._query(_statement(_USAGE_TURN_SELECT, old_usage_id))),
+            )
+        }
+        new_rows = {
+            "summaries": usage["summaries"],
+            "invocations": usage["invocations"],
+            "turns": usage["turns"],
+        }
+        old_invocation_keys = {
+            row.get("invocationId"): (row.get("runId"), row.get("retryOrdinal"), row.get("ownershipClass"))
+            for row in old_rows["invocations"]
+            if row.get("invocationId") is not None
+        }
+        new_invocation_keys = {
+            row.get("invocationId"): (row.get("runId"), row.get("retryOrdinal"), row.get("ownershipClass"))
+            for row in new_rows["invocations"]
+            if row.get("invocationId") is not None
+        }
+        for row in old_rows["turns"]:
+            row["_logicalTurnKey"] = (*old_invocation_keys.get(row.get("invocationId"), (None, None, None)), row.get("ordinal"))
+        for row in new_rows["turns"]:
+            row["_logicalTurnKey"] = (*new_invocation_keys.get(row.get("invocationId"), (None, None, None)), row.get("ordinal"))
+        key_fields = {
+            "summaries": ("scope", "run_id"),
+            "invocations": ("run_id", "retry_ordinal", "ownership_class"),
+            "turns": ("_logicalTurnKey",),
+        }
+        for name, previous in old_rows.items():
+            old_map = {tuple(row.get(field) for field in key_fields[name]): row for row in previous}
+            new_map = {
+                tuple(
+                    row.get(
+                        {
+                            "scope": "scope",
+                            "run_id": "runId",
+                            "retry_ordinal": "retryOrdinal",
+                            "ownership_class": "ownershipClass",
+                            "invocation_id": "invocationId",
+                            "ordinal": "ordinal",
+                            "period_kind": "periodKind",
+                            "period_key": "periodKey",
+                            "model": "model",
+                        }.get(field, field)
+                    )
+                    for field in key_fields[name]
+                ): row
+                for row in new_rows[name]
+            }
+            for key, old in old_map.items():
+                if not self._numeric_cost(old):
+                    continue
+                current = new_map.get(key)
+                if current is None or not self._numeric_cost(current):
+                    _invalid(D1ErrorCode.generation_conflict)
+                if tuple(old.get(field) for field in _COST_FIELDS) != tuple(current.get(_camel) for _camel in _COST_FIELDS):
+                    _invalid(D1ErrorCode.generation_conflict)
+                old_price = old.get("price_entry_digest") or old.get("price_provenance_digest")
+                new_price = current.get("priceEntryDigest") or current.get("priceProvenanceDigest")
+                if old_price != new_price:
+                    _invalid(D1ErrorCode.generation_conflict)
+
+    @staticmethod
+    def _global_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return tuple(
+            row.get(field)
+            if field in row
+            else row.get(
+                {
+                    "periodKind": "period_kind",
+                    "periodKey": "period_key",
+                    "ownershipClass": "ownership_class",
+                }.get(field, field)
+            )
+            for field in _GLOBAL_KEY_FIELDS
+        )
+
+    @staticmethod
+    def _global_db_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        result = {
+            "periodKind": row.get("period_kind"),
+            "periodKey": row.get("period_key"),
+            "model": row.get("model"),
+            "ownershipClass": row.get("ownership_class"),
+            "usageGenerationId": row.get("usage_generation_id"),
+            "globalId": row.get("global_id"),
+            "coverage": row.get("coverage"),
+            "coveredInvocations": row.get("covered_invocations"),
+            "expectedInvocations": row.get("expected_invocations"),
+            "knownTokenSubtotal": row.get("known_token_subtotal"),
+            "knownCostSubtotalMicroUsd": row.get("known_cost_subtotal_micro_usd"),
+            "promptTokens": row.get("prompt_tokens"),
+            "cachedTokens": row.get("cached_tokens"),
+            "uncachedTokens": row.get("uncached_tokens"),
+            "completionTokens": row.get("completion_tokens"),
+            "reasoningTokens": row.get("reasoning_tokens"),
+            "totalTokens": row.get("total_tokens"),
+            "uncachedInputCostMicroUsd": row.get("uncached_input_cost_micro_usd"),
+            "cachedInputCostMicroUsd": row.get("cached_input_cost_micro_usd"),
+            "outputCostMicroUsd": row.get("output_cost_micro_usd"),
+            "totalCostMicroUsd": row.get("total_cost_micro_usd"),
+            "priceProvenanceDigest": row.get("price_provenance_digest"),
+            "aggregateOnly": bool(row.get("aggregate_only")),
+        }
+        return result
+
+    @classmethod
+    def _global_delta(
+        cls,
+        old_aggregate: Mapping[str, Any] | None,
+        old_task: Mapping[str, Any] | None,
+        new_task: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if old_aggregate is None:
+            result = dict(new_task)
+            result["aggregateOnly"] = True
+            return result
+        result = dict(new_task)
+        old_task = old_task or {}
+        for field in ("coveredInvocations", "expectedInvocations"):
+            value = (
+                (old_aggregate.get(field) or 0)
+                - (old_task.get(field) or 0)
+                + (new_task.get(field) or 0)
+            )
+            if value < 0:
+                _invalid(D1ErrorCode.generation_conflict)
+            result[field] = value
+        for field in ("knownTokenSubtotal", "knownCostSubtotalMicroUsd", *_USAGE_FIELDS):
+            aggregate = old_aggregate.get(field)
+            previous = old_task.get(field)
+            current = new_task.get(field)
+            if aggregate is None and previous is None:
+                result[field] = current
+            elif aggregate is None or previous is None or current is None:
+                result[field] = None
+            else:
+                value = aggregate - previous + current
+                if value < 0:
+                    _invalid(D1ErrorCode.generation_conflict)
+                result[field] = value
+        result["coverage"] = (
+            "unavailable"
+            if all(result[field] is None for field in _USAGE_FIELDS)
+            else "complete"
+            if result["coveredInvocations"] == result["expectedInvocations"]
+            else "partial"
+        )
+        result["knownTokenSubtotal"] = result["totalTokens"]
+        result["knownCostSubtotalMicroUsd"] = result["totalCostMicroUsd"]
+        result["priceProvenanceDigest"] = (
+            new_task.get("priceProvenanceDigest")
+            if cls._numeric_cost(new_task)
+            else None
+        )
+        result["aggregateOnly"] = True
+        return result
+
+    @staticmethod
+    def _empty_global_contribution(row: Mapping[str, Any]) -> dict[str, Any]:
+        empty = dict(row)
+        empty["coverage"] = "complete"
+        empty["coveredInvocations"] = 0
+        empty["expectedInvocations"] = 0
+        empty["knownTokenSubtotal"] = 0
+        empty["knownCostSubtotalMicroUsd"] = 0
+        for field in _USAGE_FIELDS:
+            empty[field] = 0
+        empty["priceProvenanceDigest"] = None
+        empty["aggregateOnly"] = True
+        return empty
+
+    def _usage_global_contributions(self, usage_generation_id: str) -> dict[tuple[Any, ...], dict[str, Any]]:
+        grouped: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+        rows = self._query(_statement(_USAGE_INVOCATION_SELECT, usage_generation_id))
+        for raw in rows:
+            row = self._normalize_usage_row(raw)
+            if row.get("ownershipClass") != "task-owned":
+                continue
+            model = row.get("model") or "unknown"
+            grouped.setdefault(("lifetime", "lifetime", model, "task-owned"), []).append(row)
+            started_at = row.get("startedAt")
+            if isinstance(started_at, str):
+                try:
+                    date = datetime.fromisoformat(started_at.replace("Z", "+00:00")).date().isoformat()
+                except ValueError:
+                    date = None
+                if date is not None:
+                    grouped.setdefault(("daily", date, model, "task-owned"), []).append(row)
+        contributions: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for key, entries in grouped.items():
+            result: dict[str, Any] = {
+                "periodKind": key[0],
+                "periodKey": key[1],
+                "model": key[2],
+                "ownershipClass": key[3],
+                "coveredInvocations": sum(row.get("coverage") != "unavailable" for row in entries),
+                "expectedInvocations": len(entries),
+                "aggregateOnly": True,
+            }
+            for field in _USAGE_FIELDS:
+                values = [row.get(field) for row in entries]
+                result[field] = sum(values) if all(value is not None for value in values) else None
+            result["knownTokenSubtotal"] = result["totalTokens"]
+            result["knownCostSubtotalMicroUsd"] = result["totalCostMicroUsd"]
+            result["coverage"] = (
+                "unavailable"
+                if all(result[field] is None for field in _USAGE_FIELDS)
+                else "complete"
+                if result["coveredInvocations"] == result["expectedInvocations"]
+                else "partial"
+            )
+            price_digests = {row.get("priceEntryDigest") for row in entries}
+            result["priceProvenanceDigest"] = next(iter(price_digests)) if len(price_digests) == 1 else None
+            contributions[key] = result
+        return contributions
+
+    def _global_transition_statements(
+        self,
+        *,
+        task_id: str,
+        publication_id: str,
+        old_usage_id: str | None,
+        new_usage_id: str,
+        new_rows: Sequence[Mapping[str, Any]],
+        updated_at: str,
+        guarded: bool,
+    ) -> tuple[Statement, ...]:
+        current_heads = {
+            self._global_key(row): self._global_db_row(row)
+            for row in self._query(_statement(_GLOBAL_HEAD_SELECT))
+        }
+        old_by_key = self._usage_global_contributions(old_usage_id) if old_usage_id is not None else {}
+        new_by_key = {
+            self._global_key(row): dict(row)
+            for row in new_rows
+            if row["ownershipClass"] == "task-owned"
+        }
+        statements: list[Statement] = []
+        for key, new_row in sorted(new_by_key.items()):
+            old_head = current_heads.get(key)
+            old_task = (
+                old_by_key.get(key)
+                if old_usage_id is not None
+                else self._empty_global_contribution(new_row)
+                if old_head is not None
+                else None
+            )
+            aggregate = self._global_delta(old_head, old_task, new_row)
+            if any(aggregate.get(field) != new_row.get(field) for field in _GLOBAL_VALUE_FIELDS):
+                if not guarded and old_head is None:
+                    # The first publication has no task head to guard. Its
+                    # contribution is already the complete aggregate.
+                    aggregate = new_row
+                else:
+                    update_sql = _GLOBAL_UPDATE if guarded else _GLOBAL_UPDATE_EXPOSURE
+                    update_params: tuple[Scalar, ...]
+                    if guarded:
+                        update_params = (
+                            aggregate["coverage"],
+                            aggregate["coveredInvocations"],
+                            aggregate["expectedInvocations"],
+                            aggregate["knownTokenSubtotal"],
+                            aggregate["knownCostSubtotalMicroUsd"],
+                            *(aggregate[field] for field in _TOKEN_FIELDS),
+                            *(aggregate[field] for field in _COST_FIELDS),
+                            aggregate["priceProvenanceDigest"],
+                            int(aggregate["aggregateOnly"]),
+                            new_row["globalId"],
+                            new_usage_id,
+                            task_id,
+                            publication_id,
+                            old_usage_id,
+                            task_id,
+                            old_usage_id,
+                        )
+                    else:
+                        update_params = (
+                            aggregate["coverage"],
+                            aggregate["coveredInvocations"],
+                            aggregate["expectedInvocations"],
+                            aggregate["knownTokenSubtotal"],
+                            aggregate["knownCostSubtotalMicroUsd"],
+                            *(aggregate[field] for field in _TOKEN_FIELDS),
+                            *(aggregate[field] for field in _COST_FIELDS),
+                            aggregate["priceProvenanceDigest"],
+                            int(aggregate["aggregateOnly"]),
+                            new_row["globalId"],
+                            new_usage_id,
+                            new_usage_id,
+                            publication_id,
+                            task_id,
+                        )
+                    statements.append(
+                        _statement(update_sql, *update_params)
+                    )
+            if guarded:
+                statements.append(
+                    _statement(
+                        _GLOBAL_HEAD_UPSERT_GUARDED,
+                        key[0],
+                        key[1],
+                        key[2],
+                        key[3],
+                        new_usage_id,
+                        new_row["globalId"],
+                        updated_at,
+                        task_id,
+                        publication_id,
+                        old_usage_id,
+                        task_id,
+                        old_usage_id,
+                    )
+                )
+            else:
+                statements.append(
+                    _statement(
+                        _GLOBAL_HEAD_UPSERT,
+                        key[0],
+                        key[1],
+                        key[2],
+                        key[3],
+                        new_usage_id,
+                        new_row["globalId"],
+                        updated_at,
+                    )
+                )
+        return tuple(statements)
+
     def stage(self, source: Mapping[str, Any]) -> StageReceipt:
         payload = _validate_payload(source)
+        self._verify_price_ledger(payload)
         self._verify_existing_generation(payload)
         self._verify_existing_usage_generation(payload)
         self._verify_unique_generation_keys(payload)
@@ -1770,6 +2437,114 @@ class D1PublicationClient:
         self._verify_usage_generation(payload)
         self._verify_usage_rows(payload)
         return StageReceipt(payload["publicationId"], payload["taskId"], payload["generation"]["runId"])
+
+    def replace_usage(
+        self,
+        source: Mapping[str, Any],
+        base_usage_generation_id: str | None = None,
+        *,
+        expected_usage_generation_id: str | None = None,
+    ) -> ExposureReceipt:
+        """Stage and atomically expose a usage-only replacement.
+
+        The metadata generation and its task/R2 identity must already be
+        visible. The optional base ID is a compare-and-set fence for callers
+        that may have prepared more than one replacement concurrently.
+        """
+
+        if (
+            base_usage_generation_id is not None
+            and expected_usage_generation_id is not None
+            and base_usage_generation_id != expected_usage_generation_id
+        ):
+            _invalid(D1ErrorCode.generation_conflict)
+        expected_base = base_usage_generation_id or expected_usage_generation_id
+        if expected_base is not None:
+            expected_base = _id(expected_base)
+        payload = _validate_payload(source, allow_usage_replacement=True)
+        if payload["headIntent"]["state"] != "visible":
+            _invalid(D1ErrorCode.generation_state)
+        task_id = payload["taskId"]
+        publication_id = payload["publicationId"]
+        head_rows = self._query(_statement(_HEAD_SELECT, task_id))
+        if len(head_rows) != 1 or head_rows[0].get("state") != "visible":
+            _invalid(D1ErrorCode.generation_state)
+        head = head_rows[0]
+        if head.get("publication_id") != publication_id or head.get("usage_generation_id") is None:
+            _invalid(D1ErrorCode.generation_conflict)
+        old_usage_id = _id(head.get("usage_generation_id"))
+        usage_heads = self._query(_statement(_USAGE_HEAD_SELECT, task_id))
+        if len(usage_heads) != 1 or usage_heads[0].get("state") != "visible" or usage_heads[0].get("usage_generation_id") != old_usage_id:
+            _invalid(D1ErrorCode.generation_state)
+        if expected_base is not None and expected_base != old_usage_id:
+            _invalid(D1ErrorCode.generation_conflict)
+        self._verify_generation(payload)
+        self._verify_rows(payload)
+        self._verify_price_ledger(payload, check_overlap=True)
+        new_usage_id = payload["usage"]["generation"]["usageGenerationId"]
+        if new_usage_id == old_usage_id:
+            self._verify_usage_generation(payload)
+            self._verify_usage_rows(payload)
+            return ExposureReceipt(publication_id, task_id, usage_generation_id=old_usage_id)
+        self._verify_monotonic_usage(old_usage_id, payload)
+        self._verify_existing_usage_generation(payload)
+        self._verify_unique_usage_keys(payload)
+        for chunk in self._chunks(self._usage_stage_statements(payload)):
+            self._batch(chunk)
+        self._verify_usage_generation(payload)
+        self._verify_usage_rows(payload)
+        updated_at = payload["headIntent"]["updatedAt"]
+        statements: list[Statement] = [
+            _statement(_USAGE_SWAP_OLD, old_usage_id, task_id, task_id, publication_id, old_usage_id, task_id, old_usage_id),
+        ]
+        statements.extend(
+            self._global_transition_statements(
+                task_id=task_id,
+                publication_id=publication_id,
+                old_usage_id=old_usage_id,
+                new_usage_id=new_usage_id,
+                new_rows=payload["usage"]["globals"],
+                updated_at=updated_at,
+                guarded=True,
+            )
+        )
+        statements.extend(
+            (
+                _statement(_USAGE_SWAP_NEW, updated_at, new_usage_id, task_id, task_id, publication_id, old_usage_id, task_id, old_usage_id),
+                _statement(_USAGE_SWAP_HEAD, new_usage_id, updated_at, task_id, publication_id, old_usage_id, task_id, old_usage_id, old_usage_id),
+                _statement(_TASK_USAGE_SWAP, new_usage_id, updated_at, task_id, publication_id, old_usage_id, task_id, new_usage_id),
+            )
+        )
+        self._batch(tuple(statements))
+        head = self._query(_statement(_HEAD_SELECT, task_id))
+        usage_head = self._query(_statement(_USAGE_HEAD_SELECT, task_id))
+        usage_state = self._query(
+            _statement(
+                _USAGE_GENERATION_SELECT,
+                new_usage_id,
+                publication_id,
+                task_id,
+            )
+        )
+        if (
+            len(head) != 1
+            or head[0].get("publication_id") != publication_id
+            or head[0].get("usage_generation_id") != new_usage_id
+            or head[0].get("state") != "visible"
+            or len(usage_head) != 1
+            or usage_head[0].get("usage_generation_id") != new_usage_id
+            or usage_head[0].get("state") != "visible"
+            or len(usage_state) != 1
+            or usage_state[0].get("state") != "visible"
+        ):
+            _invalid(D1ErrorCode.generation_state)
+        return ExposureReceipt(publication_id, task_id, usage_generation_id=new_usage_id)
+
+    # Names used by later lifecycle callers; all route through the same CAS path.
+    replace_usage_projection = replace_usage
+    swap_usage = replace_usage
+    expose_usage = replace_usage
+    usage_only_swap = replace_usage
 
     def _verify_existing_generation(self, payload: Mapping[str, Any]) -> None:
         rows = self._query(_statement(_GENERATION_SELECT, payload["publicationId"], payload["taskId"]))
@@ -1851,38 +2626,57 @@ class D1PublicationClient:
             if current[0].get("state") == "visible":
                 if usage_head[0].get("state") != "visible":
                     _invalid(D1ErrorCode.generation_state)
-                return ExposureReceipt(payload["publicationId"], payload["taskId"])
+                return ExposureReceipt(payload["publicationId"], payload["taskId"], usage_generation_id=usage_id)
             if current[0].get("state") == "hidden":
                 if usage_head[0].get("state") != "hidden":
                     _invalid(D1ErrorCode.generation_state)
-                return ExposureReceipt(payload["publicationId"], payload["taskId"], state="hidden")
+                return ExposureReceipt(payload["publicationId"], payload["taskId"], state="hidden", usage_generation_id=usage_id)
             _invalid(D1ErrorCode.generation_state)
         if generation_state != "staged" or usage_state != "staged":
             _invalid(D1ErrorCode.generation_state)
         updated_at = payload["headIntent"]["updatedAt"]
         usage_id = payload["usage"]["generation"]["usageGenerationId"]
-        self._batch(
+        old_usage_id = (
+            current[0].get("usage_generation_id")
+            if current and current[0].get("state") == "visible"
+            else None
+        )
+        statements: list[Statement] = [
+            _statement(
+                _EXPOSE_OLD,
+                payload["taskId"],
+                payload["publicationId"],
+                payload["publicationId"],
+                payload["taskId"],
+            ),
+            _statement(
+                _EXPOSE_OLD_USAGE,
+                payload["taskId"],
+                usage_id,
+                usage_id,
+                payload["taskId"],
+            ),
+        ]
+        statements.extend(
+            self._global_transition_statements(
+                task_id=payload["taskId"],
+                publication_id=payload["publicationId"],
+                old_usage_id=old_usage_id,
+                new_usage_id=usage_id,
+                new_rows=payload["usage"]["globals"],
+                updated_at=updated_at,
+                guarded=old_usage_id is not None,
+            )
+        )
+        statements.extend(
             (
-                _statement(
-                    _EXPOSE_OLD,
-                    payload["taskId"],
-                    payload["publicationId"],
-                    payload["publicationId"],
-                    payload["taskId"],
-                ),
-                _statement(
-                    _EXPOSE_OLD_USAGE,
-                    payload["taskId"],
-                    usage_id,
-                    usage_id,
-                    payload["taskId"],
-                ),
                 _statement(_EXPOSE_NEW, updated_at, payload["publicationId"], payload["taskId"]),
                 _statement(_EXPOSE_NEW_USAGE, updated_at, usage_id, payload["taskId"]),
                 _statement(_USAGE_HEAD_UPSERT, payload["taskId"], usage_id, updated_at),
                 _statement(_HEAD_UPSERT, usage_id, updated_at, payload["publicationId"], payload["taskId"]),
             )
         )
+        self._batch(tuple(statements))
         visible = self._query(_statement(_VERIFY_COUNTS, payload["publicationId"], payload["taskId"]))
         usage_visible = self._query(_statement(_VERIFY_USAGE_COUNTS, usage_id, payload["publicationId"], payload["taskId"]))
         head = self._query(_statement(_VISIBLE_HEAD_SELECT, payload["taskId"]))
@@ -1901,7 +2695,7 @@ class D1PublicationClient:
             or usage_head[0].get("state") != "visible"
         ):
             _invalid(D1ErrorCode.generation_state)
-        return ExposureReceipt(payload["publicationId"], payload["taskId"])
+        return ExposureReceipt(payload["publicationId"], payload["taskId"], usage_generation_id=usage_id)
 
     def publish(self, source: Mapping[str, Any]) -> ExposureReceipt:
         payload = _validate_payload(source)
@@ -1963,6 +2757,22 @@ class D1PublicationClient:
         else:
             statements.append(_statement(_HIDE_RACED_VISIBLE_WITHOUT_HEAD, task_id, task_id))
             statements.append(_statement(_HIDE_USAGE_RACED_VISIBLE_WITHOUT_HEAD, task_id, task_id))
+        if usage_generation_id is not None:
+            for row in self._query(_statement(_GLOBAL_HEAD_SELECT)):
+                if row.get("usage_generation_id") != usage_generation_id or row.get("ownership_class") != "task-owned":
+                    continue
+                statements.append(
+                    _statement(
+                        _GLOBAL_HEAD_HIDE,
+                        _timestamp_now(),
+                        row.get("period_kind"),
+                        row.get("period_key"),
+                        row.get("model"),
+                        row.get("ownership_class"),
+                        row.get("usage_generation_id"),
+                        row.get("global_id"),
+                    )
+                )
         statements.extend(
             (
                 _statement(_HIDE_UPSERT, _timestamp_now(), task_id),

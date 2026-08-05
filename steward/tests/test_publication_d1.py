@@ -60,6 +60,7 @@ class ScriptedD1:
         self.connection.executescript(SCHEMA.read_text(encoding="utf-8"))
         self.requests: list[dict[str, Any]] = []
         self.fail_visibility_once = False
+        self.fail_usage_swap_once = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -69,6 +70,9 @@ class ScriptedD1:
         self.requests.append(body)
         if self.fail_visibility_once and any("UPDATE publication_generations SET state = 'superseded'" in item["sql"] for item in statements):
             self.fail_visibility_once = False
+            return httpx.Response(503, json={"success": False, "errors": [{"code": "temporarily-unavailable"}]}, request=request)
+        if self.fail_usage_swap_once and any("UPDATE usage_generations SET state = 'superseded'" in item["sql"] for item in statements):
+            self.fail_usage_swap_once = False
             return httpx.Response(503, json={"success": False, "errors": [{"code": "temporarily-unavailable"}]}, request=request)
 
         results: list[dict[str, Any]] = []
@@ -322,6 +326,33 @@ def publication(publication_id: str = "publication-clean", *, run_id: str = "run
     return payload
 
 
+def usage_replacement(source: dict[str, Any], suffix: str) -> dict[str, Any]:
+    replacement = copy.deepcopy(source)
+    usage = replacement["usage"]
+    previous_metadata_digest = replacement["generation"]["metadataDigest"]
+    previous_usage_id = usage["generation"]["usageGenerationId"]
+    usage_id = f"{previous_usage_id}-{suffix}"
+    usage["generation"]["usageGenerationId"] = usage_id
+    for row in usage["summaries"]:
+        row["usageGenerationId"] = usage_id
+        row["summaryId"] = f"{row['summaryId']}-{suffix}"
+    for row in usage["invocations"]:
+        row["usageGenerationId"] = usage_id
+        row["invocationId"] = f"{row['invocationId']}-{suffix}"
+    for row in usage["turns"]:
+        row["usageGenerationId"] = usage_id
+        row["turnId"] = f"{row['turnId']}-{suffix}"
+        row["invocationId"] = f"{row['invocationId']}-{suffix}"
+    for row in usage["prices"]:
+        row["usageGenerationId"] = usage_id
+    for row in usage["globals"]:
+        row["usageGenerationId"] = usage_id
+        row["globalId"] = f"{row['globalId']}-{suffix}"
+    refresh_metadata_digest(replacement)
+    replacement["generation"]["metadataDigest"] = previous_metadata_digest
+    return replacement
+
+
 def test_stage_is_hidden_until_verified_exposure_and_replays() -> None:
     server = ScriptedD1()
     d1 = client(server)
@@ -336,6 +367,123 @@ def test_stage_is_hidden_until_verified_exposure_and_replays() -> None:
     assert server.connection.execute("SELECT state FROM task_heads").fetchone()[0] == "visible"
     d1.stage(payload)
     assert d1.expose(payload).publication_id == payload["publicationId"]
+
+
+def test_usage_replacement_preserves_task_identity_and_replays() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-usage-replace", run_id="run-usage-replace")
+    d1.publish(first)
+    replacement = usage_replacement(first, "refresh")
+    old_usage_id = first["usage"]["generation"]["usageGenerationId"]
+    new_usage_id = replacement["usage"]["generation"]["usageGenerationId"]
+
+    result = d1.replace_usage(replacement, base_usage_generation_id=old_usage_id)
+
+    assert result.publication_id == first["publicationId"]
+    assert result.usage_generation_id == new_usage_id
+    assert tuple(server.connection.execute("SELECT publication_id, usage_generation_id, state FROM task_heads").fetchone()) == (
+        first["publicationId"],
+        new_usage_id,
+        "visible",
+    )
+    assert server.connection.execute(
+        "SELECT state FROM usage_generations WHERE usage_generation_id = ?", (old_usage_id,)
+    ).fetchone()[0] == "superseded"
+    assert tuple(server.connection.execute(
+        "SELECT usage_generation_id, state FROM usage_global_heads WHERE ownership_class = 'task-owned'"
+    ).fetchone()) == (new_usage_id, "visible")
+    assert d1.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=new_usage_id).usage_generation_id == new_usage_id
+
+
+def test_usage_replacement_rejects_numeric_cost_mutation_and_stale_base() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-usage-cost", run_id="run-usage-cost")
+    d1.publish(first)
+    invalid = usage_replacement(first, "repriced")
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in invalid["usage"][collection]:
+            row["uncachedInputCostMicroUsd"] = 11
+            row["totalCostMicroUsd"] = 61
+            if collection in {"summaries", "globals"}:
+                row["knownCostSubtotalMicroUsd"] = 61
+            if collection in {"summaries", "globals"}:
+                row["priceProvenanceDigest"] = first["usage"]["prices"][0]["priceEntryDigest"]
+            else:
+                row["priceEntryDigest"] = first["usage"]["prices"][0]["priceEntryDigest"]
+    refresh_metadata_digest(invalid)
+    invalid["generation"]["metadataDigest"] = first["generation"]["metadataDigest"]
+
+    with pytest.raises(D1Error) as error:
+        d1.replace_usage(invalid, base_usage_generation_id=first["usage"]["generation"]["usageGenerationId"])
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert server.connection.execute("SELECT count(*) FROM usage_generations WHERE state = 'staged'").fetchone()[0] == 0
+
+    replacement = usage_replacement(first, "valid")
+    d1.replace_usage(replacement, base_usage_generation_id=first["usage"]["generation"]["usageGenerationId"])
+    stale = usage_replacement(first, "stale")
+    with pytest.raises(D1Error) as error:
+        d1.replace_usage(stale, base_usage_generation_id=first["usage"]["generation"]["usageGenerationId"])
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert server.connection.execute("SELECT count(*) FROM usage_generations WHERE state = 'staged'").fetchone()[0] == 0
+
+
+def test_usage_replacement_fills_na_cost_and_failure_rolls_back() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-usage-na", run_id="run-usage-na")
+    usage = first["usage"]
+    usage["prices"] = []
+    usage["generation"]["expectedCounts"]["prices"] = 0
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in usage[collection]:
+            for field in ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"):
+                row[field] = None
+            if collection == "summaries":
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+            elif collection == "invocations":
+                row.update({"coverage": "partial", "priceEntryDigest": None})
+            elif collection == "turns":
+                row["priceEntryDigest"] = None
+            else:
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+    refresh_metadata_digest(first)
+    d1.publish(first)
+    replacement = usage_replacement(first, "fill")
+    usage = replacement["usage"]
+    price_digest = "e" * 64
+    usage["prices"] = [{
+        "priceEntryDigest": price_digest,
+        "usageGenerationId": usage["generation"]["usageGenerationId"],
+        "catalogDigest": "f" * 64,
+        "model": "gpt-fixture",
+        "effectiveAt": "2026-01-01T00:00:00Z",
+        "effectiveUntil": None,
+    }]
+    usage["generation"]["expectedCounts"]["prices"] = 1
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in usage[collection]:
+            row.update({"uncachedInputCostMicroUsd": 10, "cachedInputCostMicroUsd": 20, "outputCostMicroUsd": 30, "totalCostMicroUsd": 60})
+            if collection in {"summaries", "globals"}:
+                row.update({"coverage": "complete", "knownCostSubtotalMicroUsd": 60, "priceProvenanceDigest": price_digest})
+            else:
+                row["priceEntryDigest"] = price_digest
+    refresh_metadata_digest(replacement)
+    replacement["generation"]["metadataDigest"] = first["generation"]["metadataDigest"]
+    server.fail_usage_swap_once = True
+    with pytest.raises(D1Error) as error:
+        d1.replace_usage(replacement, base_usage_generation_id=first["usage"]["generation"]["usageGenerationId"])
+    assert error.value.code == D1ErrorCode.transient
+    assert server.connection.execute("SELECT usage_generation_id FROM task_heads").fetchone()[0] == first["usage"]["generation"]["usageGenerationId"]
+    assert server.connection.execute(
+        "SELECT state FROM usage_generations WHERE usage_generation_id = ?", (replacement["usage"]["generation"]["usageGenerationId"],)
+    ).fetchone()[0] == "staged"
+    result = d1.replace_usage(replacement, base_usage_generation_id=first["usage"]["generation"]["usageGenerationId"])
+    assert result.usage_generation_id == replacement["usage"]["generation"]["usageGenerationId"]
+    assert server.connection.execute(
+        "SELECT total_cost_micro_usd FROM usage_globals WHERE usage_generation_id = ?", (replacement["usage"]["generation"]["usageGenerationId"],)
+    ).fetchone()[0] == 60
 
 
 def test_supersession_and_hide_are_atomic_and_idempotent() -> None:

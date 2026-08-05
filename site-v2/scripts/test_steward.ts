@@ -532,7 +532,15 @@ function fakeFetch(scenarioValue: Scenario, calls: { count: number; urls: string
     if (scenarioValue.usage) {
       if (statement === cloudRepository.USAGE_CONTEXT_STATEMENT) return d1Envelope(scenarioValue.usage.contextRows);
       if (statement === cloudRepository.USAGE_SUMMARY_STATEMENT) return d1Envelope(scenarioValue.usage.summaryRows);
-      if (statement === cloudRepository.USAGE_INVOCATION_STATEMENT || statement === cloudRepository.USAGE_INVOCATION_CONTEXT_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows);
+      if (statement === cloudRepository.USAGE_INVOCATION_STATEMENT
+        || statement === cloudRepository.USAGE_INVOCATION_CONTEXT_STATEMENT
+        || statement === cloudRepository.USAGE_INVOCATION_RUN_STATEMENT
+        || statement === cloudRepository.USAGE_INVOCATION_NEXT_STATEMENT
+        || statement === cloudRepository.USAGE_INVOCATION_PREVIOUS_STATEMENT
+        || statement === cloudRepository.USAGE_INVOCATION_RUN_NEXT_STATEMENT
+        || statement === cloudRepository.USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows);
+      if (statement === cloudRepository.USAGE_INVOCATION_BOUNDARY_STATEMENT) return d1Envelope(scenarioValue.usage.invocationRows.slice(0, 1));
+      if (statement === cloudRepository.USAGE_INVOCATION_COUNT_STATEMENT || statement === cloudRepository.USAGE_INVOCATION_RUN_COUNT_STATEMENT) return d1Envelope([{ invocation_count: scenarioValue.usage.invocationRows.length }]);
       if (statement === cloudRepository.USAGE_GLOBAL_STATEMENT) return d1Envelope(scenarioValue.usage.globalRows);
     }
     if (statement === cloudRepository.STATUS_STATEMENT) {
@@ -1528,6 +1536,13 @@ async function main() {
   }, VALID_ENV, 4, (urls) => {
     assert.equal(urls.every((url) => url.startsWith("https://api.cloudflare.com/client/v4/")), true);
   });
+
+  await runCase("bounded invocation page uses a run-bound cursor", { ...scenario([], []), usage: usageScenarioRows() }, async () => {
+    const page = await cloudRepository.getCloudRepository().getUsageInvocationPage(USAGE_TASK_ID, USAGE_RUN_ID, { limit: 1 });
+    assert(page && !Array.isArray(page) && !("kind" in page));
+    assert.equal(page.invocations[0]!.runId, USAGE_RUN_ID);
+    assert.equal(page.total, 1);
+  }, VALID_ENV, 3);
 
   await runCase("usage outage is typed without exposing provider details", { ...scenario([], [], "rate-limited"), usage: usageScenarioRows() }, async () => {
     const usage = await cloudRepository.getCloudRepository().getTaskUsage(USAGE_TASK_ID);

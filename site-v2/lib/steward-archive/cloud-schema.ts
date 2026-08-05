@@ -427,6 +427,12 @@ export type CloudUsage = {
   invocations: CloudUsageInvocation[];
   globals: CloudUsageGlobalGroup[];
 };
+export type CloudUsageInvocationPage = {
+  invocations: CloudUsageInvocation[];
+  nextCursor: string | null;
+  previousCursor: string | null;
+  total: number;
+};
 export type CloudUsageTurnPage = {
   turns: CloudUsageTurn[];
   nextCursor: string | null;
@@ -754,32 +760,15 @@ function checkUsageRelations(
     if (values.some((value, index) => value !== index)) usageInvalid();
   }
 
-  const sum = (rows: readonly CloudUsageInvocation[], field: keyof CloudUsageTokenTotals | keyof CloudUsageCostTotals): number | null => {
-    let total = 0;
-    let known = false;
-    for (const row of rows) {
-      const value = row[field];
-      if (value === null) continue;
-      known = true;
-      total += value;
-      if (!Number.isSafeInteger(total)) usageInvalid();
-    }
-    return known ? total : null;
-  };
-  const fields: readonly (keyof CloudUsageTokenTotals | keyof CloudUsageCostTotals)[] = [
-    "promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens",
-    "uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd",
-  ];
   for (const summary of summaries) {
     const selected = invocations.filter((invocation) => invocation.ownershipClass === "task-owned"
       && (summary.scope === "task" || invocation.runId === summary.runId));
-    if (summary.coveredInvocations !== selected.length || summary.expectedInvocations !== selected.length) usageInvalid();
-    if (summary.coverage === "complete" || fields.some((field) => summary[field] !== null)) {
-      for (const field of fields) {
-        const value = summary[field];
-        if (value !== null && value !== sum(selected, field)) usageInvalid();
-      }
-    }
+    // `coveredInvocations` is the cached evidence count.  A partial or
+    // unavailable projection may still know that more invocations were
+    // expected than the rows currently available to the reader.  Parent
+    // token/cost values are validated as stored values by the row validator;
+    // they are never recomputed from the child rows here.
+    if (summary.coveredInvocations !== selected.length) usageInvalid();
   }
 }
 
@@ -815,6 +804,25 @@ export function validateCloudUsageTurnPageData(value: unknown): CloudUsageTurnPa
   return { turns, nextCursor: row.nextCursor, previousCursor: row.previousCursor, total };
 }
 
+export function validateCloudUsageInvocationPageData(value: unknown): CloudUsageInvocationPage {
+  const row = usageExact(value, ["invocations", "nextCursor", "previousCursor", "total"]);
+  if (!Array.isArray(row.invocations) || row.invocations.length > 128) usageInvalid();
+  if (row.nextCursor !== null && typeof row.nextCursor !== "string") usageInvalid();
+  if (row.previousCursor !== null && typeof row.previousCursor !== "string") usageInvalid();
+  const invocations = row.invocations.map((item) => validateCloudUsageInvocation(item));
+  if (invocations.some((item) => item.invocationId === null || item.ownershipClass !== "task-owned" || item.runId === null)) usageInvalid();
+  for (let index = 1; index < invocations.length; index += 1) {
+    const left = invocations[index - 1]!;
+    const right = invocations[index]!;
+    const leftRun = left.runId!;
+    const rightRun = right.runId!;
+    if (leftRun > rightRun || leftRun === rightRun && (left.retryOrdinal > right.retryOrdinal || left.retryOrdinal === right.retryOrdinal && left.invocationId! >= right.invocationId!)) usageInvalid();
+  }
+  const total = usageInteger(row.total);
+  if (total < invocations.length) usageInvalid();
+  return { invocations, nextCursor: row.nextCursor, previousCursor: row.previousCursor, total };
+}
+
 export const validateCloudUsageTokens = validateCloudUsageTokenTotals;
 export const validateCloudUsageCosts = validateCloudUsageCostTotals;
 export const validateCloudTokenTotals = validateCloudUsageTokenTotals;
@@ -825,3 +833,4 @@ export const validateCloudUsageGlobalGroups = (value: unknown): CloudUsageGlobal
   return value.map((item) => validateCloudUsageGlobalGroup(item));
 };
 export const validateCloudUsageTurnPage = validateCloudUsageTurnPageData;
+export const validateCloudUsageInvocationPage = validateCloudUsageInvocationPageData;

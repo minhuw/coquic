@@ -10,8 +10,10 @@ import {
 } from "./cloudflare";
 import {
   decodePublicationCursor,
+  decodeUsageInvocationCursor,
   decodeUsageCursor,
   encodePublicationCursor,
+  encodeUsageInvocationCursor,
   encodeUsageCursor,
   PublicationCursorError,
   resolvePublicObjectUrl,
@@ -38,6 +40,7 @@ import {
   validateCloudUsageGlobal,
   validateCloudUsageGlobalGroup,
   validateCloudUsageInvocation,
+  validateCloudUsageInvocationPageData,
   validateCloudUsageSummary,
   validateCloudUsageTurn,
   validateCloudUsageTurnPageData,
@@ -51,6 +54,7 @@ import {
   type CloudUsageGlobal,
   type CloudUsageGlobalGroup,
   type CloudUsageInvocation,
+  type CloudUsageInvocationPage,
   type CloudUsageReadResult,
   type CloudUsageSummary,
   type CloudUsageTurn,
@@ -103,6 +107,7 @@ const MAX_DETAIL_EVENTS = 100_000;
 const MAX_DETAIL_ARTIFACTS = 10_000;
 const MAX_USAGE_SUMMARIES = 4_096;
 const MAX_USAGE_INVOCATIONS = 128;
+const MAX_USAGE_INVOCATION_PAGE_SIZE = 128;
 const MAX_USAGE_GLOBALS = 4_096;
 const MAX_USAGE_TURNS = 4_096;
 const MAX_USAGE_TURN_PAGE_SIZE = 200;
@@ -599,22 +604,22 @@ ${USAGE_CONTEXT_FROM}
 `;
 
 const USAGE_VISIBLE_FROM = `
-  FROM usage_summaries AS s
-  JOIN usage_generations AS ug
+  FROM usage_summaries AS s INDEXED BY usage_summary_scope_order
+  CROSS JOIN usage_generations AS ug
     ON ug.usage_generation_id = s.usage_generation_id
    AND ug.publication_id = s.publication_id
    AND ug.task_id = s.task_id
    AND ug.state = 'visible'
    AND ug.exposed_at IS NOT NULL
-  JOIN usage_heads AS uh
+  CROSS JOIN usage_heads AS uh
     ON uh.task_id = ug.task_id
    AND uh.usage_generation_id = ug.usage_generation_id
    AND uh.state = 'visible'
-  JOIN task_heads AS th
+  CROSS JOIN task_heads AS th
     ON th.task_id = ug.task_id
    AND th.usage_generation_id = ug.usage_generation_id
    AND th.state = 'visible'
-  JOIN publication_generations AS p
+  CROSS JOIN publication_generations AS p
     ON p.publication_id = ug.publication_id
    AND p.task_id = ug.task_id
    AND p.state = 'visible'
@@ -627,7 +632,19 @@ const USAGE_SUMMARY_COLUMNS = `
   s.usage_generation_id AS usage_generation_id,
   s.publication_id AS publication_id,
   s.task_id AS task_id,
-  s.run_id AS run_id,
+  CASE WHEN s.scope = 'task' THEN NULL
+       WHEN EXISTS (
+         SELECT 1
+           FROM runs AS r
+           JOIN pipelines AS pl
+             ON pl.publication_id = r.publication_id
+            AND pl.task_id = r.task_id
+            AND pl.pipeline_id = r.pipeline_id
+          WHERE r.publication_id = s.publication_id
+            AND r.task_id = s.task_id
+            AND r.run_id = s.run_id
+       ) THEN s.run_id
+       ELSE NULL END AS run_id,
   s.scope AS scope,
   s.coverage AS coverage,
   s.covered_invocations AS covered_invocations,
@@ -650,7 +667,7 @@ const USAGE_SUMMARY_COLUMNS = `
 export const USAGE_SUMMARY_STATEMENT = `
 SELECT${USAGE_SUMMARY_COLUMNS}
 ${USAGE_VISIBLE_FROM}
- ORDER BY s.scope ASC, s.run_id ASC, s.summary_id ASC
+ ORDER BY s.scope ASC, s.usage_generation_id ASC, s.run_id ASC, s.summary_id ASC
  LIMIT ?
 `;
 
@@ -659,8 +676,8 @@ const USAGE_INVOCATION_COLUMNS = `
   i.usage_generation_id AS usage_generation_id,
   i.publication_id AS publication_id,
   i.task_id AS task_id,
-  i.pipeline_id AS pipeline_id,
-  i.run_id AS run_id,
+  CASE WHEN r.run_id IS NOT NULL AND pl.pipeline_id IS NOT NULL THEN i.pipeline_id ELSE NULL END AS pipeline_id,
+  CASE WHEN r.run_id IS NOT NULL AND pl.pipeline_id IS NOT NULL THEN i.run_id ELSE NULL END AS run_id,
   i.ownership_class AS ownership_class,
   i.retry_ordinal AS retry_ordinal,
   i.started_at AS started_at,
@@ -706,6 +723,14 @@ const USAGE_INVOCATION_FROM = `
    AND p.task_id = ug.task_id
    AND p.state = 'visible'
    AND p.exposed_at IS NOT NULL
+  LEFT JOIN runs AS r
+    ON r.publication_id = i.publication_id
+   AND r.task_id = i.task_id
+   AND r.run_id = i.run_id
+  LEFT JOIN pipelines AS pl
+    ON pl.publication_id = r.publication_id
+   AND pl.task_id = r.task_id
+   AND pl.pipeline_id = i.pipeline_id
  WHERE i.task_id = ?
    AND i.ownership_class = 'task-owned'
 `;
@@ -722,6 +747,70 @@ SELECT${USAGE_INVOCATION_COLUMNS}
 ${USAGE_INVOCATION_FROM}
   AND i.invocation_id = ?
  LIMIT 1
+`;
+
+export const USAGE_INVOCATION_RUN_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND i.run_id = ?
+ ORDER BY i.retry_ordinal ASC, i.invocation_id ASC
+ LIMIT ?
+`;
+
+export const USAGE_INVOCATION_FIRST_STATEMENT = USAGE_INVOCATION_STATEMENT;
+export const USAGE_INVOCATION_NEXT_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND (
+    i.run_id > ?
+    OR (i.run_id = ? AND (i.retry_ordinal > ? OR (i.retry_ordinal = ? AND i.invocation_id > ?)))
+  )
+ ORDER BY i.run_id ASC, i.retry_ordinal ASC, i.invocation_id ASC
+ LIMIT ?
+`;
+export const USAGE_INVOCATION_PREVIOUS_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND (
+    i.run_id < ?
+    OR (i.run_id = ? AND (i.retry_ordinal < ? OR (i.retry_ordinal = ? AND i.invocation_id < ?)))
+  )
+ ORDER BY i.run_id DESC, i.retry_ordinal DESC, i.invocation_id DESC
+ LIMIT ?
+`;
+export const USAGE_INVOCATION_RUN_FIRST_STATEMENT = USAGE_INVOCATION_RUN_STATEMENT;
+export const USAGE_INVOCATION_RUN_NEXT_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND i.run_id = ?
+  AND (i.retry_ordinal > ? OR (i.retry_ordinal = ? AND i.invocation_id > ?))
+ ORDER BY i.retry_ordinal ASC, i.invocation_id ASC
+ LIMIT ?
+`;
+export const USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND i.run_id = ?
+  AND (i.retry_ordinal < ? OR (i.retry_ordinal = ? AND i.invocation_id < ?))
+ ORDER BY i.retry_ordinal DESC, i.invocation_id DESC
+ LIMIT ?
+`;
+export const USAGE_INVOCATION_BOUNDARY_STATEMENT = `
+SELECT${USAGE_INVOCATION_COLUMNS}
+${USAGE_INVOCATION_FROM}
+  AND i.run_id = ?
+  AND i.retry_ordinal = ?
+  AND i.invocation_id = ?
+ LIMIT 1
+`;
+export const USAGE_INVOCATION_COUNT_STATEMENT = `
+SELECT COUNT(*) AS invocation_count
+${USAGE_INVOCATION_FROM}
+`;
+export const USAGE_INVOCATION_RUN_COUNT_STATEMENT = `
+SELECT COUNT(*) AS invocation_count
+${USAGE_INVOCATION_FROM}
+  AND i.run_id = ?
 `;
 
 const USAGE_GLOBAL_VISIBLE_FROM = `
@@ -782,7 +871,7 @@ const USAGE_GLOBAL_COLUMNS = `
 export const USAGE_GLOBAL_STATEMENT = `
 SELECT${USAGE_GLOBAL_COLUMNS}
 ${USAGE_GLOBAL_VISIBLE_FROM}
- ORDER BY g.model ASC, g.ownership_class ASC, g.period_kind ASC, g.period_key ASC, g.global_id ASC
+ ORDER BY gh.updated_at ASC, gh.period_kind ASC, gh.period_key ASC, gh.model ASC, gh.ownership_class ASC
  LIMIT ?
 `;
 export const USAGE_GLOBALS_STATEMENT = USAGE_GLOBAL_STATEMENT;
@@ -816,6 +905,15 @@ const USAGE_TURN_FROM = `
    AND i.ownership_class = 'task-owned'
    AND i.task_id = u.task_id
    AND i.run_id = u.run_id
+  JOIN runs AS r
+    ON r.publication_id = i.publication_id
+   AND r.task_id = i.task_id
+   AND r.run_id = i.run_id
+   AND r.pipeline_id = i.pipeline_id
+  JOIN pipelines AS pl
+    ON pl.publication_id = r.publication_id
+   AND pl.task_id = r.task_id
+   AND pl.pipeline_id = r.pipeline_id
   JOIN usage_generations AS ug
     ON ug.usage_generation_id = u.usage_generation_id
    AND ug.publication_id = u.publication_id
@@ -1299,6 +1397,12 @@ function usageCount(value: unknown): number {
   return row.turn_count;
 }
 
+function usageInvocationCount(value: unknown): number {
+  const row = exactUsageRow(value, ["invocation_count"]);
+  if (typeof row.invocation_count !== "number" || !Number.isSafeInteger(row.invocation_count) || row.invocation_count < 0 || row.invocation_count > MAX_COUNT) invalidData();
+  return row.invocation_count;
+}
+
 function usageTurnSort(left: CloudUsageTurn, right: CloudUsageTurn): number {
   if (left.invocationId !== right.invocationId) return left.invocationId < right.invocationId ? -1 : 1;
   if (left.ordinal !== right.ordinal) return left.ordinal < right.ordinal ? -1 : 1;
@@ -1313,6 +1417,13 @@ type DecodedUsageTurnCursor = {
   readonly turnId: string;
 };
 
+type DecodedUsageInvocationCursor = {
+  readonly direction: "next" | "previous";
+  readonly runId: string;
+  readonly retryOrdinal: number;
+  readonly invocationId: string;
+};
+
 function decodeTurnPageCursor(value: unknown, context: UsageContext, invocationId: string, runId: string): DecodedUsageTurnCursor {
   if (!context.usageGenerationId) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
   const cursor = decodeUsageCursor(value, {
@@ -1325,6 +1436,32 @@ function decodeTurnPageCursor(value: unknown, context: UsageContext, invocationI
   });
   if (cursor.sort[0] !== invocationId) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
   return { direction: cursor.direction, invocationId: cursor.invocationId, ordinal: cursor.sort[1], turnId: cursor.sort[2] };
+}
+
+function decodeInvocationPageCursor(value: unknown, context: UsageContext, runId: string | null): DecodedUsageInvocationCursor {
+  if (!context.usageGenerationId) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+  const cursor = decodeUsageInvocationCursor(value, {
+    publicationId: context.publicationId,
+    usageGenerationId: context.usageGenerationId,
+    taskId: context.taskId,
+    runId,
+  });
+  return { direction: cursor.direction, runId: cursor.sort[0], retryOrdinal: cursor.sort[1], invocationId: cursor.sort[2] };
+}
+
+function validateUsageInvocationOwner(
+  invocation: CloudUsageInvocation,
+  context: UsageContext,
+  expectedRunId?: string,
+): void {
+  if (invocation.usageGenerationId !== context.usageGenerationId
+    || invocation.publicationId !== context.publicationId
+    || invocation.taskId !== context.taskId
+    || invocation.ownershipClass !== "task-owned"
+    || invocation.pipelineId === null
+    || invocation.runId === null
+    || invocation.invocationId === null) invalidData();
+  if (expectedRunId !== undefined && invocation.runId !== expectedRunId) invalidData();
 }
 
 function detailLimit(expected: unknown, maximum: number): number {
@@ -1802,6 +1939,7 @@ export class CloudRepository {
     let invocations: CloudUsageInvocation[];
     try {
       invocations = invocationRows.map(parseUsageInvocationRow);
+      invocations.forEach((invocation) => validateUsageInvocationOwner(invocation, context));
     } catch {
       return usageUnavailable("invalid");
     }
@@ -1854,25 +1992,130 @@ export class CloudRepository {
     return this.getTaskUsageSummary(taskId, runId);
   }
 
-  async getUsageInvocations(taskId: string, runId?: string): Promise<CloudUsageInvocation[] | null | CloudUsageUnavailable> {
-    if (!validIdentifier(taskId) || (runId !== undefined && !validIdentifier(runId))) return null;
+  private async readUsageInvocationPage(
+    taskId: string,
+    runId: string | null,
+    options: { readonly cursor?: string | null; readonly limit?: number },
+  ): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable> {
     const context = await this.readUsageContext(taskId);
     if (context === null || isUsageUnavailable(context)) return context;
     if (!context.usageGenerationId) return usageUnavailable("missing");
-    const rows = await queryUsageRows(this.client(), USAGE_INVOCATION_STATEMENT, [taskId, MAX_USAGE_INVOCATIONS + 1]);
-    if (isUsageUnavailable(rows)) return rows;
-    if (rows.length > MAX_USAGE_INVOCATIONS) return usageUnavailable("invalid");
+    const limit = usageLimit(options.limit, MAX_USAGE_INVOCATION_PAGE_SIZE, 50);
+    let decoded: DecodedUsageInvocationCursor | null;
     try {
-      const invocations = rows.map(parseUsageInvocationRow);
-      if (invocations.some((invocation) => invocation.usageGenerationId !== context.usageGenerationId || invocation.publicationId !== context.publicationId || invocation.taskId !== context.taskId || invocation.ownershipClass !== "task-owned")) return usageUnavailable("invalid");
-      return invocations.filter((invocation) => runId === undefined || invocation.runId === runId);
+      decoded = options.cursor == null ? null : decodeInvocationPageCursor(options.cursor, context, runId);
+    } catch (error) {
+      if (error instanceof PublicationCursorError) throw error;
+      return usageUnavailable("invalid");
+    }
+
+    if (decoded) {
+      const boundaryRows = await queryUsageRows(this.client(), USAGE_INVOCATION_BOUNDARY_STATEMENT, [taskId, decoded.runId, decoded.retryOrdinal, decoded.invocationId]);
+      if (isUsageUnavailable(boundaryRows)) return boundaryRows;
+      if (boundaryRows.length !== 1) throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+      try {
+        const boundary = parseUsageInvocationRow(boundaryRows[0]);
+        validateUsageInvocationOwner(boundary, context, runId ?? undefined);
+        if (boundary.runId !== decoded.runId || boundary.retryOrdinal !== decoded.retryOrdinal || boundary.invocationId !== decoded.invocationId) throw new Error();
+      } catch {
+        throw new PublicationCursorError("STALE_CURSOR", "cursor is stale");
+      }
+    }
+
+    const runScoped = runId !== null;
+    const statement = runScoped
+      ? decoded?.direction === "next" ? USAGE_INVOCATION_RUN_NEXT_STATEMENT
+        : decoded?.direction === "previous" ? USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT : USAGE_INVOCATION_RUN_FIRST_STATEMENT
+      : decoded?.direction === "next" ? USAGE_INVOCATION_NEXT_STATEMENT
+        : decoded?.direction === "previous" ? USAGE_INVOCATION_PREVIOUS_STATEMENT : USAGE_INVOCATION_FIRST_STATEMENT;
+    const params: D1Scalar[] = runScoped
+      ? decoded?.direction === "next" || decoded?.direction === "previous"
+        ? [taskId, runId!, decoded.retryOrdinal, decoded.retryOrdinal, decoded.invocationId, limit + 1]
+        : [taskId, runId!, limit + 1]
+      : decoded?.direction === "next" || decoded?.direction === "previous"
+        ? [taskId, decoded.runId, decoded.runId, decoded.retryOrdinal, decoded.retryOrdinal, decoded.invocationId, limit + 1]
+        : [taskId, limit + 1];
+    const pageRows = await queryUsageRows(this.client(), statement, params);
+    if (isUsageUnavailable(pageRows)) return pageRows;
+    if (pageRows.length > limit + 1) return usageUnavailable("invalid");
+    let parsed: CloudUsageInvocation[];
+    try {
+      parsed = pageRows.map(parseUsageInvocationRow);
+      parsed.forEach((invocation) => validateUsageInvocationOwner(invocation, context, runId ?? undefined));
+    } catch {
+      return usageUnavailable("invalid");
+    }
+
+    const countStatement = runScoped ? USAGE_INVOCATION_RUN_COUNT_STATEMENT : USAGE_INVOCATION_COUNT_STATEMENT;
+    const countParams: D1Scalar[] = runScoped ? [taskId, runId!] : [taskId];
+    const countRows = await queryUsageRows(this.client(), countStatement, countParams);
+    if (isUsageUnavailable(countRows)) return countRows;
+    if (countRows.length !== 1) return usageUnavailable("invalid");
+    let total: number;
+    try {
+      total = usageInvocationCount(countRows[0]);
+    } catch {
+      return usageUnavailable("invalid");
+    }
+
+    const hasExtra = parsed.length > limit;
+    const output = decoded?.direction === "previous" ? parsed.slice(0, limit).reverse() : parsed.slice(0, limit);
+    const first = output[0];
+    const last = output.at(-1);
+    const cursorFor = (invocation: CloudUsageInvocation, direction: "next" | "previous") => encodeUsageInvocationCursor({
+      publicationId: context.publicationId,
+      usageGenerationId: context.usageGenerationId!,
+      taskId,
+      runId,
+      sort: [invocation.runId!, invocation.retryOrdinal, invocation.invocationId!],
+      direction,
+    });
+    let nextCursor: string | null = null;
+    let previousCursor: string | null = null;
+    if (first && ((decoded?.direction === "previous" && hasExtra) || decoded?.direction === "next")) previousCursor = cursorFor(first, "previous");
+    if (last && (((decoded?.direction === "next" || decoded === null) && hasExtra) || decoded?.direction === "previous")) nextCursor = cursorFor(last, "next");
+    try {
+      return safeValidate(() => validateCloudUsageInvocationPageData({ invocations: output, nextCursor, previousCursor, total }));
     } catch {
       return usageUnavailable("invalid");
     }
   }
 
-  async listUsageInvocations(taskId: string, runId?: string): Promise<CloudUsageInvocation[] | null | CloudUsageUnavailable> {
-    return this.getUsageInvocations(taskId, runId);
+  async getUsageInvocationPage(taskId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async getUsageInvocationPage(taskId: string, runId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async getUsageInvocationPage(
+    taskId: string,
+    runIdOrOptions?: string | { readonly cursor?: string | null; readonly limit?: number },
+    maybeOptions: { readonly cursor?: string | null; readonly limit?: number } = {},
+  ): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable> {
+    const runId = typeof runIdOrOptions === "string" ? runIdOrOptions : null;
+    const options = typeof runIdOrOptions === "string" ? maybeOptions : runIdOrOptions ?? {};
+    if (!validIdentifier(taskId) || (runId !== null && !validIdentifier(runId))) return null;
+    return this.readUsageInvocationPage(taskId, runId, options);
+  }
+
+  async listUsageInvocationPage(taskId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async listUsageInvocationPage(taskId: string, runId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async listUsageInvocationPage(taskId: string, runIdOrOptions?: string | { readonly cursor?: string | null; readonly limit?: number }, maybeOptions: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable> {
+    return typeof runIdOrOptions === "string"
+      ? this.getUsageInvocationPage(taskId, runIdOrOptions, maybeOptions)
+      : this.getUsageInvocationPage(taskId, runIdOrOptions);
+  }
+
+  async getUsageInvocations(taskId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async getUsageInvocations(taskId: string, runId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async getUsageInvocations(taskId: string, runIdOrOptions?: string | { readonly cursor?: string | null; readonly limit?: number }, maybeOptions: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable> {
+    return typeof runIdOrOptions === "string"
+      ? this.getUsageInvocationPage(taskId, runIdOrOptions, maybeOptions)
+      : this.getUsageInvocationPage(taskId, runIdOrOptions);
+  }
+
+  async listUsageInvocations(taskId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async listUsageInvocations(taskId: string, runId: string, options?: { readonly cursor?: string | null; readonly limit?: number }): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable>;
+  async listUsageInvocations(taskId: string, runIdOrOptions?: string | { readonly cursor?: string | null; readonly limit?: number }, maybeOptions: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageInvocationPage | null | CloudUsageUnavailable> {
+    return typeof runIdOrOptions === "string"
+      ? this.getUsageInvocationPage(taskId, runIdOrOptions, maybeOptions)
+      : this.getUsageInvocationPage(taskId, runIdOrOptions);
   }
 
   async getUsageTurnPage(taskId: string, invocationId: string, options: { readonly cursor?: string | null; readonly limit?: number } = {}): Promise<CloudUsageTurnPage | null | CloudUsageUnavailable> {
@@ -1891,7 +2134,11 @@ export class CloudRepository {
     } catch {
       return usageUnavailable("invalid");
     }
-    if (invocation.usageGenerationId !== context.usageGenerationId || invocation.publicationId !== context.publicationId || invocation.taskId !== taskId || invocation.ownershipClass !== "task-owned" || invocation.runId === null || invocation.pipelineId === null) return usageUnavailable("invalid");
+    try {
+      validateUsageInvocationOwner(invocation, context);
+    } catch {
+      return usageUnavailable("invalid");
+    }
 
     const countRows = await queryUsageRows(this.client(), USAGE_TURN_COUNT_STATEMENT, [taskId, invocationId]);
     if (isUsageUnavailable(countRows)) return countRows;
@@ -1904,7 +2151,7 @@ export class CloudRepository {
     }
     let decoded: DecodedUsageTurnCursor | null;
     try {
-      decoded = options.cursor == null ? null : decodeTurnPageCursor(options.cursor, context, invocationId, invocation.runId);
+      decoded = options.cursor == null ? null : decodeTurnPageCursor(options.cursor, context, invocationId, invocation.runId!);
     } catch (error) {
       if (error instanceof PublicationCursorError) throw error;
       return usageUnavailable("invalid");
@@ -2153,8 +2400,10 @@ export {
   createCloudRepository as createCloudStewardArchiveRepository,
   getCloudRepository as getCloudStewardArchiveRepository,
   decodePublicationCursor,
+  decodeUsageInvocationCursor,
   decodeUsageCursor,
   encodePublicationCursor,
+  encodeUsageInvocationCursor,
   encodeUsageCursor,
   PublicationCursorError,
 };

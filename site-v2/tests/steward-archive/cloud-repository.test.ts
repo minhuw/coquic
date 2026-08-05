@@ -34,6 +34,14 @@ const {
   USAGE_CONTEXT_STATEMENT,
   USAGE_GLOBAL_STATEMENT,
   USAGE_INVOCATION_CONTEXT_STATEMENT,
+  USAGE_INVOCATION_BOUNDARY_STATEMENT,
+  USAGE_INVOCATION_COUNT_STATEMENT,
+  USAGE_INVOCATION_RUN_STATEMENT,
+  USAGE_INVOCATION_RUN_COUNT_STATEMENT,
+  USAGE_INVOCATION_RUN_NEXT_STATEMENT,
+  USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT,
+  USAGE_INVOCATION_NEXT_STATEMENT,
+  USAGE_INVOCATION_PREVIOUS_STATEMENT,
   USAGE_INVOCATION_STATEMENT,
   USAGE_SUMMARY_STATEMENT,
   USAGE_TURN_BOUNDARY_STATEMENT,
@@ -42,7 +50,7 @@ const {
   USAGE_TURN_NEXT_STATEMENT,
   USAGE_TURN_PREVIOUS_STATEMENT,
 } = repositoryModule;
-const { decodePublicationCursor, encodeUsageCursor } = requireForTest(resolve(process.cwd(), "lib/steward-archive/publication.ts")) as typeof import("../../lib/steward-archive/publication");
+const { decodePublicationCursor, encodeUsageCursor, encodeUsageInvocationCursor } = requireForTest(resolve(process.cwd(), "lib/steward-archive/publication.ts")) as typeof import("../../lib/steward-archive/publication");
 
 const latestPublication = "publication-latest";
 
@@ -239,6 +247,10 @@ function usageInvocationRow(overrides: RawRow = {}): RawRow {
   };
 }
 
+function usageInvocationAt(runId: string, retryOrdinal: number, invocationId: string): RawRow {
+  return usageInvocationRow({ run_id: runId, retry_ordinal: retryOrdinal, invocation_id: invocationId });
+}
+
 function usageGlobalRow(overrides: RawRow = {}): RawRow {
   return {
     global_id: "global-usage", usage_generation_id: usageGenerationId, period_kind: "lifetime", period_key: "lifetime",
@@ -330,6 +342,8 @@ test("rejects malformed and cross-owner usage rows while retaining fixed visibil
   assert.match(client.calls[0]!.statement, /usage_heads/);
   assert.match(client.calls[1]!.statement, /state = 'visible'/);
   assert.match(client.calls[1]!.statement, /exposed_at IS NOT NULL/);
+  assert.match(client.calls[1]!.statement, /pipelines/);
+  assert.match(client.calls[1]!.statement, /runs/);
 
   const wrongOwner = usageInvocationRow({ task_id: "task-other" });
   const invocationResult = await new CloudRepository({ client: new FakeClient(response([usageContextRow()]), response([wrongOwner])) }).getUsageInvocations(usageTaskId);
@@ -397,6 +411,66 @@ test("fails closed for stale, cross-owner, malformed, empty, and clamped turn pa
   const clamped = await new CloudRepository({ client: clampedClient }).getUsageTurnPage(usageTaskId, usageInvocationId, { limit: 999 });
   assert(clamped && !Array.isArray(clamped) && !('kind' in clamped));
   assert.equal(clampedClient.calls.at(-1)!.params.at(-1), 201);
+});
+
+test("pages task invocations beyond the legacy 128-row cap", async () => {
+  const firstRows = [usageInvocationAt("run-a", 0, "invocation-a"), usageInvocationAt("run-a", 1, "invocation-b"), usageInvocationAt("run-b", 0, "invocation-c")];
+  const firstClient = new FakeClient(
+    response([usageContextRow()]), response(firstRows), response([{ invocation_count: 129 }]),
+  );
+  const first = await new CloudRepository({ client: firstClient }).getUsageInvocationPage(usageTaskId, { limit: 2 });
+  assert(first && !Array.isArray(first) && !("kind" in first));
+  assert.deepEqual(first.invocations.map((invocation) => invocation.invocationId), ["invocation-a", "invocation-b"]);
+  assert.equal(first.total, 129);
+  assert(first.nextCursor);
+  assert.equal(first.previousCursor, null);
+  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_STATEMENT, USAGE_INVOCATION_COUNT_STATEMENT]);
+  assert.equal(firstClient.calls[1]!.params.at(-1), 3);
+
+  const nextClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationAt("run-a", 1, "invocation-b")]), response([usageInvocationAt("run-b", 0, "invocation-c")]), response([{ invocation_count: 129 }]),
+  );
+  const next = await new CloudRepository({ client: nextClient }).getUsageInvocationPage(usageTaskId, { cursor: first.nextCursor, limit: 2 });
+  assert(next && !Array.isArray(next) && !("kind" in next));
+  assert.deepEqual(next.invocations.map((invocation) => invocation.invocationId), ["invocation-c"]);
+  assert.equal(next.nextCursor, null);
+  assert(next.previousCursor);
+  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_NEXT_STATEMENT, USAGE_INVOCATION_COUNT_STATEMENT]);
+  assert.deepEqual(nextClient.calls[2]!.params, [usageTaskId, "run-a", "run-a", 1, 1, "invocation-b", 3]);
+});
+
+test("pages run-scoped invocations backward and rejects generation or run drift", async () => {
+  const firstClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationAt(usageRunId, 0, "invocation-a"), usageInvocationAt(usageRunId, 1, "invocation-b")]), response([{ invocation_count: 3 }]),
+  );
+  const first = await new CloudRepository({ client: firstClient }).getUsageInvocations(usageTaskId, usageRunId, { limit: 1 });
+  assert(first && !Array.isArray(first) && !("kind" in first));
+  assert.deepEqual(first.invocations.map((invocation) => invocation.invocationId), ["invocation-a"]);
+  assert(first.nextCursor);
+  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_RUN_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+
+  const nextClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationAt(usageRunId, 0, "invocation-a")]), response([usageInvocationAt(usageRunId, 1, "invocation-b")]), response([{ invocation_count: 3 }]),
+  );
+  const next = await new CloudRepository({ client: nextClient }).getUsageInvocationPage(usageTaskId, usageRunId, { cursor: first.nextCursor, limit: 1 });
+  assert(next && !Array.isArray(next) && !("kind" in next));
+  assert.deepEqual(next.invocations.map((invocation) => invocation.invocationId), ["invocation-b"]);
+  assert(next.previousCursor);
+  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_RUN_NEXT_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+
+  const previousClient = new FakeClient(
+    response([usageContextRow()]), response([usageInvocationAt(usageRunId, 1, "invocation-b")]), response([usageInvocationAt(usageRunId, 0, "invocation-a")]), response([{ invocation_count: 3 }]),
+  );
+  const previous = await new CloudRepository({ client: previousClient }).getUsageInvocationPage(usageTaskId, usageRunId, { cursor: next.previousCursor, limit: 1 });
+  assert(previous && !Array.isArray(previous) && !("kind" in previous));
+  assert.deepEqual(previous.invocations.map((invocation) => invocation.invocationId), ["invocation-a"]);
+  assert.deepEqual(previousClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+
+  const stale = encodeUsageInvocationCursor({ publicationId: usagePublicationId, usageGenerationId: "usage-old", taskId: usageTaskId, runId: usageRunId, sort: [usageRunId, 0, "invocation-a"], direction: "next" });
+  await assert.rejects(
+    () => new CloudRepository({ client: new FakeClient(response([usageContextRow()])) }).getUsageInvocationPage(usageTaskId, usageRunId, { cursor: stale }),
+    (error: unknown) => error instanceof repositoryModule.PublicationCursorError && error.code === "STALE_CURSOR",
+  );
 });
 
 function statusKey(row: RawRow): [string, string, string] {

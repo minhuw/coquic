@@ -24,6 +24,7 @@ import {
   validateCloudUsageGlobal,
   validateCloudUsageGlobalGroup,
   validateCloudUsageInvocation,
+  validateCloudUsageInvocationPage,
   validateCloudUsagePrice,
   validateCloudUsageSummary,
   validateCloudUsageTokenTotals,
@@ -186,6 +187,34 @@ test("validates global groups, prices, complete usage, and bounded turn pages", 
   const page = validateCloudUsageTurnPage({ turns: [usageTurn()], nextCursor: "opaque-next", previousCursor: null, total: 1 });
   assert.equal(page.total, 1);
   assert.deepEqual(validateCloudUsageUnavailable({ kind: "unavailable", reason: "missing" }), { kind: "unavailable", reason: "missing" });
+});
+
+test("preserves partial counters and cached parent totals without child arithmetic", () => {
+  const partial = usageSummary({
+    summaryId: "summary-partial", coverage: "partial", coveredInvocations: 0, expectedInvocations: 1,
+    knownTokenSubtotal: null, knownCostSubtotalMicroUsd: null,
+    promptTokens: null, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null,
+    uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null,
+    priceProvenanceDigest: null,
+  });
+  const partialUsage = validateCloudUsageData({ ...completeUsage(), summaries: [partial], invocations: [] });
+  assert.equal(partialUsage.summaries[0]!.coveredInvocations, 0);
+  assert.equal(partialUsage.summaries[0]!.expectedInvocations, 1);
+
+  const cachedParent = usageSummary({
+    summaryId: "summary-cached-parent", promptTokens: 13, cachedTokens: 3, uncachedTokens: 10, completionTokens: 7,
+    reasoningTokens: 3, totalTokens: 20, knownTokenSubtotal: 20, uncachedInputCostMicroUsd: 17,
+    cachedInputCostMicroUsd: 23, outputCostMicroUsd: 59, totalCostMicroUsd: 99, knownCostSubtotalMicroUsd: 99,
+  });
+  const cachedUsage = validateCloudUsageData({ ...completeUsage(), summaries: [cachedParent] });
+  assert.equal(cachedUsage.summaries[0]!.totalTokens, 20);
+  assert.equal(cachedUsage.summaries[0]!.totalCostMicroUsd, 99);
+});
+
+test("validates bounded invocation pages and rejects unavailable rows", () => {
+  const page = validateCloudUsageInvocationPage({ invocations: [usageInvocation()], nextCursor: "next", previousCursor: null, total: 129 });
+  assert.equal(page.total, 129);
+  assert.throws(() => validateCloudUsageInvocationPage({ invocations: [usageInvocation({ coverage: "unavailable", invocationId: null, publicationId: null, taskId: null, pipelineId: null, runId: null, coveredTurns: 0, expectedTurns: 0, startedAt: null, completedAt: null, model: null, billingMode: null, processOutcome: null, promptTokens: null, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null, uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null, priceEntryDigest: null })], nextCursor: null, previousCursor: null, total: 1 }), /invalid Steward cloud response/);
 });
 
 test("rejects private keys, unsafe integers, malformed coverage, ownership, and cursor rows", () => {

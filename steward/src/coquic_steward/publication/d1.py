@@ -779,6 +779,7 @@ def _validate_usage(
                     _invalid(D1ErrorCode.generation_conflict)
 
     global_keys: set[tuple[object, ...]] = set()
+    task_owned_global_keys: set[tuple[object, ...]] = set()
     for item in globals_:
         row = _mapping(item)
         _keys(row, _GLOBAL)
@@ -818,6 +819,8 @@ def _validate_usage(
             _invalid(D1ErrorCode.generation_conflict)
         if row["ownershipClass"] == "task-owned" and row["aggregateOnly"] is not True:
             _invalid(D1ErrorCode.generation_conflict)
+        if row["ownershipClass"] == "task-owned":
+            task_owned_global_keys.add(key)
         _bool(row["aggregateOnly"])
         if row["priceProvenanceDigest"] is not None:
             _digest(row["priceProvenanceDigest"])
@@ -831,6 +834,13 @@ def _validate_usage(
                 # A numeric task-owned aggregate without a matching, verified
                 # invocation would otherwise bypass the rollup boundary.
                 _invalid(D1ErrorCode.generation_conflict)
+
+    # Every derived task-owned lifetime/daily key must be represented.  The
+    # unavailable-only case has no model/date evidence from which to derive a
+    # key, so its explicitly unavailable rows remain valid without inventing
+    # zero-valued evidence.
+    if verified_globals and task_owned_global_keys != set(verified_globals):
+        _invalid(D1ErrorCode.generation_conflict)
 
 
 def _validate_payload(source: Mapping[str, Any], *, allow_usage_replacement: bool = False) -> dict[str, Any]:
@@ -1170,7 +1180,8 @@ _GLOBAL_UPDATE_EXPOSURE = (
 _GLOBAL_HEAD_UPSERT = (
     "INSERT INTO usage_global_heads "
     "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, 'visible', ?) "
+    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
+    "FROM usage_globals AS g WHERE g.global_id = ? AND g.usage_generation_id = ? "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -1178,9 +1189,14 @@ _GLOBAL_HEAD_UPSERT = (
 _GLOBAL_HEAD_UPSERT_GUARDED = (
     "INSERT INTO usage_global_heads "
     "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
-    "SELECT ?, ?, ?, ?, ?, ?, 'visible', ? FROM task_heads "
-    "WHERE task_id = ? AND publication_id = ? AND usage_generation_id = ? AND state = 'visible' "
-    "AND EXISTS (SELECT 1 FROM usage_heads WHERE task_id = ? AND usage_generation_id = ? AND state = 'visible') "
+    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
+    "FROM usage_globals AS g "
+    "JOIN usage_generations AS n ON n.usage_generation_id = g.usage_generation_id "
+    "JOIN task_heads AS t ON t.task_id = n.task_id AND t.publication_id = n.publication_id "
+    "AND t.usage_generation_id = ? AND t.state = 'visible' "
+    "JOIN usage_heads AS h ON h.task_id = t.task_id AND h.usage_generation_id = t.usage_generation_id "
+    "AND h.state = 'visible' "
+    "WHERE g.global_id = ? AND g.usage_generation_id = ? "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -2159,6 +2175,8 @@ class D1PublicationClient:
             ("runId", "run_id"),
             ("invocationId", "invocation_id"),
             ("retryOrdinal", "retry_ordinal"),
+            ("startedAt", "started_at"),
+            ("completedAt", "completed_at"),
             ("periodKind", "period_kind"),
             ("periodKey", "period_key"),
             ("ownershipClass", "ownership_class"),
@@ -2306,12 +2324,14 @@ class D1PublicationClient:
             aggregate = old_aggregate.get(field)
             previous = old_task.get(field)
             current = new_task.get(field)
-            if aggregate is None and previous is None:
-                result[field] = current
-            elif aggregate is None or previous is None or current is None:
-                result[field] = None
+            if aggregate is None:
+                result[field] = current if previous is None else None
             else:
-                value = aggregate - previous + current
+                # Unknown evidence contributes no known subtotal.  Preserve a
+                # known aggregate when the replaced/removed task has no value,
+                # while retaining NULL for aggregates that were already
+                # incomplete.
+                value = aggregate - (previous or 0) + (current or 0)
                 if value < 0:
                     _invalid(D1ErrorCode.generation_conflict)
                 result[field] = value
@@ -2327,6 +2347,8 @@ class D1PublicationClient:
         result["priceProvenanceDigest"] = (
             new_task.get("priceProvenanceDigest")
             if cls._numeric_cost(new_task)
+            else old_aggregate.get("priceProvenanceDigest")
+            if cls._numeric_cost(result)
             else None
         )
         result["aggregateOnly"] = True
@@ -2349,7 +2371,7 @@ class D1PublicationClient:
             aggregate_price = aggregate.get("priceProvenanceDigest")
             result["priceProvenanceDigest"] = (
                 aggregate_price
-                if removed_price == aggregate_price
+                if removed_price is None or removed_price == aggregate_price
                 else None
             )
         else:
@@ -2415,6 +2437,13 @@ class D1PublicationClient:
             result["priceProvenanceDigest"] = next(iter(price_digests)) if len(price_digests) == 1 else None
             contributions[key] = result
         return contributions
+
+    def _usage_unavailable_invocation_count(self, usage_generation_id: str) -> int:
+        rows = self._query(_statement(_USAGE_INVOCATION_SELECT, usage_generation_id))
+        return sum(
+            row.get("coverage") == "unavailable" and row.get("ownership_class") == "task-owned"
+            for row in rows
+        )
 
     def _global_transition_statements(
         self,
@@ -2491,31 +2520,19 @@ class D1PublicationClient:
                 statements.append(
                     _statement(
                         _GLOBAL_HEAD_UPSERT_GUARDED,
-                        key[0],
-                        key[1],
-                        key[2],
-                        key[3],
-                        new_usage_id,
-                        new_row["globalId"],
                         updated_at,
-                        task_id,
-                        publication_id,
                         old_usage_id,
-                        task_id,
-                        old_usage_id,
+                        new_row["globalId"],
+                        new_usage_id,
                     )
                 )
             else:
                 statements.append(
                     _statement(
                         _GLOBAL_HEAD_UPSERT,
-                        key[0],
-                        key[1],
-                        key[2],
-                        key[3],
-                        new_usage_id,
-                        new_row["globalId"],
                         updated_at,
+                        new_row["globalId"],
+                        new_usage_id,
                     )
                 )
         return tuple(statements)
@@ -2893,13 +2910,31 @@ class D1PublicationClient:
         correction_rows: list[tuple[Mapping[str, Any], Mapping[str, Any], dict[str, Any]]] = []
         if usage_generation_id is not None:
             removed_globals.update(self._usage_global_contributions(usage_generation_id))
+            unavailable_count = self._usage_unavailable_invocation_count(usage_generation_id)
             stored_globals = {
                 self._global_key(row): self._global_db_row(row)
                 for row in self._query(_statement(_USAGE_GLOBAL_SELECT, usage_generation_id))
                 if row.get("ownership_class") == "task-owned"
             }
             for key, row in stored_globals.items():
-                removed_globals.setdefault(key, row)
+                if key in removed_globals:
+                    continue
+                if unavailable_count:
+                    # A visible aggregate may have replaced an unavailable
+                    # task row. Reconstruct only its denominator; unknown
+                    # token/cost evidence must never be treated as zero.
+                    unavailable = dict(row)
+                    unavailable["coverage"] = "unavailable"
+                    unavailable["coveredInvocations"] = 0
+                    unavailable["expectedInvocations"] = unavailable_count
+                    unavailable["knownTokenSubtotal"] = None
+                    unavailable["knownCostSubtotalMicroUsd"] = None
+                    for field in _USAGE_FIELDS:
+                        unavailable[field] = None
+                    unavailable["priceProvenanceDigest"] = None
+                    removed_globals[key] = unavailable
+                else:
+                    removed_globals[key] = row
             for key, removed in sorted(removed_globals.items()):
                 current_rows = self._query(_statement(_GLOBAL_HEAD_KEY_SELECT, *key))
                 if not current_rows:
@@ -2934,13 +2969,9 @@ class D1PublicationClient:
                     statements.append(
                         _statement(
                             _GLOBAL_HEAD_UPSERT,
-                            corrected["periodKind"],
-                            corrected["periodKey"],
-                            corrected["model"],
-                            corrected["ownershipClass"],
-                            target["usageGenerationId"],
-                            target["globalId"],
                             _timestamp_now(),
+                            target["globalId"],
+                            target["usageGenerationId"],
                         )
                     )
                 else:

@@ -329,6 +329,17 @@ def publication(
             ],
         },
     }
+    lifetime_global = payload["usage"]["globals"][0]
+    daily_global = dict(lifetime_global)
+    daily_global.update(
+        {
+            "globalId": f"global-daily-{publication_id}",
+            "periodKind": "daily",
+            "periodKey": "2026-07-28",
+        }
+    )
+    payload["usage"]["globals"].insert(1, daily_global)
+    payload["usage"]["generation"]["expectedCounts"]["globals"] = len(payload["usage"]["globals"])
     refresh_metadata_digest(payload)
     return payload
 
@@ -362,6 +373,8 @@ def usage_replacement(source: dict[str, Any], suffix: str) -> dict[str, Any]:
 
 def add_daily_task_global(payload: dict[str, Any]) -> None:
     usage = payload["usage"]
+    if any(row["ownershipClass"] == "task-owned" and row["periodKind"] == "daily" for row in usage["globals"]):
+        return
     source = next(row for row in usage["globals"] if row["ownershipClass"] == "task-owned")
     daily = copy.deepcopy(source)
     daily["globalId"] = f"{source['globalId']}-daily"
@@ -369,6 +382,138 @@ def add_daily_task_global(payload: dict[str, Any]) -> None:
     daily["periodKey"] = "2026-07-28"
     usage["globals"].append(daily)
     usage["generation"]["expectedCounts"]["globals"] = len(usage["globals"])
+    refresh_metadata_digest(payload)
+
+
+def add_second_lifetime_model(payload: dict[str, Any]) -> None:
+    usage = payload["usage"]
+    base_invocation = copy.deepcopy(usage["invocations"][0])
+    second_invocation_id = f"{base_invocation['invocationId']}-second"
+    second_price_digest = "b" * 64
+    base_invocation.update(
+        {
+            "invocationId": second_invocation_id,
+            "retryOrdinal": 1,
+            "startedAt": None,
+            "completedAt": None,
+            "model": "gpt-second",
+            "priceEntryDigest": second_price_digest,
+        }
+    )
+    usage["invocations"].append(base_invocation)
+    second_turn = copy.deepcopy(usage["turns"][0])
+    second_turn.update(
+        {
+            "turnId": f"{second_turn['turnId']}-second",
+            "invocationId": second_invocation_id,
+            "priceEntryDigest": second_price_digest,
+        }
+    )
+    usage["turns"].append(second_turn)
+    usage["prices"].append(
+        {
+            "priceEntryDigest": second_price_digest,
+            "usageGenerationId": usage["generation"]["usageGenerationId"],
+            "catalogDigest": "c" * 64,
+            "model": "gpt-second",
+            "effectiveAt": "2026-01-01T00:00:00Z",
+            "effectiveUntil": None,
+        }
+    )
+    for summary in usage["summaries"]:
+        summary.update(
+            {
+                "coveredInvocations": 2,
+                "expectedInvocations": 2,
+                "knownTokenSubtotal": 36,
+                "knownCostSubtotalMicroUsd": 120,
+                "priceProvenanceDigest": None,
+            }
+        )
+        for field in ("promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens"):
+            summary[field] *= 2
+        for field in ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"):
+            summary[field] *= 2
+    second_global = copy.deepcopy(
+        next(row for row in usage["globals"] if row["ownershipClass"] == "task-owned" and row["periodKind"] == "lifetime")
+    )
+    second_global.update(
+        {
+            "globalId": f"global-second-{payload['publicationId']}",
+            "model": "gpt-second",
+            "priceProvenanceDigest": second_price_digest,
+        }
+    )
+    usage["globals"].append(second_global)
+    usage["generation"]["expectedCounts"].update(
+        {"invocations": 2, "turns": 2, "prices": 2, "globals": len(usage["globals"])}
+    )
+    refresh_metadata_digest(payload)
+
+
+def mark_usage_unavailable(payload: dict[str, Any]) -> None:
+    usage = payload["usage"]
+    nullable_fields = (
+        "promptTokens",
+        "cachedTokens",
+        "uncachedTokens",
+        "completionTokens",
+        "reasoningTokens",
+        "totalTokens",
+        "uncachedInputCostMicroUsd",
+        "cachedInputCostMicroUsd",
+        "outputCostMicroUsd",
+        "totalCostMicroUsd",
+    )
+    invocation = usage["invocations"][0]
+    invocation.update(
+        {
+            "invocationId": None,
+            "startedAt": None,
+            "completedAt": None,
+            "model": None,
+            "billingMode": None,
+            "processOutcome": None,
+            "coverage": "unavailable",
+            "coveredTurns": 0,
+            "expectedTurns": 0,
+            "priceEntryDigest": None,
+        }
+    )
+    for field in nullable_fields:
+        invocation[field] = None
+    usage["turns"] = []
+    usage["prices"] = []
+    usage["generation"]["expectedCounts"]["turns"] = 0
+    usage["generation"]["expectedCounts"]["prices"] = 0
+    for summary in usage["summaries"]:
+        summary.update(
+            {
+                "coverage": "unavailable",
+                "coveredInvocations": 0,
+                "expectedInvocations": 1,
+                "knownTokenSubtotal": None,
+                "knownCostSubtotalMicroUsd": None,
+                "priceProvenanceDigest": None,
+            }
+        )
+        for field in nullable_fields:
+            summary[field] = None
+    for global_row in usage["globals"]:
+        if global_row["ownershipClass"] != "task-owned":
+            continue
+        global_row.update(
+            {
+                "coverage": "unavailable",
+                "coveredInvocations": 0,
+                "expectedInvocations": 1,
+                "knownTokenSubtotal": None,
+                "knownCostSubtotalMicroUsd": None,
+                "priceProvenanceDigest": None,
+            }
+        )
+        for field in nullable_fields:
+            global_row[field] = None
     refresh_metadata_digest(payload)
 
 
@@ -397,6 +542,25 @@ def test_task_owned_globals_match_verified_invocation_rollups() -> None:
     assert server.requests == []
 
 
+def test_task_owned_global_keys_must_cover_every_derived_period() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-global-missing")
+    payload["usage"]["globals"] = [
+        row
+        for row in payload["usage"]["globals"]
+        if not (row["ownershipClass"] == "task-owned" and row["periodKind"] == "daily")
+    ]
+    payload["usage"]["generation"]["expectedCounts"]["globals"] = len(payload["usage"]["globals"])
+    refresh_metadata_digest(payload)
+
+    with pytest.raises(D1Error) as error:
+        d1.stage(payload)
+
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert server.requests == []
+
+
 def test_hide_subtracts_only_the_hidden_task_global_contribution() -> None:
     server = ScriptedD1()
     d1 = client(server)
@@ -406,7 +570,7 @@ def test_hide_subtracts_only_the_hidden_task_global_contribution() -> None:
     before = server.connection.execute(
         "SELECT g.total_tokens, g.expected_invocations FROM usage_global_heads AS h "
         "JOIN usage_globals AS g ON g.global_id = h.global_id "
-        "WHERE h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
+        "WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
     ).fetchone()
     assert tuple(before) == (36, 2)
 
@@ -415,9 +579,28 @@ def test_hide_subtracts_only_the_hidden_task_global_contribution() -> None:
     after = server.connection.execute(
         "SELECT g.total_tokens, g.expected_invocations, h.state FROM usage_global_heads AS h "
         "JOIN usage_globals AS g ON g.global_id = h.global_id "
-        "WHERE h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
+        "WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
     ).fetchone()
     assert tuple(after) == (18, 1, "visible")
+
+
+def test_hide_unavailable_task_preserves_known_shared_totals() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    d1.publish(publication("publication-global-complete", run_id="run-global-complete", task_id="task-complete"))
+    unavailable = publication("publication-global-unavailable", run_id="run-global-unavailable", task_id="task-unavailable")
+    mark_usage_unavailable(unavailable)
+    d1.publish(unavailable)
+
+    d1.hide_task("task-unavailable", "unsafe_content")
+
+    row = server.connection.execute(
+        "SELECT g.total_tokens, g.total_cost_micro_usd, g.coverage, g.expected_invocations, "
+        "g.price_provenance_digest, h.state FROM usage_global_heads AS h "
+        "JOIN usage_globals AS g ON g.global_id = h.global_id "
+        "WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
+    ).fetchone()
+    assert tuple(row) == (18, 60, "complete", 1, hashlib.sha256(b"price-gpt-fixture").hexdigest(), "visible")
 
 
 def test_usage_replacement_with_daily_and_lifetime_keys_stays_below_batch_limit() -> None:
@@ -439,6 +622,31 @@ def test_usage_replacement_with_daily_and_lifetime_keys_stays_below_batch_limit(
         and any("UPDATE usage_generations SET state = 'superseded'" in item["sql"] for item in request["batch"])
     ]
     assert len(replacement_batches) == 1
+    assert sum(len(item["params"]) for item in replacement_batches[0]["batch"]) <= MAX_BATCH_PARAMETERS
+
+
+def test_three_shared_global_keys_fit_one_bounded_replacement_batch() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-global-three-one", run_id="run-global-three-one", task_id="task-global-three-one")
+    second = publication("publication-global-three-two", run_id="run-global-three-two", task_id="task-global-three-two")
+    add_second_lifetime_model(first)
+    add_second_lifetime_model(second)
+    d1.publish(first)
+    d1.publish(second)
+    replacement = usage_replacement(first, "refresh")
+    before = len(server.requests)
+
+    d1.replace_usage(replacement, base_usage_generation_id=first["usage"]["generation"]["usageGenerationId"])
+
+    replacement_batches = [
+        request
+        for request in server.requests[before:]
+        if "batch" in request
+        and any("UPDATE usage_generations SET state = 'superseded'" in item["sql"] for item in request["batch"])
+    ]
+    assert len(replacement_batches) == 1
+    assert len(replacement_batches[0]["batch"]) <= 64
     assert sum(len(item["params"]) for item in replacement_batches[0]["batch"]) <= MAX_BATCH_PARAMETERS
 
 
@@ -773,70 +981,7 @@ def test_unavailable_invocation_coverage_preserves_represented_denominator() -> 
     server = ScriptedD1()
     d1 = client(server)
     payload = publication("publication-unavailable", run_id="run-unavailable")
-    usage = payload["usage"]
-    nullable_fields = (
-        "promptTokens",
-        "cachedTokens",
-        "uncachedTokens",
-        "completionTokens",
-        "reasoningTokens",
-        "totalTokens",
-        "uncachedInputCostMicroUsd",
-        "cachedInputCostMicroUsd",
-        "outputCostMicroUsd",
-        "totalCostMicroUsd",
-    )
-
-    invocation = usage["invocations"][0]
-    invocation.update(
-        {
-            "invocationId": None,
-            "startedAt": None,
-            "completedAt": None,
-            "model": None,
-            "billingMode": None,
-            "processOutcome": None,
-            "coverage": "unavailable",
-            "coveredTurns": 0,
-            "expectedTurns": 0,
-            "priceEntryDigest": None,
-        }
-    )
-    for field in nullable_fields:
-        invocation[field] = None
-
-    usage["turns"] = []
-    usage["prices"] = []
-    usage["generation"]["expectedCounts"]["turns"] = 0
-    usage["generation"]["expectedCounts"]["prices"] = 0
-    for summary in usage["summaries"]:
-        summary.update(
-            {
-                "coverage": "unavailable",
-                "coveredInvocations": 0,
-                "expectedInvocations": 1,
-                "knownTokenSubtotal": None,
-                "knownCostSubtotalMicroUsd": None,
-                "priceProvenanceDigest": None,
-            }
-        )
-        for field in nullable_fields:
-            summary[field] = None
-
-    task_global = next(row for row in usage["globals"] if row["ownershipClass"] == "task-owned")
-    task_global.update(
-        {
-            "coverage": "unavailable",
-            "coveredInvocations": 0,
-            "expectedInvocations": 1,
-            "knownTokenSubtotal": None,
-            "knownCostSubtotalMicroUsd": None,
-            "priceProvenanceDigest": None,
-        }
-    )
-    for field in nullable_fields:
-        task_global[field] = None
-    refresh_metadata_digest(payload)
+    mark_usage_unavailable(payload)
 
     d1.stage(payload)
 

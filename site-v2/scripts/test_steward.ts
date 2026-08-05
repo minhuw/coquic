@@ -133,6 +133,11 @@ type UsageScenario = {
   readonly invocationRows: readonly TaskRow[];
   readonly globalRows: readonly TaskRow[];
 };
+type UsageScenarioOptions = {
+  readonly taskId?: string;
+  readonly summary?: Partial<TaskRow>;
+  readonly global?: Partial<TaskRow>;
+};
 type Scenario = {
   readonly rows: readonly TaskRow[];
   readonly statusRows: readonly TaskRow[];
@@ -218,23 +223,24 @@ const USAGE_INVOCATION_ID = "invocation-usage";
 const USAGE_RUN_ID = "run-usage";
 const USAGE_DIGEST = "c".repeat(64);
 
-function usageScenarioRows(): UsageScenario {
+function usageScenarioRows(options: UsageScenarioOptions = {}): UsageScenario {
+  const taskId = options.taskId ?? USAGE_TASK_ID;
   const contextRows: TaskRow[] = [{
-    task_id: USAGE_TASK_ID, publication_id: USAGE_PUBLICATION_ID, task_head_state: "visible", task_head_updated_at: "2026-07-28T00:00:03Z",
+    task_id: taskId, publication_id: USAGE_PUBLICATION_ID, task_head_state: "visible", task_head_updated_at: "2026-07-28T00:00:03Z",
     task_head_usage_generation_id: USAGE_GENERATION_ID, generation_publication_id: USAGE_PUBLICATION_ID, generation_state: "visible",
     generation_exposed_at: EXPOSED_AT, usage_head_generation_id: USAGE_GENERATION_ID, usage_head_state: "visible",
     usage_head_updated_at: "2026-07-28T00:00:03Z", usage_generation_id: USAGE_GENERATION_ID, usage_publication_id: USAGE_PUBLICATION_ID,
-    usage_task_id: USAGE_TASK_ID, usage_schema_version: "1.0", usage_metadata_digest: "e".repeat(64), usage_generation_state: "visible",
+    usage_task_id: taskId, usage_schema_version: "1.0", usage_metadata_digest: "e".repeat(64), usage_generation_state: "visible",
     usage_generation_exposed_at: EXPOSED_AT,
   }];
   const summaryRows: TaskRow[] = [{
-    summary_id: "summary-task", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: USAGE_TASK_ID,
+    summary_id: "summary-task", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: taskId,
     run_id: null, scope: "task", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
-    output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST,
+    output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, ...options.summary,
   }, {
-    summary_id: "summary-run", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: USAGE_TASK_ID,
+    summary_id: "summary-run", usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID, task_id: taskId,
     run_id: USAGE_RUN_ID, scope: "run", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
@@ -242,7 +248,7 @@ function usageScenarioRows(): UsageScenario {
   }];
   const invocationRows: TaskRow[] = [{
     invocation_id: USAGE_INVOCATION_ID, usage_generation_id: USAGE_GENERATION_ID, publication_id: USAGE_PUBLICATION_ID,
-    task_id: USAGE_TASK_ID, pipeline_id: "pipeline-usage", run_id: USAGE_RUN_ID, ownership_class: "task-owned", retry_ordinal: 0,
+    task_id: taskId, pipeline_id: "pipeline-usage", run_id: USAGE_RUN_ID, ownership_class: "task-owned", retry_ordinal: 0,
     started_at: "2026-07-28T00:00:00Z", completed_at: "2026-07-28T00:00:01Z", model: "gpt-fixture", billing_mode: "api",
     process_outcome: "success", coverage: "complete", issue_count: 0, covered_turns: 0, expected_turns: 0,
     prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9, completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18,
@@ -251,6 +257,12 @@ function usageScenarioRows(): UsageScenario {
   }];
   const globalRows: TaskRow[] = [{
     global_id: "global-usage", usage_generation_id: USAGE_GENERATION_ID, period_kind: "lifetime", period_key: "lifetime",
+    model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
+    known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
+    completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
+    output_cost_micro_usd: 30, total_cost_micro_usd: 60, price_provenance_digest: USAGE_DIGEST, aggregate_only: 1, ...options.global,
+  }, {
+    global_id: "global-daily", usage_generation_id: USAGE_GENERATION_ID, period_kind: "daily", period_key: "2026-07-28",
     model: "gpt-fixture", ownership_class: "task-owned", coverage: "complete", covered_invocations: 1, expected_invocations: 1,
     known_token_subtotal: 18, known_cost_subtotal_micro_usd: 60, prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9,
     completion_tokens: 7, reasoning_tokens: 3, total_tokens: 18, uncached_input_cost_micro_usd: 10, cached_input_cost_micro_usd: 20,
@@ -707,6 +719,7 @@ async function startPlaywrightFixtureServer(): Promise<void> {
       [activeRow],
       [browserTaskRow(cleanTask, "2026-07-28T00:00:03Z"), browserTaskRow(toolHeavyTask, "2026-07-28T00:00:02Z"), browserTaskRow(redactedTask, "2026-07-28T00:00:01Z")],
     ),
+    usage: usageScenarioRows({ taskId: "task-clean" }),
     details: {
       "task-clean": cleanDetail,
       "task-redacted": redactedDetail,
@@ -957,6 +970,91 @@ async function main() {
     assert.match(html, /Active tasks/);
     assert.match(html, /Task history/);
     assertOverviewHasNoLegacyOutput(html);
+  });
+
+  const usageTask = { ...activeFixture.data.task, taskId: USAGE_TASK_ID, title: "Usage fixture task" };
+  const usageRows = [taskRow(usageTask, "2026-07-28T00:00:03Z")];
+  const usageRenderScenario = (options: UsageScenarioOptions = {}): Scenario => ({
+    ...scenario(usageRows, []),
+    usage: usageScenarioRows({ taskId: USAGE_TASK_ID, ...options }),
+  });
+
+  await runCase("overview cached usage render", usageRenderScenario(), async () => {
+    const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /Token and estimated-cost evidence/);
+    assert.match(html, /Lifetime totals by model and ownership/);
+    assert.match(html, /UTC daily evidence/);
+    assert.match(html, /gpt-fixture/);
+    assert.match(html, /18/);
+    assert.match(html, /\$0\.000060/);
+    assert.match(html, /Complete - 1\/1 invocations/);
+    assert.match(html, /Usage components/);
+    assert.match(html, /Usage fixture task/);
+  });
+
+  await runCase("overview partial and unpriced usage", usageRenderScenario({
+    summary: {
+      coverage: "partial", covered_invocations: 1, expected_invocations: 2,
+      known_token_subtotal: 18, known_cost_subtotal_micro_usd: null,
+      prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9, completion_tokens: 7, reasoning_tokens: 3, total_tokens: null,
+      uncached_input_cost_micro_usd: null, cached_input_cost_micro_usd: null, output_cost_micro_usd: null, total_cost_micro_usd: null,
+      price_provenance_digest: null,
+    },
+    global: {
+      coverage: "partial", covered_invocations: 1, expected_invocations: 2,
+      known_token_subtotal: 18, known_cost_subtotal_micro_usd: null,
+      prompt_tokens: 11, cached_tokens: 2, uncached_tokens: 9, completion_tokens: 7, reasoning_tokens: 3, total_tokens: null,
+      uncached_input_cost_micro_usd: null, cached_input_cost_micro_usd: null, output_cost_micro_usd: null, total_cost_micro_usd: null,
+      price_provenance_digest: null,
+    },
+  }), async () => {
+    const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /18/);
+    assert.match(html, /N\.A\./);
+    assert.match(html, /Partial - 1\/2 invocations/);
+  });
+
+  await runCase("overview zero and safe-integer usage", usageRenderScenario({
+    summary: {
+      known_token_subtotal: Number.MAX_SAFE_INTEGER, known_cost_subtotal_micro_usd: Number.MAX_SAFE_INTEGER,
+      prompt_tokens: Number.MAX_SAFE_INTEGER, cached_tokens: 0, uncached_tokens: Number.MAX_SAFE_INTEGER,
+      completion_tokens: 0, reasoning_tokens: 0, total_tokens: Number.MAX_SAFE_INTEGER,
+      uncached_input_cost_micro_usd: Number.MAX_SAFE_INTEGER, cached_input_cost_micro_usd: 0, output_cost_micro_usd: 0,
+      total_cost_micro_usd: Number.MAX_SAFE_INTEGER,
+    },
+    global: {
+      known_token_subtotal: Number.MAX_SAFE_INTEGER, known_cost_subtotal_micro_usd: Number.MAX_SAFE_INTEGER,
+      prompt_tokens: Number.MAX_SAFE_INTEGER, cached_tokens: 0, uncached_tokens: Number.MAX_SAFE_INTEGER,
+      completion_tokens: 0, reasoning_tokens: 0, total_tokens: Number.MAX_SAFE_INTEGER,
+      uncached_input_cost_micro_usd: Number.MAX_SAFE_INTEGER, cached_input_cost_micro_usd: 0, output_cost_micro_usd: 0,
+      total_cost_micro_usd: Number.MAX_SAFE_INTEGER,
+    },
+  }), async () => {
+    const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /9,007,199,254,740,991/);
+    assert.match(html, /\$9,007,199,254\.740991/);
+  });
+
+  await runCase("overview unavailable cached usage", usageRenderScenario({
+    summary: {
+      coverage: "unavailable", covered_invocations: 0, expected_invocations: 1,
+      known_token_subtotal: null, known_cost_subtotal_micro_usd: null,
+      prompt_tokens: null, cached_tokens: null, uncached_tokens: null, completion_tokens: null, reasoning_tokens: null, total_tokens: null,
+      uncached_input_cost_micro_usd: null, cached_input_cost_micro_usd: null, output_cost_micro_usd: null, total_cost_micro_usd: null,
+      price_provenance_digest: null,
+    },
+    global: {
+      coverage: "unavailable", covered_invocations: 0, expected_invocations: 1,
+      known_token_subtotal: null, known_cost_subtotal_micro_usd: null,
+      prompt_tokens: null, cached_tokens: null, uncached_tokens: null, completion_tokens: null, reasoning_tokens: null, total_tokens: null,
+      uncached_input_cost_micro_usd: null, cached_input_cost_micro_usd: null, output_cost_micro_usd: null, total_cost_micro_usd: null,
+      price_provenance_digest: null,
+    },
+  }), async () => {
+    const html = await renderOverview({ view: "tasks" });
+    assert.match(html, /Unavailable - 0\/1 invocations/);
+    assert.match(html, /N\.A\./);
+    assert.match(html, /Usage fixture task/);
   });
 
   const historyRowsForPagination = [

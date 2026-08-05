@@ -215,6 +215,24 @@ test("Steward task navigation exposes the public task channels", async ({ page }
   await expect(page).toHaveURL(/\/steward\/tasks\//);
 });
 
+test("Steward cached usage keeps exact totals, coverage, and task links", async ({ page }) => {
+  await page.goto("/steward?view=tasks");
+  await expect(page.getByRole("heading", { name: "Token and estimated-cost evidence" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Lifetime totals by model and ownership" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "UTC daily evidence" })).toBeVisible();
+  await expect(page.getByText("$0.000060", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Complete - 1/1 invocations", { exact: true }).first()).toBeVisible();
+  const cleanTask = page.locator("li").filter({ hasText: "Clean publication fixture" }).first();
+  await expect(cleanTask).toContainText("18");
+  await expect(cleanTask).toContainText("$0.000060");
+  await expect(cleanTask.getByRole("link", { name: "Clean publication fixture" })).toHaveAttribute("href", "/steward/tasks/task-clean");
+  const disclosure = cleanTask.getByText("Usage components", { exact: true });
+  await expect(disclosure).toBeVisible();
+  await disclosure.focus();
+  await page.keyboard.press("Enter");
+  await expect(cleanTask.getByText("Prompt tokens", { exact: true })).toBeVisible();
+});
+
 test("global Signals and Planning remain explicit terminal unavailable states", async ({ page, request }) => {
   for (const [view, heading] of [["signals", "Signals unavailable"], ["planning", "Planning unavailable"]] as const) {
     await page.goto(`/steward?view=${view}`);

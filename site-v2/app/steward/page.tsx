@@ -10,7 +10,16 @@ import {
 import type {
   CloudStatus,
   CloudTaskSummary,
+  CloudUsageGlobalGroup,
+  CloudUsageReadResult,
+  CloudUsageSummary,
+  CloudUsageUnavailable,
 } from "@/lib/steward-archive/cloud-schema";
+import {
+  TaskUsageSummary,
+  UsageEvidence,
+  isUsageUnavailable,
+} from "./usage-summary";
 
 export const metadata: Metadata = {
   title: "Steward",
@@ -188,7 +197,15 @@ function TaskCompleteness({ task }: { task: CloudTaskSummary }) {
   );
 }
 
-function TaskRowView({ task, selected }: { task: CloudTaskSummary; selected: boolean }) {
+function TaskRowView({
+  task,
+  selected,
+  usage,
+}: {
+  task: CloudTaskSummary;
+  selected: boolean;
+  usage: CloudUsageReadResult<CloudUsageSummary> | null;
+}) {
   return (
     <li className={`border-b border-line py-4 ${selected ? "border-l-2 border-l-accent pl-4" : ""}`}>
       <div className="flex items-baseline justify-between gap-3 text-xs">
@@ -205,6 +222,7 @@ function TaskRowView({ task, selected }: { task: CloudTaskSummary; selected: boo
       <div className="mt-3">
         <TaskCompleteness task={task} />
       </div>
+      <TaskUsageSummary usage={usage} />
     </li>
   );
 }
@@ -222,19 +240,27 @@ function TasksView({
   historyPage,
   cursor,
   activeCursor,
+  globalUsage,
+  taskUsage,
 }: {
   status: CloudStatus | null;
   activePage: CloudTaskPage | null;
   historyPage: CloudTaskPage | null;
   cursor: string | null;
   activeCursor: string | null;
+  globalUsage: CloudUsageGlobalGroup[] | CloudUsageUnavailable;
+  taskUsage: ReadonlyMap<string, CloudUsageReadResult<CloudUsageSummary> | null>;
 }) {
+  const usageEvidence = <UsageEvidence usage={globalUsage} />;
   if (!status || !activePage || !historyPage) {
     return (
-      <UnavailableView
-        title="Cloud task overview unavailable"
-        description="The public task status or collection is temporarily unavailable."
-      />
+      <>
+        <UnavailableView
+          title="Cloud task overview unavailable"
+          description="The public task status or collection is temporarily unavailable."
+        />
+        {usageEvidence}
+      </>
     );
   }
 
@@ -268,7 +294,7 @@ function TasksView({
             <span className="text-xs text-muted data-text">{activePage.total}</span>
           </div>
           <ul className="mt-4 border-t border-line">
-            {activeRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === selectedTask?.taskId} />)}
+            {activeRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === selectedTask?.taskId} usage={taskUsage.get(task.taskId) ?? null} />)}
           </ul>
           {activePage.total ? (
             <nav aria-label="Active task pages" className="mt-5 flex justify-between text-xs">
@@ -281,7 +307,7 @@ function TasksView({
             <span className="text-xs text-muted data-text">{historyPage.total}</span>
           </div>
           <ul className="mt-4 border-t border-line">
-            {historyRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === selectedTask?.taskId} />)}
+            {historyRows.map((task) => <TaskRowView key={task.taskId} task={task} selected={task.taskId === selectedTask?.taskId} usage={taskUsage.get(task.taskId) ?? null} />)}
           </ul>
           <nav aria-label="Task history pages" className="mt-5 flex justify-between text-xs">
             {historyPage.previousCursor ? <Link href={tasksHref(historyPage.previousCursor, activeCursor)} className="text-accent">Previous page</Link> : <span className="text-faint">First page</span>}
@@ -325,6 +351,7 @@ function TasksView({
           </p>
         </aside>
       </section>
+      {usageEvidence}
     </div>
   );
 }
@@ -342,9 +369,15 @@ export default async function StewardPage({
   let status: CloudStatus | null = null;
   let activePage: CloudTaskPage | null = null;
   let historyPage: CloudTaskPage | null = null;
+  let globalUsage: CloudUsageGlobalGroup[] | CloudUsageUnavailable = {
+    kind: "unavailable",
+    reason: "unavailable",
+  };
+  const taskUsage = new Map<string, CloudUsageReadResult<CloudUsageSummary> | null>();
 
+  let repository: ReturnType<typeof getCloudRepository> | null = null;
   try {
-    const repository = getCloudRepository();
+    repository = getCloudRepository();
     [status, activePage, historyPage] = await Promise.all([
       repository.getStatus(),
       repository.listActiveTasks({ cursor: activeCursor }),
@@ -354,6 +387,25 @@ export default async function StewardPage({
     status = null;
     activePage = null;
     historyPage = null;
+  }
+
+  if (repository) {
+    const visibleTasks = [...new Map(
+      [...(activePage?.tasks ?? []), ...(historyPage?.tasks ?? [])].map((task) => [task.taskId, task]),
+    ).values()];
+    const [globalResult, ...summaryResults] = await Promise.all([
+      repository.getGlobalUsage().catch(() => ({ kind: "unavailable", reason: "unavailable" } as CloudUsageUnavailable)),
+      ...visibleTasks.map((task) => repository!.getTaskUsageSummary(task.taskId).catch(() => ({ kind: "unavailable", reason: "unavailable" } as CloudUsageUnavailable))),
+    ]);
+    globalUsage = globalResult;
+    visibleTasks.forEach((task, index) => {
+      const result = summaryResults[index] ?? null;
+      if (result && !isUsageUnavailable(result) && (result.taskId !== task.taskId || result.scope !== "task" || result.runId !== null)) {
+        taskUsage.set(task.taskId, { kind: "unavailable", reason: "invalid" });
+      } else {
+        taskUsage.set(task.taskId, result);
+      }
+    });
   }
 
   const githubStars = await getGitHubStars();
@@ -382,7 +434,7 @@ export default async function StewardPage({
           {activeView === "planning" ? (
             <UnavailableView title="Planning unavailable" description="The initial public cloud contract does not publish global planning evidence." />
           ) : null}
-          {activeView === "tasks" ? <TasksView status={status} activePage={activePage} historyPage={historyPage} cursor={cursor} activeCursor={activeCursor} /> : null}
+          {activeView === "tasks" ? <TasksView status={status} activePage={activePage} historyPage={historyPage} cursor={cursor} activeCursor={activeCursor} globalUsage={globalUsage} taskUsage={taskUsage} /> : null}
         </div>
       </main>
       <footer className="border-t border-line">

@@ -927,6 +927,63 @@ def test_overhead_replay_replacement_and_hide_preserve_global_sums() -> None:
     assert overhead_row() == (10, 11, "complete", "visible")
 
 
+def test_overhead_retry_rejects_staged_generation_with_unexpected_price_row() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    overhead = {
+        "date": "2026-07-28",
+        "model": "gpt-overhead-poisoned",
+        "ownerClass": "Steward overhead",
+        "tokens": {
+            "inputTokens": 5,
+            "cachedInputTokens": 1,
+            "uncachedInputTokens": 4,
+            "outputTokens": 3,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 8,
+        },
+        "cost": {
+            "uncachedInputMicroUsd": 4,
+            "cachedInputMicroUsd": 2,
+            "outputMicroUsd": 3,
+            "totalMicroUsd": 9,
+        },
+        "coverage": {"status": "Complete", "coveredInvocations": 1, "expectedInvocations": 1},
+    }
+    overhead_digest = _overhead_digest((_overhead_row(overhead),))
+    server.fail_usage_swap_once = True
+    with pytest.raises(D1Error) as error:
+        d1.upsert_overhead(overhead, digest=overhead_digest)
+    assert error.value.code == D1ErrorCode.network
+    assert server.connection.execute("SELECT count(*) FROM usage_global_heads WHERE state = 'visible'").fetchone()[0] == 0
+
+    daily_id = server.connection.execute(
+        "SELECT g.usage_generation_id FROM usage_globals AS g WHERE g.period_kind = 'daily' AND g.model = ?",
+        (overhead["model"],),
+    ).fetchone()[0]
+    price_digest = "e" * 64
+    server.connection.execute(
+        "INSERT INTO usage_prices (price_entry_digest, usage_generation_id, catalog_digest, model, effective_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (price_digest, daily_id, "f" * 64, overhead["model"], "2026-01-01T00:00:00Z"),
+    )
+    server.connection.commit()
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_prices WHERE usage_generation_id = ?", (daily_id,)
+    ).fetchone()[0] == 1
+
+    with pytest.raises(D1Error) as error:
+        d1.upsert_overhead(overhead, digest=overhead_digest)
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert server.connection.execute("SELECT count(*) FROM usage_global_heads WHERE state = 'visible'").fetchone()[0] == 0
+    assert all(
+        row[0] == "staged"
+        for row in server.connection.execute(
+            "SELECT state FROM usage_generations WHERE ownership_class = 'steward-overhead'"
+        )
+    )
+
+
 def test_overhead_starts_without_tasks_and_exposes_detached_daily_and_lifetime() -> None:
     server = ScriptedD1()
     d1 = client(server)

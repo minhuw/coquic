@@ -1593,8 +1593,13 @@ _OVERHEAD_GENERATION_INSERT = (
 )
 _OVERHEAD_GENERATION_SELECT = (
     "SELECT usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, "
-    "expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, expected_global_count, created_at "
-    "FROM usage_generations WHERE usage_generation_id = ?"
+    "expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, expected_global_count, created_at, "
+    "(SELECT count(*) FROM usage_summaries WHERE usage_generation_id = g.usage_generation_id) AS summary_count, "
+    "(SELECT count(*) FROM usage_invocations WHERE usage_generation_id = g.usage_generation_id) AS invocation_count, "
+    "(SELECT count(*) FROM usage_turns WHERE usage_generation_id = g.usage_generation_id) AS turn_count, "
+    "(SELECT count(*) FROM usage_prices WHERE usage_generation_id = g.usage_generation_id) AS price_count, "
+    "(SELECT count(*) FROM usage_globals WHERE usage_generation_id = g.usage_generation_id) AS global_count "
+    "FROM usage_generations AS g WHERE g.usage_generation_id = ?"
 )
 _OVERHEAD_GLOBAL_SELECT = (
     "SELECT global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, "
@@ -3598,6 +3603,11 @@ class D1PublicationClient:
             or generation.get("expected_turn_count") != 0
             or generation.get("expected_price_count") != 0
             or generation.get("expected_global_count") != 1
+            or generation.get("summary_count") != 0
+            or generation.get("invocation_count") != 0
+            or generation.get("turn_count") != 0
+            or generation.get("price_count") != 0
+            or generation.get("global_count") != 1
             or generation.get("state") != "visible"
         ):
             _invalid(D1ErrorCode.generation_conflict)
@@ -3641,6 +3651,11 @@ class D1PublicationClient:
             or generation.get("expected_turn_count") != 0
             or generation.get("expected_price_count") != 0
             or generation.get("expected_global_count") != 1
+            or generation.get("summary_count") != 0
+            or generation.get("invocation_count") != 0
+            or generation.get("turn_count") != 0
+            or generation.get("price_count") != 0
+            or generation.get("global_count") != 1
         ):
             _invalid(D1ErrorCode.generation_conflict)
         globals_ = self._query(_statement(_OVERHEAD_GLOBAL_SELECT, usage_generation_id))

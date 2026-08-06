@@ -245,7 +245,48 @@ if "FROM task_heads" in " ".join(args):
             sample["task_summary_coverage"] = "partial"
             sample["run_summary_coverage"] = "partial"
             sample["global_coverage"] = "partial"
-        print(json.dumps({"success": True, "results": [sample]}))
+        samples = [sample]
+        if case in {"two-invocations", "two-invocations-contradictory"}:
+            second = dict(sample)
+            second.update(
+                invocation_id="invocation-2",
+                retry_ordinal=1,
+                turn_id="turn-2",
+                turn_invocation_id="invocation-2",
+                turn_ordinal=1,
+            )
+            for prefix in ("task_summary", "run_summary", "global"):
+                second[f"{prefix}_covered_invocations"] = 2
+                second[f"{prefix}_expected_invocations"] = 2
+                for field in token_fields:
+                    second[f"{prefix}_{field}"] = sample[f"{prefix}_{field}"] * 2
+                second[f"{prefix}_known_token_subtotal"] = sample[f"{prefix}_known_token_subtotal"] * 2
+            second["generation_expected_invocation_count"] = 2
+            second["generation_expected_turn_count"] = 2
+            second["run_invocation_count"] = 2
+            second["run_turn_count"] = 2
+            second["invocation_count"] = 2
+            second["turn_count"] = 2
+            sample["generation_expected_invocation_count"] = 2
+            sample["generation_expected_turn_count"] = 2
+            sample["run_invocation_count"] = 2
+            sample["run_turn_count"] = 2
+            sample["invocation_count"] = 2
+            sample["turn_count"] = 2
+            for prefix in ("task_summary", "run_summary", "global"):
+                sample[f"{prefix}_covered_invocations"] = 2
+                sample[f"{prefix}_expected_invocations"] = 2
+                for field in token_fields:
+                    sample[f"{prefix}_{field}"] *= 2
+                sample[f"{prefix}_known_token_subtotal"] *= 2
+            if case == "two-invocations-contradictory":
+                for prefix in ("task_summary", "run_summary", "global"):
+                    sample[f"{prefix}_total_tokens"] //= 2
+                    sample[f"{prefix}_known_token_subtotal"] //= 2
+                    second[f"{prefix}_total_tokens"] = sample[f"{prefix}_total_tokens"]
+                    second[f"{prefix}_known_token_subtotal"] = sample[f"{prefix}_known_token_subtotal"]
+            samples.append(second)
+        print(json.dumps({"success": True, "results": samples}))
     raise SystemExit(0)
 if case == "malformed":
     print("not-json")
@@ -649,6 +690,26 @@ def test_activation_accepts_partial_unpriced_usage_without_recomputing(harness: 
     harness["env"]["WRANGLER_CASE"] = "partial"
     activated = _run(harness, "--mode", "activate", apply=True)
     assert activated.returncode == 0, activated.stderr
+
+
+def test_activation_reconciles_two_invocations_and_related_turns(harness: dict[str, Any]) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    harness["env"]["PULUMI_CASE"] = "same"
+    harness["env"]["WRANGLER_CASE"] = "two-invocations"
+    activated = _run(harness, "--mode", "activate", apply=True)
+    assert activated.returncode == 0, activated.stderr
+
+
+def test_activation_rejects_two_invocation_contradictory_rollup(harness: dict[str, Any]) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    harness["env"]["PULUMI_CASE"] = "same"
+    harness["env"]["WRANGLER_CASE"] = "two-invocations-contradictory"
+    activated = _run(harness, "--mode", "activate", apply=True)
+    assert activated.returncode != 0
+    assert "sample" in activated.stderr
+    assert not harness["site_input"].exists()
 
 
 @pytest.mark.parametrize("case", ["exact-empty", "exact-populated"])

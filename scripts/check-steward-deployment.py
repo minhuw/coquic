@@ -269,6 +269,7 @@ def _scan_response(body: bytes, document: object | None = None, *, strict_urls: 
 class _UsageRow:
     cells: list[str]
     disclosures: list[dict[str, str]]
+    selected: bool = False
 
 
 @dataclass
@@ -292,7 +293,6 @@ class _UsageHTMLParser(HTMLParser):
         self._definition_label: list[str] | None = None
         self._definition_value: list[str] | None = None
         self._pending_label: str | None = None
-        self._state_depth = 0
 
     @staticmethod
     def _text(parts: list[str] | None) -> str:
@@ -312,13 +312,15 @@ class _UsageHTMLParser(HTMLParser):
         usage_state = attributes.get("data-usage-state")
         if usage_state is not None:
             self.usage_states.append(usage_state)
-            self._state_depth += 1
         if normalized == "table":
             self._table = []
         elif normalized == "tr" and self._table is not None:
             self._row = _UsageRow([], [])
         elif normalized in {"th", "td"} and self._row is not None:
             self._cell = []
+        elif normalized == "a" and self._row is not None:
+            if (attributes.get("aria-current") or "").lower() == "page":
+                self._row.selected = True
         elif normalized == "details" and self._row is not None:
             self._disclosure = {}
         elif normalized == "dt" and self._disclosure is not None:
@@ -360,8 +362,6 @@ class _UsageHTMLParser(HTMLParser):
             self._definition_label = None
             self._definition_value = None
             self._pending_label = None
-        if self._state_depth and normalized in {"section", "div"}:
-            self._state_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth:
@@ -464,10 +464,9 @@ def _validate_usage_disclosure(disclosure: dict[str, str]) -> bool:
 
 
 def _row_disclosure_matches(row: _UsageRow, token_text: str, cost_text: str) -> bool:
-    valid = [item for item in row.disclosures if _validate_usage_disclosure(item)]
-    if not valid:
+    disclosure = _usage_disclosure(row)
+    if disclosure is None:
         return False
-    disclosure = {" ".join(key.lower().split()): value for key, value in valid[0].items()}
     displayed_token = _usage_number(token_text)
     disclosed_token = _usage_number(disclosure["total tokens"])
     if displayed_token is None and disclosed_token is not None and token_text.strip() in {"N.A.", "Unavailable"}:
@@ -480,6 +479,79 @@ def _row_disclosure_matches(row: _UsageRow, token_text: str, cost_text: str) -> 
         return False
     if displayed_cost is not None and disclosed_cost is not None and displayed_cost != disclosed_cost:
         return False
+    return True
+
+
+def _usage_disclosure(row: _UsageRow) -> dict[str, str] | None:
+    for disclosure in row.disclosures:
+        if _validate_usage_disclosure(disclosure):
+            return {" ".join(key.lower().split()): value for key, value in disclosure.items()}
+    return None
+
+
+def _usage_identity(row: _UsageRow, index: int) -> str | None:
+    if len(row.cells) <= index:
+        return None
+    match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]{0,127})", row.cells[index].strip())
+    return match.group(1) if match else None
+
+
+def _usage_metrics(row: _UsageRow) -> tuple[tuple[int | None, ...], tuple[int | None, ...]] | None:
+    disclosure = _usage_disclosure(row)
+    if disclosure is None:
+        return None
+    tokens = tuple(_usage_number(disclosure[label]) for label in (
+        "prompt tokens", "cached tokens", "uncached tokens", "completion tokens", "reasoning tokens", "total tokens",
+    ))
+    costs = tuple(_usage_number(disclosure[label], cost=True) for label in (
+        "uncached input cost", "cached input cost", "output cost", "total cost",
+    ))
+    return tokens, costs
+
+
+def _usage_coverage_counts(value: str) -> tuple[str, int | None, int | None] | None:
+    match = re.fullmatch(
+        r"(Complete|Partial|Unavailable|N\.A\.)(?: - ([0-9][0-9,]*)/([0-9][0-9,]*) (?:turns|invocations))?",
+        value.strip(),
+    )
+    if match is None:
+        return None
+    label, covered, expected = match.groups()
+    if covered is None:
+        return label, None, None
+    return label, int(covered.replace(",", "")), int(expected.replace(",", ""))
+
+
+def _usage_rollup_matches(parent: _UsageRow, turns: list[_UsageRow], coverage_index: int) -> bool:
+    if len(parent.cells) <= coverage_index:
+        return False
+    coverage = _usage_coverage_counts(parent.cells[coverage_index])
+    if coverage is None or coverage[0] != "Complete":
+        return True
+    _, covered, expected = coverage
+    if covered is None or expected is None or covered != expected or len(turns) != expected:
+        return False
+    parent_metrics = _usage_metrics(parent)
+    child_metrics = [_usage_metrics(turn) for turn in turns]
+    if parent_metrics is None or any(metrics is None for metrics in child_metrics):
+        return False
+    parent_tokens, parent_costs = parent_metrics
+    token_values = [metrics[0] for metrics in child_metrics if metrics is not None]
+    cost_values = [metrics[1] for metrics in child_metrics if metrics is not None]
+    for index, expected_value in enumerate(parent_tokens):
+        values = [metrics[index] for metrics in token_values]
+        if any(value is None for value in values) or expected_value != sum(value for value in values if value is not None):
+            return False
+    for index, expected_value in enumerate(parent_costs):
+        values = [metrics[index] for metrics in cost_values]
+        if all(value is None for value in values):
+            total = None
+        elif any(value is None for value in values):
+            return False
+        else:
+            total = sum(value for value in values if value is not None)
+        if expected_value != total:
+            return False
     return True
 
 
@@ -538,9 +610,18 @@ def _validate_usage_tables(
         if selected is None or turns is None:
             return False, "task_usage_table_missing"
         invocation_table, invocation_headers = selected
-        for row in invocation_table.rows[1:]:
+        invocation_rows = invocation_table.rows[1:]
+        invocation_ids: set[str] = set()
+        selected_rows: list[_UsageRow] = []
+        for row in invocation_rows:
             if len(row.cells) <= max(invocation_headers.values()):
                 return False, "task_usage_row_incomplete"
+            invocation_id = _usage_identity(row, invocation_headers["invocation / retry"])
+            if invocation_id is None or invocation_id in invocation_ids:
+                return False, "task_usage_identity_invalid"
+            invocation_ids.add(invocation_id)
+            if row.selected:
+                selected_rows.append(row)
             if re.search(r"\bRetry [0-9]+\b", row.cells[invocation_headers["invocation / retry"]]) is None:
                 return False, "task_usage_retry_missing"
             if _usage_number(row.cells[invocation_headers["token"]]) is None and row.cells[invocation_headers["token"]] not in {"N.A.", "Unavailable"}:
@@ -556,13 +637,17 @@ def _validate_usage_tables(
             ):
                 return False, "task_usage_components_invalid"
         turn_table, turn_headers = turns
-        for row in turn_table.rows[1:]:
+        turn_rows = turn_table.rows[1:]
+        turn_ids: set[str] = set()
+        for row in turn_rows:
             if len(row.cells) <= max(turn_headers.values()):
                 return False, "task_turn_row_incomplete"
             if re.fullmatch(r"[1-9][0-9,]*", row.cells[turn_headers["turn"]]) is None:
                 return False, "task_turn_ordinal_invalid"
-            if not row.cells[turn_headers["turn id"]]:
+            turn_id = _usage_identity(row, turn_headers["turn id"])
+            if turn_id is None or turn_id in turn_ids:
                 return False, "task_turn_id_missing"
+            turn_ids.add(turn_id)
             if _usage_number(row.cells[turn_headers["token"]]) is None and row.cells[turn_headers["token"]] not in {"N.A.", "Unavailable"}:
                 return False, "task_turn_token_invalid"
             if _usage_number(row.cells[turn_headers["estimated cost"]], cost=True) is None and row.cells[turn_headers["estimated cost"]] not in {"N.A.", "Unavailable"}:
@@ -575,6 +660,13 @@ def _validate_usage_tables(
                 row.cells[turn_headers["estimated cost"]],
             ):
                 return False, "task_turn_components_invalid"
+        if len(selected_rows) > 1:
+            return False, "task_usage_identity_invalid"
+        if len(invocation_rows) > 1 and not selected_rows:
+            return False, "task_usage_identity_invalid"
+        selected_parent = selected_rows[0] if selected_rows else (invocation_rows[0] if invocation_rows else None)
+        if selected_parent is None or not _usage_rollup_matches(selected_parent, turn_rows, invocation_headers["coverage"]):
+            return False, "task_usage_rollup_invalid"
     disclosures = [disclosure for table in parser.tables for row in table.rows for disclosure in row.disclosures]
     if not disclosures or not any(_validate_usage_disclosure(disclosure) for disclosure in disclosures):
         return False, "usage_components_invalid"

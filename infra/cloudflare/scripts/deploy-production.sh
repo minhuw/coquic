@@ -773,9 +773,10 @@ def rows(value: object) -> list[object] | None:
 
 
 items = rows(response)
-if not items or len(items) != 1 or not isinstance(items[0], dict):
-    raise ValueError("sample task evidence is missing or ambiguous")
-sample = items[0]
+MAX_SAMPLE_ROWS = 16_384
+if not items or len(items) > MAX_SAMPLE_ROWS or not all(isinstance(item, dict) for item in items):
+    raise ValueError("sample task evidence is missing, unbounded, or malformed")
+samples = [item for item in items if isinstance(item, dict)]
 
 token_fields = ("prompt_tokens", "cached_tokens", "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens")
 cost_fields = ("uncached_input_cost_micro_usd", "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd")
@@ -810,15 +811,19 @@ for group in metric_groups:
 allowed.update(f"turn_{field}" for field in (*token_fields, *cost_fields))
 private_key = re.compile(r"(?i)(?:api[_ -]?token|access[_ -]?key|password|secret|credential|private|prompt_text|raw|transcript|path|url)")
 private_value = re.compile(r"(?i)(?:file://|https?://|s3://|gs://|ssh://|wss?://|/home/|/media/|/tmp/|begin private key|authorization\s*:\s*bearer)")
-if set(sample) - allowed or any(private_key.search(str(key)) for key in sample if key not in allowed):
-    raise ValueError("sample row contains a private or unexpected field")
-if set(sample) != allowed:
-    raise ValueError("sample evidence shape is incomplete")
-if any(isinstance(value, str) and private_value.search(value) for value in sample.values()):
-    raise ValueError("sample row contains a private value")
+for sample in samples:
+    if set(sample) - allowed or any(private_key.search(str(key)) for key in sample if key not in allowed):
+        raise ValueError("sample row contains a private or unexpected field")
+    if set(sample) != allowed:
+        raise ValueError("sample evidence shape is incomplete")
+    if any(isinstance(value, str) and private_value.search(value) for value in sample.values()):
+        raise ValueError("sample row contains a private value")
 
 
-def text(name: str, *, optional: bool = False) -> str | None:
+first = samples[0]
+
+
+def row_text(sample: dict[str, object], name: str, *, optional: bool = False) -> str | None:
     item = sample[name]
     if item is None and optional:
         return None
@@ -827,7 +832,13 @@ def text(name: str, *, optional: bool = False) -> str | None:
     return item
 
 
-def integer(name: str, *, optional: bool = False, maximum: int = 9_007_199_254_740_991) -> int | None:
+def row_integer(
+    sample: dict[str, object],
+    name: str,
+    *,
+    optional: bool = False,
+    maximum: int = 9_007_199_254_740_991,
+) -> int | None:
     item = sample[name]
     if item is None and optional:
         return None
@@ -836,89 +847,72 @@ def integer(name: str, *, optional: bool = False, maximum: int = 9_007_199_254_7
     return item
 
 
-def state(name: str, expected: str) -> None:
-    if text(name) != expected:
+def same_field(name: str) -> object:
+    values = {sample[name] for sample in samples}
+    if len(values) != 1:
+        raise ValueError("sample repeated evidence is inconsistent")
+    return first[name]
+
+
+def state(sample: dict[str, object], name: str, expected: str) -> None:
+    if row_text(sample, name) != expected:
         raise ValueError("sample state is incoherent")
 
 
-publication_id = text("publication_id")
-task_id = text("task_id")
-generation_id = text("usage_generation_id")
-run_id = text("run_id")
-pipeline_id = text("pipeline_id")
-state("task_head_state", "visible")
-state("usage_head_state", "visible")
-state("usage_generation_state", "visible")
-state("publication_generation_state", "visible")
-if text("usage_head_task_id") != task_id or text("usage_head_generation_id") != generation_id:
+shared_fields = (
+    "publication_id", "task_id", "usage_generation_id", "task_head_state",
+    "usage_head_task_id", "usage_head_generation_id", "usage_head_state", "usage_generation_state",
+    "generation_publication_id", "generation_task_id", "generation_ownership_class",
+    "publication_generation_state", "task_lifecycle_state", "run_state", "run_id", "pipeline_id",
+    "task_summary_id", "task_summary_usage_generation_id", "task_summary_publication_id",
+    "task_summary_task_id", "task_summary_scope", "task_summary_run_id", "run_summary_id",
+    "run_summary_usage_generation_id", "run_summary_publication_id", "run_summary_task_id",
+    "run_summary_scope", "run_summary_run_id", "generation_expected_summary_count",
+    "generation_expected_invocation_count", "generation_expected_turn_count",
+    "generation_expected_price_count", "generation_expected_global_count", "run_invocation_count",
+    "run_turn_count", "run_count", "summary_count", "invocation_count", "turn_count",
+    "price_count",
+)
+for group in ("task_summary", "run_summary"):
+    shared_fields += tuple(
+        f"{group}_{field}"
+        for field in ("coverage", "covered_invocations", "expected_invocations", "known_token_subtotal", "known_cost_subtotal_micro_usd", *token_fields, *cost_fields)
+    )
+for name in shared_fields:
+    same_field(name)
+
+publication_id = row_text(first, "publication_id")
+task_id = row_text(first, "task_id")
+generation_id = row_text(first, "usage_generation_id")
+run_id = row_text(first, "run_id")
+pipeline_id = row_text(first, "pipeline_id")
+state(first, "task_head_state", "visible")
+state(first, "usage_head_state", "visible")
+state(first, "usage_generation_state", "visible")
+state(first, "publication_generation_state", "visible")
+if row_text(first, "usage_head_task_id") != task_id or row_text(first, "usage_head_generation_id") != generation_id:
     raise ValueError("sample usage head ownership is inconsistent")
-if text("generation_publication_id") != publication_id or text("generation_task_id") != task_id:
+if row_text(first, "generation_publication_id") != publication_id or row_text(first, "generation_task_id") != task_id:
     raise ValueError("sample generation ownership is inconsistent")
-if text("generation_ownership_class") != "task-owned":
+if row_text(first, "generation_ownership_class") != "task-owned":
     raise ValueError("sample generation ownership class is invalid")
-if text("task_lifecycle_state") not in {"active", "completed", "failed", "cancelled"}:
+if row_text(first, "task_lifecycle_state") not in {"active", "completed", "failed", "cancelled"}:
     raise ValueError("sample task state is invalid")
-if text("run_state") not in {"completed", "failed", "cancelled"}:
+if row_text(first, "run_state") not in {"completed", "failed", "cancelled"}:
     raise ValueError("sample run state is invalid")
-if text("task_summary_usage_generation_id") != generation_id or text("task_summary_publication_id") != publication_id or text("task_summary_task_id") != task_id:
+if row_text(first, "task_summary_usage_generation_id") != generation_id or row_text(first, "task_summary_publication_id") != publication_id or row_text(first, "task_summary_task_id") != task_id:
     raise ValueError("sample task summary ownership is inconsistent")
-if text("run_summary_usage_generation_id") != generation_id or text("run_summary_publication_id") != publication_id or text("run_summary_task_id") != task_id:
+if row_text(first, "run_summary_usage_generation_id") != generation_id or row_text(first, "run_summary_publication_id") != publication_id or row_text(first, "run_summary_task_id") != task_id:
     raise ValueError("sample run summary ownership is inconsistent")
-if text("task_summary_scope") != "task" or text("run_summary_scope") != "run":
+if row_text(first, "task_summary_scope") != "task" or row_text(first, "run_summary_scope") != "run":
     raise ValueError("sample summaries have invalid scopes")
-if text("task_summary_run_id", optional=True) is not None or text("run_summary_run_id") != run_id:
+if row_text(first, "task_summary_run_id", optional=True) is not None or row_text(first, "run_summary_run_id") != run_id:
     raise ValueError("sample summaries have invalid run ownership")
 
-for name in ("task_summary_id", "run_summary_id", "invocation_id", "turn_id", "global_id"):
-    text(name)
-if text("invocation_publication_id") != publication_id or text("invocation_task_id") != task_id:
-    raise ValueError("sample invocation ownership is inconsistent")
-if text("invocation_pipeline_id") != pipeline_id or text("invocation_run_id") != run_id:
-    raise ValueError("sample invocation run ownership is inconsistent")
-if text("invocation_ownership_class") != "task-owned":
-    raise ValueError("sample invocation ownership class is invalid")
-if text("turn_usage_generation_id") != generation_id or text("turn_invocation_id") != text("invocation_id"):
-    raise ValueError("sample turn ownership is inconsistent")
-if text("turn_publication_id") != publication_id or text("turn_task_id") != task_id or text("turn_run_id") != run_id:
-    raise ValueError("sample turn run ownership is inconsistent")
-if text("global_usage_generation_id") != generation_id or text("global_ownership_class") != "task-owned":
-    raise ValueError("sample global ownership is inconsistent")
-if text("global_period_kind") not in {"lifetime", "daily"}:
-    raise ValueError("sample global period is invalid")
-if text("global_period_key") != "lifetime" and text("global_period_kind") == "lifetime":
-    raise ValueError("sample global period key is invalid")
-if text("global_period_kind") == "daily" and re.fullmatch(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", text("global_period_key")) is None:
-    raise ValueError("sample daily period key is invalid")
-if not text("global_model"):
-    raise ValueError("sample global model is missing")
-state("global_head_state", "visible")
-if text("global_head_usage_generation_id") != generation_id or text("global_head_id") != text("global_id"):
-    raise ValueError("sample global head ownership is inconsistent")
-
-expected_counts = {
-    "summary_count": integer("generation_expected_summary_count"),
-    "invocation_count": integer("generation_expected_invocation_count"),
-    "turn_count": integer("generation_expected_turn_count"),
-    "price_count": integer("generation_expected_price_count"),
-    "global_count": integer("generation_expected_global_count"),
-}
-for name, expected in expected_counts.items():
-    actual = integer(name)
-    minimum = 0 if name == "price_count" else 1
-    if expected is None or actual is None or expected < minimum or actual != expected:
-        raise ValueError("sample generation counts are inconsistent")
-if integer("run_count") != 1 or integer("invocation_count") < 1 or integer("turn_count") < 1:
-    raise ValueError("sample usage level is missing")
-if integer("run_invocation_count") != integer("invocation_count") or integer("run_turn_count") != integer("turn_count"):
-    raise ValueError("sample run counts are inconsistent")
-if integer("retry_ordinal", maximum=4_096) is None or integer("turn_ordinal", maximum=4_096) is None or integer("turn_ordinal", maximum=4_096) < 1:
-    raise ValueError("sample retry or turn ordinal is invalid")
-
-
-def validate_metrics(prefix: str, *, turn: bool = False) -> tuple[int | None, ...]:
+def validate_metrics(sample: dict[str, object], prefix: str, *, turn: bool = False) -> tuple[int | None, ...]:
     values = tuple(sample[f"{prefix}_{field}"] for field in token_fields)
     for item in values:
-        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 9_007_199_254_740_991):
             raise ValueError("sample token metric is invalid")
     if all(item is not None for item in values):
         prompt, cached, uncached, completion, reasoning, total = values
@@ -928,30 +922,30 @@ def validate_metrics(prefix: str, *, turn: bool = False) -> tuple[int | None, ..
         raise ValueError("sample turn token evidence is incomplete")
     costs = tuple(sample[f"{prefix}_{field}"] for field in cost_fields)
     for item in costs:
-        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 9_007_199_254_740_991):
             raise ValueError("sample cost metric is invalid")
     if any(item is None for item in costs) and not all(item is None for item in costs):
         raise ValueError("sample cost state is mixed")
     return values
 
 
-def validate_coverage(prefix: str, count_name: str) -> None:
-    coverage = text(f"{prefix}_coverage")
+def validate_coverage(sample: dict[str, object], prefix: str, count_name: str) -> None:
+    coverage = row_text(sample, f"{prefix}_coverage")
     if coverage not in {"complete", "partial", "unavailable"}:
         raise ValueError("sample coverage is invalid")
     covered_name = f"{prefix}_covered_{count_name}"
     expected_name = f"{prefix}_expected_{count_name}"
-    covered = integer(covered_name)
-    expected = integer(expected_name)
+    covered = row_integer(sample, covered_name)
+    expected = row_integer(sample, expected_name)
     if covered is None or expected is None or covered > expected:
         raise ValueError("sample coverage counts are invalid")
     if coverage == "complete" and covered != expected:
         raise ValueError("sample complete coverage is inconsistent")
-    if coverage == "unavailable" and (
-        sample[f"{prefix}_known_token_subtotal"] is not None
-        or sample[f"{prefix}_known_cost_subtotal_micro_usd"] is not None
-    ):
-        raise ValueError("sample unavailable coverage has fabricated subtotals")
+    if coverage == "unavailable":
+        if sample[f"{prefix}_known_token_subtotal"] is not None or sample[f"{prefix}_known_cost_subtotal_micro_usd"] is not None:
+            raise ValueError("sample unavailable coverage has fabricated subtotals")
+        if any(sample[f"{prefix}_{field}"] is not None for field in (*token_fields, *cost_fields)):
+            raise ValueError("sample unavailable coverage has fabricated metrics")
     total = sample[f"{prefix}_total_tokens"]
     known_total = sample[f"{prefix}_known_token_subtotal"]
     if total is not None and known_total is not None and total != known_total:
@@ -962,19 +956,137 @@ def validate_coverage(prefix: str, count_name: str) -> None:
         raise ValueError("sample cost subtotal is inconsistent")
 
 
-for prefix in ("task_summary", "run_summary", "invocation", "global"):
-    validate_coverage(prefix, "invocations" if prefix != "invocation" else "turns")
-    validate_metrics(prefix)
-validate_metrics("turn", turn=True)
+for sample in samples:
+    for name in ("task_summary_id", "run_summary_id", "invocation_id", "turn_id", "global_id"):
+        row_text(sample, name)
+    if row_text(sample, "invocation_publication_id") != publication_id or row_text(sample, "invocation_task_id") != task_id:
+        raise ValueError("sample invocation ownership is inconsistent")
+    if row_text(sample, "invocation_pipeline_id") != pipeline_id or row_text(sample, "invocation_run_id") != run_id:
+        raise ValueError("sample invocation run ownership is inconsistent")
+    if row_text(sample, "invocation_ownership_class") != "task-owned":
+        raise ValueError("sample invocation ownership class is invalid")
+    if row_text(sample, "turn_usage_generation_id") != generation_id or row_text(sample, "turn_invocation_id") != row_text(sample, "invocation_id"):
+        raise ValueError("sample turn ownership is inconsistent")
+    if row_text(sample, "turn_publication_id") != publication_id or row_text(sample, "turn_task_id") != task_id or row_text(sample, "turn_run_id") != run_id:
+        raise ValueError("sample turn run ownership is inconsistent")
+    if row_text(sample, "global_usage_generation_id") != generation_id or row_text(sample, "global_ownership_class") != "task-owned":
+        raise ValueError("sample global ownership is inconsistent")
+    period_kind = row_text(sample, "global_period_kind")
+    if period_kind not in {"lifetime", "daily"}:
+        raise ValueError("sample global period is invalid")
+    period_key = row_text(sample, "global_period_key")
+    if period_kind == "lifetime" and period_key != "lifetime":
+        raise ValueError("sample lifetime period key is invalid")
+    if period_kind == "daily" and re.fullmatch(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", period_key or "") is None:
+        raise ValueError("sample daily period key is invalid")
+    state(sample, "global_head_state", "visible")
+    if row_text(sample, "global_head_usage_generation_id") != generation_id or row_text(sample, "global_head_id") != row_text(sample, "global_id"):
+        raise ValueError("sample global head ownership is inconsistent")
+    row_integer(sample, "retry_ordinal", maximum=4_096)
+    turn_ordinal = row_integer(sample, "turn_ordinal", maximum=4_096)
+    if turn_ordinal is None or turn_ordinal < 1:
+        raise ValueError("sample turn ordinal is invalid")
+    for prefix in ("task_summary", "run_summary", "invocation", "global"):
+        validate_coverage(sample, prefix, "turns" if prefix == "invocation" else "invocations")
+    validate_metrics(sample, prefix)
+    validate_metrics(sample, "turn", turn=True)
 
-if text("invocation_model") != text("global_model"):
-    raise ValueError("sample invocation and global models differ")
-if integer("run_invocation_count") == 1:
-    for field in token_fields:
-        values = [sample[f"{prefix}_{field}"] for prefix in ("task_summary", "run_summary", "invocation", "turn", "global")]
-        known = [item for item in values if item is not None]
-        if known and len(set(known)) != 1:
+
+def identity_records(prefix: str, fields: tuple[str, ...]) -> dict[str, dict[str, object]]:
+    records: dict[str, dict[str, object]] = {}
+    for sample in samples:
+        identity = row_text(sample, f"{prefix}_id")
+        assert identity is not None
+        if identity in records and any(records[identity][field] != sample[field] for field in fields):
+            raise ValueError(f"sample {prefix} identity is contradictory")
+        records.setdefault(identity, sample)
+    return records
+
+
+invocation_fields = (
+    "invocation_publication_id", "invocation_task_id", "invocation_pipeline_id", "invocation_run_id",
+    "invocation_ownership_class", "retry_ordinal", "invocation_model", "invocation_coverage",
+    "invocation_covered_turns", "invocation_expected_turns", "invocation_known_token_subtotal",
+    "invocation_known_cost_subtotal_micro_usd", *(f"invocation_{field}" for field in (*token_fields, *cost_fields)),
+)
+turn_fields = (
+    "turn_usage_generation_id", "turn_invocation_id", "turn_publication_id", "turn_task_id", "turn_run_id",
+    "turn_ordinal", *(f"turn_{field}" for field in (*token_fields, *cost_fields)),
+)
+global_fields = (
+    "global_usage_generation_id", "global_head_usage_generation_id", "global_head_id", "global_head_state",
+    "global_period_kind", "global_period_key", "global_model", "global_ownership_class",
+    *(f"global_{field}" for field in ("coverage", "covered_invocations", "expected_invocations", "known_token_subtotal", "known_cost_subtotal_micro_usd", *token_fields, *cost_fields)),
+)
+invocations = identity_records("invocation", invocation_fields)
+turns = identity_records("turn", turn_fields)
+globals = identity_records("global", global_fields)
+if len({(row["invocation_id"], row["turn_id"], row["global_id"]) for row in samples}) != len(samples):
+    raise ValueError("sample evidence contains duplicate invocation, turn, and global rows")
+
+for name, expected_name, minimum in (
+    ("summary_count", "generation_expected_summary_count", 1),
+    ("invocation_count", "generation_expected_invocation_count", 1),
+    ("turn_count", "generation_expected_turn_count", 1),
+    ("price_count", "generation_expected_price_count", 0),
+    ("global_count", "generation_expected_global_count", 1),
+):
+    expected = row_integer(first, expected_name)
+    actual = row_integer(first, name)
+    if expected is None or actual is None or expected < minimum or actual != expected:
+        raise ValueError("sample generation counts are inconsistent")
+if row_integer(first, "invocation_count") != len(invocations) or row_integer(first, "turn_count") != len(turns) or row_integer(first, "global_count") != len(globals):
+    raise ValueError("sample evidence does not cover every counted row")
+if row_integer(first, "run_count") != 1 or row_integer(first, "run_invocation_count") != len(invocations) or row_integer(first, "run_turn_count") != len(turns):
+    raise ValueError("sample run counts are inconsistent")
+for prefix in ("task_summary", "run_summary"):
+    if row_text(first, f"{prefix}_coverage") == "complete":
+        if row_integer(first, f"{prefix}_covered_invocations") != len(invocations) or row_integer(first, f"{prefix}_expected_invocations") != len(invocations):
+            raise ValueError("sample summary coverage is inconsistent")
+
+turns_by_invocation: dict[str, list[dict[str, object]]] = {}
+for turn in turns.values():
+    turns_by_invocation.setdefault(row_text(turn, "turn_invocation_id") or "", []).append(turn)
+for invocation_id, invocation in invocations.items():
+    children = turns_by_invocation.get(invocation_id, [])
+    covered = row_integer(invocation, "invocation_covered_turns")
+    expected = row_integer(invocation, "invocation_expected_turns")
+    if covered is None or expected is None or covered != len(children) or covered > expected:
+        raise ValueError("sample invocation turn coverage is inconsistent")
+
+
+def rollup_metrics(parent: dict[str, object], parent_prefix: str, children: list[dict[str, object]], child_prefix: str) -> None:
+    if row_text(parent, f"{parent_prefix}_coverage") != "complete":
+        return
+    for field in (*token_fields, *cost_fields):
+        values = [child[f"{child_prefix}_{field}"] for child in children]
+        if not values:
+            total = None
+        elif all(value is None for value in values):
+            total = None
+        elif any(value is None for value in values):
+            raise ValueError("sample complete rollup has unknown child metrics")
+        else:
+            total = sum(value for value in values if isinstance(value, int))
+        if parent[f"{parent_prefix}_{field}"] != total:
             raise ValueError("sample usage levels disagree")
+
+
+rollup_metrics(first, "task_summary", list(invocations.values()), "invocation")
+rollup_metrics(first, "run_summary", list(invocations.values()), "invocation")
+for invocation_id, invocation in invocations.items():
+    rollup_metrics(invocation, "invocation", turns_by_invocation.get(invocation_id, []), "turn")
+
+models = {row_text(invocation, "invocation_model") for invocation in invocations.values()}
+for global_row in globals.values():
+    model = row_text(global_row, "global_model")
+    if model not in models:
+        raise ValueError("sample global model is unrelated to selected task")
+    matching = [invocation for invocation in invocations.values() if row_text(invocation, "invocation_model") == model]
+    if row_text(global_row, "global_coverage") == "complete":
+        expected = row_integer(global_row, "global_expected_invocations")
+        if expected == len(matching):
+            rollup_metrics(global_row, "global", matching, "invocation")
 print("valid")
 PY
   then
@@ -1168,8 +1280,7 @@ if [[ "${mode}" == "activate" ]]; then
    AND u.run_id = i.run_id
   JOIN usage_globals AS g
     ON g.usage_generation_id = ug.usage_generation_id
-   AND g.ownership_class = 'task-owned'
-   AND g.model = i.model
+    AND g.ownership_class = 'task-owned'
   JOIN usage_global_heads AS gh
     ON gh.global_id = g.global_id
    AND gh.usage_generation_id = g.usage_generation_id
@@ -1180,7 +1291,7 @@ if [[ "${mode}" == "activate" ]]; then
    AND gh.state = 'visible'
   WHERE th.state = 'visible'
   ORDER BY r.run_id, i.retry_ordinal, i.invocation_id, u.ordinal, g.period_kind, g.period_key, g.model
-  LIMIT 1"
+  LIMIT 16385"
   if ! "${wrangler_bin}" d1 execute "${steward_d1_database_id}" \
     --remote \
     --command "${sample_query}" \

@@ -308,6 +308,34 @@ def test_usage_checker_rejects_label_only_canned_evidence(tmp_path: Path) -> Non
     assert _statuses(result, "usage_global_structure") == ["fail"]
 
 
+def test_usage_checker_reconciles_invocation_identity_and_turn_rollup(tmp_path: Path) -> None:
+    responses = _populated_responses()
+    task_path = next(path for path in responses if path.startswith("/steward/tasks/"))
+    body = responses[task_path].body.replace(b"invocation-1", b"invocation-15").replace(b"turn-1", b"turn-777")
+    body = body.replace(
+        b'<td>Complete - 1/1 turns</td><td>15</td><td>N.A.</td><td>N.A.</td><td><details>',
+        b'<td>Complete - 1/1 turns</td><td>777</td><td>N.A.</td><td>N.A.</td><td><details>',
+        1,
+    )
+    original = b'<dt>Prompt tokens</dt><dd>10</dd><dt>Cached tokens</dt><dd>2</dd><dt>Uncached tokens</dt><dd>8</dd><dt>Completion tokens</dt><dd>5</dd><dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>15</dd>'
+    replacement = b'<dt>Prompt tokens</dt><dd>500</dd><dt>Cached tokens</dt><dd>2</dd><dt>Uncached tokens</dt><dd>498</dd><dt>Completion tokens</dt><dd>277</dd><dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>777</dd>'
+    prefix, separator, suffix = body.rpartition(original)
+    assert separator
+    body = prefix + replacement + suffix
+    responses[task_path].body = body
+    with FixtureServer(responses) as server:
+        completed, result = _run_check(server.base_url, tmp_path)
+
+    assert completed.returncode == 1
+    assert result["ok"] is False
+    assert _statuses(result, "usage_task_structure") == ["fail"]
+    assert any(
+        check.get("detail") == "task_usage_rollup_invalid"
+        for check in result["checks"]
+        if check["name"] == "usage_task_structure"
+    )
+
+
 @pytest.mark.parametrize("case", ["missing", "wrong_version", "malformed", "private", "oversize", "slow"])
 def test_invalid_publication_paths_fail_without_response_values(case: str, tmp_path: Path) -> None:
     responses = _empty_responses()

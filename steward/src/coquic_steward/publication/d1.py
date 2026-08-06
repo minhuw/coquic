@@ -9,6 +9,7 @@ single final batch is the only operation that can change a public head.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -123,6 +124,7 @@ class StageReceipt:
     task_id: str
     run_id: str
     staged: bool = True
+    usage_generation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,30 @@ class HideReceipt:
     publication_id: str | None
     state: str = "hidden"
     changed: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class OverheadReceipt:
+    """Receipt for one aggregate-only Steward-overhead reconciliation."""
+
+    date: str | None = None
+    model: str | None = None
+    digest: str | None = None
+    state: str = "visible"
+    changed: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class UsageBackfillReceipt:
+    """Bounded result from a cached-D1 N.A.-cost backfill."""
+
+    task_id: str | None = None
+    old_usage_generation_id: str | None = None
+    usage_generation_id: str | None = None
+    processed_turns: int = 0
+    changed: bool = False
+    next_cursor: str | None = None
+    blocked_reason: str | None = None
 
 
 _TOP_LEVEL = frozenset(
@@ -530,6 +556,249 @@ def _verified_global_rollups(invocations: Sequence[Mapping[str, Any]]) -> dict[t
     return result
 
 
+def _object_mapping(value: object) -> Mapping[str, Any] | None:
+    """Detach a small model-like value without importing control-loop types."""
+
+    if isinstance(value, Mapping):
+        return value
+    for name in ("public_dict", "model_dump", "as_dict"):
+        method = getattr(value, name, None)
+        if callable(method):
+            try:
+                candidate = method(by_alias=True, mode="json") if name == "model_dump" else method()
+            except TypeError:
+                try:
+                    candidate = method()
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            if isinstance(candidate, Mapping):
+                return candidate
+    return None
+
+
+_OVERHEAD_PUBLIC_KEYS = frozenset({"date", "model", "ownerClass", "tokens", "cost", "coverage"})
+_OVERHEAD_TOKEN_KEYS = frozenset({
+    "inputTokens", "cachedInputTokens", "uncachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens",
+})
+_OVERHEAD_COST_KEYS = frozenset({"uncachedInputMicroUsd", "cachedInputMicroUsd", "outputMicroUsd", "totalMicroUsd"})
+_OVERHEAD_COVERAGE_KEYS = frozenset({"status", "coveredInvocations", "expectedInvocations"})
+
+
+def _overhead_public_mapping(value: object) -> dict[str, Any]:
+    """Return the strict public allowlist used for producer/D1 digesting."""
+
+    row = _object_mapping(value)
+    if row is None:
+        _invalid(D1ErrorCode.generation_conflict)
+    if _OVERHEAD_PUBLIC_KEYS <= frozenset(row):
+        if frozenset(row) != _OVERHEAD_PUBLIC_KEYS:
+            _invalid(D1ErrorCode.generation_conflict)
+        tokens = _object_mapping(row["tokens"])
+        costs = _object_mapping(row["cost"])
+        coverage = _object_mapping(row["coverage"])
+        if tokens is None or costs is None or coverage is None:
+            _invalid(D1ErrorCode.generation_conflict)
+        if frozenset(tokens) != _OVERHEAD_TOKEN_KEYS or frozenset(costs) != _OVERHEAD_COST_KEYS or frozenset(coverage) != _OVERHEAD_COVERAGE_KEYS:
+            _invalid(D1ErrorCode.generation_conflict)
+        if not isinstance(row["date"], str) or not isinstance(row["model"], str):
+            _invalid(D1ErrorCode.generation_conflict)
+        if row["ownerClass"] != "Steward overhead":
+            _invalid(D1ErrorCode.generation_conflict)
+        return {
+            "date": row["date"],
+            "model": row["model"],
+            "ownerClass": "Steward overhead",
+            "tokens": dict(tokens),
+            "cost": dict(costs),
+            "coverage": dict(coverage),
+        }
+    # Normalized rows are accepted only by the local helper/tests.  They are
+    # never accepted as a model-like producer value and retain their exact
+    # allowlist for deterministic replay.
+    normalized_keys = {
+        "periodKind", "periodKey", "model", "ownershipClass", "coverage", "coveredInvocations", "expectedInvocations",
+        "knownTokenSubtotal", "knownCostSubtotalMicroUsd", *_USAGE_FIELDS, "priceProvenanceDigest", "aggregateOnly",
+    }
+    if frozenset(row) != normalized_keys:
+        _invalid(D1ErrorCode.generation_conflict)
+    normalized = dict(row)
+    if normalized.get("periodKind") not in {"daily", "lifetime"}:
+        _invalid(D1ErrorCode.generation_conflict)
+    period_key = normalized.get("periodKey")
+    if normalized["periodKind"] == "lifetime":
+        if period_key != "lifetime":
+            _invalid(D1ErrorCode.generation_conflict)
+    elif not isinstance(period_key, str) or re.fullmatch(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", period_key) is None:
+        _invalid(D1ErrorCode.generation_conflict)
+    try:
+        if normalized["periodKind"] == "daily":
+            datetime.fromisoformat(period_key).date()
+    except (TypeError, ValueError):
+        _invalid(D1ErrorCode.generation_conflict)
+    _text(normalized.get("model"), maximum=256)
+    if normalized.get("ownershipClass") != "steward-overhead" or normalized.get("aggregateOnly") is not True:
+        _invalid(D1ErrorCode.generation_conflict)
+    covered = _usage_integer(normalized.get("coveredInvocations"), allow_none=False)
+    expected = _usage_integer(normalized.get("expectedInvocations"), allow_none=False)
+    if covered > expected or (normalized.get("coverage") == "complete" and covered != expected):
+        _invalid(D1ErrorCode.generation_conflict)
+    if normalized.get("coverage") not in {"complete", "partial", "unavailable"}:
+        _invalid(D1ErrorCode.generation_conflict)
+    _usage_math(normalized)
+    if normalized.get("coverage") == "unavailable" and any(normalized.get(field) is not None for field in _USAGE_FIELDS):
+        _invalid(D1ErrorCode.generation_conflict)
+    if normalized.get("knownTokenSubtotal") is not None:
+        _usage_integer(normalized["knownTokenSubtotal"])
+    if normalized.get("knownCostSubtotalMicroUsd") is not None:
+        _usage_integer(normalized["knownCostSubtotalMicroUsd"])
+    if normalized.get("totalTokens") is not None and normalized.get("knownTokenSubtotal") != normalized.get("totalTokens"):
+        _invalid(D1ErrorCode.generation_conflict)
+    if normalized.get("totalCostMicroUsd") is not None and normalized.get("knownCostSubtotalMicroUsd") != normalized.get("totalCostMicroUsd"):
+        _invalid(D1ErrorCode.generation_conflict)
+    if normalized.get("priceProvenanceDigest") is not None:
+        _invalid(D1ErrorCode.generation_conflict)
+    return normalized
+
+
+def _overhead_row(value: object) -> dict[str, Any]:
+    """Normalize one aggregate overhead row to the public global shape."""
+
+    row = _overhead_public_mapping(value)
+    if "periodKey" in row:
+        # A normalized row is already in the D1 global shape.
+        return dict(row)
+    date = row.get("date", row.get("periodKey"))
+    model = row.get("model")
+    owner = row.get("ownerClass", row.get("owner_class", row.get("ownershipClass")))
+    if not isinstance(date, str) or re.fullmatch(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", date) is None:
+        _invalid(D1ErrorCode.generation_conflict)
+    try:
+        datetime.fromisoformat(date).date()
+    except ValueError:
+        _invalid(D1ErrorCode.generation_conflict)
+    model = _text(model, maximum=256)
+    if owner not in {None, "Steward overhead", "steward-overhead"}:
+        _invalid(D1ErrorCode.generation_conflict)
+    tokens = _object_mapping(row.get("tokens")) or row
+    costs = _object_mapping(row.get("cost")) or row
+    coverage = _object_mapping(row.get("coverage")) or row
+    def pick(values: Mapping[str, Any], *names: str) -> Any:
+        for name in names:
+            if name in values:
+                return values[name]
+        return None
+
+    token_values = {
+        "promptTokens": pick(tokens, "inputTokens", "input_tokens", "promptTokens", "prompt_tokens"),
+        "cachedTokens": pick(tokens, "cachedInputTokens", "cached_input_tokens", "cachedTokens", "cached_tokens"),
+        "uncachedTokens": pick(tokens, "uncachedInputTokens", "uncached_input_tokens", "uncachedTokens", "uncached_tokens"),
+        "completionTokens": pick(tokens, "outputTokens", "output_tokens", "completionTokens", "completion_tokens"),
+        "reasoningTokens": pick(tokens, "reasoningOutputTokens", "reasoning_output_tokens", "reasoningTokens", "reasoning_tokens"),
+        "totalTokens": pick(tokens, "totalTokens", "total_tokens"),
+    }
+    cost_values = {
+        "uncachedInputCostMicroUsd": pick(costs, "uncachedInputMicroUsd", "uncached_input_micro_usd", "uncachedInputCostMicroUsd", "uncached_input_cost_micro_usd"),
+        "cachedInputCostMicroUsd": pick(costs, "cachedInputMicroUsd", "cached_input_micro_usd", "cachedInputCostMicroUsd", "cached_input_cost_micro_usd"),
+        "outputCostMicroUsd": pick(costs, "outputMicroUsd", "output_micro_usd", "outputCostMicroUsd", "output_cost_micro_usd"),
+        "totalCostMicroUsd": pick(costs, "totalMicroUsd", "total_micro_usd", "totalCostMicroUsd", "total_cost_micro_usd"),
+    }
+    status = coverage.get("status", coverage.get("coverage"))
+    status_map = {"Complete": "complete", "Partial": "partial", "N.A.": "unavailable", "complete": "complete", "partial": "partial", "unavailable": "unavailable"}
+    if status is not None and status not in status_map:
+        _invalid(D1ErrorCode.generation_conflict)
+    normalized_status = status_map.get(status, "unavailable")
+    covered = coverage.get("coveredInvocations", coverage.get("covered_invocations", 0))
+    expected = coverage.get("expectedInvocations", coverage.get("expected_invocations", 0))
+    covered = _usage_integer(covered, allow_none=False)
+    expected = _usage_integer(expected, allow_none=False)
+    if covered > expected:
+        _invalid(D1ErrorCode.generation_conflict)
+    if normalized_status == "complete" and covered != expected:
+        _invalid(D1ErrorCode.generation_conflict)
+    for field, item in (*token_values.items(), *cost_values.items()):
+        _usage_integer(item)
+    if normalized_status == "unavailable":
+        for field in (*token_values, *cost_values):
+            token_values[field] = None
+        known_token = None
+        known_cost = None
+    else:
+        known_token = token_values["totalTokens"]
+        known_cost = cost_values["totalCostMicroUsd"]
+    normalized = {
+        "periodKind": "daily",
+        "periodKey": date,
+        "model": model,
+        "ownershipClass": "steward-overhead",
+        "coverage": normalized_status,
+        "coveredInvocations": covered,
+        "expectedInvocations": expected,
+        "knownTokenSubtotal": known_token,
+        "knownCostSubtotalMicroUsd": known_cost,
+        **token_values,
+        **cost_values,
+        "priceProvenanceDigest": None,
+        "aggregateOnly": True,
+    }
+    _usage_math(normalized)
+    return normalized
+
+
+def _overhead_public_value(normalized: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "date": normalized["periodKey"],
+        "model": normalized["model"],
+        "ownerClass": "Steward overhead",
+        "tokens": {
+            "inputTokens": normalized["promptTokens"],
+            "cachedInputTokens": normalized["cachedTokens"],
+            "uncachedInputTokens": normalized["uncachedTokens"],
+            "outputTokens": normalized["completionTokens"],
+            "reasoningOutputTokens": normalized["reasoningTokens"],
+            "totalTokens": normalized["totalTokens"],
+        },
+        "cost": {
+            "uncachedInputMicroUsd": normalized["uncachedInputCostMicroUsd"],
+            "cachedInputMicroUsd": normalized["cachedInputCostMicroUsd"],
+            "outputMicroUsd": normalized["outputCostMicroUsd"],
+            "totalMicroUsd": normalized["totalCostMicroUsd"],
+        },
+        "coverage": {
+            "status": {"complete": "Complete", "partial": "Partial", "unavailable": "N.A."}[normalized["coverage"]],
+            "coveredInvocations": normalized["coveredInvocations"],
+            "expectedInvocations": normalized["expectedInvocations"],
+        },
+    }
+
+
+def _overhead_digest(rows: Sequence[Mapping[str, Any]], supplied: object | None = None) -> str:
+    canonical_rows: list[dict[str, Any]] = []
+    for row in rows:
+        mapping = _overhead_public_mapping(row)
+        if "periodKey" in mapping:
+            canonical_rows.append(_overhead_public_value(_overhead_row(mapping)))
+        else:
+            # Digest the producer allowlist before semantic math validation so
+            # a supplied digest mismatch remains the reported failure class.
+            canonical_rows.append(dict(mapping))
+    canonical_rows.sort(key=lambda row: (row["date"], row["model"]))
+    # A single row is the producer's public_dict representation.  A bounded
+    # multi-row call is represented as a canonical sorted list of those rows.
+    value: object = canonical_rows[0] if len(canonical_rows) == 1 else canonical_rows
+    try:
+        canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        _invalid(D1ErrorCode.generation_conflict)
+    computed = hashlib.sha256(canonical).hexdigest()
+    if supplied is not None:
+        supplied_digest = _digest(supplied)
+        if not hmac.compare_digest(supplied_digest, computed):
+            _invalid(D1ErrorCode.digest_mismatch)
+    return computed
+
+
 def _validate_usage(
     payload: Mapping[str, Any],
     pipeline_ids: set[str],
@@ -828,7 +1097,14 @@ def _validate_usage(
             key = (row["periodKind"], row["periodKey"], row["model"], row["ownershipClass"])
             expected = verified_globals.get(key)
             if expected is not None:
-                if any(row[field] != expected[field] for field in _GLOBAL_VALUE_FIELDS):
+                if any(
+                    row[field] != expected[field]
+                    and not (
+                        field == "coverage"
+                        and {row[field], expected[field]} == {"partial", "complete"}
+                    )
+                    for field in _GLOBAL_VALUE_FIELDS
+                ):
                     _invalid(D1ErrorCode.generation_conflict)
             elif row["coverage"] != "unavailable" or any(row[field] is not None for field in _USAGE_FIELDS):
                 # A numeric task-owned aggregate without a matching, verified
@@ -1011,9 +1287,9 @@ _GENERATION_INSERT = (
 )
 _USAGE_GENERATION_INSERT = (
     "INSERT INTO usage_generations "
-    "(usage_generation_id, publication_id, task_id, schema_version, metadata_digest, state, "
+    "(usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, "
     "expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, "
-    "expected_global_count, created_at) VALUES (?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?, ?) "
+    "expected_global_count, created_at) VALUES (?, ?, ?, 'task-owned', ?, ?, 'staged', ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT(usage_generation_id) DO NOTHING"
 )
 _TASK_INSERT = (
@@ -1082,7 +1358,7 @@ _GENERATION_SELECT = (
     "FROM publication_generations WHERE publication_id = ? AND task_id = ?"
 )
 _USAGE_GENERATION_SELECT = (
-    "SELECT usage_generation_id, publication_id, task_id, schema_version, metadata_digest, state, "
+    "SELECT usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, "
     "expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, "
     "expected_global_count, created_at FROM usage_generations "
     "WHERE usage_generation_id = ? AND publication_id = ? AND task_id = ?"
@@ -1101,7 +1377,7 @@ _VERIFY_COUNTS = (
     "FROM publication_generations AS p WHERE p.publication_id = ? AND p.task_id = ?"
 )
 _VERIFY_USAGE_COUNTS = (
-    "SELECT u.state, u.metadata_digest, u.expected_summary_count, u.expected_invocation_count, "
+    "SELECT u.state, u.ownership_class, u.metadata_digest, u.expected_summary_count, u.expected_invocation_count, "
     "u.expected_turn_count, u.expected_price_count, u.expected_global_count, "
     "(SELECT count(*) FROM usage_summaries WHERE usage_generation_id = u.usage_generation_id) AS summary_count, "
     "(SELECT count(*) FROM usage_invocations WHERE usage_generation_id = u.usage_generation_id) AS invocation_count, "
@@ -1147,7 +1423,7 @@ _PRICE_NEXT_SELECT = (
     "ORDER BY effective_at, price_entry_digest LIMIT 2"
 )
 _USAGE_GLOBAL_SELECT = "SELECT global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest, aggregate_only FROM usage_globals WHERE usage_generation_id = ? ORDER BY global_id"
-_HEAD_SELECT = "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?"
+_HEAD_SELECT = "SELECT publication_id, usage_generation_id, state, updated_at FROM task_heads WHERE task_id = ?"
 _GLOBAL_HEAD_KEY_SELECT = (
     "SELECT h.period_kind, h.period_key, h.model, h.ownership_class, h.usage_generation_id, h.global_id, h.state, "
     "g.coverage, g.covered_invocations, g.expected_invocations, g.known_token_subtotal, "
@@ -1304,6 +1580,51 @@ _TASK_USAGE_SWAP = (
 )
 _STAGED_GENERATION_SELECT = "SELECT publication_id FROM publication_generations WHERE task_id = ? AND state = 'staged'"
 _STAGED_USAGE_GENERATION_SELECT = "SELECT usage_generation_id FROM usage_generations WHERE task_id = ? AND state = 'staged'"
+
+# Overhead has an independently owned generation with no task/publication
+# identity.  Its one global is exposed through the shared global-head table,
+# never through task or usage heads.
+_OVERHEAD_GENERATION_INSERT = (
+    "INSERT INTO usage_generations "
+    "(usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, "
+    "expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, "
+    "expected_global_count, created_at) VALUES (?, NULL, NULL, 'steward-overhead', '1.0', ?, 'staged', 0, 0, 0, 0, 1, ?) "
+    "ON CONFLICT(usage_generation_id) DO NOTHING"
+)
+_OVERHEAD_GENERATION_SELECT = (
+    "SELECT usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, "
+    "expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, expected_global_count, created_at "
+    "FROM usage_generations WHERE usage_generation_id = ?"
+)
+_OVERHEAD_GLOBAL_SELECT = (
+    "SELECT global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, "
+    "covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, "
+    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
+    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
+    "price_provenance_digest, aggregate_only FROM usage_globals WHERE usage_generation_id = ?"
+)
+_OVERHEAD_GLOBAL_INSERT = (
+    "INSERT INTO usage_globals "
+    "(global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, "
+    "covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, "
+    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
+    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
+    "price_provenance_digest, aggregate_only) VALUES (?, ?, ?, ?, ?, 'steward-overhead', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1) "
+    "ON CONFLICT(global_id) DO NOTHING"
+)
+_VISIBLE_NA_TURNS_SELECT = (
+    "SELECT t.turn_id, t.usage_generation_id, t.invocation_id, t.publication_id, t.task_id, t.run_id, "
+    "t.ordinal, t.prompt_tokens, t.cached_tokens, t.uncached_tokens, t.completion_tokens, "
+    "t.reasoning_tokens, t.total_tokens, t.uncached_input_cost_micro_usd, t.cached_input_cost_micro_usd, "
+    "t.output_cost_micro_usd, t.total_cost_micro_usd, t.price_entry_digest, i.model, i.started_at, "
+    "i.billing_mode, i.coverage AS invocation_coverage, h.usage_generation_id AS head_usage_generation_id "
+    "FROM usage_turns AS t JOIN usage_invocations AS i ON i.invocation_id = t.invocation_id "
+    "JOIN task_heads AS h ON h.task_id = t.task_id AND h.usage_generation_id = t.usage_generation_id "
+    "WHERE h.state = 'visible' AND t.usage_generation_id = h.usage_generation_id "
+    "AND (t.total_cost_micro_usd IS NULL OR t.uncached_input_cost_micro_usd IS NULL "
+    "OR t.cached_input_cost_micro_usd IS NULL OR t.output_cost_micro_usd IS NULL) "
+    "AND (t.turn_id > ? OR ? IS NULL) ORDER BY t.turn_id LIMIT ?"
+)
 
 
 def _row_values(row: object) -> Mapping[str, Any]:
@@ -1540,6 +1861,7 @@ class D1PublicationClient:
             generation["usageGenerationId"],
             payload["publicationId"],
             payload["taskId"],
+            "task-owned",
             generation["schemaVersion"],
             generation["metadataDigest"],
             "staged",
@@ -1585,6 +1907,7 @@ class D1PublicationClient:
                 "usage_generation_id",
                 "publication_id",
                 "task_id",
+                "ownership_class",
                 "schema_version",
                 "metadata_digest",
                 "state",
@@ -1597,15 +1920,15 @@ class D1PublicationClient:
             )
         )
         expected = self._usage_generation_expected(payload)
-        if actual[5] == "superseded":
-            if not allow_superseded or actual[:5] != expected[:5] or actual[6:] != expected[6:]:
+        if actual[6] == "superseded":
+            if not allow_superseded or actual[:6] != expected[:6] or actual[7:] != expected[7:]:
                 _invalid(D1ErrorCode.generation_state)
             return "superseded"
-        if actual != expected and not (actual[:5] == expected[:5] and actual[6:] == expected[6:] and actual[5] == "visible"):
+        if actual != expected and not (actual[:6] == expected[:6] and actual[7:] == expected[7:] and actual[6] == "visible"):
             _invalid(D1ErrorCode.generation_conflict)
-        if actual[5] not in {"staged", "visible"}:
+        if actual[6] not in {"staged", "visible"}:
             _invalid(D1ErrorCode.generation_state)
-        return actual[5]
+        return actual[6]
 
     def _usage_stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
         """Build only the bounded rows belonging to a detached usage generation."""
@@ -2694,6 +3017,7 @@ class D1PublicationClient:
                     "usage_generation_id",
                     "publication_id",
                     "task_id",
+                    "ownership_class",
                     "schema_version",
                     "metadata_digest",
                     "state",
@@ -2705,7 +3029,7 @@ class D1PublicationClient:
                     "created_at",
                 )
             )
-            if actual != expected and not (actual[:5] == expected[:5] and actual[6:] == expected[6:] and actual[5] in {"visible", "superseded"}):
+            if actual != expected and not (actual[:6] == expected[:6] and actual[7:] == expected[7:] and actual[6] in {"visible", "superseded"}):
                 _invalid(D1ErrorCode.generation_conflict)
             if row.get("state") not in {"staged", "visible", "superseded"}:
                 _invalid(D1ErrorCode.generation_state)
@@ -2728,6 +3052,378 @@ class D1PublicationClient:
         rows = self._query(_statement(_USAGE_GENERATION_ID_SELECT, usage_generation["usageGenerationId"]))
         if any(row.get("publication_id") != payload["publicationId"] or row.get("task_id") != payload["taskId"] for row in rows):
             _invalid(D1ErrorCode.generation_conflict)
+
+    def _visible_usage_payload(self, task_id: str, usage_generation_id: str) -> dict[str, Any]:
+        """Rebuild a complete replacement envelope from public D1 rows only."""
+
+        head_rows = self._query(_statement(_HEAD_SELECT, task_id))
+        if len(head_rows) != 1 or head_rows[0].get("state") != "visible":
+            _invalid(D1ErrorCode.generation_state)
+        head = head_rows[0]
+        publication_id = _id(head.get("publication_id"))
+        if head.get("usage_generation_id") != usage_generation_id:
+            _invalid(D1ErrorCode.generation_conflict)
+        generation_rows = self._query(_statement(_GENERATION_SELECT, publication_id, task_id))
+        usage_generation_rows = self._query(_statement(_USAGE_GENERATION_SELECT, usage_generation_id, publication_id, task_id))
+        if len(generation_rows) != 1 or len(usage_generation_rows) != 1:
+            _invalid(D1ErrorCode.generation_state)
+        generation = generation_rows[0]
+        usage_generation = usage_generation_rows[0]
+        task_rows = self._query(_statement(_TASK_SELECT, publication_id))
+        pipeline_rows = self._query(_statement(_PIPELINE_SELECT, publication_id))
+        run_rows = self._query(_statement(_RUN_SELECT, publication_id))
+        event_rows = self._query(_statement(_EVENT_SELECT, publication_id))
+        artifact_rows = self._query(_statement(_ARTIFACT_SELECT, publication_id))
+        if len(task_rows) != 1:
+            _invalid(D1ErrorCode.generation_state)
+        task = task_rows[0]
+        usage_summaries = self._query(_statement(_USAGE_SUMMARY_SELECT, usage_generation_id))
+        usage_invocations = self._query(_statement(_USAGE_INVOCATION_SELECT, usage_generation_id))
+        usage_turns = self._query(_statement(_USAGE_TURN_SELECT, usage_generation_id))
+        usage_globals = self._query(_statement(_USAGE_GLOBAL_SELECT, usage_generation_id))
+        usage_prices = self._query(_statement(_USAGE_PRICE_SELECT, usage_generation_id, usage_generation_id, usage_generation_id, usage_generation_id))
+
+        def row_map(raw: Mapping[str, Any], fields: Sequence[tuple[str, str]]) -> dict[str, Any]:
+            return {public: raw.get(database) for public, database in fields}
+
+        payload: dict[str, Any] = {
+            "schemaVersion": "2.0",
+            "publicationId": publication_id,
+            "taskId": task_id,
+            "generation": {
+                "publicationId": publication_id,
+                "taskId": task_id,
+                "runId": generation.get("run_id"),
+                "metadataDigest": generation.get("metadata_digest"),
+                "idempotencyKey": generation.get("idempotency_key"),
+                "state": "staged",
+                "expectedCounts": {
+                    "tasks": generation.get("expected_task_count"),
+                    "pipelines": generation.get("expected_pipeline_count"),
+                    "runs": generation.get("expected_run_count"),
+                    "events": generation.get("expected_event_count"),
+                    "artifacts": generation.get("expected_artifact_count"),
+                },
+                "createdAt": generation.get("created_at"),
+            },
+            "headIntent": {
+                "publicationId": publication_id,
+                "taskId": task_id,
+                "state": "visible",
+                "updatedAt": head.get("updated_at"),
+            },
+            "task": row_map(task, (("taskId", "task_id"), ("title", "title"), ("lifecycleState", "lifecycle_state"), ("createdAt", "created_at"), ("completedAt", "completed_at"))),
+            "pipelines": [row_map(item, (("pipelineId", "pipeline_id"), ("taskId", "task_id"), ("name", "name"), ("createdAt", "created_at"))) for item in pipeline_rows],
+            "runs": [row_map(item, (("runId", "run_id"), ("taskId", "task_id"), ("pipelineId", "pipeline_id"), ("role", "role"), ("runState", "run_state"), ("startedAt", "started_at"), ("completedAt", "completed_at"), ("durationMs", "duration_ms"), ("atifDigest", "atif_digest"), ("atifArtifactId", "atif_artifact_id"))) for item in run_rows],
+            "events": [row_map(item, (("taskId", "task_id"), ("sequence", "sequence"), ("eventType", "event_type"), ("occurredAt", "occurred_at"), ("summary", "summary"))) for item in event_rows],
+            "artifacts": [
+                {
+                    **row_map(item, (("artifactId", "artifact_id"), ("taskId", "task_id"), ("runId", "run_id"), ("logicalPath", "logical_path"), ("publicKey", "public_key"), ("mediaType", "media_type"), ("byteSize", "byte_size"), ("sha256", "sha256"), ("availability", "availability"))),
+                    "disclosure": {"redactionApplied": bool(item.get("redaction_applied")), "originalRetained": bool(item.get("original_retained"))},
+                }
+                for item in artifact_rows
+            ],
+        }
+        usage: dict[str, Any] = {
+            "schemaVersion": "1.0",
+            "generation": {
+                "usageGenerationId": usage_generation_id,
+                "publicationId": publication_id,
+                "taskId": task_id,
+                "schemaVersion": usage_generation.get("schema_version"),
+                "metadataDigest": usage_generation.get("metadata_digest"),
+                "state": "staged",
+                "expectedCounts": {
+                    "summaries": usage_generation.get("expected_summary_count"),
+                    "invocations": usage_generation.get("expected_invocation_count"),
+                    "turns": usage_generation.get("expected_turn_count"),
+                    "prices": usage_generation.get("expected_price_count"),
+                    "globals": usage_generation.get("expected_global_count"),
+                },
+                "createdAt": usage_generation.get("created_at"),
+            },
+            "summaries": [],
+            "invocations": [],
+            "turns": [],
+            "prices": [],
+            "globals": [],
+        }
+        def usage_fields(item: Mapping[str, Any], names: Sequence[str]) -> dict[str, Any]:
+            normalized = self._normalize_usage_row(item)
+            return {name: normalized.get(name) for name in names}
+
+        summary_names = tuple(_SUMMARY)
+        invocation_names = tuple(_INVOCATION)
+        turn_names = tuple(_TURN)
+        global_names = tuple(_GLOBAL)
+        for item in usage_summaries:
+            value = usage_fields(item, summary_names)
+            value.update({"summaryId": item.get("summary_id"), "scope": item.get("scope"), "coverage": item.get("coverage"), "coveredInvocations": item.get("covered_invocations"), "expectedInvocations": item.get("expected_invocations"), "knownTokenSubtotal": item.get("known_token_subtotal"), "knownCostSubtotalMicroUsd": item.get("known_cost_subtotal_micro_usd"), "runId": item.get("run_id")})
+            usage["summaries"].append(value)
+        for item in usage_invocations:
+            value = usage_fields(item, invocation_names)
+            value.update({"invocationId": item.get("invocation_id"), "pipelineId": item.get("pipeline_id"), "ownershipClass": item.get("ownership_class"), "billingMode": item.get("billing_mode"), "processOutcome": item.get("process_outcome"), "coverage": item.get("coverage"), "issueCount": item.get("issue_count"), "coveredTurns": item.get("covered_turns"), "expectedTurns": item.get("expected_turns")})
+            usage["invocations"].append(value)
+        for item in usage_turns:
+            value = usage_fields(item, turn_names)
+            value.update({"turnId": item.get("turn_id"), "ordinal": item.get("ordinal")})
+            usage["turns"].append(value)
+        for item in usage_globals:
+            value = usage_fields(item, global_names)
+            value.update({"globalId": item.get("global_id"), "periodKind": item.get("period_kind"), "periodKey": item.get("period_key"), "ownershipClass": item.get("ownership_class"), "coverage": item.get("coverage"), "coveredInvocations": item.get("covered_invocations"), "expectedInvocations": item.get("expected_invocations"), "knownTokenSubtotal": item.get("known_token_subtotal"), "knownCostSubtotalMicroUsd": item.get("known_cost_subtotal_micro_usd"), "aggregateOnly": bool(item.get("aggregate_only"))})
+            usage["globals"].append(value)
+        # A visible global head stores the aggregate after other task
+        # publications have been merged.  A usage-only replacement must be
+        # validated against this task's own invocation evidence first; the
+        # transition below will merge that contribution back into the shared
+        # aggregate atomically.
+        task_contributions = self._usage_global_contributions(usage_generation_id)
+        for item in usage["globals"]:
+            if item.get("ownershipClass") != "task-owned":
+                continue
+            contribution = task_contributions.get(self._global_key(item))
+            if contribution is None:
+                continue
+            for field in _GLOBAL_VALUE_FIELDS:
+                item[field] = contribution[field]
+        referenced_price_digests = {
+            row.get("priceEntryDigest")
+            for collection in ("invocations", "turns")
+            for row in usage[collection]
+            if row.get("priceEntryDigest") is not None
+        }
+        referenced_price_digests.update(
+            row.get("priceProvenanceDigest")
+            for collection in ("summaries", "globals")
+            for row in usage[collection]
+            if row.get("priceProvenanceDigest") is not None
+        )
+        for item in usage_prices:
+            if item.get("price_entry_digest") not in referenced_price_digests:
+                continue
+            usage["prices"].append({"priceEntryDigest": item.get("price_entry_digest"), "usageGenerationId": item.get("usage_generation_id"), "catalogDigest": item.get("catalog_digest"), "model": item.get("model"), "effectiveAt": item.get("effective_at"), "effectiveUntil": item.get("effective_until")})
+        payload["usage"] = usage
+        artifact_by_digest = {item.get("sha256"): item.get("artifact_id") for item in artifact_rows}
+        for run in payload["runs"]:
+            run["atifArtifactId"] = artifact_by_digest.get(run.get("atifDigest"))
+        return payload
+
+    @staticmethod
+    def _price_digest(entry: object, catalog_digest: str) -> str:
+        public = getattr(entry, "to_public_dict", None)
+        if callable(public):
+            value = public(catalog_digest=catalog_digest)
+        elif isinstance(entry, Mapping):
+            value = dict(entry)
+            value.setdefault("catalog_digest", catalog_digest)
+        else:
+            _invalid(D1ErrorCode.generation_conflict)
+        canonical = (json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _catalog_timestamp(value: object) -> str | None:
+        """Serialize catalog interval endpoints to the D1 timestamp shape."""
+
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None or value.utcoffset() is None:
+                _invalid(D1ErrorCode.generation_conflict)
+            return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        if isinstance(value, str):
+            return _timestamp(value)
+        _invalid(D1ErrorCode.generation_conflict)
+
+    def _build_price_backfill(self, payload: dict[str, Any], *, catalog: object, selected_turn_ids: set[str]) -> tuple[dict[str, Any], int]:
+        try:
+            catalog_digest_value = getattr(catalog, "digest", None)
+            if catalog_digest_value is None:
+                catalog_digest_value = getattr(catalog, "catalog_digest", None)
+            catalog_digest = str(catalog_digest_value)
+            find = getattr(catalog, "find")
+        except Exception:
+            _invalid(D1ErrorCode.generation_conflict)
+        if _DIGEST.fullmatch(catalog_digest) is None or not callable(find):
+            _invalid(D1ErrorCode.generation_conflict)
+        try:
+            from ..agents.telemetry import TelemetryTurn, estimate_cost
+        except Exception:
+            _invalid(D1ErrorCode.generation_conflict)
+        usage = payload["usage"]
+        old_usage_id = usage["generation"]["usageGenerationId"]
+        new_usage_id = "usage-" + hashlib.sha256(f"{old_usage_id}:{catalog_digest}".encode()).hexdigest()
+        invocations = usage["invocations"]
+        inv_by_id = {item.get("invocationId"): item for item in invocations if item.get("invocationId") is not None}
+        price_rows = {item["priceEntryDigest"]: item for item in usage["prices"]}
+        filled = 0
+        turn_price: dict[str, str] = {}
+        for turn in usage["turns"]:
+            turn_id = turn.get("turnId")
+            if turn_id not in selected_turn_ids or all(turn.get(field) is not None for field in _COST_FIELDS):
+                continue
+            invocation = inv_by_id.get(turn.get("invocationId"))
+            if invocation is None or invocation.get("model") is None or invocation.get("startedAt") is None or invocation.get("billingMode") is None:
+                continue
+            if any(turn.get(field) is None for field in _TOKEN_FIELDS):
+                continue
+            try:
+                started = datetime.fromisoformat(str(invocation["startedAt"]).replace("Z", "+00:00"))
+                entry = find(invocation["model"], started)
+                if entry is None:
+                    continue
+                telemetry_turn = TelemetryTurn.from_usage({"input_tokens": turn["promptTokens"], "cached_input_tokens": turn["cachedTokens"], "output_tokens": turn["completionTokens"], "reasoning_output_tokens": turn["reasoningTokens"]}, ordinal=turn["ordinal"])
+                estimate = estimate_cost([telemetry_turn], billing_mode=invocation["billingMode"], configured_model=invocation["model"], started_at=started, catalog=catalog)
+            except Exception:
+                continue
+            if getattr(estimate, "status", None).value != "estimated":
+                continue
+            turn.update({"uncachedInputCostMicroUsd": estimate.uncached_input_micro_usd, "cachedInputCostMicroUsd": estimate.cached_input_micro_usd, "outputCostMicroUsd": estimate.output_micro_usd, "totalCostMicroUsd": estimate.micro_usd})
+            price_digest = self._price_digest(entry, catalog_digest)
+            turn["priceEntryDigest"] = price_digest
+            price_rows.setdefault(
+                price_digest,
+                {
+                    "priceEntryDigest": price_digest,
+                    "usageGenerationId": new_usage_id,
+                    "catalogDigest": catalog_digest,
+                    "model": entry.model,
+                    "effectiveAt": self._catalog_timestamp(entry.effective_from),
+                    "effectiveUntil": self._catalog_timestamp(entry.effective_until),
+                },
+            )
+            turn_price[str(turn_id)] = price_digest
+            filled += 1
+        if not filled:
+            return payload, 0
+        old_to_new_invocation: dict[str, str] = {}
+        for invocation in invocations:
+            old_id = invocation.get("invocationId")
+            new_id = "invocation-" + hashlib.sha256(f"{new_usage_id}:{old_id or invocation.get('runId')}:{invocation.get('retryOrdinal')}".encode()).hexdigest()
+            old_to_new_invocation[str(old_id)] = new_id
+            invocation["invocationId"] = new_id
+        for turn in usage["turns"]:
+            old_id = turn.get("invocationId")
+            turn["invocationId"] = old_to_new_invocation.get(str(old_id), old_id)
+            turn["turnId"] = "turn-" + hashlib.sha256(f"{new_usage_id}:{turn.get('invocationId')}:{turn.get('ordinal')}".encode()).hexdigest()
+        for invocation in invocations:
+            matching = [item for item in usage["turns"] if item.get("invocationId") == invocation.get("invocationId")]
+            if matching and all(item.get(field) is not None for item in matching for field in _COST_FIELDS) and not self._numeric_cost(invocation):
+                for field in _COST_FIELDS:
+                    invocation[field] = sum(item[field] for item in matching)
+                digests = {item.get("priceEntryDigest") for item in matching}
+                invocation["priceEntryDigest"] = next(iter(digests)) if len(digests) == 1 else None
+        for summary in usage["summaries"]:
+            matching = [item for item in invocations if summary.get("scope") == "task" or item.get("runId") == summary.get("runId")]
+            if matching and not self._numeric_cost(summary) and all(self._numeric_cost(item) for item in matching):
+                for field in _COST_FIELDS:
+                    summary[field] = sum(item[field] for item in matching)
+                summary["knownCostSubtotalMicroUsd"] = summary["totalCostMicroUsd"]
+                digests = {item.get("priceEntryDigest") for item in matching}
+                summary["priceProvenanceDigest"] = next(iter(digests)) if len(digests) == 1 else None
+        for global_row in usage["globals"]:
+            if global_row.get("ownershipClass") != "task-owned" or self._numeric_cost(global_row):
+                continue
+            matching = [item for item in invocations if item.get("ownershipClass") == "task-owned" and item.get("model") == global_row.get("model") and (global_row.get("periodKind") == "lifetime" or (isinstance(item.get("startedAt"), str) and item["startedAt"][:10] == global_row.get("periodKey")))]
+            if matching and all(self._numeric_cost(item) for item in matching):
+                for field in _COST_FIELDS:
+                    global_row[field] = sum(item[field] for item in matching)
+                global_row["knownCostSubtotalMicroUsd"] = global_row["totalCostMicroUsd"]
+                digests = {item.get("priceEntryDigest") for item in matching}
+                global_row["priceProvenanceDigest"] = next(iter(digests)) if len(digests) == 1 else None
+        for collection in ("summaries", "invocations", "turns", "globals", "prices"):
+            for row in usage[collection]:
+                row["usageGenerationId"] = new_usage_id
+        for summary in usage["summaries"]:
+            summary["summaryId"] = "summary-" + hashlib.sha256(f"{new_usage_id}:{summary.get('scope')}:{summary.get('runId')}".encode()).hexdigest()
+        for global_row in usage["globals"]:
+            global_row["globalId"] = "global-" + hashlib.sha256(f"{new_usage_id}:{global_row.get('periodKind')}:{global_row.get('periodKey')}:{global_row.get('model')}:{global_row.get('ownershipClass')}".encode()).hexdigest()
+        usage["prices"] = list(price_rows.values())
+        usage["generation"]["usageGenerationId"] = new_usage_id
+        usage["generation"]["expectedCounts"] = {name: len(usage[name]) for name in ("summaries", "invocations", "turns", "prices", "globals")}
+        usage["generation"]["metadataDigest"] = _usage_metadata_digest(payload)
+        return payload, filled
+
+    def backfill_na_costs(
+        self,
+        catalog: object,
+        *,
+        cursor: str | None = None,
+        limit: int = 64,
+    ) -> UsageBackfillReceipt:
+        """Fill only newly priceable N.A. turns from cached public evidence."""
+
+        rows, next_cursor = self.list_visible_na_turns(cursor=cursor, limit=limit)
+        if not rows:
+            return UsageBackfillReceipt(next_cursor=None)
+        marker = getattr(self, "_backfill_completed", None)
+        if marker is None:
+            marker = set()
+            self._backfill_completed = marker
+        catalog_digest_value = getattr(catalog, "digest", None)
+        if catalog_digest_value is None:
+            catalog_digest_value = getattr(catalog, "catalog_digest", "")
+        catalog_digest = str(catalog_digest_value)
+        processed = 0
+        changed = False
+        first_task_id: str | None = None
+        first_usage_id: str | None = None
+        result_usage_id: str | None = None
+        grouped: dict[tuple[str, str], set[str]] = {}
+        for row in rows:
+            task_value = row.get("task_id")
+            usage_value = row.get("head_usage_generation_id")
+            if not isinstance(task_value, str) or not isinstance(usage_value, str):
+                continue
+            grouped.setdefault((task_value, usage_value), set()).add(str(row.get("turn_id")))
+        for (task_id, usage_id), selected_ids in sorted(grouped.items()):
+            if first_task_id is None:
+                first_task_id, first_usage_id = task_id, usage_id
+            marker_key = (task_id, usage_id, catalog_digest)
+            if marker_key in marker:
+                result_usage_id = usage_id
+                continue
+            payload = self._visible_usage_payload(task_id, usage_id)
+            payload, filled = self._build_price_backfill(payload, catalog=catalog, selected_turn_ids=selected_ids)
+            if not filled:
+                marker.add(marker_key)
+                result_usage_id = usage_id
+                continue
+            new_usage_id = payload["usage"]["generation"]["usageGenerationId"]
+            try:
+                receipt = self.replace_usage(payload, base_usage_generation_id=usage_id)
+            except D1Error as error:
+                if error.code == D1ErrorCode.generation_conflict:
+                    return UsageBackfillReceipt(
+                        first_task_id,
+                        first_usage_id,
+                        new_usage_id,
+                        processed + filled,
+                        changed,
+                        next_cursor,
+                        "numeric_conflict",
+                    )
+                raise
+            marker.add((task_id, receipt.usage_generation_id, catalog_digest))
+            processed += filled
+            changed = True
+            result_usage_id = receipt.usage_generation_id
+        return UsageBackfillReceipt(
+            first_task_id,
+            first_usage_id,
+            result_usage_id,
+            processed,
+            changed,
+            # Replacements derive fresh turn identities.  A cursor from the
+            # superseded generation is therefore not a valid continuation;
+            # restart from the first visible N.A. row on the next bounded
+            # worker unit.
+            None if changed else next_cursor,
+        )
+
+    reconcile_price_catalog = backfill_na_costs
+    backfill_na_turns = backfill_na_costs
+    fill_na_costs = backfill_na_costs
 
     def expose(self, source: Mapping[str, Any]) -> ExposureReceipt:
         payload = _validate_payload(source)
@@ -2827,6 +3523,406 @@ class D1PublicationClient:
         payload = _validate_payload(source)
         self.stage(payload)
         return self.expose(payload)
+
+    @staticmethod
+    def _overhead_value_digest(row: Mapping[str, Any]) -> str:
+        value = {key: row[key] for key in (*_GLOBAL_KEY_FIELDS, *_GLOBAL_VALUE_FIELDS)}
+        canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _overhead_generation_id(period_kind: str, period_key: str, model: str, value_digest: str) -> str:
+        identity = json.dumps(
+            {"periodKind": period_kind, "periodKey": period_key, "model": model, "valueDigest": value_digest},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "usage-overhead-" + hashlib.sha256(identity).hexdigest()
+
+    @staticmethod
+    def _overhead_global_id(period_kind: str, period_key: str, model: str, value_digest: str) -> str:
+        identity = json.dumps(
+            {"periodKind": period_kind, "periodKey": period_key, "model": model, "valueDigest": value_digest},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "global-overhead-" + hashlib.sha256(identity).hexdigest()
+
+    @staticmethod
+    def _overhead_guard(
+        daily: Mapping[str, Any] | None,
+        lifetime: Mapping[str, Any] | None,
+        *,
+        model: str | None = None,
+        daily_period_key: str | None = None,
+    ) -> tuple[str, tuple[Scalar, ...]]:
+        """Build a visible-head CAS predicate for both aggregate keys."""
+
+        terms: list[str] = []
+        params: list[Scalar] = []
+        for index, expected in enumerate((daily, lifetime)):
+            kind = expected.get("periodKind") if expected is not None else ("daily" if index == 0 else "lifetime")
+            period_key = expected.get("periodKey") if expected is not None else (daily_period_key if index == 0 else "lifetime")
+            expected_model = expected.get("model") if expected is not None else model
+            owner = "steward-overhead"
+            if expected is None:
+                terms.append(
+                    "NOT EXISTS (SELECT 1 FROM usage_global_heads "
+                    "WHERE period_kind = ? AND period_key = ? AND model = ? AND ownership_class = ? "
+                    "AND state = 'visible')"
+                )
+                params.extend((kind, period_key, expected_model, owner))
+            else:
+                terms.append(
+                    "EXISTS (SELECT 1 FROM usage_global_heads "
+                    "WHERE period_kind = ? AND period_key = ? AND model = ? AND ownership_class = ? "
+                    "AND usage_generation_id = ? AND global_id = ? AND state = 'visible')"
+                )
+                params.extend((kind, period_key, expected_model, owner, expected["usageGenerationId"], expected["globalId"]))
+        return " AND ".join(terms), tuple(params)
+
+    def _verify_overhead_stored(self, head: Mapping[str, Any]) -> dict[str, Any]:
+        """Reject malformed or task-owned rows reached through an overhead head."""
+
+        usage_id = _id(head.get("usageGenerationId"))
+        generations = self._query(_statement(_OVERHEAD_GENERATION_SELECT, usage_id))
+        if len(generations) != 1:
+            _invalid(D1ErrorCode.generation_state)
+        generation = generations[0]
+        if (
+            generation.get("publication_id") is not None
+            or generation.get("task_id") is not None
+            or generation.get("ownership_class") != "steward-overhead"
+            or generation.get("expected_summary_count") != 0
+            or generation.get("expected_invocation_count") != 0
+            or generation.get("expected_turn_count") != 0
+            or generation.get("expected_price_count") != 0
+            or generation.get("expected_global_count") != 1
+            or generation.get("state") != "visible"
+        ):
+            _invalid(D1ErrorCode.generation_conflict)
+        globals_ = self._query(_statement(_OVERHEAD_GLOBAL_SELECT, usage_id))
+        if len(globals_) != 1:
+            _invalid(D1ErrorCode.generation_state)
+        stored = self._global_db_row(globals_[0])
+        _overhead_public_mapping(
+            {key: stored[key] for key in (
+                "periodKind", "periodKey", "model", "ownershipClass", "coverage",
+                "coveredInvocations", "expectedInvocations", "knownTokenSubtotal",
+                "knownCostSubtotalMicroUsd", *_USAGE_FIELDS, "priceProvenanceDigest", "aggregateOnly",
+            )}
+        )
+        for field in (*_GLOBAL_KEY_FIELDS, "usageGenerationId", "globalId"):
+            if stored.get(field) != head.get(field):
+                _invalid(D1ErrorCode.generation_conflict)
+        if stored.get("ownershipClass") != "steward-overhead" or stored.get("aggregateOnly") is not True:
+            _invalid(D1ErrorCode.generation_conflict)
+        return stored
+
+    def _verify_overhead_generation(
+        self,
+        usage_generation_id: str,
+        global_id: str,
+        expected: Mapping[str, Any],
+    ) -> None:
+        generations = self._query(_statement(_OVERHEAD_GENERATION_SELECT, usage_generation_id))
+        if len(generations) != 1:
+            _invalid(D1ErrorCode.generation_state)
+        generation = generations[0]
+        if (
+            generation.get("publication_id") is not None
+            or generation.get("task_id") is not None
+            or generation.get("ownership_class") != "steward-overhead"
+            or generation.get("schema_version") != "1.0"
+            or generation.get("metadata_digest") != expected["metadataDigest"]
+            or generation.get("state") not in {"staged", "visible"}
+            or generation.get("expected_summary_count") != 0
+            or generation.get("expected_invocation_count") != 0
+            or generation.get("expected_turn_count") != 0
+            or generation.get("expected_price_count") != 0
+            or generation.get("expected_global_count") != 1
+        ):
+            _invalid(D1ErrorCode.generation_conflict)
+        globals_ = self._query(_statement(_OVERHEAD_GLOBAL_SELECT, usage_generation_id))
+        if len(globals_) != 1:
+            _invalid(D1ErrorCode.count_mismatch)
+        actual = self._global_db_row(globals_[0])
+        if actual.get("globalId") != global_id or actual.get("usageGenerationId") != usage_generation_id:
+            _invalid(D1ErrorCode.generation_conflict)
+        for field in (*_GLOBAL_KEY_FIELDS, *_GLOBAL_VALUE_FIELDS):
+            if actual.get(field) != expected.get(field):
+                _invalid(D1ErrorCode.generation_conflict)
+
+    @staticmethod
+    def _overhead_lifetime_row(
+        old_daily: Mapping[str, Any] | None,
+        old_lifetime: Mapping[str, Any] | None,
+        new_daily: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Replace one daily contribution while preserving unknown evidence."""
+
+        if old_lifetime is None:
+            if old_daily is not None:
+                _invalid(D1ErrorCode.generation_conflict)
+            result = dict(new_daily)
+            result.update({"periodKind": "lifetime", "periodKey": "lifetime"})
+            return result
+        result = dict(old_lifetime)
+        result.update({"periodKind": "lifetime", "periodKey": "lifetime", "ownershipClass": "steward-overhead", "aggregateOnly": True})
+        old_daily = old_daily or {}
+        for field in ("coveredInvocations", "expectedInvocations"):
+            value = (old_lifetime.get(field) or 0) - (old_daily.get(field) or 0) + (new_daily.get(field) or 0)
+            if value < 0 or value > _SAFE_INTEGER_MAX:
+                _invalid(D1ErrorCode.generation_conflict)
+            result[field] = value
+        for field in _USAGE_FIELDS:
+            aggregate = old_lifetime.get(field)
+            previous = old_daily.get(field)
+            current = new_daily.get(field)
+            if aggregate is None or current is None or (old_daily and previous is None):
+                result[field] = None
+                continue
+            value = aggregate - (previous or 0) + current
+            if value < 0 or value > _SAFE_INTEGER_MAX:
+                _invalid(D1ErrorCode.generation_conflict)
+            result[field] = value
+        result["knownTokenSubtotal"] = result["totalTokens"]
+        result["knownCostSubtotalMicroUsd"] = result["totalCostMicroUsd"]
+        result["coverage"] = (
+            "unavailable"
+            if all(result[field] is None for field in _USAGE_FIELDS)
+            else "complete"
+            if result["coveredInvocations"] == result["expectedInvocations"]
+            and all(result[field] is not None for field in _USAGE_FIELDS)
+            else "partial"
+        )
+        result["priceProvenanceDigest"] = None
+        return result
+
+    def _upsert_overhead_one(
+        self,
+        row: Mapping[str, Any],
+        row_digest: str,
+        updated_at: str,
+    ) -> OverheadReceipt:
+        date = row["periodKey"]
+        model = row["model"]
+        daily_key = ("daily", date, model, "steward-overhead")
+        lifetime_key = ("lifetime", "lifetime", model, "steward-overhead")
+        daily_rows = self._query(_statement(_GLOBAL_HEAD_KEY_SELECT, *daily_key))
+        lifetime_rows = self._query(_statement(_GLOBAL_HEAD_KEY_SELECT, *lifetime_key))
+        if len(daily_rows) > 1 or len(lifetime_rows) > 1:
+            _invalid(D1ErrorCode.generation_state)
+        old_daily = self._verify_overhead_stored(self._global_db_row(daily_rows[0])) if daily_rows else None
+        old_lifetime = self._verify_overhead_stored(self._global_db_row(lifetime_rows[0])) if lifetime_rows else None
+        if old_daily is not None and old_lifetime is None:
+            _invalid(D1ErrorCode.generation_state)
+        new_daily = dict(row)
+        new_daily.update({"periodKind": "daily", "periodKey": date, "ownershipClass": "steward-overhead", "aggregateOnly": True})
+        new_lifetime = self._overhead_lifetime_row(old_daily, old_lifetime, new_daily)
+        daily_value_digest = row_digest
+        lifetime_value_digest = self._overhead_value_digest(new_lifetime)
+        daily_id = self._overhead_generation_id("daily", date, model, daily_value_digest)
+        daily_global_id = self._overhead_global_id("daily", date, model, daily_value_digest)
+        lifetime_id = self._overhead_generation_id("lifetime", "lifetime", model, lifetime_value_digest)
+        lifetime_global_id = self._overhead_global_id("lifetime", "lifetime", model, lifetime_value_digest)
+        daily_expected = {**new_daily, "metadataDigest": daily_value_digest}
+        lifetime_expected = {**new_lifetime, "metadataDigest": lifetime_value_digest}
+        if (
+            old_daily is not None
+            and old_lifetime is not None
+            and old_daily.get("usageGenerationId") == daily_id
+            and old_daily.get("globalId") == daily_global_id
+            and old_lifetime.get("usageGenerationId") == lifetime_id
+            and old_lifetime.get("globalId") == lifetime_global_id
+        ):
+            self._verify_overhead_generation(daily_id, daily_global_id, daily_expected)
+            self._verify_overhead_generation(lifetime_id, lifetime_global_id, lifetime_expected)
+            return OverheadReceipt(date, model, row_digest, changed=False)
+
+        self._batch(
+            (
+                _statement(_OVERHEAD_GENERATION_INSERT, daily_id, daily_value_digest, updated_at),
+                _statement(
+                    _OVERHEAD_GLOBAL_INSERT,
+                    daily_global_id,
+                    daily_id,
+                    new_daily["periodKind"],
+                    new_daily["periodKey"],
+                    new_daily["model"],
+                    new_daily["coverage"],
+                    new_daily["coveredInvocations"],
+                    new_daily["expectedInvocations"],
+                    new_daily["knownTokenSubtotal"],
+                    new_daily["knownCostSubtotalMicroUsd"],
+                    *(new_daily[field] for field in _TOKEN_FIELDS),
+                    *(new_daily[field] for field in _COST_FIELDS),
+                ),
+                _statement(_OVERHEAD_GENERATION_INSERT, lifetime_id, lifetime_value_digest, updated_at),
+                _statement(
+                    _OVERHEAD_GLOBAL_INSERT,
+                    lifetime_global_id,
+                    lifetime_id,
+                    new_lifetime["periodKind"],
+                    new_lifetime["periodKey"],
+                    new_lifetime["model"],
+                    new_lifetime["coverage"],
+                    new_lifetime["coveredInvocations"],
+                    new_lifetime["expectedInvocations"],
+                    new_lifetime["knownTokenSubtotal"],
+                    new_lifetime["knownCostSubtotalMicroUsd"],
+                    *(new_lifetime[field] for field in _TOKEN_FIELDS),
+                    *(new_lifetime[field] for field in _COST_FIELDS),
+                ),
+            )
+        )
+        self._verify_overhead_generation(daily_id, daily_global_id, daily_expected)
+        self._verify_overhead_generation(lifetime_id, lifetime_global_id, lifetime_expected)
+
+        old_ids = tuple(
+            item["usageGenerationId"]
+            for item, replacement_id in ((old_daily, daily_id), (old_lifetime, lifetime_id))
+            if item is not None and item["usageGenerationId"] != replacement_id
+        )
+        old_daily_head = (
+            {"periodKind": old_daily["periodKind"], "periodKey": old_daily["periodKey"], "model": old_daily["model"], "usageGenerationId": old_daily["usageGenerationId"], "globalId": old_daily["globalId"]}
+            if old_daily
+            else None
+        )
+        old_lifetime_head = (
+            {"periodKind": old_lifetime["periodKind"], "periodKey": old_lifetime["periodKey"], "model": old_lifetime["model"], "usageGenerationId": old_lifetime["usageGenerationId"], "globalId": old_lifetime["globalId"]}
+            if old_lifetime
+            else None
+        )
+        guard, guard_params = self._overhead_guard(
+            old_daily_head,
+            old_lifetime_head,
+            model=model,
+            daily_period_key=date,
+        )
+        if old_ids:
+            supersede_sql = (
+                "UPDATE usage_generations SET state = 'superseded' WHERE ownership_class = 'steward-overhead' "
+                f"AND state = 'visible' AND usage_generation_id IN ({','.join('?' for _ in old_ids)}) AND {guard}"
+            )
+            supersede_params: tuple[Scalar, ...] = (*old_ids, *guard_params)
+        else:
+            supersede_sql = "UPDATE usage_generations SET state = 'superseded' WHERE 0"
+            supersede_params = ()
+        expose_sql = (
+            "UPDATE usage_generations SET state = 'visible', exposed_at = ? "
+            f"WHERE ownership_class = 'steward-overhead' AND state = 'staged' AND usage_generation_id IN (?, ?) AND {guard}"
+        )
+        expose_params: tuple[Scalar, ...] = (updated_at, daily_id, lifetime_id, *guard_params)
+        daily_new = {"periodKind": "daily", "periodKey": date, "model": model, "usageGenerationId": daily_id, "globalId": daily_global_id}
+        daily_head_sql = (
+            "INSERT INTO usage_global_heads "
+            "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
+            "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
+            f"FROM usage_globals AS g WHERE g.global_id = ? AND g.usage_generation_id = ? AND {guard} "
+            "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
+            "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, state = 'visible', updated_at = excluded.updated_at"
+        )
+        daily_head_params: tuple[Scalar, ...] = (updated_at, daily_global_id, daily_id, *guard_params)
+        lifetime_guard, lifetime_guard_params = self._overhead_guard(
+            daily_new,
+            old_lifetime_head,
+            model=model,
+            daily_period_key=date,
+        )
+        lifetime_head_sql = (
+            "INSERT INTO usage_global_heads "
+            "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
+            "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
+            f"FROM usage_globals AS g WHERE g.global_id = ? AND g.usage_generation_id = ? AND {lifetime_guard} "
+            "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
+            "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, state = 'visible', updated_at = excluded.updated_at"
+        )
+        lifetime_head_params: tuple[Scalar, ...] = (updated_at, lifetime_global_id, lifetime_id, *lifetime_guard_params)
+        self._batch(
+            (
+                _statement(supersede_sql, *supersede_params),
+                _statement(expose_sql, *expose_params),
+                _statement(daily_head_sql, *daily_head_params),
+                _statement(lifetime_head_sql, *lifetime_head_params),
+            )
+        )
+        current_daily = self._query(_statement(_GLOBAL_HEAD_KEY_SELECT, *daily_key))
+        current_lifetime = self._query(_statement(_GLOBAL_HEAD_KEY_SELECT, *lifetime_key))
+        if (
+            len(current_daily) != 1
+            or len(current_lifetime) != 1
+            or current_daily[0].get("usage_generation_id") != daily_id
+            or current_daily[0].get("global_id") != daily_global_id
+            or current_lifetime[0].get("usage_generation_id") != lifetime_id
+            or current_lifetime[0].get("global_id") != lifetime_global_id
+        ):
+            _invalid(D1ErrorCode.generation_conflict)
+        self._verify_overhead_generation(daily_id, daily_global_id, daily_expected)
+        self._verify_overhead_generation(lifetime_id, lifetime_global_id, lifetime_expected)
+        return OverheadReceipt(date, model, row_digest, changed=True)
+
+    def upsert_overhead(
+        self,
+        source: object,
+        *,
+        digest: str | None = None,
+        archive_digest: str | None = None,
+        updated_at: str | None = None,
+    ) -> OverheadReceipt | tuple[OverheadReceipt, ...]:
+        """Atomically replace bounded daily/model overhead aggregates."""
+
+        if isinstance(source, Mapping) or _object_mapping(source) is not None:
+            values = (source,)
+        elif isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)):
+            values = tuple(source)
+        else:
+            _invalid(D1ErrorCode.generation_conflict)
+        if not values or len(values) > 32:
+            _invalid(D1ErrorCode.count_mismatch)
+        supplied_digest = archive_digest if archive_digest is not None else digest
+        batch_digest = _overhead_digest(tuple(_object_mapping(value) or value for value in values), supplied_digest)
+        normalized = tuple(_overhead_row(value) for value in values)
+        if updated_at is None:
+            updated_at = _timestamp_now()
+        else:
+            _timestamp(updated_at)
+        seen: set[tuple[str, str]] = set()
+        receipts: list[OverheadReceipt] = []
+        for row in sorted(normalized, key=lambda item: (item["periodKey"], item["model"])):
+            key = (row["periodKey"], row["model"])
+            if key in seen:
+                _invalid(D1ErrorCode.generation_conflict)
+            seen.add(key)
+            row_digest = _overhead_digest((row,))
+            receipts.append(self._upsert_overhead_one(row, row_digest, updated_at))
+        if len(receipts) > 1:
+            receipts = [OverheadReceipt(item.date, item.model, batch_digest, item.state, item.changed) for item in receipts]
+        return receipts[0] if len(receipts) == 1 else tuple(receipts)
+
+    def list_visible_na_turns(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 64,
+    ) -> tuple[list[Mapping[str, Any]], str | None]:
+        """Return one bounded cursor page of visible turns missing costs."""
+
+        if cursor is not None:
+            cursor = _id(cursor)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 128:
+            _invalid(D1ErrorCode.count_mismatch)
+        rows = self._query((_VISIBLE_NA_TURNS_SELECT, (cursor, cursor, limit)))
+        next_cursor = str(rows[-1].get("turn_id")) if len(rows) == limit and rows else None
+        return rows, next_cursor
+
+    # Stable aliases used by daemon/reconciliation callers.
+    upsert_overhead_usage = upsert_overhead
+    reconcile_overhead = upsert_overhead
+    replace_overhead = upsert_overhead
+    publish_overhead = upsert_overhead
+    page_na_turns = list_visible_na_turns
+    list_na_turns = list_visible_na_turns
 
     def hide_task(self, task_id: str, reason_code: str) -> HideReceipt:
         task_id = _id(task_id)
@@ -3034,10 +4130,12 @@ __all__ = [
     "D1PublicationClient",
     "ExposureReceipt",
     "HideReceipt",
+    "OverheadReceipt",
     "MAX_BATCH_BYTES",
     "MAX_BATCH_PARAMETERS",
     "MAX_BATCH_STATEMENTS",
     "MAX_RESPONSE_BYTES",
     "PublicationD1Client",
     "StageReceipt",
+    "UsageBackfillReceipt",
 ]

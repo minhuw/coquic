@@ -264,6 +264,34 @@ function usageGlobalRow(overrides: RawRow = {}): RawRow {
   };
 }
 
+function overheadGlobalRow(overrides: RawRow = {}): RawRow {
+  return usageGlobalRow({
+    global_id: "global-overhead",
+    usage_generation_id: "usage-overhead",
+    period_kind: "daily",
+    period_key: "2026-07-28",
+    model: "gpt-overhead",
+    ownership_class: "steward-overhead",
+    coverage: "unavailable",
+    covered_invocations: 0,
+    expected_invocations: 0,
+    known_token_subtotal: null,
+    known_cost_subtotal_micro_usd: null,
+    prompt_tokens: null,
+    cached_tokens: null,
+    uncached_tokens: null,
+    completion_tokens: null,
+    reasoning_tokens: null,
+    total_tokens: null,
+    uncached_input_cost_micro_usd: null,
+    cached_input_cost_micro_usd: null,
+    output_cost_micro_usd: null,
+    total_cost_micro_usd: null,
+    price_provenance_digest: null,
+    ...overrides,
+  });
+}
+
 function usageTurnRow(ordinal: number, turnId = `turn-${ordinal}`, overrides: RawRow = {}): RawRow {
   return {
     turn_id: turnId, usage_generation_id: usageGenerationId, invocation_id: usageInvocationId, publication_id: usagePublicationId,
@@ -311,6 +339,30 @@ test("reads only visible cached usage and preserves D1 numeric values", async ()
   assert.equal(client.calls[3]!.params.at(-1), 4_097);
   for (const call of client.calls) assert.match(call.statement, /SELECT/);
   assert(client.calls.every((call) => /^\s*SELECT/i.test(call.statement)));
+});
+
+test("reads detached overhead globals without task joins", async () => {
+  const client = new FakeClient(response([overheadGlobalRow()]));
+  const usage = await new CloudRepository({ client }).getGlobalUsage();
+  assert(Array.isArray(usage));
+  assert.equal(usage[0]!.daily[0]!.ownershipClass, "steward-overhead");
+  assert.equal(usage[0]!.daily[0]!.totalTokens, null);
+  assert.match(client.calls[0]!.statement, /UNION ALL/);
+  assert.match(client.calls[0]!.statement, /ug\.publication_id IS NULL/);
+  assert.match(client.calls[0]!.statement, /ug\.task_id IS NULL/);
+  assert.match(client.calls[0]!.statement, /gh\.ownership_class = 'task-owned'/);
+  assert.match(client.calls[0]!.statement, /gh\.ownership_class = 'steward-overhead'/);
+});
+
+test("rejects malformed or mismatched overhead global rows", async () => {
+  const staged = await new CloudRepository({ client: new FakeClient(response([overheadGlobalRow({ generation_state: "staged" })])) }).getGlobalUsage();
+  assert.deepEqual(staged, { kind: "unavailable", reason: "invalid" });
+
+  const mismatched = await new CloudRepository({ client: new FakeClient(response([overheadGlobalRow({ ownership_class: "invalid-owner" })])) }).getGlobalUsage();
+  assert.deepEqual(mismatched, { kind: "unavailable", reason: "invalid" });
+
+  const privateShape = await new CloudRepository({ client: new FakeClient(response([overheadGlobalRow({ private_path: "hidden" })])) }).getGlobalUsage();
+  assert.deepEqual(privateShape, { kind: "unavailable", reason: "invalid" });
 });
 
 test("distinguishes an absent task, missing usage head, corrupt usage, and D1 outage", async () => {

@@ -64,7 +64,7 @@ from ..publication.generation import (
     compose_publication_generation,
 )
 from ..publication.outbox import CleanupIntent, CleanupState, ReceiptClass
-from ..publication.d1 import D1PublicationClient
+from ..publication.d1 import D1Error, D1PublicationClient, _overhead_digest
 from ..publication.publisher import CloudPublisher, _call_composer
 from ..publication.r2 import R2Client, private_original_key
 from ..core.subprocesses import (
@@ -446,6 +446,11 @@ class StewardDaemon:
         self._publication_callback: Callable[[], None] | None = None
         self._publication_cancel: Callable[[], None] | None = None
         self._publication_deadline: float | None = None
+        self._publication_overhead_position = 0
+        self._publication_overhead_digest: str | None = None
+        self._publication_backfill_cursor: str | None = None
+        self._publication_backfill_catalog_digest: str | None = None
+        self._publication_backfill_blocked = False
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
@@ -976,7 +981,17 @@ class StewardDaemon:
                 "pending": False,
                 "watermark": None,
             }
-        return reducer.reconcile()
+        # The committed repository catalog is the sole pricing authority.
+        # Refresh it at the bounded control-loop boundary so a catalog
+        # replacement is observed without restarting the daemon.  A malformed
+        # or unavailable candidate never displaces the last validated catalog.
+        self._publication_catalog()
+        result = reducer.reconcile()
+        if result.get("processed") or result.get("pending"):
+            publication_wakeup = getattr(self, "_publication_wakeup", None)
+            if publication_wakeup is not None:
+                publication_wakeup.set()
+        return result
 
     def _drain_control_loop_once(
         self, *, full_audit: bool = False, publish: bool = True
@@ -1023,6 +1038,8 @@ class StewardDaemon:
                     }
                     if usage.get("pending"):
                         result["pending"] = True
+                    if usage.get("processed") or usage.get("pending"):
+                        self._publication_wakeup.set()
                 except Exception as exc:
                     result["usage"] = {
                         "processed": 0,
@@ -1286,6 +1303,145 @@ class StewardDaemon:
             self._log(f"publication source unavailable error={exc.__class__.__name__}")
             return None
 
+    @staticmethod
+    def _publication_usage_mapping(value: object) -> Mapping[str, object] | None:
+        if isinstance(value, Mapping):
+            return value
+        for name in ("public_dict", "model_dump", "as_dict"):
+            method = getattr(value, name, None)
+            if not callable(method):
+                continue
+            try:
+                candidate = method(by_alias=True, mode="json") if name == "model_dump" else method()
+            except TypeError:
+                try:
+                    candidate = method()
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            if isinstance(candidate, Mapping):
+                return candidate
+        return None
+
+    def _publication_overhead_rows(self) -> tuple[object, ...]:
+        ledger = getattr(self, "_control_loop_ledger", None)
+        if ledger is None:
+            return ()
+        listing = getattr(ledger, "list_overhead_usage", None)
+        if not callable(listing):
+            return ()
+        try:
+            return tuple(listing())
+        except Exception as exc:
+            self._log(f"publication overhead listing failed error={exc.__class__.__name__}")
+            return ()
+
+    def _publication_catalog(self) -> object | None:
+        reducer = getattr(self, "_control_loop_usage", None)
+        current = getattr(reducer, "catalog", None)
+        config = getattr(self, "config", None)
+        repo_root = getattr(config, "repo_root", None)
+        if reducer is None or repo_root is None:
+            return current
+        try:
+            candidate = PriceCatalog.from_path(Path(repo_root) / "steward" / "model-prices.json")
+        except (FileNotFoundError, OSError, ValueError):
+            return current
+        current_digest = getattr(current, "digest", None)
+        if current_digest is None:
+            current_digest = getattr(current, "catalog_digest", None)
+        if candidate.digest != current_digest:
+            reducer.catalog = candidate
+            current = candidate
+            publication_wakeup = getattr(self, "_publication_wakeup", None)
+            if publication_wakeup is not None:
+                publication_wakeup.set()
+        return current
+
+    def _reconcile_publication_usage(self, publisher: CloudPublisher) -> bool:
+        """Process one bounded overhead or cached-D1 backfill obligation."""
+
+        rows = self._publication_overhead_rows()
+        if rows:
+            serialized = [self._publication_usage_mapping(row) for row in rows]
+            if all(item is not None for item in serialized):
+                try:
+                    aggregate_digest = _overhead_digest(tuple(item for item in serialized if item is not None))
+                except D1Error:
+                    # Keep malformed test doubles and legacy ledgers bounded;
+                    # the D1 boundary still rejects this shape fail-closed.
+                    aggregate_digest = hashlib.sha256(
+                        json.dumps(serialized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest()
+                if aggregate_digest != getattr(self, "_publication_overhead_digest", None):
+                    position = getattr(self, "_publication_overhead_position", 0)
+                    if not isinstance(position, int) or position < 0 or position >= len(rows):
+                        position = 0
+                    row = rows[position]
+                    row_mapping = serialized[position]
+                    try:
+                        row_digest = _overhead_digest((row_mapping,))
+                    except D1Error:
+                        row_digest = hashlib.sha256(
+                            json.dumps(row_mapping, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                        ).hexdigest()
+                    try:
+                        publisher.reconcile_overhead(row, digest=row_digest)
+                    except RuntimeError:
+                        # Keep the cursor pending when the publisher has not
+                        # been provisioned with the reconciliation primitive.
+                        # A later worker cycle or restart must be able to
+                        # retry the same bounded obligation.
+                        return False
+                    except Exception as exc:
+                        self._log(f"publication overhead reconciliation failed error={exc.__class__.__name__}")
+                        return True
+                    position += 1
+                    if position >= len(rows):
+                        position = 0
+                        self._publication_overhead_digest = aggregate_digest
+                    self._publication_overhead_position = position
+                    return True
+
+        catalog = self._publication_catalog()
+        if catalog is None:
+            return False
+        catalog_digest = getattr(catalog, "digest", None)
+        if catalog_digest is None:
+            catalog_digest = getattr(catalog, "catalog_digest", None)
+        if not isinstance(catalog_digest, str) or not catalog_digest:
+            return False
+        if catalog_digest != getattr(self, "_publication_backfill_catalog_digest", None):
+            self._publication_backfill_catalog_digest = catalog_digest
+            self._publication_backfill_cursor = None
+            self._publication_backfill_blocked = False
+        if getattr(self, "_publication_backfill_blocked", False):
+            return False
+        try:
+            receipt = publisher.backfill_usage(
+                catalog,
+                cursor=getattr(self, "_publication_backfill_cursor", None),
+                limit=64,
+            )
+        except RuntimeError:
+            return False
+        except Exception as exc:
+            self._log(f"publication usage backfill failed error={exc.__class__.__name__}")
+            return True
+        blocked_reason = getattr(receipt, "blocked_reason", None)
+        if blocked_reason:
+            self._publication_backfill_blocked = True
+            self._log(f"publication usage backfill blocked reason={blocked_reason}")
+            return False
+        next_cursor = getattr(receipt, "next_cursor", None)
+        self._publication_backfill_cursor = next_cursor if isinstance(next_cursor, str) else None
+        return bool(
+            getattr(receipt, "changed", False)
+            or getattr(receipt, "processed_turns", 0)
+            or self._publication_backfill_cursor is not None
+        )
+
     def _drain_pending_publication_hides(self, publisher: CloudPublisher) -> tuple[bool, bool]:
         """Reconcile local hide fences before claiming any exposure work.
 
@@ -1344,6 +1500,8 @@ class StewardDaemon:
             # remains unresolved.  Successful hides immediately re-run the
             # cycle so another pending fence is drained before exposure work.
             return hide_progress
+        if self._reconcile_publication_usage(publisher):
+            return True
         listing = getattr(self.store, "list_publication_generations", None)
         if not callable(listing):
             listing = getattr(self.store, "list_generations", None)
@@ -4130,6 +4288,9 @@ class StewardDaemon:
             except Exception as exc:
                 self._log(f"control-loop wakeup lag id={getattr(wakeup, 'id', '-') } error={exc.__class__.__name__}")
         self._control_loop_wakeup.set()
+        publication_wakeup = getattr(self, "_publication_wakeup", None)
+        if publication_wakeup is not None:
+            publication_wakeup.set()
 
     def _dispatch_queued(
         self,

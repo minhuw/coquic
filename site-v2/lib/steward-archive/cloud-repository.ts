@@ -828,7 +828,44 @@ export const USAGE_INVOCATION_COUNT_STATEMENT = USAGE_INVOCATION_TOTAL_STATEMENT
 export const USAGE_INVOCATION_RUN_COUNT_STATEMENT = USAGE_INVOCATION_RUN_TOTAL_STATEMENT;
 
 const USAGE_GLOBAL_VISIBLE_FROM = `
-  FROM usage_global_heads AS gh
+  FROM (
+    SELECT gh.global_id, gh.usage_generation_id, gh.period_kind, gh.period_key,
+           gh.model, gh.ownership_class, gh.state, gh.updated_at
+    FROM usage_global_heads AS gh
+    JOIN usage_generations AS ug
+      ON ug.usage_generation_id = gh.usage_generation_id
+     AND ug.ownership_class = 'task-owned'
+     AND ug.state = 'visible'
+     AND ug.exposed_at IS NOT NULL
+    JOIN usage_heads AS uh
+      ON uh.task_id = ug.task_id
+     AND uh.usage_generation_id = ug.usage_generation_id
+     AND uh.state = 'visible'
+    JOIN task_heads AS th
+      ON th.task_id = ug.task_id
+     AND th.usage_generation_id = ug.usage_generation_id
+     AND th.state = 'visible'
+    JOIN publication_generations AS p
+      ON p.publication_id = ug.publication_id
+     AND p.task_id = ug.task_id
+     AND p.state = 'visible'
+     AND p.exposed_at IS NOT NULL
+    WHERE gh.state = 'visible'
+      AND gh.ownership_class = 'task-owned'
+    UNION ALL
+    SELECT gh.global_id, gh.usage_generation_id, gh.period_kind, gh.period_key,
+           gh.model, gh.ownership_class, gh.state, gh.updated_at
+    FROM usage_global_heads AS gh
+    JOIN usage_generations AS ug
+      ON ug.usage_generation_id = gh.usage_generation_id
+     AND ug.ownership_class = 'steward-overhead'
+     AND ug.publication_id IS NULL
+     AND ug.task_id IS NULL
+     AND ug.state = 'visible'
+     AND ug.exposed_at IS NOT NULL
+    WHERE gh.state = 'visible'
+      AND gh.ownership_class = 'steward-overhead'
+  ) AS gh
   JOIN usage_globals AS g
     ON g.global_id = gh.global_id
    AND g.usage_generation_id = gh.usage_generation_id
@@ -836,24 +873,6 @@ const USAGE_GLOBAL_VISIBLE_FROM = `
    AND g.period_key = gh.period_key
    AND g.model = gh.model
    AND g.ownership_class = gh.ownership_class
-  JOIN usage_generations AS ug
-    ON ug.usage_generation_id = gh.usage_generation_id
-   AND ug.state = 'visible'
-   AND ug.exposed_at IS NOT NULL
-  JOIN usage_heads AS uh
-    ON uh.task_id = ug.task_id
-   AND uh.usage_generation_id = ug.usage_generation_id
-   AND uh.state = 'visible'
-  JOIN task_heads AS th
-    ON th.task_id = ug.task_id
-   AND th.usage_generation_id = ug.usage_generation_id
-   AND th.state = 'visible'
-  JOIN publication_generations AS p
-    ON p.publication_id = ug.publication_id
-   AND p.task_id = ug.task_id
-   AND p.state = 'visible'
-   AND p.exposed_at IS NOT NULL
- WHERE gh.state = 'visible'
 `;
 
 const USAGE_GLOBAL_COLUMNS = `

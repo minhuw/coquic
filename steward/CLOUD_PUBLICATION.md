@@ -59,6 +59,16 @@ one begins, and provider calls occur outside local SQLite transactions.
    upserts the task and usage heads in one transaction. The client verifies both
    heads. Child rows and object bytes are immutable after exposure.
 
+Aggregate overhead reconciliation is a separate D1-only path. It accepts only
+the strict public allowlist from `StewardOverheadUsage.public_dict()`, stages a
+detached generation with null task/publication identity and one global, and
+updates the matching UTC-daily and model lifetime heads together. The lifetime
+row replaces the prior daily contribution with safe-integer deltas; it never
+allocates a synthetic task or detail identity. The producer and D1 compute the
+same canonical digest, so a reused digest with different content fails before
+any head changes. A stale compare-and-set or provider failure leaves both old
+heads visible for retry.
+
 ## Durable recovery
 
 The SQLite publication outbox is the durable operation record. It stores the
@@ -68,8 +78,10 @@ Workers reconcile pending local hide fences before claiming any exposure work,
 then claim one generation with a bounded lease and renew it around each remote
 operation. Restart reconciliation reclaims expired leases and resumes from
 receipts; retries reuse the same identity and never overwrite an R2 object or
-expose a partial D1 generation. Network, quota, timeout, and other transient
-provider failures leave the hide fence pending for the next worker cycle.
+expose a partial D1 generation. The overhead cursor is advanced only after a
+typed CAS/transport success, so a failed one-unit reconciliation remains the
+next retry obligation. Network, quota, timeout, and other transient provider
+failures leave the hide fence pending for the next worker cycle.
 Conflicting identity, digest, count, schema, permission, or other permanent
 failures stop publication and retain local evidence.
 

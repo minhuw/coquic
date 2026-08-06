@@ -1771,6 +1771,34 @@ def _d1_stage(
         raise
 
 
+def _d1_stage_overhead(
+    connection: sqlite3.Connection,
+    usage_generation_id: str = "usage-overhead-1",
+    global_id: str = "global-overhead-1",
+    *,
+    period_kind: str = "daily",
+    period_key: str = "2026-07-28",
+    model: str = "gpt-overhead",
+    publication_id: str | None = None,
+    task_id: str | None = None,
+) -> None:
+    """Insert one detached overhead generation and its visible global head."""
+
+    created_at = "2026-07-28T00:00:00Z"
+    connection.execute(
+        "INSERT INTO usage_generations (usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, expected_global_count, created_at, exposed_at) VALUES (?, ?, ?, 'steward-overhead', '1.0', ?, 'visible', 0, 0, 0, 0, 1, ?, ?)",
+        (usage_generation_id, publication_id, task_id, "a" * 64, created_at, created_at),
+    )
+    connection.execute(
+        "INSERT INTO usage_globals (global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest, aggregate_only) VALUES (?, ?, ?, ?, ?, 'steward-overhead', 'complete', 1, 1, 8, 9, 5, 1, 4, 3, 1, 8, 4, 2, 3, 9, NULL, 1)",
+        (global_id, usage_generation_id, period_kind, period_key, model),
+    )
+    connection.execute(
+        "INSERT INTO usage_global_heads (period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) VALUES (?, ?, ?, 'steward-overhead', ?, ?, 'visible', ?)",
+        (period_kind, period_key, model, usage_generation_id, global_id, created_at),
+    )
+
+
 def _d1_stage_usage_clone(connection: sqlite3.Connection, task_id: str, source_usage_id: str, new_usage_id: str) -> None:
     """Stage a second usage generation for the same visible publication."""
 
@@ -2148,6 +2176,42 @@ def _run_d1_cases() -> tuple[int, int]:
         _d1_hide(connection, "task-1")
         record("hide-atomic-supersession", connection.execute("SELECT state FROM task_heads WHERE task_id = ?", ("task-1",)).fetchone()[0] == "hidden" and connection.execute("SELECT state FROM usage_heads WHERE task_id = ?", ("task-1",)).fetchone()[0] == "hidden" and connection.execute("SELECT count(*) FROM publication_generations WHERE task_id = ? AND state = 'staged'", ("task-1",)).fetchone()[0] == 0 and connection.execute("SELECT count(*) FROM usage_generations WHERE task_id = ? AND state = 'staged'", ("task-1",)).fetchone()[0] == 0)
         record("hidden-task-excluded", _d1_public_rows(connection) == [])
+        overhead = _d1_connection()
+        try:
+            _d1_stage_overhead(overhead)
+            overhead.commit()
+            record(
+                "overhead-detached-owner",
+                overhead.execute(
+                    "SELECT ug.publication_id IS NULL AND ug.task_id IS NULL AND ug.ownership_class = 'steward-overhead' AND NOT EXISTS (SELECT 1 FROM usage_heads WHERE usage_generation_id = ug.usage_generation_id) FROM usage_generations AS ug WHERE ug.usage_generation_id = 'usage-overhead-1'"
+                ).fetchone()[0] == 1,
+            )
+            record(
+                "overhead-private-shape-denial",
+                _d1_rejected(
+                    overhead,
+                    "INSERT INTO usage_global_heads (period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) VALUES (?, ?, ?, 'steward-overhead', ?, ?, 'visible', ?)",
+                    ("daily", "2026-07-28", "private://model", "usage-overhead-1", "global-overhead-1", "2026-07-28T00:00:00Z"),
+                ),
+            )
+            record(
+                "overhead-mixed-owner-denial",
+                _d1_rejected(
+                    overhead,
+                    "INSERT INTO usage_generations (usage_generation_id, publication_id, task_id, ownership_class, schema_version, metadata_digest, state, expected_summary_count, expected_invocation_count, expected_turn_count, expected_price_count, expected_global_count, created_at) VALUES (?, ?, ?, 'steward-overhead', '1.0', ?, 'staged', 0, 0, 0, 0, 1, ?)",
+                    ("usage-overhead-mixed", "pub-1", "task-1", "b" * 64, "2026-07-28T00:00:00Z"),
+                ),
+            )
+            record(
+                "overhead-dangling-head-denial",
+                _d1_rejected(
+                    overhead,
+                    "INSERT INTO usage_global_heads (period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) VALUES ('daily', '2026-07-29', 'gpt-overhead', 'steward-overhead', 'missing-generation', 'missing-global', 'visible', '2026-07-28T00:00:00Z')",
+                    (),
+                ),
+            )
+        finally:
+            overhead.close()
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as error:
         record("d1-execution", False)
         print(f"FAIL d1 execution: {type(error).__name__}", file=sys.stderr)

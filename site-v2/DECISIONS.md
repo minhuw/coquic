@@ -446,7 +446,10 @@ bounded drill-down without parsing R2 during ordinary requests.
 - Public usage responses use `schemaVersion: "4.0"`; fixed limits and opaque
   publication/generation-scoped turn cursors prevent unbounded responses.
   Overhead rows expose aggregates only, never individual invocation or turn
-  drill-down. Hidden tasks contribute to neither task nor global totals.
+  drill-down. They use independent D1 generations with null task/publication
+  ownership; one guarded swap advances the daily and lifetime heads together,
+  and stale writers leave both prior heads unchanged. Hidden tasks contribute
+  to neither task nor global totals.
 
 ### Rejected alternatives
 

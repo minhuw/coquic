@@ -4,17 +4,21 @@ import copy
 import hashlib
 import json
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from coquic_steward.agents.telemetry import PriceCatalog
 from coquic_steward.publication.d1 import (
     D1Error,
     D1ErrorCode,
     D1PublicationClient,
     MAX_BATCH_PARAMETERS,
+    _overhead_digest,
+    _overhead_row,
 )
 
 
@@ -832,6 +836,356 @@ def test_usage_replacement_fills_na_cost_and_failure_rolls_back() -> None:
     assert server.connection.execute(
         "SELECT total_cost_micro_usd FROM usage_globals WHERE usage_generation_id = ?", (replacement["usage"]["generation"]["usageGenerationId"],)
     ).fetchone()[0] == 60
+
+
+def test_overhead_replay_replacement_and_hide_preserve_global_sums() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-overhead-one", run_id="run-overhead-one", task_id="task-overhead-one")
+    second = publication("publication-overhead-two", run_id="run-overhead-two", task_id="task-overhead-two")
+    d1.publish(first)
+    d1.publish(second)
+
+    overhead = {
+        "date": "2026-07-28",
+        "model": "gpt-overhead",
+        "ownerClass": "Steward overhead",
+        "tokens": {
+            "inputTokens": 5,
+            "cachedInputTokens": 1,
+            "uncachedInputTokens": 4,
+            "outputTokens": 3,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 8,
+        },
+        "cost": {
+            "uncachedInputMicroUsd": 4,
+            "cachedInputMicroUsd": 2,
+            "outputMicroUsd": 3,
+            "totalMicroUsd": 9,
+        },
+        "coverage": {
+            "status": "Complete",
+            "coveredInvocations": 1,
+            "expectedInvocations": 1,
+        },
+    }
+    overhead_digest = _overhead_digest((_overhead_row(overhead),))
+    old_usage_id = server.connection.execute(
+        "SELECT usage_generation_id FROM task_heads WHERE task_id = ?",
+        (first["taskId"],),
+    ).fetchone()[0]
+    server.fail_usage_swap_once = True
+    with pytest.raises(D1Error) as error:
+        d1.upsert_overhead(overhead, digest=overhead_digest)
+    assert error.value.code == D1ErrorCode.transient
+    assert server.connection.execute(
+        "SELECT usage_generation_id FROM task_heads WHERE task_id = ?",
+        (first["taskId"],),
+    ).fetchone()[0] == old_usage_id
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_global_heads WHERE ownership_class = 'steward-overhead'"
+    ).fetchone()[0] == 0
+
+    first_receipt = d1.upsert_overhead(overhead, digest=overhead_digest)
+    replay_receipt = d1.upsert_overhead(copy.deepcopy(overhead), digest=overhead_digest)
+    assert first_receipt.changed is True
+    assert replay_receipt.changed is False
+
+    def overhead_row() -> tuple[object, ...]:
+        return tuple(
+            server.connection.execute(
+                "SELECT g.total_tokens, g.total_cost_micro_usd, g.coverage, h.state "
+                "FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id "
+                "WHERE h.period_kind = 'daily' AND h.period_key = '2026-07-28' "
+                "AND h.model = 'gpt-overhead' AND h.ownership_class = 'steward-overhead'"
+            ).fetchone()
+        )
+
+    assert overhead_row() == (8, 9, "complete", "visible")
+    d1.hide_task("task-overhead-two", "unsafe_content")
+    assert overhead_row() == (8, 9, "complete", "visible")
+
+    mismatched = copy.deepcopy(overhead)
+    mismatched["tokens"]["totalTokens"] = 10
+    with pytest.raises(D1Error) as error:
+        d1.upsert_overhead(mismatched, digest=overhead_digest)
+    assert error.value.code == D1ErrorCode.digest_mismatch
+    assert overhead_row() == (8, 9, "complete", "visible")
+
+    changed = copy.deepcopy(overhead)
+    changed["tokens"]["inputTokens"] = 7
+    changed["tokens"]["uncachedInputTokens"] = 6
+    changed["tokens"]["totalTokens"] = 10
+    changed["cost"]["uncachedInputMicroUsd"] = 6
+    changed["cost"]["totalMicroUsd"] = 11
+    replacement_receipt = d1.upsert_overhead(
+        changed,
+        digest=_overhead_digest((_overhead_row(changed),)),
+    )
+    assert replacement_receipt.changed is True
+    assert overhead_row() == (10, 11, "complete", "visible")
+
+
+def test_overhead_starts_without_tasks_and_exposes_detached_daily_and_lifetime() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    overhead = {
+        "date": "2026-07-28",
+        "model": "gpt-overhead-fresh",
+        "ownerClass": "Steward overhead",
+        "tokens": {
+            "inputTokens": 5,
+            "cachedInputTokens": 1,
+            "uncachedInputTokens": 4,
+            "outputTokens": 3,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 8,
+        },
+        "cost": {
+            "uncachedInputMicroUsd": 4,
+            "cachedInputMicroUsd": 2,
+            "outputMicroUsd": 3,
+            "totalMicroUsd": 9,
+        },
+        "coverage": {"status": "Complete", "coveredInvocations": 1, "expectedInvocations": 1},
+    }
+    receipt = d1.upsert_overhead(overhead, digest=_overhead_digest((overhead,)))
+    assert receipt.changed is True
+    assert server.connection.execute("SELECT count(*) FROM task_heads").fetchone()[0] == 0
+    assert server.connection.execute("SELECT count(*) FROM usage_heads").fetchone()[0] == 0
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_generations WHERE ownership_class = 'steward-overhead' AND publication_id IS NULL AND task_id IS NULL"
+    ).fetchone()[0] == 2
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_global_heads WHERE state = 'visible' AND ownership_class = 'steward-overhead'"
+    ).fetchone()[0] == 2
+
+
+def test_overhead_lifetime_replaces_one_daily_contribution() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+
+    def make_row(day: str, total: int) -> dict[str, Any]:
+        return {
+            "date": day,
+            "model": "gpt-overhead-delta",
+            "ownerClass": "Steward overhead",
+            "tokens": {
+                "inputTokens": total,
+                "cachedInputTokens": 0,
+                "uncachedInputTokens": total,
+                "outputTokens": 0,
+                "reasoningOutputTokens": 0,
+                "totalTokens": total,
+            },
+            "cost": {
+                "uncachedInputMicroUsd": total,
+                "cachedInputMicroUsd": 0,
+                "outputMicroUsd": 0,
+                "totalMicroUsd": total,
+            },
+            "coverage": {"status": "Complete", "coveredInvocations": 1, "expectedInvocations": 1},
+        }
+
+    first = make_row("2026-07-28", 8)
+    second = make_row("2026-07-29", 4)
+    d1.upsert_overhead(first, digest=_overhead_digest((first,)))
+    d1.upsert_overhead(second, digest=_overhead_digest((second,)))
+    replacement = make_row("2026-07-28", 10)
+    d1.upsert_overhead(replacement, digest=_overhead_digest((replacement,)))
+    assert tuple(server.connection.execute(
+        "SELECT g.total_tokens, g.total_cost_micro_usd FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-overhead-delta'"
+    ).fetchone()) == (14, 14)
+    assert tuple(server.connection.execute(
+        "SELECT g.total_tokens, g.total_cost_micro_usd FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id WHERE h.period_kind = 'daily' AND h.period_key = '2026-07-28' AND h.model = 'gpt-overhead-delta'"
+    ).fetchone()) == (10, 10)
+
+
+def test_overhead_partial_replacement_keeps_unknown_lifetime_generation() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+
+    def make_row(status: str, input_tokens: int | None) -> dict[str, Any]:
+        return {
+            "date": "2026-07-28",
+            "model": "gpt-overhead-partial",
+            "ownerClass": "Steward overhead",
+            "tokens": {
+                "inputTokens": input_tokens,
+                "cachedInputTokens": 0 if input_tokens is not None else None,
+                "uncachedInputTokens": input_tokens,
+                "outputTokens": 0 if input_tokens is not None else None,
+                "reasoningOutputTokens": 0 if input_tokens is not None else None,
+                "totalTokens": input_tokens,
+            },
+            "cost": {
+                "uncachedInputMicroUsd": None,
+                "cachedInputMicroUsd": None,
+                "outputMicroUsd": None,
+                "totalMicroUsd": None,
+            },
+            "coverage": {"status": status, "coveredInvocations": 0, "expectedInvocations": 1},
+        }
+
+    unavailable = make_row("N.A.", None)
+    partial = make_row("Partial", 1)
+    d1.upsert_overhead(unavailable, digest=_overhead_digest((unavailable,)))
+    d1.upsert_overhead(partial, digest=_overhead_digest((partial,)))
+    assert tuple(server.connection.execute(
+        "SELECT g.coverage, g.total_tokens FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-overhead-partial'"
+    ).fetchone()) == ("unavailable", None)
+    assert tuple(server.connection.execute(
+        "SELECT g.coverage, g.total_tokens FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id WHERE h.period_kind = 'daily' AND h.period_key = '2026-07-28' AND h.model = 'gpt-overhead-partial'"
+    ).fetchone()) == ("partial", 1)
+
+
+def test_overhead_stale_cas_leaves_both_heads_on_the_winning_writer() -> None:
+    class InterposedD1(ScriptedD1):
+        def __init__(self) -> None:
+            super().__init__()
+            self.triggered = False
+            self.callback: Any = None
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            statements = body.get("batch") or [{"sql": body["sql"], "params": body.get("params", [])}]
+            response = super().__call__(request)
+            if not self.triggered and any("INSERT INTO usage_generations" in item["sql"] and "steward-overhead" in item["sql"] for item in statements):
+                self.triggered = True
+                assert callable(self.callback)
+                self.callback()
+            return response
+
+    def make_row(total: int) -> dict[str, Any]:
+        return {
+            "date": "2026-07-28",
+            "model": "gpt-overhead-race",
+            "ownerClass": "Steward overhead",
+            "tokens": {"inputTokens": total, "cachedInputTokens": 0, "uncachedInputTokens": total, "outputTokens": 0, "reasoningOutputTokens": 0, "totalTokens": total},
+            "cost": {"uncachedInputMicroUsd": total, "cachedInputMicroUsd": 0, "outputMicroUsd": 0, "totalMicroUsd": total},
+            "coverage": {"status": "Complete", "coveredInvocations": 1, "expectedInvocations": 1},
+        }
+
+    server = InterposedD1()
+    first_client = client(server)
+    winning = make_row(8)
+    loser = make_row(10)
+    winning_client = client(server)
+    server.callback = lambda: winning_client.upsert_overhead(loser, digest=_overhead_digest((loser,)))
+    with pytest.raises(D1Error) as error:
+        first_client.upsert_overhead(winning, digest=_overhead_digest((winning,)))
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert tuple(server.connection.execute(
+        "SELECT g.total_tokens, g.total_cost_micro_usd FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id WHERE h.period_kind = 'daily' AND h.period_key = '2026-07-28' AND h.model = 'gpt-overhead-race'"
+    ).fetchone()) == (10, 10)
+    assert tuple(server.connection.execute(
+        "SELECT g.total_tokens, g.total_cost_micro_usd FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-overhead-race'"
+    ).fetchone()) == (10, 10)
+
+
+def test_overhead_batch_limit_rejects_more_than_32_rows() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    template = {
+        "date": "2026-01-01",
+        "model": "gpt-overhead-bounds",
+        "ownerClass": "Steward overhead",
+        "tokens": {"inputTokens": 0, "cachedInputTokens": 0, "uncachedInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0, "totalTokens": 0},
+        "cost": {"uncachedInputMicroUsd": 0, "cachedInputMicroUsd": 0, "outputMicroUsd": 0, "totalMicroUsd": 0},
+        "coverage": {"status": "Complete", "coveredInvocations": 0, "expectedInvocations": 0},
+    }
+    rows = []
+    for index in range(33):
+        row = copy.deepcopy(template)
+        row["date"] = (date(2026, 1, 1) + timedelta(days=index)).isoformat()
+        rows.append(row)
+    with pytest.raises(D1Error) as error:
+        d1.upsert_overhead(rows, digest=_overhead_digest(tuple(rows)))
+    assert error.value.code == D1ErrorCode.count_mismatch
+
+
+def test_catalog_backfill_changes_only_na_turns_and_replays_from_cached_d1() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    numeric = publication("publication-backfill-numeric", run_id="run-backfill-numeric", task_id="task-backfill-numeric")
+    missing = publication("publication-backfill-na", run_id="run-backfill-na", task_id="task-backfill-na")
+    # Keep the already-priced comparison task on a separate model so the
+    # newly added fixture interval is not an immutable price-ledger conflict.
+    for collection in ("invocations", "turns", "prices", "globals"):
+        for row in numeric["usage"][collection]:
+            if row.get("model") == "gpt-fixture":
+                row["model"] = "gpt-numeric"
+    refresh_metadata_digest(numeric)
+    missing_usage = missing["usage"]
+    missing_usage["prices"] = []
+    missing_usage["generation"]["expectedCounts"]["prices"] = 0
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in missing_usage[collection]:
+            for field in ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"):
+                row[field] = None
+            if collection == "summaries":
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+            elif collection == "invocations":
+                row.update({"coverage": "partial", "priceEntryDigest": None})
+            elif collection == "turns":
+                row["priceEntryDigest"] = None
+            elif row["ownershipClass"] == "task-owned":
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+    refresh_metadata_digest(missing)
+    d1.publish(numeric)
+    d1.publish(missing)
+    numeric_before = tuple(
+        server.connection.execute(
+            "SELECT uncached_input_cost_micro_usd, cached_input_cost_micro_usd, "
+            "output_cost_micro_usd, total_cost_micro_usd FROM usage_turns WHERE task_id = ?",
+            (numeric["taskId"],),
+        ).fetchone()
+    )
+    catalog = PriceCatalog.from_dict(
+        {
+            "schema_version": 1,
+            "entries": [
+                {
+                    "id": "fixture-backfill",
+                    "model": "gpt-fixture",
+                    "effective_from": "2026-01-01T00:00:00Z",
+                    "effective_until": None,
+                    "input_micro_usd_per_million": 1_000_000,
+                    "cached_input_micro_usd_per_million": 500_000,
+                    "output_micro_usd_per_million": 2_000_000,
+                    "source": {"label": "fixture", "url": "https://example.invalid/catalog"},
+                }
+            ],
+        }
+    )
+    old_usage_id = missing_usage["generation"]["usageGenerationId"]
+    receipt = d1.backfill_na_costs(catalog, limit=1)
+    assert receipt.changed is True
+    assert receipt.processed_turns == 1
+    assert receipt.next_cursor is None
+    new_usage_id = server.connection.execute(
+        "SELECT usage_generation_id FROM task_heads WHERE task_id = ?", (missing["taskId"],)
+    ).fetchone()[0]
+    assert new_usage_id != old_usage_id
+    assert tuple(
+        server.connection.execute(
+            "SELECT uncached_input_cost_micro_usd, cached_input_cost_micro_usd, "
+            "output_cost_micro_usd, total_cost_micro_usd FROM usage_turns "
+            "WHERE task_id = ? AND usage_generation_id = ?",
+            (missing["taskId"], new_usage_id),
+        ).fetchone()
+    ) == (9, 1, 14, 24)
+    assert tuple(
+        server.connection.execute(
+            "SELECT uncached_input_cost_micro_usd, cached_input_cost_micro_usd, "
+            "output_cost_micro_usd, total_cost_micro_usd FROM usage_turns WHERE task_id = ?",
+            (numeric["taskId"],),
+        ).fetchone()
+    ) == numeric_before
+    replay = d1.backfill_na_costs(catalog, limit=1)
+    assert replay.changed is False
+    assert replay.processed_turns == 0
 
 
 def test_supersession_and_hide_are_atomic_and_idempotent() -> None:

@@ -26,14 +26,16 @@ CREATE TABLE publication_generations (
 
 CREATE TABLE usage_generations (
     usage_generation_id TEXT PRIMARY KEY,
-    publication_id TEXT NOT NULL,
-    task_id TEXT NOT NULL,
+    publication_id TEXT,
+    task_id TEXT,
+    ownership_class TEXT NOT NULL DEFAULT 'task-owned'
+        CHECK (ownership_class IN ('task-owned', 'steward-overhead')),
     schema_version TEXT NOT NULL CHECK (schema_version = '1.0'),
     metadata_digest TEXT NOT NULL
         CHECK (length(metadata_digest) = 64 AND metadata_digest NOT GLOB '*[^0-9a-f]*'),
     state TEXT NOT NULL DEFAULT 'staged'
         CHECK (state IN ('staged', 'visible', 'superseded')),
-    expected_summary_count INTEGER NOT NULL CHECK (typeof(expected_summary_count) = 'integer' AND expected_summary_count BETWEEN 1 AND 9007199254740991),
+    expected_summary_count INTEGER NOT NULL CHECK (typeof(expected_summary_count) = 'integer' AND expected_summary_count BETWEEN 0 AND 9007199254740991),
     expected_invocation_count INTEGER NOT NULL CHECK (typeof(expected_invocation_count) = 'integer' AND expected_invocation_count BETWEEN 0 AND 9007199254740991),
     expected_turn_count INTEGER NOT NULL CHECK (typeof(expected_turn_count) = 'integer' AND expected_turn_count BETWEEN 0 AND 9007199254740991),
     expected_price_count INTEGER NOT NULL CHECK (typeof(expected_price_count) = 'integer' AND expected_price_count BETWEEN 0 AND 9007199254740991),
@@ -41,6 +43,11 @@ CREATE TABLE usage_generations (
     created_at TEXT NOT NULL,
     exposed_at TEXT,
     UNIQUE (usage_generation_id, task_id),
+    CHECK ((ownership_class = 'task-owned' AND publication_id IS NOT NULL AND task_id IS NOT NULL AND expected_summary_count >= 1)
+        OR (ownership_class = 'steward-overhead' AND publication_id IS NULL AND task_id IS NULL
+            AND expected_summary_count = 0 AND expected_invocation_count = 0
+            AND expected_turn_count = 0 AND expected_price_count = 0
+            AND expected_global_count = 1)),
     FOREIGN KEY (publication_id, task_id)
         REFERENCES publication_generations (publication_id, task_id)
 );
@@ -346,6 +353,51 @@ CREATE TABLE usage_global_heads (
     FOREIGN KEY (global_id)
         REFERENCES usage_globals (global_id)
 );
+
+-- A global head may not relabel a generation or cross the ownership boundary.
+-- The detached overhead owner is the only class allowed to have null task and
+-- publication identities.
+CREATE TRIGGER usage_global_head_ownership_guard
+BEFORE INSERT ON usage_global_heads
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM usage_globals AS g
+      JOIN usage_generations AS ug
+        ON ug.usage_generation_id = g.usage_generation_id
+     WHERE g.global_id = NEW.global_id
+       AND g.usage_generation_id = NEW.usage_generation_id
+       AND g.period_kind = NEW.period_kind
+       AND g.period_key = NEW.period_key
+       AND g.model = NEW.model
+       AND g.ownership_class = NEW.ownership_class
+       AND ug.ownership_class = NEW.ownership_class
+       AND (ug.ownership_class = 'steward-overhead'
+            AND ug.publication_id IS NULL AND ug.task_id IS NULL
+            OR ug.ownership_class = 'task-owned'
+            AND ug.publication_id IS NOT NULL AND ug.task_id IS NOT NULL)
+)
+BEGIN SELECT RAISE(ABORT, 'global head ownership mismatch'); END;
+
+CREATE TRIGGER usage_global_head_ownership_update_guard
+BEFORE UPDATE ON usage_global_heads
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM usage_globals AS g
+      JOIN usage_generations AS ug
+        ON ug.usage_generation_id = g.usage_generation_id
+     WHERE g.global_id = NEW.global_id
+       AND g.usage_generation_id = NEW.usage_generation_id
+       AND g.period_kind = NEW.period_kind
+       AND g.period_key = NEW.period_key
+       AND g.model = NEW.model
+       AND g.ownership_class = NEW.ownership_class
+       AND ug.ownership_class = NEW.ownership_class
+       AND (ug.ownership_class = 'steward-overhead'
+            AND ug.publication_id IS NULL AND ug.task_id IS NULL
+            OR ug.ownership_class = 'task-owned'
+            AND ug.publication_id IS NOT NULL AND ug.task_id IS NOT NULL)
+)
+BEGIN SELECT RAISE(ABORT, 'global head ownership mismatch'); END;
 
 CREATE UNIQUE INDEX one_visible_generation_per_task
     ON publication_generations (task_id) WHERE state = 'visible';

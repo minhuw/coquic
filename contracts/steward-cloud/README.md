@@ -212,8 +212,15 @@ catalog rates.
 Global rows are keyed by exact `model`, `ownershipClass` (`task-owned` or
 `steward-overhead`), and either `lifetime` or one UTC `YYYY-MM-DD` day. Overhead
 is one aggregate row per key; individual unauthenticated calls never become
-public invocation or turn rows. Hidden tasks contribute to neither task nor
-global aggregates.
+public invocation or turn rows. A task-owned usage generation has non-null
+publication/task ownership and at least one summary. A `steward-overhead`
+generation has null publication/task ownership, zero summary/invocation/turn/
+price rows, exactly one global, and no task or usage head. Daily and lifetime
+overhead generations are staged independently and their two global heads are
+advanced by one guarded D1 batch. A stale writer therefore changes neither
+head, while a replay of the same canonical `StewardOverheadUsage.public_dict`
+content is a no-op. Hidden tasks contribute to neither task nor global
+aggregates.
 
 ## Public response revision
 

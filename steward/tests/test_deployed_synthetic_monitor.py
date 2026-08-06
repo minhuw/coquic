@@ -336,6 +336,54 @@ def test_usage_checker_reconciles_invocation_identity_and_turn_rollup(tmp_path: 
     )
 
 
+def test_usage_checker_reconciles_partial_invocation_with_covered_turn(tmp_path: Path) -> None:
+    responses = _populated_responses()
+    task_path = next(path for path in responses if path.startswith("/steward/tasks/"))
+    responses[task_path].body = responses[task_path].body.replace(
+        b"Complete - 1/1 turns", b"Partial - 1/2 turns", 1
+    )
+    with FixtureServer(responses) as server:
+        completed, result = _run_check(server.base_url, tmp_path)
+
+    assert completed.returncode == 0
+    assert result["ok"] is True
+    assert _statuses(result, "usage_task_structure") == ["pass"]
+
+
+def test_usage_checker_rejects_contradictory_partial_invocation_rollup(tmp_path: Path) -> None:
+    responses = _populated_responses()
+    task_path = next(path for path in responses if path.startswith("/steward/tasks/"))
+    body = responses[task_path].body.replace(
+        b"<td>15</td><td>N.A.</td><td>Complete - 1/1 turns</td><td><details>",
+        b"<td>999</td><td>N.A.</td><td>Partial - 1/2 turns</td><td><details>",
+        1,
+    )
+    original = (
+        b"<dt>Prompt tokens</dt><dd>10</dd><dt>Cached tokens</dt><dd>2</dd>"
+        b"<dt>Uncached tokens</dt><dd>8</dd><dt>Completion tokens</dt><dd>5</dd>"
+        b"<dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>15</dd>"
+    )
+    replacement = (
+        b"<dt>Prompt tokens</dt><dd>500</dd><dt>Cached tokens</dt><dd>2</dd>"
+        b"<dt>Uncached tokens</dt><dd>498</dd><dt>Completion tokens</dt><dd>499</dd>"
+        b"<dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>999</dd>"
+    )
+    prefix, separator, suffix = body.partition(original)
+    assert separator
+    responses[task_path].body = prefix + replacement + suffix
+
+    with FixtureServer(responses) as server:
+        completed, result = _run_check(server.base_url, tmp_path)
+
+    assert completed.returncode == 1
+    assert result["ok"] is False
+    assert any(
+        check.get("detail") == "task_usage_rollup_invalid"
+        for check in result["checks"]
+        if check["name"] == "usage_task_structure"
+    )
+
+
 @pytest.mark.parametrize("case", ["missing", "wrong_version", "malformed", "private", "oversize", "slow"])
 def test_invalid_publication_paths_fail_without_response_values(case: str, tmp_path: Path) -> None:
     responses = _empty_responses()

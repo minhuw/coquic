@@ -241,10 +241,18 @@ if "FROM task_heads" in " ".join(args):
         }
         if case == "cross-owner":
             sample["turn_task_id"] = "other-task"
-        if case == "partial":
+        if case in {"partial", "partial-contradictory"}:
             sample["task_summary_coverage"] = "partial"
             sample["run_summary_coverage"] = "partial"
             sample["global_coverage"] = "partial"
+        if case == "partial-contradictory":
+            sample["task_summary_prompt_tokens"] = 500
+            sample["task_summary_cached_tokens"] = 2
+            sample["task_summary_uncached_tokens"] = 498
+            sample["task_summary_completion_tokens"] = 499
+            sample["task_summary_reasoning_tokens"] = 1
+            sample["task_summary_total_tokens"] = 999
+            sample["task_summary_known_token_subtotal"] = 999
         samples = [sample]
         if case in {"two-invocations", "two-invocations-contradictory"}:
             second = dict(sample)
@@ -690,6 +698,17 @@ def test_activation_accepts_partial_unpriced_usage_without_recomputing(harness: 
     harness["env"]["WRANGLER_CASE"] = "partial"
     activated = _run(harness, "--mode", "activate", apply=True)
     assert activated.returncode == 0, activated.stderr
+
+
+def test_activation_rejects_contradictory_partial_rollup(harness: dict[str, Any]) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    harness["env"]["PULUMI_CASE"] = "same"
+    harness["env"]["WRANGLER_CASE"] = "partial-contradictory"
+    activated = _run(harness, "--mode", "activate", apply=True)
+    assert activated.returncode != 0
+    assert "sample" in activated.stderr
+    assert not harness["site_input"].exists()
 
 
 def test_activation_reconciles_two_invocations_and_related_turns(harness: dict[str, Any]) -> None:

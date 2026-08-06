@@ -914,10 +914,15 @@ def validate_metrics(sample: dict[str, object], prefix: str, *, turn: bool = Fal
     for item in values:
         if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 9_007_199_254_740_991):
             raise ValueError("sample token metric is invalid")
-    if all(item is not None for item in values):
-        prompt, cached, uncached, completion, reasoning, total = values
-        if cached > prompt or uncached != prompt - cached or reasoning > completion or total != prompt + completion:
-            raise ValueError("sample token arithmetic is inconsistent")
+    prompt, cached, uncached, completion, reasoning, total = values
+    if prompt is not None and cached is not None and cached > prompt:
+        raise ValueError("sample token arithmetic is inconsistent")
+    if prompt is not None and cached is not None and uncached is not None and uncached != prompt - cached:
+        raise ValueError("sample token arithmetic is inconsistent")
+    if completion is not None and reasoning is not None and reasoning > completion:
+        raise ValueError("sample token arithmetic is inconsistent")
+    if prompt is not None and completion is not None and total is not None and total != prompt + completion:
+        raise ValueError("sample token arithmetic is inconsistent")
     if turn and any(item is None for item in values):
         raise ValueError("sample turn token evidence is incomplete")
     costs = tuple(sample[f"{prefix}_{field}"] for field in cost_fields)
@@ -926,6 +931,8 @@ def validate_metrics(sample: dict[str, object], prefix: str, *, turn: bool = Fal
             raise ValueError("sample cost metric is invalid")
     if any(item is None for item in costs) and not all(item is None for item in costs):
         raise ValueError("sample cost state is mixed")
+    if all(item is not None for item in costs) and costs[-1] != sum(item for item in costs[:-1] if item is not None):
+        raise ValueError("sample cost arithmetic is inconsistent")
     return values
 
 
@@ -939,6 +946,8 @@ def validate_coverage(sample: dict[str, object], prefix: str, count_name: str) -
     expected = row_integer(sample, expected_name)
     if covered is None or expected is None or covered > expected:
         raise ValueError("sample coverage counts are invalid")
+    row_integer(sample, f"{prefix}_known_token_subtotal", optional=True)
+    row_integer(sample, f"{prefix}_known_cost_subtotal_micro_usd", optional=True)
     if coverage == "complete" and covered != expected:
         raise ValueError("sample complete coverage is inconsistent")
     if coverage == "unavailable":
@@ -988,7 +997,7 @@ for sample in samples:
         raise ValueError("sample turn ordinal is invalid")
     for prefix in ("task_summary", "run_summary", "invocation", "global"):
         validate_coverage(sample, prefix, "turns" if prefix == "invocation" else "invocations")
-    validate_metrics(sample, prefix)
+        validate_metrics(sample, prefix)
     validate_metrics(sample, "turn", turn=True)
 
 
@@ -1039,11 +1048,6 @@ if row_integer(first, "invocation_count") != len(invocations) or row_integer(fir
     raise ValueError("sample evidence does not cover every counted row")
 if row_integer(first, "run_count") != 1 or row_integer(first, "run_invocation_count") != len(invocations) or row_integer(first, "run_turn_count") != len(turns):
     raise ValueError("sample run counts are inconsistent")
-for prefix in ("task_summary", "run_summary"):
-    if row_text(first, f"{prefix}_coverage") == "complete":
-        if row_integer(first, f"{prefix}_covered_invocations") != len(invocations) or row_integer(first, f"{prefix}_expected_invocations") != len(invocations):
-            raise ValueError("sample summary coverage is inconsistent")
-
 turns_by_invocation: dict[str, list[dict[str, object]]] = {}
 for turn in turns.values():
     turns_by_invocation.setdefault(row_text(turn, "turn_invocation_id") or "", []).append(turn)
@@ -1056,20 +1060,40 @@ for invocation_id, invocation in invocations.items():
 
 
 def rollup_metrics(parent: dict[str, object], parent_prefix: str, children: list[dict[str, object]], child_prefix: str) -> None:
-    if row_text(parent, f"{parent_prefix}_coverage") != "complete":
+    coverage = row_text(parent, f"{parent_prefix}_coverage")
+    if coverage == "unavailable":
         return
+    covered_name = f"{parent_prefix}_covered_turns" if parent_prefix == "invocation" else f"{parent_prefix}_covered_invocations"
+    expected_name = f"{parent_prefix}_expected_turns" if parent_prefix == "invocation" else f"{parent_prefix}_expected_invocations"
+    covered = row_integer(parent, covered_name)
+    expected = row_integer(parent, expected_name)
+    if covered is None or expected is None or covered != len(children) or covered > expected:
+        raise ValueError("sample usage coverage does not match represented children")
+    if coverage == "complete" and covered != expected:
+        raise ValueError("sample complete rollup coverage is inconsistent")
     for field in (*token_fields, *cost_fields):
         values = [child[f"{child_prefix}_{field}"] for child in children]
-        if not values:
-            total = None
-        elif all(value is None for value in values):
-            total = None
-        elif any(value is None for value in values):
-            raise ValueError("sample complete rollup has unknown child metrics")
-        else:
-            total = sum(value for value in values if isinstance(value, int))
-        if parent[f"{parent_prefix}_{field}"] != total:
+        parent_value = parent[f"{parent_prefix}_{field}"]
+        if parent_value is None:
+            if coverage == "complete" and any(value is not None for value in values):
+                raise ValueError("sample complete rollup has unknown parent metrics")
+            continue
+        if not values or any(value is None for value in values):
+            raise ValueError("sample rollup has unknown child metrics")
+        if parent_value != sum(value for value in values if isinstance(value, int)):
             raise ValueError("sample usage levels disagree")
+    for known_field, child_field in (
+        ("known_token_subtotal", "total_tokens"),
+        ("known_cost_subtotal_micro_usd", "total_cost_micro_usd"),
+    ):
+        known = parent[f"{parent_prefix}_{known_field}"]
+        if known is None:
+            continue
+        values = [child[f"{child_prefix}_{child_field}"] for child in children]
+        if not values or any(value is None for value in values):
+            raise ValueError("sample rollup has unknown child subtotals")
+        if known != sum(value for value in values if isinstance(value, int)):
+            raise ValueError("sample usage subtotals disagree")
 
 
 rollup_metrics(first, "task_summary", list(invocations.values()), "invocation")

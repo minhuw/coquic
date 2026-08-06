@@ -519,38 +519,50 @@ def _usage_coverage_counts(value: str) -> tuple[str, int | None, int | None] | N
     label, covered, expected = match.groups()
     if covered is None:
         return label, None, None
-    return label, int(covered.replace(",", "")), int(expected.replace(",", ""))
+    covered_count = int(covered.replace(",", ""))
+    expected_count = int(expected.replace(",", ""))
+    if covered_count > expected_count:
+        return None
+    return label, covered_count, expected_count
 
 
 def _usage_rollup_matches(parent: _UsageRow, turns: list[_UsageRow], coverage_index: int) -> bool:
     if len(parent.cells) <= coverage_index:
         return False
     coverage = _usage_coverage_counts(parent.cells[coverage_index])
-    if coverage is None or coverage[0] != "Complete":
+    if coverage is None:
+        return False
+    status, covered, expected = coverage
+    if status in {"Unavailable", "N.A."}:
         return True
-    _, covered, expected = coverage
-    if covered is None or expected is None or covered != expected or len(turns) != expected:
+    if covered is None or expected is None or covered != len(turns):
+        return False
+    if status == "Complete" and covered != expected:
         return False
     parent_metrics = _usage_metrics(parent)
     child_metrics = [_usage_metrics(turn) for turn in turns]
-    if parent_metrics is None or any(metrics is None for metrics in child_metrics):
+    if parent_metrics is None:
         return False
     parent_tokens, parent_costs = parent_metrics
-    token_values = [metrics[0] for metrics in child_metrics if metrics is not None]
-    cost_values = [metrics[1] for metrics in child_metrics if metrics is not None]
     for index, expected_value in enumerate(parent_tokens):
-        values = [metrics[index] for metrics in token_values]
-        if any(value is None for value in values) or expected_value != sum(value for value in values if value is not None):
+        values = [metrics[0][index] for metrics in child_metrics if metrics is not None]
+        if expected_value is None:
+            if status == "Complete" and any(value is not None for value in values):
+                return False
+            continue
+        if len(values) != len(child_metrics) or any(value is None for value in values):
+            return False
+        if expected_value != sum(value for value in values if value is not None):
             return False
     for index, expected_value in enumerate(parent_costs):
-        values = [metrics[index] for metrics in cost_values]
-        if all(value is None for value in values):
-            total = None
-        elif any(value is None for value in values):
+        values = [metrics[1][index] for metrics in child_metrics if metrics is not None]
+        if expected_value is None:
+            if status == "Complete" and any(value is not None for value in values):
+                return False
+            continue
+        if len(values) != len(child_metrics) or any(value is None for value in values):
             return False
-        else:
-            total = sum(value for value in values if value is not None)
-        if expected_value != total:
+        if expected_value != sum(value for value in values if value is not None):
             return False
     return True
 

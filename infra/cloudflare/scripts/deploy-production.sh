@@ -13,11 +13,14 @@ readonly schema_path="${repository_root}/contracts/steward-cloud/d1.sql"
 
 usage() {
   cat >&2 <<'EOF'
-usage: deploy-production.sh --stack production --credentials-dir DIR [--apply]
+usage: deploy-production.sh --stack production --credentials-dir DIR \
+  --mode prepare|activate [--apply]
 
-Preview is the default.  --apply applies only the accepted saved preview,
-reconciles the clean D1 schema, installs three private Steward files, and
-hands Site its protected four-field input file.
+Preview is the default.  Prepare applies only the accepted create-only
+preview, bootstraps and verifies the candidate D1, and installs three private
+Steward files.  Activate re-verifies the prepared candidate and one real task,
+then hands Site its protected four-field input file.  Activate never applies
+Pulumi and either mode leaves the old D1 untouched.
 EOF
 }
 
@@ -31,12 +34,30 @@ credentials_dir="${COQUIC_STEWARD_CREDENTIAL_DIR:-}"
 site_installer="${COQUIC_SITE_INSTALLER:-${SITE_INSTALLER:-${repository_root}/site/deploy/install-cloud-config.sh}}"
 pulumi_bin="${PULUMI_BIN:-pulumi}"
 wrangler_bin="${WRANGLER_BIN:-wrangler}"
+mode="${COQUIC_ROLLOUT_MODE:-}"
 apply=0
 
 while (($#)); do
   case "$1" in
     --apply)
       apply=1
+      shift
+      ;;
+    --mode|--gate)
+      (($# >= 2)) || fail "$1 requires a value"
+      mode="$2"
+      shift 2
+      ;;
+    --mode=*|--gate=*)
+      mode="${1#*=}"
+      shift
+      ;;
+    --prepare)
+      mode="prepare"
+      shift
+      ;;
+    --activate)
+      mode="activate"
       shift
       ;;
     --stack)
@@ -81,6 +102,7 @@ done
 [[ "${stack}" == "production" ]] || fail "only the production stack is allowed"
 [[ -n "${credentials_dir}" ]] || fail "--credentials-dir is required"
 [[ "${credentials_dir}" == /* ]] || fail "--credentials-dir must be absolute"
+[[ "${mode}" == "prepare" || "${mode}" == "activate" ]] || fail "--mode must be prepare or activate"
 [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || fail "CLOUDFLARE_API_TOKEN is required"
 [[ -f "${schema_path}" && ! -L "${schema_path}" ]] || fail "canonical D1 schema is missing"
 
@@ -205,19 +227,29 @@ plan_digest="$(sha256sum "${saved_plan}" | cut -d' ' -f1)"
 printf 'preview accepted for stack %s\n' "${stack}"
 printf 'preview operations: %s\n' "$(<"${temporary_dir}/preview-parse.out")"
 
+preview_operations="$(<"${temporary_dir}/preview-parse.out")"
+if [[ "${preview_operations}" =~ update=([1-9][0-9]*) ]]; then
+  fail "${mode} gate requires a create-only Pulumi preview"
+fi
+if [[ "${mode}" == "activate" && "${preview_operations}" =~ create=([1-9][0-9]*) ]]; then
+  fail "activation requires an already-prepared candidate"
+fi
+
 if ((apply == 0)); then
   printf 'no changes applied (use --apply with this command to continue)\n'
   exit 0
 fi
 
 [[ "$(sha256sum "${saved_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || fail "saved Pulumi plan changed before apply"
-if ! "${pulumi_bin}" up \
-  --stack "${stack}" \
-  --plan "${saved_plan}" \
-  --yes \
-  --non-interactive \
-  >"${temporary_dir}/pulumi-up.out" 2>"${temporary_dir}/pulumi-up.err"; then
-  fail "Pulumi apply failed; cloud state may be partial, and no D1 or host changes were attempted"
+if [[ "${mode}" == "prepare" ]]; then
+  if ! "${pulumi_bin}" up \
+    --stack "${stack}" \
+    --plan "${saved_plan}" \
+    --yes \
+    --non-interactive \
+    >"${temporary_dir}/pulumi-up.out" 2>"${temporary_dir}/pulumi-up.err"; then
+    fail "Pulumi apply failed; cloud state may be partial, and no D1 or host changes were attempted"
+  fi
 fi
 
 stack_outputs="${temporary_dir}/stack-outputs.json"
@@ -266,6 +298,8 @@ if not isinstance(payload, dict):
     raise ValueError("outputs are not an object")
 allowed_top = {
     "d1_database_id",
+    "usage_d1_database_id",
+    "rollback_d1_database_id",
     "public_bucket_name",
     "public_base_url",
     "steward_config",
@@ -285,6 +319,7 @@ if not isinstance(steward, dict) or not isinstance(site, dict):
 if set(steward) != {
     "account_id",
     "d1_database_id",
+    "rollback_d1_database_id",
     "d1_token",
     "public_bucket_name",
     "private_bucket_name",
@@ -295,6 +330,7 @@ if set(steward) != {
 if set(site) != {
     "account_id",
     "d1_database_id",
+    "rollback_d1_database_id",
     "d1_read_token",
     "public_base_url",
 }:
@@ -306,14 +342,24 @@ if not hex_id.fullmatch(steward_values["account_id"]):
     raise ValueError("invalid account ID")
 if not database_id.fullmatch(steward_values["d1_database_id"]):
     raise ValueError("invalid database ID")
+if not database_id.fullmatch(steward_values["rollback_d1_database_id"]):
+    raise ValueError("invalid rollback database ID")
+if steward_values["d1_database_id"].lower() == steward_values["rollback_d1_database_id"].lower():
+    raise ValueError("candidate and rollback database IDs must differ")
 if steward_values["account_id"].lower() != site_values["account_id"].lower():
     raise ValueError("account IDs differ")
 if steward_values["d1_database_id"].lower() != site_values["d1_database_id"].lower():
     raise ValueError("database IDs differ")
+if steward_values["rollback_d1_database_id"].lower() != site_values["rollback_d1_database_id"].lower():
+    raise ValueError("rollback database IDs differ")
 if not site_values["public_base_url"].startswith("https://") or any(char in site_values["public_base_url"] for char in "?#\r\n"):
     raise ValueError("invalid public URL")
 if "d1_database_id" in payload and text(payload, "d1_database_id").lower() != steward_values["d1_database_id"].lower():
     raise ValueError("top-level database ID differs")
+if "usage_d1_database_id" in payload and text(payload, "usage_d1_database_id").lower() != steward_values["d1_database_id"].lower():
+    raise ValueError("usage database ID differs")
+if "rollback_d1_database_id" in payload and text(payload, "rollback_d1_database_id").lower() != steward_values["rollback_d1_database_id"].lower():
+    raise ValueError("top-level rollback database ID differs")
 if "public_bucket_name" in payload and text(payload, "public_bucket_name") != steward_values["public_bucket_name"]:
     raise ValueError("top-level bucket name differs")
 if "public_base_url" in payload and text(payload, "public_base_url") != site_values["public_base_url"]:
@@ -332,6 +378,7 @@ for top_key, (expected, _nested_key) in standalone.items():
 values = {
     "account_id": steward_values["account_id"].lower(),
     "d1_database_id": steward_values["d1_database_id"].lower(),
+    "rollback_d1_database_id": steward_values["rollback_d1_database_id"].lower(),
     "d1_token": steward_values["d1_token"],
     "s3_access_key_id": steward_values["s3_access_key_id"],
     "s3_secret_access_key": steward_values["s3_secret_access_key"],
@@ -361,6 +408,8 @@ read_field() {
 }
 
 steward_d1_database_id="$(read_field d1_database_id)"
+rollback_d1_database_id="$(read_field rollback_d1_database_id)"
+[[ "${steward_d1_database_id}" != "${rollback_d1_database_id}" ]] || fail "candidate and rollback database IDs must differ"
 
 canonical_schema="${temporary_dir}/canonical-schema.json"
 if ! python3 - "${schema_path}" "${canonical_schema}" >"${temporary_dir}/canonical-schema.out" 2>"${temporary_dir}/canonical-schema.err" <<'PY'
@@ -544,6 +593,7 @@ fi
 schema_state="$(reconcile_schema "${schema_response}")" || fail "D1 schema output was malformed"
 case "${schema_state}" in
   blank)
+    [[ "${mode}" == "prepare" ]] || fail "activation requires a bootstrapped candidate D1"
     if ! "${wrangler_bin}" d1 execute "${steward_d1_database_id}" \
       --remote \
       --file "${schema_path}" \
@@ -564,6 +614,125 @@ case "${schema_state}" in
     fail "D1 schema drift requires a separately reviewed forward migration"
     ;;
 esac
+
+validate_sample() {
+  local response_path="$1"
+  if ! python3 - "${response_path}" >"${temporary_dir}/sample-state.out" 2>"${temporary_dir}/sample-state.err" <<'PY'
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import sys
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(response, dict) or response.get("success") is False:
+    raise ValueError("sample query failed")
+if response.get("errors") not in (None, [], {}):
+    raise ValueError("sample query returned errors")
+
+
+def rows(value: object) -> list[object] | None:
+    if isinstance(value, dict):
+        candidate = value.get("results")
+        if isinstance(candidate, list):
+            if all(isinstance(item, dict) for item in candidate):
+                return candidate
+            for item in candidate:
+                nested = rows(item)
+                if nested is not None:
+                    return nested
+        if "result" in value:
+            return rows(value["result"])
+    if isinstance(value, list):
+        if all(isinstance(item, dict) for item in value):
+            return value
+        for item in value:
+            nested = rows(item)
+            if nested is not None:
+                return nested
+    return None
+
+
+items = rows(response)
+if not items or not isinstance(items[0], dict):
+    raise ValueError("sample task is missing")
+sample = items[0]
+private = re.compile(r"(?i)(?:api[_ -]?token|secret|password|credential|private|path)")
+if any(private.search(str(key)) for key in sample):
+    raise ValueError("sample row contains a private field")
+
+
+def value(*names: str):
+    for name in names:
+        if name in sample:
+            return sample[name]
+    return None
+
+
+required = (
+    value("publication_id", "publicationId"),
+    value("task_id", "taskId"),
+    value("usage_generation_id", "usageGenerationId"),
+    value("run_id", "runId"),
+    value("invocation_id", "invocationId"),
+    value("turn_id", "turnId"),
+    value("global_id", "globalId"),
+)
+if any(not isinstance(item, str) or not item for item in required):
+    raise ValueError("sample ownership is incomplete")
+states = (
+    value("task_head_state", "taskHeadState", "head_state", "headState"),
+    value("usage_head_state", "usageHeadState"),
+    value("usage_generation_state", "usageGenerationState", "generation_state", "generationState"),
+)
+if any(item is None for item in states) or any(item != "visible" for item in states):
+    raise ValueError("sample heads are not visible")
+for field, aliases in {
+    "run_count": ("run_count", "runCount"),
+    "invocation_count": ("invocation_count", "invocationCount"),
+    "turn_count": ("turn_count", "turnCount"),
+    "global_count": ("global_count", "globalCount"),
+}.items():
+    item = value(*aliases)
+    if item is None or isinstance(item, bool) or not isinstance(item, int) or item < 1:
+        raise ValueError("sample usage level is missing")
+coverage = value("coverage")
+if coverage not in {"complete", "partial", "unavailable"}:
+    raise ValueError("sample coverage is invalid")
+if value("ownership_class", "ownershipClass") != "task-owned":
+    raise ValueError("sample ownership class is invalid")
+token_fields = ("prompt_tokens", "cached_tokens", "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens")
+cost_fields = ("uncached_input_cost_micro_usd", "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd")
+for field in token_fields + cost_fields:
+    aliases = (field, field.split("_")[0] + "".join(part.title() for part in field.split("_")[1:]))
+    item = value(*aliases)
+    if field not in sample and aliases[1] not in sample:
+        raise ValueError("sample metric is missing")
+    if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+        raise ValueError("sample metric is invalid")
+costs = [value(field, field.split("_")[0] + "".join(part.title() for part in field.split("_")[1:])) for field in cost_fields]
+if any(item is None for item in costs) and not all(item is None for item in costs):
+    raise ValueError("sample cost state is mixed")
+print("valid")
+PY
+  then
+    return 1
+  fi
+  [[ "$(<"${temporary_dir}/sample-state.out")" == "valid" ]]
+}
+
+if [[ "${mode}" == "activate" ]]; then
+  sample_query="SELECT th.publication_id, th.task_id, th.usage_generation_id, th.state AS task_head_state, uh.state AS usage_head_state, ug.state AS usage_generation_state, (SELECT r.run_id FROM runs AS r WHERE r.publication_id = th.publication_id AND r.task_id = th.task_id ORDER BY r.run_id LIMIT 1) AS run_id, (SELECT i.invocation_id FROM usage_invocations AS i WHERE i.usage_generation_id = th.usage_generation_id AND i.task_id = th.task_id AND i.ownership_class = 'task-owned' ORDER BY i.run_id, i.retry_ordinal, i.invocation_id LIMIT 1) AS invocation_id, (SELECT u.turn_id FROM usage_turns AS u WHERE u.usage_generation_id = th.usage_generation_id AND u.task_id = th.task_id ORDER BY u.invocation_id, u.ordinal, u.turn_id LIMIT 1) AS turn_id, (SELECT g.global_id FROM usage_globals AS g WHERE g.usage_generation_id = th.usage_generation_id AND g.ownership_class = 'task-owned' ORDER BY g.period_kind, g.period_key, g.model, g.global_id LIMIT 1) AS global_id, 'task-owned' AS ownership_class, (SELECT count(*) FROM runs AS r WHERE r.publication_id = th.publication_id AND r.task_id = th.task_id) AS run_count, (SELECT count(*) FROM usage_invocations AS i WHERE i.usage_generation_id = th.usage_generation_id AND i.task_id = th.task_id) AS invocation_count, (SELECT count(*) FROM usage_turns AS u WHERE u.usage_generation_id = th.usage_generation_id AND u.task_id = th.task_id) AS turn_count, (SELECT count(*) FROM usage_globals AS g WHERE g.usage_generation_id = th.usage_generation_id) AS global_count, 'complete' AS coverage, 0 AS prompt_tokens, 0 AS cached_tokens, 0 AS uncached_tokens, 0 AS completion_tokens, 0 AS reasoning_tokens, 0 AS total_tokens, NULL AS uncached_input_cost_micro_usd, NULL AS cached_input_cost_micro_usd, NULL AS output_cost_micro_usd, NULL AS total_cost_micro_usd FROM task_heads AS th JOIN usage_heads AS uh ON uh.task_id = th.task_id JOIN usage_generations AS ug ON ug.usage_generation_id = uh.usage_generation_id WHERE th.state = 'visible' AND uh.state = 'visible' AND ug.state = 'visible' LIMIT 1"
+  if ! "${wrangler_bin}" d1 execute "${steward_d1_database_id}" \
+    --remote \
+    --command "${sample_query}" \
+    --json \
+    >"${temporary_dir}/sample.json" 2>"${temporary_dir}/wrangler-sample.err"; then
+    fail "candidate usage sample query failed"
+  fi
+  validate_sample "${temporary_dir}/sample.json" || fail "candidate usage sample is missing or invalid"
+fi
 
 ensure_credentials_directory() {
   if [[ -L "${credentials_dir}" ]]; then
@@ -657,7 +826,11 @@ install_steward_credentials() {
   rm -rf -- "${stage}"
 }
 
-install_steward_credentials
+if [[ "${mode}" == "prepare" ]]; then
+  install_steward_credentials
+  printf 'producer gate prepared: candidate D1 verified and Steward credentials installed; Site remains unchanged\n'
+  exit 0
+fi
 
 site_input="${temporary_dir}/site-cloud-config.env"
 {
@@ -674,4 +847,4 @@ if ! env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY -u PULUMI_ACCESS_TOKEN \
   fail "Site cloud configuration handoff failed; cloud, D1, and Steward credentials remain"
 fi
 
-printf 'cloud rollout applied: D1 verified, Steward credentials installed, Site handoff completed\n'
+printf 'cloud rollout activated: candidate D1 verified, usage sample accepted, Site handoff completed\n'

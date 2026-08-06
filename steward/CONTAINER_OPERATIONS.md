@@ -67,12 +67,21 @@ remove objects that are not proven Steward-owned and unreferenced.
 
 ## Ordered launch
 
-Use this sequence after the Cloudflare operator has verified D1 and installed
-the three publication files. Keep non-secret Compose values in a private copy
-of `steward/containers/.env.example`; it contains paths and limits, not
-credential values. Before bootstrap or start, the daemon configuration must
-also enable publication and point its credential fields at the daemon's secret
-mounts.
+Use this sequence after the Cloudflare operator has completed the clean-D1
+producer gate and installed the three candidate publication files. Keep
+non-secret Compose values in a private copy of
+`steward/containers/.env.example`; it contains paths and limits, not credential
+values. Before bootstrap or start, the daemon configuration must also enable
+publication and point its credential fields at the daemon's secret mounts. The
+old D1 remains retained as the rollback identity and is never dual-written.
+
+The Cloudflare operator runs
+`infra/cloudflare/scripts/deploy-production.sh --mode prepare --apply` before
+this launch. Steward then completes one real task on the candidate. Only after
+that task passes the read-only usage sample does the operator run
+`--mode activate --apply` to hand the candidate reader identity to Site.
+Prepare owns producer admission; activation owns Site reader admission. Neither
+gate applies Pulumi destructively or fabricates a task.
 
 1. Verify ownership and mode of the credential files, the absolute
    `COQUIC_HOME`, the canonical clone settings, pinned image inputs, and the
@@ -136,7 +145,10 @@ mounts.
    ```
 
 7. After Site is activated, run the read-only checker once for the empty state
-   or for the first real published task. The checker is never a launch hook.
+   or for the first real published task. The checker proves global and task
+   usage surfaces, including run, invocation/retry, one bounded turn page,
+   ownership, coverage, Token fields, and numeric/N.A. cost state. It is never
+   a launch hook.
 
 Bootstrap is idempotent. A successful repeat verifies the same clone and keeps
 the current release; it does not initialize a database or begin processing.

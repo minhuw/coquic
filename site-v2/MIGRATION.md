@@ -23,12 +23,14 @@ nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contract
 ## Stage 2: Roll out Cloudflare locally
 
 Cloudflare rollout is an explicit local operator action, never a Site GitHub
-workflow step. From the reproducible Nix shell, run the only rollout command:
+workflow step. The stack retains the old protected D1 and creates a separate
+clean usage D1. From the reproducible Nix shell, run the producer prepare gate:
 
 ```sh
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --stack production \
-  --credentials-dir /absolute/path/to/steward/credentials
+  --credentials-dir /absolute/path/to/steward/credentials \
+  --mode prepare
 ```
 
 The default is a structured, read-only Pulumi preview. Review the preview and
@@ -39,20 +41,35 @@ secret in output. Add `--apply` only after that review:
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --stack production \
   --credentials-dir /absolute/path/to/steward/credentials \
+  --mode prepare \
   --apply
 ```
 
-Apply uses the accepted saved plan, verifies the exact D1 schema, bootstraps a
-blank database when necessary, and refuses schema drift until a separately
-reviewed forward migration exists. It writes three mode-0600 Steward credential
-files into the operator-selected mode-0700 directory, then passes exactly four
-Site fields to `site/deploy/install-cloud-config.sh` over the protected SSH
-handoff. It does not deploy Site, start Steward, delete resources, rotate
-tokens, or start a recurring monitor.
+Prepare uses the accepted create-only saved plan, verifies the exact candidate
+D1 schema, bootstraps a blank candidate when necessary, and refuses schema
+drift until a separately reviewed forward migration exists. It writes three
+mode-0600 Steward credential files into the operator-selected mode-0700
+directory and leaves Site untouched. The old D1 remains protected and is never
+queried, migrated, scanned, or dual-written.
+
+After Steward has completed one real task on the candidate, run the reader
+activation gate. It performs no Pulumi apply and does not bootstrap a blank
+database. It re-verifies the candidate schema and a real-task sample with
+task/usage heads, run, invocation/retry, turn, global rollup, ownership,
+coverage, six Token fields, and numeric or N.A. cost state. Only then does it
+pass exactly four fields to `site/deploy/install-cloud-config.sh`:
+
+```sh
+nix develop -c infra/cloudflare/scripts/deploy-production.sh \
+  --stack production \
+  --credentials-dir /absolute/path/to/steward/credentials \
+  --mode activate \
+  --apply
+```
 
 ## Stage 3: Activate Site independently
 
-Before activation, confirm the protected handoff has installed:
+Before activation, confirm the prepare gate has installed:
 
 - `CLOUDFLARE_ACCOUNT_ID`;
 - `COQUIC_STEWARD_D1_DATABASE_ID`;
@@ -72,8 +89,11 @@ repair is therefore independent of provider/schema state.
 ## Stage 4: Prove empty and first-real-task states
 
 Run the on-demand checker after activation. It is read-only and accepts a valid
-empty publication. It must not require a canary, schedule, polling loop, or
-synthetic task.
+empty publication with explicit usage skips. With a real task it also proves
+the rendered lifetime/daily globals and the task run, invocation/retry, and
+bounded turn surfaces, including ownership, coverage, Token totals, and
+numeric/N.A. cost state. It must not require a canary, schedule, polling loop,
+or synthetic task.
 
 ```sh
 nix develop -c uv run --project steward python scripts/check-steward-deployment.py \
@@ -82,12 +102,12 @@ nix develop -c uv run --project steward python scripts/check-steward-deployment.
 ```
 
 For an empty deployment, the checker proves valid status and task envelopes and
-records explicit skips for detail, trajectory, and artifacts. Once one real
-published task exists, it selects the first task, verifies task ownership,
-loads its complete trajectory, calls the same-origin artifact action, and
-verifies one `307` redirect to a safe HTTPS location whose decoded path matches
-the validated public key. A failed schema, ownership, integrity, or redirect
-check fails closed.
+records explicit skips for detail, trajectory, artifacts, and usage. Once one
+real published task exists, it selects the first task, verifies task ownership,
+loads its complete trajectory, proves the usage surfaces, calls the same-origin
+artifact action, and verifies one `307` redirect to a safe HTTPS location whose
+decoded path matches the validated public key. A failed schema, ownership,
+integrity, usage, or redirect check fails closed.
 
 The checker is on-demand only. There is no scheduled live monitor or dedicated
 canary, and no deployment step fabricates an empty or real task.
@@ -96,10 +116,12 @@ canary, and no deployment step fabricates an empty or real task.
 
 Application rollback is a Site concern. If an ordinary deploy, service restart,
 or post-deploy verification fails, `deploy-remote.sh` restores the prior
-`current` release, service files, TLS files, and non-cloud configuration. The
-four protected cloud exports are carried forward unchanged. Cloudflare
-resources, D1 schema, R2 objects, and Steward credentials are not rolled back
-by Site application rollback.
+`current` release, service files, TLS files, and non-cloud configuration. Before
+reader activation, restore Steward to the retained old D1 identity and leave
+Site on the old configuration. After activation, restore the paired Site
+release/config first, then restore Steward to that same old D1. Both protected
+databases remain intact; no migration, old-R2 scan, dual write, compatibility
+reader, or deletion is part of rollback.
 
 Provider rollback is a separately reviewed operator action. A schema change
 requires a forward migration review; an infrastructure change must pass the

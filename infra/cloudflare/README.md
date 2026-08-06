@@ -1,10 +1,11 @@
 # Cloudflare publication operations
 
 This stack is the provider boundary for Steward cloud publication and Site V2.
-It creates one protected D1 database for public metadata, one public R2 bucket
-for immutable sanitized objects, and one private R2 bucket for optional
-originals. The private bucket has no public endpoint or development URL and
-expires objects after 2,592,000 seconds (30 days).
+It retains the protected legacy D1 database and creates a second protected,
+clean usage D1 for the cutover. It also creates one public R2 bucket for
+immutable sanitized objects and one private R2 bucket for optional originals.
+The private bucket has no public endpoint or development URL and expires
+objects after 2,592,000 seconds (30 days).
 
 D1 rows and public objects contain only the validated public contract. Local
 SQLite, task archives, and the optional original remain Steward's private
@@ -45,6 +46,7 @@ pulumi stack select production
 pulumi config set account_id <account-id>
 pulumi config set zone_id <zone-id>
 pulumi config set database_name coquic-publication
+pulumi config set usage_database_name coquic-publication-usage
 pulumi config set public_bucket_name coquic-public-artifacts
 pulumi config set private_bucket_name coquic-private-originals
 pulumi config set public_hostname artifacts.coquic.minhuw.dev
@@ -62,13 +64,15 @@ Return to the repository root after setting the Pulumi configuration; the
 rollout command below is written relative to that root.
 
 `infra/cloudflare/scripts/deploy-production.sh` is the only rollout command.
-It requires an absolute credentials directory and permits only the
-`production` stack:
+It requires an absolute credentials directory, an explicit gate, and permits
+only the `production` stack. Preview is read-only; prepare is the only mode
+that may apply the create-only candidate plan:
 
 ```sh
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --stack production \
-  --credentials-dir /srv/coquic-steward/private/credentials
+  --credentials-dir /srv/coquic-steward/private/credentials \
+  --mode prepare
 ```
 
 The default is a read-only structured Pulumi preview. Provider output is
@@ -84,21 +88,39 @@ After reviewing the preview, rerun the same command with `--apply`:
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --stack production \
   --credentials-dir /srv/coquic-steward/private/credentials \
+  --mode prepare \
   --apply
 ```
 
-The apply invocation creates and rechecks a fresh structured preview, then
-applies that exact saved plan with Pulumi. It does not accept a separate plan
-file or silently approve a destructive change. It never destroys resources,
-rotates tokens, deploys the Site application, starts Steward, or starts a
-recurring monitor.
+The prepare invocation creates and rechecks a fresh structured preview, then
+applies that exact saved plan with Pulumi. The preview must contain creates and
+no updates, deletes, or replacements. It bootstraps the candidate schema and
+installs the three Steward files, but never invokes Site. It never destroys
+resources, rotates tokens, or starts Steward.
+
+After Steward has produced one real task in the candidate D1, rerun the same
+command in activation mode. Activation never applies Pulumi or bootstraps a
+blank database. It rechecks the exact schema and a joined task/usage sample
+covering runs, invocations, turns, globals, ownership, coverage, Token fields,
+and numeric or N.A. cost state before passing the candidate ID to Site:
+
+```sh
+nix develop -c infra/cloudflare/scripts/deploy-production.sh \
+  --stack production \
+  --credentials-dir /srv/coquic-steward/private/credentials \
+  --mode activate \
+  --apply
+```
 
 ## D1 and credential handoff
 
-After a successful provider apply, the command validates the exact Pulumi
-`steward_config` and `site_config` objects from a private `--show-secrets`
-capture. Unexpected fields, mismatched account/database IDs, malformed IDs, or
-invalid URLs stop the run without printing the values.
+After a successful provider apply (or a read-only activation preview), the
+command validates the exact Pulumi `steward_config` and `site_config` objects
+from a private `--show-secrets` capture. Both objects carry the candidate
+`d1_database_id` and the old `rollback_d1_database_id`; mismatched IDs,
+malformed IDs, unexpected fields, or invalid URLs stop the run without printing
+the values. The old database is never queried or handed to either producer or
+reader during this rollout.
 
 It then queries D1 with a fixed read-only `sqlite_master` statement:
 
@@ -128,8 +150,9 @@ regular files are staged and restored if any part of the three-file install
 fails. Values never appear in stdout, stderr, arguments, Compose environment,
 or public publication data.
 
-Finally, the command creates a mode-`0600` temporary input containing exactly
-these four Site fields and invokes the protected SSH handoff:
+Activation creates a mode-`0600` temporary input containing exactly these four
+Site fields and invokes the protected SSH handoff. Prepare deliberately does
+not create this file or invoke Site:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID
@@ -153,19 +176,22 @@ decide what is safe to inspect and rerun:
 | Failure | State that may remain | Recovery |
 | --- | --- | --- |
 | Pulumi auth/preview/parse | No provider or host mutation | Correct local inputs and rerun preview. |
-| Pulumi apply | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next preview, then rerun the same command. |
-| Outputs or D1 verification | Cloud apply may be complete; no host files were installed | Resolve the provider/schema issue under review, then rerun. |
-| Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership/mode/path issues and rerun. |
-| Site SSH handoff | Cloud, D1, and verified Steward files remain | Repair the protected SSH boundary and rerun; no automatic cloud rollback runs. |
+| Pulumi apply during prepare | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next create-only preview, then rerun prepare. |
+| Outputs or candidate schema verification | Cloud apply may be complete; no host files were installed | Resolve the provider/schema issue under review, then rerun prepare or activation. |
+| Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership/mode/path issues and rerun prepare. |
+| Candidate sample | Steward remains on the candidate; Site is unchanged | Repair the producer/task evidence and rerun activation. |
+| Site SSH handoff | Candidate D1 and Steward files remain; old D1 is untouched | Repair the protected SSH boundary and rerun activation; no automatic cloud rollback runs. |
 
 Every rerun repeats the destructive-plan and schema checks. An exact D1 schema
 is a no-op, and existing credential files are replaced atomically. Never use a
 manual delete, broad glob, or ad hoc secret copy to recover a partial run.
 
-Site application rollback is independent: it preserves the four cloud fields
-and does not change Pulumi resources, D1 schema, R2 objects, or Steward files.
-Provider changes and token rotation remain explicit operator reviews. There is
-no routine provider rollback command.
+Rollback before activation restores Steward's prior configuration and keeps
+Site on the old D1. After activation, rollback is a paired Site release/config
+restore followed by Steward reconfiguration to the retained
+`rollback_d1_database_id`; it does not migrate, scan, dual-write, or delete
+either database. Provider changes and token rotation remain explicit operator
+reviews. There is no routine provider rollback command.
 
 ## Site replica cleanup boundary
 

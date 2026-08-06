@@ -134,6 +134,28 @@ replacement, containment mismatch, missing receipt, or deletion error leaves
 the intent pending or blocked for restart reconciliation; unpublished or
 unverified evidence is never removed.
 
+## Clean-D1 cutover
+
+The Cloudflare stack owns two protected databases during Direction 1: the
+retained old D1 and a named clean usage D1. The old identity is rollback-only;
+Steward writes exactly one database at a time and never migrates, scans old R2,
+dual-writes, or installs a compatibility reader.
+
+The infrastructure operator owns the two gates. `--mode prepare --apply` is the
+producer gate: it accepts only a create-only Pulumi preview, bootstraps and
+verifies the blank candidate schema, and installs the candidate D1 credentials
+for Steward. It never changes Site. After one real task is complete, the same
+operator runs `--mode activate --apply`; activation performs a read-only schema
+check and joined sample proof for task/usage heads, run, invocation/retry, turn,
+global rollup, ownership, coverage, Token fields, and numeric or N.A. cost state
+before invoking the protected Site handoff. Both modes are rerunnable and
+capture provider output under a private temporary directory.
+
+Before activation, a failed producer or sample leaves Site on the old D1. After
+activation, rollback restores the paired Site release/config first and then
+points Steward back to the retained old D1. Both databases remain protected and
+available for inspection; database retirement is a separate operator review.
+
 ## Deployment boundary
 
 Publication is disabled by default in local fixtures. The trusted daemon alone

@@ -50,6 +50,8 @@ if args[:1] == ["preview"]:
         print("not structured JSON")
     elif case == "update":
         print(json.dumps({"op": "update", "urn": "urn:pulumi:production"}))
+    elif case == "same":
+        print(json.dumps({"op": "same", "urn": "urn:pulumi:production"}))
     else:
         print(json.dumps({"op": "create", "urn": "urn:pulumi:production"}))
     raise SystemExit(0)
@@ -94,6 +96,14 @@ if "--command" not in args:
     raise SystemExit(2)
 if case == "query-failure":
     raise SystemExit(1)
+if "FROM task_heads" in " ".join(args):
+    if case == "missing-sample":
+        print(json.dumps({"success": True, "results": []}))
+    elif case == "wrong-rollup":
+        print(json.dumps({"success": True, "results": [{"publication_id": "publication-1", "task_id": "task-1", "usage_generation_id": "usage-1", "run_id": "run-1", "invocation_id": "invocation-1", "turn_id": "turn-1", "global_id": "global-1", "ownership_class": "task-owned", "task_head_state": "visible", "usage_head_state": "visible", "usage_generation_state": "visible", "run_count": 1, "invocation_count": 0, "turn_count": 1, "global_count": 1}]}))
+    else:
+        print(json.dumps({"success": True, "results": [{"publication_id": "publication-1", "task_id": "task-1", "usage_generation_id": "usage-1", "run_id": "run-1", "invocation_id": "invocation-1", "turn_id": "turn-1", "global_id": "global-1", "ownership_class": "task-owned", "task_head_state": "visible", "usage_head_state": "visible", "usage_generation_state": "visible", "run_count": 1, "invocation_count": 1, "turn_count": 1, "global_count": 1, "coverage": "complete", "prompt_tokens": 10, "cached_tokens": 2, "uncached_tokens": 8, "completion_tokens": 5, "reasoning_tokens": 1, "total_tokens": 15, "uncached_input_cost_micro_usd": None, "cached_input_cost_micro_usd": None, "output_cost_micro_usd": None, "total_cost_micro_usd": None}]}))
+    raise SystemExit(0)
 if case == "malformed":
     print("not-json")
     raise SystemExit(0)
@@ -216,6 +226,7 @@ def _outputs() -> tuple[dict[str, Any], dict[str, str]]:
     steward = {
         "account_id": account,
         "d1_database_id": database,
+        "rollback_d1_database_id": "abcdefab-abcd-4abc-8def-abcdefabcdef",
         "d1_token": values["d1_token"],
         "public_bucket_name": "coquic-public-artifacts",
         "private_bucket_name": "coquic-private-originals",
@@ -225,11 +236,14 @@ def _outputs() -> tuple[dict[str, Any], dict[str, str]]:
     site = {
         "account_id": account,
         "d1_database_id": database,
+        "rollback_d1_database_id": steward["rollback_d1_database_id"],
         "d1_read_token": values["d1_read_token"],
         "public_base_url": "https://artifacts.coquic.minhuw.dev",
     }
     payload = {
         "d1_database_id": database,
+        "usage_d1_database_id": database,
+        "rollback_d1_database_id": steward["rollback_d1_database_id"],
         "public_bucket_name": steward["public_bucket_name"],
         "public_base_url": site["public_base_url"],
         "steward_config": steward,
@@ -309,7 +323,12 @@ def harness(tmp_path: Path) -> dict[str, Any]:
 
 
 def _run(harness: dict[str, Any], *extra: str, apply: bool = False) -> subprocess.CompletedProcess[str]:
-    args = ["--stack", "production", "--credentials-dir", str(harness["credentials"])]
+    mode = "prepare"
+    if "--mode" in extra:
+        mode_index = extra.index("--mode")
+        mode = extra[mode_index + 1]
+        extra = extra[:mode_index] + extra[mode_index + 2:]
+    args = ["--stack", "production", "--credentials-dir", str(harness["credentials"]), "--mode", mode]
     if apply:
         args.append("--apply")
     args.extend(extra)
@@ -358,11 +377,11 @@ def test_default_preview_is_read_only(harness: dict[str, Any]) -> None:
     assert "bootstrap-" not in result.stdout + result.stderr
 
 
-def test_update_preview_is_accepted(harness: dict[str, Any]) -> None:
+def test_update_preview_is_rejected_for_create_only_gate(harness: dict[str, Any]) -> None:
     harness["env"]["PULUMI_CASE"] = "update"
     result = _run(harness)
-    assert result.returncode == 0, result.stderr
-    assert "update=1" in result.stdout
+    assert result.returncode != 0
+    assert "create-only" in result.stderr
     assert not harness["applied"].exists()
     assert _argv(_logs(harness), "wrangler") == []
 
@@ -396,7 +415,7 @@ def test_wrong_stack_and_missing_auth_are_rejected(harness: dict[str, Any]) -> N
     no_auth_env = harness["env"].copy()
     no_auth_env.pop("CLOUDFLARE_API_TOKEN")
     no_auth = subprocess.run(
-        ["bash", str(SCRIPT), "--stack", "production", "--credentials-dir", str(harness["credentials"])],
+        ["bash", str(SCRIPT), "--stack", "production", "--credentials-dir", str(harness["credentials"]), "--mode", "prepare"],
         cwd=ROOT,
         env=no_auth_env,
         text=True,
@@ -411,7 +430,7 @@ def test_apply_bootstraps_blank_schema_and_installs_private_outputs(harness: dic
     harness["env"]["WRANGLER_CASE"] = "blank"
     result = _run(harness, apply=True)
     assert result.returncode == 0, result.stderr
-    assert "cloud rollout applied" in result.stdout
+    assert "producer gate prepared" in result.stdout
     assert harness["applied"].exists()
     assert harness["bootstrapped"].exists()
     values = harness["values"]
@@ -426,6 +445,22 @@ def test_apply_bootstraps_blank_schema_and_installs_private_outputs(harness: dic
         assert path.read_text(encoding="utf-8") == value + "\n"
         assert not path.is_symlink()
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not harness["site_input"].exists()
+    wrangler = _argv(_logs(harness), "wrangler")
+    assert any("--file" in argv for argv in wrangler)
+    assert len([argv for argv in wrangler if "--command" in argv]) == 2
+    joined = " ".join(json.dumps(entry) for entry in _logs(harness))
+    assert "bootstrap-" not in joined
+
+
+def test_activation_reverifies_sample_and_hands_site_candidate(harness: dict[str, Any]) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    prior_up_count = sum(argv[0] == "up" for argv in _argv(_logs(harness), "pulumi"))
+    harness["env"]["PULUMI_CASE"] = "same"
+    activated = _run(harness, "--mode", "activate", apply=True)
+    assert activated.returncode == 0, activated.stderr
+    assert "cloud rollout activated" in activated.stdout
     site_lines = harness["site_input"].read_text(encoding="utf-8").splitlines()
     assert [line.split("=", 1)[0] for line in site_lines] == [
         "CLOUDFLARE_ACCOUNT_ID",
@@ -433,12 +468,9 @@ def test_apply_bootstraps_blank_schema_and_installs_private_outputs(harness: dic
         "COQUIC_STEWARD_D1_READ_TOKEN",
         "COQUIC_STEWARD_PUBLIC_R2_BASE_URL",
     ]
-    assert values["d1_read_token"] in site_lines[2]
-    wrangler = _argv(_logs(harness), "wrangler")
-    assert any("--file" in argv for argv in wrangler)
-    assert len([argv for argv in wrangler if "--command" in argv]) == 2
-    joined = " ".join(json.dumps(entry) for entry in _logs(harness))
-    assert "bootstrap-" not in joined
+    assert harness["values"]["d1_read_token"] in site_lines[2]
+    pulumi = _argv(_logs(harness), "pulumi")
+    assert sum(argv[0] == "up" for argv in pulumi) == prior_up_count
 
 
 @pytest.mark.parametrize("case", ["exact-empty", "exact-populated"])
@@ -511,8 +543,11 @@ def test_exact_output_allowlist_rejects_extra_field_without_leaking_values(harne
 
 
 def test_site_failure_leaves_installed_steward_files_for_rerun(harness: dict[str, Any]) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    harness["env"]["PULUMI_CASE"] = "same"
     harness["env"]["SITE_CASE"] = "failure"
-    result = _run(harness, apply=True)
+    result = _run(harness, "--mode", "activate", apply=True)
     assert result.returncode != 0
     assert "handoff failed" in result.stderr
     assert (harness["credentials"] / "d1-read-token").exists()

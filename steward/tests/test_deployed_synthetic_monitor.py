@@ -104,7 +104,13 @@ def _headers(content_type: str) -> dict[str, str]:
 
 def _dashboard() -> ResponseSpec:
     return ResponseSpec(
-        body=b"<!doctype html><html><body>CoQUIC Steward</body></html>",
+        body=(
+            b"<!doctype html><html><body>CoQUIC Steward "
+            b'<section data-usage-state="ready">'
+            b"Token and estimated-cost evidence Lifetime totals by model and ownership "
+            b"UTC daily evidence Ownership task-owned Token 15 Estimated cost N.A. Complete"
+            b"</section></body></html>"
+        ),
         headers=_headers("text/html; charset=utf-8"),
     )
 
@@ -161,11 +167,20 @@ def _populated_responses() -> dict[str, ResponseSpec]:
         for artifact in detail["data"]["artifacts"]
         if artifact["artifactId"] == action["artifactId"]
     )
-    return {
+    task_page = (
+        "<!doctype html><html><body>"
+        f'<section data-usage-state="ready">{task_id} '
+        "Run, invocation, and turn usage Invocations and retries Turns "
+        "Usage components task and run ownership match Retry 0 Token 15 Estimated cost N.A. "
+        "Complete Bounded turn usage"
+        "</section></body></html>"
+    )
+    responses = {
         "/steward": _dashboard(),
         "/api/steward/status": ResponseSpec(body=_json_bytes(_status(empty=False)), headers=_headers("application/json; charset=utf-8")),
         "/api/steward/tasks": ResponseSpec(body=_json_bytes(_task_page(detail)), headers=_headers("application/json; charset=utf-8")),
         f"/api/steward/tasks/{task_id}": ResponseSpec(body=_json_bytes(detail), headers=_headers("application/json; charset=utf-8")),
+        f"/steward/tasks/{task_id}": ResponseSpec(body=task_page.encode("utf-8"), headers=_headers("text/html; charset=utf-8")),
         f"/api/steward/tasks/{task_id}/transcript?run={run_id}": ResponseSpec(
             body=_json_bytes(trajectory), headers=_headers("application/json; charset=utf-8")
         ),
@@ -179,6 +194,7 @@ def _populated_responses() -> dict[str, ResponseSpec]:
             },
         ),
     }
+    return responses
 
 
 def _run_check(base_url: str, tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess[str], dict]:

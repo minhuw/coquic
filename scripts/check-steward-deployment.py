@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import ipaddress
 import json
 import math
@@ -262,6 +263,108 @@ def _scan_response(body: bytes, document: object | None = None, *, strict_urls: 
     except UnicodeDecodeError:
         return "invalid_utf8"
     return _scan_text(text, strict_urls=strict_urls)
+
+
+def _visible_html_text(body: bytes) -> str | None:
+    try:
+        decoded = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    without_scripts = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", decoded)
+    text = re.sub(r"(?s)<[^>]*>", " ", without_scripts)
+    return " ".join(html.unescape(text).split())
+
+
+def _record_usage_surface(
+    result: dict[str, Any],
+    label: str,
+    response: FetchResult,
+    max_latency_ms: float,
+    *,
+    task_id: str | None = None,
+) -> bool:
+    """Check the rendered, read-only usage proof without parsing provider data."""
+
+    if response.status_code != 200 or response.error is not None:
+        _add_check(result, f"{label}_endpoint", "fail", detail=response.error or f"http_{response.status_code}")
+        _add_check(result, f"{label}_headers", "skip", detail="surface_unavailable")
+        _add_check(result, f"{label}_privacy", "skip", detail="surface_unavailable")
+        _add_check(result, f"{label}_structure", "skip", detail="surface_unavailable")
+        _add_latency(result, f"{label}_latency", response, max_latency_ms)
+        return False
+
+    _add_check(result, f"{label}_endpoint", "pass", status_code=200)
+    header_problems = _header_problems(response.headers, "text/html")
+    if header_problems:
+        _add_check(result, f"{label}_headers", "fail", detail="invalid_headers", problems=header_problems)
+    else:
+        _add_check(result, f"{label}_headers", "pass")
+    finding = _scan_response(response.body, strict_urls=False)
+    if finding:
+        _add_check(result, f"{label}_privacy", "fail", detail=finding)
+    else:
+        _add_check(result, f"{label}_privacy", "pass")
+    visible = _visible_html_text(response.body)
+    if visible is None:
+        _add_check(result, f"{label}_structure", "fail", detail="invalid_utf8")
+        _add_latency(result, f"{label}_latency", response, max_latency_ms)
+        return False
+
+    ready = 'data-usage-state="ready"' in response.body.decode("utf-8", errors="ignore")
+    if label == "usage_global":
+        required = (
+            "Token and estimated-cost evidence",
+            "Lifetime totals by model and ownership",
+            "UTC daily evidence",
+            "Ownership",
+        )
+    else:
+        required = (
+            "Run, invocation, and turn usage",
+            "Invocations and retries",
+            "Turns",
+            "Usage components",
+        )
+    missing = [item for item in required if item not in visible]
+    if not ready or missing:
+        _add_check(
+            result,
+            f"{label}_structure",
+            "fail",
+            detail="usage_surface_incomplete",
+            missing=missing or ["data-usage-state=ready"],
+        )
+    else:
+        _add_check(result, f"{label}_structure", "pass")
+
+    coverage = bool(re.search(r"\b(?:Complete|Partial|Unavailable|N\.A\.)\b", visible))
+    _add_check(result, f"{label}_coverage", "pass" if coverage else "fail", detail=None if coverage else "coverage_missing")
+    metric_labels = all(item in visible for item in ("Token", "Estimated cost"))
+    metric_state = bool(re.search(r"(?:N\.A\.|Unavailable|\$[0-9]|\b[0-9][0-9,]*\b)", visible))
+    _add_check(
+        result,
+        f"{label}_metrics",
+        "pass" if metric_labels and metric_state else "fail",
+        detail=None if metric_labels and metric_state else "token_or_cost_missing",
+    )
+    if label == "usage_global":
+        ownership = "Ownership" in visible and "steward" in visible.lower()
+        _add_check(result, f"{label}_ownership", "pass" if ownership else "fail", detail=None if ownership else "ownership_missing")
+    else:
+        ownership = "ownership match" in visible.lower() or "taskId" in visible
+        _add_check(result, f"{label}_ownership", "pass" if ownership else "fail", detail=None if ownership else "ownership_missing")
+        retries = "Retry" in visible or "retry" in visible.lower()
+        _add_check(result, f"{label}_retries", "pass" if retries else "fail", detail=None if retries else "retry_missing")
+        turns = "Turns" in visible and ("Bounded turn usage" in visible or "turn usage" in visible.lower())
+        _add_check(result, f"{label}_turns", "pass" if turns else "fail", detail=None if turns else "turn_page_missing")
+    if task_id is not None and task_id not in visible:
+        _add_check(result, f"{label}_task", "fail", detail="task_ownership_missing")
+    _add_latency(result, f"{label}_latency", response, max_latency_ms)
+    return not any(
+        check["status"] == "fail"
+        for check in result["checks"]
+        if check["name"].startswith(f"{label}_")
+    )
 
 
 def _header_problems(
@@ -684,6 +787,14 @@ def run_check(
     else:
         _add_check(result, "publication_state", "skip", detail="status_or_tasks_unavailable")
 
+    if isinstance(status_data, dict) and status_data.get("state") == "available":
+        _record_usage_surface(result, "usage_global", dashboard, max_latency_ms)
+    else:
+        _add_check(result, "usage_global_structure", "skip", detail="no_real_task")
+        _add_check(result, "usage_global_coverage", "skip", detail="no_real_task")
+        _add_check(result, "usage_global_metrics", "skip", detail="no_real_task")
+        _add_check(result, "usage_global_ownership", "skip", detail="no_real_task")
+
     selected_task: dict[str, Any] | None = None
     task_id: str | None = None
     if task_items:
@@ -718,6 +829,16 @@ def run_check(
             _add_check(result, "task_detail_ownership", "pass")
         else:
             _add_check(result, "task_detail_ownership", "skip", detail="detail_unavailable")
+
+        task_surface_path = f"/steward/tasks/{quote(task_id, safe='')}"
+        task_surface_response = _fetch(base_url, task_surface_path, timeout_seconds)
+        _record_usage_surface(
+            result,
+            "usage_task",
+            task_surface_response,
+            max_latency_ms,
+            task_id=task_id,
+        )
 
         trajectory_data: object | None = None
         trajectory_run_id: str | None = None

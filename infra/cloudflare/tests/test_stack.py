@@ -23,6 +23,7 @@ from infra.cloudflare.__main__ import (
 )
 from infra.cloudflare.config import (
     CloudflareConfig,
+    DEFAULT_USAGE_DATABASE_NAME,
     PRIVATE_RETENTION_SECONDS,
     PUBLIC_HOSTNAME,
 )
@@ -33,6 +34,7 @@ def valid_values() -> dict[str, Any]:
         "account_id": "a" * 32,
         "zone_id": "b" * 32,
         "database_name": "coquic-publication",
+        "usage_database_name": DEFAULT_USAGE_DATABASE_NAME,
         "public_bucket_name": "coquic-public-artifacts",
         "private_bucket_name": "coquic-private-originals",
         "public_hostname": PUBLIC_HOSTNAME,
@@ -67,6 +69,17 @@ def test_config_rejects_identical_buckets() -> None:
         raise AssertionError("identical bucket names were accepted")
 
 
+def test_config_rejects_usage_database_replacement() -> None:
+    values = valid_values()
+    values["usage_database_name"] = values["database_name"]
+    try:
+        CloudflareConfig.from_mapping(values)
+    except ValueError as exc:
+        assert "usage_database_name" in str(exc)
+    else:
+        raise AssertionError("usage database replacement was accepted")
+
+
 def test_config_rejects_wrong_hostname() -> None:
     values = valid_values()
     values["public_hostname"] = "objects.example.test"
@@ -98,7 +111,7 @@ class RecordingMocks(Mocks):
         self.resources.append(args)
         state = dict(args.inputs)
         if args.typ == "cloudflare:index/d1Database:D1Database":
-            state["uuid"] = "c" * 32
+            state["uuid"] = "c" * 32 if args.name == "publicationDatabase" else "d" * 32
         if args.typ == "cloudflare:index/accountToken:AccountToken":
             state["value"] = f"mock-value-{args.name}"
         return f"mock-{len(self.resources)}", state
@@ -169,12 +182,26 @@ def test_resources_match_storage_topology() -> None:
     assert counts == Counter(
         {
             "cloudflare:index/accountToken:AccountToken": 2,
-            "cloudflare:index/d1Database:D1Database": 1,
+            "cloudflare:index/d1Database:D1Database": 2,
             "cloudflare:index/r2Bucket:R2Bucket": 2,
             "cloudflare:index/r2CustomDomain:R2CustomDomain": 1,
             "cloudflare:index/r2BucketLifecycle:R2BucketLifecycle": 1,
         }
     )
+
+    databases = [
+        resource
+        for resource in resources
+        if resource.typ == "cloudflare:index/d1Database:D1Database"
+    ]
+    assert {resource.name for resource in databases} == {
+        "publicationDatabase",
+        "usageDatabase",
+    }
+    assert {resource.inputs["name"] for resource in databases} == {
+        "coquic-publication",
+        DEFAULT_USAGE_DATABASE_NAME,
+    }
 
     by_type = {resource.typ: resource for resource in resources if resource.typ != "cloudflare:index/r2Bucket:R2Bucket"}
     domain = by_type["cloudflare:index/r2CustomDomain:R2CustomDomain"]
@@ -258,6 +285,7 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
     assert set(steward) == {
         "account_id",
         "d1_database_id",
+        "rollback_d1_database_id",
         "d1_token",
         "public_bucket_name",
         "private_bucket_name",
@@ -272,8 +300,12 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
     assert set(site) == {
         "account_id",
         "d1_database_id",
+        "rollback_d1_database_id",
         "d1_read_token",
         "public_base_url",
     }
+    assert steward["d1_database_id"] != steward["rollback_d1_database_id"]
+    assert site["d1_database_id"] == steward["d1_database_id"]
+    assert site["rollback_d1_database_id"] == steward["rollback_d1_database_id"]
     assert all("private" not in key.lower() for key in site)
     assert all("bucket" not in key.lower() for key in site)

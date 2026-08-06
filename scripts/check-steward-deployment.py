@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import html
+from html.parser import HTMLParser
 import ipaddress
 import json
 import math
@@ -265,14 +265,322 @@ def _scan_response(body: bytes, document: object | None = None, *, strict_urls: 
     return _scan_text(text, strict_urls=strict_urls)
 
 
-def _visible_html_text(body: bytes) -> str | None:
+@dataclass
+class _UsageRow:
+    cells: list[str]
+    disclosures: list[dict[str, str]]
+
+
+@dataclass
+class _UsageTable:
+    rows: list[_UsageRow]
+
+
+class _UsageHTMLParser(HTMLParser):
+    """Parse only bounded table/disclosure structure from a rendered page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.visible_parts: list[str] = []
+        self.usage_states: list[str] = []
+        self.tables: list[_UsageTable] = []
+        self._ignored_depth = 0
+        self._table: list[_UsageRow] | None = None
+        self._row: _UsageRow | None = None
+        self._cell: list[str] | None = None
+        self._disclosure: dict[str, str] | None = None
+        self._definition_label: list[str] | None = None
+        self._definition_value: list[str] | None = None
+        self._pending_label: str | None = None
+        self._state_depth = 0
+
+    @staticmethod
+    def _text(parts: list[str] | None) -> str:
+        if not parts:
+            return ""
+        return " ".join(" ".join(parts).split())
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.lower()
+        attributes = {key.lower(): value for key, value in attrs}
+        if normalized in {"script", "style"}:
+            self._ignored_depth += 1
+            return
+        if self._ignored_depth:
+            return
+        self.visible_parts.append("")
+        usage_state = attributes.get("data-usage-state")
+        if usage_state is not None:
+            self.usage_states.append(usage_state)
+            self._state_depth += 1
+        if normalized == "table":
+            self._table = []
+        elif normalized == "tr" and self._table is not None:
+            self._row = _UsageRow([], [])
+        elif normalized in {"th", "td"} and self._row is not None:
+            self._cell = []
+        elif normalized == "details" and self._row is not None:
+            self._disclosure = {}
+        elif normalized == "dt" and self._disclosure is not None:
+            self._definition_label = []
+        elif normalized == "dd" and self._disclosure is not None:
+            self._definition_value = []
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.lower()
+        if normalized in {"script", "style"}:
+            if self._ignored_depth:
+                self._ignored_depth -= 1
+            return
+        if self._ignored_depth:
+            return
+        if normalized in {"th", "td"} and self._cell is not None and self._row is not None:
+            self._row.cells.append(self._text(self._cell))
+            self._cell = None
+        elif normalized == "tr" and self._row is not None and self._table is not None:
+            if self._row.cells:
+                self._table.append(self._row)
+            self._row = None
+        elif normalized == "table" and self._table is not None:
+            self.tables.append(_UsageTable(self._table))
+            self._table = None
+        elif normalized == "dt" and self._definition_label is not None:
+            self._pending_label = self._text(self._definition_label)
+            self._definition_label = None
+        elif normalized == "dd" and self._definition_value is not None and self._disclosure is not None:
+            label = self._pending_label or ""
+            if label:
+                self._disclosure[label] = self._text(self._definition_value)
+            self._definition_value = None
+            self._pending_label = None
+        elif normalized == "details" and self._disclosure is not None and self._row is not None:
+            if self._disclosure:
+                self._row.disclosures.append(self._disclosure)
+            self._disclosure = None
+            self._definition_label = None
+            self._definition_value = None
+            self._pending_label = None
+        if self._state_depth and normalized in {"section", "div"}:
+            self._state_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        self.visible_parts.append(data)
+        if self._cell is not None:
+            self._cell.append(data)
+        if self._definition_label is not None:
+            self._definition_label.append(data)
+        if self._definition_value is not None:
+            self._definition_value.append(data)
+
+    @property
+    def visible_text(self) -> str:
+        return " ".join(" ".join(self.visible_parts).split())
+
+
+def _parse_usage_html(body: bytes) -> _UsageHTMLParser | None:
     try:
         decoded = body.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    without_scripts = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", decoded)
-    text = re.sub(r"(?s)<[^>]*>", " ", without_scripts)
-    return " ".join(html.unescape(text).split())
+    parser = _UsageHTMLParser()
+    try:
+        parser.feed(decoded)
+        parser.close()
+    except (ValueError, TypeError):
+        return None
+    return parser
+
+
+_USAGE_TOKEN_LABELS = {
+    "prompt tokens",
+    "cached tokens",
+    "uncached tokens",
+    "completion tokens",
+    "reasoning tokens",
+    "total tokens",
+}
+_USAGE_COST_LABELS = {
+    "uncached input cost",
+    "cached input cost",
+    "output cost",
+    "total cost",
+}
+
+
+def _usage_number(value: str, *, cost: bool = False) -> int | None:
+    normalized = value.strip()
+    if normalized in {"N.A.", "Unavailable"}:
+        return None
+    if cost:
+        match = re.fullmatch(r"\$([0-9][0-9,]*)\.([0-9]{6})", normalized)
+        if match is None:
+            return None
+        parsed = int(match.group(1).replace(",", "")) * 1_000_000 + int(match.group(2))
+        return parsed if parsed <= 9_007_199_254_740_991 else None
+    if re.fullmatch(r"[0-9][0-9,]*", normalized) is None:
+        return None
+    parsed = int(normalized.replace(",", ""))
+    return parsed if parsed <= 9_007_199_254_740_991 else None
+
+
+def _usage_coverage(value: str, count_word: str) -> bool:
+    match = re.fullmatch(
+        rf"(Complete|Partial|Unavailable|N\.A\.)(?: - ([0-9][0-9,]*)/([0-9][0-9,]*) {count_word})?",
+        value.strip(),
+    )
+    if match is None:
+        return False
+    label, covered, expected = match.groups()
+    if covered is None:
+        return label in {"Unavailable", "N.A."}
+    covered_count = int(covered.replace(",", ""))
+    expected_count = int(expected.replace(",", ""))
+    if covered_count > expected_count:
+        return False
+    return label != "Complete" or covered_count == expected_count
+
+
+def _validate_usage_disclosure(disclosure: dict[str, str]) -> bool:
+    normalized = {" ".join(key.lower().split()): value for key, value in disclosure.items()}
+    if not _USAGE_TOKEN_LABELS <= set(normalized) or not _USAGE_COST_LABELS <= set(normalized):
+        return False
+    tokens = [_usage_number(normalized[label]) for label in sorted(_USAGE_TOKEN_LABELS)]
+    if any(value is None for value in tokens):
+        known_tokens = [value for value in tokens if value is not None]
+    else:
+        prompt, cached, completion, reasoning, total, uncached = (
+            normalized[label] and _usage_number(normalized[label])
+            for label in ("prompt tokens", "cached tokens", "completion tokens", "reasoning tokens", "total tokens", "uncached tokens")
+        )
+        if cached > prompt or uncached != prompt - cached or reasoning > completion or total != prompt + completion:
+            return False
+        known_tokens = tokens
+    costs = [_usage_number(normalized[label], cost=True) for label in sorted(_USAGE_COST_LABELS)]
+    if any(value is None for value in costs) and not all(value is None for value in costs):
+        return False
+    return bool(known_tokens or all(value is None for value in costs))
+
+
+def _row_disclosure_matches(row: _UsageRow, token_text: str, cost_text: str) -> bool:
+    valid = [item for item in row.disclosures if _validate_usage_disclosure(item)]
+    if not valid:
+        return False
+    disclosure = {" ".join(key.lower().split()): value for key, value in valid[0].items()}
+    displayed_token = _usage_number(token_text)
+    disclosed_token = _usage_number(disclosure["total tokens"])
+    if displayed_token is None and disclosed_token is not None and token_text.strip() in {"N.A.", "Unavailable"}:
+        return False
+    if displayed_token is not None and disclosed_token is not None and displayed_token != disclosed_token:
+        return False
+    displayed_cost = _usage_number(cost_text, cost=True)
+    disclosed_cost = _usage_number(disclosure["total cost"], cost=True)
+    if displayed_cost is None and disclosed_cost is not None and cost_text.strip() in {"N.A.", "Unavailable"}:
+        return False
+    if displayed_cost is not None and disclosed_cost is not None and displayed_cost != disclosed_cost:
+        return False
+    return True
+
+
+def _table_with_headers(parser: _UsageHTMLParser, required: tuple[str, ...]) -> tuple[_UsageTable, dict[str, int]] | None:
+    for table in parser.tables:
+        if not table.rows:
+            continue
+        headers = {" ".join(cell.lower().split()): index for index, cell in enumerate(table.rows[0].cells)}
+        if all(item in headers for item in required) and len(table.rows) > 1:
+            return table, headers
+    return None
+
+
+def _validate_usage_tables(
+    parser: _UsageHTMLParser,
+    *,
+    label: str,
+    task_id: str | None,
+) -> tuple[bool, str | None]:
+    if "ready" not in {state.lower() for state in parser.usage_states}:
+        return False, "usage_surface_incomplete"
+    if label == "usage_global":
+        selected = _table_with_headers(
+            parser,
+            ("model", "ownership", "token", "estimated cost", "coverage", "details"),
+        )
+        if selected is None:
+            return False, "global_usage_table_missing"
+        table, headers = selected
+        token_index = headers["token"]
+        cost_index = headers["estimated cost"]
+        coverage_index = headers["coverage"]
+        owner_index = headers["ownership"]
+        for row in table.rows[1:]:
+            if len(row.cells) <= max(token_index, cost_index, coverage_index, owner_index):
+                return False, "global_usage_row_incomplete"
+            if row.cells[owner_index] not in {"Task-owned", "Steward overhead"}:
+                return False, "global_usage_ownership_invalid"
+            if _usage_number(row.cells[token_index]) is None and row.cells[token_index] not in {"N.A.", "Unavailable"}:
+                return False, "global_usage_token_invalid"
+            if _usage_number(row.cells[cost_index], cost=True) is None and row.cells[cost_index] not in {"N.A.", "Unavailable"}:
+                return False, "global_usage_cost_invalid"
+            if not _usage_coverage(row.cells[coverage_index], "invocations"):
+                return False, "global_usage_coverage_invalid"
+            if not _row_disclosure_matches(row, row.cells[token_index], row.cells[cost_index]):
+                return False, "global_usage_components_invalid"
+    else:
+        selected = _table_with_headers(
+            parser,
+            ("invocation / retry", "role", "model", "utc start", "outcome", "token", "estimated cost", "coverage", "details"),
+        )
+        turns = _table_with_headers(
+            parser,
+            ("turn", "turn id", "utc start", "model", "coverage", "token", "estimated cost", "price", "details"),
+        )
+        if selected is None or turns is None:
+            return False, "task_usage_table_missing"
+        invocation_table, invocation_headers = selected
+        for row in invocation_table.rows[1:]:
+            if len(row.cells) <= max(invocation_headers.values()):
+                return False, "task_usage_row_incomplete"
+            if re.search(r"\bRetry [0-9]+\b", row.cells[invocation_headers["invocation / retry"]]) is None:
+                return False, "task_usage_retry_missing"
+            if _usage_number(row.cells[invocation_headers["token"]]) is None and row.cells[invocation_headers["token"]] not in {"N.A.", "Unavailable"}:
+                return False, "task_usage_token_invalid"
+            if _usage_number(row.cells[invocation_headers["estimated cost"]], cost=True) is None and row.cells[invocation_headers["estimated cost"]] not in {"N.A.", "Unavailable"}:
+                return False, "task_usage_cost_invalid"
+            if not _usage_coverage(row.cells[invocation_headers["coverage"]], "turns"):
+                return False, "task_usage_coverage_invalid"
+            if not _row_disclosure_matches(
+                row,
+                row.cells[invocation_headers["token"]],
+                row.cells[invocation_headers["estimated cost"]],
+            ):
+                return False, "task_usage_components_invalid"
+        turn_table, turn_headers = turns
+        for row in turn_table.rows[1:]:
+            if len(row.cells) <= max(turn_headers.values()):
+                return False, "task_turn_row_incomplete"
+            if re.fullmatch(r"[1-9][0-9,]*", row.cells[turn_headers["turn"]]) is None:
+                return False, "task_turn_ordinal_invalid"
+            if not row.cells[turn_headers["turn id"]]:
+                return False, "task_turn_id_missing"
+            if _usage_number(row.cells[turn_headers["token"]]) is None and row.cells[turn_headers["token"]] not in {"N.A.", "Unavailable"}:
+                return False, "task_turn_token_invalid"
+            if _usage_number(row.cells[turn_headers["estimated cost"]], cost=True) is None and row.cells[turn_headers["estimated cost"]] not in {"N.A.", "Unavailable"}:
+                return False, "task_turn_cost_invalid"
+            if not _usage_coverage(row.cells[turn_headers["coverage"]], "turns"):
+                return False, "task_turn_coverage_invalid"
+            if not _row_disclosure_matches(
+                row,
+                row.cells[turn_headers["token"]],
+                row.cells[turn_headers["estimated cost"]],
+            ):
+                return False, "task_turn_components_invalid"
+    disclosures = [disclosure for table in parser.tables for row in table.rows for disclosure in row.disclosures]
+    if not disclosures or not any(_validate_usage_disclosure(disclosure) for disclosure in disclosures):
+        return False, "usage_components_invalid"
+    if task_id is not None and task_id not in parser.visible_text:
+        return False, "task_ownership_missing"
+    return True, None
 
 
 def _record_usage_surface(
@@ -304,60 +612,22 @@ def _record_usage_surface(
         _add_check(result, f"{label}_privacy", "fail", detail=finding)
     else:
         _add_check(result, f"{label}_privacy", "pass")
-    visible = _visible_html_text(response.body)
-    if visible is None:
+    parser = _parse_usage_html(response.body)
+    if parser is None:
         _add_check(result, f"{label}_structure", "fail", detail="invalid_utf8")
         _add_latency(result, f"{label}_latency", response, max_latency_ms)
         return False
-
-    ready = 'data-usage-state="ready"' in response.body.decode("utf-8", errors="ignore")
+    valid, detail = _validate_usage_tables(parser, label=label, task_id=task_id)
+    _add_check(result, f"{label}_structure", "pass" if valid else "fail", detail=detail)
+    _add_check(result, f"{label}_coverage", "pass" if valid else "fail", detail=None if valid else "coverage_or_structure_invalid")
+    _add_check(result, f"{label}_metrics", "pass" if valid else "fail", detail=None if valid else "token_or_cost_invalid")
     if label == "usage_global":
-        required = (
-            "Token and estimated-cost evidence",
-            "Lifetime totals by model and ownership",
-            "UTC daily evidence",
-            "Ownership",
-        )
+        _add_check(result, f"{label}_ownership", "pass" if valid else "fail", detail=None if valid else "ownership_or_structure_invalid")
     else:
-        required = (
-            "Run, invocation, and turn usage",
-            "Invocations and retries",
-            "Turns",
-            "Usage components",
-        )
-    missing = [item for item in required if item not in visible]
-    if not ready or missing:
-        _add_check(
-            result,
-            f"{label}_structure",
-            "fail",
-            detail="usage_surface_incomplete",
-            missing=missing or ["data-usage-state=ready"],
-        )
-    else:
-        _add_check(result, f"{label}_structure", "pass")
-
-    coverage = bool(re.search(r"\b(?:Complete|Partial|Unavailable|N\.A\.)\b", visible))
-    _add_check(result, f"{label}_coverage", "pass" if coverage else "fail", detail=None if coverage else "coverage_missing")
-    metric_labels = all(item in visible for item in ("Token", "Estimated cost"))
-    metric_state = bool(re.search(r"(?:N\.A\.|Unavailable|\$[0-9]|\b[0-9][0-9,]*\b)", visible))
-    _add_check(
-        result,
-        f"{label}_metrics",
-        "pass" if metric_labels and metric_state else "fail",
-        detail=None if metric_labels and metric_state else "token_or_cost_missing",
-    )
-    if label == "usage_global":
-        ownership = "Ownership" in visible and "steward" in visible.lower()
-        _add_check(result, f"{label}_ownership", "pass" if ownership else "fail", detail=None if ownership else "ownership_missing")
-    else:
-        ownership = "ownership match" in visible.lower() or "taskId" in visible
-        _add_check(result, f"{label}_ownership", "pass" if ownership else "fail", detail=None if ownership else "ownership_missing")
-        retries = "Retry" in visible or "retry" in visible.lower()
-        _add_check(result, f"{label}_retries", "pass" if retries else "fail", detail=None if retries else "retry_missing")
-        turns = "Turns" in visible and ("Bounded turn usage" in visible or "turn usage" in visible.lower())
-        _add_check(result, f"{label}_turns", "pass" if turns else "fail", detail=None if turns else "turn_page_missing")
-    if task_id is not None and task_id not in visible:
+        _add_check(result, f"{label}_ownership", "pass" if valid else "fail", detail=None if valid else "ownership_or_structure_invalid")
+        _add_check(result, f"{label}_retries", "pass" if valid else "fail", detail=None if valid else "retry_or_structure_invalid")
+        _add_check(result, f"{label}_turns", "pass" if valid else "fail", detail=None if valid else "turn_or_structure_invalid")
+    if task_id is not None and task_id not in parser.visible_text:
         _add_check(result, f"{label}_task", "fail", detail="task_ownership_missing")
     _add_latency(result, f"{label}_latency", response, max_latency_ms)
     return not any(

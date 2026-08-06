@@ -150,17 +150,21 @@ chmod 400 "${saved_plan}"
 
 # Pulumi's JSON mode is a stream of event objects in current releases, while
 # test doubles and older releases may emit one JSON array/object.  Parse both
-# forms and inspect only operation fields, never free-form provider text.
-if ! python3 - "${preview_output}" >"${temporary_dir}/preview-parse.out" 2>"${temporary_dir}/preview-parse.err" <<'PY'
+# forms and admit only the managed resources and transitions below.  Resource
+# identity is checked separately from operation text so an arbitrary create
+# event cannot satisfy the create-only gate.
+if ! python3 - "${preview_output}" "${mode}" >"${temporary_dir}/preview-parse.out" 2>"${temporary_dir}/preview-parse.err" <<'PY'
 from __future__ import annotations
 
 import json
 from collections import Counter
 from pathlib import Path
+import re
 import sys
 
 
 raw = Path(sys.argv[1]).read_text(encoding="utf-8")
+mode = sys.argv[2]
 if not raw.strip():
     raise SystemExit(2)
 
@@ -180,46 +184,141 @@ except json.JSONDecodeError:
 if not objects or not all(isinstance(item, (dict, list)) for item in objects):
     raise SystemExit(2)
 
-destructive = {
-    "delete",
-    "delete-replaced",
-    "replace",
-    "create-replacement",
-    "update-replacement",
-    "replace-on-diff",
-    "replace-on-delete",
-    "delete-before-replace",
-}
 operation_keys = {"op", "operation", "action", "change"}
-counts: Counter[str] = Counter()
+resource_wrapper_keys = {"metadata", "resource", "resourcepreevent", "resourcepostevent", "resourceoutputsevent", "event"}
+sensitive_key = re.compile(r"(?i)(?:access[_ -]?token|api[_ -]?key|password|private[_ -]?key|secret|credential)")
+sensitive_value = re.compile(r"(?i)begin private key|authorization\s*:\s*bearer|(?:api[_ -]?key|access[_ -]?token|password|secret)\s*[:=]|\bsecret\b")
+
+# These are the Pulumi type/name identities owned by this stack.  The
+# publication database and all non-usage resources must remain retained.
+expected_resources = {
+    ("cloudflare:index/d1database:d1database", "publicationdatabase"),
+    ("cloudflare:index/d1database:d1database", "usagedatabase"),
+    ("cloudflare:index/r2bucket:r2bucket", "publicartifacts"),
+    ("cloudflare:index/r2bucket:r2bucket", "privateoriginals"),
+    ("cloudflare:index/r2customdomain:r2customdomain", "publicartifactsdomain"),
+    ("cloudflare:index/r2bucketlifecycle:r2bucketlifecycle", "privateoriginalslifecycle"),
+    ("cloudflare:index/accounttoken:accounttoken", "stewardpublicationtoken"),
+    ("cloudflare:index/accounttoken:accounttoken", "sitereadertoken"),
+}
+candidate_resource = ("cloudflare:index/d1database:d1database", "usagedatabase")
 
 
-def walk(value: object) -> None:
+def normalize(value: object) -> str:
+    return str(value).strip().lower().replace("_", "")
+
+
+def urn_identity(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, str):
+        return None
+    parts = value.split("::")
+    if len(parts) < 2:
+        return None
+    resource_type, name = parts[-2:]
+    if not resource_type or not name:
+        return None
+    return normalize(resource_type), normalize(name)
+
+
+def resource_identity(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    identity = urn_identity(value.get("urn"))
+    resource_type = value.get("type")
+    name = value.get("name")
+    if isinstance(resource_type, str) and isinstance(name, str) and resource_type and name:
+        identity = (normalize(resource_type), normalize(name))
+    return identity
+
+
+def operation(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for key, child in value.items():
+        if normalize(key) in {normalize(item) for item in operation_keys} and isinstance(child, str):
+            return child.strip().lower().replace("_", "-")
+    return None
+
+
+def scan_sensitive(value: object, key: str | None = None) -> None:
     if isinstance(value, dict):
-        for key, child in value.items():
-            normalized_key = str(key).lower().replace("-", "_")
-            if normalized_key in operation_keys and isinstance(child, str):
-                normalized = child.lower().replace("_", "-")
-                if normalized in destructive or "replace" in normalized or normalized.startswith("delete"):
-                    raise SystemExit(3)
-                counts[normalized] += 1
-            if "replace" in normalized_key and child in (True, "true", "replace", "delete-before-replace"):
-                raise SystemExit(3)
-            if "delete" in normalized_key and child in (True, "true", "delete", "delete-before-replace"):
-                raise SystemExit(3)
-            walk(child)
+        for child_key, child in value.items():
+            child_name = str(child_key)
+            if child_name.strip().lower() == "secret" and child is True:
+                raise ValueError("preview contains a secret value")
+            if sensitive_key.search(child_name) and isinstance(child, str) and child.strip():
+                raise ValueError("preview contains a secret value")
+            scan_sensitive(child, child_name)
     elif isinstance(value, list):
         for child in value:
-            walk(child)
+            scan_sensitive(child, key)
+    elif isinstance(value, str) and sensitive_value.search(value):
+        raise ValueError("preview contains a secret value")
+
+
+records: set[tuple[tuple[str, str], str]] = set()
+
+
+def walk(value: object) -> int:
+    if isinstance(value, list):
+        return sum(walk(child) for child in value)
+    if not isinstance(value, dict):
+        return 0
+    scan_sensitive(value)
+    found = 0
+    current_operation = operation(value)
+    identity = resource_identity(value)
+    if current_operation is not None and identity is not None:
+        records.add((identity, current_operation))
+        found += 1
+    elif current_operation is not None:
+        for child_key, child in value.items():
+            if normalize(child_key) in resource_wrapper_keys:
+                child_identity = resource_identity(child)
+                if child_identity is not None:
+                    records.add((child_identity, current_operation))
+                    found += 1
+    for child_key, child in value.items():
+        # Provider event wrappers put the operation and resource identity in a
+        # nested metadata object.  Walk all children, but use the count to
+        # distinguish a wrapper from an unstructured operation record.
+        found += walk(child)
+    if current_operation is not None and identity is None and found == 0:
+        raise ValueError("operation has no structured resource identity")
+    return found
 
 
 for item in objects:
     walk(item)
+
+if not records:
+    raise ValueError("preview contains no structured resource events")
+
+resource_operations: dict[tuple[str, str], set[str]] = {}
+for identity, op in records:
+    resource_operations.setdefault(identity, set()).add(op)
+
+if set(resource_operations) != expected_resources:
+    raise ValueError("preview resource allowlist does not match the protected stack")
+if any(len(operations) != 1 for operations in resource_operations.values()):
+    raise ValueError("preview contains conflicting operations for a resource")
+
+for identity, operations in resource_operations.items():
+    op = next(iter(operations))
+    if identity == candidate_resource:
+        if op not in {"create", "same", "read", "refresh"}:
+            raise ValueError("candidate database transition is not create-only")
+        if mode == "activate" and op == "create":
+            raise ValueError("activation requires an already-prepared candidate")
+    elif op not in {"same", "read", "refresh"}:
+        raise ValueError("retained resource transition is not read-only")
+
+counts: Counter[str] = Counter(op for _, op in records)
 labels = ("create", "update", "same", "read", "refresh")
-print(" ".join(f"{label}={counts.get(label, 0)}" for label in labels) + f" events={len(objects)}")
+print(" ".join(f"{label}={counts.get(label, 0)}" for label in labels) + f" resources={len(resource_operations)}")
 PY
 then
-  fail "Pulumi preview was not a safe structured plan"
+  fail "Pulumi preview was not a safe structured plan or create-only resource allowlist"
 fi
 
 plan_digest="$(sha256sum "${saved_plan}" | cut -d' ' -f1)"
@@ -631,6 +730,25 @@ if not isinstance(response, dict) or response.get("success") is False:
 if response.get("errors") not in (None, [], {}):
     raise ValueError("sample query returned errors")
 
+envelope_private_key = re.compile(r"(?i)(?:api[_ -]?token|access[_ -]?key|password|secret|credential|private|prompt_text|raw|transcript|path|url)")
+envelope_private_value = re.compile(r"(?i)(?:file://|https?://|s3://|gs://|ssh://|wss?://|/home/|/media/|/tmp/|begin private key|authorization\s*:\s*bearer)")
+
+
+def scan_public_payload(value: object) -> None:
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            if envelope_private_key.search(str(child_key)) and child not in (None, [], {}):
+                raise ValueError("sample response contains a private field")
+            scan_public_payload(child)
+    elif isinstance(value, list):
+        for child in value:
+            scan_public_payload(child)
+    elif isinstance(value, str) and envelope_private_value.search(value):
+        raise ValueError("sample response contains a private value")
+
+
+scan_public_payload(response)
+
 
 def rows(value: object) -> list[object] | None:
     if isinstance(value, dict):
@@ -655,65 +773,208 @@ def rows(value: object) -> list[object] | None:
 
 
 items = rows(response)
-if not items or not isinstance(items[0], dict):
-    raise ValueError("sample task is missing")
+if not items or len(items) != 1 or not isinstance(items[0], dict):
+    raise ValueError("sample task evidence is missing or ambiguous")
 sample = items[0]
-private = re.compile(r"(?i)(?:api[_ -]?token|secret|password|credential|private|path)")
-if any(private.search(str(key)) for key in sample):
-    raise ValueError("sample row contains a private field")
 
-
-def value(*names: str):
-    for name in names:
-        if name in sample:
-            return sample[name]
-    return None
-
-
-required = (
-    value("publication_id", "publicationId"),
-    value("task_id", "taskId"),
-    value("usage_generation_id", "usageGenerationId"),
-    value("run_id", "runId"),
-    value("invocation_id", "invocationId"),
-    value("turn_id", "turnId"),
-    value("global_id", "globalId"),
-)
-if any(not isinstance(item, str) or not item for item in required):
-    raise ValueError("sample ownership is incomplete")
-states = (
-    value("task_head_state", "taskHeadState", "head_state", "headState"),
-    value("usage_head_state", "usageHeadState"),
-    value("usage_generation_state", "usageGenerationState", "generation_state", "generationState"),
-)
-if any(item is None for item in states) or any(item != "visible" for item in states):
-    raise ValueError("sample heads are not visible")
-for field, aliases in {
-    "run_count": ("run_count", "runCount"),
-    "invocation_count": ("invocation_count", "invocationCount"),
-    "turn_count": ("turn_count", "turnCount"),
-    "global_count": ("global_count", "globalCount"),
-}.items():
-    item = value(*aliases)
-    if item is None or isinstance(item, bool) or not isinstance(item, int) or item < 1:
-        raise ValueError("sample usage level is missing")
-coverage = value("coverage")
-if coverage not in {"complete", "partial", "unavailable"}:
-    raise ValueError("sample coverage is invalid")
-if value("ownership_class", "ownershipClass") != "task-owned":
-    raise ValueError("sample ownership class is invalid")
 token_fields = ("prompt_tokens", "cached_tokens", "uncached_tokens", "completion_tokens", "reasoning_tokens", "total_tokens")
 cost_fields = ("uncached_input_cost_micro_usd", "cached_input_cost_micro_usd", "output_cost_micro_usd", "total_cost_micro_usd")
-for field in token_fields + cost_fields:
-    aliases = (field, field.split("_")[0] + "".join(part.title() for part in field.split("_")[1:]))
-    item = value(*aliases)
-    if field not in sample and aliases[1] not in sample:
-        raise ValueError("sample metric is missing")
-    if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
-        raise ValueError("sample metric is invalid")
-costs = [value(field, field.split("_")[0] + "".join(part.title() for part in field.split("_")[1:])) for field in cost_fields]
-if any(item is None for item in costs) and not all(item is None for item in costs):
-    raise ValueError("sample cost state is mixed")
+metric_groups = (
+    "task_summary",
+    "run_summary",
+    "invocation",
+    "global",
+)
+allowed = {
+    "publication_id", "task_id", "usage_generation_id",
+    "task_head_state", "usage_head_task_id", "usage_head_generation_id", "usage_head_state", "usage_generation_state",
+    "generation_publication_id", "generation_task_id", "generation_ownership_class",
+    "publication_generation_state", "task_lifecycle_state", "run_state",
+    "run_id", "pipeline_id", "task_summary_id", "task_summary_usage_generation_id", "task_summary_publication_id", "task_summary_task_id", "task_summary_scope",
+    "task_summary_run_id", "run_summary_id", "run_summary_usage_generation_id", "run_summary_publication_id", "run_summary_task_id", "run_summary_scope", "run_summary_run_id",
+    "invocation_id", "invocation_publication_id", "invocation_task_id",
+    "invocation_pipeline_id", "invocation_run_id", "invocation_ownership_class", "invocation_model",
+    "retry_ordinal", "turn_id", "turn_usage_generation_id", "turn_invocation_id",
+    "turn_publication_id", "turn_task_id", "turn_run_id", "turn_ordinal",
+    "global_id", "global_usage_generation_id", "global_head_usage_generation_id", "global_head_id", "global_head_state", "global_period_kind",
+    "global_period_key", "global_model", "global_ownership_class",
+    "generation_expected_summary_count", "generation_expected_invocation_count",
+    "generation_expected_turn_count", "generation_expected_price_count",
+    "generation_expected_global_count", "run_invocation_count", "run_turn_count",
+    "run_count", "summary_count", "invocation_count", "turn_count", "price_count", "global_count",
+}
+for group in metric_groups:
+    allowed.update(f"{group}_{field}" for field in ("coverage", "known_token_subtotal", "known_cost_subtotal_micro_usd", *token_fields, *cost_fields))
+    count_fields = ("covered_turns", "expected_turns") if group == "invocation" else ("covered_invocations", "expected_invocations")
+    allowed.update(f"{group}_{field}" for field in count_fields)
+allowed.update(f"turn_{field}" for field in (*token_fields, *cost_fields))
+private_key = re.compile(r"(?i)(?:api[_ -]?token|access[_ -]?key|password|secret|credential|private|prompt_text|raw|transcript|path|url)")
+private_value = re.compile(r"(?i)(?:file://|https?://|s3://|gs://|ssh://|wss?://|/home/|/media/|/tmp/|begin private key|authorization\s*:\s*bearer)")
+if set(sample) - allowed or any(private_key.search(str(key)) for key in sample if key not in allowed):
+    raise ValueError("sample row contains a private or unexpected field")
+if set(sample) != allowed:
+    raise ValueError("sample evidence shape is incomplete")
+if any(isinstance(value, str) and private_value.search(value) for value in sample.values()):
+    raise ValueError("sample row contains a private value")
+
+
+def text(name: str, *, optional: bool = False) -> str | None:
+    item = sample[name]
+    if item is None and optional:
+        return None
+    if not isinstance(item, str) or not item or any(ord(char) < 32 or ord(char) == 127 for char in item):
+        raise ValueError("sample identity is invalid")
+    return item
+
+
+def integer(name: str, *, optional: bool = False, maximum: int = 9_007_199_254_740_991) -> int | None:
+    item = sample[name]
+    if item is None and optional:
+        return None
+    if isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > maximum:
+        raise ValueError("sample counter is invalid")
+    return item
+
+
+def state(name: str, expected: str) -> None:
+    if text(name) != expected:
+        raise ValueError("sample state is incoherent")
+
+
+publication_id = text("publication_id")
+task_id = text("task_id")
+generation_id = text("usage_generation_id")
+run_id = text("run_id")
+pipeline_id = text("pipeline_id")
+state("task_head_state", "visible")
+state("usage_head_state", "visible")
+state("usage_generation_state", "visible")
+state("publication_generation_state", "visible")
+if text("usage_head_task_id") != task_id or text("usage_head_generation_id") != generation_id:
+    raise ValueError("sample usage head ownership is inconsistent")
+if text("generation_publication_id") != publication_id or text("generation_task_id") != task_id:
+    raise ValueError("sample generation ownership is inconsistent")
+if text("generation_ownership_class") != "task-owned":
+    raise ValueError("sample generation ownership class is invalid")
+if text("task_lifecycle_state") not in {"active", "completed", "failed", "cancelled"}:
+    raise ValueError("sample task state is invalid")
+if text("run_state") not in {"completed", "failed", "cancelled"}:
+    raise ValueError("sample run state is invalid")
+if text("task_summary_usage_generation_id") != generation_id or text("task_summary_publication_id") != publication_id or text("task_summary_task_id") != task_id:
+    raise ValueError("sample task summary ownership is inconsistent")
+if text("run_summary_usage_generation_id") != generation_id or text("run_summary_publication_id") != publication_id or text("run_summary_task_id") != task_id:
+    raise ValueError("sample run summary ownership is inconsistent")
+if text("task_summary_scope") != "task" or text("run_summary_scope") != "run":
+    raise ValueError("sample summaries have invalid scopes")
+if text("task_summary_run_id", optional=True) is not None or text("run_summary_run_id") != run_id:
+    raise ValueError("sample summaries have invalid run ownership")
+
+for name in ("task_summary_id", "run_summary_id", "invocation_id", "turn_id", "global_id"):
+    text(name)
+if text("invocation_publication_id") != publication_id or text("invocation_task_id") != task_id:
+    raise ValueError("sample invocation ownership is inconsistent")
+if text("invocation_pipeline_id") != pipeline_id or text("invocation_run_id") != run_id:
+    raise ValueError("sample invocation run ownership is inconsistent")
+if text("invocation_ownership_class") != "task-owned":
+    raise ValueError("sample invocation ownership class is invalid")
+if text("turn_usage_generation_id") != generation_id or text("turn_invocation_id") != text("invocation_id"):
+    raise ValueError("sample turn ownership is inconsistent")
+if text("turn_publication_id") != publication_id or text("turn_task_id") != task_id or text("turn_run_id") != run_id:
+    raise ValueError("sample turn run ownership is inconsistent")
+if text("global_usage_generation_id") != generation_id or text("global_ownership_class") != "task-owned":
+    raise ValueError("sample global ownership is inconsistent")
+if text("global_period_kind") not in {"lifetime", "daily"}:
+    raise ValueError("sample global period is invalid")
+if text("global_period_key") != "lifetime" and text("global_period_kind") == "lifetime":
+    raise ValueError("sample global period key is invalid")
+if text("global_period_kind") == "daily" and re.fullmatch(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", text("global_period_key")) is None:
+    raise ValueError("sample daily period key is invalid")
+if not text("global_model"):
+    raise ValueError("sample global model is missing")
+state("global_head_state", "visible")
+if text("global_head_usage_generation_id") != generation_id or text("global_head_id") != text("global_id"):
+    raise ValueError("sample global head ownership is inconsistent")
+
+expected_counts = {
+    "summary_count": integer("generation_expected_summary_count"),
+    "invocation_count": integer("generation_expected_invocation_count"),
+    "turn_count": integer("generation_expected_turn_count"),
+    "price_count": integer("generation_expected_price_count"),
+    "global_count": integer("generation_expected_global_count"),
+}
+for name, expected in expected_counts.items():
+    actual = integer(name)
+    minimum = 0 if name == "price_count" else 1
+    if expected is None or actual is None or expected < minimum or actual != expected:
+        raise ValueError("sample generation counts are inconsistent")
+if integer("run_count") != 1 or integer("invocation_count") < 1 or integer("turn_count") < 1:
+    raise ValueError("sample usage level is missing")
+if integer("run_invocation_count") != integer("invocation_count") or integer("run_turn_count") != integer("turn_count"):
+    raise ValueError("sample run counts are inconsistent")
+if integer("retry_ordinal", maximum=4_096) is None or integer("turn_ordinal", maximum=4_096) is None or integer("turn_ordinal", maximum=4_096) < 1:
+    raise ValueError("sample retry or turn ordinal is invalid")
+
+
+def validate_metrics(prefix: str, *, turn: bool = False) -> tuple[int | None, ...]:
+    values = tuple(sample[f"{prefix}_{field}"] for field in token_fields)
+    for item in values:
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+            raise ValueError("sample token metric is invalid")
+    if all(item is not None for item in values):
+        prompt, cached, uncached, completion, reasoning, total = values
+        if cached > prompt or uncached != prompt - cached or reasoning > completion or total != prompt + completion:
+            raise ValueError("sample token arithmetic is inconsistent")
+    if turn and any(item is None for item in values):
+        raise ValueError("sample turn token evidence is incomplete")
+    costs = tuple(sample[f"{prefix}_{field}"] for field in cost_fields)
+    for item in costs:
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+            raise ValueError("sample cost metric is invalid")
+    if any(item is None for item in costs) and not all(item is None for item in costs):
+        raise ValueError("sample cost state is mixed")
+    return values
+
+
+def validate_coverage(prefix: str, count_name: str) -> None:
+    coverage = text(f"{prefix}_coverage")
+    if coverage not in {"complete", "partial", "unavailable"}:
+        raise ValueError("sample coverage is invalid")
+    covered_name = f"{prefix}_covered_{count_name}"
+    expected_name = f"{prefix}_expected_{count_name}"
+    covered = integer(covered_name)
+    expected = integer(expected_name)
+    if covered is None or expected is None or covered > expected:
+        raise ValueError("sample coverage counts are invalid")
+    if coverage == "complete" and covered != expected:
+        raise ValueError("sample complete coverage is inconsistent")
+    if coverage == "unavailable" and (
+        sample[f"{prefix}_known_token_subtotal"] is not None
+        or sample[f"{prefix}_known_cost_subtotal_micro_usd"] is not None
+    ):
+        raise ValueError("sample unavailable coverage has fabricated subtotals")
+    total = sample[f"{prefix}_total_tokens"]
+    known_total = sample[f"{prefix}_known_token_subtotal"]
+    if total is not None and known_total is not None and total != known_total:
+        raise ValueError("sample token subtotal is inconsistent")
+    cost = sample[f"{prefix}_total_cost_micro_usd"]
+    known_cost = sample[f"{prefix}_known_cost_subtotal_micro_usd"]
+    if cost is not None and known_cost is not None and cost != known_cost:
+        raise ValueError("sample cost subtotal is inconsistent")
+
+
+for prefix in ("task_summary", "run_summary", "invocation", "global"):
+    validate_coverage(prefix, "invocations" if prefix != "invocation" else "turns")
+    validate_metrics(prefix)
+validate_metrics("turn", turn=True)
+
+if text("invocation_model") != text("global_model"):
+    raise ValueError("sample invocation and global models differ")
+if integer("run_invocation_count") == 1:
+    for field in token_fields:
+        values = [sample[f"{prefix}_{field}"] for prefix in ("task_summary", "run_summary", "invocation", "turn", "global")]
+        known = [item for item in values if item is not None]
+        if known and len(set(known)) != 1:
+            raise ValueError("sample usage levels disagree")
 print("valid")
 PY
   then
@@ -723,7 +984,203 @@ PY
 }
 
 if [[ "${mode}" == "activate" ]]; then
-  sample_query="SELECT th.publication_id, th.task_id, th.usage_generation_id, th.state AS task_head_state, uh.state AS usage_head_state, ug.state AS usage_generation_state, (SELECT r.run_id FROM runs AS r WHERE r.publication_id = th.publication_id AND r.task_id = th.task_id ORDER BY r.run_id LIMIT 1) AS run_id, (SELECT i.invocation_id FROM usage_invocations AS i WHERE i.usage_generation_id = th.usage_generation_id AND i.task_id = th.task_id AND i.ownership_class = 'task-owned' ORDER BY i.run_id, i.retry_ordinal, i.invocation_id LIMIT 1) AS invocation_id, (SELECT u.turn_id FROM usage_turns AS u WHERE u.usage_generation_id = th.usage_generation_id AND u.task_id = th.task_id ORDER BY u.invocation_id, u.ordinal, u.turn_id LIMIT 1) AS turn_id, (SELECT g.global_id FROM usage_globals AS g WHERE g.usage_generation_id = th.usage_generation_id AND g.ownership_class = 'task-owned' ORDER BY g.period_kind, g.period_key, g.model, g.global_id LIMIT 1) AS global_id, 'task-owned' AS ownership_class, (SELECT count(*) FROM runs AS r WHERE r.publication_id = th.publication_id AND r.task_id = th.task_id) AS run_count, (SELECT count(*) FROM usage_invocations AS i WHERE i.usage_generation_id = th.usage_generation_id AND i.task_id = th.task_id) AS invocation_count, (SELECT count(*) FROM usage_turns AS u WHERE u.usage_generation_id = th.usage_generation_id AND u.task_id = th.task_id) AS turn_count, (SELECT count(*) FROM usage_globals AS g WHERE g.usage_generation_id = th.usage_generation_id) AS global_count, 'complete' AS coverage, 0 AS prompt_tokens, 0 AS cached_tokens, 0 AS uncached_tokens, 0 AS completion_tokens, 0 AS reasoning_tokens, 0 AS total_tokens, NULL AS uncached_input_cost_micro_usd, NULL AS cached_input_cost_micro_usd, NULL AS output_cost_micro_usd, NULL AS total_cost_micro_usd FROM task_heads AS th JOIN usage_heads AS uh ON uh.task_id = th.task_id JOIN usage_generations AS ug ON ug.usage_generation_id = uh.usage_generation_id WHERE th.state = 'visible' AND uh.state = 'visible' AND ug.state = 'visible' LIMIT 1"
+  sample_query="SELECT
+    th.publication_id AS publication_id,
+    th.task_id AS task_id,
+    th.usage_generation_id AS usage_generation_id,
+    th.state AS task_head_state,
+    uh.task_id AS usage_head_task_id,
+    uh.usage_generation_id AS usage_head_generation_id,
+    uh.state AS usage_head_state,
+    ug.state AS usage_generation_state,
+    ug.publication_id AS generation_publication_id,
+    ug.task_id AS generation_task_id,
+    ug.ownership_class AS generation_ownership_class,
+    pg.state AS publication_generation_state,
+    t.lifecycle_state AS task_lifecycle_state,
+    r.run_state AS run_state,
+    r.run_id AS run_id,
+    r.pipeline_id AS pipeline_id,
+    ts.summary_id AS task_summary_id,
+    ts.usage_generation_id AS task_summary_usage_generation_id,
+    ts.publication_id AS task_summary_publication_id,
+    ts.task_id AS task_summary_task_id,
+    ts.scope AS task_summary_scope,
+    ts.run_id AS task_summary_run_id,
+    ts.coverage AS task_summary_coverage,
+    ts.covered_invocations AS task_summary_covered_invocations,
+    ts.expected_invocations AS task_summary_expected_invocations,
+    ts.known_token_subtotal AS task_summary_known_token_subtotal,
+    ts.known_cost_subtotal_micro_usd AS task_summary_known_cost_subtotal_micro_usd,
+    ts.prompt_tokens AS task_summary_prompt_tokens,
+    ts.cached_tokens AS task_summary_cached_tokens,
+    ts.uncached_tokens AS task_summary_uncached_tokens,
+    ts.completion_tokens AS task_summary_completion_tokens,
+    ts.reasoning_tokens AS task_summary_reasoning_tokens,
+    ts.total_tokens AS task_summary_total_tokens,
+    ts.uncached_input_cost_micro_usd AS task_summary_uncached_input_cost_micro_usd,
+    ts.cached_input_cost_micro_usd AS task_summary_cached_input_cost_micro_usd,
+    ts.output_cost_micro_usd AS task_summary_output_cost_micro_usd,
+    ts.total_cost_micro_usd AS task_summary_total_cost_micro_usd,
+    rs.summary_id AS run_summary_id,
+    rs.usage_generation_id AS run_summary_usage_generation_id,
+    rs.publication_id AS run_summary_publication_id,
+    rs.task_id AS run_summary_task_id,
+    rs.scope AS run_summary_scope,
+    rs.run_id AS run_summary_run_id,
+    rs.coverage AS run_summary_coverage,
+    rs.covered_invocations AS run_summary_covered_invocations,
+    rs.expected_invocations AS run_summary_expected_invocations,
+    rs.known_token_subtotal AS run_summary_known_token_subtotal,
+    rs.known_cost_subtotal_micro_usd AS run_summary_known_cost_subtotal_micro_usd,
+    rs.prompt_tokens AS run_summary_prompt_tokens,
+    rs.cached_tokens AS run_summary_cached_tokens,
+    rs.uncached_tokens AS run_summary_uncached_tokens,
+    rs.completion_tokens AS run_summary_completion_tokens,
+    rs.reasoning_tokens AS run_summary_reasoning_tokens,
+    rs.total_tokens AS run_summary_total_tokens,
+    rs.uncached_input_cost_micro_usd AS run_summary_uncached_input_cost_micro_usd,
+    rs.cached_input_cost_micro_usd AS run_summary_cached_input_cost_micro_usd,
+    rs.output_cost_micro_usd AS run_summary_output_cost_micro_usd,
+    rs.total_cost_micro_usd AS run_summary_total_cost_micro_usd,
+    i.invocation_id AS invocation_id,
+    i.publication_id AS invocation_publication_id,
+    i.task_id AS invocation_task_id,
+    i.pipeline_id AS invocation_pipeline_id,
+    i.run_id AS invocation_run_id,
+    i.ownership_class AS invocation_ownership_class,
+    i.retry_ordinal AS retry_ordinal,
+    i.model AS invocation_model,
+    i.coverage AS invocation_coverage,
+    i.covered_turns AS invocation_covered_turns,
+    i.expected_turns AS invocation_expected_turns,
+    NULL AS invocation_known_token_subtotal,
+    NULL AS invocation_known_cost_subtotal_micro_usd,
+    i.prompt_tokens AS invocation_prompt_tokens,
+    i.cached_tokens AS invocation_cached_tokens,
+    i.uncached_tokens AS invocation_uncached_tokens,
+    i.completion_tokens AS invocation_completion_tokens,
+    i.reasoning_tokens AS invocation_reasoning_tokens,
+    i.total_tokens AS invocation_total_tokens,
+    i.uncached_input_cost_micro_usd AS invocation_uncached_input_cost_micro_usd,
+    i.cached_input_cost_micro_usd AS invocation_cached_input_cost_micro_usd,
+    i.output_cost_micro_usd AS invocation_output_cost_micro_usd,
+    i.total_cost_micro_usd AS invocation_total_cost_micro_usd,
+    u.turn_id AS turn_id,
+    u.usage_generation_id AS turn_usage_generation_id,
+    u.invocation_id AS turn_invocation_id,
+    u.publication_id AS turn_publication_id,
+    u.task_id AS turn_task_id,
+    u.run_id AS turn_run_id,
+    u.ordinal AS turn_ordinal,
+    u.prompt_tokens AS turn_prompt_tokens,
+    u.cached_tokens AS turn_cached_tokens,
+    u.uncached_tokens AS turn_uncached_tokens,
+    u.completion_tokens AS turn_completion_tokens,
+    u.reasoning_tokens AS turn_reasoning_tokens,
+    u.total_tokens AS turn_total_tokens,
+    u.uncached_input_cost_micro_usd AS turn_uncached_input_cost_micro_usd,
+    u.cached_input_cost_micro_usd AS turn_cached_input_cost_micro_usd,
+    u.output_cost_micro_usd AS turn_output_cost_micro_usd,
+    u.total_cost_micro_usd AS turn_total_cost_micro_usd,
+    g.global_id AS global_id,
+    g.usage_generation_id AS global_usage_generation_id,
+    gh.usage_generation_id AS global_head_usage_generation_id,
+    gh.global_id AS global_head_id,
+    gh.state AS global_head_state,
+    g.period_kind AS global_period_kind,
+    g.period_key AS global_period_key,
+    g.model AS global_model,
+    g.ownership_class AS global_ownership_class,
+    g.coverage AS global_coverage,
+    g.covered_invocations AS global_covered_invocations,
+    g.expected_invocations AS global_expected_invocations,
+    g.known_token_subtotal AS global_known_token_subtotal,
+    g.known_cost_subtotal_micro_usd AS global_known_cost_subtotal_micro_usd,
+    g.prompt_tokens AS global_prompt_tokens,
+    g.cached_tokens AS global_cached_tokens,
+    g.uncached_tokens AS global_uncached_tokens,
+    g.completion_tokens AS global_completion_tokens,
+    g.reasoning_tokens AS global_reasoning_tokens,
+    g.total_tokens AS global_total_tokens,
+    g.uncached_input_cost_micro_usd AS global_uncached_input_cost_micro_usd,
+    g.cached_input_cost_micro_usd AS global_cached_input_cost_micro_usd,
+    g.output_cost_micro_usd AS global_output_cost_micro_usd,
+    g.total_cost_micro_usd AS global_total_cost_micro_usd,
+    ug.expected_summary_count AS generation_expected_summary_count,
+    ug.expected_invocation_count AS generation_expected_invocation_count,
+    ug.expected_turn_count AS generation_expected_turn_count,
+    ug.expected_price_count AS generation_expected_price_count,
+    ug.expected_global_count AS generation_expected_global_count,
+    (SELECT count(*) FROM runs AS rc WHERE rc.publication_id = th.publication_id AND rc.task_id = th.task_id) AS run_count,
+    (SELECT count(*) FROM usage_summaries AS sc WHERE sc.usage_generation_id = ug.usage_generation_id AND sc.publication_id = th.publication_id AND sc.task_id = th.task_id) AS summary_count,
+    (SELECT count(*) FROM usage_invocations AS ic WHERE ic.usage_generation_id = ug.usage_generation_id AND ic.task_id = th.task_id AND ic.ownership_class = 'task-owned') AS invocation_count,
+    (SELECT count(*) FROM usage_turns AS uc WHERE uc.usage_generation_id = ug.usage_generation_id AND uc.task_id = th.task_id) AS turn_count,
+    (SELECT count(*) FROM usage_prices AS pc WHERE pc.usage_generation_id = ug.usage_generation_id) AS price_count,
+    (SELECT count(*) FROM usage_globals AS gc WHERE gc.usage_generation_id = ug.usage_generation_id AND gc.ownership_class = 'task-owned') AS global_count,
+    (SELECT count(*) FROM usage_invocations AS ric WHERE ric.usage_generation_id = ug.usage_generation_id AND ric.task_id = th.task_id AND ric.run_id = r.run_id AND ric.ownership_class = 'task-owned') AS run_invocation_count,
+    (SELECT count(*) FROM usage_turns AS rtc WHERE rtc.usage_generation_id = ug.usage_generation_id AND rtc.task_id = th.task_id AND rtc.run_id = r.run_id) AS run_turn_count
+  FROM task_heads AS th
+  JOIN publication_generations AS pg
+    ON pg.publication_id = th.publication_id
+   AND pg.task_id = th.task_id
+   AND pg.state = 'visible'
+  JOIN tasks AS t
+    ON t.publication_id = pg.publication_id
+   AND t.task_id = pg.task_id
+  JOIN usage_heads AS uh
+    ON uh.task_id = th.task_id
+   AND uh.usage_generation_id = th.usage_generation_id
+   AND uh.state = 'visible'
+  JOIN usage_generations AS ug
+    ON ug.usage_generation_id = uh.usage_generation_id
+   AND ug.publication_id = pg.publication_id
+   AND ug.task_id = pg.task_id
+   AND ug.ownership_class = 'task-owned'
+   AND ug.state = 'visible'
+  JOIN runs AS r
+    ON r.publication_id = pg.publication_id
+   AND r.task_id = pg.task_id
+  JOIN usage_summaries AS ts
+    ON ts.usage_generation_id = ug.usage_generation_id
+   AND ts.publication_id = pg.publication_id
+   AND ts.task_id = pg.task_id
+   AND ts.scope = 'task'
+   AND ts.run_id IS NULL
+  JOIN usage_summaries AS rs
+    ON rs.usage_generation_id = ug.usage_generation_id
+   AND rs.publication_id = pg.publication_id
+   AND rs.task_id = pg.task_id
+   AND rs.scope = 'run'
+   AND rs.run_id = r.run_id
+  JOIN usage_invocations AS i
+    ON i.usage_generation_id = ug.usage_generation_id
+   AND i.publication_id = pg.publication_id
+   AND i.task_id = pg.task_id
+   AND i.pipeline_id = r.pipeline_id
+   AND i.run_id = r.run_id
+   AND i.ownership_class = 'task-owned'
+  JOIN usage_turns AS u
+    ON u.usage_generation_id = i.usage_generation_id
+   AND u.invocation_id = i.invocation_id
+   AND u.publication_id = i.publication_id
+   AND u.task_id = i.task_id
+   AND u.run_id = i.run_id
+  JOIN usage_globals AS g
+    ON g.usage_generation_id = ug.usage_generation_id
+   AND g.ownership_class = 'task-owned'
+   AND g.model = i.model
+  JOIN usage_global_heads AS gh
+    ON gh.global_id = g.global_id
+   AND gh.usage_generation_id = g.usage_generation_id
+   AND gh.period_kind = g.period_kind
+   AND gh.period_key = g.period_key
+   AND gh.model = g.model
+   AND gh.ownership_class = g.ownership_class
+   AND gh.state = 'visible'
+  WHERE th.state = 'visible'
+  ORDER BY r.run_id, i.retry_ordinal, i.invocation_id, u.ordinal, g.period_kind, g.period_key, g.model
+  LIMIT 1"
   if ! "${wrangler_bin}" d1 execute "${steward_d1_database_id}" \
     --remote \
     --command "${sample_query}" \

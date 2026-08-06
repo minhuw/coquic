@@ -49,11 +49,43 @@ if args[:1] == ["preview"]:
     elif case == "malformed-preview":
         print("not structured JSON")
     elif case == "update":
-        print(json.dumps({"op": "update", "urn": "urn:pulumi:production"}))
-    elif case == "same":
-        print(json.dumps({"op": "same", "urn": "urn:pulumi:production"}))
+        print(json.dumps({"op": "update", "type": "cloudflare:index/d1Database:D1Database", "name": "usageDatabase"}))
+    elif case == "three-create":
+        for resource_type, name in (
+            ("cloudflare:index/d1Database:D1Database", "publicationDatabase"),
+            ("cloudflare:index/d1Database:D1Database", "usageDatabase"),
+            ("cloudflare:index/r2Bucket:R2Bucket", "unexpectedBucket"),
+        ):
+            print(json.dumps({"op": "create", "type": resource_type, "name": name}))
+    elif case == "secret-preview":
+        print(json.dumps({"op": "create", "type": "cloudflare:index/d1Database:D1Database", "name": "usageDatabase", "output": "fixture-secret"}))
     else:
-        print(json.dumps({"op": "create", "urn": "urn:pulumi:production"}))
+        resources = [
+            ("cloudflare:index/d1Database:D1Database", "publicationDatabase"),
+            ("cloudflare:index/d1Database:D1Database", "usageDatabase"),
+            ("cloudflare:index/r2Bucket:R2Bucket", "publicArtifacts"),
+            ("cloudflare:index/r2Bucket:R2Bucket", "privateOriginals"),
+            ("cloudflare:index/r2CustomDomain:R2CustomDomain", "publicArtifactsDomain"),
+            ("cloudflare:index/r2BucketLifecycle:R2BucketLifecycle", "privateOriginalsLifecycle"),
+            ("cloudflare:index/accountToken:AccountToken", "stewardPublicationToken"),
+            ("cloudflare:index/accountToken:AccountToken", "siteReaderToken"),
+        ]
+        operation = "same" if case == "same" else "create" if case == "ok" else "same"
+        for resource_type, name in resources:
+            if name == "usageDatabase" and operation == "create":
+                resource_operation = "create"
+            else:
+                resource_operation = "same"
+            print(json.dumps({
+                "resourcePreEvent": {
+                    "metadata": {
+                        "op": resource_operation,
+                        "type": resource_type,
+                        "name": name,
+                        "urn": f"urn:pulumi:production::coquic-cloudflare::{resource_type}::{name}",
+                    }
+                }
+            }))
     raise SystemExit(0)
 if args[:1] == ["up"]:
     Path(os.environ["PULUMI_APPLIED"]).write_text("yes", encoding="utf-8")
@@ -102,7 +134,118 @@ if "FROM task_heads" in " ".join(args):
     elif case == "wrong-rollup":
         print(json.dumps({"success": True, "results": [{"publication_id": "publication-1", "task_id": "task-1", "usage_generation_id": "usage-1", "run_id": "run-1", "invocation_id": "invocation-1", "turn_id": "turn-1", "global_id": "global-1", "ownership_class": "task-owned", "task_head_state": "visible", "usage_head_state": "visible", "usage_generation_state": "visible", "run_count": 1, "invocation_count": 0, "turn_count": 1, "global_count": 1}]}))
     else:
-        print(json.dumps({"success": True, "results": [{"publication_id": "publication-1", "task_id": "task-1", "usage_generation_id": "usage-1", "run_id": "run-1", "invocation_id": "invocation-1", "turn_id": "turn-1", "global_id": "global-1", "ownership_class": "task-owned", "task_head_state": "visible", "usage_head_state": "visible", "usage_generation_state": "visible", "run_count": 1, "invocation_count": 1, "turn_count": 1, "global_count": 1, "coverage": "complete", "prompt_tokens": 10, "cached_tokens": 2, "uncached_tokens": 8, "completion_tokens": 5, "reasoning_tokens": 1, "total_tokens": 15, "uncached_input_cost_micro_usd": None, "cached_input_cost_micro_usd": None, "output_cost_micro_usd": None, "total_cost_micro_usd": None}]}))
+        token_fields = {
+            "prompt_tokens": 10,
+            "cached_tokens": 2,
+            "uncached_tokens": 8,
+            "completion_tokens": 5,
+            "reasoning_tokens": 1,
+            "total_tokens": 15,
+        }
+        cost_fields = {
+            "uncached_input_cost_micro_usd": None,
+            "cached_input_cost_micro_usd": None,
+            "output_cost_micro_usd": None,
+            "total_cost_micro_usd": None,
+        }
+        summary = {
+            "coverage": "complete",
+            "covered_invocations": 1,
+            "expected_invocations": 1,
+            "known_token_subtotal": 15,
+            "known_cost_subtotal_micro_usd": None,
+            **token_fields,
+            **cost_fields,
+        }
+        sample = {
+            "publication_id": "publication-1",
+            "task_id": "task-1",
+            "usage_generation_id": "usage-1",
+            "task_head_state": "visible",
+            "usage_head_task_id": "task-1",
+            "usage_head_generation_id": "usage-1",
+            "usage_head_state": "visible",
+            "usage_generation_state": "visible",
+            "generation_publication_id": "publication-1",
+            "generation_task_id": "task-1",
+            "generation_ownership_class": "task-owned",
+            "publication_generation_state": "visible",
+            "task_lifecycle_state": "completed",
+            "run_state": "completed",
+            "run_id": "run-1",
+            "pipeline_id": "pipeline-1",
+            "task_summary_id": "summary-task",
+            "task_summary_usage_generation_id": "usage-1",
+            "task_summary_publication_id": "publication-1",
+            "task_summary_task_id": "task-1",
+            "task_summary_scope": "task",
+            "task_summary_run_id": None,
+            "run_summary_id": "summary-run",
+            "run_summary_usage_generation_id": "usage-1",
+            "run_summary_publication_id": "publication-1",
+            "run_summary_task_id": "task-1",
+            "run_summary_scope": "run",
+            "run_summary_run_id": "run-1",
+            **{f"task_summary_{key}": value for key, value in summary.items()},
+            **{f"run_summary_{key}": value for key, value in summary.items()},
+            "invocation_id": "invocation-1",
+            "invocation_publication_id": "publication-1",
+            "invocation_task_id": "task-1",
+            "invocation_pipeline_id": "pipeline-1",
+            "invocation_run_id": "run-1",
+            "invocation_ownership_class": "task-owned",
+            "retry_ordinal": 0,
+            "invocation_model": "gpt-fixture",
+            "invocation_coverage": "complete",
+            "invocation_covered_turns": 1,
+            "invocation_expected_turns": 1,
+            "invocation_known_token_subtotal": None,
+            "invocation_known_cost_subtotal_micro_usd": None,
+            **{f"invocation_{key}": value for key, value in {**token_fields, **cost_fields}.items()},
+            "turn_id": "turn-1",
+            "turn_usage_generation_id": "usage-1",
+            "turn_invocation_id": "invocation-1",
+            "turn_publication_id": "publication-1",
+            "turn_task_id": "task-1",
+            "turn_run_id": "run-1",
+            "turn_ordinal": 1,
+            **{f"turn_{key}": value for key, value in {**token_fields, **cost_fields}.items()},
+            "global_id": "global-1",
+            "global_usage_generation_id": "usage-1",
+            "global_head_usage_generation_id": "usage-1",
+            "global_head_id": "global-1",
+            "global_head_state": "visible",
+            "global_period_kind": "lifetime",
+            "global_period_key": "lifetime",
+            "global_model": "gpt-fixture",
+            "global_ownership_class": "task-owned",
+            "global_coverage": "complete",
+            "global_covered_invocations": 1,
+            "global_expected_invocations": 1,
+            "global_known_token_subtotal": 15,
+            "global_known_cost_subtotal_micro_usd": None,
+            **{f"global_{key}": value for key, value in {**token_fields, **cost_fields}.items()},
+            "generation_expected_summary_count": 2,
+            "generation_expected_invocation_count": 1,
+            "generation_expected_turn_count": 1,
+            "generation_expected_price_count": 0,
+            "generation_expected_global_count": 1,
+            "run_invocation_count": 1,
+            "run_turn_count": 1,
+            "run_count": 1,
+            "summary_count": 2,
+            "invocation_count": 1,
+            "turn_count": 1,
+            "price_count": 0,
+            "global_count": 1,
+        }
+        if case == "cross-owner":
+            sample["turn_task_id"] = "other-task"
+        if case == "partial":
+            sample["task_summary_coverage"] = "partial"
+            sample["run_summary_coverage"] = "partial"
+            sample["global_coverage"] = "partial"
+        print(json.dumps({"success": True, "results": [sample]}))
     raise SystemExit(0)
 if case == "malformed":
     print("not-json")
@@ -401,6 +544,18 @@ def test_preview_rejects_unreliable_or_destructive_plan(
     assert _argv(_logs(harness), "wrangler") == []
 
 
+@pytest.mark.parametrize("case", ["three-create", "secret-preview"])
+def test_preview_requires_exact_resources_and_redacts_secret_events(
+    harness: dict[str, Any], case: str
+) -> None:
+    harness["env"]["PULUMI_CASE"] = case
+    result = _run(harness)
+    assert result.returncode != 0
+    assert "fixture-secret" not in result.stdout + result.stderr
+    assert not harness["applied"].exists()
+    assert _argv(_logs(harness), "wrangler") == []
+
+
 def test_wrong_stack_and_missing_auth_are_rejected(harness: dict[str, Any]) -> None:
     wrong = subprocess.run(
         ["bash", str(SCRIPT), "--stack", "staging", "--credentials-dir", str(harness["credentials"])],
@@ -471,6 +626,29 @@ def test_activation_reverifies_sample_and_hands_site_candidate(harness: dict[str
     assert harness["values"]["d1_read_token"] in site_lines[2]
     pulumi = _argv(_logs(harness), "pulumi")
     assert sum(argv[0] == "up" for argv in pulumi) == prior_up_count
+
+
+@pytest.mark.parametrize("case", ["missing-sample", "wrong-rollup", "cross-owner"])
+def test_activation_rejects_incomplete_or_cross_owned_usage_evidence(
+    harness: dict[str, Any], case: str
+) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    harness["env"]["PULUMI_CASE"] = "same"
+    harness["env"]["WRANGLER_CASE"] = case
+    activated = _run(harness, "--mode", "activate", apply=True)
+    assert activated.returncode != 0
+    assert "sample" in activated.stderr
+    assert not harness["site_input"].exists()
+
+
+def test_activation_accepts_partial_unpriced_usage_without_recomputing(harness: dict[str, Any]) -> None:
+    prepared = _run(harness, apply=True)
+    assert prepared.returncode == 0, prepared.stderr
+    harness["env"]["PULUMI_CASE"] = "same"
+    harness["env"]["WRANGLER_CASE"] = "partial"
+    activated = _run(harness, "--mode", "activate", apply=True)
+    assert activated.returncode == 0, activated.stderr
 
 
 @pytest.mark.parametrize("case", ["exact-empty", "exact-populated"])

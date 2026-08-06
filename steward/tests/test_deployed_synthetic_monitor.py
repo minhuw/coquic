@@ -107,8 +107,17 @@ def _dashboard() -> ResponseSpec:
         body=(
             b"<!doctype html><html><body>CoQUIC Steward "
             b'<section data-usage-state="ready">'
-            b"Token and estimated-cost evidence Lifetime totals by model and ownership "
-            b"UTC daily evidence Ownership task-owned Token 15 Estimated cost N.A. Complete"
+            b"<h2>Token and estimated-cost evidence</h2>"
+            b"<h3>Lifetime totals by model and ownership</h3>"
+            b"<table><thead><tr><th>Model</th><th>Ownership</th><th>Token</th><th>Estimated cost</th><th>Coverage</th><th>Details</th></tr></thead>"
+            b"<tbody><tr><th>gpt-fixture</th><td>Task-owned</td><td>15</td><td>N.A.</td><td>Complete - 1/1 invocations</td><td><details><summary>Usage components</summary><dl>"
+            b"<dt>Prompt tokens</dt><dd>10</dd><dt>Cached tokens</dt><dd>2</dd><dt>Uncached tokens</dt><dd>8</dd>"
+            b"<dt>Completion tokens</dt><dd>5</dd><dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>15</dd>"
+            b"<dt>Uncached input cost</dt><dd>N.A.</dd><dt>Cached input cost</dt><dd>N.A.</dd><dt>Output cost</dt><dd>N.A.</dd><dt>Total cost</dt><dd>N.A.</dd>"
+            b"</dl></details></td></tr></tbody></table>"
+            b"<h3>UTC daily evidence</h3>"
+            b"<table><thead><tr><th>UTC date</th><th>Model</th><th>Ownership</th><th>Token</th><th>Estimated cost</th><th>Coverage</th><th>Details</th></tr></thead>"
+            b"<tbody><tr><th>2026-07-28</th><th>gpt-fixture</th><td>Task-owned</td><td>15</td><td>N.A.</td><td>Complete - 1/1 invocations</td><td>daily</td></tr></tbody></table>"
             b"</section></body></html>"
         ),
         headers=_headers("text/html; charset=utf-8"),
@@ -169,10 +178,17 @@ def _populated_responses() -> dict[str, ResponseSpec]:
     )
     task_page = (
         "<!doctype html><html><body>"
-        f'<section data-usage-state="ready">{task_id} '
-        "Run, invocation, and turn usage Invocations and retries Turns "
-        "Usage components task and run ownership match Retry 0 Token 15 Estimated cost N.A. "
-        "Complete Bounded turn usage"
+        f'<section data-usage-state="ready">{task_id}<h2>Run, invocation, and turn usage</h2>'
+        '<h3>Invocations and retries</h3><table><thead><tr><th>Invocation / retry</th><th>Role</th><th>Model</th><th>UTC start</th><th>Outcome</th><th>Token</th><th>Estimated cost</th><th>Coverage</th><th>Details</th></tr></thead>'
+        '<tbody><tr><th>invocation-1 <span>Retry 0</span></th><td>implementation</td><td>gpt-fixture</td><td>Jul 28, 12:00 AM UTC</td><td>success</td><td>15</td><td>N.A.</td><td>Complete - 1/1 turns</td><td><details><summary>Usage components</summary><dl>'
+        '<dt>Prompt tokens</dt><dd>10</dd><dt>Cached tokens</dt><dd>2</dd><dt>Uncached tokens</dt><dd>8</dd><dt>Completion tokens</dt><dd>5</dd><dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>15</dd>'
+        '<dt>Uncached input cost</dt><dd>N.A.</dd><dt>Cached input cost</dt><dd>N.A.</dd><dt>Output cost</dt><dd>N.A.</dd><dt>Total cost</dt><dd>N.A.</dd>'
+        '</dl></details></td></tr></tbody></table>'
+        '<h3>Turns</h3><table><thead><tr><th>Turn</th><th>Turn ID</th><th>UTC start</th><th>Model</th><th>Coverage</th><th>Token</th><th>Estimated cost</th><th>Price</th><th>Details</th></tr></thead>'
+        '<tbody><tr><th>1</th><td>turn-1</td><td>Jul 28, 12:00 AM UTC</td><td>gpt-fixture</td><td>Complete - 1/1 turns</td><td>15</td><td>N.A.</td><td>N.A.</td><td><details><summary>Usage components</summary><dl>'
+        '<dt>Prompt tokens</dt><dd>10</dd><dt>Cached tokens</dt><dd>2</dd><dt>Uncached tokens</dt><dd>8</dd><dt>Completion tokens</dt><dd>5</dd><dt>Reasoning tokens</dt><dd>1</dd><dt>Total tokens</dt><dd>15</dd>'
+        '<dt>Uncached input cost</dt><dd>N.A.</dd><dt>Cached input cost</dt><dd>N.A.</dd><dt>Output cost</dt><dd>N.A.</dd><dt>Total cost</dt><dd>N.A.</dd>'
+        '</dl></details></td></tr></tbody></table>'
         "</section></body></html>"
     )
     responses = {
@@ -272,6 +288,24 @@ def test_populated_publication_checks_detail_trajectory_and_one_redirect(tmp_pat
     assert all(method == "GET" for method, _, _ in server.requests)
     assert all(headers.get("cache-control") == "no-store" for _, _, headers in server.requests)
     assert "objects.example" not in completed.stdout
+
+
+def test_usage_checker_rejects_label_only_canned_evidence(tmp_path: Path) -> None:
+    responses = _populated_responses()
+    responses["/steward"] = ResponseSpec(
+        body=(
+            b'<section data-usage-state="ready">Token and estimated-cost evidence '
+            b"Lifetime totals by model and ownership UTC daily evidence Ownership "
+            b"Task-owned Token 999 Estimated cost N.A. Complete</section>"
+        ),
+        headers=_headers("text/html; charset=utf-8"),
+    )
+    with FixtureServer(responses) as server:
+        completed, result = _run_check(server.base_url, tmp_path)
+
+    assert completed.returncode == 1
+    assert result["ok"] is False
+    assert _statuses(result, "usage_global_structure") == ["fail"]
 
 
 @pytest.mark.parametrize("case", ["missing", "wrong_version", "malformed", "private", "oversize", "slow"])

@@ -1107,9 +1107,9 @@ for global_row in globals.values():
     if model not in models:
         raise ValueError("sample global model is unrelated to selected task")
     matching = [invocation for invocation in invocations.values() if row_text(invocation, "invocation_model") == model]
-    if row_text(global_row, "global_coverage") == "complete":
-        expected = row_integer(global_row, "global_expected_invocations")
-        if expected == len(matching):
+    if row_text(global_row, "global_coverage") != "unavailable":
+        covered = row_integer(global_row, "global_covered_invocations")
+        if covered <= len(matching):
             rollup_metrics(global_row, "global", matching, "invocation")
 print("valid")
 PY

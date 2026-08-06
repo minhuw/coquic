@@ -245,14 +245,15 @@ if "FROM task_heads" in " ".join(args):
             sample["task_summary_coverage"] = "partial"
             sample["run_summary_coverage"] = "partial"
             sample["global_coverage"] = "partial"
+            sample["global_expected_invocations"] = 2
         if case == "partial-contradictory":
-            sample["task_summary_prompt_tokens"] = 500
-            sample["task_summary_cached_tokens"] = 2
-            sample["task_summary_uncached_tokens"] = 498
-            sample["task_summary_completion_tokens"] = 499
-            sample["task_summary_reasoning_tokens"] = 1
-            sample["task_summary_total_tokens"] = 999
-            sample["task_summary_known_token_subtotal"] = 999
+            sample["global_prompt_tokens"] = 500
+            sample["global_cached_tokens"] = 2
+            sample["global_uncached_tokens"] = 498
+            sample["global_completion_tokens"] = 499
+            sample["global_reasoning_tokens"] = 1
+            sample["global_total_tokens"] = 999
+            sample["global_known_token_subtotal"] = 999
         samples = [sample]
         if case in {"two-invocations", "two-invocations-contradictory"}:
             second = dict(sample)

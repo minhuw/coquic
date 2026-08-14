@@ -39,6 +39,7 @@ from coquic_steward.execution.container import (
 from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import (
+    FreshPlannerSession,
     LocalSessionInvoker,
     _ActiveInvocation,
     runtime_factory_for_config,
@@ -889,93 +890,93 @@ def test_streaming_result_does_not_retain_complete_stdout(tmp_path: Path) -> Non
     assert len(outcome.stderr) == 64 * 1024
 
 
-def test_signal_planner_uses_canonical_session_run_and_archive_lineage(
+def test_signal_planner_uses_fresh_session_run_and_private_lineage(
     config: StewardConfig,
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("CODEX_API_KEY", "fake-key")
-    store = TaskStore(config.db_path)
-    allocations = []
-    create_session_with_run = store.create_session_with_run
+    monkeypatch.setattr(
+        StewardConfig,
+        "read_codex_api_key_bytes",
+        lambda _config: "fake-key",
+    )
 
-    def record_allocation(*args, **kwargs):
-        allocated = create_session_with_run(*args, **kwargs)
-        allocations.append((kwargs, allocated))
-        return allocated
+    class PlannerInvoker(LocalSessionInvoker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests = []
 
-    monkeypatch.setattr(store, "create_session_with_run", record_allocation)
-
-    class PlannerInvoker(FakeInvoker):
-        def invoke(self, request, **kwargs):
-            outcome = super().invoke(request, **kwargs)
+        def invoke(
+            self,
+            request,
+            *,
+            api_key,
+            append,
+            timeout_seconds,
+            interrupt_grace_seconds,
+            launch_gate=None,
+        ):
+            assert api_key == "fake-key"
+            self.requests.append(request)
+            line = b'{"thread_id":"provider-session"}\n'
+            append(line)
             request.output_last_message.write_text(
                 '{"consumed_item_ids":[],"tasks":[]}\n', encoding="utf-8"
             )
-            return outcome
-
-    class CapturingSupervisor(SessionSupervisor):
-        def run(self, *args, **kwargs):
-            result = super().run(*args, **kwargs)
-            self.worker_results = [
-                *getattr(self, "worker_results", []),
-                result,
-            ]
-            return result
+            return InvocationOutcome(
+                exit_code=0,
+                stdout=line,
+                stderr=b"",
+                incomplete_suffix=b"",
+                events=({"thread_id": "provider-session"},),
+                provider_session_id="provider-session",
+            )
 
     invoker = PlannerInvoker()
-    supervisor = CapturingSupervisor(
-        config,
-        store,
-        invoker=invoker,
-        image_digest="sha256:" + "a" * 64,
-        codex_identity="codex-0.144.6",
+    session = FreshPlannerSession(config, invoker=invoker)
+    planner = CodexPlanner(config, invocation=session)
+    first = planner.run(
+        ProjectSignals(repository="minhuw/coquic"),
+        [],
+        run_id="planner-run-one",
     )
-    planner = CodexPlanner(config, invocation=supervisor)
-    first = planner.run(ProjectSignals(repository="minhuw/coquic"), [])
-    second = planner.run(ProjectSignals(repository="minhuw/coquic"), [])
+    second = planner.run(
+        ProjectSignals(repository="minhuw/coquic"),
+        [],
+        run_id="planner-run-two",
+    )
 
-    assert len(allocations) == 2
+    assert first.completed
+    assert second.completed
+    assert first.planned == []
+    assert second.planned == []
     assert first.thread_id is None
     assert second.thread_id is None
-    assert first.run_id not in {None, "steward-planner", "provider-session"}
-    assert second.run_id not in {None, first.run_id, "provider-session"}
-    assert all(result.thread_id is None for result in supervisor.worker_results)
-    assert [result.run_id for result in supervisor.worker_results] == [
-        first.run_id,
-        second.run_id,
+    assert [first.run_id, second.run_id] == [
+        "planner-run-one",
+        "planner-run-two",
     ]
-
-    sessions = store.list_sessions("steward-planner")
-    assert len(sessions) == 2
-    assert [session.home_uid for session in sessions] == [10000, 10001]
-    assert all(session.checkpoint_id for session in sessions)
-    assert all(session.provider_session_id == "provider-session" for session in sessions)
+    assert first.transcript_path != second.transcript_path
+    assert first.transcript_path.parent != second.transcript_path.parent
+    assert [request.run_id for request in invoker.requests] == [
+        "planner-run-one",
+        "planner-run-two",
+    ]
+    assert len({request.session_id for request in invoker.requests}) == 2
+    assert len({request.session_uid for request in invoker.requests}) == 2
+    assert all(request.provider_session_id is None for request in invoker.requests)
     assert all(
-        kwargs["checkpoint_id"] == session.checkpoint_id
-        and allocated_session.id == session.id
-        and allocated_run.id in {first.run_id, second.run_id}
-        for (kwargs, (allocated_session, allocated_run)), session in zip(
-            allocations, sessions, strict=True
-        )
+        request.output_last_message.parent == planner_run.transcript_path.parent
+        for request, planner_run in zip(invoker.requests, (first, second), strict=True)
     )
-    assert [request.session_uid for request in invoker.requests] == [10000, 10001]
-    assert [request.session_id for request in invoker.requests] == [
-        session.id for session in sessions
-    ]
-    for planner_run in (first, second):
-        run = store.get_run(planner_run.run_id)
-        run_json = (
-            config.tasks_dir
-            / "steward-planner"
-            / "pipelines"
-            / run.pipeline_id
-            / "runs"
-            / run.id
-            / "run.json"
-        )
-        assert run_json.exists()
-        assert "provider-session" not in run_json.read_text(encoding="utf-8")
-        assert planner_run.transcript_path.parent == run_json.parent
+    assert all(
+        planner_run.transcript_path.read_bytes()
+        == b'{"thread_id":"provider-session"}\n'
+        for planner_run in (first, second)
+    )
+    assert all(
+        planner_run.transcript_path.parent == planner_run.prompt_path.parent
+        for planner_run in (first, second)
+    )
 
 
 def test_production_construction_rejects_local_codex_fallback(

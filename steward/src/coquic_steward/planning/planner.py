@@ -114,10 +114,15 @@ class CodexPlanner:
         verifier: PlanVerifier | None = None,
         *,
         runner: CodexRunner | None = None,
-        invocation: object | None = None,
+        invocation: FreshPlannerSession | None = None,
     ):
         self.config = config
-        self._injected_invocation = invocation
+        if runner is not None and invocation is not None:
+            raise ValueError("CodexPlanner accepts either runner or invocation, not both")
+        if runner is not None and not isinstance(runner, CodexRunner):
+            raise TypeError("runner must be a CodexRunner")
+        if invocation is not None and not isinstance(invocation, FreshPlannerSession):
+            raise TypeError("invocation must be a FreshPlannerSession")
         if (
             runner is None
             and invocation is None
@@ -128,10 +133,12 @@ class CodexPlanner:
             )
         self.runner = (
             runner
-            or getattr(invocation, "runner", None)
-            or (invocation if invocation is not None and hasattr(invocation, "run") else None)
-            or CodexRunner(config)
+            if runner is not None
+            else CodexRunner(config)
+            if invocation is None
+            else None
         )
+        self.invocation = invocation
         self.verifier = verifier or PlanVerifier()
 
     def plan(
@@ -154,8 +161,8 @@ class CodexPlanner:
             "stage": CodexStage.signal_planner,
         }
         prompt = render_planner_prompt(signals, active, self.config)
-        if isinstance(self._injected_invocation, FreshPlannerSession):
-            fresh = self._injected_invocation.run(
+        if self.invocation is not None:
+            fresh = self.invocation.run(
                 run_id or planner_task.id,
                 prompt=prompt,
                 output_schema=runner_kwargs["output_schema"],
@@ -186,6 +193,7 @@ class CodexPlanner:
                 },
             )()
         else:
+            assert self.runner is not None
             result = self.runner.run(
                 planner_task,
                 prompt,
@@ -246,7 +254,7 @@ def run_planner(
     active_tasks: list[TaskRecord],
     *,
     runner: CodexRunner | None = None,
-    invocation: object | None = None,
+    invocation: FreshPlannerSession | None = None,
     run_id: str | None = None,
 ) -> PlannerRun:
     return CodexPlanner(config, runner=runner, invocation=invocation).run(

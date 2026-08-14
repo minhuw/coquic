@@ -57,7 +57,8 @@ from coquic_steward.core.models import (
     utc_now,
 )
 from coquic_steward.core.subprocesses import CommandResult, run_command
-from coquic_steward.execution import StewardExecutor, Worktrees
+from coquic_steward.execution import SessionSupervisor, StewardExecutor, Worktrees
+from coquic_steward.execution.session import FreshPlannerSession
 from coquic_steward.execution.executor import (
     _is_transient_push_failure,
     commit_message_schema_path,
@@ -3301,6 +3302,44 @@ def test_codex_planner_prompt_includes_active_tasks(
     assert "resume" not in args
     assert "planner-thread-1" not in args
     assert args.count("--output-schema") == 2
+
+
+def test_codex_planner_selects_explicit_runner_boundaries(
+    config: StewardConfig,
+) -> None:
+    default_planner = CodexPlanner(config)
+    assert isinstance(default_planner.runner, CodexRunner)
+
+    explicit_runner = CodexRunner(config)
+    explicit_planner = CodexPlanner(config, runner=explicit_runner)
+    assert explicit_planner.runner is explicit_runner
+
+    class MethodLookalike:
+        def run(self, *_args, **_kwargs):
+            raise AssertionError("unsupported planner lookalike was invoked")
+
+    class NestedRunner:
+        def __init__(self) -> None:
+            self.runner = explicit_runner
+
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        CodexPlanner(config, invocation=MethodLookalike())
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        CodexPlanner(config, invocation=NestedRunner())
+
+    supervisor = SessionSupervisor(
+        config,
+        TaskStore(config.db_path),
+        require_boundary=False,
+    )
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        CodexPlanner(config, invocation=supervisor)
+    with pytest.raises(ValueError, match="either runner or invocation"):
+        CodexPlanner(
+            config,
+            runner=explicit_runner,
+            invocation=FreshPlannerSession(config),
+        )
 
 
 def test_codex_runner_places_resume_options_before_session(

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from coquic_steward.core.config import StewardConfig
-from coquic_steward.core.models import TaskKind, TaskSpec, TaskStatus, WorkerKind
+from coquic_steward.core.models import (
+    CleanupStatus,
+    TaskKind,
+    TaskSpec,
+    TaskStatus,
+    WorkerKind,
+)
 from coquic_steward.storage import TaskStore
 from coquic_steward.storage.schema import TaskRow
 
@@ -78,10 +84,12 @@ def test_cleanup_queries_use_all_events_and_latest_completion(
     config: StewardConfig,
 ) -> None:
     store = TaskStore(config.db_path)
+    no_obligation = _task(store, "no-obligation")
     pending_only = _task(store, "pending-only")
     completed = _task(store, "completed")
     duplicate = _task(store, "duplicate")
     reopened = _task(store, "reopened")
+    reopened_after_completion = _task(store, "reopened-after-completion")
     late_completion = _task(store, "late-completion")
 
     store.add_event(pending_only.id, "cleanup_pending", "pending")
@@ -91,17 +99,63 @@ def test_cleanup_queries_use_all_events_and_latest_completion(
     store.add_event(duplicate.id, "cleanup_pending", "pending again")
     store.add_event(reopened.id, "cleanup_complete", "complete first")
     store.add_event(reopened.id, "cleanup_pending", "pending again")
+    store.add_event(
+        reopened_after_completion.id,
+        "cleanup_pending",
+        "pending first",
+    )
+    store.add_event(
+        reopened_after_completion.id,
+        "cleanup_complete",
+        "complete first",
+    )
+    store.add_event(
+        reopened_after_completion.id,
+        "cleanup_pending",
+        "pending reopened",
+    )
 
     for index in range(205):
         store.add_event(late_completion.id, "cleanup_pending", f"pending {index}")
     store.add_event(late_completion.id, "cleanup_complete", "late completion")
 
     pending_ids = set(store.cleanup_pending_task_ids())
-    assert pending_ids == {pending_only.id, duplicate.id, reopened.id}
+    assert pending_ids == {
+        pending_only.id,
+        duplicate.id,
+        reopened.id,
+        reopened_after_completion.id,
+    }
+    states = {
+        task.id: store.cleanup_obligation_state(task.id)
+        for task in (
+            no_obligation,
+            pending_only,
+            completed,
+            duplicate,
+            reopened,
+            reopened_after_completion,
+            late_completion,
+        )
+    }
+    assert states == {
+        no_obligation.id: None,
+        pending_only.id: CleanupStatus.pending,
+        completed.id: CleanupStatus.complete,
+        duplicate.id: CleanupStatus.pending,
+        reopened.id: CleanupStatus.pending,
+        reopened_after_completion.id: CleanupStatus.pending,
+        late_completion.id: CleanupStatus.complete,
+    }
+    assert {
+        task_id
+        for task_id, state in states.items()
+        if state is CleanupStatus.pending
+    } == pending_ids
     assert {task.id for task in store.cleanup_pending_tasks()} == pending_ids
-    assert store.cleanup_pending_count() == 3
-    assert store.pending_cleanup_count() == 3
-    assert store.count_cleanup_pending() == 3
+    assert store.cleanup_pending_count() == 4
+    assert store.pending_cleanup_count() == 4
+    assert store.count_cleanup_pending() == 4
     assert store.has_cleanup_pending(pending_only.id)
     assert store.has_pending_cleanup(reopened.id)
     assert not store.has_cleanup_pending(completed.id)

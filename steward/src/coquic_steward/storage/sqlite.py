@@ -40,6 +40,7 @@ from ..core.lifecycle import (
 )
 from ..core.models import (
     ACTIVE_STATUSES,
+    CleanupStatus,
     CodexRunState,
     CodexSession,
     Event,
@@ -5273,6 +5274,26 @@ class SQLiteTaskStore:
                 row_to_event(row, path_codec=self.path_codec)
                 for row in session.scalars(statement).all()
             ]
+
+    def cleanup_obligation_state(self, task_id: str) -> CleanupStatus | None:
+        """Return the latest ordered terminal cleanup obligation state."""
+
+        with Session(self.engine) as session:
+            kind = session.scalar(
+                select(EventRow.kind)
+                .where(
+                    EventRow.task_id == task_id,
+                    EventRow.kind.in_(
+                        (
+                            CleanupStatus.pending.value,
+                            CleanupStatus.complete.value,
+                        )
+                    ),
+                )
+                .order_by(EventRow.id.desc())
+                .limit(1)
+            )
+        return CleanupStatus(kind) if kind is not None else None
 
     def event_exists(self, task_id: str, kind: str) -> bool:
         """Return whether one event kind exists for a task."""

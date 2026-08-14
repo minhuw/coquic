@@ -4097,12 +4097,24 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
 
     assert daemon.finalize_terminal_task(task.id) is False
     assert any(event.kind == "cleanup_pending" for event in store.events(task.id))
+    store.add_event(task.id, "cleanup_complete", "previous cleanup completed")
+    store.add_event(task.id, "cleanup_pending", "cleanup reopened")
     assert worktree.exists() and private_home.exists()
     daemon.startup_reconcile()
     assert worktree.exists() and private_home.exists()
     daemon.run_cycle(plan=False, dispatch=False)
 
     kinds = [event.kind for event in store.events(task.id)]
+    assert [
+        kind
+        for kind in kinds
+        if kind in {"cleanup_pending", "cleanup_complete"}
+    ] == [
+        "cleanup_pending",
+        "cleanup_complete",
+        "cleanup_pending",
+        "cleanup_complete",
+    ]
     assert kinds.index("cleanup_pending") < kinds.index("cleanup.container_removed")
     assert kinds.index("cleanup.container_removed") < kinds.index(
         "cleanup.worktree_removed"

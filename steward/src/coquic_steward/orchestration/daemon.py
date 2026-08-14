@@ -31,6 +31,7 @@ from ..core.lifecycle import (
 )
 from ..core.models import (
     ACTIVE_STATUSES,
+    CleanupStatus,
     DaemonCycleResult,
     DaemonCycleSummary,
     DaemonRuntime,
@@ -1767,15 +1768,15 @@ class StewardDaemon:
     def _reconcile_task(self, task: TaskRecord) -> ReconciliationOutcome:
         """Reconcile archive, ledger, process, Git, and cleanup identities."""
 
-        events = self.store.events(task.id)
+        cleanup_state = self.store.cleanup_obligation_state(task.id)
         terminal = TaskStatus(task.status).terminal
-        if terminal and any(event.kind == "cleanup_complete" for event in events):
+        if terminal and cleanup_state is CleanupStatus.complete:
             return ReconciliationOutcome(
                 task.id,
                 ReconciliationDisposition.unchanged,
                 "terminal cleanup already complete",
             )
-        if terminal and any(event.kind == "cleanup_pending" for event in events):
+        if terminal and cleanup_state is CleanupStatus.pending:
             if self.finalize_terminal_task(task.id):
                 return ReconciliationOutcome(
                     task.id,
@@ -3589,19 +3590,19 @@ class StewardDaemon:
         task = self.store.get(task_id)
         if not TaskStatus(task.status).terminal:
             return False
+        cleanup_state = self.store.cleanup_obligation_state(task.id)
         events = self.store.events(task.id)
-        cleanup_complete = any(event.kind == "cleanup_complete" for event in events)
         existing_intent = self._cleanup_intent_for_task(task.id)
         existing_state = existing_intent.state if existing_intent is not None else None
         if existing_state is CleanupState.completed:
-            if not cleanup_complete:
+            if cleanup_state is not CleanupStatus.complete:
                 self.store.add_event(
                     task.id,
                     "cleanup_complete",
                     "terminal archive deletion completed",
                 )
             return True
-        if cleanup_complete:
+        if cleanup_state is CleanupStatus.complete:
             return True
         if existing_state is CleanupState.blocked:
             return False
@@ -3723,8 +3724,9 @@ class StewardDaemon:
                     {"error": exc.__class__.__name__},
                 )
                 return False
-        if not any(event.kind == "cleanup_pending" for event in events):
+        if cleanup_state is None:
             self.store.add_event(task.id, "cleanup_pending", "terminal manifest verified")
+            cleanup_state = CleanupStatus.pending
         events = self.store.events(task.id)
 
         publication_enabled = bool(
@@ -3854,7 +3856,7 @@ class StewardDaemon:
                     {"error": exc.__class__.__name__},
                 )
                 return False
-        if not any(event.kind == "cleanup_complete" for event in self.store.events(task.id)):
+        if cleanup_state is not CleanupStatus.complete:
             self.store.add_event(
                 task.id,
                 "cleanup_complete",

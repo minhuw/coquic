@@ -1548,6 +1548,7 @@ _GLOBAL_TRANSITION_UPDATE = (
     "AND completion_tokens IS NULL AND reasoning_tokens IS NULL AND total_tokens IS NULL "
     "AND uncached_input_cost_micro_usd IS NULL AND cached_input_cost_micro_usd IS NULL "
     "AND output_cost_micro_usd IS NULL AND total_cost_micro_usd IS NULL THEN 'unavailable' "
+    "WHEN new_coverage = 'complete' AND covered_invocations = expected_invocations THEN 'complete' "
     "WHEN covered_invocations = expected_invocations AND prompt_tokens IS NOT NULL AND cached_tokens IS NOT NULL "
     "AND uncached_tokens IS NOT NULL AND completion_tokens IS NOT NULL AND reasoning_tokens IS NOT NULL "
     "AND total_tokens IS NOT NULL AND uncached_input_cost_micro_usd IS NOT NULL "

@@ -1050,6 +1050,62 @@ def test_partial_global_cost_coverage_survives_replacement_and_replay() -> None:
     assert d1.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=new_usage_id).usage_generation_id == new_usage_id
 
 
+def test_complete_global_cost_coverage_survives_replacement_and_replay() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication(
+        "publication-complete-cost-replace",
+        run_id="run-complete-cost-replace",
+        task_id="task-complete-cost-replace",
+    )
+    usage = first["usage"]
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in usage[collection]:
+            for field in ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"):
+                row[field] = None
+            if collection == "summaries":
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+            elif collection == "invocations":
+                row.update({"coverage": "partial", "priceEntryDigest": None})
+            elif collection == "turns":
+                row["priceEntryDigest"] = None
+            elif row["ownershipClass"] == "task-owned":
+                # The producer may retain a complete 1/1 global label while
+                # invocation evidence is partial because costs are unknown.
+                row.update({"coverage": "complete", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+    usage["prices"] = []
+    usage["generation"]["expectedCounts"]["prices"] = 0
+    refresh_metadata_digest(first)
+
+    d1.publish(first)
+    old_usage_id = usage["generation"]["usageGenerationId"]
+    expected = [
+        ("daily", "complete", 1, 1, 18, None),
+        ("lifetime", "complete", 1, 1, 18, None),
+    ]
+    assert [
+        tuple(row)
+        for row in server.connection.execute(
+            "SELECT period_kind, coverage, covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd "
+            "FROM usage_globals WHERE usage_generation_id = ? AND ownership_class = 'task-owned' ORDER BY period_kind",
+            (old_usage_id,),
+        )
+    ] == expected
+
+    replacement = usage_replacement(first, "same-shape")
+    new_usage_id = replacement["usage"]["generation"]["usageGenerationId"]
+    assert d1.replace_usage(replacement, base_usage_generation_id=old_usage_id).usage_generation_id == new_usage_id
+    assert [
+        tuple(row)
+        for row in server.connection.execute(
+            "SELECT period_kind, coverage, covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd "
+            "FROM usage_globals WHERE usage_generation_id = ? AND ownership_class = 'task-owned' ORDER BY period_kind",
+            (new_usage_id,),
+        )
+    ] == expected
+    assert d1.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=new_usage_id).usage_generation_id == new_usage_id
+
+
 def test_usage_replacement_preserves_task_identity_and_replays() -> None:
     server = ScriptedD1()
     d1 = client(server)

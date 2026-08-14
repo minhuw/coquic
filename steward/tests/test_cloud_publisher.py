@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import threading
@@ -10,7 +11,15 @@ from coquic_steward.publication import (
     ReasonCode,
     RepairRequired,
 )
-from coquic_steward.publication.d1 import D1Error, D1ErrorCode
+from coquic_steward.publication.d1 import (
+    D1Error,
+    D1ErrorCode,
+    ExposureReceipt,
+    HideReceipt,
+    OverheadReceipt,
+    StageReceipt,
+    UsageBackfillReceipt,
+)
 from coquic_steward.publication.generation import (
     GenerationObject,
     GenerationOriginal,
@@ -26,8 +35,18 @@ from coquic_steward.publication.outbox import (
     PublicationState,
     ReceiptClass,
 )
-from coquic_steward.publication.publisher import CloudPublisher, PublicationStatus
-from coquic_steward.publication.r2 import R2Error, R2ErrorCategory, R2ObjectClass
+from coquic_steward.publication.publisher import (
+    CloudPublisher,
+    PublicationHideStatus,
+    PublicationStatus,
+)
+from coquic_steward.publication.r2 import (
+    R2Error,
+    R2ErrorCategory,
+    R2ObjectClass,
+    R2PutResult,
+    R2PutStatus,
+)
 from coquic_steward.storage import TaskStore
 
 
@@ -124,11 +143,78 @@ class _FakeStore:
         self.events: list[str] = []
         self.renew_lost = False
         self.block_lost = False
+        self.hide_fence = SimpleNamespace(state="pending", reason=None)
 
     def get_publication_generation(self, publication_id: str):
         return self.generation if publication_id == self.generation.publication_id else None
 
-    def claim_publication(self, worker_id: str, *, publication_id: str, now: datetime, lease_seconds: int):
+    def get_publication_health(self, *, now: datetime | None = None):
+        return SimpleNamespace(
+            queued_count=1,
+            blocked_count=0,
+            cleanup_pending_count=0,
+            cleanup_pending_bytes=0,
+            oldest_queued_at=None,
+            updated_at=now or NOW,
+            reason=None,
+            last_category="success",
+        )
+
+    def list_publication_generations(
+        self,
+        *,
+        task_id: str | None = None,
+        states: set[PublicationState | str] | None = None,
+        limit: int | None = None,
+    ):
+        values = [self.generation]
+        if task_id is not None:
+            values = [item for item in values if item.task_id == task_id]
+        if states:
+            normalized = {PublicationState(item).value for item in states}
+            values = [item for item in values if item.state.value in normalized]
+        return values if limit is None else values[:limit]
+
+    def begin_publication_hide(
+        self,
+        task_id: str,
+        reason: str = "operator_blocked",
+        *,
+        now: datetime | None = None,
+        generation_boundary: str | None = None,
+    ):
+        assert task_id == self.generation.task_id
+        self.events.append("begin_hide")
+        self.generation.state = PublicationState.blocked
+        self.generation.reason = reason
+        self.generation.retry_at = None
+        self.generation.lease_owner = None
+        self.generation.lease_expires_at = None
+        self.hide_fence.state = "pending"
+        self.hide_fence.reason = reason
+        return SimpleNamespace(status=PublicationOperationStatus.enqueued, fence=self.hide_fence)
+
+    def confirm_publication_hide(
+        self,
+        task_id: str,
+        *,
+        reason: str | None = None,
+        confirmed_at: datetime | None = None,
+        now: datetime | None = None,
+    ):
+        assert task_id == self.generation.task_id
+        self.events.append("confirm_hide")
+        self.hide_fence.state = "confirmed"
+        return SimpleNamespace(status=PublicationOperationStatus.verified, fence=self.hide_fence)
+
+    def claim_publication(
+        self,
+        worker_id: str,
+        *,
+        publication_id: str | None = None,
+        now: datetime,
+        lease_seconds: int = MAX_LEASE_SECONDS,
+    ):
         self.events.append("claim")
         self.generation.state = (
             PublicationState.building
@@ -141,7 +227,16 @@ class _FakeStore:
         self.generation.lease_expires_at = now + timedelta(seconds=lease_seconds)
         return SimpleNamespace(status=PublicationOperationStatus.claimed, generation=self.generation)
 
-    def renew_publication_lease(self, worker_id: str, *, publication_id: str, now: datetime, lease_seconds: int):
+    def renew_publication_lease(
+        self,
+        worker_id: str | None = None,
+        *,
+        lease_owner: str | None = None,
+        publication_id: str,
+        now: datetime,
+        lease_seconds: int = MAX_LEASE_SECONDS,
+    ):
+        assert (lease_owner or worker_id) == "worker-1"
         self.events.append("renew")
         if self.renew_lost:
             return SimpleNamespace(status=PublicationOperationStatus.lost_claim, generation=self.generation)
@@ -149,49 +244,98 @@ class _FakeStore:
         self.generation.updated_at = now
         return SimpleNamespace(status=PublicationOperationStatus.renewed, generation=self.generation)
 
-    def advance_publication(self, publication_id: str, expected_state: PublicationState, target_state: PublicationState, *, lease_owner: str, now: datetime):
+    def advance_publication(
+        self,
+        publication_id: str,
+        expected_state: PublicationState | str,
+        target_state: PublicationState | str,
+        *,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        now: datetime | None = None,
+        lease_expires_at: datetime | None = None,
+        retry_at: datetime | None = None,
+        reason: str | None = None,
+    ):
+        expected_state = PublicationState(expected_state)
+        target_state = PublicationState(target_state)
         self.events.append(target_state.value)
         if self.generation.state is not expected_state:
             return SimpleNamespace(status=PublicationOperationStatus.lost_claim, generation=self.generation)
         self.generation.state = target_state
-        self.generation.updated_at = now
+        self.generation.updated_at = now or NOW
         if target_state is PublicationState.exposed:
             self.generation.lease_owner = None
             self.generation.lease_expires_at = None
         return SimpleNamespace(status=PublicationOperationStatus.advanced, generation=self.generation)
 
-    def list_publication_receipts(self, publication_id: str):
-        return list(self.receipts)
+    def list_publication_receipts(
+        self,
+        publication_id: str,
+        *,
+        receipt_class: ReceiptClass | str | None = None,
+    ):
+        values = list(self.receipts)
+        if receipt_class is not None:
+            normalized = ReceiptClass(receipt_class)
+            values = [item for item in values if item.receipt_class is normalized]
+        return values
 
     def record_publication_receipt(
         self,
         publication_id: str,
         receipt: PublicationReceipt,
         *,
-        lease_owner: str,
-        now: datetime,
+        receipt_id: str | None = None,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        owner: str | None = None,
+        now: datetime | None = None,
     ):
-        assert lease_owner == "worker-1"
+        assert (lease_owner or worker_id or owner) == "worker-1"
         assert now == NOW
         self.events.append(f"receipt:{receipt.receipt_class.value}")
         self.receipts.append(receipt)
         return SimpleNamespace(status=PublicationOperationStatus.recorded, generation=self.generation, receipt=receipt)
 
-    def schedule_publication_retry(self, publication_id: str, **kwargs):
+    def replace_blocked_publication(self, old_publication_id: str, generation: object):
+        return SimpleNamespace(status=PublicationOperationStatus.enqueued, generation=generation)
+
+    def schedule_publication_retry(
+        self,
+        publication_id: str,
+        *,
+        expected_state: PublicationState | str | None = None,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        retry_at: datetime | None = None,
+        backoff_seconds: int | None = None,
+        reason: str = "network",
+        now: datetime | None = None,
+    ):
         self.events.append("retry_wait")
         self.generation.state = PublicationState.retry_wait
-        self.generation.reason = kwargs.get("reason")
-        self.generation.retry_at = kwargs.get("retry_at", NOW)
+        self.generation.reason = reason
+        self.generation.retry_at = retry_at or NOW
         self.generation.lease_owner = None
         self.generation.lease_expires_at = None
         return SimpleNamespace(status=PublicationOperationStatus.retry_wait, generation=self.generation)
 
-    def block_publication(self, publication_id: str, **kwargs):
+    def block_publication(
+        self,
+        publication_id: str,
+        *,
+        expected_state: PublicationState | str | None = None,
+        lease_owner: str | None = None,
+        worker_id: str | None = None,
+        reason: str = "operator_blocked",
+        now: datetime | None = None,
+    ):
         self.events.append("blocked")
         if self.block_lost:
             return SimpleNamespace(status=PublicationOperationStatus.lost_claim, generation=self.generation)
         self.generation.state = PublicationState.blocked
-        self.generation.reason = kwargs.get("reason")
+        self.generation.reason = reason
         self.generation.retry_at = None
         self.generation.lease_owner = None
         self.generation.lease_expires_at = None
@@ -204,21 +348,43 @@ class _FakeProvider:
         self.fail = fail
         self.calls: list[tuple[str, str]] = []
 
-    def put_object(self, key: str, content: bytes, object_class: R2ObjectClass, **kwargs: object):
+    def put_object(
+        self,
+        key: str,
+        content: bytes,
+        object_class: R2ObjectClass = R2ObjectClass.public,
+        *,
+        metadata: object | None = None,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
+    ) -> R2PutResult:
         self.calls.append(("private" if object_class is R2ObjectClass.private else "public", key))
         self.store.events.append(f"r2:{self.calls[-1][0]}")
         if self.fail is not None:
             raise self.fail
+        return R2PutResult(
+            R2PutStatus.uploaded,
+            key,
+            object_class,
+            len(content),
+            hashlib.sha256(content).hexdigest(),
+        )
 
-    def stage(self, payload: object):
+    def stage(self, payload: object) -> StageReceipt:
         self.store.events.append("d1:stage")
+        return StageReceipt(IDENTITY.publication_id, "task-1", "run-1")
 
-    def expose(self, payload: object):
+    def expose(self, payload: object) -> ExposureReceipt:
         self.store.events.append("d1:expose")
-        return SimpleNamespace(state="visible")
+        return ExposureReceipt(IDENTITY.publication_id, "task-1")
 
-    def hide_task(self, task_id: str, reason: str):
+    def hide_task(self, task_id: str, reason: str) -> HideReceipt:
         self.store.events.append("d1:hide")
+        return HideReceipt(
+            task_id,
+            self.store.generation.publication_id,
+            changed=True,
+        )
 
 
 class _TransientHideProvider(_FakeProvider):
@@ -227,12 +393,17 @@ class _TransientHideProvider(_FakeProvider):
         self.hide_attempts = 0
         self.head_visible = True
 
-    def hide_task(self, task_id: str, reason: str):
+    def hide_task(self, task_id: str, reason: str) -> HideReceipt:
         self.hide_attempts += 1
         self.store.events.append("d1:hide-attempt")
         if self.hide_attempts == 1:
             raise D1Error(D1ErrorCode.transient)
         self.head_visible = False
+        return HideReceipt(
+            task_id,
+            self.store.generation.publication_id,
+            changed=True,
+        )
 
 
 class _SQLitePublicationProvider:
@@ -248,38 +419,40 @@ class _SQLitePublicationProvider:
         self.put_attempts = 0
         self.head_visible = True
 
-    def hide_task(self, task_id: str, reason: str) -> object:
+    def hide_task(self, task_id: str, reason: str) -> HideReceipt:
         self.hide_attempts += 1
         if self.hide_attempts <= self.hide_failures:
             raise D1Error(D1ErrorCode.transient)
         changed = self.head_visible
         self.head_visible = False
-        return SimpleNamespace(
-            task_id=task_id,
-            publication_id=None,
-            state="hidden",
-            changed=changed,
-        )
+        return HideReceipt(task_id, None, changed=changed)
 
-    def put_object(self, key: str, content: bytes, object_class: R2ObjectClass, **kwargs: object):
+    def put_object(
+        self,
+        key: str,
+        content: bytes,
+        object_class: R2ObjectClass = R2ObjectClass.public,
+        *,
+        metadata: object | None = None,
+        expected_sha256: str | None = None,
+        expected_size: int | None = None,
+    ) -> R2PutResult:
         self.put_attempts += 1
         if self.put_failure is not None:
             raise self.put_failure
-        return SimpleNamespace(
-            key=key,
-            sha256=kwargs.get("expected_sha256"),
-            byte_size=kwargs.get("expected_size"),
+        return R2PutResult(
+            R2PutStatus.uploaded,
+            key,
+            object_class,
+            len(content),
+            hashlib.sha256(content).hexdigest(),
         )
 
-    def stage(self, payload: object):
-        return SimpleNamespace(publication_id=IDENTITY.publication_id, task_id="task-1")
+    def stage(self, payload: object) -> StageReceipt:
+        return StageReceipt(IDENTITY.publication_id, "task-1", "run-1")
 
-    def expose(self, payload: object):
-        return SimpleNamespace(
-            state="visible",
-            publication_id=IDENTITY.publication_id,
-            task_id="task-1",
-        )
+    def expose(self, payload: object) -> ExposureReceipt:
+        return ExposureReceipt(IDENTITY.publication_id, "task-1")
 
 
 class _StageBarrierProvider(_SQLitePublicationProvider):
@@ -308,6 +481,50 @@ def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> C
         compose=compose or compose_publication_generation,
         now=lambda: NOW,
     )
+
+
+def test_usage_delegates_use_canonical_d1_operations() -> None:
+    overhead = OverheadReceipt("2026-07-28", "model", "digest")
+    backfill = UsageBackfillReceipt(
+        task_id="task-1",
+        old_usage_generation_id="usage-old",
+        usage_generation_id="usage-new",
+        processed_turns=2,
+        changed=True,
+        next_cursor="cursor-next",
+    )
+    calls: list[tuple[str, object, object]] = []
+
+    class D1:
+        def upsert_overhead(
+            self,
+            source: object,
+            *,
+            digest: str | None = None,
+            archive_digest: str | None = None,
+            updated_at: str | None = None,
+        ) -> OverheadReceipt:
+            calls.append(("overhead", source, digest))
+            return overhead
+
+        def backfill_na_costs(
+            self,
+            catalog: object,
+            *,
+            cursor: str | None = None,
+            limit: int = 64,
+        ) -> UsageBackfillReceipt:
+            calls.append(("backfill", catalog, cursor))
+            assert limit == 8
+            return backfill
+
+    publisher = CloudPublisher(_FakeStore(), object(), D1())
+    assert publisher.reconcile_overhead({"model": "model"}, digest="row-digest") is overhead
+    assert publisher.backfill_usage("catalog", cursor="cursor", limit=8) is backfill
+    assert calls == [
+        ("overhead", {"model": "model"}, "row-digest"),
+        ("backfill", "catalog", "cursor"),
+    ]
 
 
 def _compose_generation(
@@ -511,23 +728,22 @@ def test_transient_hide_failure_replays_before_blocking() -> None:
 
     assert first.status is PublicationStatus.retry_wait
     assert first.reason == "network"
-    assert store.generation.state is PublicationState.retry_wait
+    assert store.generation.state is PublicationState.blocked
     assert store.generation.reason == "unsafe_content"
     assert provider.head_visible is True
     assert provider.hide_attempts == 1
-    assert store.events[:5] == ["claim", "building", "renew", "d1:hide-attempt", "retry_wait"]
+    assert store.events[:5] == ["claim", "building", "renew", "begin_hide", "d1:hide-attempt"]
 
-    # The retry boundary is durable; once it is due, the next worker attempt
-    # reclaims and hides before composing or changing the public state.
-    store.generation.retry_at = NOW
-    second = publisher.publish(IDENTITY.publication_id, source={"task": {}})
+    # The pending hide fence is durable; the next worker unit retries the
+    # provider boundary without composing or changing the public state.
+    second = publisher.hide_task("task-1", "unsafe_content")
 
-    assert second.status is PublicationStatus.blocked
+    assert second.status is PublicationHideStatus.hidden
     assert store.generation.state is PublicationState.blocked
     assert provider.head_visible is False
     assert provider.hide_attempts == 2
     assert compose_calls == [{"task": {}}]
-    assert store.events[-4:] == ["claim", "renew", "d1:hide-attempt", "blocked"]
+    assert store.events[-3:] == ["begin_hide", "d1:hide-attempt", "confirm_hide"]
 
 
 def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> None:

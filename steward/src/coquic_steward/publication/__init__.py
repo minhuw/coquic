@@ -17,6 +17,7 @@ from .atif import (
     validate_atif_document,
 )
 
+from .d1 import OverheadReceipt, UsageBackfillReceipt
 from .models import (
     AtifDocument,
     AtifResult,
@@ -184,9 +185,13 @@ from .publisher import (
     CloudPublisher,
     GenerationPublisher,
     PublicationPublisher,
+    PublicationHideResult,
+    PublicationHideStatus,
     PublicationOutcomeResult,
     PublicationResult,
     PublicationStatus,
+    publication_generation_views,
+    publication_health_view,
     PublishStatus,
     Publisher,
     PublisherResult,
@@ -364,9 +369,15 @@ __all__ = [
     "CloudPublisher",
     "GenerationPublisher",
     "PublicationPublisher",
+    "PublicationHideResult",
+    "PublicationHideStatus",
     "PublicationOutcomeResult",
     "PublicationResult",
     "PublicationStatus",
+    "publication_generation_views",
+    "publication_health_view",
+    "OverheadReceipt",
+    "UsageBackfillReceipt",
     "PublishStatus",
     "Publisher",
     "PublisherResult",

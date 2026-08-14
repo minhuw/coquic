@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from coquic_steward import cli
 from coquic_steward.cli import app
+from coquic_steward.publication.d1 import HideReceipt
 from coquic_steward.publication.models import FailClosed, ReasonCode
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
@@ -91,10 +92,16 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
     generation = _generation()
 
     class Store:
-        def get_publication_health(self):
+        def get_publication_health(self, *, now: datetime | None = None):
             return health
 
-        def list_publication_generations(self, *, limit):
+        def list_publication_generations(
+            self,
+            *,
+            task_id: str | None = None,
+            states: set[PublicationState | str] | None = None,
+            limit: int | None = None,
+        ):
             assert limit == 1
             return [generation]
 
@@ -382,10 +389,9 @@ def test_hide_real_store_blocks_101_queued_generations_and_replays(tmp_path) -> 
         changed = True
 
         def hide_task(self, task_id, reason):
-            result = SimpleNamespace(
-                task_id=task_id,
-                publication_id=generations[0].publication_id,
-                state="hidden",
+            result = HideReceipt(
+                task_id,
+                generations[0].publication_id,
                 changed=self.changed,
             )
             self.changed = False
@@ -422,9 +428,38 @@ def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:
         def get_publication_generation(self, _publication_id):
             return current
 
-        def list_publication_generations(self, *, task_id, limit):
+        def list_publication_generations(
+            self,
+            *,
+            task_id: str | None = None,
+            states: set[PublicationState | str] | None = None,
+            limit: int | None = None,
+        ):
             assert task_id == current.task_id
             return [current]
+
+        def begin_publication_hide(
+            self,
+            task_id,
+            reason="operator_blocked",
+            *,
+            now=None,
+            generation_boundary=None,
+        ):
+            return SimpleNamespace(
+                status=PublicationOperationStatus.enqueued,
+                fence=SimpleNamespace(state="pending"),
+            )
+
+        def confirm_publication_hide(
+            self,
+            task_id,
+            *,
+            reason=None,
+            confirmed_at=None,
+            now=None,
+        ):
+            return SimpleNamespace(status=PublicationOperationStatus.verified)
 
         def block_publication(self, *_args, **_kwargs):
             return SimpleNamespace(status="blocked")
@@ -433,10 +468,9 @@ def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:
         Store(),
         object(),
         SimpleNamespace(
-            hide_task=lambda task_id, reason: SimpleNamespace(
-                task_id=task_id,
-                publication_id=current.publication_id,
-                state="hidden",
+            hide_task=lambda task_id, reason: HideReceipt(
+                task_id,
+                current.publication_id,
                 changed=True,
             )
         ),
@@ -450,10 +484,9 @@ def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:
     assert hidden.status is PublicationHideStatus.hidden
     assert hidden.changed is True
 
-    publisher.d1.hide_task = lambda task_id, reason: SimpleNamespace(
-        task_id=task_id,
-        publication_id=current.publication_id,
-        state="hidden",
+    publisher.d1.hide_task = lambda task_id, reason: HideReceipt(
+        task_id,
+        current.publication_id,
         changed=False,
     )
     replay = publisher.hide_task(current.task_id, "unsafe_content")
@@ -473,10 +506,16 @@ def test_invalid_reason_and_identifier_do_not_echo_input(monkeypatch) -> None:
 
 def test_view_helpers_accept_empty_store() -> None:
     class Store:
-        def get_publication_health(self):
+        def get_publication_health(self, *, now: datetime | None = None):
             return SimpleNamespace(updated_at=NOW, oldest_queued_at=None)
 
-        def list_publication_generations(self, *, limit):
+        def list_publication_generations(
+            self,
+            *,
+            task_id: str | None = None,
+            states: set[PublicationState | str] | None = None,
+            limit: int | None = None,
+        ):
             return []
 
     assert publication_health_view(Store(), now=NOW)["queuedCount"] == 0

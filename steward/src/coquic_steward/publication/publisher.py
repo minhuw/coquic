@@ -14,9 +14,17 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
-from .d1 import D1Error
+if TYPE_CHECKING:
+    from ..storage import TaskStore
+from .d1 import (
+    D1Error,
+    D1PublicationClient,
+    HideReceipt,
+    OverheadReceipt,
+    UsageBackfillReceipt,
+)
 from .generation import (
     GenerationOutcome,
     GenerationObject,
@@ -34,7 +42,7 @@ from .outbox import (
     PublicationState,
     ReceiptClass,
 )
-from .r2 import R2Error, R2ErrorCategory, R2ObjectClass, private_original_key
+from .r2 import R2Client, R2Error, R2ErrorCategory, R2ObjectClass, private_original_key
 
 
 class PublicationStatus(StrEnum):
@@ -424,21 +432,13 @@ def _view_identifier(value: object) -> str | None:
 
 
 def publication_health_view(
-    store: object,
+    store: TaskStore,
     *,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Return only bounded queue, block, cleanup, age, and reason facts."""
 
-    getter = getattr(store, "get_publication_health", None) or getattr(
-        store, "publication_health", None
-    )
-    if not callable(getter):
-        raise ValueError("publication health unavailable")
-    try:
-        health = getter(now=now) if now is not None else getter()
-    except TypeError:
-        health = getter()
+    health = store.get_publication_health(now=now)
     timestamp = _timestamp(now, _now()) if now is not None else _now()
     updated_at = _view_value(health, "updated_at", "updatedAt")
     oldest = _view_value(health, "oldest_queued_at", "oldestQueuedAt")
@@ -472,7 +472,7 @@ def publication_health_view(
 
 
 def publication_generation_views(
-    store: object,
+    store: TaskStore,
     *,
     limit: int = 20,
     now: datetime | None = None,
@@ -481,19 +481,8 @@ def publication_generation_views(
 
     if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= _MAX_VIEW_LIMIT:
         raise ValueError("invalid publication view limit")
-    listing = getattr(store, "list_publication_generations", None) or getattr(
-        store, "list_generations", None
-    )
-    if not callable(listing):
-        raise ValueError("publication generations unavailable")
-    try:
-        generations = listing(limit=limit)
-    except TypeError:
-        generations = listing(limit)
+    generations = store.list_publication_generations(limit=limit)
     timestamp = _timestamp(now, _now()) if now is not None else _now()
-    receipt_listing = getattr(store, "list_publication_receipts", None) or getattr(
-        store, "list_receipts", None
-    )
     values: list[dict[str, object]] = []
     for generation in list(generations)[:limit]:
         publication_id = _view_identifier(
@@ -520,9 +509,9 @@ def publication_generation_views(
             "artifacts": _view_int(_view_value(generation, "artifacts", default=_view_value(counts, "artifacts", default=0))),
         }
         receipt_classes: set[str] = set()
-        if callable(receipt_listing) and publication_id is not None:
+        if publication_id is not None:
             try:
-                receipts = receipt_listing(publication_id)
+                receipts = store.list_publication_receipts(publication_id)
             except Exception:
                 receipts = ()
             for receipt in receipts:
@@ -675,9 +664,9 @@ class CloudPublisher:
 
     def __init__(
         self,
-        store: object,
-        r2: object,
-        d1: object,
+        store: TaskStore,
+        r2: R2Client,
+        d1: D1PublicationClient,
         worker_id: str = "publication-worker",
         *,
         compose: Callable[..., GenerationOutcome] = compose_publication_generation,
@@ -704,10 +693,7 @@ class CloudPublisher:
         return _timestamp(self._clock(), _now())
 
     def _get(self, publication_id: str) -> object | None:
-        getter = getattr(self.store, "get_publication_generation", None) or getattr(self.store, "get_generation", None)
-        if getter is None:
-            return None
-        return getter(publication_id)
+        return self.store.get_publication_generation(publication_id)
 
     def status_view(self, *, now: datetime | None = None) -> dict[str, object]:
         """Return the bounded local health view used by operator commands."""
@@ -723,6 +709,27 @@ class CloudPublisher:
         """Return bounded generation summaries used by operator commands."""
 
         return publication_generation_views(self.store, limit=limit, now=now)
+
+    def reconcile_overhead(
+        self,
+        source: object,
+        *,
+        digest: str | None = None,
+    ) -> OverheadReceipt:
+        """Reconcile one aggregate-only Steward overhead row in D1."""
+
+        return self.d1.upsert_overhead(source, digest=digest)
+
+    def backfill_usage(
+        self,
+        catalog: object,
+        *,
+        cursor: str | None = None,
+        limit: int = 64,
+    ) -> UsageBackfillReceipt:
+        """Fill newly priceable cached-D1 usage turns through D1."""
+
+        return self.d1.backfill_na_costs(catalog, cursor=cursor, limit=limit)
 
     publication_status = status_view
     publication_list = list_view
@@ -741,10 +748,7 @@ class CloudPublisher:
                 retry_at = getattr(current, "retry_at", None)
                 if retry_at is not None and retry_at > timestamp:
                     return None, _result(PublicationStatus.retry_wait, publication_id, reason=getattr(current, "reason", "network"))
-            claim = getattr(self.store, "claim_publication", None) or getattr(self.store, "claim_generation", None)
-            if claim is None:
-                return None, _result(PublicationStatus.lost_claim, publication_id, reason="integrity")
-            claimed = claim(
+            claimed = self.store.claim_publication(
                 self.worker_id,
                 publication_id=publication_id,
                 now=timestamp,
@@ -766,12 +770,11 @@ class CloudPublisher:
         return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
 
     def _renew(self, generation: object) -> tuple[object | None, PublicationResult | None]:
-        renew = getattr(self.store, "renew_publication_lease", None) or getattr(self.store, "renew_generation_lease", None)
         publication_id = getattr(generation, "publication_id", None)
-        if renew is None or not isinstance(publication_id, str):
+        if not isinstance(publication_id, str):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
         try:
-            renewed = renew(
+            renewed = self.store.renew_publication_lease(
                 self.worker_id,
                 publication_id=publication_id,
                 now=self._time(),
@@ -791,12 +794,11 @@ class CloudPublisher:
         expected: PublicationState,
         target: PublicationState,
     ) -> tuple[object | None, PublicationResult | None]:
-        advance = getattr(self.store, "advance_publication", None) or getattr(self.store, "advance_generation", None)
         publication_id = getattr(generation, "publication_id", None)
-        if advance is None or not isinstance(publication_id, str):
+        if not isinstance(publication_id, str):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
         try:
-            changed = advance(
+            changed = self.store.advance_publication(
                 publication_id,
                 expected,
                 target,
@@ -823,8 +825,7 @@ class CloudPublisher:
         ``begin_publication_hide`` is the local half of the cross-boundary
         protocol.  It retires the generation before the provider call, so a
         transient provider failure leaves a pending hide fence rather than a
-        claimable publication row.  Narrow test doubles from before the fence
-        API retain the previous direct-provider behavior.
+        claimable publication row.
         """
 
         renewed, lost = self._renew(generation)
@@ -847,51 +848,24 @@ class CloudPublisher:
                 durable_reason=category,
             )
 
-        begin = getattr(self.store, "begin_publication_hide", None)
-        if callable(begin):
-            hide_reason = category if category in _HIDE_REASONS else "integrity"
-            hidden = self.hide_task(task_id, hide_reason)
-            if hidden.ok:
-                return renewed, None
-            result_reason = _reason(hidden.reason, "integrity")
-            if _is_transient(result_reason):
-                return None, _result(
-                    PublicationStatus.retry_wait,
-                    getattr(renewed, "publication_id", None),
-                    reason=result_reason,
-                    phase=phase,
-                )
+        hide_reason = category if category in _HIDE_REASONS else "integrity"
+        hidden = self.hide_task(task_id, hide_reason)
+        if hidden.ok:
+            return renewed, None
+        result_reason = _reason(hidden.reason, "integrity")
+        if _is_transient(result_reason):
             return None, _result(
-                PublicationStatus.blocked,
+                PublicationStatus.retry_wait,
                 getattr(renewed, "publication_id", None),
                 reason=result_reason,
                 phase=phase,
             )
-
-        # Compatibility path for small pre-fence test doubles.  Production
-        # TaskStore instances always expose begin_publication_hide.
-        hide_task = getattr(self.d1, "hide_task", None)
-        if hide_task is None:
-            return None, self._retry(
-                renewed,
-                "provider",
-                phase=phase,
-                hide_pending=True,
-                durable_reason=category,
-            )
-        try:
-            # The provider call stays outside the local state transaction.  A
-            # successful no-op is also evidence that no visible head remains.
-            hide_task(task_id, category)
-        except Exception as error:
-            return None, self._retry(
-                renewed,
-                _provider_category(error),
-                phase=phase,
-                hide_pending=True,
-                durable_reason=category,
-            )
-        return renewed, None
+        return None, _result(
+            PublicationStatus.blocked,
+            getattr(renewed, "publication_id", None),
+            reason=result_reason,
+            phase=phase,
+        )
 
     def _block(self, generation: object, reason: object, *, hide: bool, phase: str) -> PublicationResult:
         publication_id = getattr(generation, "publication_id", None)
@@ -904,19 +878,16 @@ class CloudPublisher:
             if renewed is None:
                 return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
             generation = renewed
-        block = getattr(self.store, "block_publication", None) or getattr(self.store, "block_generation", None)
-        block_result: object | None = None
-        if block is not None and isinstance(publication_id, str):
-            try:
-                block_result = block(
-                    publication_id,
-                    lease_owner=self.worker_id,
-                    reason=category,
-                    now=self._time(),
-                )
-            except Exception:
-                pass
-        if block_result is None:
+        if not isinstance(publication_id, str):
+            return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+        try:
+            block_result = self.store.block_publication(
+                publication_id,
+                lease_owner=self.worker_id,
+                reason=category,
+                now=self._time(),
+            )
+        except Exception:
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
         if _is_lost(block_result):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
@@ -943,8 +914,7 @@ class CloudPublisher:
         durable_reason: object | None = None,
     ) -> PublicationResult:
         publication_id = getattr(generation, "publication_id", None)
-        retry = getattr(self.store, "schedule_publication_retry", None) or getattr(self.store, "schedule_retry", None)
-        if retry is None or not isinstance(publication_id, str):
+        if not isinstance(publication_id, str):
             if hide_pending:
                 return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
             return self._block(generation, "integrity", hide=False, phase=phase)
@@ -960,7 +930,7 @@ class CloudPublisher:
         if persisted_reason == "precondition":
             persisted_reason = "integrity"
         try:
-            scheduled = retry(
+            scheduled = self.store.schedule_publication_retry(
                 publication_id,
                 expected_state=getattr(generation, "state", None),
                 lease_owner=self.worker_id,
@@ -1130,11 +1100,8 @@ class CloudPublisher:
             record = getattr(composed, "outbox", None)
         if record is None or _view_identifier(_publication_id_from(record)) != composed.publication_id:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        replace = getattr(self.store, "replace_blocked_publication", None)
-        if not callable(replace):
-            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         try:
-            operation = replace(publication_id, record)
+            operation = self.store.replace_blocked_publication(publication_id, record)
         except Exception:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         operation_status = _status(getattr(operation, "status", operation))
@@ -1218,102 +1185,84 @@ class CloudPublisher:
                 task_id=task_id,
                 reason="invalid_metadata",
             )
-        begin = getattr(self.store, "begin_publication_hide", None)
-        fenced = callable(begin)
-        if fenced:
-            try:
-                try:
-                    started = begin(task_id, reason, now=self._time())
-                except TypeError:
-                    started = begin(task_id, reason)
-            except Exception as error:
-                return PublicationHideResult(
-                    PublicationHideStatus.blocked,
-                    task_id=task_id,
-                    reason=_provider_category(error),
-                )
-            started_status = _status(getattr(started, "status", started))
-            if started_status not in {
-                PublicationOperationStatus.enqueued.value,
-                PublicationOperationStatus.existing.value,
-            }:
-                return PublicationHideResult(
-                    PublicationHideStatus.blocked,
-                    task_id=task_id,
-                    reason=_reason(getattr(started, "reason", None), "integrity"),
-                )
-            fence = getattr(started, "fence", None)
-            fence_state = _status(getattr(fence, "state", ""))
-            if fence_state == "confirmed":
-                # The durable confirmation is already the validated receipt
-                # boundary.  Do not issue an unnecessary provider request.
-                publication_id: str | None = None
-                listing = getattr(self.store, "list_publication_generations", None) or getattr(
-                    self.store, "list_generations", None
-                )
-                if callable(listing):
-                    try:
-                        try:
-                            generations = listing(task_id=task_id, limit=None)
-                        except TypeError:
-                            generations = listing(task_id=task_id)
-                        for generation in generations:
-                            state = _status(getattr(generation, "state", ""))
-                            candidate = getattr(generation, "publication_id", None)
-                            if state in {
-                                PublicationState.exposed.value,
-                                PublicationState.terminal_cleaned.value,
-                            } and isinstance(candidate, str):
-                                publication_id = candidate
-                    except Exception:
-                        publication_id = None
-                return PublicationHideResult(
-                    PublicationHideStatus.unchanged,
-                    task_id=task_id,
-                    publication_id=publication_id,
-                    reason=reason,
-                    changed=False,
-                )
-
-        hide = getattr(self.d1, "hide_task", None)
-        if not callable(hide):
+        if self.d1 is None:
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 task_id=task_id,
                 reason="precondition",
             )
         try:
-            receipt = hide(task_id, reason)
+            started = self.store.begin_publication_hide(
+                task_id,
+                reason,
+                now=self._time(),
+            )
         except Exception as error:
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 task_id=task_id,
                 reason=_provider_category(error),
             )
-        # A real provider must return a typed receipt.  The compatibility path
-        # accepts the historical no-return test double only when no local
-        # fence API is present.
-        if fenced and receipt is None:
+        started_status = _status(getattr(started, "status", started))
+        if started_status not in {
+            PublicationOperationStatus.enqueued.value,
+            PublicationOperationStatus.existing.value,
+        }:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason=_reason(getattr(started, "reason", None), "integrity"),
+            )
+        fence = getattr(started, "fence", None)
+        fence_state = _status(getattr(fence, "state", ""))
+        if fence_state == "confirmed":
+            # The durable confirmation is already the validated receipt
+            # boundary.  Do not issue an unnecessary provider request.
+            publication_id: str | None = None
+            try:
+                generations = self.store.list_publication_generations(
+                    task_id=task_id,
+                    limit=None,
+                )
+                for generation in generations:
+                    state = _status(getattr(generation, "state", ""))
+                    candidate = getattr(generation, "publication_id", None)
+                    if state in {
+                        PublicationState.exposed.value,
+                        PublicationState.terminal_cleaned.value,
+                    } and isinstance(candidate, str):
+                        publication_id = candidate
+            except Exception:
+                publication_id = None
+            return PublicationHideResult(
+                PublicationHideStatus.unchanged,
+                task_id=task_id,
+                publication_id=publication_id,
+                reason=reason,
+                changed=False,
+            )
+
+        try:
+            receipt = self.d1.hide_task(task_id, reason)
+        except Exception as error:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason=_provider_category(error),
+            )
+        if not isinstance(receipt, HideReceipt):
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 task_id=task_id,
                 reason="integrity",
             )
-        receipt_task = getattr(receipt, "task_id", task_id)
-        receipt_state = getattr(receipt, "state", "hidden")
-        if fenced and (not hasattr(receipt, "task_id") or not hasattr(receipt, "state")):
+        if receipt.task_id != task_id or receipt.state != "hidden":
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 task_id=task_id,
                 reason="integrity",
             )
-        if receipt_task != task_id or receipt_state != "hidden":
-            return PublicationHideResult(
-                PublicationHideStatus.blocked,
-                task_id=task_id,
-                reason="integrity",
-            )
-        publication_id = getattr(receipt, "publication_id", None)
+        publication_id = receipt.publication_id
         if publication_id is not None:
             try:
                 publication_id = _identifier(publication_id)
@@ -1329,32 +1278,69 @@ class CloudPublisher:
                     task_id=task_id,
                     reason="integrity",
                 )
-        changed = getattr(receipt, "changed", True)
-        if fenced and not isinstance(changed, bool):
+        changed = receipt.changed
+        try:
+            confirmed = self.store.confirm_publication_hide(
+                task_id,
+                reason=reason,
+                confirmed_at=self._time(),
+            )
+        except Exception:
             return PublicationHideResult(
                 PublicationHideStatus.blocked,
                 task_id=task_id,
                 publication_id=publication_id,
                 reason="integrity",
             )
-        if fenced:
-            confirm = getattr(self.store, "confirm_publication_hide", None)
-            if not callable(confirm):
-                return PublicationHideResult(
-                    PublicationHideStatus.blocked,
+        confirmed_status = _status(getattr(confirmed, "status", confirmed))
+        if confirmed_status not in {
+            PublicationOperationStatus.verified.value,
+            PublicationOperationStatus.existing.value,
+        }:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                publication_id=publication_id,
+                reason=_reason(getattr(confirmed, "reason", None), "integrity"),
+            )
+
+        try:
+            # Hide reconciliation is an internal safety operation, not a
+            # bounded operator view.  Read the complete typed task scope
+            # so an older queued generation cannot remain claimable after
+            # a successful remote hide.
+            generations = list(
+                self.store.list_publication_generations(
                     task_id=task_id,
-                    publication_id=publication_id,
-                    reason="precondition",
+                    limit=None,
                 )
+            )
+        except Exception:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                publication_id=publication_id,
+                reason="integrity",
+            )
+        for generation in generations:
+            if getattr(generation, "task_id", task_id) != task_id:
+                continue
+            generation_id = getattr(generation, "publication_id", None)
+            state = _status(getattr(generation, "state", ""))
+            if not isinstance(generation_id, str) or state in {
+                PublicationState.exposed.value,
+                PublicationState.terminal_cleaned.value,
+                PublicationState.blocked.value,
+            }:
+                continue
             try:
-                try:
-                    confirmed = confirm(
-                        task_id,
-                        reason=reason,
-                        confirmed_at=self._time(),
-                    )
-                except TypeError:
-                    confirmed = confirm(task_id, reason=reason)
+                operation = self.store.block_publication(
+                    generation_id,
+                    expected_state=state,
+                    lease_owner=getattr(generation, "lease_owner", None),
+                    reason=reason,
+                    now=self._time(),
+                )
             except Exception:
                 return PublicationHideResult(
                     PublicationHideStatus.blocked,
@@ -1362,111 +1348,16 @@ class CloudPublisher:
                     publication_id=publication_id,
                     reason="integrity",
                 )
-            confirmed_status = _status(getattr(confirmed, "status", confirmed))
-            if confirmed_status not in {
-                PublicationOperationStatus.verified.value,
+            if _status(getattr(operation, "status", operation)) not in {
+                PublicationOperationStatus.blocked.value,
                 PublicationOperationStatus.existing.value,
             }:
                 return PublicationHideResult(
                     PublicationHideStatus.blocked,
                     task_id=task_id,
                     publication_id=publication_id,
-                    reason=_reason(getattr(confirmed, "reason", None), "integrity"),
-                )
-            return PublicationHideResult(
-                PublicationHideStatus.hidden if changed else PublicationHideStatus.unchanged,
-                task_id=task_id,
-                publication_id=publication_id,
-                reason=reason,
-                changed=changed,
-            )
-        listing = getattr(self.store, "list_publication_generations", None) or getattr(
-            self.store, "list_generations", None
-        )
-        if callable(listing):
-            try:
-                # Hide reconciliation is an internal safety operation, not a
-                # bounded operator view.  Read the complete typed task scope
-                # so an older queued generation cannot remain claimable after
-                # a successful remote hide.
-                generations = listing(task_id=task_id, limit=None)
-            except TypeError:
-                try:
-                    generations = listing(task_id=task_id)
-                except TypeError:
-                    try:
-                        generations = listing(limit=None)
-                    except Exception:
-                        return PublicationHideResult(
-                            PublicationHideStatus.blocked,
-                            task_id=task_id,
-                            publication_id=publication_id,
-                            reason="integrity",
-                        )
-                except Exception:
-                    return PublicationHideResult(
-                        PublicationHideStatus.blocked,
-                        task_id=task_id,
-                        publication_id=publication_id,
-                        reason="integrity",
-                    )
-            except Exception:
-                return PublicationHideResult(
-                    PublicationHideStatus.blocked,
-                    task_id=task_id,
-                    publication_id=publication_id,
                     reason="integrity",
                 )
-            try:
-                generations = list(generations)
-            except Exception:
-                return PublicationHideResult(
-                    PublicationHideStatus.blocked,
-                    task_id=task_id,
-                    publication_id=publication_id,
-                    reason="integrity",
-                )
-            block = getattr(self.store, "block_publication", None) or getattr(
-                self.store, "block_generation", None
-            )
-            if callable(block):
-                for generation in generations:
-                    if getattr(generation, "task_id", task_id) != task_id:
-                        continue
-                    generation_id = getattr(generation, "publication_id", None)
-                    state = _status(getattr(generation, "state", ""))
-                    if not isinstance(generation_id, str) or state in {
-                        PublicationState.exposed.value,
-                        PublicationState.terminal_cleaned.value,
-                        PublicationState.blocked.value,
-                    }:
-                        continue
-                    try:
-                        operation = block(
-                            generation_id,
-                            expected_state=state,
-                            lease_owner=getattr(generation, "lease_owner", None),
-                            reason=reason,
-                            now=self._time(),
-                        )
-                    except Exception:
-                        return PublicationHideResult(
-                            PublicationHideStatus.blocked,
-                            task_id=task_id,
-                            publication_id=publication_id,
-                            reason="integrity",
-                        )
-                    if _status(getattr(operation, "status", operation)) not in {
-                        PublicationOperationStatus.blocked.value,
-                        PublicationOperationStatus.existing.value,
-                    }:
-                        return PublicationHideResult(
-                            PublicationHideStatus.blocked,
-                            task_id=task_id,
-                            publication_id=publication_id,
-                            reason="integrity",
-                        )
-        changed = bool(getattr(receipt, "changed", True))
         return PublicationHideResult(
             PublicationHideStatus.hidden if changed else PublicationHideStatus.unchanged,
             task_id=task_id,
@@ -1479,10 +1370,7 @@ class CloudPublisher:
     hide_publication = hide_task
 
     def _receipts(self, publication_id: str) -> dict[tuple[ReceiptClass, str], PublicationReceipt]:
-        listing = getattr(self.store, "list_publication_receipts", None) or getattr(self.store, "list_receipts", None)
-        if listing is None:
-            return {}
-        values = listing(publication_id)
+        values = self.store.list_publication_receipts(publication_id)
         result: dict[tuple[ReceiptClass, str], PublicationReceipt] = {}
         for value in values:
             if not isinstance(value, PublicationReceipt):
@@ -1503,12 +1391,11 @@ class CloudPublisher:
         generation: object,
         receipt: PublicationReceipt,
     ) -> tuple[object | None, PublicationResult | None]:
-        record = getattr(self.store, "record_publication_receipt", None) or getattr(self.store, "record_receipt", None)
         publication_id = getattr(generation, "publication_id", None)
-        if record is None or not isinstance(publication_id, str):
+        if not isinstance(publication_id, str):
             return None, self._block(generation, "integrity", hide=False, phase="receipt")
         try:
-            saved = record(
+            saved = self.store.record_publication_receipt(
                 publication_id,
                 receipt,
                 lease_owner=self.worker_id,
@@ -1940,12 +1827,12 @@ Publisher = CloudPublisher
 
 
 def publish_generation(
-    store: object,
+    store: TaskStore,
     source: object | None = None,
     *,
     publication_id: str | None = None,
-    r2: object,
-    d1: object,
+    r2: R2Client,
+    d1: D1PublicationClient,
     worker_id: str = "publication-worker",
     compose: Callable[..., GenerationOutcome] = compose_publication_generation,
     now: Callable[[], datetime] | datetime | None = None,
@@ -1976,7 +1863,7 @@ def publish_generation(
 
 
 def retry_publication(
-    store: object,
+    store: TaskStore,
     publication_id: str,
     source: object | None = None,
     *,
@@ -2000,11 +1887,11 @@ def retry_publication(
 
 
 def hide_publication(
-    store: object,
+    store: TaskStore,
     task_id: str,
     reason: str = "operator_blocked",
     *,
-    d1: object,
+    d1: D1PublicationClient,
     now: Callable[[], datetime] | datetime | None = None,
 ) -> PublicationHideResult:
     """Hide one task head through typed D1 and local durable state."""

@@ -7,12 +7,14 @@ knowledge beyond an append callback supplied by the trusted supervisor.
 
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
+import queue
 import selectors
 import signal
 import subprocess  # nosec B404 - explicit argv and shell=False
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,10 +23,22 @@ from typing import Any, Callable, Iterable, Protocol
 from ..core.models import CodexStage
 
 
+class _InvocationPipe(Protocol):
+    def read(self, size: int) -> bytes: ...
+
+    def close(self) -> None: ...
+
+    def fileno(self) -> int: ...
+
+    def write(self, data: bytes) -> int: ...
+
+    def flush(self) -> None: ...
+
+
 class InvocationProcess(Protocol):
-    stdout: Any
-    stderr: Any
-    stdin: Any
+    stdout: _InvocationPipe | None
+    stderr: _InvocationPipe | None
+    stdin: _InvocationPipe | None
     returncode: int | None
 
     def poll(self) -> int | None: ...
@@ -185,6 +199,19 @@ def launch_local(request: InvocationRequest, *, api_key: str | None = None) -> s
     )
 
 
+_STREAM_CHUNK_SIZE = 64 * 1024
+_STDERR_TAIL_SIZE = 64 * 1024
+_HANDOFF_WAIT_SECONDS = 0.05
+
+
+@dataclass(frozen=True)
+class _PipeReadResult:
+    stream_index: int
+    kind: str
+    data: bytes = b""
+    error: Exception | None = None
+
+
 def stream_process(
     process: InvocationProcess,
     request: InvocationRequest,
@@ -195,7 +222,7 @@ def stream_process(
     interrupt_grace_seconds: float = 2.0,
     interrupted: bool = False,
 ) -> InvocationOutcome:
-    """Stream process stdout without text decoding or complete-record caps."""
+    """Stream both process pipes while retaining bounded diagnostics."""
 
     if process.stdin is not None:
         try:
@@ -206,90 +233,46 @@ def stream_process(
         except (BrokenPipeError, OSError):
             pass
     decoder = JsonlStream(append, observe=observe)
-    stderr_data = _BoundedBytes(64 * 1024)
+    stderr_data = _BoundedBytes(_STDERR_TAIL_SIZE)
+    streams = _unique_streams(((process.stdout, True), (process.stderr, False)))
+    deadline = time.monotonic() + timeout_seconds
     selector = selectors.DefaultSelector()
-    streams = ((process.stdout, True), (process.stderr, False))
-    selector_supported = True
-    for stream, is_stdout in streams:
-        if stream is not None:
-            try:
-                selector.register(stream, selectors.EVENT_READ, is_stdout)
-            except (ValueError, OSError, PermissionError):
-                selector_supported = False
-                break
-    started = time.monotonic()
-    forced = False
-    if not selector_supported:
-        for stream, is_stdout in streams:
-            if stream is None:
-                continue
-            while True:
-                data = stream.read(65536)
-                if isinstance(data, str):
-                    data = data.encode("utf-8")
-                if not data:
-                    break
-                if is_stdout:
-                    decoder.feed(data)
-                else:
-                    stderr_data.extend(data)
-        try:
-            exit_code = process.wait(timeout=timeout_seconds)
-        except (subprocess.TimeoutExpired, TimeoutError):
-            forced = True
-            process.kill()
-            exit_code = process.wait()
-        return InvocationOutcome(
-            exit_code=exit_code,
-            stdout=b"",
-            stderr=bytes(stderr_data),
-            incomplete_suffix=decoder.finish(),
-            events=(),
-            provider_session_id=decoder.provider_session_id,
-            malformed_lines=decoder.malformed_lines,
-            forced=forced,
-            interrupted=interrupted,
-        )
-    while selector.get_map() or process.poll() is None:
-        remaining = timeout_seconds - (time.monotonic() - started)
-        if remaining <= 0:
-            interrupted = True
-            try:
-                process.send_signal(signal.SIGTERM)
-                process.wait(timeout=interrupt_grace_seconds)
-            except (OSError, subprocess.TimeoutExpired, TimeoutError):
-                forced = True
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-            break
-        for key, _ in selector.select(min(0.25, remaining)):
-            stream = key.fileobj
-            is_stdout = key.data
-            try:
-                try:
-                    chunk = os.read(stream.fileno(), 65536)
-                except (AttributeError, io.UnsupportedOperation):
-                    chunk = stream.read(65536)
-            except OSError:
-                chunk = b""
-            if not chunk:
-                selector.unregister(stream)
-                continue
-            if is_stdout:
-                decoder.feed(chunk)
-            else:
-                stderr_data.extend(chunk)
+    fallback_threads: list[threading.Thread] = []
     try:
-        exit_code = process.wait(timeout=interrupt_grace_seconds)
-    except (subprocess.TimeoutExpired, TimeoutError):
-        forced = True
+        selector_supported = True
         try:
-            process.kill()
-        except OSError:
-            pass
-        exit_code = process.wait()
+            for stream, is_stdout in streams:
+                selector.register(stream, selectors.EVENT_READ, is_stdout)
+        except (KeyError, OSError, TypeError, ValueError):
+            selector_supported = False
+
+        if selector_supported:
+            exit_code, forced, interrupted = _drain_with_selector(
+                process,
+                selector,
+                decoder,
+                stderr_data,
+                deadline=deadline,
+                interrupt_grace_seconds=interrupt_grace_seconds,
+                interrupted=interrupted,
+            )
+        else:
+            selector.close()
+            exit_code, forced, interrupted = _drain_with_fallback(
+                process,
+                streams,
+                decoder,
+                stderr_data,
+                deadline=deadline,
+                interrupt_grace_seconds=interrupt_grace_seconds,
+                interrupted=interrupted,
+                reader_threads=fallback_threads,
+            )
+    finally:
+        selector.close()
+        _close_streams(streams)
+        for thread in fallback_threads:
+            thread.join()
     return InvocationOutcome(
         exit_code=exit_code,
         stdout=b"",
@@ -301,6 +284,231 @@ def stream_process(
         forced=forced,
         interrupted=interrupted,
     )
+
+
+def _unique_streams(
+    streams: Iterable[tuple[_InvocationPipe | None, bool]],
+) -> tuple[tuple[_InvocationPipe, bool], ...]:
+    unique: list[tuple[_InvocationPipe, bool]] = []
+    seen: set[int] = set()
+    for stream, is_stdout in streams:
+        if stream is None or id(stream) in seen:
+            continue
+        seen.add(id(stream))
+        unique.append((stream, is_stdout))
+    return tuple(unique)
+
+
+def _close_streams(
+    streams: Iterable[tuple[_InvocationPipe, bool]],
+) -> None:
+    seen: set[int] = set()
+    for stream, _ in streams:
+        identity = id(stream)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _terminate_after_deadline(
+    process: InvocationProcess,
+    *,
+    interrupt_grace_seconds: float,
+) -> tuple[int, bool]:
+    """Terminate a live process, escalating only after the grace period."""
+
+    if process.poll() is not None:
+        return process.wait(), False
+    try:
+        process.send_signal(signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        exit_code = process.wait(timeout=interrupt_grace_seconds)
+    except (subprocess.TimeoutExpired, TimeoutError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+        return process.wait(), True
+    return exit_code, False
+
+
+def _drain_with_selector(
+    process: InvocationProcess,
+    selector: selectors.BaseSelector,
+    decoder: JsonlStream,
+    stderr_data: _BoundedBytes,
+    *,
+    deadline: float,
+    interrupt_grace_seconds: float,
+    interrupted: bool,
+) -> tuple[int, bool, bool]:
+    forced = False
+    while selector.get_map() or process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            exit_code, forced = _terminate_after_deadline(
+                process,
+                interrupt_grace_seconds=interrupt_grace_seconds,
+            )
+            return exit_code, forced, True
+        if not selector.get_map():
+            try:
+                exit_code = process.wait(timeout=remaining)
+            except (subprocess.TimeoutExpired, TimeoutError):
+                exit_code, forced = _terminate_after_deadline(
+                    process,
+                    interrupt_grace_seconds=interrupt_grace_seconds,
+                )
+                return exit_code, forced, True
+            return exit_code, forced, interrupted
+        try:
+            ready = selector.select(min(0.25, remaining))
+        except (OSError, ValueError):
+            ready = ()
+        for key, _ in ready:
+            stream = key.fileobj
+            is_stdout = bool(key.data)
+            try:
+                try:
+                    chunk = os.read(stream.fileno(), _STREAM_CHUNK_SIZE)
+                except (AttributeError, io.UnsupportedOperation):
+                    chunk = stream.read(_STREAM_CHUNK_SIZE)
+            except (OSError, ValueError):
+                chunk = b""
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            if not chunk:
+                try:
+                    selector.unregister(stream)
+                except (KeyError, OSError, ValueError):
+                    pass
+                continue
+            if is_stdout:
+                decoder.feed(chunk)
+            else:
+                stderr_data.extend(chunk)
+    return process.wait(), forced, interrupted
+
+
+def _publish_pipe_result(
+    handoff: queue.Queue[_PipeReadResult],
+    result: _PipeReadResult,
+    stop: threading.Event,
+) -> bool:
+    while not stop.is_set():
+        try:
+            handoff.put(result, timeout=_HANDOFF_WAIT_SECONDS)
+        except queue.Full:
+            continue
+        return True
+    return False
+
+
+def _read_pipe(
+    stream: _InvocationPipe,
+    stream_index: int,
+    handoff: queue.Queue[_PipeReadResult],
+    stop: threading.Event,
+) -> None:
+    try:
+        while not stop.is_set():
+            data = stream.read(_STREAM_CHUNK_SIZE)
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            if not isinstance(data, bytes):
+                raise TypeError("invocation streams must return bytes")
+            if not data:
+                _publish_pipe_result(
+                    handoff,
+                    _PipeReadResult(stream_index, "eof"),
+                    stop,
+                )
+                return
+            if not _publish_pipe_result(
+                handoff,
+                _PipeReadResult(stream_index, "data", data),
+                stop,
+            ):
+                return
+    except Exception as error:
+        _publish_pipe_result(
+            handoff,
+            _PipeReadResult(stream_index, "error", error=error),
+            stop,
+        )
+
+
+def _drain_with_fallback(
+    process: InvocationProcess,
+    streams: tuple[tuple[_InvocationPipe, bool], ...],
+    decoder: JsonlStream,
+    stderr_data: _BoundedBytes,
+    *,
+    deadline: float,
+    interrupt_grace_seconds: float,
+    interrupted: bool,
+    reader_threads: list[threading.Thread],
+) -> tuple[int, bool, bool]:
+    handoff: queue.Queue[_PipeReadResult] = queue.Queue(maxsize=max(1, len(streams)))
+    stop = threading.Event()
+    threads = tuple(
+        threading.Thread(
+            target=_read_pipe,
+            args=(stream, index, handoff, stop),
+            daemon=False,
+            name=f"invocation-stream-{index}",
+        )
+        for index, (stream, _) in enumerate(streams)
+    )
+    for thread in threads:
+        thread.start()
+        reader_threads.append(thread)
+
+    completed: set[int] = set()
+    exit_code: int | None = None
+    forced = False
+    try:
+        while len(completed) < len(streams) or process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                exit_code, forced = _terminate_after_deadline(
+                    process,
+                    interrupt_grace_seconds=interrupt_grace_seconds,
+                )
+                interrupted = True
+                break
+            if len(completed) == len(streams):
+                try:
+                    exit_code = process.wait(timeout=remaining)
+                except (subprocess.TimeoutExpired, TimeoutError):
+                    exit_code, forced = _terminate_after_deadline(
+                        process,
+                        interrupt_grace_seconds=interrupt_grace_seconds,
+                    )
+                    interrupted = True
+                break
+            try:
+                result = handoff.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                continue
+            if result.kind == "data":
+                if streams[result.stream_index][1]:
+                    decoder.feed(result.data)
+                else:
+                    stderr_data.extend(result.data)
+            elif result.kind in {"eof", "error"}:
+                completed.add(result.stream_index)
+    finally:
+        stop.set()
+    if exit_code is None:
+        exit_code = process.wait()
+    return exit_code, forced, interrupted
 
 
 class _BoundedBytes:

@@ -4,6 +4,8 @@ import io
 import signal
 import stat
 import subprocess
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -589,6 +591,187 @@ class _CompletedProcess:
 
     def kill(self):
         self.returncode = 137
+
+
+class _BarrierPipe:
+    def __init__(self, barrier: threading.Barrier, payload: bytes) -> None:
+        self._barrier = barrier
+        self._payload = payload
+        self._reads = 0
+        self.reader_threads: list[threading.Thread] = []
+        self.close_calls = 0
+
+    def fileno(self) -> int:
+        raise io.UnsupportedOperation("selector unsupported")
+
+    def read(self, _size: int) -> bytes:
+        self.reader_threads.append(threading.current_thread())
+        if self._reads == 0:
+            self._reads += 1
+            self._barrier.wait(timeout=1)
+            return self._payload
+        return b""
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _HeldOpenPipe:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.closed = threading.Event()
+        self.reader_threads: list[threading.Thread] = []
+        self.close_calls = 0
+
+    def fileno(self) -> int:
+        raise io.UnsupportedOperation("selector unsupported")
+
+    def read(self, _size: int) -> bytes:
+        self.reader_threads.append(threading.current_thread())
+        self.started.set()
+        self.closed.wait()
+        return b""
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed.set()
+
+
+class _FallbackProcess:
+    def __init__(self, stdout, stderr, *, live: bool = False, graceful: bool = False):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.stdin = io.BytesIO()
+        self.returncode = None if live else 0
+        self.signals: list[int] = []
+        self.kill_calls = 0
+        self._graceful = graceful
+        self._exited = threading.Event()
+        if not live:
+            self._exited.set()
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if not self._exited.wait(timeout):
+            raise subprocess.TimeoutExpired(["fake"], timeout)
+        assert self.returncode is not None
+        return self.returncode
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+        if self._graceful:
+            self.returncode = 143
+            self._exited.set()
+
+    def kill(self):
+        self.kill_calls += 1
+        self.returncode = 137
+        self._exited.set()
+
+
+def _request(tmp_path: Path) -> InvocationRequest:
+    return InvocationRequest(
+        codex_bin="codex",
+        cwd=tmp_path,
+        prompt="prompt",
+        output_last_message=tmp_path / "last.md",
+        stage=CodexStage.code,
+    )
+
+
+def test_fallback_drains_stdout_and_stderr_concurrently(tmp_path: Path) -> None:
+    barrier = threading.Barrier(2)
+    line = b'{"type":"item.completed"}\n'
+    stdout = _BarrierPipe(barrier, line * 10000 + b"partial")
+    stderr = _BarrierPipe(barrier, b"x" * 100000)
+    records: list[bytes] = []
+    events: list[dict] = []
+
+    outcome = stream_process(
+        _FallbackProcess(stdout, stderr),
+        _request(tmp_path),
+        append=records.append,
+        observe=events.append,
+        timeout_seconds=1,
+    )
+
+    assert len(records) == 10000
+    assert len(events) == 10000
+    assert outcome.incomplete_suffix == b"partial"
+    assert len(outcome.stderr) == 64 * 1024
+    assert stdout.close_calls == 1
+    assert stderr.close_calls == 1
+    threads = {*stdout.reader_threads, *stderr.reader_threads}
+    assert len(threads) == 2
+    assert all(not thread.daemon and not thread.is_alive() for thread in threads)
+
+
+def test_fallback_deadline_escalates_and_joins_open_readers(tmp_path: Path) -> None:
+    stdout = _HeldOpenPipe()
+    stderr = _HeldOpenPipe()
+    process = _FallbackProcess(stdout, stderr, live=True)
+    started = time.monotonic()
+
+    outcome = stream_process(
+        process,
+        _request(tmp_path),
+        append=lambda _chunk: None,
+        timeout_seconds=0.05,
+        interrupt_grace_seconds=0.02,
+    )
+
+    assert time.monotonic() - started < 1
+    assert process.signals == [signal.SIGTERM]
+    assert process.kill_calls == 1
+    assert outcome.exit_code == 137
+    assert outcome.interrupted
+    assert outcome.forced
+    assert stdout.close_calls == 1
+    assert stderr.close_calls == 1
+    threads = {*stdout.reader_threads, *stderr.reader_threads}
+    assert len(threads) == 2
+    assert all(not thread.daemon and not thread.is_alive() for thread in threads)
+
+
+def test_fallback_deadline_honors_graceful_termination(tmp_path: Path) -> None:
+    stdout = _HeldOpenPipe()
+    stderr = _HeldOpenPipe()
+    process = _FallbackProcess(stdout, stderr, live=True, graceful=True)
+
+    outcome = stream_process(
+        process,
+        _request(tmp_path),
+        append=lambda _chunk: None,
+        timeout_seconds=0.05,
+        interrupt_grace_seconds=0.2,
+    )
+
+    assert process.signals == [signal.SIGTERM]
+    assert process.kill_calls == 0
+    assert outcome.exit_code == 143
+    assert outcome.interrupted
+    assert not outcome.forced
+
+
+def test_fallback_shared_stream_is_read_and_closed_once(tmp_path: Path) -> None:
+    stream = _HeldOpenPipe()
+    process = _FallbackProcess(stream, stream, live=True)
+
+    outcome = stream_process(
+        process,
+        _request(tmp_path),
+        append=lambda _chunk: None,
+        timeout_seconds=0.05,
+        interrupt_grace_seconds=0.02,
+    )
+
+    assert outcome.interrupted
+    assert stream.close_calls == 1
+    assert len(stream.reader_threads) == 1
+    assert not stream.reader_threads[0].daemon
+    assert not stream.reader_threads[0].is_alive()
 
 
 def test_streaming_result_does_not_retain_complete_stdout(tmp_path: Path) -> None:

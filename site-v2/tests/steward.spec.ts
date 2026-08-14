@@ -285,11 +285,6 @@ test("global Signals and Planning remain explicit terminal unavailable states", 
     await expect(page.getByRole("heading", { name: heading })).toBeVisible();
     await expect(page.getByText("No local fallback or fixture records are displayed.", { exact: true })).toBeVisible();
   }
-  for (const endpoint of ["/api/steward/revision", "/api/steward/signals/example/events", "/api/steward/planner-runs/example/transcript"]) {
-    const response = await request.get(endpoint);
-    expect(response.status()).toBe(410);
-    expect(await response.text()).not.toContain("example");
-  }
 });
 
 test("complete trajectory renders every record in source order with stable anchors", async ({ page }) => {

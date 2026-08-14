@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
+import stat
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
@@ -242,6 +244,25 @@ _PUBLICATION_HIDE_FENCE_COLUMNS = (
     "task_id,reason,state,generation_boundary,requested_at,confirmed_at"
 )
 
+# Exact factories create only this current SQLite shape.  The constructor remains
+# the compatibility path until the ordered caller migration removes it.
+SQLITE_USER_VERSION = 1
+CURRENT_SCHEMA_VERSION = SQLITE_USER_VERSION
+CURRENT_SCHEMA_CATALOG_DIGEST = "113f1c9e9acc8a350d01756de0ac481653b9eb306eac03495834c06890e5e6fd"
+SCHEMA_CATALOG_DIGEST = CURRENT_SCHEMA_CATALOG_DIGEST
+_CONTROL_LOOP_META_SEED_KEYS = frozenset({"epoch_id", "next_sequence", "planning_blocked"})
+
+
+class SQLiteStoreLifecycleError(RuntimeError):
+    """The exact Store lifecycle precondition or validation failed."""
+
+
+# Public aliases make the failure boundary explicit without adding another
+# exception hierarchy for the additive factories.
+StoreCreationError = SQLiteStoreLifecycleError
+StoreOpenError = SQLiteStoreLifecycleError
+StoreValidationError = SQLiteStoreLifecycleError
+
 
 class TaskPage(NamedTuple):
     """One detached keyset page of tasks and its continuation cursor."""
@@ -298,6 +319,267 @@ class SQLiteTaskStore:
         self._ensure_publication_health()
         self._migrate_portable_paths()
         self._migrate_legacy_json()
+
+    @classmethod
+    def create(
+        cls,
+        path: Path | str,
+        *,
+        on_change: Callable[[], None] | None = None,
+    ) -> "SQLiteTaskStore":
+        """Create and durably publish one exact current Store database.
+
+        The task epoch is published before the database and is the only
+        creation identity.  A failed attempt leaves only the narrowly
+        recognized hidden prefix, which a later attempt rebuilds from scratch.
+        """
+
+        database = Path(path).expanduser()
+        epoch_id, _remnants = cls._prepare_creation_state(database)
+        # Recognized remnants are evidence of an interrupted attempt, not a
+        # database to adopt.  Leave them untouched so a concurrent creator
+        # cannot delete another live attempt; this attempt always gets a new
+        # temporary name and builds it from scratch.
+        temporary = cls._new_database_temporary(database, epoch_id)
+        try:
+            cls._build_current_database(temporary, epoch_id)
+            cls._durabilize_database(temporary)
+            cls._validate_current_database(temporary, epoch_id)
+            try:
+                os.link(temporary, database)
+                _publish_database_sidecars(temporary, database)
+                _fsync_directory(database.parent)
+            except FileExistsError:
+                # The target was absent at entry but another creator won the
+                # no-replace publication race.  Only an exact current winner
+                # can be adopted; an arbitrary file is never inspected as a
+                # usable Store.
+                _validate_optional_sqlite_sidecars(database)
+                winner_epoch = _read_task_epoch(database.parent / "tasks")
+                if winner_epoch["epochId"] != epoch_id:
+                    raise SQLiteStoreLifecycleError(
+                        "concurrent Store winner has a mismatched task epoch"
+                    )
+                cls._validate_current_database(database, epoch_id)
+                return cls._open_validated(database, epoch_id, on_change)
+            finally:
+                _remove_factory_temporary(temporary)
+            _fsync_directory(database.parent)
+            return cls.open(database, on_change=on_change)
+        except Exception:
+            _remove_factory_temporary(temporary)
+            raise
+
+    @classmethod
+    def open(
+        cls,
+        path: Path | str,
+        *,
+        on_change: Callable[[], None] | None = None,
+    ) -> "SQLiteTaskStore":
+        """Open an exact current Store without schema or application writes."""
+
+        database = Path(path).expanduser()
+        epoch = _read_task_epoch(database.parent / "tasks")
+        epoch_id = epoch["epochId"]
+        cls._validate_current_database(database, epoch_id)
+        return cls._open_validated(database, epoch_id, on_change)
+
+    @classmethod
+    def _open_validated(
+        cls,
+        database: Path,
+        epoch_id: str,
+        on_change: Callable[[], None] | None,
+    ) -> "SQLiteTaskStore":
+        store = cls._blank_store(database, on_change=on_change, wal=False)
+        store.control_loop = _bind_existing_control_loop(database, epoch_id)
+        return store
+
+    @classmethod
+    def _blank_store(
+        cls,
+        database: Path,
+        *,
+        on_change: Callable[[], None] | None,
+        wal: bool,
+    ) -> "SQLiteTaskStore":
+        store = cls.__new__(cls)
+        store.path = database
+        store.on_change = on_change
+        store._legacy_database = False
+        store.path_codec = PathCodec(
+            database.parent, legacy_dir=database.parent / "steward"
+        )
+        store.engine = create_engine(f"sqlite:///{database}", future=True)
+        event.listen(
+            store.engine,
+            "connect",
+            _configure_sqlite if wal else _configure_sqlite_read_only,
+        )
+        store.control_loop = None
+        return store
+
+    @classmethod
+    def _prepare_creation_state(
+        cls, database: Path
+    ) -> tuple[str, list[Path]]:
+        _refuse_existing_database_state(database)
+        _ensure_database_parent(database.parent)
+
+        tasks_root = database.parent / "tasks"
+        epoch_path = tasks_root / "epoch.json"
+        epoch: dict[str, object] | None = None
+        epoch_temporaries: list[Path] = []
+        if os.path.lexists(tasks_root):
+            _require_directory(tasks_root, "task archive root")
+            entries = _directory_entries(tasks_root, "task archive root")
+            if os.path.lexists(epoch_path):
+                epoch = _read_epoch_document(epoch_path)
+                for entry in entries:
+                    if entry == epoch_path:
+                        continue
+                    if entry.name.startswith(f".{epoch_path.name}.tmp-"):
+                        _require_regular_file(entry, "epoch temporary")
+                        epoch_temporaries.append(entry)
+                    else:
+                        raise SQLiteStoreLifecycleError(
+                            "task archive root contains extra visible state"
+                        )
+            elif entries:
+                raise SQLiteStoreLifecycleError(
+                    "task archive root lacks a valid epoch"
+                )
+
+        expected_epoch_id = None if epoch is None else str(epoch["epochId"])
+        database_temporaries = _scan_database_temporaries(
+            database, expected_epoch_id
+        )
+        if epoch is None:
+            if database_temporaries:
+                raise SQLiteStoreLifecycleError(
+                    "database temporary exists without a task epoch"
+                )
+            from ..execution.task_archive import TaskArchive
+
+            try:
+                epoch = TaskArchive(tasks_root).ensure_epoch()
+            except Exception as exc:
+                raise SQLiteStoreLifecycleError(
+                    "unable to publish the task epoch"
+                ) from exc
+            expected_epoch_id = str(epoch["epochId"])
+            # Recheck the related prefix after epoch publication.  A
+            # mismatched remnant must not be hidden by the newly chosen ID.
+            database_temporaries = _scan_database_temporaries(
+                database, expected_epoch_id
+            )
+        assert expected_epoch_id is not None
+        return expected_epoch_id, [*epoch_temporaries, *database_temporaries]
+
+    @classmethod
+    def _new_database_temporary(cls, database: Path, epoch_id: str) -> Path:
+        for _ in range(32):
+            candidate = database.parent / (
+                f".{database.name}.create-{epoch_id}-{secrets.token_hex(8)}.tmp"
+            )
+            if not os.path.lexists(candidate):
+                return candidate
+        raise SQLiteStoreLifecycleError("unable to allocate a database temporary")
+
+    @classmethod
+    def _build_current_database(cls, database: Path, epoch_id: str) -> None:
+        store = cls._blank_store(database, on_change=None, wal=True)
+        try:
+            Base.metadata.create_all(store.engine)
+            store.control_loop = ControlLoopLedger(database, epoch_id=epoch_id)
+            with store.engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"PRAGMA user_version = {SQLITE_USER_VERSION}"
+                )
+                _install_ledger_ownership_triggers(connection)
+            store._ensure_publication_health()
+            try:
+                os.chmod(database, 0o600)
+            except OSError:
+                pass
+        finally:
+            store.engine.dispose()
+
+    @classmethod
+    def _durabilize_database(cls, database: Path) -> None:
+        try:
+            with sqlite3.connect(database, timeout=30) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.Error as exc:
+            raise SQLiteStoreLifecycleError(
+                "unable to checkpoint the Store database"
+            ) from exc
+        for suffix in ("-wal", "-shm"):
+            sidecar = database.with_name(database.name + suffix)
+            if os.path.lexists(sidecar):
+                _require_regular_file(sidecar, "database temporary sidecar")
+            else:
+                try:
+                    with sidecar.open("xb"):
+                        pass
+                except OSError as exc:
+                    raise SQLiteStoreLifecycleError(
+                        "unable to initialize WAL sidecar"
+                    ) from exc
+            try:
+                with sidecar.open("rb") as handle:
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                raise SQLiteStoreLifecycleError(
+                    "unable to sync WAL sidecar"
+                ) from exc
+        try:
+            with database.open("rb") as handle:
+                os.fsync(handle.fileno())
+            _fsync_directory(database.parent)
+        except OSError as exc:
+            raise SQLiteStoreLifecycleError(
+                "unable to durably sync the Store database"
+            ) from exc
+
+    @classmethod
+    def _validate_current_database(cls, database: Path, epoch_id: str) -> None:
+        _require_regular_file(database, "Store database")
+        _require_wal_sidecars(database)
+        try:
+            uri = database.resolve().as_uri() + "?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=30)
+        except (OSError, sqlite3.Error) as exc:
+            raise SQLiteStoreLifecycleError("unable to open the Store database") from exc
+        try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            journal_mode = str(
+                connection.execute("PRAGMA journal_mode").fetchone()[0]
+            ).lower()
+            if journal_mode != "wal":
+                raise SQLiteStoreLifecycleError(
+                    "Store database is not using WAL journaling"
+                )
+            user_version = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if user_version != SQLITE_USER_VERSION:
+                raise SQLiteStoreLifecycleError("Store database version mismatch")
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise SQLiteStoreLifecycleError("Store database integrity check failed")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise SQLiteStoreLifecycleError(
+                    "Store database foreign-key check failed"
+                )
+            if _catalog_digest(connection) != CURRENT_SCHEMA_CATALOG_DIGEST:
+                raise SQLiteStoreLifecycleError("Store database catalog mismatch")
+            _validate_store_seeds(connection, epoch_id)
+        except sqlite3.Error as exc:
+            raise SQLiteStoreLifecycleError("invalid Store database") from exc
+        finally:
+            connection.close()
 
     def add_task(
         self, spec: TaskSpec, *, dedupe_key: str | None = None
@@ -6834,3 +7116,254 @@ def _configure_sqlite(dbapi_connection, _connection_record) -> None:
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+def _configure_sqlite_read_only(dbapi_connection, _connection_record) -> None:
+    """Configure an already validated WAL database without changing it."""
+
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+def _require_directory(path: Path, label: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise SQLiteStoreLifecycleError(f"{label} must be a real directory")
+
+
+def _require_regular_file(path: Path, label: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError(f"{label} is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SQLiteStoreLifecycleError(f"{label} must be a regular file")
+
+
+def _directory_entries(path: Path, label: str) -> list[Path]:
+    try:
+        return list(path.iterdir())
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError(f"unable to inspect {label}") from exc
+
+
+def _ensure_database_parent(parent: Path) -> None:
+    if os.path.lexists(parent):
+        _require_directory(parent, "database parent")
+        return
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError("unable to create database parent") from exc
+    _require_directory(parent, "database parent")
+
+
+def _refuse_existing_database_state(database: Path) -> None:
+    for candidate in (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    ):
+        if os.path.lexists(candidate):
+            raise SQLiteStoreLifecycleError(
+                "create() refuses a pre-existing database state"
+            )
+
+
+def _read_epoch_document(path: Path) -> dict[str, object]:
+    _require_regular_file(path, "epoch document")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SQLiteStoreLifecycleError("invalid task epoch document") from exc
+    from ..execution.task_archive import TaskArchive
+
+    if not TaskArchive._valid_epoch(value):
+        raise SQLiteStoreLifecycleError("invalid task epoch document")
+    return dict(value)
+
+
+def _read_task_epoch(tasks_root: Path) -> dict[str, object]:
+    _require_directory(tasks_root, "task archive root")
+    return _read_epoch_document(tasks_root / "epoch.json")
+
+
+def _scan_database_temporaries(
+    database: Path, epoch_id: str | None
+) -> list[Path]:
+    parent = database.parent
+    marker = f".{database.name}.create-"
+    if not os.path.lexists(parent):
+        return []
+    _require_directory(parent, "database parent")
+    remnants: list[Path] = []
+    entries = _directory_entries(parent, "database parent")
+    base_names: set[str] = set()
+    sidecar_bases: set[str] = set()
+    for entry in entries:
+        if not entry.name.startswith(marker):
+            continue
+        suffix = entry.name[len(marker) :]
+        if epoch_id is None:
+            raise SQLiteStoreLifecycleError(
+                "database temporary exists without a task epoch"
+            )
+        expected = f"{epoch_id}-"
+        is_base = suffix.endswith(".tmp")
+        sidecar_suffix = next(
+            (
+                candidate
+                for candidate in ("-wal", "-shm")
+                if suffix.endswith(".tmp" + candidate)
+            ),
+            None,
+        )
+        if not is_base and sidecar_suffix is None:
+            raise SQLiteStoreLifecycleError(
+                "database temporary has a mismatched task epoch"
+            )
+        identity = (
+            suffix[: -len(".tmp")]
+            if is_base
+            else suffix[: -len(".tmp" + sidecar_suffix)]
+        )
+        if not identity.startswith(expected) or len(identity) <= len(expected):
+            raise SQLiteStoreLifecycleError("database temporary identity is empty")
+        _require_regular_file(entry, "database temporary")
+        remnants.append(entry)
+        if is_base:
+            base_names.add(entry.name)
+        else:
+            sidecar_bases.add(entry.name[: -len(sidecar_suffix)])
+    if not sidecar_bases.issubset(base_names):
+        raise SQLiteStoreLifecycleError("database temporary sidecar is orphaned")
+    return remnants
+
+
+def _unlink_regular_remnant(path: Path) -> None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError("unable to remove Store temporary") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SQLiteStoreLifecycleError("Store temporary is not a regular file")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError("unable to remove Store temporary") from exc
+
+
+def _remove_factory_temporary(path: Path) -> None:
+    # Only remove the exact temporary family allocated by this attempt.  A
+    # mismatched or special visible entry is never repaired here.
+    _unlink_regular_remnant(path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = path.with_name(path.name + suffix)
+        if os.path.lexists(sidecar):
+            _unlink_regular_remnant(sidecar)
+
+
+def _validate_optional_sqlite_sidecars(database: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if os.path.lexists(sidecar):
+            _require_regular_file(sidecar, "database sidecar")
+
+
+def _require_wal_sidecars(database: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if not os.path.lexists(sidecar):
+            raise SQLiteStoreLifecycleError("Store WAL sidecar is missing")
+        _require_regular_file(sidecar, "Store WAL sidecar")
+
+
+def _publish_database_sidecars(temporary: Path, database: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        source = temporary.with_name(temporary.name + suffix)
+        target = database.with_name(database.name + suffix)
+        _require_regular_file(source, "database temporary sidecar")
+        try:
+            os.link(source, target)
+        except FileExistsError:
+            _require_regular_file(target, "database sidecar")
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError("directory fsync is unavailable") from exc
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError("directory fsync failed") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _catalog_digest(connection: sqlite3.Connection) -> str:
+    rows = connection.execute(
+        """
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type, name
+        """
+    ).fetchall()
+    payload = [
+        [str(kind), str(name), str(table), sql]
+        for kind, name, table, sql in rows
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _validate_store_seeds(connection: sqlite3.Connection, epoch_id: str) -> None:
+    rows = dict(connection.execute("SELECT key, value FROM control_loop_meta"))
+    if not _CONTROL_LOOP_META_SEED_KEYS.issubset(rows):
+        raise SQLiteStoreLifecycleError("Store metadata seeds are incomplete")
+    if rows["epoch_id"] != epoch_id:
+        raise SQLiteStoreLifecycleError("Store and task epochs do not match")
+    try:
+        if int(rows["next_sequence"]) < 0:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise SQLiteStoreLifecycleError("Store sequence seed is invalid") from exc
+    if rows["planning_blocked"] not in {"0", "1"}:
+        raise SQLiteStoreLifecycleError("Store planning seed is invalid")
+
+    health = connection.execute(
+        """
+        SELECT id, queued_count, blocked_count, cleanup_pending_count,
+               cleanup_pending_bytes
+        FROM publication_health
+        """
+    ).fetchall()
+    if len(health) != 1 or health[0][0] != 1:
+        raise SQLiteStoreLifecycleError("Store publication seed is invalid")
+    if any(value < 0 for value in health[0][1:]):
+        raise SQLiteStoreLifecycleError("Store publication seed is invalid")
+
+
+def _bind_existing_control_loop(
+    database: Path, epoch_id: str
+) -> ControlLoopLedger:
+    # Constructing ControlLoopLedger normally creates/probes tables and seeds
+    # metadata.  Exact open has already validated those bytes and must not do
+    # any application write, so bind the validated object without __init__.
+    ledger = ControlLoopLedger.__new__(ControlLoopLedger)
+    ledger.path = database
+    ledger._epoch_id = epoch_id
+    return ledger

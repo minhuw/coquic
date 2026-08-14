@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -426,3 +427,19 @@ def test_events_at_uses_one_connection_and_bounded_chunks(
     assert connection_count == 1
     assert len(events) == 501
     assert events[500].sequence == 500
+
+
+def test_exact_store_factory_binds_ledger_before_control_loop_use(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+
+    assert store.control_loop.epoch_id == (
+        json.loads(
+            (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
+        )["epochId"]
+    )
+    store.control_loop.set_planning_blocked(True, reason="test")
+
+    reopened = TaskStore.open(database)
+    assert reopened.control_loop.epoch_id == store.control_loop.epoch_id
+    assert reopened.control_loop.planning_blocked

@@ -11,6 +11,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -549,6 +550,46 @@ class ControlLoopRetryRow(Base):
             name="ck_control_loop_retry_eligibility",
         ),
     )
+
+
+class ControlLoopOverheadUsageRow(Base):
+    __tablename__ = "control_loop_overhead_usage"
+
+    usage_date: Mapped[str] = mapped_column(Text, nullable=False, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, nullable=False, primary_key=True)
+    owner_class: Mapped[str] = mapped_column(Text, nullable=False, primary_key=True)
+    tokens_json: Mapped[str] = mapped_column(Text, nullable=False)
+    costs_json: Mapped[str] = mapped_column(Text, nullable=False)
+    coverage_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ControlLoopOverheadUsageRunRow(Base):
+    __tablename__ = "control_loop_overhead_usage_runs"
+
+    planner_run_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey(
+            "control_loop_planner_runs.planner_run_id", ondelete="CASCADE"
+        ),
+        nullable=False,
+        primary_key=True,
+    )
+    archive_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    processed_at: Mapped[str] = mapped_column(Text, nullable=False)
+    rows_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="[]",
+        server_default=text("'[]'"),
+    )
+    cost_pending: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+
+    __table_args__ = (CheckConstraint("cost_pending IN (0,1)"),)
 
 
 class DaemonStateRow(Base):
@@ -1374,6 +1415,34 @@ Index(
     "ix_publication_hide_fences_state_requested",
     PublicationHideFenceRow.state,
     PublicationHideFenceRow.requested_at,
+)
+Index(
+    "ix_control_loop_observations_signal",
+    ControlLoopObservationRow.signal_id,
+    ControlLoopObservationRow.observed_at,
+)
+Index(
+    "ix_control_loop_events_epoch_sequence",
+    ControlLoopEventRow.epoch_id,
+    ControlLoopEventRow.sequence,
+)
+Index(
+    "ix_control_loop_outbox_pending",
+    ControlLoopOutboxRow.materialized_at,
+    ControlLoopOutboxRow.sequence,
+)
+Index(
+    "ix_control_loop_planner_terminal_order",
+    ControlLoopPlannerRunRow.epoch_id,
+    ControlLoopPlannerRunRow.state,
+    ControlLoopPlannerRunRow.completed_at,
+    ControlLoopPlannerRunRow.planner_run_id,
+)
+Index(
+    "ix_control_loop_overhead_pending",
+    ControlLoopOverheadUsageRunRow.cost_pending,
+    ControlLoopOverheadUsageRunRow.processed_at,
+    ControlLoopOverheadUsageRunRow.planner_run_id,
 )
 
 # Readable aliases for callers that inspect the normalized SQL schema directly.

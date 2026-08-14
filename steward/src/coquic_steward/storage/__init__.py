@@ -9,10 +9,21 @@ from ..core.models import (
     SchedulerState,
     SignalFetchStatus,
 )
-from .sqlite import SQLiteTaskStore
+from .sqlite import (
+    CURRENT_SCHEMA_CATALOG_DIGEST,
+    CURRENT_SCHEMA_VERSION,
+    SQLITE_USER_VERSION,
+    SQLiteStoreLifecycleError,
+    SQLiteTaskStore,
+    StoreCreationError,
+    StoreOpenError,
+    StoreValidationError,
+)
 from ..control_loop import ControlLoopLedger
 from .schema import (
     CodexSessionRow,
+    ControlLoopOverheadUsageRow,
+    ControlLoopOverheadUsageRunRow,
     TaskExecutionRow,
     TaskPipelineRow,
     TaskRunRow,
@@ -163,7 +174,16 @@ def _now() -> datetime:
 
 __all__ = [
     "SQLiteTaskStore",
+    "CURRENT_SCHEMA_CATALOG_DIGEST",
+    "CURRENT_SCHEMA_VERSION",
+    "SQLITE_USER_VERSION",
+    "SQLiteStoreLifecycleError",
+    "StoreCreationError",
+    "StoreOpenError",
+    "StoreValidationError",
     "ControlLoopLedger",
+    "ControlLoopOverheadUsageRow",
+    "ControlLoopOverheadUsageRunRow",
     "TaskStore",
     "CodexSessionRow",
     "TaskExecutionRow",

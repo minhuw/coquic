@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from coquic_steward.execution.task_archive import TaskArchive
+from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
+from coquic_steward.storage.sqlite import (
+    CURRENT_SCHEMA_CATALOG_DIGEST,
+    SQLITE_USER_VERSION,
+)
+
+
+def _catalog_digest(connection: sqlite3.Connection) -> str:
+    rows = connection.execute(
+        """
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type, name
+        """
+    ).fetchall()
+    payload = [
+        [str(kind), str(name), str(table), sql]
+        for kind, name, table, sql in rows
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=False).encode("utf-8")
+    ).hexdigest()
+
+
+def test_current_schema_oracle_is_complete_and_seeded(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            SQLITE_USER_VERSION,
+        )
+        assert _catalog_digest(connection) == CURRENT_SCHEMA_CATALOG_DIGEST
+        assert connection.execute(
+            "SELECT value FROM control_loop_meta WHERE key='epoch_id'"
+        ).fetchone() == (store.control_loop.epoch_id,)
+        assert connection.execute(
+            "SELECT value FROM control_loop_meta WHERE key='next_sequence'"
+        ).fetchone() == ("0",)
+        assert connection.execute(
+            "SELECT value FROM control_loop_meta WHERE key='planning_blocked'"
+        ).fetchone() == ("0",)
+        assert connection.execute(
+            "SELECT id,queued_count,blocked_count,cleanup_pending_count,cleanup_pending_bytes "
+            "FROM publication_health"
+        ).fetchone()[:5] == (1, 0, 0, 0, 0)
+
+        overhead_columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(control_loop_overhead_usage)"
+            )
+        ]
+        assert overhead_columns == [
+            "usage_date",
+            "model",
+            "owner_class",
+            "tokens_json",
+            "costs_json",
+            "coverage_json",
+        ]
+        marker_columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(control_loop_overhead_usage_runs)"
+            )
+        ]
+        assert marker_columns == [
+            "planner_run_id",
+            "archive_digest",
+            "processed_at",
+            "rows_json",
+            "cost_pending",
+        ]
+        index_names = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(control_loop_overhead_usage_runs)"
+            )
+        }
+        assert "ix_control_loop_overhead_pending" in index_names
+
+
+def test_create_and_open_bind_the_immutable_task_epoch_and_callback(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    calls: list[str] = []
+
+    def on_change() -> None:
+        calls.append("changed")
+
+    created = TaskStore.create(database, on_change=on_change)
+    reopened = TaskStore.open(database, on_change=on_change)
+
+    assert created.on_change is on_change
+    assert reopened.on_change is on_change
+    assert created.control_loop.epoch_id == reopened.control_loop.epoch_id
+    assert json.loads(
+        (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
+    )["epochId"] == created.control_loop.epoch_id
+    assert calls == []
+
+
+def test_open_validation_does_not_repair_or_write(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    TaskStore.create(database).engine.dispose()
+    tracked = [database, database.with_name("steward.sqlite-wal"), database.with_name("steward.sqlite-shm")]
+    before = {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in tracked}
+
+    opened = TaskStore.open(database)
+    opened.engine.dispose()
+
+    after = {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in tracked}
+    assert after == before
+
+
+def test_create_rejects_existing_target_and_extra_archive_state(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    TaskStore.create(database).engine.dispose()
+    before = {path: path.stat().st_mtime_ns for path in tmp_path.iterdir()}
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+    assert {path: path.stat().st_mtime_ns for path in tmp_path.iterdir()} == before
+
+    other_root = tmp_path / "other"
+    tasks = other_root / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "visible-state").write_text("not an epoch", encoding="utf-8")
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(other_root / "steward.sqlite")
+    assert not (tasks / "epoch.json").exists()
+    assert not (other_root / "steward.sqlite").exists()
+
+
+def test_create_rebuilds_instead_of_adopting_recognized_database_temporary(
+    tmp_path: Path,
+) -> None:
+    tasks = tmp_path / "tasks"
+    epoch_id = TaskArchive(tasks).ensure_epoch()["epochId"]
+    remnant = tmp_path / f".steward.sqlite.create-{epoch_id}-interrupted.tmp"
+    remnant.write_bytes(b"not a database")
+
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+
+    assert store.control_loop.epoch_id == epoch_id
+    assert remnant.exists()
+    assert (tmp_path / "steward.sqlite").is_file()
+
+
+def test_open_rejects_version_corruption_without_repair(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    TaskStore.create(database).engine.dispose()
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version = 999")
+        connection.commit()
+    before = database.read_bytes()
+
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.open(database)
+
+    assert database.read_bytes() == before

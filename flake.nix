@@ -90,12 +90,6 @@
           venvSkip = (old.venvSkip or [ ]) ++ [ "bin/coquic-steward" ];
         }
       );
-      stewardDependencyParity = pkgs.runCommand "coquic-steward-dependency-parity" { } ''
-        ${stewardPython}/bin/python ${projectSrc}/scripts/check-steward-dependency-parity.py \
-          --root ${projectSrc}
-        mkdir -p $out
-        touch $out/check-passed
-      '';
       stewardSource = pkgs.stdenvNoCC.mkDerivation {
         pname = "coquic-steward-source";
         version = "0.1.0";
@@ -2403,7 +2397,6 @@ EOF
         coquic-boringssl-musl = boringsslMuslPackage;
         coquic-tests-quictls = mkCoquicCheck quictlsProfile;
         coquic-tests-boringssl = mkCoquicCheck boringsslProfile;
-        steward-dependency-parity = stewardDependencyParity;
       };
 
       packages.${system} = {

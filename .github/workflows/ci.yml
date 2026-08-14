@@ -43,20 +43,17 @@ jobs:
         with:
           summarize: false
 
+      - name: Check Steward dependency lock
+        run: nix develop -c uv lock --check --project steward
+
       - name: Test Steward suite
-        run: nix develop -c uv run --project steward python -m pytest steward/tests -q
+        run: nix develop -c uv run --locked --project steward python -m pytest steward/tests -q
 
       - name: Smoke Steward package import
         run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'import coquic_steward'
 
       - name: Smoke Steward CLI load
         run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'from coquic_steward.cli import app; assert app is not None'
-
-      - name: Check Steward dependency parity
-        run: nix develop -c python scripts/check-steward-dependency-parity.py
-
-      - name: Test Steward suite with production dependencies
-        run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -m pytest steward/tests -q
 
   format:
     name: Format

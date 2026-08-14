@@ -83,7 +83,6 @@ _KNOWN_STEWARD_SECTIONS = frozenset(
         "containers",
         "task_container",
         "publication",
-        "cloud_publication",
         "deployment",
         "container_operations",
     }
@@ -176,25 +175,6 @@ class StewardContainerConfig:
     @property
     def image_digest_locked(self) -> bool:
         return self.image_digest is not None
-
-
-def _publication_value(
-    primary: object,
-    aliases: tuple[object, ...],
-    *,
-    default: object,
-    label: str,
-) -> object:
-    """Select one spelling of a publication setting without hiding conflicts."""
-
-    selected = primary
-    for alias in aliases:
-        if alias is None:
-            continue
-        if selected != default and selected != alias:
-            raise ValueError(f"conflicting publication settings for {label}")
-        selected = alias
-    return selected
 
 
 def _publication_optional_path(value: object, label: str) -> Path | None:
@@ -328,128 +308,22 @@ class StewardPublicationConfig:
     max_retries: int = 3
     retry_backoff_seconds: float = 5.0
 
-    # Accepted Python spellings for callers that use the service-prefixed
-    # vocabulary.  The parser accepts the same aliases in TOML.
-    cloudflare_account_id: str | None = None
-    cloudflare_database_id: str | None = None
-    database_id: str | None = None
-    d1_read_token_path: Path | None = None
-    d1_api_token_path: Path | None = None
-    d1_token_file: Path | None = None
-    d1_read_token_file: Path | None = None
-    r2_endpoint_url: str | None = None
-    access_key_id_path: Path | None = None
-    secret_access_key_path: Path | None = None
-    access_key_file: Path | None = None
-    secret_key_file: Path | None = None
-    r2_access_key_path: Path | None = None
-    r2_secret_key_path: Path | None = None
-    r2_access_key_file: Path | None = None
-    r2_secret_key_file: Path | None = None
-    public_r2_bucket: str | None = None
-    private_r2_bucket: str | None = None
-    public_bucket_name: str | None = None
-    private_bucket_name: str | None = None
-    public_r2_base_url: str | None = None
-    staging_dir: Path | None = None
-    staging_path: Path | None = None
-    trusted_staging_root: Path | None = None
-    lease_seconds: float | None = None
-    lease_duration: float | None = None
-    retry_limit: int | None = None
-    max_retry_count: int | None = None
-
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("publication.enabled must be a boolean")
 
-        account = _publication_value(
-            self.account_id,
-            (self.cloudflare_account_id,),
-            default="",
-            label="account_id",
-        )
-        database = _publication_value(
-            self.d1_database_id,
-            (self.cloudflare_database_id, self.database_id),
-            default="",
-            label="d1_database_id",
-        )
-        token_path = _publication_value(
-            self.d1_token_path,
-            (
-                self.d1_read_token_path,
-                self.d1_api_token_path,
-                self.d1_token_file,
-                self.d1_read_token_file,
-            ),
-            default=None,
-            label="d1_token_path",
-        )
-        endpoint = _publication_value(
-            self.r2_endpoint,
-            (self.r2_endpoint_url,),
-            default="",
-            label="r2_endpoint",
-        )
-        access_path = _publication_value(
-            self.r2_access_key_id_path,
-            (
-                self.access_key_id_path,
-                self.access_key_file,
-                self.r2_access_key_path,
-                self.r2_access_key_file,
-            ),
-            default=None,
-            label="r2_access_key_id_path",
-        )
-        secret_path = _publication_value(
-            self.r2_secret_access_key_path,
-            (
-                self.secret_access_key_path,
-                self.secret_key_file,
-                self.r2_secret_key_path,
-                self.r2_secret_key_file,
-            ),
-            default=None,
-            label="r2_secret_access_key_path",
-        )
-        public_bucket = _publication_value(
-            self.public_bucket,
-            (self.public_r2_bucket, self.public_bucket_name),
-            default="",
-            label="public_bucket",
-        )
-        private_bucket = _publication_value(
-            self.private_bucket,
-            (self.private_r2_bucket, self.private_bucket_name),
-            default="",
-            label="private_bucket",
-        )
-        public_url = _publication_value(
-            self.public_base_url,
-            (self.public_r2_base_url,),
-            default="",
-            label="public_base_url",
-        )
-        staging = _publication_value(
-            self.staging_root,
-            (self.staging_dir, self.staging_path, self.trusted_staging_root),
-            default=None,
-            label="staging_root",
-        )
-        lease = _publication_value(
-            self.lease_duration_seconds,
-            (self.lease_seconds, self.lease_duration),
-            default=300.0,
-            label="lease_duration_seconds",
-        )
-        retries = _publication_value(
-            self.max_retries,
-            (self.retry_limit, self.max_retry_count),
-            default=3,
-            label="max_retries",
-        )
+        account = self.account_id
+        database = self.d1_database_id
+        token_path = self.d1_token_path
+        endpoint = self.r2_endpoint
+        access_path = self.r2_access_key_id_path
+        secret_path = self.r2_secret_access_key_path
+        public_bucket = self.public_bucket
+        private_bucket = self.private_bucket
+        public_url = self.public_base_url
+        staging = self.staging_root
+        lease = self.lease_duration_seconds
+        retries = self.max_retries
 
         for value, label in (
             (account, "account_id"),
@@ -558,36 +432,6 @@ class StewardPublicationConfig:
         object.__setattr__(self, "max_retries", retry_count)
         object.__setattr__(self, "retry_backoff_seconds", retry_backoff)
 
-        # Keep aliases normalized so callers using either vocabulary observe
-        # identical values without ever receiving credential contents.
-        object.__setattr__(self, "cloudflare_account_id", account or None)
-        object.__setattr__(self, "cloudflare_database_id", database or None)
-        object.__setattr__(self, "database_id", database or None)
-        object.__setattr__(self, "d1_read_token_path", token_path)
-        object.__setattr__(self, "d1_api_token_path", token_path)
-        object.__setattr__(self, "d1_token_file", token_path)
-        object.__setattr__(self, "d1_read_token_file", token_path)
-        object.__setattr__(self, "r2_endpoint_url", endpoint or None)
-        object.__setattr__(self, "access_key_id_path", access_path)
-        object.__setattr__(self, "secret_access_key_path", secret_path)
-        object.__setattr__(self, "access_key_file", access_path)
-        object.__setattr__(self, "secret_key_file", secret_path)
-        object.__setattr__(self, "r2_access_key_path", access_path)
-        object.__setattr__(self, "r2_secret_key_path", secret_path)
-        object.__setattr__(self, "r2_access_key_file", access_path)
-        object.__setattr__(self, "r2_secret_key_file", secret_path)
-        object.__setattr__(self, "public_r2_bucket", public_bucket or None)
-        object.__setattr__(self, "private_r2_bucket", private_bucket or None)
-        object.__setattr__(self, "public_bucket_name", public_bucket or None)
-        object.__setattr__(self, "private_bucket_name", private_bucket or None)
-        object.__setattr__(self, "public_r2_base_url", public_url or None)
-        object.__setattr__(self, "staging_dir", staging)
-        object.__setattr__(self, "staging_path", staging)
-        object.__setattr__(self, "trusted_staging_root", staging)
-        object.__setattr__(self, "lease_seconds", lease_seconds)
-        object.__setattr__(self, "lease_duration", lease_seconds)
-        object.__setattr__(self, "retry_limit", retry_count)
-        object.__setattr__(self, "max_retry_count", retry_count)
 
 
 # Descriptive aliases used by callers that refer to the host-side boundary.
@@ -1272,6 +1116,8 @@ def load_config(
     if not isinstance(steward, dict):
         raise ValueError("steward configuration must be a table")
     _reject_embedded_secrets(steward)
+    if "cloud_publication" in steward:
+        raise ValueError("unknown configuration section: steward.cloud_publication")
     for section_name, section_value in steward.items():
         if isinstance(section_value, dict) and section_name not in _KNOWN_STEWARD_SECTIONS:
             raise ValueError(f"unknown configuration section: steward.{section_name}")
@@ -1281,7 +1127,7 @@ def load_config(
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
     container_data = _section_alias(steward, "container", "containers", "task_container")
-    publication_data = _section_alias(steward, "publication", "cloud_publication")
+    publication_data = _section_alias(steward, "publication")
     deployment_data = _section_alias(steward, "deployment", "container_operations")
     deployment_config = _deployment_config(deployment_data, root)
     selected_task_image = (
@@ -1570,47 +1416,19 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
     allowed = {
         "enabled",
         "account_id",
-        "cloudflare_account_id",
-        "cloudflare_database_id",
         "d1_database_id",
-        "database_id",
         "d1_token_path",
-        "d1_read_token_path",
-        "d1_api_token_path",
-        "d1_token_file",
-        "d1_read_token_file",
         "r2_endpoint",
-        "r2_endpoint_url",
         "r2_access_key_id_path",
-        "access_key_id_path",
-        "access_key_file",
-        "r2_access_key_path",
-        "r2_access_key_file",
         "r2_secret_access_key_path",
-        "secret_access_key_path",
-        "secret_key_file",
-        "r2_secret_key_path",
-        "r2_secret_key_file",
         "public_bucket",
-        "public_r2_bucket",
-        "public_bucket_name",
         "private_bucket",
-        "private_r2_bucket",
-        "private_bucket_name",
         "public_base_url",
-        "public_r2_base_url",
         "staging_root",
-        "staging_dir",
-        "staging_path",
-        "trusted_staging_root",
         "build_timeout_seconds",
         "network_timeout_seconds",
         "lease_duration_seconds",
-        "lease_seconds",
-        "lease_duration",
         "max_retries",
-        "retry_limit",
-        "max_retry_count",
         "retry_backoff_seconds",
     }
     unknown = sorted(set(data) - allowed)
@@ -1625,47 +1443,19 @@ def _publication_config(raw: object) -> StewardPublicationConfig:
     return StewardPublicationConfig(
         enabled=enabled,
         account_id=data.get("account_id", ""),
-        cloudflare_account_id=data.get("cloudflare_account_id"),
-        cloudflare_database_id=data.get("cloudflare_database_id"),
         d1_database_id=data.get("d1_database_id", ""),
-        database_id=data.get("database_id"),
         d1_token_path=data.get("d1_token_path"),
-        d1_read_token_path=data.get("d1_read_token_path"),
-        d1_api_token_path=data.get("d1_api_token_path"),
-        d1_token_file=data.get("d1_token_file"),
-        d1_read_token_file=data.get("d1_read_token_file"),
         r2_endpoint=data.get("r2_endpoint", ""),
-        r2_endpoint_url=data.get("r2_endpoint_url"),
         r2_access_key_id_path=data.get("r2_access_key_id_path"),
-        access_key_id_path=data.get("access_key_id_path"),
-        access_key_file=data.get("access_key_file"),
-        r2_access_key_path=data.get("r2_access_key_path"),
-        r2_access_key_file=data.get("r2_access_key_file"),
         r2_secret_access_key_path=data.get("r2_secret_access_key_path"),
-        secret_access_key_path=data.get("secret_access_key_path"),
-        secret_key_file=data.get("secret_key_file"),
-        r2_secret_key_path=data.get("r2_secret_key_path"),
-        r2_secret_key_file=data.get("r2_secret_key_file"),
         public_bucket=data.get("public_bucket", ""),
-        public_r2_bucket=data.get("public_r2_bucket"),
-        public_bucket_name=data.get("public_bucket_name"),
         private_bucket=data.get("private_bucket", ""),
-        private_r2_bucket=data.get("private_r2_bucket"),
-        private_bucket_name=data.get("private_bucket_name"),
         public_base_url=data.get("public_base_url", ""),
-        public_r2_base_url=data.get("public_r2_base_url"),
         staging_root=data.get("staging_root"),
-        staging_dir=data.get("staging_dir"),
-        staging_path=data.get("staging_path"),
-        trusted_staging_root=data.get("trusted_staging_root"),
         build_timeout_seconds=data.get("build_timeout_seconds", 300.0),
         network_timeout_seconds=data.get("network_timeout_seconds", 30.0),
         lease_duration_seconds=data.get("lease_duration_seconds", 300.0),
-        lease_seconds=data.get("lease_seconds"),
-        lease_duration=data.get("lease_duration"),
         max_retries=data.get("max_retries", 3),
-        retry_limit=data.get("retry_limit"),
-        max_retry_count=data.get("max_retry_count"),
         retry_backoff_seconds=data.get("retry_backoff_seconds", 5.0),
     )
 

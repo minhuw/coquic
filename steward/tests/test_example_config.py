@@ -149,6 +149,68 @@ def test_publication_rejects_unknown_keys_and_unknown_section(
         load_config(repo_root=repo, config_path=unsupported_path)
 
 
+@pytest.mark.parametrize(
+    "removed_key",
+    (
+        "cloudflare_account_id",
+        "cloudflare_database_id",
+        "database_id",
+        "d1_read_token_path",
+        "d1_api_token_path",
+        "d1_token_file",
+        "d1_read_token_file",
+        "r2_endpoint_url",
+        "access_key_id_path",
+        "secret_access_key_path",
+        "access_key_file",
+        "secret_key_file",
+        "r2_access_key_path",
+        "r2_secret_key_path",
+        "r2_access_key_file",
+        "r2_secret_key_file",
+        "public_r2_bucket",
+        "private_r2_bucket",
+        "public_bucket_name",
+        "private_bucket_name",
+        "public_r2_base_url",
+        "staging_dir",
+        "staging_path",
+        "trusted_staging_root",
+        "lease_seconds",
+        "lease_duration",
+        "retry_limit",
+        "max_retry_count",
+    ),
+)
+def test_publication_rejects_removed_keys(
+    repo: Path, tmp_path: Path, removed_key: str
+) -> None:
+    config_path, _credentials, _staging = _write_publication_config(
+        tmp_path,
+        publication_overrides=f"{removed_key} = true",
+    )
+
+    with pytest.raises(ValueError, match=rf"unsupported keys: {removed_key}"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+@pytest.mark.parametrize("removed_section", ("cloud_publication",))
+def test_publication_rejects_removed_sections(
+    repo: Path, tmp_path: Path, removed_section: str
+) -> None:
+    config_path = tmp_path / "removed-section.toml"
+    config_path.write_text(
+        f"[steward.{removed_section}]\nenabled = false\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"unknown configuration section: steward\.{removed_section}",
+    ):
+        load_config(repo_root=repo, config_path=config_path)
+
+
 def test_explicit_runtime_repository_loads_config_outside_a_checkout(
     repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

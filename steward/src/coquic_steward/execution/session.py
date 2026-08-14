@@ -1606,6 +1606,11 @@ class SessionSupervisor:
         runtime = active.runtime
         process = active.process
         identity = active.identity
+        if invoker is not None:
+            if process is None:
+                process = invoker.process
+            if identity is None and isinstance(invoker, ContainerSessionInvoker):
+                identity = invoker.identity
         if runtime is not None and identity is not None:
             runtime.signal(identity, signal.SIGKILL if force else signal.SIGTERM)
             exited = self._wait_for_exec_exit(

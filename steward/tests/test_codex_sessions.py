@@ -33,7 +33,11 @@ from coquic_steward.execution.container import (
 )
 from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
-from coquic_steward.execution.session import LocalSessionInvoker, runtime_factory_for_config
+from coquic_steward.execution.session import (
+    LocalSessionInvoker,
+    _ActiveInvocation,
+    runtime_factory_for_config,
+)
 from coquic_steward.planning.planner import CodexPlanner
 from coquic_steward.storage import TaskStore
 
@@ -411,6 +415,53 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
     persisted = store.get_run(run.id)
     assert persisted.state == "interrupted"
     assert persisted.exit_reason == "forced termination"
+
+
+def test_interrupt_uses_invoker_process_during_active_publication(
+    config: StewardConfig,
+) -> None:
+    class Store:
+        def mark_run_interrupted(self, run_id, *, reason):
+            self.reason = reason
+            return SimpleNamespace(exit_code=143)
+
+    class LiveProcess:
+        def __init__(self) -> None:
+            self.signals: list[int] = []
+            self.waits: list[float] = []
+            self.kills = 0
+
+        def send_signal(self, sig: int) -> None:
+            self.signals.append(sig)
+
+        def wait(self, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.waits.append(timeout)
+            raise subprocess.TimeoutExpired(["codex"], timeout)
+
+        def kill(self) -> None:
+            self.kills += 1
+
+    store = Store()
+    invoker = LocalSessionInvoker()
+    process = LiveProcess()
+    invoker.process = process
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        invoker=invoker,
+        image_digest="sha256:" + "a" * 64,
+    )
+    supervisor._active["run-one"] = _ActiveInvocation(invoker, None)
+
+    result = supervisor.interrupt("run-one", grace_seconds=0.25)
+
+    assert process.signals == [signal.SIGTERM]
+    assert process.waits == [0.25]
+    assert process.kills == 1
+    assert result.forced
+    assert result.status.value == "forced"
+    assert store.reason == "forced termination"
 
 
 def test_interrupt_does_not_treat_runtime_probe_failure_as_process_exit(

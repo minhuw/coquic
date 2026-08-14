@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import coquic_steward.publication as publication
 from coquic_steward.publication import (
     FailClosed,
     FindingSummary,
@@ -33,6 +34,31 @@ from coquic_steward.publication import (
     read_stable_jsonl,
 )
 from coquic_steward.publication import models as publication_models
+
+
+def test_publication_exports_use_canonical_names() -> None:
+    exported = set(publication.__all__)
+    assert {
+        "AtifSource",
+        "SanitizationResult",
+        "UsageTokens",
+        "MediaInspection",
+        "inspect_media",
+        "build_publication_bundle",
+        "CloudPublisher",
+        "publish_generation",
+    } <= exported
+    removed = {
+        "CompletedRun",
+        "AtifResult",
+        "UsageValidationError",
+        "MediaResult",
+        "scan_corpus",
+        "build_publication",
+        "Publisher",
+    }
+    assert removed.isdisjoint(exported)
+    assert all(not hasattr(publication, name) for name in removed)
 
 
 def _run(state: str = "completed") -> RunMetadata:

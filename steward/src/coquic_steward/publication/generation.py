@@ -62,11 +62,8 @@ from .pipeline import build_publication_bundle
 from .redaction import discover_secrets
 from .scanner import CorpusEntry, run_trufflehog
 from .usage import build_task_usage_projection
-from .outbox import (
-    GenerationIdentity as OutboxGenerationIdentity,
-    PublicationCounts,
-    PublicationGeneration as OutboxGenerationRecord,
-)
+from . import outbox
+from .outbox import GenerationIdentity, PublicationCounts
 
 
 PUBLICATION_SCHEMA_VERSION: Final[str] = "2.0"
@@ -767,7 +764,7 @@ class PublicationGeneration:
             task_value = self.payload["taskId"]
             if not isinstance(task_value, str):
                 raise PublicationError(ReasonCode.invalid_metadata)
-            identity = OutboxGenerationIdentity(task_value, boundary)
+            identity = GenerationIdentity(task_value, boundary)
             generation = self.payload["generation"]
             if not isinstance(generation, Mapping):
                 raise PublicationError(ReasonCode.invalid_metadata)
@@ -821,8 +818,8 @@ class PublicationGeneration:
         return self._generation_boundary
 
     @property
-    def identity(self) -> OutboxGenerationIdentity:
-        return OutboxGenerationIdentity(self.task_id, self.generation_boundary)
+    def identity(self) -> GenerationIdentity:
+        return GenerationIdentity(self.task_id, self.generation_boundary)
 
     @property
     def publication(self) -> Mapping[str, Any]:
@@ -851,7 +848,7 @@ class PublicationGeneration:
         return self.private_originals[0] if len(self.private_originals) == 1 else None
 
     @property
-    def outbox_record(self) -> OutboxGenerationRecord:
+    def outbox_record(self) -> outbox.PublicationGeneration:
         """Return the exact durable outbox record represented by this envelope."""
 
         counts = self.generation.get("expectedCounts")
@@ -869,7 +866,7 @@ class PublicationGeneration:
         head_intent = self.payload.get("headIntent")
         if not isinstance(head_intent, Mapping):
             raise PublicationError(ReasonCode.invalid_metadata)
-        return OutboxGenerationRecord(
+        return outbox.PublicationGeneration(
             publication_id=self.identity.publication_id,
             task_id=self.identity.task_id,
             run_id=self.run_id,
@@ -888,19 +885,15 @@ class PublicationGeneration:
         )
 
     @property
-    def outbox_generation(self) -> OutboxGenerationRecord:
+    def outbox_generation(self) -> outbox.PublicationGeneration:
         return self.outbox_record
 
     @property
-    def outbox(self) -> OutboxGenerationRecord:
+    def outbox(self) -> outbox.PublicationGeneration:
         return self.outbox_record
 
-    def to_outbox(self) -> OutboxGenerationRecord:
+    def to_outbox(self) -> outbox.PublicationGeneration:
         return self.outbox_record
-
-    to_outbox_record = to_outbox
-    as_outbox_record = to_outbox
-    as_outbox = to_outbox
 
     def as_dict(self) -> dict[str, Any]:
         return _thaw(self.payload)
@@ -910,13 +903,6 @@ class PublicationGeneration:
 
 
 GenerationOutcome: TypeAlias = PublicationGeneration | RepairRequired | FailClosed
-Generation = PublicationGeneration
-ComposedGeneration = PublicationGeneration
-PublicationGenerationResult = PublicationGeneration
-PublishableGeneration = PublicationGeneration
-TaskPublicationGeneration = PublicationGeneration
-GenerationObjectDescriptor = GenerationObject
-PrivateOriginalDescriptor = GenerationOriginal
 
 
 @dataclass(frozen=True, slots=True)
@@ -1937,7 +1923,7 @@ def _build_generation(
         "artifacts": sorted(artifact_rows, key=lambda row: (row["runId"], row["logicalPath"], row["artifactId"])),
     }
     seed = hashlib.sha256(_canonical(seed_metadata)).hexdigest()
-    identity = OutboxGenerationIdentity(task_id, seed)
+    identity = GenerationIdentity(task_id, seed)
     publication_id = identity.publication_id
     idempotency_key = identity.idempotency_key
     try:
@@ -2129,17 +2115,6 @@ def compose_publication_generation(
         return _failure(ReasonCode.invalid_metadata)
 
 
-build_publication_generation = compose_publication_generation
-build_generation = compose_publication_generation
-compose_generation = compose_publication_generation
-assemble_publication_generation = compose_publication_generation
-assemble_generation = compose_publication_generation
-build_task_generation = compose_publication_generation
-compose_task_generation = compose_publication_generation
-build_task_publication = compose_publication_generation
-GenerationIdentity = OutboxGenerationIdentity
-
-
 __all__ = [
     "PUBLICATION_SCHEMA_VERSION",
     "MAX_GENERATION_RUNS",
@@ -2148,24 +2123,9 @@ __all__ = [
     "MAX_GENERATION_OBJECTS",
     "MAX_GRAPH_CAPTURE_PASSES",
     "GenerationObject",
-    "GenerationObjectDescriptor",
     "GenerationOriginal",
-    "PrivateOriginalDescriptor",
     "GenerationIdentity",
     "PublicationGeneration",
-    "PublicationGenerationResult",
-    "PublishableGeneration",
-    "TaskPublicationGeneration",
     "GenerationOutcome",
-    "Generation",
-    "ComposedGeneration",
     "compose_publication_generation",
-    "build_publication_generation",
-    "build_generation",
-    "compose_generation",
-    "assemble_publication_generation",
-    "assemble_generation",
-    "build_task_generation",
-    "compose_task_generation",
-    "build_task_publication",
 ]

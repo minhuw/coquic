@@ -117,13 +117,6 @@ class AtifSource:
         object.__setattr__(self, "invocations", invocations)
 
 
-# Names used by different publication callers all describe the same source
-# boundary.  Keeping aliases here avoids forcing transport stages to know the
-# internal class name.
-CompletedRun = AtifSource
-CompletedRunSnapshot = AtifSource
-
-
 @dataclass(slots=True)
 class _ArtifactState:
     artifact_id: str
@@ -2773,8 +2766,6 @@ __all__ = [
     "SUPPORTED_IMAGE_MEDIA_TYPES",
     "AtifConversionError",
     "AtifSource",
-    "CompletedRun",
-    "CompletedRunSnapshot",
     "canonical_atif_bytes",
     "convert_completed_run",
     "convert_run",

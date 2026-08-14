@@ -166,15 +166,6 @@ class R2PutResult:
         return True
 
 
-# Descriptive aliases keep the boundary easy to discover for callers.
-ObjectClass = R2ObjectClass
-R2FailureCategory = R2ErrorCategory
-R2ResultStatus = R2PutStatus
-R2Request = R2PutRequest
-R2Result = R2PutResult
-R2UploadError = R2Error
-
-
 def _validation(reason: str = "invalid object") -> None:
     raise R2ValidationError(reason) from None
 
@@ -647,27 +638,19 @@ class R2Client:
             conflict=False,
         )
 
-    head_and_verify = verify_object
-
 
 __all__ = [
     "MAX_R2_CREDENTIAL_BYTES",
     "MAX_R2_KEY_LENGTH",
     "MAX_R2_METADATA_VALUE_LENGTH",
     "MAX_R2_OBJECT_BYTES",
-    "ObjectClass",
     "R2Client",
     "R2Error",
     "R2ErrorCategory",
-    "R2FailureCategory",
     "R2ObjectClass",
     "R2PutRequest",
     "R2PutResult",
     "R2PutStatus",
-    "R2Request",
-    "R2Result",
-    "R2ResultStatus",
-    "R2UploadError",
     "R2ValidationError",
     "classify_provider_error",
     "private_original_key",

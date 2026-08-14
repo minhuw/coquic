@@ -392,17 +392,6 @@ def run_trufflehog(
         return ScannerReport(failure=ReasonCode.scanner_failure)
 
 
-# Compatibility spellings used by transport stages and focused tests.
-scan_trufflehog = run_trufflehog
-scan_corpus = run_trufflehog
-scan_publication_corpus = run_trufflehog
-run_secret_scanner = run_trufflehog
-ScannerResult = ScannerReport
-SecretFinding = ScannerFinding
-parse_scanner_output = parse_trufflehog_json
-parse_trufflehog_output = parse_trufflehog_json
-
-
 __all__ = [
     "CorpusEntry",
     "MAX_SCANNER_OUTPUT_BYTES",
@@ -411,16 +400,8 @@ __all__ = [
     "MAX_CORPUS_ENTRIES",
     "REDACTION_MARKER",
     "ScannerFinding",
-    "SecretFinding",
     "ScannerProtocolError",
     "ScannerReport",
-    "ScannerResult",
-    "parse_scanner_output",
     "parse_trufflehog_json",
-    "parse_trufflehog_output",
     "run_trufflehog",
-    "scan_corpus",
-    "scan_publication_corpus",
-    "scan_trufflehog",
-    "run_secret_scanner",
 ]

@@ -30,7 +30,7 @@ from .generation import (
     GenerationOriginal,
     PUBLICATION_SCHEMA_VERSION,
     PublicationComposer,
-    PublicationGeneration as ComposedGeneration,
+    PublicationGeneration,
     compose_publication_generation,
 )
 from .models import FailClosed, PublicationError, ReasonCode, RepairRequired
@@ -58,13 +58,6 @@ class PublicationStatus(StrEnum):
     repair_required = "repair_required"
     blocked = "blocked"
     lost_claim = "lost_claim"
-
-
-# Descriptive aliases make the result discoverable without introducing a
-# second status vocabulary for callers.
-PublishStatus = PublicationStatus
-PublisherStatus = PublicationStatus
-CloudPublishStatus = PublicationStatus
 
 
 class PublicationHideStatus(StrEnum):
@@ -198,7 +191,7 @@ def _publication_id_from(value: object) -> object | None:
 def _is_composed_generation(value: object) -> bool:
     """Accept the immutable envelope and bounded test doubles alike."""
 
-    if isinstance(value, ComposedGeneration):
+    if isinstance(value, PublicationGeneration):
         return True
     return all(
         hasattr(value, name)
@@ -361,11 +354,6 @@ class PublicationHideResult:
             "reason": self.reason,
             "changed": self.changed,
         }
-
-
-PublisherResult = PublicationResult
-CloudPublicationResult = PublicationResult
-PublicationOutcomeResult = PublicationResult
 
 
 def _result(
@@ -708,9 +696,6 @@ class CloudPublisher:
         """Fill newly priceable cached-D1 usage turns through D1."""
 
         return self.d1.backfill_na_costs(catalog, cursor=cursor, limit=limit)
-
-    publication_status = status_view
-    publication_list = list_view
 
     def _claim(self, publication_id: str, current: object | None) -> tuple[object | None, PublicationResult | None]:
         if current is None:
@@ -1096,10 +1081,6 @@ class CloudPublisher:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         return _result(PublicationStatus.queued, queued_id, phase="retry")
 
-    retry = retry_publication
-    retry_generation = retry_publication
-    rescan_retry = retry_publication
-
     def _retry_hide_head(self, generation: object, reason: str) -> PublicationHideResult:
         task_id = getattr(generation, "task_id", None)
         if not isinstance(task_id, str):
@@ -1345,9 +1326,6 @@ class CloudPublisher:
             changed=changed,
         )
 
-    hide = hide_task
-    hide_publication = hide_task
-
     def _receipts(self, publication_id: str) -> dict[tuple[ReceiptClass, str], PublicationReceipt]:
         values = self.store.list_publication_receipts(publication_id)
         result: dict[tuple[ReceiptClass, str], PublicationReceipt] = {}
@@ -1398,7 +1376,7 @@ class CloudPublisher:
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase="receipt")
         return None, self._block(generation, "integrity", hide=False, phase="receipt")
 
-    def _authenticate(self, durable: object, composed: ComposedGeneration) -> str | None:
+    def _authenticate(self, durable: object, composed: PublicationGeneration) -> str | None:
         """Compare all identity and count fields before any provider request."""
 
         task_id = getattr(durable, "task_id", None)
@@ -1794,17 +1772,6 @@ class CloudPublisher:
             return _result(PublicationStatus.exposed, publication_id)
         return self._block(durable, "integrity", hide=False, phase="state")
 
-    publish_claimed = publish
-    publish_generation = publish
-    run = publish
-
-
-PublicationPublisher = CloudPublisher
-GenerationPublisher = CloudPublisher
-CloudPublicationPublisher = CloudPublisher
-Publisher = CloudPublisher
-
-
 def publish_generation(
     store: TaskStore,
     source: object | None = None,
@@ -1878,29 +1845,13 @@ def hide_publication(
     return CloudPublisher(store, object(), d1, now=now).hide_task(task_id, reason)
 
 
-publish_claimed_generation = publish_generation
-publish_publication_generation = publish_generation
-
-
 __all__ = [
-    "CloudPublicationPublisher",
-    "CloudPublicationResult",
-    "CloudPublishStatus",
     "CloudPublisher",
-    "GenerationPublisher",
-    "PublicationPublisher",
     "PublicationResult",
-    "PublicationOutcomeResult",
     "PublicationHideResult",
     "PublicationHideStatus",
     "PublicationStatus",
-    "PublishStatus",
-    "Publisher",
-    "PublisherResult",
-    "PublisherStatus",
-    "publish_claimed_generation",
     "publish_generation",
-    "publish_publication_generation",
     "publication_generation_views",
     "publication_health_view",
     "retry_publication",

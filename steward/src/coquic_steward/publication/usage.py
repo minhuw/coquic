@@ -53,9 +53,6 @@ class UsageProjectionError(ValueError):
     """Raised when sanitized evidence cannot be authenticated or projected."""
 
 
-UsageValidationError = UsageProjectionError
-
-
 _ATIF_SCHEMA_VERSION = "ATIF-v1.7"
 _INVOCATION_KEYS = frozenset(
     {
@@ -717,20 +714,7 @@ def build_task_usage_projection(
     )
 
 
-# Keep the builder discoverable under the short names likely used by later
-# publication stages.  It remains unused by generation.py in this plan.
-build_usage_projection = build_task_usage_projection
-project_task_usage = build_task_usage_projection
-build_usage = build_task_usage_projection
-project_usage = build_task_usage_projection
-
-
 __all__ = [
     "UsageProjectionError",
-    "UsageValidationError",
     "build_task_usage_projection",
-    "build_usage_projection",
-    "project_task_usage",
-    "build_usage",
-    "project_usage",
 ]

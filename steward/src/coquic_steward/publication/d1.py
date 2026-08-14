@@ -36,7 +36,6 @@ MAX_BATCH_PARAMETERS = 99
 MAX_BATCH_BYTES = 100_000
 MAX_BATCH_STATEMENTS = 64
 MAX_RESPONSE_BYTES = 1_048_576
-MAX_RESULT_SETS = MAX_BATCH_STATEMENTS
 MAX_RESULT_ROWS = 4_096
 MAX_TOKEN_LENGTH = 4_096
 MAX_TIMEOUT_SECONDS = 120.0
@@ -1891,7 +1890,7 @@ class D1PublicationClient:
         if document["errors"]:
             _invalid(D1ErrorCode.provider)
         result = document.get("result")
-        if not isinstance(result, list) or len(result) != len(statements) or len(result) > MAX_RESULT_SETS:
+        if not isinstance(result, list) or len(result) != len(statements) or len(result) > MAX_BATCH_STATEMENTS:
             _invalid(D1ErrorCode.malformed_response)
         rows: list[Mapping[str, Any]] = []
         for entry in result:
@@ -3077,12 +3076,6 @@ class D1PublicationClient:
             _invalid(D1ErrorCode.generation_state)
         return ExposureReceipt(publication_id, task_id, usage_generation_id=new_usage_id)
 
-    # Names used by later lifecycle callers; all route through the same CAS path.
-    replace_usage_projection = replace_usage
-    swap_usage = replace_usage
-    expose_usage = replace_usage
-    usage_only_swap = replace_usage
-
     def _verify_existing_generation(self, payload: Mapping[str, Any]) -> None:
         rows = self._query(_statement(_GENERATION_SELECT, payload["publicationId"], payload["taskId"]))
         if rows:
@@ -3509,10 +3502,6 @@ class D1PublicationClient:
             # worker unit.
             None if changed else next_cursor,
         )
-
-    reconcile_price_catalog = backfill_na_costs
-    backfill_na_turns = backfill_na_costs
-    fill_na_costs = backfill_na_costs
 
     def expose(self, source: Mapping[str, Any]) -> ExposureReceipt:
         payload = _validate_payload(source)
@@ -4015,14 +4004,6 @@ class D1PublicationClient:
         next_cursor = str(rows[-1].get("turn_id")) if len(rows) == limit and rows else None
         return rows, next_cursor
 
-    # Stable aliases used by daemon/reconciliation callers.
-    upsert_overhead_usage = upsert_overhead
-    reconcile_overhead = upsert_overhead
-    replace_overhead = upsert_overhead
-    publish_overhead = upsert_overhead
-    page_na_turns = list_visible_na_turns
-    list_na_turns = list_visible_na_turns
-
     def hide_task(self, task_id: str, reason_code: str) -> HideReceipt:
         task_id = _id(task_id)
         if not isinstance(reason_code, str) or _REASON.fullmatch(reason_code) is None or _PRIVATE_LOCATOR.search(reason_code):
@@ -4231,12 +4212,7 @@ class D1PublicationClient:
         return HideReceipt(task_id, effective_publication_id, changed=changed)
 
 
-D1Client = D1PublicationClient
-PublicationD1Client = D1PublicationClient
-
-
 __all__ = [
-    "D1Client",
     "D1Error",
     "D1ErrorCode",
     "D1PublicationClient",
@@ -4247,7 +4223,6 @@ __all__ = [
     "MAX_BATCH_PARAMETERS",
     "MAX_BATCH_STATEMENTS",
     "MAX_RESPONSE_BYTES",
-    "PublicationD1Client",
     "StageReceipt",
     "UsageBackfillReceipt",
 ]

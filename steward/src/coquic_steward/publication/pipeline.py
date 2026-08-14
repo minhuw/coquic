@@ -565,15 +565,6 @@ def _run_from_atif(document: AtifDocument) -> RunMetadata:
         raise PublicationError(ReasonCode.invalid_metadata) from None
 
 
-# Compatibility spellings for transport callers that use the operation name.
-assemble_publication_bundle = build_publication_bundle
-build_publication = build_publication_bundle
-assemble_publication = build_publication_bundle
-
-
 __all__ = [
-    "assemble_publication",
-    "assemble_publication_bundle",
-    "build_publication",
     "build_publication_bundle",
 ]

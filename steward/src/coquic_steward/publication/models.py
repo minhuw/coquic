@@ -898,18 +898,6 @@ class SanitizationResult:
         return self.document
 
 
-# Descriptive aliases for callers that name this stage redaction rather than
-# sanitization; all aliases retain the same bounded result contract.
-RedactionResult = SanitizationResult
-SanitizerResult = SanitizationResult
-
-
-# ``AtifTrajectory`` is a descriptive compatibility name used by callers that
-# model the structured Harbor object rather than its canonical byte envelope.
-AtifTrajectory = AtifDocument
-AtifResult = AtifDocument
-
-
 @dataclass(frozen=True, slots=True)
 class _DirectoryLink:
     parent_fd: int
@@ -2046,8 +2034,6 @@ class UsageTokens:
             "totalTokens": self.total_tokens,
         }
 
-    to_dict = as_dict
-
     @classmethod
     def from_dict(cls, value: object) -> "UsageTokens":
         if not isinstance(value, Mapping):
@@ -2168,8 +2154,6 @@ class UsageCosts:
             "reason": self.reason,
         }
 
-    to_dict = as_dict
-
     @classmethod
     def from_dict(cls, value: object) -> "UsageCosts":
         if not isinstance(value, Mapping):
@@ -2262,8 +2246,6 @@ class UsageCoverage:
             "status": self.status,
         }
 
-    to_dict = as_dict
-
     @classmethod
     def from_dict(cls, value: object) -> "UsageCoverage":
         if not isinstance(value, Mapping) or set(value) != {
@@ -2323,7 +2305,6 @@ class PriceProvenance:
             "catalogDigest": self.catalog_digest,
         }
 
-    to_dict = as_dict
 
 
 def _merge_usage_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
@@ -2927,29 +2908,6 @@ class TaskUsageProjection:
             "lifetime": [item.as_dict() for item in self.lifetime],
         }
 
-    to_dict = as_dict
-
-
-# Names used by downstream publication work are intentionally small aliases;
-# they refer to the same frozen values and do not create a second contract.
-TokenUsage = UsageTokens
-CostSummary = UsageCosts
-Coverage = UsageCoverage
-UsageCost = UsageCosts
-UsageTurnRow = UsageTurn
-TurnUsage = UsageTurn
-UsageInvocationRow = UsageInvocation
-InvocationUsage = UsageInvocation
-UsageRunSummary = UsageRun
-RunUsage = UsageRun
-UsageTaskSummary = TaskUsageSummary
-UsageTask = TaskUsageSummary
-DailyUsageInput = TaskUsageDaily
-LifetimeUsageInput = TaskUsageLifetime
-GenerationMetadata = UsageGenerationMetadata
-UsagePrice = PriceProvenance
-UsageProjection = TaskUsageProjection
-TaskUsage = TaskUsageProjection
 
 
 __all__ = [
@@ -2974,12 +2932,10 @@ __all__ = [
     "Publishable",
     "ReasonCode",
     "RepairRequired",
-    "RedactionResult",
     "RunIdentity",
     "RunLineage",
     "RunMetadata",
     "SanitizationResult",
-    "SanitizerResult",
     "SourceDocument",
     "StableRead",
     "UsageSummary",
@@ -2987,35 +2943,17 @@ __all__ = [
     "MAX_USAGE_INVOCATIONS",
     "MAX_USAGE_TURNS",
     "UsageTokens",
-    "TokenUsage",
     "UsageCosts",
-    "CostSummary",
-    "UsageCost",
     "UsageCoverage",
-    "Coverage",
     "PriceProvenance",
     "UsageTurn",
-    "UsageTurnRow",
-    "TurnUsage",
     "UsageInvocation",
-    "UsageInvocationRow",
-    "InvocationUsage",
     "UsageRun",
-    "UsageRunSummary",
-    "RunUsage",
     "TaskUsageSummary",
-    "UsageTaskSummary",
-    "UsageTask",
     "TaskUsageDaily",
-    "DailyUsageInput",
     "TaskUsageLifetime",
-    "LifetimeUsageInput",
     "UsageGenerationMetadata",
-    "GenerationMetadata",
-    "UsagePrice",
     "TaskUsageProjection",
-    "UsageProjection",
-    "TaskUsage",
     "private_staging",
     "read_stable_file",
     "read_stable_jsonl",

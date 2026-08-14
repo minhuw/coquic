@@ -293,10 +293,6 @@ def discover_secrets(sources: object) -> tuple[str, ...]:
     return tuple(sorted(values, key=lambda item: (-len(item.encode("utf-8")), item)))
 
 
-collect_known_secrets = discover_secrets
-load_credential_values = discover_secrets
-
-
 def _thaw(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _thaw(child) for key, child in value.items()}
@@ -697,13 +693,6 @@ def sanitize_publication(
     return SanitizationResult.failed(ReasonCode.irreparable)
 
 
-# Focused names for callers that separate literal and scanner stages.
-sanitize_atif_document = sanitize_publication
-sanitize_publication_text = sanitize_publication
-redact_document = redact_atif_document
-redact_atif = redact_atif_document
-
-
 __all__ = [
     "MAX_CREDENTIAL_SOURCE_BYTES",
     "MAX_REPAIR_PASSES",
@@ -712,12 +701,6 @@ __all__ = [
     "REDACTION_MARKER",
     "RedactionError",
     "discover_secrets",
-    "collect_known_secrets",
-    "load_credential_values",
-    "redact_atif",
     "redact_atif_document",
-    "redact_document",
-    "sanitize_atif_document",
     "sanitize_publication",
-    "sanitize_publication_text",
 ]

@@ -266,12 +266,6 @@ class MediaInspection:
         )
 
 
-# Descriptive compatibility spellings used by later publication stages.
-MediaInspectionResult = MediaInspection
-MediaResult = MediaInspection
-MediaInspectionOutcome = MediaInspection
-
-
 @dataclass(frozen=True, slots=True)
 class MediaInspectionReport:
     """Bounded aggregate decision for one completed ATIF bundle."""
@@ -315,10 +309,6 @@ class MediaInspectionReport:
         if self.reason_codes:
             value["reasonCodes"] = [reason.value for reason in self.reason_codes]
         return value
-
-
-MediaReport = MediaInspectionReport
-MediaSecurityReport = MediaInspectionReport
 
 
 MediaHandler = Callable[[bytes, str], MediaInspection]
@@ -1405,15 +1395,6 @@ def inspect_media(
     return result
 
 
-inspect_artifact = inspect_media
-inspect_component = inspect_media
-inspect_publication_artifact = inspect_media
-inspect_image = inspect_media
-inspect_media_artifact = inspect_media
-validate_media = inspect_media
-register_inspectable_handler = register_media_handler
-
-
 def inspect_publication_media(
     source: AtifDocument | PublicBundle | Sequence[PublicBundleComponent] | Sequence[SourceDocument] | object,
     **kwargs: Any,
@@ -1437,10 +1418,6 @@ def inspect_publication_media(
     return MediaInspectionReport(tuple(results))
 
 
-inspect_publication = inspect_publication_media
-inspect_media_bundle = inspect_publication_media
-
-
 __all__ = [
     "MAX_IMAGE_DIMENSION",
     "MAX_IMAGE_FRAMES",
@@ -1457,24 +1434,10 @@ __all__ = [
     "MediaInspection",
     "MediaInspectionError",
     "MediaInspectionReport",
-    "MediaInspectionResult",
-    "MediaInspectionOutcome",
-    "MediaReport",
-    "MediaResult",
-    "MediaSecurityReport",
     "classify_media",
-    "inspect_artifact",
-    "inspect_component",
     "inspect_media",
-    "inspect_media_bundle",
-    "inspect_publication",
-    "inspect_publication_artifact",
     "inspect_publication_media",
-    "inspect_image",
-    "inspect_media_artifact",
-    "validate_media",
     "register_media_handler",
-    "register_inspectable_handler",
     "registered_media_handlers",
     "unregister_media_handler",
 ]

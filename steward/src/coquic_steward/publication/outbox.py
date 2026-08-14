@@ -75,22 +75,9 @@ class PublicationState(StrEnum):
     terminal_cleaned = "terminal_cleaned"
 
 
-# ``GenerationState`` and ``OutboxState`` are descriptive names used by later
-# callers.  Keeping them as aliases prevents callers from inventing a second
-# state vocabulary.
-GenerationState = PublicationState
-OutboxState = PublicationState
-PublicationOutboxState = PublicationState
-GenerationStatus = PublicationState
-
-
 class ReceiptClass(StrEnum):
     public = "public"
     private = "private"
-
-
-PublicationReceiptClass = ReceiptClass
-ReceiptKind = ReceiptClass
 
 
 class CleanupState(StrEnum):
@@ -105,13 +92,6 @@ class PublicationHideState(StrEnum):
     pending = "pending"
     confirmed = "confirmed"
     released = "released"
-
-
-# Descriptive aliases keep the hide vocabulary discoverable to callers that
-# name the fence, intent, or task operation differently.
-HideFenceState = PublicationHideState
-HideState = PublicationHideState
-PublicationHideIntentState = PublicationHideState
 
 
 class PublicationOperationStatus(StrEnum):
@@ -371,10 +351,6 @@ def deterministic_publication_id(task_id: str, stable_boundary: str) -> str:
     return GenerationIdentity(task_id, stable_boundary).publication_id
 
 
-publication_id_for = deterministic_publication_id
-generation_id_for = deterministic_publication_id
-
-
 @dataclass(frozen=True, slots=True)
 class PublicationCounts:
     """Bounded expected local row/object counts for one generation."""
@@ -411,9 +387,6 @@ class PublicationCounts:
             "events": self.events,
             "artifacts": self.artifacts,
         }
-
-
-ExpectedCounts = PublicationCounts
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,11 +477,6 @@ class PublicationReceipt:
         verified_at: datetime,
     ) -> "PublicationReceipt":
         return cls(ReceiptClass.private, sha256, byte_size, content_key, verified_at)
-
-
-Receipt = PublicationReceipt
-OutboxReceipt = PublicationReceipt
-PublicationReceiptValue = PublicationReceipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -696,8 +664,6 @@ class PublicationGeneration:
             exposed_at=updated if destination is PublicationState.exposed else self.exposed_at,
         )
 
-    transition = transition_to
-
     def as_dict(self) -> dict[str, object]:
         return {
             "publicationId": self.publication_id,
@@ -717,11 +683,6 @@ class PublicationGeneration:
             "updatedAt": _timestamp_text(self.updated_at),
             "exposedAt": _timestamp_text(self.exposed_at) if self.exposed_at else None,
         }
-
-
-Generation = PublicationGeneration
-OutboxGeneration = PublicationGeneration
-GenerationRecord = PublicationGeneration
 
 
 @dataclass(frozen=True, slots=True)
@@ -782,11 +743,6 @@ class PublicationHealth:
             "oldestQueuedAgeSeconds": self.oldest_queued_age_seconds,
             "lastCategory": self.last_category,
         }
-
-
-Health = PublicationHealth
-OutboxHealth = PublicationHealth
-HealthSnapshot = PublicationHealth
 
 
 def _exact_path(value: object) -> str:
@@ -895,11 +851,6 @@ class CleanupIntent:
         return self.as_dict()
 
 
-PublicationCleanupIntent = CleanupIntent
-OutboxCleanupIntent = CleanupIntent
-CleanupIntentValue = CleanupIntent
-
-
 @dataclass(frozen=True, slots=True)
 class PublicationHideFence:
     """Task-scoped local fence which precedes any remote hide request."""
@@ -979,12 +930,6 @@ class PublicationHideFence:
 
     def as_public_dict(self) -> dict[str, object]:
         return self.as_dict()
-
-
-PublicationHideIntent = PublicationHideFence
-TaskPublicationHideFence = PublicationHideFence
-HideFence = PublicationHideFence
-HideIntent = PublicationHideFence
 
 
 @dataclass(frozen=True, slots=True)
@@ -1112,33 +1057,10 @@ class PublicationOperationResult:
         return value
 
 
-# Descriptive aliases keep the result discoverable for callers that name the
-# operation rather than the shared mutation boundary.
-PublicationMutationStatus = PublicationOperationStatus
-PublicationResultStatus = PublicationOperationStatus
-PublicationMutationResult = PublicationOperationResult
-PublicationTransitionResult = PublicationOperationResult
-PublicationClaimResult = PublicationOperationResult
-PublicationLeaseResult = PublicationOperationResult
-PublicationReceiptResult = PublicationOperationResult
-PublicationCleanupResult = PublicationOperationResult
-OutboxOperationResult = PublicationOperationResult
-
-
 __all__ = [
     "CleanupIntent",
     "CleanupState",
-    "HideFence",
-    "HideFenceState",
-    "HideIntent",
-    "HideState",
-    "ExpectedCounts",
-    "Generation",
     "GenerationIdentity",
-    "GenerationState",
-    "GenerationRecord",
-    "GenerationStatus",
-    "Health",
     "MAX_ATTEMPTS",
     "MAX_CLEANUP_PATH_LENGTH",
     "MAX_CONTENT_KEY_LENGTH",
@@ -1147,46 +1069,19 @@ __all__ = [
     "MAX_OBJECT_BYTES",
     "MAX_REASON_LENGTH",
     "MAX_RETRY_DELAY_SECONDS",
-    "OutboxCleanupIntent",
-    "OutboxGeneration",
-    "OutboxHealth",
-    "OutboxReceipt",
-    "OutboxState",
-    "PublicationOutboxState",
     "OutboxValidationError",
-    "PublicationCleanupIntent",
     "PublicationCounts",
     "PublicationGeneration",
     "PublicationHealth",
     "PublicationHideFence",
-    "PublicationHideIntent",
-    "PublicationHideIntentState",
     "PublicationHideState",
-    "TaskPublicationHideFence",
     "PublicationOperationResult",
     "PublicationOperationStatus",
-    "PublicationMutationResult",
-    "PublicationMutationStatus",
-    "PublicationResultStatus",
-    "PublicationTransitionResult",
-    "PublicationClaimResult",
-    "PublicationLeaseResult",
-    "PublicationReceiptResult",
-    "PublicationCleanupResult",
-    "OutboxOperationResult",
     "PublicationReceipt",
-    "PublicationReceiptClass",
-    "PublicationReceiptValue",
     "PublicationState",
-    "Receipt",
     "ReceiptClass",
-    "ReceiptKind",
-    "CleanupIntentValue",
-    "HealthSnapshot",
     "allowed_transition",
     "deterministic_publication_id",
-    "generation_id_for",
     "legal_transition",
-    "publication_id_for",
     "transition_state",
 ]

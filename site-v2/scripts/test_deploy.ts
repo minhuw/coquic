@@ -211,10 +211,16 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     const remoteConfigRoot = join(remoteRoot, "etc", "coquic-demo");
     const appEnvPath = join(remoteConfigRoot, "app.env");
     const servicePath = join(remoteRoot, "etc", "systemd", "system", "coquic-demo.service");
+    const previousReleaseOnlyMarker = join(retainedRelease, "app", "public", "previous-release-only.marker");
+    const packagedCurrentMarker = join(deployApp, "public", "packaged-current.marker");
     await mkdir(retainedRelease, { recursive: true });
     await mkdir(obsoleteRelease, { recursive: true });
+    await mkdir(join(retainedRelease, "app", "public"), { recursive: true });
+    await mkdir(join(deployApp, "public"), { recursive: true });
     await writeFile(join(retainedRelease, "marker"), "retained\n");
     await writeFile(join(obsoleteRelease, "marker"), "obsolete\n");
+    await writeFile(previousReleaseOnlyMarker, "previous-release-only\n");
+    await writeFile(packagedCurrentMarker, "packaged-current\n");
     await symlink(retainedRelease, current);
     await writeFile(servicePath, "service-preserved\n");
     await mkdir(join(remoteConfigRoot, "tls"), { recursive: true });
@@ -261,6 +267,16 @@ else printf '%s\\n' coquic-wasm-demo-v1; fi
     assert.equal(deployed.code, 0, deployed.output);
     const firstTarget = await readlink(current);
     assert.match(firstTarget, /111111111111$/);
+    assert.deepEqual(
+      await snapshotPath(join(firstTarget, "app", "public", "previous-release-only.marker")),
+      { kind: "missing" },
+      "previous-release-only public assets are not carried into a new release",
+    );
+    assert.equal(
+      await readFile(join(firstTarget, "app", "public", "packaged-current.marker"), "utf8"),
+      "packaged-current\n",
+      "packaged current public assets are installed",
+    );
     const installedAppEnv = await readFile(appEnvPath, "utf8");
     assert.ok(installedAppEnv.includes(`export CLOUDFLARE_ACCOUNT_ID=${cloudAccount.toLowerCase()}`));
     assert.ok(installedAppEnv.includes(`export COQUIC_STEWARD_D1_DATABASE_ID=${cloudDatabase}`));

@@ -712,8 +712,8 @@ preserve_installed_cloud_exports() {
   local filtered_path="${remote_upload_dir}/app.env.filtered"
   local preserved_path="${remote_upload_dir}/app.env.cloud"
 
-  # The ordinary deploy owns QA/preview and legacy archive exports, but it
-  # must carry the four operator-installed cloud exports forward unchanged.
+  # The ordinary deploy owns QA/preview configuration, but it must carry the
+  # four operator-installed cloud exports forward unchanged.
   sudo awk '
     /^[[:space:]]*(export[[:space:]]+)?(CLOUDFLARE_ACCOUNT_ID|COQUIC_STEWARD_D1_DATABASE_ID|COQUIC_STEWARD_D1_READ_TOKEN|COQUIC_STEWARD_PUBLIC_R2_BASE_URL)=/ { next }
     { print }
@@ -813,49 +813,6 @@ sudo rm -rf "${remote_release_dir}/app"
 sudo install -d -m 755 "${remote_release_dir}/app"
 sudo tar -xf "${remote_upload_dir}/app.tar" -C "${remote_release_dir}/app"
 sudo install -d -m 755 "${remote_release_dir}/app/public"
-previous_app_public_dir="${remote_current_link}/app/public"
-if [[ "${same_release_repair_mode}" == "1" ]]; then
-  previous_app_public_dir="${remote_upload_dir}/current.app.bak/public"
-fi
-preserve_runtime_public_file() {
-  local entry="$1"
-  local source_path="${previous_app_public_dir}/${entry}"
-  local dest_path="${remote_release_dir}/app/public/${entry}"
-  if ! sudo test -f "${source_path}" || sudo test -f "${dest_path}"; then
-    return
-  fi
-  if sudo grep -Eq '"event_name"[[:space:]]*:[[:space:]]*"local_fake_preview"|"commit"[[:space:]]*:[[:space:]]*"fake-preview|fake://' "${source_path}"; then
-    echo "skipping preview runtime data: ${entry}" >&2
-    return
-  fi
-  sudo install -m 644 "${source_path}" "${dest_path}"
-}
-preserve_runtime_public_dir() {
-  local entry="$1"
-  local source_path="${previous_app_public_dir}/${entry}"
-  local dest_path="${remote_release_dir}/app/public/${entry}"
-  if ! sudo test -d "${source_path}" || sudo test -d "${dest_path}"; then
-    return
-  fi
-  if sudo test -f "${source_path}/index.json" &&
-     sudo grep -Eq '"event_name"[[:space:]]*:[[:space:]]*"local_fake_preview"|"commit"[[:space:]]*:[[:space:]]*"fake-preview|fake://' "${source_path}/index.json"; then
-    echo "skipping preview runtime data directory: ${entry}" >&2
-    return
-  fi
-  sudo cp -a "${source_path}" "${dest_path}"
-}
-preserve_runtime_public_file "perf-results.json"
-preserve_runtime_public_file "perf-history.json"
-preserve_runtime_public_dir "perf-history"
-preserve_runtime_public_dir "perf-artifacts"
-preserve_runtime_public_file "interop-results.json"
-preserve_runtime_public_file "coverage-results.json"
-preserve_runtime_public_dir "duvet"
-preserve_runtime_public_dir "steward"
-if sudo test -d "${previous_app_public_dir}/coverage" &&
-   ! sudo test -d "${remote_release_dir}/app/public/coverage"; then
-  sudo cp -a "${previous_app_public_dir}/coverage" "${remote_release_dir}/app/public/coverage"
-fi
 
 sudo install -m 644 "${remote_upload_dir}/coquic-demo.service" "${remote_systemd_service}"
 sudo install -m 644 "${remote_upload_dir}/fullchain.pem" "${remote_config_root}/tls/fullchain.pem"

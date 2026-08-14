@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
 
 from coquic_steward.agents.telemetry import PriceCatalog, PriceEntry
 from coquic_steward.publication import (
+    AtifDocument,
     TaskUsageProjection,
     UsageCoverage,
     UsageCosts,
@@ -97,6 +99,15 @@ def _run(run_id: str, invocations: list[dict[str, object]]) -> dict[str, object]
     }
 
 
+class _UsageAsDictLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def as_dict(self) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("unsupported serializer executed")
+
+
 def test_projection_prices_turns_rolls_up_and_is_order_independent() -> None:
     first = _run(
         "run-two",
@@ -129,6 +140,16 @@ def test_projection_prices_turns_rolls_up_and_is_order_independent() -> None:
     assert left.invocations[1].turns[0].cost.status == "Partial"
     assert left.invocations[0].tokens.total_tokens is None
     assert left.invocations[0].cost.total_micro_usd is None
+
+
+def test_projection_accepts_detached_atif_document() -> None:
+    document = _run("run-document", [_invocation("run-document", "inv-document", 0)])
+    content = json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+    projection = build_task_usage_projection(AtifDocument(document, content), _catalog())
+
+    assert isinstance(projection, TaskUsageProjection)
+    assert projection.runs[0].run_id == "run-document"
 
 
 def test_projection_uses_exact_invocation_start_price_and_catalog_provenance() -> None:
@@ -201,6 +222,15 @@ def test_projection_rejects_cross_owner_and_duplicate_identity() -> None:
     cross_owner["extra"]["coquic"]["source"]["invocations"][0]["taskId"] = "other-task"  # type: ignore[index]
     with pytest.raises(UsageProjectionError):
         build_task_usage_projection(cross_owner, _catalog())
+
+
+def test_projection_rejects_as_dict_lookalikes_without_execution() -> None:
+    lookalike = _UsageAsDictLookalike()
+
+    with pytest.raises(UsageProjectionError):
+        build_task_usage_projection(lookalike, _catalog())
+
+    assert lookalike.called is False
 
 
 def test_projection_accepts_nullable_billing_mode_for_unavailable_invocation() -> None:

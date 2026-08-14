@@ -19,7 +19,9 @@ from ..agents.telemetry import (
     TelemetryTurn,
     estimate_cost,
 )
+from .outbox import PublicationCounts
 from .models import (
+    AtifDocument,
     MAX_USAGE_INVOCATIONS,
     MAX_USAGE_TURNS,
     PriceProvenance,
@@ -31,6 +33,7 @@ from .models import (
     UsageCosts,
     UsageInvocation,
     UsageRun,
+    UsageSummary,
     UsageTokens,
     UsageTurn,
     _merge_usage_costs,
@@ -88,6 +91,23 @@ _COVERAGE_VALUES = {
     "na": "N.A.",
 }
 
+_MAPPING_VALUES = (
+    AtifDocument,
+    PublicationCounts,
+    UsageSummary,
+    UsageTokens,
+    UsageCosts,
+    UsageCoverage,
+    PriceProvenance,
+    UsageTurn,
+    UsageInvocation,
+    UsageRun,
+    TaskUsageSummary,
+    TaskUsageDaily,
+    TaskUsageLifetime,
+    TaskUsageProjection,
+)
+
 
 def _fail(message: str) -> None:
     # Do not include evidence values in validation errors: sanitized input is
@@ -98,14 +118,38 @@ def _fail(message: str) -> None:
 def _mapping(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return {str(key): _usage_thaw(item) for key, item in value.items()}
-    as_dict = getattr(value, "as_dict", None)
-    if callable(as_dict):
-        try:
-            mapped = as_dict()
-        except Exception:
-            _fail("evidence is not a detached mapping")
-        if isinstance(mapped, Mapping):
-            return {str(key): _usage_thaw(item) for key, item in mapped.items()}
+    if isinstance(value, AtifDocument):
+        mapped = AtifDocument.as_dict(value)
+    elif isinstance(value, PublicationCounts):
+        mapped = PublicationCounts.as_dict(value)
+    elif isinstance(value, UsageSummary):
+        mapped = UsageSummary.as_dict(value)
+    elif isinstance(value, UsageTokens):
+        mapped = UsageTokens.as_dict(value)
+    elif isinstance(value, UsageCosts):
+        mapped = UsageCosts.as_dict(value)
+    elif isinstance(value, UsageCoverage):
+        mapped = UsageCoverage.as_dict(value)
+    elif isinstance(value, PriceProvenance):
+        mapped = PriceProvenance.as_dict(value)
+    elif isinstance(value, UsageTurn):
+        mapped = UsageTurn.as_dict(value)
+    elif isinstance(value, UsageInvocation):
+        mapped = UsageInvocation.as_dict(value)
+    elif isinstance(value, UsageRun):
+        mapped = UsageRun.as_dict(value)
+    elif isinstance(value, TaskUsageSummary):
+        mapped = TaskUsageSummary.as_dict(value)
+    elif isinstance(value, TaskUsageDaily):
+        mapped = TaskUsageDaily.as_dict(value)
+    elif isinstance(value, TaskUsageLifetime):
+        mapped = TaskUsageLifetime.as_dict(value)
+    elif isinstance(value, TaskUsageProjection):
+        mapped = TaskUsageProjection.as_dict(value)
+    else:
+        _fail("evidence is not a detached mapping")
+    if isinstance(mapped, Mapping):
+        return {str(key): _usage_thaw(item) for key, item in mapped.items()}
     _fail("evidence is not a detached mapping")
 
 
@@ -576,7 +620,7 @@ def build_task_usage_projection(
         _fail("price catalog is invalid")
     if isinstance(evidence, (str, bytes)):
         _fail("evidence is not a sequence")
-    if isinstance(evidence, Mapping) or callable(getattr(evidence, "as_dict", None)):
+    if isinstance(evidence, Mapping) or isinstance(evidence, _MAPPING_VALUES):
         values = (evidence,)
     elif isinstance(evidence, Sequence):
         values = tuple(evidence)

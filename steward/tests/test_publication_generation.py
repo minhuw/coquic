@@ -176,6 +176,24 @@ class _CaptureWindowMapping(Mapping[str, object]):
         return self._values.items()
 
 
+class _GenerationAsDictLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def as_dict(self) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("unsupported serializer executed")
+
+
+class _GenerationModelDumpLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def model_dump(self, **_kwargs: object) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("unsupported serializer executed")
+
+
 def test_generation_is_deterministic_and_detached() -> None:
     graph = _graph(_source())
     first = _compose(graph)
@@ -260,6 +278,19 @@ def test_generation_rejects_caller_supplied_identity() -> None:
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.invalid_metadata,)
+
+
+@pytest.mark.parametrize("lookalike_type", [_GenerationAsDictLookalike, _GenerationModelDumpLookalike])
+def test_generation_rejects_serializer_lookalikes_without_execution(lookalike_type) -> None:
+    lookalike = lookalike_type()
+    graph = _graph(_source())
+    graph["task"] = lookalike
+
+    result = _compose(graph)
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.invalid_metadata,)
+    assert lookalike.called is False
 
 
 def test_active_task_after_completed_planning_run_is_visible() -> None:

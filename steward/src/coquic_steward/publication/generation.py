@@ -25,17 +25,38 @@ from .d1 import D1Error, _usage_metadata_digest, _validate_payload
 from .atif import AtifSource
 from .media import inspect_media
 from .models import (
+    AtifDocument,
     FailClosed,
     FindingSummary,
     LogicalArtifact,
+    PriceProvenance,
+    PrivateOriginal,
     PublicationError,
     PublicationOutcome,
     PublicationSnapshot,
+    PublicBundle,
+    PublicBundleComponent,
     Publishable,
     ReasonCode,
     RepairRequired,
+    RunIdentity,
+    RunLineage,
     RunMetadata,
+    SanitizationResult,
+    SourceDocument,
+    StableRead,
+    TaskUsageDaily,
+    TaskUsageLifetime,
     TaskUsageProjection,
+    TaskUsageSummary,
+    UsageCosts,
+    UsageCoverage,
+    UsageGenerationMetadata,
+    UsageInvocation,
+    UsageRun,
+    UsageSummary,
+    UsageTokens,
+    UsageTurn,
 )
 from .pipeline import build_publication_bundle
 from .redaction import discover_secrets
@@ -43,6 +64,7 @@ from .scanner import CorpusEntry, run_trufflehog
 from .usage import build_task_usage_projection
 from .outbox import (
     GenerationIdentity as OutboxGenerationIdentity,
+    PublicationCounts,
     PublicationGeneration as OutboxGenerationRecord,
 )
 
@@ -61,6 +83,109 @@ _TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
 _MISSING: Final = object()
+
+
+def _known_public_mapping(value: object) -> Mapping[str, Any] | None:
+    """Serialize only named current publication values.
+
+    This is deliberately a closed dispatch table.  In particular, an
+    arbitrary object exposing a serializer-shaped attribute is not a
+    publication input and must never get to execute that attribute.
+    """
+
+    if isinstance(value, RunIdentity):
+        return RunIdentity.as_dict(value)
+    if isinstance(value, RunLineage):
+        return RunLineage.as_dict(value)
+    if isinstance(value, UsageSummary):
+        return UsageSummary.as_dict(value)
+    if isinstance(value, RunMetadata):
+        return RunMetadata.as_dict(value)
+    if isinstance(value, SourceDocument):
+        return SourceDocument.as_dict(value)
+    if isinstance(value, LogicalArtifact):
+        return LogicalArtifact.as_dict(value)
+    if isinstance(value, PublicBundleComponent):
+        return PublicBundleComponent.as_dict(value)
+    if isinstance(value, PublicBundle):
+        return PublicBundle.as_dict(value)
+    if isinstance(value, PrivateOriginal):
+        return PrivateOriginal.as_dict(value)
+    if isinstance(value, FindingSummary):
+        return FindingSummary.as_dict(value)
+    if isinstance(value, PublicationSnapshot):
+        return PublicationSnapshot.as_dict(value)
+    if isinstance(value, Publishable):
+        return Publishable.as_dict(value)
+    if isinstance(value, RepairRequired):
+        return RepairRequired.as_dict(value)
+    if isinstance(value, FailClosed):
+        return FailClosed.as_dict(value)
+    if isinstance(value, AtifDocument):
+        return AtifDocument.as_dict(value)
+    if isinstance(value, SanitizationResult):
+        return SanitizationResult.as_dict(value)
+    if isinstance(value, UsageTokens):
+        return UsageTokens.as_dict(value)
+    if isinstance(value, UsageCosts):
+        return UsageCosts.as_dict(value)
+    if isinstance(value, UsageCoverage):
+        return UsageCoverage.as_dict(value)
+    if isinstance(value, PriceProvenance):
+        return PriceProvenance.as_dict(value)
+    if isinstance(value, UsageTurn):
+        return UsageTurn.as_dict(value)
+    if isinstance(value, UsageInvocation):
+        return UsageInvocation.as_dict(value)
+    if isinstance(value, UsageRun):
+        return UsageRun.as_dict(value)
+    if isinstance(value, TaskUsageSummary):
+        return TaskUsageSummary.as_dict(value)
+    if isinstance(value, TaskUsageDaily):
+        return TaskUsageDaily.as_dict(value)
+    if isinstance(value, TaskUsageLifetime):
+        return TaskUsageLifetime.as_dict(value)
+    if isinstance(value, UsageGenerationMetadata):
+        return UsageGenerationMetadata.as_dict(value)
+    if isinstance(value, TaskUsageProjection):
+        return TaskUsageProjection.as_dict(value)
+    if isinstance(value, GenerationObject):
+        return GenerationObject.as_dict(value)
+    if isinstance(value, GenerationOriginal):
+        return GenerationOriginal.as_dict(value)
+    if isinstance(value, PublicationGeneration):
+        return PublicationGeneration.as_dict(value)
+    if isinstance(value, PublicationCounts):
+        return PublicationCounts.as_dict(value)
+    return None
+
+
+def _has_owned_content(value: object) -> bool:
+    """Recognize the named byte-bearing values that must stay attached."""
+
+    if isinstance(
+        value,
+        (
+            StableRead,
+            SourceDocument,
+            PublicBundleComponent,
+            PrivateOriginal,
+            AtifDocument,
+            GenerationObject,
+            GenerationOriginal,
+        ),
+    ):
+        return True
+    if isinstance(value, SanitizationResult):
+        return value.content is not None
+    return False
+
+
+def _preserve_owned_value(value: object) -> bool:
+    return _has_owned_content(value) or isinstance(
+        value,
+        (LogicalArtifact, PublicationSnapshot, RunMetadata, Publishable, RepairRequired, FailClosed),
+    )
 
 
 def _freeze_graph(value: Any) -> Any:
@@ -87,16 +212,14 @@ def _freeze_graph(value: Any) -> Any:
         return tuple(_freeze_graph(item) for item in value)
     if isinstance(value, tuple):
         return tuple(_freeze_graph(item) for item in value)
-    if isinstance(getattr(value, "content", _MISSING), (bytes, bytearray)):
+    if _preserve_owned_value(value):
         return value
-    as_dict = getattr(value, "as_dict", None)
-    if callable(as_dict) and not isinstance(value, (LogicalArtifact, PublicationSnapshot, RunMetadata, Publishable, RepairRequired, FailClosed)):
-        try:
-            candidate = as_dict()
-        except Exception:
-            raise PublicationError(ReasonCode.invalid_metadata) from None
-        if isinstance(candidate, Mapping):
-            return MappingProxyType({str(key): _freeze_graph(item) for key, item in candidate.items()})
+    try:
+        candidate = _known_public_mapping(value)
+    except Exception:
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    if candidate is not None:
+        return MappingProxyType({str(key): _freeze_graph(item) for key, item in candidate.items()})
     return value
 
 
@@ -132,15 +255,25 @@ def _graph_serial(value: Any, budget: list[int]) -> Any:
         return result
     if isinstance(value, (list, tuple)):
         return [_graph_serial(item, budget) for item in value]
-    as_dict = getattr(value, "as_dict", None)
-    if callable(as_dict):
-        try:
-            candidate = as_dict()
-        except Exception:
-            raise PublicationError(ReasonCode.invalid_metadata) from None
+    try:
+        candidate = _known_public_mapping(value)
+    except Exception:
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    if candidate is not None:
         return {"__type__": type(value).__name__, "value": _graph_serial(candidate, budget)}
-    content = getattr(value, "content", _MISSING)
-    if isinstance(content, (bytes, bytearray)):
+    if isinstance(
+        value,
+        (
+            StableRead,
+            SourceDocument,
+            PublicBundleComponent,
+            PrivateOriginal,
+            AtifDocument,
+            GenerationObject,
+            GenerationOriginal,
+        ),
+    ):
+        content = value.content
         return {
             "__type__": type(value).__name__,
             "content": _graph_serial(content, budget),
@@ -228,21 +361,11 @@ def _mapping(value: object) -> Mapping[str, Any] | None:
         if any(not isinstance(key, str) for key in value):
             return None
         return value
-    as_dict = getattr(value, "as_dict", None)
-    if callable(as_dict):
-        try:
-            candidate = as_dict()
-        except Exception:
-            return None
-        return candidate if isinstance(candidate, Mapping) else None
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            candidate = model_dump(mode="json", by_alias=True)
-        except Exception:
-            return None
-        return candidate if isinstance(candidate, Mapping) else None
-    return None
+    try:
+        candidate = _known_public_mapping(value)
+    except Exception:
+        return None
+    return candidate if isinstance(candidate, Mapping) else None
 
 
 def _id(value: object) -> str:
@@ -319,13 +442,13 @@ def _source_from_entry(entry: object) -> object:
 
 def _run_mapping(value: object) -> Mapping[str, Any] | None:
     if isinstance(value, Publishable):
-        return value.snapshot.run.as_dict()
+        return _run_mapping(value.snapshot.run)
     if isinstance(value, PublicationSnapshot):
-        return value.run.as_dict()
+        return _run_mapping(value.run)
     if isinstance(value, AtifSource):
         return _run_mapping(value.run)
     if isinstance(value, RunMetadata):
-        return value.as_dict()
+        return _known_public_mapping(value)
     mapping = _mapping(value)
     if mapping is None:
         return None
@@ -832,12 +955,11 @@ def _contains_identity_fields(value: object, *, budget: list[int]) -> bool:
             _contains_identity_fields(child, budget=budget)
             for child in (value.run, value.documents, value.artifacts)
         )
-    as_dict = getattr(value, "as_dict", None)
-    if callable(as_dict):
-        try:
-            candidate = as_dict()
-        except Exception:
-            raise PublicationError(ReasonCode.invalid_metadata) from None
+    try:
+        candidate = _known_public_mapping(value)
+    except Exception:
+        raise PublicationError(ReasonCode.invalid_metadata) from None
+    if candidate is not None:
         return _contains_identity_fields(candidate, budget=budget)
     return False
 
@@ -1199,11 +1321,10 @@ def _usage_costs(value: object) -> dict[str, int | None]:
 def _usage_price_digest(value: object | None) -> str | None:
     if value is None:
         return None
-    as_dict = getattr(value, "as_dict", None)
-    if not callable(as_dict):
+    if not isinstance(value, PriceProvenance):
         raise PublicationError(ReasonCode.invalid_metadata)
     try:
-        return hashlib.sha256(_canonical(as_dict())).hexdigest()
+        return hashlib.sha256(_canonical(PriceProvenance.as_dict(value))).hexdigest()
     except (PublicationError, TypeError, ValueError, RecursionError):
         raise PublicationError(ReasonCode.invalid_metadata) from None
 

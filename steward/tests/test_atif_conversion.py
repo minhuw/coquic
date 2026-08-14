@@ -143,6 +143,15 @@ def _telemetry_sidecar(
     }
 
 
+class _InvocationToDictLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def to_dict(self, **_kwargs: object) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("unsupported serializer executed")
+
+
 def _invocation_descriptor(
     invocation_id: str,
     retry_ordinal: int,
@@ -424,6 +433,20 @@ def test_telemetry_availability_and_full_sidecar_evidence_are_preserved() -> Non
     assert telemetry["duration_ms"] == 1000
     assert telemetry["cost"] == {"status": "unavailable", "reason": "no price"}
     assert "private-invocation" not in result.content.decode()
+
+
+def test_invocation_to_dict_lookalikes_are_rejected_without_execution() -> None:
+    lookalike = _InvocationToDictLookalike()
+
+    with pytest.raises(AtifConversionError) as error:
+        convert_completed_run(
+            run=_run(),
+            documents=_documents([{"type": "agent_message", "text": "complete"}]),
+            invocations=[lookalike],
+        )
+
+    assert error.value.code == ReasonCode.invalid_metadata
+    assert lookalike.called is False
 
 
 def test_invocations_publish_ordered_retries_and_keep_missing_usage_explicit() -> None:

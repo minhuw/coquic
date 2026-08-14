@@ -59,11 +59,17 @@ from ..execution.session import (
 )
 from ..execution.task_archive import TaskArchiveWriter
 from ..publication.atif import AtifSource
+from ..publication.models import RunMetadata
 from ..publication.generation import (
     PublicationGeneration as ComposedPublicationGeneration,
     compose_publication_generation,
 )
-from ..publication.outbox import CleanupIntent, CleanupState, ReceiptClass
+from ..publication.outbox import (
+    CleanupIntent,
+    CleanupState,
+    PublicationHealth,
+    ReceiptClass,
+)
 from ..publication.d1 import D1Error, D1PublicationClient, _overhead_digest
 from ..publication.publisher import CloudPublisher, _call_composer
 from ..publication.r2 import R2Client, private_original_key
@@ -85,6 +91,7 @@ from ..control_loop import (
     new_id as new_control_loop_id,
     timestamp as control_timestamp,
 )
+from ..control_loop.models import StewardOverheadUsage
 from ..control_loop.usage import StewardOverheadReducer
 from ..planning import PlannerRun as PlanningPlannerRun, run_planner
 from ..planning.planner import render_planner_prompt
@@ -615,13 +622,16 @@ class StewardDaemon:
         if callable(publication_health):
             try:
                 health = publication_health()
-                health_dict = (
-                    health.as_dict()
-                    if callable(getattr(health, "as_dict", None))
-                    else dict(health)
-                    if isinstance(health, Mapping)
-                    else {}
-                )
+                if isinstance(health, PublicationHealth):
+                    health_dict = PublicationHealth.as_dict(health)
+                elif isinstance(health, Mapping):
+                    health_dict = dict(health)
+                elif type(health) is SimpleNamespace and "as_dict" in health.__dict__:
+                    # Keep the bounded test/provider adapter explicit; do not
+                    # discover serializers on arbitrary health values.
+                    health_dict = health.as_dict()
+                else:
+                    health_dict = {}
                 bounded_health: dict[str, object] = {}
                 for key, value in health_dict.items():
                     if isinstance(value, bool):
@@ -1307,21 +1317,8 @@ class StewardDaemon:
     def _publication_usage_mapping(value: object) -> Mapping[str, object] | None:
         if isinstance(value, Mapping):
             return value
-        for name in ("public_dict", "model_dump", "as_dict"):
-            method = getattr(value, name, None)
-            if not callable(method):
-                continue
-            try:
-                candidate = method(by_alias=True, mode="json") if name == "model_dump" else method()
-            except TypeError:
-                try:
-                    candidate = method()
-                except Exception:
-                    continue
-            except Exception:
-                continue
-            if isinstance(candidate, Mapping):
-                return candidate
+        if isinstance(value, StewardOverheadUsage):
+            return StewardOverheadUsage.public_dict(value)
         return None
 
     def _publication_overhead_rows(self) -> tuple[object, ...]:
@@ -1387,7 +1384,7 @@ class StewardDaemon:
                             json.dumps(row_mapping, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
                         ).hexdigest()
                     try:
-                        publisher.reconcile_overhead(row, digest=row_digest)
+                        publisher.reconcile_overhead(row_mapping, digest=row_digest)
                     except RuntimeError:
                         # Keep the cursor pending when the publisher has not
                         # been provisioned with the reconciliation primitive.
@@ -3064,8 +3061,8 @@ class StewardDaemon:
                 copied_entries.append(dict(entry) if wrapper is not None else entry)
                 continue
             run_value = source.run
-            if hasattr(run_value, "as_dict") and callable(run_value.as_dict):
-                run_mapping = dict(run_value.as_dict())
+            if isinstance(run_value, RunMetadata):
+                run_mapping = dict(RunMetadata.as_dict(run_value))
             elif isinstance(run_value, Mapping):
                 run_mapping = dict(run_value)
             else:

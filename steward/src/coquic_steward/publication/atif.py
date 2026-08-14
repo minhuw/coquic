@@ -1903,18 +1903,10 @@ _INVOCATION_DESCRIPTOR_KEYS: Final[frozenset[str]] = frozenset(
 
 
 def _invocation_mapping(value: object) -> dict[str, Any]:
-    """Detach one archive-owned invocation without importing archive code."""
+    """Accept only an owner-detached invocation mapping."""
 
     if isinstance(value, Mapping):
         return {str(key): item for key, item in value.items()}
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            mapped = to_dict(include_telemetry=True)
-        except (TypeError, ValueError, AttributeError):
-            _fail(ReasonCode.invalid_metadata)
-        if isinstance(mapped, Mapping):
-            return {str(key): item for key, item in mapped.items()}
     _fail(ReasonCode.invalid_metadata)
 
 

@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from coquic_steward.agents.invocation import InvocationOutcome
+from coquic_steward.control_loop.models import StewardOverheadUsage
 from coquic_steward.core.models import (
     CodexRunState,
     PipelineCursorPhase,
@@ -56,6 +57,8 @@ from coquic_steward.execution.session import (
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.cli import _run_until_stopped
 from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
+from coquic_steward.publication.atif import AtifSource
+from coquic_steward.publication.models import RunIdentity, RunMetadata
 from coquic_steward.orchestration.preflight import (
     StewardPreflightError,
     run_preflight,
@@ -3442,3 +3445,114 @@ def test_terminal_container_remove_requires_stopped_identity(config):
     TaskContainerRuntime(runtime_config, client=Client()).remove()
 
     assert [call[0] for call in calls] == ["inspect", "rm"]
+
+
+class _DaemonSerializerLookalike:
+    def __init__(self) -> None:
+        self.as_dict_called = False
+        self.public_dict_called = False
+
+    def as_dict(self) -> dict[str, object]:
+        self.as_dict_called = True
+        raise AssertionError("unsupported serializer executed")
+
+    def public_dict(self) -> dict[str, object]:
+        self.public_dict_called = True
+        raise AssertionError("unsupported serializer executed")
+
+
+class _DaemonRunAsDictLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def as_dict(self) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("unsupported serializer executed")
+
+
+def _terminal_run_metadata() -> RunMetadata:
+    started = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    return RunMetadata(
+        RunIdentity("task-terminal", "pipeline-terminal", "run-original"),
+        "implementation",
+        "succeeded",
+        started,
+        started.replace(second=1),
+        1_000,
+    )
+
+
+def test_terminal_publication_graph_statistically_detaches_run_metadata() -> None:
+    daemon = object.__new__(StewardDaemon)
+    task = SimpleNamespace(
+        id="task-terminal",
+        status=TaskStatus.succeeded.value,
+        updated_at=datetime(2026, 7, 28, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    source = AtifSource(
+        run=_terminal_run_metadata(),
+        documents={"run.json": b'{"runId":"run-original"}\n'},
+    )
+    graph = {"task": {"taskId": task.id}, "runs": [source]}
+
+    result = daemon._terminal_publication_graph(task, SimpleNamespace(id="run-original"), graph, "run-terminal")
+
+    assert result is not None
+    replaced = result["runs"][0]
+    assert isinstance(replaced, AtifSource)
+    assert isinstance(replaced.run, dict)
+    assert replaced.run["runId"] == "run-terminal"
+    assert json.loads(replaced.documents["run.json"].decode())["runId"] == "run-terminal"
+
+
+def test_terminal_publication_graph_rejects_run_serializer_lookalikes() -> None:
+    daemon = object.__new__(StewardDaemon)
+    task = SimpleNamespace(
+        id="task-terminal",
+        status=TaskStatus.succeeded.value,
+        updated_at=datetime(2026, 7, 28, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    lookalike = _DaemonRunAsDictLookalike()
+    source = AtifSource(run=lookalike, documents={})
+    graph = {"task": {"taskId": task.id}, "runs": [source]}
+
+    result = daemon._terminal_publication_graph(task, SimpleNamespace(id="run-original"), graph, "run-terminal")
+
+    assert result is None
+    assert lookalike.called is False
+
+
+def test_publication_usage_mapping_uses_only_the_current_overhead_value() -> None:
+    daemon = object.__new__(StewardDaemon)
+    row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
+
+    mapped = daemon._publication_usage_mapping(row)
+
+    assert mapped == row.public_dict()
+
+
+def test_publication_usage_mapping_rejects_serializer_lookalikes() -> None:
+    daemon = object.__new__(StewardDaemon)
+    lookalike = _DaemonSerializerLookalike()
+
+    assert daemon._publication_usage_mapping(lookalike) is None
+    assert lookalike.as_dict_called is False
+    assert lookalike.public_dict_called is False
+
+
+def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> None:
+    daemon = object.__new__(StewardDaemon)
+    row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
+    daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [row])
+    daemon._publication_overhead_digest = None
+    daemon._publication_overhead_position = 0
+    daemon._log = lambda *_args, **_kwargs: None
+    received: list[object] = []
+
+    class Publisher:
+        def reconcile_overhead(self, source: object, *, digest: str | None = None) -> None:
+            received.append(source)
+
+    assert daemon._reconcile_publication_usage(Publisher()) is True
+    assert received == [row.public_dict()]
+    assert received[0] is not row

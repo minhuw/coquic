@@ -195,7 +195,7 @@ announced without replacing retained valid evidence with an error message.
   navigation device, not an aggregate health score.
 - Views are exactly Signals, Planning, and Tasks. Tasks is the default because
   execution evidence is the primary public value; Signals and Planning remain
-  discoverable and show the documented unavailable state without legacy data.
+  discoverable and show an explicit unavailable state without synthesized data.
 - At wide desktop widths, Tasks uses parallel queue, selected execution, and
   current-evidence panes; Signals and Planning retain their named panes while
   unavailable. These panes return to source order as one readable column on
@@ -210,13 +210,13 @@ announced without replacing retained valid evidence with an error message.
 ## Steward planning `/steward?view=planning`
 
 - Keep the global Planning destination discoverable, but render its documented
-  unavailable state because the global planner archive is not published by the
-  cloud reader. Do not synthesize planner runs, read a legacy archive, or expose
-  a partial fallback. Planning evidence attached to a published task remains
+  unavailable state because the global planner domain is not published by the
+  cloud reader. Do not synthesize planner runs, read another source, or expose a
+  partial fallback. Planning evidence attached to a published task remains
   available in that task's relational detail.
 - Distinguish loading, empty, unavailable, running, succeeded, failed, and invalid
-  states wherever a state is meaningful; the retired global route is terminal and
-  unavailable.
+  states wherever a state is meaningful; the global Planning surface is
+  explicitly unavailable in the initial publication.
 
 ## Steward task `/steward/tasks/[taskId]`
 
@@ -255,8 +255,8 @@ announced without replacing retained valid evidence with an error message.
 
 - Read only the validated public publication: visible task heads and visible
   generations in Cloudflare D1, plus immutable sanitized objects in public R2.
-  Local filesystem archives, SQLite, rsync, Workers, sidecars, compatibility
-  readers, and historical migration are not inputs to this surface.
+  Local filesystems, SQLite, rsync, Workers, sidecars, and alternate publication
+  sources are not inputs to this surface.
 - Active and history task views show only visible, complete summaries. An active
   task remains reachable after a completed planning publication; staged,
   superseded, hidden, malformed, dangling, or private-shaped rows fail closed.
@@ -281,8 +281,8 @@ announced without replacing retained valid evidence with an error message.
   one same-origin `307 Temporary Redirect`. Site never proxies bytes or accepts
   a caller-supplied URL; unavailable artifacts remain unavailable.
 - Global Signals, Planning, and revision destinations remain discoverable but
-  return the documented terminal unavailable response. They never read a legacy
-  archive or fabricate data from fixtures.
+  render the documented unavailable product state. They never read another
+  source or fabricate data from fixtures.
 - Cloud states distinguish available, valid empty, transient unavailable,
   terminal unavailable, malformed, and integrity failure. Only transient
   network, timeout, rate-limit, or server failures offer a manual retry; no route

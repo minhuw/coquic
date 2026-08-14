@@ -51,9 +51,9 @@
     },
     "jsonReport": {
       "availability": "available",
-      "url": "/coverage-results.json",
+      "url": "/api/v2/evidence/coverage/current",
       "mediaType": "application/json",
-      "filename": "coverage-results.json",
+      "filename": "coverage-snapshot.json",
       "byteSize": 8000,
       "originalByteSize": 8000,
       "sha256": null,

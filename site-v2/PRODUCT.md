@@ -8,7 +8,10 @@ behavior, compare evidence, study its development history, and observe the
 automation that maintains it.
 
 The website MUST not imply production readiness. Claims about compatibility,
-coverage, performance, or compliance MUST be traceable to dated evidence.
+coverage, performance, or compliance MUST be traceable to dated evidence. Site
+V2 is greenfield: no prior clients, URLs, payloads, datasets, caches, databases,
+deployments, or cookie/configuration continuity are part of the product
+contract. Only the canonical routes below are public.
 
 ## Audiences and primary jobs
 
@@ -40,12 +43,8 @@ following destinations MUST remain discoverable from every primary page:
 | Duvet | `/duvet` | RFC requirement traceability. |
 | Steward | `/steward` | Read-only repository automation monitor. |
 
-Compatibility aliases MUST continue to resolve with the same title, primary
-heading, and data contract:
-
-- `/perf-comparison` -> `/performance`
-- `/interop-results` -> `/interop`
-- `/coverage-results` -> `/coverage`
+Only the canonical routes listed below are public. V2 does not define
+alternate or historical paths, redirects, or compatibility behavior.
 
 Dynamic routes:
 

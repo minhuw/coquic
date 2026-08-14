@@ -7,18 +7,24 @@ These instructions apply to all work under `site-v2/`.
 - Treat this directory as the sole product and interface specification.
 - Do not inspect, copy, import, translate, or imitate presentation code from
   `site/next`.
-- Do not inspect legacy CSS, visual snapshots, component markup, or page
-  screenshots when making design decisions.
+- Do not inspect CSS, visual snapshots, component markup, or page screenshots
+  from another application when making design decisions.
 - Do not import runtime code directly from `site/next`.
-- A narrowly scoped legacy adapter MAY read an old payload only when `DATA.md`
-  explicitly identifies that migration source. Keep adapters outside the new
-  presentation layer.
-- Existing Playwright tests MAY be consulted only to confirm behavior after the
-  behavior has been captured in this contract. Legacy visual assertions are not
-  V2 requirements.
+- Data from another application, deployment, or publication is not a Site V2
+  input. Do not add an adapter, fallback reader, or conversion layer for it.
+- Tests outside `site-v2` are not a product specification. Consult V2 tests
+  only after the behavior is captured in this contract; tests from another
+  application do not create V2 requirements.
 
 ## Product rules
 
+- Site V2 is greenfield. Assume no prior clients, URLs, payloads, datasets,
+  caches, databases, deployments, or cookie/configuration continuity.
+- Do not add adapters, redirects, alternate paths, tombstones, compatibility
+  envelopes, fallback readers, backfills, or conversion recipes.
+- Before first launch, a breaking change updates the sole current contract,
+  schema, and synchronized examples in place; there is no older consumer or
+  compatibility window to preserve.
 - Read `DESIGN.md` before any visual, layout, component, or interaction work.
 - Read `STACK.md` before creating application structure, adding frontend
   dependencies, or generating shadcn components.
@@ -39,7 +45,7 @@ These instructions apply to all work under `site-v2/`.
 ## Change control
 
 - Contract changes require a short rationale in `DECISIONS.md`.
-- Breaking payload changes require a new major `schemaVersion`.
-- New optional fields require a minor schema version and MUST be safe for older
-  consumers to ignore.
+- After launch, breaking payload changes require a new major `schemaVersion`.
+- New optional fields require a minor schema version and MUST be safe for
+  current consumers to ignore.
 - Examples and schemas MUST change together.

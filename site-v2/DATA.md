@@ -2,10 +2,9 @@
 
 Site V2 is a standalone Next.js Node reader for Steward's public cloud
 publication. Cloudflare D1 contains validated public metadata and Cloudflare R2
-contains immutable sanitized objects. Acquisition, validation/normalization,
-domain state, and rendering remain separate. The former filesystem archive,
-rsync convergence, in-process importer, local cache, and raw control-loop peer
-are historical producer/reader designs, not inputs to this contract.
+contains immutable sanitized objects. Acquisition, validation, domain state, and
+rendering remain separate. The current cloud publication is the sole data input;
+there is no prior archive, local cache, or alternate source to preserve.
 
 The D1 reader uses native server-side `fetch` against the Cloudflare REST API.
 It reads only visible publication relationships and never mutates D1. R2 URLs
@@ -16,11 +15,11 @@ Site does not accept or proxy a caller-supplied object URL.
 
 Unrelated first-party resources retain their existing major versions. Steward
 cloud status, task page, task detail, trajectory descriptor, and problem
-responses use `schemaVersion: "3.0"`:
+responses use `schemaVersion: "4.0"`:
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "4.0",
   "generatedAt": "2026-07-19T12:00:00Z",
   "data": {}
 }
@@ -98,15 +97,14 @@ include `warnings` identifying omissions.
 | Steward cloud task      | `/api/steward/tasks/{taskId}`                 | `steward-cloud.schema.json#/$defs/taskDetailResponse` |
 | Steward trajectory descriptor | `/api/steward/tasks/{taskId}/transcript?run={runId}` | `steward-cloud.schema.json#/$defs/trajectoryDescriptorResponse` |
 | Steward logical artifact | `/api/steward/tasks/{taskId}/artifact?path={logicalPath}` | one validated `307` redirect |
-| Retired revision domain | `/api/steward/revision`                       | `steward-cloud.schema.json#/$defs/problemResponse` (`410`) |
 
 The browser-local Workbench command/event protocol is defined by
 `workbench.schema.json` and [WORKBENCH.md](WORKBENCH.md); it is not an HTTP API.
 
-Stable unrelated evidence, QA, transcript, and dataset paths retain their
-documented contracts. Steward's raw archive and control-loop compatibility paths
-are not reader inputs; retired global domains return the cloud `410` problem
-instead of a compatibility read.
+Stable evidence, QA, transcript, and dataset paths retain their documented
+contracts. The Steward cloud publication is the sole reader input. Global
+Signals, Planning, and revision remain explicit unavailable product states until
+a current public contract publishes them.
 
 ## Steward cloud publication
 
@@ -119,8 +117,8 @@ to one database; all rows reachable through it must therefore be public-safe.
 
 The four server values are Cloudflare account ID, D1 database ID, D1 Read token,
 and anonymous public R2 base URL. The reader has no Worker, D1 write, local
-SQLite/cache, sidecar, compatibility reader, raw fallback, or history migration.
-Builds and tests do not require live cloud credentials.
+SQLite/cache, sidecar, raw fallback, or alternate publication input. Builds and
+tests do not require live cloud credentials.
 
 ### Public identity and relationships
 
@@ -158,52 +156,59 @@ completed planning trajectory while its lifecycle remains `active`; an
 unavailable trajectory is represented by `null` in detail or a terminal `404`
 from the descriptor route.
 
-## Normalization from legacy data
+## Canonical producer obligations
+
+Producers emit the current schemas directly. They MUST publish canonical field
+names, units, identifiers, status values, and envelope versions; Site does not
+translate an earlier shape or infer omitted evidence.
 
 ### Performance
 
-- Convert `schema_version` to the V2 envelope version.
-- Convert source labels into unique implementation records.
-- Convert each legacy row to one measurement with a stable ID.
-- Convert MiB/s to bits/s using `value * 1024 * 1024 * 8`.
-- Preserve requests/s, latency microseconds, elapsed milliseconds, utilization,
-  versions, congestion control, failures, and artifact links.
-- Legacy zero latency/request fields that are inapplicable to a scenario become
-  `null`; genuine measured zero requires `status: "ok"` and metric applicability.
-- Legacy `missing` sources become implementation availability, not fake rows.
+- Emit one current envelope with unique implementation and measurement IDs.
+- Use bits/second, requests/second, microseconds, milliseconds, bytes, and
+  ratios as the canonical units. Preserve versions, congestion control,
+  failures, and artifact links.
+- Mark a metric `null` when it is inapplicable. A measured zero remains numeric
+  only when the result is valid and the metric applies.
+- Represent an unavailable source explicitly rather than publishing a fake
+  implementation or measurement.
 
 ### Interop
 
-- Normalize `succeeded` to `pass`, `peer_broken` to `peer_failure`, and
-  `known_peer_broken` to `known_peer_issue`.
-- Create explicit lane and testcase IDs. Omitted matrix cells are
-  `not_reported`; they are not silently synthesized as pass or unsupported.
-- Preserve raw producer status and known-peer evidence.
+- Emit the normalized result values `pass`, `unsupported`, `peer_failure`,
+  `known_peer_issue`, `fail`, and `not_reported` directly.
+- Publish explicit lane and testcase IDs. Omitted matrix cells are
+  `not_reported`; they are never synthesized as pass or unsupported.
+- Preserve the raw producer result and known-peer evidence beside the normalized
+  result.
 
 ### Coverage
 
-- Preserve exact covered/total counts. Discard serialized percentages and derive
-  them in consumers.
-- Preserve component and least-covered-file order.
+- Emit exact covered/total counts for functions, lines, and branches. Consumers
+  derive percentages from those counts.
+- Emit component and least-covered-file arrays in producer order.
+- Publish report artifacts with their current same-origin URLs and availability;
+  unavailable reports carry an explicit reason rather than an empty value.
 
 ### Transcripts
 
-- Preserve current public session IDs and original JSONL line ordering.
-- Move pagination metadata into the shared page object.
-- Treat archive availability as an artifact object rather than empty strings.
+- Emit current public session IDs and original JSONL line ordering.
+- Publish pagination metadata in the shared page object.
+- Describe archive availability as a typed artifact with safe download metadata,
+  never as an empty string or fabricated record.
 
 ### Steward
 
 - Cloud task status is `available`, `empty`, or `unavailable`; a valid empty
   publication is not an error or synthesized zero evidence.
-- Visible D1 relationships are validated before normalization. A task page is
+- Visible D1 relationships are validated before rendering. A task page is
   complete within its bounded page; task detail validates exact expected counts,
   ownership, event sequence, run duration, artifact identity, and disclosure
   consistency before returning any field.
-- Cloud envelopes use version `3.0`. The detail `trajectory` is either a complete
+- Cloud envelopes use version `4.0`. The detail `trajectory` is either a complete
   validated descriptor for an available immutable JSON artifact or `null`; the
   reader does not expose partial ATIF/JSONL records, offsets, cursors, or raw
-  transcript fallback.
+  transcript content.
 - Artifact identity remains public and deterministic: `logicalPath` identifies
   the producer-declared artifact, while `publicKey` is the validated
   content-addressed R2 key. Both are returned with media type, byte size, digest,
@@ -211,13 +216,9 @@ from the descriptor route.
 - D1 rows and R2 descriptors exclude credentials, private locators, scanner
   details, and private filesystem paths. The account-scoped D1 token never
   reaches a response or browser bundle.
-- Complete ATIF validation, acquisition, normalization, API, rendering,
-  activation, and proof remain owned by Plans 048, 049, and 051-056. Deployment
-  Plan 060 owns old launch-wiring removal; this contract does not define those
-  implementation or deployment steps.
-- Convert loose external links and commit records to typed link/commit objects.
-- Generate daily summaries in UTC from sanitized aggregate model-usage records
-  and Git history. Never publish prompts, transcript content, or private paths.
+- Emit typed external links and commit records, plus sanitized UTC daily
+  summaries from aggregate model-usage records and Git history. Never publish
+  prompts, transcript content, or private paths.
 - A model request is one non-null token-usage record. Daily token totals sum the
   final cumulative usage record from each CoQUIC session in the UTC window.
 - `toolCalls` counts Codex `custom_tool_call` and `function_call` response
@@ -251,13 +252,12 @@ The reader fails closed on invalid configuration, D1 transport/provider errors,
 oversized or malformed responses, invalid public rows, dangling relationships,
 unsafe object keys, and unavailable artifacts. It never returns a partial graph
 or repairs publication data in the presentation layer. There is no local
-SQLite/cache, sidecar, Worker, D1 mutation, raw filesystem scan, compatibility
-reader, prefix/revision polling, or history migration.
+SQLite/cache, sidecar, Worker, D1 mutation, filesystem archive input, or
+alternate publication fallback.
 
-Retired revision, global signal, and planner domains are unpublished by design.
-Their cloud problem envelope is `schemaVersion: "3.0"`, `code: "UNAVAILABLE"`,
-`status: 410`, and `retryable: false`. The response does not reflect route
-parameters or private values.
+Global Signals, Planning, and revision are not published by the initial cloud
+contract. They remain explicit unavailable product states; Site does not create
+cloud payloads for them, infer them from task data, or read another source.
 
 ## Content catalogs
 

@@ -58,6 +58,8 @@
   and type.
 - The RAG proxy forwards only documented headers and has a bounded timeout.
 - Steward publications are read-only and sanitized at the producer boundary.
+- V2 is greenfield: no prior clients, URLs, payloads, datasets, caches,
+  databases, deployments, or cookie/configuration continuity are inputs.
 - External links opened in a new context use appropriate opener isolation.
 - Do not expose filesystem paths, credentials, private prompts, or raw internal
   Steward state beyond fields declared in the public schema.
@@ -94,8 +96,8 @@
   their opener, and image/download actions MUST remain same-origin logical-path
   routes. Browser assertions MUST never depend on a direct private or R2 URL.
 - The reader has no D1 mutation, local SQLite/cache, filesystem archive,
-  Worker, sidecar, compatibility reader, history migration, automatic polling,
-  or raw fallback. Public output contains no private locator, credential,
+  Worker, sidecar, alternate publication reader, automatic polling, or raw
+  fallback. Public output contains no private locator, credential,
   matched secret, scanner record, or filesystem path.
 - `steward-overhead` is aggregate-only. Public rows MUST NOT expose individual
   overhead invocations, turns, provider/session identifiers, or raw sidecar

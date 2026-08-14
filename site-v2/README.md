@@ -8,14 +8,18 @@ provider locator.
 
 This directory is a clean-room product and interface specification. An
 implementation MUST be buildable from it without reading `site/next`, its
-styles, components, screenshots, or generated DOM.
+styles, components, screenshots, or generated DOM. Site V2 is greenfield: no
+prior client, URL, payload, dataset, cache, database, deployment, or
+cookie/configuration contract is an input. Only the current schemas and
+canonical routes defined here are public contracts.
 
 ## Production boundary
 
 Site V2 owns the reader and its Node deployment. Cloudflare infrastructure and
 Steward publication are separate operator concerns. Site has no Worker,
-sidecar, D1 write path, local database or cache, filesystem archive importer,
-raw fallback, compatibility reader, or history migration.
+sidecar, D1 write path, local database or cache, filesystem archive importer, or
+raw fallback. It reads only the current validated cloud publication and never
+accepts a prior data shape or deployment input.
 
 The server receives exactly four protected values:
 
@@ -56,14 +60,8 @@ boundary. Do not use it to protect sensitive data.
   shadcn/typeset integration rules plus the deployment boundary.
 - [DATA.md](DATA.md): canonical cloud publication data model, naming rules,
   resources, and validation policy.
-- [STEWARD_DATASET.md](STEWARD_DATASET.md): the detailed Steward
-  cloud-publication consumer boundary for task graphs, immutable artifacts,
-  trajectories, and failure states. Its former raw filesystem model is
-  historical context only.
 - [API.md](API.md): HTTP and event-stream contracts.
 - [WORKBENCH.md](WORKBENCH.md): clean UI-to-WASM command/event boundary.
-- [MIGRATION.md](MIGRATION.md): independent cloud rollout, activation,
-  rollback, and cutover gates.
 - `schemas/`: normative JSON Schema 2020-12 documents.
 - `examples/`: representative valid payloads for implementers and tests.
 
@@ -94,12 +92,12 @@ V2 is ready to replace the current site only when:
 1. Every route in `PRODUCT.md` satisfies `FUNCTIONAL.md`.
 2. Every API and artifact validates against the schemas in this directory.
 3. Every requirement in `QUALITY.md` has automated evidence.
-4. The cloud reader, same-origin artifact actions, aliases, and stable download
+4. The cloud reader, same-origin artifact actions, and current download
    contracts are verified without exposing private or provider-only values.
 5. Cloud rollout, Site deploy/rollback, and the on-demand empty/real-task
    checker are all proven independently of live credentials in tests.
-6. Product review approves the new visual language independently of legacy
-   screenshots.
+6. Product review approves the new visual language independently of any other
+   application's screenshots.
 
 ## Validate this package
 

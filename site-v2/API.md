@@ -25,7 +25,6 @@
 | 429    | Rate limited; include `Retry-After` when known.                        |
 | 500    | Producer or transformation failure.                                    |
 | 503    | Required backend/publication unavailable.                              |
-| 410    | A retired or unpublished cloud domain is intentionally unavailable.     |
 
 ## QA
 
@@ -90,9 +89,8 @@ reader using server-side native `fetch` to Cloudflare D1 REST and anonymous
 public R2. D1 reads join only `visible` task heads and visible publications;
 staged, superseded, hidden, malformed, dangling, or private-shaped data fails
 closed. The account-scoped D1 Read token is server-only because Cloudflare cannot
-scope it to one database. No endpoint writes D1, runs a Worker/sidecar, opens a
-local SQLite/cache, scans a filesystem archive, or serves a compatibility/history
-fallback.
+scope it to one database. The reader has no D1 write path, Worker/sidecar, local
+SQLite/cache, filesystem archive input, or alternate publication fallback.
 
 ### Status and task pages
 
@@ -195,21 +193,7 @@ It never proxies bytes and ignores caller-supplied URL parameters. Invalid paths
 return `400`; missing or unavailable artifacts return `404`; unsafe public data
 or cloud failures return a problem response without reflecting private values.
 
-## Retired cloud domains and errors
-
-The revision and global signal/planner archive domains are unpublished in the
-cloud contract. Each of these routes returns the same no-store `410` problem and
-never reads D1 or R2:
-
-- `GET /api/steward/revision`
-- `GET /api/steward/signals/{signalId}/events`
-- `GET /api/steward/planner-runs/{plannerRunId}/transcript`
-- `GET /api/steward/planner-runs/{plannerRunId}/artifacts/{artifact}`
-
-The body is a `schemaVersion: "4.0"` `problemResponse` with
-`code: "UNAVAILABLE"`, message `The global archive domain is unavailable in the
-cloud contract.`, `retryable: false`, `status: 410`, and `type: null`. Route
-parameters, query strings, credentials, and private values are never reflected.
+## Cloud route errors
 
 Cloud route problem categories are closed and non-diagnostic:
 
@@ -230,14 +214,5 @@ manual Retry action. No cloud route automatically polls, retries, falls back to
 partial data, or repairs a publication in the UI.
 
 The transcript route's `422` integrity and `503` transient policy above is more
-specific than these shared legacy categories; unrelated cloud routes retain
-their documented status mappings.
-
-## Legacy compatibility
-
-Unrelated legacy artifact paths remain stable during migration: `/perf-results.json`,
-`/perf-history/index.json`, `/interop-results.json`, `/coverage-results.json`,
-`/coverage/index.html`, `/duvet/report.html`, `/duvet/report.json`,
-`/duvet/snapshot.txt`, transcript raw downloads, and published dataset archive
-URLs. Steward cloud routes above are the sole task reader; there is no raw
-archive compatibility reader or historical migration.
+specific than these shared cloud categories; unrelated cloud routes retain their
+documented status mappings.

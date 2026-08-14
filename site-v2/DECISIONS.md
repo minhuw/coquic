@@ -188,7 +188,7 @@ and unavailable planning telemetry remains unavailable rather than zero.
 
 ## D-019: Preview access is an explicit construction notice
 
-On 2026-07-22, V2 gained an optional shared-password gate for compatibility
+On 2026-07-22, V2 gained an optional shared-password gate for preview
 deployments. When configured, every application route redirects to one
 under-construction screen and returns reviewers to their requested URL after
 entry. The screen uses the established product identity, status language,
@@ -199,133 +199,19 @@ The gate is deliberately described as a convenience notice, not authentication
 or a security boundary. It is enabled only by deployment configuration, stores
 no account data, and remains disabled in ordinary local development.
 
-## D-020: Raw Steward archive is a placement-public, eventually consistent tree (historical)
-
-This is a historical, non-normative record. The cloud publication and reader
-contract in D-023 supersedes its raw-tree, placement, and convergence choices.
-
-The post-Steward-2.0 raw research archive is a distinct channel from the
-sanitized Steward mirror. `$COQUIC_HOME/tasks/` is the canonical task directory;
-the producer and Site V2 receiver share its relative hierarchy. One process is
-one run nested under exactly one pipeline, and only explicit interrupted
-planning/implementation/review recovery may resume a stable archive session.
-The archive is published by placement: durable non-hidden task evidence is
-public, while daemon credentials, private Codex homes, SQLite, worktrees, and
-global runtime state stay outside the root. Raw bytes are accepted without
-sanitization or content filtering.
-
-Live publication is eventually consistent. Stable paths, atomic small metadata
-replacement, append-only JSONL, complete-line parsing, last-valid JSON caching,
-idempotent prefix cursors, and replacement/truncation rebuilds let a watcher and
-periodic reconciliation converge after missed events or restart. Transport
-ordering has no semantic meaning. A task status is observed independently from
-archive verification. After terminal outcome and external-result finalization,
-one immutable task-local manifest covers every other durable regular file with
-exact size and lower-case SHA-256; a manifest arriving before bytes remains
-incomplete until verified, and any later mutation is corruption.
-
-Rejected alternatives are a generated local dataset projection, a manifest-last
-live snapshot, one revision tree per sync, blind parsing on web requests,
-transport-order assumptions, raw sanitization, and legacy backfill. The Site V2
-cache is rebuildable and never shares a table or disclosure policy with the
-sanitized Steward cache. Availability-specific schema constraints preserve the
-difference between genuine zero values and absent evidence, including pricing
-provenance, while the task-list and grouped task-detail APIs have their own V2
-envelopes because cached summaries and expanded pipeline/verification state are
-not on-disk `task.json` documents.
-
-## D-021: Site V2 consumes the archive in-process through a rebuildable index (historical)
-
-This is a historical, non-normative record. The cloud publication and reader
-contract in D-023 supersedes its importer, SQLite, and local-cache choices.
-
-The raw task archive consumer is an asynchronous in-process Next.js service.
-`instrumentation.ts` starts one idempotent background importer for the Node
-runtime and never waits for the initial tree scan. SQLite is a disposable,
-rebuildable cross-task metadata/index cache: it stores task/pipeline/run
-relationships, aggregate availability, safe file descriptors, complete-record
-offsets, accepted-prefix identities, manifest state, and bounded importer
-health, but never raw prompt/transcript/patch/review/tool-output bodies.
-
-Aggregate dashboard, history, usage/cost, freshness, and revision requests use
-SQLite only. A detail request first resolves an indexed task ID, then reads only
-the selected metadata or accepted evidence below that one task root. Cursors
-are opaque and bound to the current file identity; changed prefixes invalidate
-continuations. Active tasks and terminal history use independent bounded cursor
-pages so active work stays prominent without making any indexed task
-unreachable. Pipeline-owned run selection is validated and retained in URL
-state. Signals and Planning now consume the same cache through the raw
-control-loop peer, while selected evidence is read lazily from validated byte
-ranges or manifest-verified planner-run artifacts.
-
-Rejected alternatives are an importer/API sidecar, a second service or custom
-Next server, a full-payload SQLite copy, request-time cross-task scans,
-fixture-backed production, SSE/WebSocket refresh, and a task-page redesign.
-
-Deployment creates `/opt/coquic-demo/steward/tasks`,
-`/opt/coquic-demo/steward/control-loop`, and the sibling cache but does not
-provision receiver credentials. An operator must point the forced receiver at
-the two raw roots using the existing ownership and SSH policy before live
-publication begins.
-# Durable raw control-loop peer (Steward 2.0)
-
-Steward publishes `$COQUIC_HOME/control-loop/` as a canonical public archive
-peer of `$COQUIC_HOME/tasks/`.  Both roots share one immutable post-2.0 epoch
-ID and start/policy boundary, while their format versions remain independent.
-Daily complete-line JSONL preserves every normalized fetch and observation,
-including repeated observations that deduplicate to one canonical signal.  The
-archive records explicit observation -> signal -> planner run -> proposal ->
-optional task IDs and terminal planner-run manifests.  `current.json` is only a
-bounded atomic projection; the event ledger is authoritative history.
-
-Global scheduler-planner attempts are fresh isolated Codex sessions.  Sealed
-prior runs are optional read-only untrusted context; no resume/thread file or
-provider session continuity is permitted.  Epoch or visible-byte conflicts
-block new planning but never stop active task pipelines; temporary
-materialization lag retries asynchronously.
-
-The old sanitized Steward mirror is retired after task consumers use the raw
-task root.  Existing legacy mirror bytes are inert and are not automatically
-deleted.  Plan 009 owns transfer of both roots and Plan 010 owns Site V2
-import/index/UI; this decision adds neither.
-
-## D-022: One cache indexes both public archive peers (historical)
-
-This is a historical, non-normative record. The cloud publication and reader
-contract in D-023 supersedes its cache, raw-peer, and control-loop choices.
-
-Site V2 consumes the task and raw control-loop peers through one asynchronous
-in-process importer, one SQLite cache, one cache revision, and one lifecycle.
-Aggregate requests are SQLite-only. A selected signal or planner run may read
-only its indexed complete event ranges or its manifest-verified run artifact;
-raw bodies are never copied into SQLite. The task and control-loop roots are
-reconciled independently and joined only when their immutable epoch IDs match.
-Unordered direct sync is handled by last-valid per-domain generations, with
-pending, incompatible, corrupt, and missing states preserved. Explicit graph
-IDs drive both-direction signal/planner/proposal/task navigation.
-
-Rejected alternatives are a sidecar importer, snapshot or acknowledgement
-protocol, raw-body cache, inferred edges, a second timer/process/database,
-retention or sanitization, and a Steward command channel. Signals and Planning
-therefore replace the earlier not-connected placeholder without changing the
-Steward visual system or task-detail composition.
-
 ## D-023: Standalone Site V2 reads the public cloud publication
 
-On 2026-07-29, this decision records the clean replacement for the raw archive
-reader. It explicitly supersedes D-020, D-021, and D-022 for Steward data-source,
-publication, reader lifecycle, and route behavior. Those decisions remain
-readable as historical, non-normative records; none is erased or silently
-rewritten.
+Site V2 uses one initial architecture for public Steward data: a standalone
+Next.js Node reader over validated Cloudflare D1 metadata and immutable,
+sanitized Cloudflare R2 objects. This is the sole current reader contract.
 
 ### Context
 
-Steward now publishes validated public metadata in Cloudflare D1 and immutable,
-sanitized objects in public R2. Site V2 is a standalone Next.js Node deployment,
-so acquisition, validation/normalization, domain state, and rendering remain
-separate. The reader uses server-side native `fetch` to the Cloudflare D1 REST
-API and resolves anonymous public R2 objects only from validated artifact
-identity. Local filesystem archives are not a reader input.
+Steward publishes public task metadata, relationships, and sanitized evidence
+as a visible D1 publication with immutable R2 objects. Site separates acquisition,
+validation, domain state, and rendering. It uses server-side native `fetch` for
+the Cloudflare D1 REST API and resolves anonymous R2 objects only from validated
+artifact identity.
 
 ### Choice
 
@@ -336,14 +222,15 @@ identity. Local filesystem archives are not a reader input.
   `visible` task head to its referenced `visible` publication; staged,
   superseded, hidden, malformed, dangling, or private-shaped data fails closed.
 - Cloud responses use `schemaVersion: "4.0"` for status, task pages, task
-  detail, complete trajectory descriptors, usage summaries, and problems. A trajectory response
-  is a complete descriptor for one immutable sanitized JSON artifact, not a
-  partial transcript or an unvalidated content fallback.
+  detail, complete trajectory descriptors, usage summaries, and problems. A
+  trajectory response is a complete descriptor for one immutable sanitized JSON
+  artifact, not partial content or an unvalidated fallback.
 - Artifact actions accept a validated logical path, derive the content-addressed
   public key, and return exactly one same-origin `307 Temporary Redirect` to the
   anonymous R2 object. Site never proxies bytes or accepts a caller-supplied URL.
-- This is a clean rollout: there is no Worker move, D1 write, local SQLite or
-  cache, sidecar, compatibility reader, or historical archive migration.
+- Global Signals, Planning, and revision are product states rather than initial
+  cloud resources. The UI keeps the destinations discoverable and renders them
+  unavailable until a current public contract exists.
 
 ### Consequences and ownership
 
@@ -353,11 +240,10 @@ content-addressed `publicKey`, media type, byte size, SHA-256, availability, and
 disclosure flags. The reader can expose an active task after a completed planning
 run while retaining a complete descriptor; it never invents a partial result.
 
-Plans 048, 049, and 051-056 own complete ATIF validation, cloud acquisition,
-normalization, API contracts, rendering, activation, and proof. This decision
-does not duplicate or invent those behaviors. Deployment Plan 060 owns removal
-of old launch wiring; deployment, credential installation, and rollout remain
-operator-owned work outside this reader contract.
+The current publication producer owns schema, validation, and exposure. Site
+owns read-only acquisition, validation, domain state, and rendering. The
+contract stays current by updating the sole schema, examples, and reader
+behavior together before any first launch.
 
 ### Security and non-goals
 
@@ -366,11 +252,7 @@ private bucket/key/URL, matched secret, scanner record, or private filesystem
 path. The account-scoped token is never serialized to a response or client
 bundle. R2 objects are immutable and addressed only by validated task identity
 and SHA-256. There is no D1 mutation path, local persistence, sidecar process,
-raw or compatibility fallback, prefix/revision polling, or history migration.
-
-Unpublished revision, global signal, and planner domains are intentionally
-retired. Their routes return one non-retryable `410` problem envelope rather
-than attempting a legacy read.
+filesystem archive input, alternate publication reader, or raw fallback.
 
 ## D-024: Transcript reads return normalized complete trajectories
 

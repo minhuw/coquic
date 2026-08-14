@@ -396,6 +396,37 @@ def usage_replacement(source: dict[str, Any], suffix: str) -> dict[str, Any]:
     return replacement
 
 
+def set_usage_generation_id(payload: dict[str, Any], usage_generation_id: str) -> None:
+    usage = payload["usage"]
+    usage["generation"]["usageGenerationId"] = usage_generation_id
+    for collection in ("summaries", "invocations", "turns", "prices", "globals"):
+        for row in usage[collection]:
+            row["usageGenerationId"] = usage_generation_id
+    refresh_metadata_digest(payload)
+
+
+def set_task_owned_model(payload: dict[str, Any], model: str, price_digest: str) -> None:
+    usage = payload["usage"]
+    for summary in usage["summaries"]:
+        if summary["priceProvenanceDigest"] is not None:
+            summary["priceProvenanceDigest"] = price_digest
+    for invocation in usage["invocations"]:
+        invocation["model"] = model
+        invocation["priceEntryDigest"] = price_digest
+    for turn in usage["turns"]:
+        turn["priceEntryDigest"] = price_digest
+    for price in usage["prices"]:
+        price["model"] = model
+        price["priceEntryDigest"] = price_digest
+    for global_row in usage["globals"]:
+        if global_row["ownershipClass"] != "task-owned":
+            continue
+        global_row["model"] = model
+        if global_row["priceProvenanceDigest"] is not None:
+            global_row["priceProvenanceDigest"] = price_digest
+    refresh_metadata_digest(payload)
+
+
 def add_daily_task_global(payload: dict[str, Any]) -> None:
     usage = payload["usage"]
     if any(row["ownershipClass"] == "task-owned" and row["periodKind"] == "daily" for row in usage["globals"]):
@@ -1001,6 +1032,66 @@ def test_global_transition_boundary_replacement_uses_fixed_final_batch() -> None
         "SELECT count(*) FROM usage_global_heads WHERE ownership_class = 'task-owned' AND usage_generation_id = ?",
         (new_usage_id,),
     ).fetchone()[0] == 256
+
+
+def test_global_transition_treats_usage_generation_id_as_literal() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+
+    hidden = publication("publication-usageza", task_id="task-usageza", run_id="run-usageza")
+    set_usage_generation_id(hidden, "usageza")
+    d1.publish(hidden)
+    d1.hide_task(hidden["taskId"], "unsafe_content")
+
+    incoming = publication("publication-usage_a", task_id="task-usage_a", run_id="run-usage_a")
+    set_usage_generation_id(incoming, "usage_a")
+    set_task_owned_model(incoming, "gpt-disjoint", "e" * 64)
+    d1.publish(incoming)
+
+    rows = server.connection.execute(
+        "SELECT h.period_kind, h.model, h.usage_generation_id, h.global_id, h.state, "
+        "g.total_tokens, g.total_cost_micro_usd "
+        "FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id "
+        "WHERE h.ownership_class = 'task-owned' ORDER BY h.model, h.period_kind"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (
+            "daily",
+            "gpt-disjoint",
+            "usage_a",
+            "global-rollup-usage_a:global-daily-publication-usage_a",
+            "visible",
+            18,
+            60,
+        ),
+        (
+            "lifetime",
+            "gpt-disjoint",
+            "usage_a",
+            "global-rollup-usage_a:global-publication-usage_a",
+            "visible",
+            18,
+            60,
+        ),
+        (
+            "daily",
+            "gpt-fixture",
+            "usageza",
+            "global-rollup-usageza:global-daily-publication-usageza",
+            "hidden",
+            0,
+            0,
+        ),
+        (
+            "lifetime",
+            "gpt-fixture",
+            "usageza",
+            "global-rollup-usageza:global-publication-usageza",
+            "hidden",
+            0,
+            0,
+        ),
+    ]
 
 
 def test_price_overlap_with_distinct_digest_is_rejected_before_staging() -> None:

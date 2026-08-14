@@ -1541,7 +1541,7 @@ _GLOBAL_HEAD_UPSERT_SET = (
     "INSERT INTO usage_global_heads "
     "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
     "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, ?, g.global_id, 'visible', ? "
-    "FROM usage_globals AS g WHERE g.usage_generation_id IS NULL AND g.global_id LIKE ? "
+    "FROM usage_globals AS g WHERE g.usage_generation_id IS NULL AND instr(g.global_id, ?) = 1 "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -1554,7 +1554,7 @@ _GLOBAL_HEAD_UPSERT_SET_GUARDED = (
     "JOIN task_heads AS t ON t.task_id = ? AND t.usage_generation_id = ? AND t.state = 'visible' "
     "JOIN usage_heads AS h ON h.task_id = t.task_id AND h.usage_generation_id = t.usage_generation_id "
     "AND h.state = 'visible' "
-    "WHERE g.usage_generation_id IS NULL AND g.global_id LIKE ? "
+    "WHERE g.usage_generation_id IS NULL AND instr(g.global_id, ?) = 1 "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -2922,6 +2922,8 @@ class D1PublicationClient:
         # the task-owned global shape.
         del publication_id, new_rows
         rollup_prefix = f"global-rollup-{new_usage_id}"
+        # The ID grammar admits "_"; this is an identity prefix, not a LIKE pattern.
+        head_prefix = f"{rollup_prefix}:"
         update = _statement(
             _GLOBAL_TRANSITION_UPDATE,
             old_usage_id,
@@ -2937,10 +2939,10 @@ class D1PublicationClient:
                 updated_at,
                 task_id,
                 old_usage_id,
-                f"{rollup_prefix}:%",
+                head_prefix,
             )
         else:
-            heads = _statement(_GLOBAL_HEAD_UPSERT_SET, new_usage_id, updated_at, f"{rollup_prefix}:%")
+            heads = _statement(_GLOBAL_HEAD_UPSERT_SET, new_usage_id, updated_at, head_prefix)
         return update, heads
 
     def stage(self, source: Mapping[str, Any]) -> StageReceipt:

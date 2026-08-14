@@ -53,7 +53,6 @@ from ..execution.session import (
     _write_publication_snapshot,
     enqueue_materialized_publication,
     load_publication_snapshot,
-    publication_graph_for_task,
     runtime_factory_for_config,
     planner_session_for_config,
 )
@@ -67,11 +66,29 @@ from ..publication.generation import (
 from ..publication.outbox import (
     CleanupIntent,
     CleanupState,
+    PublicationGeneration,
     PublicationHealth,
+    PublicationHideFence,
+    PublicationOperationResult,
+    PublicationOperationStatus,
+    PublicationReceipt,
+    PublicationState,
     ReceiptClass,
 )
-from ..publication.d1 import D1Error, D1PublicationClient, _overhead_digest
-from ..publication.publisher import CloudPublisher, _call_composer
+from ..publication.d1 import (
+    D1Error,
+    D1PublicationClient,
+    OverheadReceipt,
+    UsageBackfillReceipt,
+    _overhead_digest,
+)
+from ..publication.publisher import (
+    CloudPublisher,
+    PublicationHideResult,
+    PublicationHideStatus,
+    PublicationResult,
+    PublicationStatus,
+)
 from ..publication.r2 import R2Client, private_original_key
 from ..core.subprocesses import (
     ProcessGroupCancellationOwner,
@@ -1189,12 +1206,7 @@ class StewardDaemon:
             )
         except Exception:
             for client in (r2, d1):
-                close = getattr(client, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
+                _close_publication_client(client)
             raise
         lease_seconds = max(1, int(publication.lease_duration_seconds))
         retry_backoff_seconds = max(1, int(publication.retry_backoff_seconds))
@@ -1236,44 +1248,38 @@ class StewardDaemon:
     def _repair_staged_generation(
         self,
         publisher: CloudPublisher,
-        generation: object,
+        generation: PublicationGeneration,
         source: object | None,
         compose_kwargs: Mapping[str, object],
     ) -> bool:
         """Replace a credential-free staging row before any provider request."""
 
-        publication_id = getattr(generation, "publication_id", None)
-        retry = getattr(publisher, "retry_publication", None)
-        if not isinstance(publication_id, str) or source is None or not callable(retry):
+        if source is None:
             return False
-        composer = getattr(publisher, "compose", None)
-        task_id = getattr(generation, "task_id", None)
-        if callable(composer):
-            if not isinstance(task_id, str):
-                return False
-            try:
-                candidate = _call_composer(
-                    composer,
-                    source,
-                    task_id=task_id,
-                    kwargs=compose_kwargs,
-                )
-            except Exception as exc:
-                self._log(
-                    "publication generation identity check failed "
-                    f"generation={publication_id} error={exc.__class__.__name__}"
-                )
-                return False
-            # A blocked row is eligible for replacement only when the daemon's
-            # credential-aware composition proves a different canonical
-            # generation.  This check is transport-free and avoids replaying
-            # an unchanged row's hide reconciliation against the provider.
-            if not isinstance(candidate, ComposedPublicationGeneration):
-                return False
-            if candidate.task_id != task_id or candidate.publication_id == publication_id:
-                return False
+        publication_id = generation.publication_id
+        task_id = generation.task_id
         try:
-            result = retry(
+            candidate = publisher.compose(
+                source,
+                task_id=task_id,
+                **compose_kwargs,
+            )
+        except Exception as exc:
+            self._log(
+                "publication generation identity check failed "
+                f"generation={publication_id} error={exc.__class__.__name__}"
+            )
+            return False
+        # A blocked row is eligible for replacement only when the daemon's
+        # credential-aware composition proves a different canonical
+        # generation.  This check is transport-free and avoids replaying
+        # an unchanged row's hide reconciliation against the provider.
+        if not isinstance(candidate, ComposedPublicationGeneration):
+            return False
+        if candidate.task_id != task_id or candidate.publication_id == publication_id:
+            return False
+        try:
+            result = publisher.retry_publication(
                 publication_id,
                 source,
                 compose_kwargs=compose_kwargs,
@@ -1284,9 +1290,9 @@ class StewardDaemon:
                 f"generation={publication_id} error={exc.__class__.__name__}"
             )
             return False
-        status = getattr(result, "status", None)
-        status = getattr(status, "value", status)
-        if status == "queued":
+        if not isinstance(result, PublicationResult):
+            return False
+        if result.status is PublicationStatus.queued:
             self._log(
                 "publication generation reconciled "
                 f"generation={publication_id}"
@@ -1294,21 +1300,15 @@ class StewardDaemon:
             return True
         return False
 
-    def _publication_source(self, generation: object) -> object | None:
-        task_id = getattr(generation, "task_id", None)
-        run_id = getattr(generation, "run_id", None)
-        if not isinstance(task_id, str):
-            return None
+    def _publication_source(self, generation: PublicationGeneration) -> object | None:
+        task_id = generation.task_id
+        run_id = generation.run_id
         try:
-            if isinstance(run_id, str):
-                snapshot = load_publication_snapshot(self.config, task_id, run_id)
-                if snapshot is not None:
-                    return snapshot
+            snapshot = load_publication_snapshot(self.config, task_id, run_id)
+            if snapshot is not None:
+                return snapshot
             task = self.store.get(task_id)
-            graph_builder = getattr(self.executor, "_integration_publication_graph", None)
-            if callable(graph_builder):
-                return graph_builder(task)
-            return publication_graph_for_task(self.config, self.store, task)
+            return self.executor._integration_publication_graph(task)
         except Exception as exc:
             self._log(f"publication source unavailable error={exc.__class__.__name__}")
             return None
@@ -1325,11 +1325,8 @@ class StewardDaemon:
         ledger = getattr(self, "_control_loop_ledger", None)
         if ledger is None:
             return ()
-        listing = getattr(ledger, "list_overhead_usage", None)
-        if not callable(listing):
-            return ()
         try:
-            return tuple(listing())
+            return tuple(ledger.list_overhead_usage())
         except Exception as exc:
             self._log(f"publication overhead listing failed error={exc.__class__.__name__}")
             return ()
@@ -1364,35 +1361,49 @@ class StewardDaemon:
             serialized = [self._publication_usage_mapping(row) for row in rows]
             if all(item is not None for item in serialized):
                 try:
-                    aggregate_digest = _overhead_digest(tuple(item for item in serialized if item is not None))
+                    aggregate_digest = _overhead_digest(
+                        tuple(item for item in serialized if item is not None)
+                    )
                 except D1Error:
                     # Keep malformed test doubles and legacy ledgers bounded;
                     # the D1 boundary still rejects this shape fail-closed.
                     aggregate_digest = hashlib.sha256(
-                        json.dumps(serialized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                        json.dumps(
+                            serialized,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
                     ).hexdigest()
                 if aggregate_digest != getattr(self, "_publication_overhead_digest", None):
                     position = getattr(self, "_publication_overhead_position", 0)
                     if not isinstance(position, int) or position < 0 or position >= len(rows):
                         position = 0
-                    row = rows[position]
                     row_mapping = serialized[position]
                     try:
                         row_digest = _overhead_digest((row_mapping,))
                     except D1Error:
                         row_digest = hashlib.sha256(
-                            json.dumps(row_mapping, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                            json.dumps(
+                                row_mapping,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
                         ).hexdigest()
                     try:
-                        publisher.reconcile_overhead(row_mapping, digest=row_digest)
-                    except RuntimeError:
-                        # Keep the cursor pending when the publisher has not
-                        # been provisioned with the reconciliation primitive.
-                        # A later worker cycle or restart must be able to
-                        # retry the same bounded obligation.
-                        return False
+                        receipt = publisher.reconcile_overhead(
+                            row_mapping,
+                            digest=row_digest,
+                        )
                     except Exception as exc:
-                        self._log(f"publication overhead reconciliation failed error={exc.__class__.__name__}")
+                        self._log(
+                            "publication overhead reconciliation failed "
+                            f"error={exc.__class__.__name__}"
+                        )
+                        return True
+                    if not isinstance(receipt, OverheadReceipt):
+                        self._log("publication overhead reconciliation returned an invalid receipt")
                         return True
                     position += 1
                     if position >= len(rows):
@@ -1404,9 +1415,7 @@ class StewardDaemon:
         catalog = self._publication_catalog()
         if catalog is None:
             return False
-        catalog_digest = getattr(catalog, "digest", None)
-        if catalog_digest is None:
-            catalog_digest = getattr(catalog, "catalog_digest", None)
+        catalog_digest = catalog.digest
         if not isinstance(catalog_digest, str) or not catalog_digest:
             return False
         if catalog_digest != getattr(self, "_publication_backfill_catalog_digest", None):
@@ -1421,25 +1430,28 @@ class StewardDaemon:
                 cursor=getattr(self, "_publication_backfill_cursor", None),
                 limit=64,
             )
-        except RuntimeError:
-            return False
         except Exception as exc:
             self._log(f"publication usage backfill failed error={exc.__class__.__name__}")
             return True
-        blocked_reason = getattr(receipt, "blocked_reason", None)
-        if blocked_reason:
+        if not isinstance(receipt, UsageBackfillReceipt):
+            self._log("publication usage backfill returned an invalid receipt")
+            return True
+        if receipt.blocked_reason:
             self._publication_backfill_blocked = True
-            self._log(f"publication usage backfill blocked reason={blocked_reason}")
+            self._log(
+                f"publication usage backfill blocked reason={receipt.blocked_reason}"
+            )
             return False
-        next_cursor = getattr(receipt, "next_cursor", None)
-        self._publication_backfill_cursor = next_cursor if isinstance(next_cursor, str) else None
+        self._publication_backfill_cursor = receipt.next_cursor
         return bool(
-            getattr(receipt, "changed", False)
-            or getattr(receipt, "processed_turns", 0)
+            receipt.changed
+            or receipt.processed_turns
             or self._publication_backfill_cursor is not None
         )
 
-    def _drain_pending_publication_hides(self, publisher: CloudPublisher) -> tuple[bool, bool]:
+    def _drain_pending_publication_hides(
+        self, publisher: CloudPublisher
+    ) -> tuple[bool, bool]:
         """Reconcile local hide fences before claiming any exposure work.
 
         The first value reports progress; the second reports that a pending
@@ -1448,13 +1460,8 @@ class StewardDaemon:
         cycle can retry the hide.
         """
 
-        listing = getattr(self.store, "list_pending_publication_hides", None)
-        if not callable(listing):
-            listing = getattr(self.store, "pending_publication_hides", None)
-        if not callable(listing):
-            return False, False
         try:
-            pending = list(listing())
+            pending = list(self.store.list_pending_publication_hides())
         except Exception as exc:
             self._log(
                 "publication hide reconciliation listing failed "
@@ -1465,11 +1472,11 @@ class StewardDaemon:
             return False, False
         progressed = False
         for fence in pending:
-            task_id = getattr(fence, "task_id", None)
-            reason = getattr(fence, "reason", None)
-            if not isinstance(task_id, str) or not isinstance(reason, str):
+            if not isinstance(fence, PublicationHideFence):
                 self._log("publication hide reconciliation rejected malformed fence")
                 return False, True
+            task_id = fence.task_id
+            reason = fence.reason
             try:
                 result = publisher.hide_task(task_id, reason)
             except Exception as exc:
@@ -1478,14 +1485,18 @@ class StewardDaemon:
                     f"task={task_id} error={exc.__class__.__name__}"
                 )
                 return False, True
-            status = getattr(result, "status", None)
-            status_value = getattr(status, "value", status)
-            if status_value in {"hidden", "unchanged"}:
+            if not isinstance(result, PublicationHideResult):
+                self._log("publication hide reconciliation returned an invalid result")
+                return False, True
+            if result.status in {
+                PublicationHideStatus.hidden,
+                PublicationHideStatus.unchanged,
+            }:
                 progressed = True
                 continue
             self._log(
                 "publication hide reconciliation pending "
-                f"task={task_id} status={status_value or 'unknown'}"
+                f"task={task_id} status={result.status.value}"
             )
             return False, True
         return progressed, True
@@ -1499,57 +1510,52 @@ class StewardDaemon:
             return hide_progress
         if self._reconcile_publication_usage(publisher):
             return True
-        listing = getattr(self.store, "list_publication_generations", None)
-        if not callable(listing):
-            listing = getattr(self.store, "list_generations", None)
-        if not callable(listing):
-            return False
-        expire = getattr(self.store, "expire_publication_leases", None)
-        if callable(expire):
-            try:
-                # Recovery is part of every worker cycle, not only startup.
-                # The store performs the lease compare-and-set and preserves
-                # all receipts while moving expired work to retry_wait.
-                expire()
-            except Exception as exc:
-                self._log(
-                    "publication lease reconciliation failed "
-                    f"error={exc.__class__.__name__}"
-                )
         try:
-            generations = listing(
-                states={"queued", "retry_wait"},
+            # Recovery is part of every worker cycle, not only startup.
+            # The store performs the lease compare-and-set and preserves
+            # all receipts while moving expired work to retry_wait.
+            self.store.expire_publication_leases()
+        except Exception as exc:
+            self._log(
+                "publication lease reconciliation failed "
+                f"error={exc.__class__.__name__}"
+            )
+        try:
+            generations = self.store.list_publication_generations(
+                states={PublicationState.queued, PublicationState.retry_wait},
                 limit=1,
             )
-        except TypeError:
-            generations = listing(limit=1)
+        except Exception as exc:
+            self._log(
+                "publication generation listing failed "
+                f"error={exc.__class__.__name__}"
+            )
+            return True
         if not generations:
             # A daemon can crash after the publisher fail-closes the old
             # credential-free staging identity but before retry_publication
             # replaces it.  Reconcile that bounded local state on restart.
             try:
-                blocked = listing(states={"blocked"}, limit=None)
-            except TypeError:
-                blocked = listing(limit=None)
-            generations = [
-                item
-                for item in blocked
-                if getattr(item, "reason", None) == "integrity"
-            ]
+                generations = [
+                    generation
+                    for generation in self.store.list_publication_generations(
+                        states={PublicationState.blocked},
+                        limit=None,
+                    )
+                    if generation.reason == "integrity"
+                ]
+            except Exception as exc:
+                self._log(
+                    "publication blocked-generation listing failed "
+                    f"error={exc.__class__.__name__}"
+                )
+                return True
         if not generations:
             return False
         compose_kwargs = self._publication_compose_kwargs()
-        generation = generations[0]
-        state = getattr(
-            getattr(generation, "state", None),
-            "value",
-            getattr(generation, "state", None),
-        )
-        if state == "blocked":
+        generation: PublicationGeneration = generations[0]
+        if generation.state is PublicationState.blocked:
             for generation in generations:
-                publication_id = getattr(generation, "publication_id", None)
-                if not isinstance(publication_id, str):
-                    continue
                 source = self._publication_source(generation)
                 if self._repair_staged_generation(
                     publisher,
@@ -1559,27 +1565,25 @@ class StewardDaemon:
                 ):
                     return True
             return False
-        generation = generations[0]
-        publication_id = getattr(generation, "publication_id", None)
-        if not isinstance(publication_id, str):
-            return True
         source = self._publication_source(generation)
+        publication_id = generation.publication_id
         try:
             result = publisher.publish(
                 publication_id,
                 source=source,
                 compose_kwargs=compose_kwargs,
             )
-            status = getattr(result, "status", None)
+            if not isinstance(result, PublicationResult):
+                self._log("publication worker returned an invalid result")
+                return True
             self._log(
                 "publication worker processed "
-                f"generation={publication_id} status={status or 'unknown'}"
+                f"generation={publication_id} status={result.status.value}"
             )
-            status_value = getattr(status, "value", status)
             if (
-                status_value == "blocked"
-                and getattr(result, "reason", None) == "integrity"
-                and getattr(result, "phase", None) == "authenticate"
+                result.status is PublicationStatus.blocked
+                and result.reason == "integrity"
+                and result.phase == "authenticate"
             ):
                 return self._repair_staged_generation(
                     publisher,
@@ -1599,7 +1603,7 @@ class StewardDaemon:
         # A successful exposure may immediately drain another queued row.  All
         # other outcomes wait for the store callback or the bounded retry timer
         # so a durable retry boundary cannot turn into a busy loop.
-        return str(status) == "exposed"
+        return result.status is PublicationStatus.exposed
 
     def _publication_worker_loop(self) -> None:
         publisher: CloudPublisher | None = None
@@ -1612,14 +1616,6 @@ class StewardDaemon:
                 return
             clients_closed.set()
             transport_tracker.cancel()
-            for name in ("cancel", "close"):
-                close_publisher = getattr(publisher, name, None)
-                if callable(close_publisher):
-                    try:
-                        close_publisher()
-                    except Exception:
-                        pass
-                    break
             for client in clients:
                 _close_publication_client(client)
 
@@ -1628,10 +1624,7 @@ class StewardDaemon:
                 if publisher is None:
                     try:
                         publisher = self._build_publication_publisher()
-                        clients = (
-                            getattr(publisher, "r2", None),
-                            getattr(publisher, "d1", None),
-                        )
+                        clients = (publisher.r2, publisher.d1)
                         for client in clients:
                             transport_tracker.install(client)
                         self._publication_cancel = close_clients
@@ -1664,9 +1657,7 @@ class StewardDaemon:
             if self._publication_thread is not None and self._publication_thread.is_alive():
                 return
             try:
-                expire = getattr(self.store, "expire_publication_leases", None)
-                if callable(expire):
-                    expire()
+                self.store.expire_publication_leases()
             except Exception as exc:
                 self._log(
                     "publication lease reconciliation failed "
@@ -2910,11 +2901,8 @@ class StewardDaemon:
         return False
 
     def _terminal_publication_run(self, task_id: str) -> object | None:
-        listing = getattr(self.store, "list_runs", None)
-        if not callable(listing):
-            return None
         try:
-            runs = listing(task_id)
+            runs = self.store.list_runs(task_id)
         except (AttributeError, KeyError):
             return None
         completed: list[object] = []
@@ -3124,12 +3112,7 @@ class StewardDaemon:
             existing = load_publication_snapshot(self.config, task.id, run_id)
             if existing is not None and self._terminal_snapshot_is_final(task, existing):
                 return True
-            graph_builder = getattr(self.executor, "_integration_publication_graph", None)
-            graph = (
-                graph_builder(task)
-                if callable(graph_builder)
-                else publication_graph_for_task(self.config, self.store, task)
-            )
+            graph = self.executor._integration_publication_graph(task)
             snapshot_run_id = run_id
             if existing is not None or not self._terminal_snapshot_is_final(task, graph):
                 snapshot_run_id = terminal_run_id
@@ -3158,20 +3141,15 @@ class StewardDaemon:
     def _terminal_publication_receipts_verified(
         self,
         task: TaskRecord,
-        generation: object,
+        generation: PublicationGeneration,
     ) -> tuple[bool, str]:
         """Authenticate durable receipts against the immutable source graph."""
 
-        publication_id = getattr(generation, "publication_id", None)
-        if not isinstance(publication_id, str):
+        if not isinstance(generation, PublicationGeneration):
             return False, "invalid_generation"
-        receipts_listing = getattr(self.store, "list_publication_receipts", None)
-        if not callable(receipts_listing):
-            receipts_listing = getattr(self.store, "list_receipts", None)
-        if not callable(receipts_listing):
-            return False, "receipts_unavailable"
+        publication_id = generation.publication_id
         try:
-            receipts = list(receipts_listing(publication_id))
+            receipts = list(self.store.list_publication_receipts(publication_id))
         except Exception:
             return False, "receipts_unavailable"
 
@@ -3191,13 +3169,10 @@ class StewardDaemon:
         payload = composed.payload
         task_value = payload.get("task") if isinstance(payload, Mapping) else None
         if (
-            hasattr(task, "status")
-            and (
-                not isinstance(task_value, Mapping)
-                or task_value.get("taskId") != task.id
-                or task_value.get("lifecycleState")
-                != self._terminal_publication_lifecycle(task)
-            )
+            not isinstance(task_value, Mapping)
+            or task_value.get("taskId") != task.id
+            or task_value.get("lifecycleState")
+            != self._terminal_publication_lifecycle(task)
         ):
             return False, "terminal_lifecycle_mismatch"
         head_intent = payload.get("headIntent") if isinstance(payload, Mapping) else None
@@ -3209,17 +3184,15 @@ class StewardDaemon:
         ):
             return False, "head_mismatch"
 
-        expected_identity = {
-            "publication_id": composed.publication_id,
-            "task_id": composed.task_id,
-            "run_id": composed.run_id,
-            "generation_boundary": composed.generation_boundary,
-            "metadata_digest": composed.metadata_digest,
-            "idempotency_key": composed.idempotency_key,
-        }
-        for name, expected in expected_identity.items():
-            if getattr(generation, name, None) != expected:
-                return False, "generation_mismatch"
+        if (
+            generation.publication_id != composed.publication_id
+            or generation.task_id != composed.task_id
+            or generation.run_id != composed.run_id
+            or generation.generation_boundary != composed.generation_boundary
+            or generation.metadata_digest != composed.metadata_digest
+            or generation.idempotency_key != composed.idempotency_key
+        ):
+            return False, "generation_mismatch"
 
         expected: dict[tuple[str, str], tuple[str, int, str | None]] = {}
         try:
@@ -3239,43 +3212,27 @@ class StewardDaemon:
         except Exception:
             return False, "composition_incomplete"
 
-        expected_objects = getattr(generation, "objects", None)
-        expected_artifacts = getattr(generation, "artifacts", None)
         if (
-            not isinstance(expected_objects, int)
-            or isinstance(expected_objects, bool)
-            or not isinstance(expected_artifacts, int)
-            or isinstance(expected_artifacts, bool)
-            or expected_objects != len(expected)
-            or expected_artifacts != len(composed.objects)
+            generation.objects != len(expected)
+            or generation.artifacts != len(composed.objects)
         ):
             return False, "receipt_count_mismatch"
 
         actual: dict[tuple[str, str], tuple[str, int, str | None]] = {}
         try:
             for receipt in receipts:
-                receipt_class = getattr(receipt, "receipt_class", None)
-                if receipt_class is None:
-                    receipt_class = getattr(receipt, "object_class", None)
-                receipt_class = getattr(receipt_class, "value", receipt_class)
-                key = getattr(receipt, "content_key", None)
-                digest = getattr(receipt, "sha256", None)
-                byte_size = getattr(receipt, "byte_size", None)
-                if (
-                    receipt_class not in {ReceiptClass.public.value, ReceiptClass.private.value}
-                    or not isinstance(key, str)
-                    or not isinstance(digest, str)
-                    or not isinstance(byte_size, int)
-                    or isinstance(byte_size, bool)
-                ):
+                if not isinstance(receipt, PublicationReceipt):
                     return False, "receipt_invalid"
-                identity = (receipt_class, key)
+                receipt_class = receipt.receipt_class
+                if receipt_class not in {ReceiptClass.public, ReceiptClass.private}:
+                    return False, "receipt_invalid"
+                identity = (receipt_class.value, receipt.content_key)
                 if identity in actual:
                     return False, "receipt_duplicate"
                 actual[identity] = (
-                    digest,
-                    byte_size,
-                    getattr(receipt, "logical_path", None),
+                    receipt.sha256,
+                    receipt.byte_size,
+                    receipt.logical_path,
                 )
         except Exception:
             return False, "receipt_invalid"
@@ -3317,69 +3274,62 @@ class StewardDaemon:
                 f"error={exc.__class__.__name__}"
             )
             queued = None
-        candidate = getattr(queued, "generation", None)
-        if candidate is None and getattr(queued, "publication_id", None) is not None:
-            candidate = queued
-        publication_id = getattr(candidate, "publication_id", None)
-        if not isinstance(publication_id, str):
-            listing = getattr(self.store, "list_publication_generations", None)
-            if not callable(listing):
-                listing = getattr(self.store, "list_generations", None)
-            if callable(listing):
-                try:
-                    matches = [
-                        item
-                        for item in listing(task_id=task.id)
-                        if getattr(item, "run_id", None) == snapshot_run_id
-                    ]
-                except Exception:
-                    matches = []
-                if len(matches) == 1:
-                    candidate = matches[0]
-                    publication_id = getattr(candidate, "publication_id", None)
-        if not isinstance(publication_id, str):
+        candidate = (
+            queued.generation
+            if isinstance(queued, PublicationOperationResult)
+            else None
+        )
+        if candidate is None:
+            try:
+                matches = [
+                    item
+                    for item in self.store.list_publication_generations(
+                        task_id=task.id,
+                        limit=None,
+                    )
+                    if item.run_id == snapshot_run_id
+                ]
+            except Exception:
+                matches = []
+            if len(matches) == 1:
+                candidate = matches[0]
+        if not isinstance(candidate, PublicationGeneration):
             return self._terminal_publication_block(task.id, "final_generation_missing")
-        if (
-            getattr(candidate, "task_id", task.id) != task.id
-            or getattr(candidate, "run_id", snapshot_run_id) != snapshot_run_id
-        ):
+        publication_id = candidate.publication_id
+        if candidate.task_id != task.id or candidate.run_id != snapshot_run_id:
             return self._terminal_publication_block(
                 task.id,
                 "final_generation_mismatch",
                 publication_id=publication_id,
             )
 
-        getter = getattr(self.store, "get_publication_generation", None)
-        if not callable(getter):
-            getter = getattr(self.store, "get_generation", None)
         try:
-            generation = getter(publication_id) if callable(getter) else candidate
+            generation = self.store.get_publication_generation(publication_id)
         except Exception:
             generation = None
-        if generation is None:
+        if not isinstance(generation, PublicationGeneration):
             return self._terminal_publication_block(
                 task.id,
                 "final_generation_missing",
                 publication_id=publication_id,
             )
         if (
-            getattr(generation, "task_id", None) != task.id
-            or getattr(generation, "run_id", None) != snapshot_run_id
-            or getattr(generation, "publication_id", None) != publication_id
+            generation.task_id != task.id
+            or generation.run_id != snapshot_run_id
+            or generation.publication_id != publication_id
         ):
             return self._terminal_publication_block(
                 task.id,
                 "final_generation_mismatch",
                 publication_id=publication_id,
             )
-        state = getattr(getattr(generation, "state", None), "value", getattr(generation, "state", None))
-        if state != "exposed":
+        if generation.state is not PublicationState.exposed:
             return self._terminal_publication_block(
                 task.id,
-                f"final_generation_{str(state or 'unknown')}",
+                f"final_generation_{generation.state.value}",
                 publication_id=publication_id,
             )
-        if hasattr(generation, "exposed_at") and getattr(generation, "exposed_at") is None:
+        if generation.exposed_at is None:
             return self._terminal_publication_block(
                 task.id,
                 "exposure_timestamp_missing",
@@ -3396,7 +3346,7 @@ class StewardDaemon:
 
     def _terminal_publication_generation_for_cleanup(
         self, task: TaskRecord
-    ) -> object | None:
+    ) -> PublicationGeneration | None:
         """Return the exact exposed generation authenticated by the gate."""
 
         run = self._terminal_publication_run(task.id)
@@ -3405,70 +3355,46 @@ class StewardDaemon:
         snapshot_run_id = self._terminal_publication_snapshot_run_id(task, run)
         if snapshot_run_id is None:
             return None
-        listing = getattr(self.store, "list_publication_generations", None)
-        if not callable(listing):
-            listing = getattr(self.store, "list_generations", None)
-        if not callable(listing):
-            return None
         try:
             matches = [
                 item
-                for item in listing(task_id=task.id)
-                if getattr(item, "task_id", None) == task.id
-                and getattr(item, "run_id", None) == snapshot_run_id
-                and getattr(
-                    getattr(item, "state", None),
-                    "value",
-                    getattr(item, "state", None),
+                for item in self.store.list_publication_generations(
+                    task_id=task.id,
+                    limit=None,
                 )
-                == "exposed"
+                if item.task_id == task.id
+                and item.run_id == snapshot_run_id
+                and item.state is PublicationState.exposed
             ]
         except Exception:
             return None
         if len(matches) != 1:
             return None
-        candidate = matches[0]
-        publication_id = getattr(candidate, "publication_id", None)
-        getter = getattr(self.store, "get_publication_generation", None)
-        if not callable(getter):
-            getter = getattr(self.store, "get_generation", None)
+        candidate: PublicationGeneration = matches[0]
         try:
-            generation = getter(publication_id) if callable(getter) else candidate
+            generation = self.store.get_publication_generation(
+                candidate.publication_id
+            )
         except Exception:
             return None
         if (
-            generation is None
-            or getattr(generation, "task_id", None) != task.id
-            or getattr(generation, "run_id", None) != snapshot_run_id
-            or getattr(generation, "publication_id", None) != publication_id
-            or getattr(
-                getattr(generation, "state", None),
-                "value",
-                getattr(generation, "state", None),
-            )
-            != "exposed"
+            not isinstance(generation, PublicationGeneration)
+            or generation.task_id != task.id
+            or generation.run_id != snapshot_run_id
+            or generation.publication_id != candidate.publication_id
+            or generation.state is not PublicationState.exposed
         ):
             return None
         return generation
 
-    def _cleanup_intents_for_task(self, task_id: str) -> list[object]:
-        listing = getattr(self.store, "list_cleanup_intents", None)
-        if not callable(listing):
-            listing = getattr(self.store, "cleanup_intents", None)
-        if not callable(listing):
-            return []
+    def _cleanup_intents_for_task(self, task_id: str) -> list[CleanupIntent]:
         try:
-            values = list(listing(task_id=task_id))
-        except TypeError:
-            try:
-                values = [item for item in listing() if getattr(item, "task_id", None) == task_id]
-            except Exception:
-                return []
+            values = list(self.store.list_cleanup_intents(task_id=task_id))
         except Exception:
             return []
-        return [item for item in values if getattr(item, "task_id", task_id) == task_id]
+        return [item for item in values if item.task_id == task_id]
 
-    def _cleanup_intent_for_task(self, task_id: str) -> object | None:
+    def _cleanup_intent_for_task(self, task_id: str) -> CleanupIntent | None:
         intents = self._cleanup_intents_for_task(task_id)
         if not intents:
             return None
@@ -3476,43 +3402,34 @@ class StewardDaemon:
         # durable completion and the task event.  Otherwise resume the oldest
         # pending intent deterministically.
         completed = [
-            item
-            for item in intents
-            if getattr(getattr(item, "state", None), "value", getattr(item, "state", None))
-            == CleanupState.completed.value
+            item for item in intents if item.state is CleanupState.completed
         ]
         if completed:
-            return max(completed, key=lambda item: str(getattr(item, "completed_at", "")))
-        return min(intents, key=lambda item: str(getattr(item, "requested_at", "")))
+            return max(completed, key=lambda item: str(item.completed_at))
+        return min(intents, key=lambda item: str(item.requested_at))
 
     def _create_terminal_cleanup_intent(
         self,
         task: TaskRecord,
-        generation: object,
+        generation: PublicationGeneration,
         archive: TaskArchiveWriter,
         manifest_digest: str,
-    ) -> object | None:
-        creator = getattr(self.store, "create_cleanup_intent", None)
-        if not callable(creator):
-            self._terminal_publication_block(task.id, "cleanup_intent_unavailable")
-            return None
-        requested_at = utc_now()
-        generation_updated = getattr(generation, "updated_at", None)
-        if isinstance(generation_updated, datetime) and generation_updated > requested_at:
-            requested_at = generation_updated
-        publication_id = getattr(generation, "publication_id", None)
-        if not isinstance(publication_id, str):
+    ) -> CleanupIntent | None:
+        if not isinstance(generation, PublicationGeneration):
             self._terminal_publication_block(task.id, "cleanup_generation_invalid")
             return None
+        requested_at = utc_now()
+        if generation.updated_at > requested_at:
+            requested_at = generation.updated_at
         try:
             intent = CleanupIntent(
                 task_id=task.id,
-                publication_id=publication_id,
+                publication_id=generation.publication_id,
                 manifest_digest=manifest_digest,
                 exact_path=str(archive.task_dir(task.id)),
                 requested_at=requested_at,
             )
-            result = creator(intent)
+            result = self.store.create_cleanup_intent(intent)
         except Exception as exc:
             self._log(
                 "terminal cleanup intent unavailable "
@@ -3520,49 +3437,59 @@ class StewardDaemon:
             )
             self._terminal_publication_block(task.id, "cleanup_intent_invalid")
             return None
-        status = getattr(getattr(result, "status", None), "value", getattr(result, "status", None))
-        if status not in {"enqueued", "existing"}:
+        if not isinstance(result, PublicationOperationResult):
+            self._terminal_publication_block(task.id, "cleanup_intent_invalid")
+            return None
+        if result.status not in {
+            PublicationOperationStatus.enqueued,
+            PublicationOperationStatus.existing,
+        }:
             self._terminal_publication_block(task.id, "cleanup_intent_rejected")
             return None
-        cleanup = getattr(result, "cleanup", None)
+        cleanup = result.cleanup
+        if cleanup is not None and not isinstance(cleanup, CleanupIntent):
+            self._terminal_publication_block(task.id, "cleanup_intent_invalid")
+            return None
         return cleanup if cleanup is not None else intent
 
     def _delete_terminal_archive(
         self,
         task: TaskRecord,
         archive: TaskArchiveWriter,
-        intent: object,
+        intent: CleanupIntent,
     ) -> bool:
         """Verify, remove, and durably complete one exact cleanup intent."""
 
-        intent_id = getattr(intent, "intent_id", None)
-        manifest_digest = getattr(intent, "manifest_digest", None)
-        verifier = getattr(self.store, "verify_cleanup_intent", None)
-        completer = getattr(self.store, "complete_cleanup_intent", None)
-        if not isinstance(intent_id, str) or not isinstance(manifest_digest, str):
-            return False
-        if not callable(verifier) or not callable(completer):
-            self._terminal_publication_block(task.id, "cleanup_intent_unavailable")
-            return False
-
-        state = getattr(getattr(intent, "state", None), "value", getattr(intent, "state", None))
-        verified = getattr(intent, "verified_at", None) is not None
+        intent_id = intent.intent_id
+        manifest_digest = intent.manifest_digest
+        verified = intent.verified_at is not None
         deletion_observed = False
-        if state == CleanupState.blocked.value:
+        if intent.state is CleanupState.blocked:
             return False
         try:
             if not verified:
                 current_digest = archive.manifest_digest(task.id)
                 if current_digest != manifest_digest:
                     raise ArchiveConflictError("terminal manifest digest changed")
-                result = verifier(intent_id, manifest_digest=manifest_digest)
-                status = getattr(getattr(result, "status", None), "value", getattr(result, "status", None))
-                if status not in {"verified", "existing"}:
+                result = self.store.verify_cleanup_intent(
+                    intent_id,
+                    manifest_digest=manifest_digest,
+                )
+                if not isinstance(result, PublicationOperationResult):
                     return False
-                intent = getattr(result, "cleanup", None) or intent
-                verified = getattr(intent, "verified_at", None) is not None or status in {
-                    "verified",
-                    "existing",
+                if result.status not in {
+                    PublicationOperationStatus.verified,
+                    PublicationOperationStatus.existing,
+                }:
+                    return False
+                verified_intent = result.cleanup
+                if verified_intent is not None:
+                    if not isinstance(verified_intent, CleanupIntent):
+                        return False
+                    intent = verified_intent
+                verified = intent.verified_at is not None or result.status in {
+                    PublicationOperationStatus.verified,
+                    PublicationOperationStatus.existing,
                 }
 
             # A verified intent may survive a crash while its exact archive is
@@ -3592,16 +3519,16 @@ class StewardDaemon:
             deletion_observed = True
             if outcome not in {"absent", manifest_digest}:
                 raise ArchiveConflictError("terminal manifest digest changed during deletion")
-            completed = completer(
+            completed = self.store.complete_cleanup_intent(
                 intent_id,
                 manifest_digest=manifest_digest,
             )
-            completed_status = getattr(
-                getattr(completed, "status", None),
-                "value",
-                getattr(completed, "status", None),
-            )
-            if completed_status not in {"completed", "existing"}:
+            if not isinstance(completed, PublicationOperationResult):
+                return False
+            if completed.status not in {
+                PublicationOperationStatus.completed,
+                PublicationOperationStatus.existing,
+            }:
                 return False
             return True
         except Exception as exc:
@@ -3614,10 +3541,12 @@ class StewardDaemon:
                     archive.task_dir(task.id).lstat()
                 except FileNotFoundError:
                     deletion_observed = True
-            blocker = getattr(self.store, "block_cleanup_intent", None)
-            if not deletion_observed and callable(blocker):
+            if not deletion_observed:
                 try:
-                    blocker(intent_id, reason="cleanup_failed")
+                    self.store.block_cleanup_intent(
+                        intent_id,
+                        reason="cleanup_failed",
+                    )
                 except Exception:
                     pass
             return False
@@ -3631,12 +3560,8 @@ class StewardDaemon:
         events = self.store.events(task.id)
         cleanup_complete = any(event.kind == "cleanup_complete" for event in events)
         existing_intent = self._cleanup_intent_for_task(task.id)
-        existing_state = (
-            getattr(getattr(existing_intent, "state", None), "value", getattr(existing_intent, "state", None))
-            if existing_intent is not None
-            else None
-        )
-        if existing_state == CleanupState.completed.value:
+        existing_state = existing_intent.state if existing_intent is not None else None
+        if existing_state is CleanupState.completed:
             if not cleanup_complete:
                 self.store.add_event(
                     task.id,
@@ -3646,7 +3571,7 @@ class StewardDaemon:
             return True
         if cleanup_complete:
             return True
-        if existing_state == CleanupState.blocked.value:
+        if existing_state is CleanupState.blocked:
             return False
         pipelines = []
         try:
@@ -3703,14 +3628,12 @@ class StewardDaemon:
         manifest = archive.task_dir(task.id) / "manifest.json"
         archive_absent_after_intent = False
         archive_missing_with_intent = False
-        if existing_intent is not None and existing_state == CleanupState.pending.value:
+        if existing_intent is not None and existing_state is CleanupState.pending:
             try:
                 archive.task_dir(task.id).lstat()
             except FileNotFoundError:
                 archive_missing_with_intent = True
-                archive_absent_after_intent = (
-                    getattr(existing_intent, "verified_at", None) is not None
-                )
+                archive_absent_after_intent = existing_intent.verified_at is not None
         if archive_missing_with_intent and not archive_absent_after_intent:
             self.store.add_event(
                 task.id,
@@ -3786,7 +3709,11 @@ class StewardDaemon:
                     task.id, "final_generation_unavailable"
                 )
             if archive_absent_after_intent:
-                manifest_digest = getattr(cleanup_intent, "manifest_digest", None)
+                manifest_digest = (
+                    cleanup_intent.manifest_digest
+                    if cleanup_intent is not None
+                    else None
+                )
             else:
                 try:
                     manifest_digest = archive.manifest_digest(task.id)
@@ -3803,12 +3730,9 @@ class StewardDaemon:
                 return False
             if cleanup_intent is not None:
                 if (
-                    getattr(cleanup_intent, "publication_id", None)
-                    != getattr(cleanup_generation, "publication_id", None)
-                    or getattr(cleanup_intent, "manifest_digest", None)
-                    != manifest_digest
-                    or getattr(cleanup_intent, "exact_path", None)
-                    != str(archive.task_dir(task.id))
+                    cleanup_intent.publication_id != cleanup_generation.publication_id
+                    or cleanup_intent.manifest_digest != manifest_digest
+                    or cleanup_intent.exact_path != str(archive.task_dir(task.id))
                 ):
                     self._terminal_publication_block(task.id, "cleanup_intent_mismatch")
                     return False

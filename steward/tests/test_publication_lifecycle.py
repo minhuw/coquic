@@ -25,10 +25,16 @@ from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequ
 from coquic_steward.publication.outbox import (
     CleanupIntent,
     CleanupState,
+    PublicationOperationResult,
+    PublicationOperationStatus,
     PublicationReceipt,
     ReceiptClass,
 )
-from coquic_steward.publication.publisher import CloudPublisher
+from coquic_steward.publication.publisher import (
+    CloudPublisher,
+    PublicationResult,
+    PublicationStatus,
+)
 from coquic_steward.publication.r2 import private_original_key
 from coquic_steward.publication.scanner import ScannerFinding, ScannerReport
 from coquic_steward.storage import TaskStore
@@ -539,6 +545,8 @@ def test_terminal_publication_receipts_match_immutable_generation(
     monkeypatch,
 ) -> None:
     graph = _publication_graph("terminal-receipts")
+    graph["task"]["lifecycleState"] = "completed"
+    graph["task"]["completedAt"] = "2026-07-28T12:00:01Z"
     from coquic_steward.publication.generation import compose_publication_generation
 
     composed = compose_publication_generation(
@@ -577,7 +585,7 @@ def test_terminal_publication_receipts_match_immutable_generation(
         def list_publication_receipts(self, _publication_id):
             return list(receipts)
 
-    task = SimpleNamespace(id=durable.task_id)
+    task = SimpleNamespace(id=durable.task_id, status="succeeded")
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
     daemon._publication_source = lambda _generation: graph
@@ -605,6 +613,8 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
     credential = "synthetic-credential-value"
     config = _publication_config(tmp_path, credential)
     graph = _publication_graph("terminal-credential")
+    graph["task"]["lifecycleState"] = "completed"
+    graph["task"]["completedAt"] = "2026-07-28T12:00:01Z"
     source = graph["runs"][0]
     source.documents["codex.jsonl"] = source.documents["codex.jsonl"].replace(
         b'"safe"', json.dumps(credential).encode("utf-8")
@@ -674,7 +684,7 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
     )
 
     assert daemon._terminal_publication_receipts_verified(
-        SimpleNamespace(id=aware.task_id), durable
+        SimpleNamespace(id=aware.task_id, status="succeeded"), durable
     ) == (True, "verified")
     assert calls == [
         (
@@ -691,7 +701,7 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
         exposed_at=now,
     )
     assert daemon._terminal_publication_receipts_verified(
-        SimpleNamespace(id=free.task_id), free_durable
+        SimpleNamespace(id=free.task_id, status="succeeded"), free_durable
     ) == (False, "generation_mismatch")
 
 
@@ -902,9 +912,17 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
             self.publish_calls: list[object] = []
             self.retry_calls: list[tuple[object, object, object]] = []
 
-        def publish(self, *args: object, **_kwargs: object) -> object:
+        def compose(self, source: object, *, task_id: str, **kwargs: object):
+            return session_module.compose_publication_generation(
+                source,
+                task_id=task_id,
+                scanner_runner=scanner,
+                **kwargs,
+            )
+
+        def publish(self, *args: object, **_kwargs: object) -> PublicationResult:
             self.publish_calls.append(args)
-            return SimpleNamespace(status="blocked")
+            return PublicationResult(PublicationStatus.blocked)
 
         def retry_publication(
             self,
@@ -912,11 +930,14 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
             source: object,
             *,
             compose_kwargs: object,
-        ) -> object:
+        ) -> PublicationResult:
             self.retry_calls.append((publication_id, source, compose_kwargs))
             if publication_id == older.publication_id:
-                return SimpleNamespace(status="blocked")
-            return SimpleNamespace(status="queued")
+                return PublicationResult(PublicationStatus.blocked)
+            return PublicationResult(
+                PublicationStatus.queued,
+                publication_id=later_aware.publication_id,
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.config = SimpleNamespace(publication=config)
@@ -937,13 +958,14 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
 
     assert daemon._publish_next_generation(publisher) is True
     assert publisher.publish_calls == []
-    expected_retry_ids = (
+    expected_retry_ids = [later_free.publication_id]
+    assert [call[0] for call in publisher.retry_calls] == expected_retry_ids
+    expected_source_ids = (
         [older.publication_id, later_free.publication_id]
         if older_reason == "integrity"
         else [later_free.publication_id]
     )
-    assert [call[0] for call in publisher.retry_calls] == expected_retry_ids
-    assert source_calls == expected_retry_ids
+    assert source_calls == expected_source_ids
 
     untouched = restarted.get_publication_generation(older.publication_id)
     assert untouched is not None
@@ -1282,9 +1304,14 @@ def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation
     assert daemon._terminal_publication_gate(task) is True
 
 
-def _enqueue_terminal(run: object, expected: str, generation: object) -> object:
+def _enqueue_terminal(
+    run: object, expected: str, generation: object
+) -> PublicationOperationResult:
     assert getattr(run, "id", None) == expected
-    return generation
+    return PublicationOperationResult(
+        PublicationOperationStatus.enqueued,
+        generation=generation,
+    )
 
 
 def test_materialized_success_enqueues_deterministically_without_transport(
@@ -1455,11 +1482,11 @@ def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path
 
         def block_cleanup_intent(self, intent_id: str, *, reason: str):
             self.blocked.append((intent_id, reason))
-            return SimpleNamespace(status="blocked")
+            return PublicationOperationResult(PublicationOperationStatus.blocked)
 
         def complete_cleanup_intent(self, intent_id: str, **_kwargs: object):
             self.completed.append(intent_id)
-            return SimpleNamespace(status="completed")
+            return PublicationOperationResult(PublicationOperationStatus.completed)
 
     store = CleanupStore()
     daemon = object.__new__(StewardDaemon)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import gc
 import json
@@ -56,9 +57,26 @@ from coquic_steward.execution.session import (
 )
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.cli import _run_until_stopped
+from coquic_steward.orchestration import daemon as daemon_module
 from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
 from coquic_steward.publication.atif import AtifSource
+from coquic_steward.publication.d1 import OverheadReceipt
 from coquic_steward.publication.models import RunIdentity, RunMetadata
+from coquic_steward.publication.generation import compose_publication_generation
+from coquic_steward.publication.outbox import (
+    GenerationIdentity,
+    PublicationGeneration,
+    PublicationHideFence,
+    PublicationOperationResult,
+    PublicationOperationStatus,
+    PublicationState,
+)
+from coquic_steward.publication.publisher import (
+    PublicationHideResult,
+    PublicationHideStatus,
+    PublicationResult,
+    PublicationStatus,
+)
 from coquic_steward.orchestration.preflight import (
     StewardPreflightError,
     run_preflight,
@@ -111,6 +129,99 @@ def _task(store: TaskStore, title: str = "lifecycle"):
     return task, store.list_pipelines(task.id)[0]
 
 
+def _publication_generation(
+    task_id: str,
+    *,
+    run_id: str | None = None,
+    state: PublicationState = PublicationState.queued,
+    reason: str | None = None,
+) -> PublicationGeneration:
+    boundary = f"boundary-{task_id}"
+    identity = GenerationIdentity(task_id, boundary)
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    return PublicationGeneration(
+        publication_id=identity.publication_id,
+        task_id=task_id,
+        metadata_digest="f" * 64,
+        idempotency_key=identity.idempotency_key,
+        created_at=now,
+        updated_at=now,
+        run_id=run_id or f"run-{task_id}",
+        generation_boundary=boundary,
+        state=state,
+        reason=reason,
+    )
+
+
+def _worker_composed_generation(task_id: str):
+    pipeline_id = f"pipeline-{task_id}"
+    run_id = f"run-{task_id}"
+    documents = {
+        "codex.jsonl": b'{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"safe"}}\n',
+        "activities.jsonl": (
+            b'{"record_type":"header","schema_version":1}\n'
+            b'{"record_type":"event","schema_version":1,"sequence":1,"source_event_id":"activity-1","activity":"investigate","summary":"Complete the task","recorded_at":"2026-07-28T12:00:00.100Z"}\n'
+            b'{"record_type":"summary","schema_version":1,"capture_state":"complete","recorded":1,"invalid":0,"duplicate":0,"omitted":0,"truncated":false}\n'
+        ),
+        "telemetry.json": b'{"schema_version":1,"provenance":"codex_exec","completeness":"complete","aggregate":{},"cost":{"status":"unavailable"}}',
+        "run.json": (
+            f'{{"taskId":"{task_id}","pipelineId":"{pipeline_id}","runId":"{run_id}","role":"planning","state":"succeeded","startedAt":"2026-07-28T12:00:00.000Z","completedAt":"2026-07-28T12:00:01.000Z"}}\n'
+        ).encode(),
+    }
+    graph = {
+        "task": {
+            "taskId": task_id,
+            "title": "worker publication",
+            "lifecycleState": "active",
+            "createdAt": "2026-07-28T12:00:00Z",
+            "completedAt": None,
+        },
+        "pipelines": [
+            {
+                "pipelineId": pipeline_id,
+                "taskId": task_id,
+                "name": "Planning pipeline",
+                "createdAt": "2026-07-28T12:00:00Z",
+            }
+        ],
+        "runs": [
+            AtifSource(
+                run={
+                    "taskId": task_id,
+                    "pipelineId": pipeline_id,
+                    "runId": run_id,
+                    "role": "planning",
+                    "state": "succeeded",
+                    "startedAt": "2026-07-28T12:00:00.000Z",
+                    "completedAt": "2026-07-28T12:00:01.000Z",
+                    "durationMs": 1_000,
+                },
+                documents=documents,
+            )
+        ],
+        "events": [
+            {
+                "taskId": task_id,
+                "sequence": 1,
+                "eventType": "completed",
+                "occurredAt": "2026-07-28T12:00:01Z",
+                "summary": "Planning completed",
+            }
+        ],
+        "artifacts": [],
+    }
+    result = compose_publication_generation(
+        graph,
+        task_id=task_id,
+        scanner_runner=lambda _argv, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=b"",
+        ),
+    )
+    assert result.status == "publishable"
+    return result
+
+
 def _force_task_pages(monkeypatch, store: TaskStore) -> list[int]:
     """Exercise detached lifecycle enumeration with a deliberately tiny page."""
 
@@ -150,12 +261,18 @@ def _planner_signal(store: TaskStore, suffix: str = "retry") -> SignalItem:
 
 
 def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
-    generation = SimpleNamespace(publication_id="pub-worker", task_id="task-worker")
+    generation = _publication_generation("task-worker")
 
     class Store:
         def __init__(self):
             self.on_change = None
             self.list_calls = 0
+
+        def list_pending_publication_hides(self):
+            return []
+
+        def expire_publication_leases(self):
+            return []
 
         def list_publication_generations(self, **_kwargs):
             self.list_calls += 1
@@ -167,7 +284,10 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
 
         def publish(self, *args, **_kwargs):
             self.calls.append(args)
-            return SimpleNamespace(status="retry_wait")
+            return PublicationResult(
+                PublicationStatus.retry_wait,
+                publication_id=generation.publication_id,
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
@@ -189,7 +309,7 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
 
     publisher = Publisher()
     assert daemon._publish_next_generation(publisher) is False
-    assert publisher.calls == [("pub-worker",)]
+    assert publisher.calls == [(generation.publication_id,)]
 
     daemon._install_publication_change_callback()
     assert callable(daemon.store.on_change)
@@ -203,16 +323,25 @@ def test_publication_worker_drains_pending_hides_before_exposure_claim():
     class Store:
         def list_pending_publication_hides(self):
             events.append("list-hides")
-            return [SimpleNamespace(task_id="task-hidden", reason="unsafe_content")]
+            return [PublicationHideFence("task-hidden", "unsafe_content")]
 
         def list_publication_generations(self, **_kwargs):
             events.append("list-generations")
-            return [SimpleNamespace(publication_id="pub-queued", task_id="task-queued")]
+            return [_publication_generation("task-queued")]
+
+        def expire_publication_leases(self):
+            events.append("expire-leases")
+            return []
 
     class Publisher:
         def hide_task(self, task_id: str, reason: str):
             events.append(f"hide:{task_id}:{reason}")
-            return SimpleNamespace(status="hidden")
+            return PublicationHideResult(
+                PublicationHideStatus.hidden,
+                task_id=task_id,
+                reason=reason,
+                changed=True,
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
@@ -228,16 +357,20 @@ def test_publication_worker_keeps_exposure_queued_when_hide_reconciliation_fails
     class Store:
         def list_pending_publication_hides(self):
             events.append("list-hides")
-            return [SimpleNamespace(task_id="task-hidden", reason="unsafe_content")]
+            return [PublicationHideFence("task-hidden", "unsafe_content")]
 
         def list_publication_generations(self, **_kwargs):
             events.append("list-generations")
-            return [SimpleNamespace(publication_id="pub-queued", task_id="task-queued")]
+            return [_publication_generation("task-queued")]
 
     class Publisher:
         def hide_task(self, task_id: str, reason: str):
             events.append(f"hide:{task_id}:{reason}")
-            return SimpleNamespace(status="blocked", reason="network")
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason="network",
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
@@ -365,14 +498,15 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
     tmp_path: Path,
 ) -> None:
     config = _enabled_publication_config(tmp_path, "synthetic-worker-credential")
-    generation = SimpleNamespace(
-        publication_id="pub-credential-free-staging",
-        task_id="task-credential-staging",
-        state="queued",
-        reason=None,
-    )
+    generation = _publication_generation("task-credential-staging")
 
     class Store:
+        def list_pending_publication_hides(self):
+            return []
+
+        def expire_publication_leases(self):
+            return []
+
         def list_publication_generations(self, **_kwargs):
             return [generation]
 
@@ -380,6 +514,9 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
         def __init__(self):
             self.publish_calls: list[dict[str, object]] = []
             self.retry_calls: list[dict[str, object]] = []
+
+        def compose(self, _source, *, task_id, **_kwargs):
+            return _worker_composed_generation(task_id)
 
         def publish(self, publication_id, *, source, compose_kwargs):
             self.publish_calls.append(
@@ -389,8 +526,9 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
                     "compose_kwargs": compose_kwargs,
                 }
             )
-            return SimpleNamespace(
-                status="blocked",
+            return PublicationResult(
+                PublicationStatus.blocked,
+                publication_id=publication_id,
                 reason="integrity",
                 phase="authenticate",
             )
@@ -403,7 +541,10 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
                     "compose_kwargs": compose_kwargs,
                 }
             )
-            return SimpleNamespace(status="queued")
+            return PublicationResult(
+                PublicationStatus.queued,
+                publication_id="pub-repaired-staging",
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
@@ -432,14 +573,19 @@ def test_publication_worker_reconciles_blocked_identity_after_restart(
     tmp_path: Path,
 ) -> None:
     config = _enabled_publication_config(tmp_path, "synthetic-restart-credential")
-    generation = SimpleNamespace(
-        publication_id="pub-credential-free-restart",
-        task_id="task-credential-restart",
-        state="blocked",
+    generation = _publication_generation(
+        "task-credential-restart",
+        state=PublicationState.blocked,
         reason="integrity",
     )
 
     class Store:
+        def list_pending_publication_hides(self):
+            return []
+
+        def expire_publication_leases(self):
+            return []
+
         def list_publication_generations(self, **_kwargs):
             return [generation]
 
@@ -448,13 +594,19 @@ def test_publication_worker_reconciles_blocked_identity_after_restart(
             self.publish_calls = 0
             self.retry_calls: list[object] = []
 
+        def compose(self, _source, *, task_id, **_kwargs):
+            return _worker_composed_generation(task_id)
+
         def publish(self, *_args, **_kwargs):
             self.publish_calls += 1
-            return SimpleNamespace(status="blocked")
+            return PublicationResult(PublicationStatus.blocked)
 
         def retry_publication(self, publication_id, source, *, compose_kwargs):
             self.retry_calls.append((publication_id, source, compose_kwargs))
-            return SimpleNamespace(status="queued")
+            return PublicationResult(
+                PublicationStatus.queued,
+                publication_id="pub-repaired-restart",
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
@@ -475,12 +627,9 @@ def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):
         state="succeeded",
         completed_at=datetime.now(timezone.utc),
     )
-    generation = SimpleNamespace(
-        publication_id="pub-terminal-publication",
-        task_id=task.id,
+    generation = _publication_generation(
+        task.id,
         run_id=run.id,
-        state="queued",
-        exposed_at=None,
     )
 
     class Store:
@@ -508,7 +657,10 @@ def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):
     daemon._terminal_publication_receipts_verified = lambda *_args: (True, "verified")
     monkeypatch.setattr(
         "coquic_steward.orchestration.daemon.enqueue_materialized_publication",
-        lambda *_args: generation,
+        lambda *_args: PublicationOperationResult(
+            PublicationOperationStatus.enqueued,
+            generation=generation,
+        ),
     )
 
     assert daemon._terminal_publication_gate(task) is False
@@ -518,30 +670,33 @@ def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):
         for event in daemon.store.events(task.id)
     )
 
-    generation.state = "exposed"
-    generation.exposed_at = datetime.now(timezone.utc)
+    exposed_at = datetime.now(timezone.utc)
+    generation = replace(
+        generation,
+        state=PublicationState.exposed,
+        updated_at=exposed_at,
+        exposed_at=exposed_at,
+    )
     assert daemon._terminal_publication_gate(task) is True
     assert len(daemon.store.events(task.id)) == 1
 
 
 def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():
-    generation = SimpleNamespace(
-        publication_id="pub-expired",
-        task_id="task-expired",
-        run_id="run-expired",
-        state="building",
-    )
+    generation = _publication_generation("task-expired")
 
     class Store:
         def __init__(self):
             self.expire_calls = 0
 
+        def list_pending_publication_hides(self):
+            return []
+
         def expire_publication_leases(self):
             self.expire_calls += 1
-            generation.state = "retry_wait"
+            return []
 
         def list_publication_generations(self, **_kwargs):
-            return [generation] if generation.state == "retry_wait" else []
+            return [generation]
 
     class Publisher:
         def __init__(self):
@@ -549,7 +704,10 @@ def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():
 
         def publish(self, *args, **_kwargs):
             self.calls.append(args)
-            return SimpleNamespace(status="exposed")
+            return PublicationResult(
+                PublicationStatus.exposed,
+                publication_id=generation.publication_id,
+            )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
@@ -560,7 +718,7 @@ def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():
     publisher = Publisher()
     assert daemon._publish_next_generation(publisher) is True
     assert daemon.store.expire_calls == 1
-    assert publisher.calls == [("pub-expired",)]
+    assert publisher.calls == [(generation.publication_id,)]
 
 
 def test_publication_worker_shutdown_cancels_clients_before_deadline():
@@ -3447,6 +3605,48 @@ def test_terminal_container_remove_requires_stopped_identity(config):
     assert [call[0] for call in calls] == ["inspect", "rm"]
 
 
+def test_daemon_publication_dispatch_is_static() -> None:
+    source = Path(daemon_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper_names = {
+        "_repair_staged_generation",
+        "_publication_source",
+        "_publication_overhead_rows",
+        "_reconcile_publication_usage",
+        "_drain_pending_publication_hides",
+        "_publish_next_generation",
+        "_terminal_publication_run",
+        "_prepare_terminal_publication_snapshot",
+        "_terminal_publication_receipts_verified",
+        "_terminal_publication_gate",
+        "_terminal_publication_generation_for_cleanup",
+        "_cleanup_intents_for_task",
+        "_create_terminal_cleanup_intent",
+        "_delete_terminal_archive",
+    }
+    failures: list[str] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node.name not in helper_names:
+                return
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                    if child.func.id in {"hasattr", "callable"}:
+                        failures.append(f"{node.name}:{child.lineno}:{child.func.id}")
+                    elif child.func.id == "getattr" and child.args:
+                        target = ast.unparse(child.args[0])
+                        if target in {"self.store", "publisher", "self.executor"}:
+                            failures.append(f"{node.name}:{child.lineno}:getattr({target})")
+                if isinstance(child, ast.ExceptHandler):
+                    if isinstance(child.type, ast.Name) and child.type.id == "TypeError":
+                        failures.append(f"{node.name}:{child.lineno}:TypeError retry")
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    assert failures == []
+
+
 class _DaemonSerializerLookalike:
     def __init__(self) -> None:
         self.as_dict_called = False
@@ -3595,8 +3795,9 @@ def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> N
     received: list[object] = []
 
     class Publisher:
-        def reconcile_overhead(self, source: object, *, digest: str | None = None) -> None:
+        def reconcile_overhead(self, source: object, *, digest: str | None = None):
             received.append(source)
+            return OverheadReceipt()
 
     assert daemon._reconcile_publication_usage(Publisher()) is True
     assert received == [row.public_dict()]

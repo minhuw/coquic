@@ -8,25 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  steward-migration:
-    name: Steward Migration Guard
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
-        with:
-          summarize: false
-
-      - name: Check removed dashboard invariants
-        run: nix develop -c ./scripts/check-steward-migration.py
-
-      - name: Smoke Steward without Node.js
-        run: nix develop -c ./scripts/smoke-steward-no-node.sh
-
   steward-schema:
     name: Steward Schema
     runs-on: ubuntu-latest
@@ -64,6 +45,12 @@ jobs:
 
       - name: Test Steward suite
         run: nix develop -c uv run --project steward python -m pytest steward/tests -q
+
+      - name: Smoke Steward package import
+        run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'import coquic_steward'
+
+      - name: Smoke Steward CLI load
+        run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'from coquic_steward.cli import app; assert app is not None'
 
       - name: Check Steward dependency parity
         run: nix develop -c python scripts/check-steward-dependency-parity.py

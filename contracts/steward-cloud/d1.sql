@@ -302,7 +302,10 @@ CREATE TABLE usage_turns (
 
 CREATE TABLE usage_globals (
     global_id TEXT PRIMARY KEY,
-    usage_generation_id TEXT NOT NULL,
+    -- A NULL generation marks an aggregate-only materialization owned by the
+    -- global head; validated publication contributions always carry a
+    -- generation ID.
+    usage_generation_id TEXT,
     period_kind TEXT NOT NULL CHECK (period_kind IN ('lifetime', 'daily')),
     period_key TEXT NOT NULL,
     model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 256),
@@ -333,6 +336,7 @@ CREATE TABLE usage_globals (
     CHECK ((period_kind = 'lifetime' AND period_key = 'lifetime')
         OR (period_kind = 'daily' AND period_key GLOB '20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]')),
     CHECK (ownership_class = 'steward-overhead' OR aggregate_only = 1),
+    CHECK (usage_generation_id IS NOT NULL OR ownership_class = 'task-owned'),
     FOREIGN KEY (usage_generation_id)
         REFERENCES usage_generations (usage_generation_id)
 );
@@ -363,9 +367,10 @@ WHEN NOT EXISTS (
     SELECT 1
       FROM usage_globals AS g
       JOIN usage_generations AS ug
-        ON ug.usage_generation_id = g.usage_generation_id
+        ON ug.usage_generation_id = NEW.usage_generation_id
      WHERE g.global_id = NEW.global_id
-       AND g.usage_generation_id = NEW.usage_generation_id
+       AND (g.usage_generation_id = NEW.usage_generation_id
+            OR (g.usage_generation_id IS NULL AND NEW.ownership_class = 'task-owned'))
        AND g.period_kind = NEW.period_kind
        AND g.period_key = NEW.period_key
        AND g.model = NEW.model
@@ -384,9 +389,10 @@ WHEN NOT EXISTS (
     SELECT 1
       FROM usage_globals AS g
       JOIN usage_generations AS ug
-        ON ug.usage_generation_id = g.usage_generation_id
+        ON ug.usage_generation_id = NEW.usage_generation_id
      WHERE g.global_id = NEW.global_id
-       AND g.usage_generation_id = NEW.usage_generation_id
+       AND (g.usage_generation_id = NEW.usage_generation_id
+            OR (g.usage_generation_id IS NULL AND NEW.ownership_class = 'task-owned'))
        AND g.period_kind = NEW.period_kind
        AND g.period_key = NEW.period_key
        AND g.model = NEW.model

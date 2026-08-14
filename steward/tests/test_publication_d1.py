@@ -634,6 +634,48 @@ def mark_usage_unavailable(payload: dict[str, Any]) -> None:
     refresh_metadata_digest(payload)
 
 
+def mark_usage_costs_unknown(
+    payload: dict[str, Any],
+    *,
+    global_coverage: str,
+    invocation_coverage: str = "partial",
+) -> None:
+    usage = payload["usage"]
+    cost_fields = (
+        "uncachedInputCostMicroUsd",
+        "cachedInputCostMicroUsd",
+        "outputCostMicroUsd",
+        "totalCostMicroUsd",
+    )
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in usage[collection]:
+            for field in cost_fields:
+                row[field] = None
+            if collection == "summaries":
+                row.update(
+                    {
+                        "coverage": global_coverage,
+                        "knownCostSubtotalMicroUsd": None,
+                        "priceProvenanceDigest": None,
+                    }
+                )
+            elif collection == "invocations":
+                row.update({"coverage": invocation_coverage, "priceEntryDigest": None})
+            elif collection == "turns":
+                row["priceEntryDigest"] = None
+            elif row["ownershipClass"] == "task-owned":
+                row.update(
+                    {
+                        "coverage": global_coverage,
+                        "knownCostSubtotalMicroUsd": None,
+                        "priceProvenanceDigest": None,
+                    }
+                )
+    usage["prices"] = []
+    usage["generation"]["expectedCounts"]["prices"] = 0
+    refresh_metadata_digest(payload)
+
+
 def test_task_owned_globals_match_verified_invocation_rollups() -> None:
     server = ScriptedD1()
     d1 = client(server)
@@ -711,6 +753,16 @@ def test_hide_unavailable_task_preserves_known_shared_totals() -> None:
 
     d1.hide_task("task-unavailable", "unsafe_content")
 
+    unavailable_usage_id = unavailable["usage"]["generation"]["usageGenerationId"]
+    assert tuple(
+        server.connection.execute(
+            "SELECT total_tokens, total_cost_micro_usd, coverage, expected_invocations "
+            "FROM usage_globals WHERE usage_generation_id = ? AND period_kind = 'lifetime' "
+            "AND model = 'gpt-fixture' AND ownership_class = 'task-owned'",
+            (unavailable_usage_id,),
+        ).fetchone()
+    ) == (None, None, "unavailable", 1)
+
     row = server.connection.execute(
         "SELECT g.total_tokens, g.total_cost_micro_usd, g.coverage, g.expected_invocations, "
         "g.price_provenance_digest, h.state FROM usage_global_heads AS h "
@@ -751,6 +803,69 @@ def test_exposure_after_unavailable_task_preserves_unknown_shared_totals() -> No
         None,
         complete["usage"]["globals"][0]["priceProvenanceDigest"],
     )
+
+
+def test_shared_global_coverage_does_not_promote_partial_contribution() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    partial = publication("publication-global-partial", run_id="run-global-partial", task_id="task-global-partial")
+    mark_usage_costs_unknown(partial, global_coverage="partial")
+    complete = publication("publication-global-null-cost", run_id="run-global-null-cost", task_id="task-global-null-cost")
+    mark_usage_costs_unknown(complete, global_coverage="complete")
+
+    d1.publish(partial)
+    d1.publish(complete)
+
+    rows = server.connection.execute(
+        "SELECT h.period_kind, g.coverage, g.covered_invocations, g.expected_invocations, g.total_tokens, "
+        "g.total_cost_micro_usd, g.price_provenance_digest FROM usage_global_heads AS h "
+        "JOIN usage_globals AS g ON g.global_id = h.global_id "
+        "WHERE h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned' ORDER BY h.period_kind"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("daily", "partial", 2, 2, 36, None, None),
+        ("lifetime", "partial", 2, 2, 36, None, None),
+    ]
+
+
+def test_shared_generation_replay_keeps_immutable_payload_globals() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication("publication-replay-first", run_id="run-replay-first", task_id="task-replay-first")
+    second = publication("publication-replay-second", run_id="run-replay-second", task_id="task-replay-second")
+
+    d1.publish(first)
+    d1.publish(second)
+    second_usage_id = second["usage"]["generation"]["usageGenerationId"]
+    before = tuple(
+        server.connection.execute(
+            "SELECT coverage, covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd "
+            "FROM usage_globals WHERE usage_generation_id = ? AND period_kind = 'lifetime' "
+            "AND model = 'gpt-fixture' AND ownership_class = 'task-owned'",
+            (second_usage_id,),
+        ).fetchone()
+    )
+    assert before == ("complete", 1, 1, 18, 60)
+
+    assert d1.expose(copy.deepcopy(second)).publication_id == second["publicationId"]
+
+    after = tuple(
+        server.connection.execute(
+            "SELECT coverage, covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd "
+            "FROM usage_globals WHERE usage_generation_id = ? AND period_kind = 'lifetime' "
+            "AND model = 'gpt-fixture' AND ownership_class = 'task-owned'",
+            (second_usage_id,),
+        ).fetchone()
+    )
+    assert after == before
+    visible = tuple(
+        server.connection.execute(
+            "SELECT g.coverage, g.covered_invocations, g.expected_invocations, g.total_tokens, g.total_cost_micro_usd "
+            "FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id "
+            "WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-fixture' AND h.ownership_class = 'task-owned'"
+        ).fetchone()
+    )
+    assert visible == ("complete", 2, 2, 36, 120)
 
 
 def test_usage_replacement_with_daily_and_lifetime_keys_stays_below_batch_limit() -> None:
@@ -834,7 +949,7 @@ def test_global_transition_boundary_exposure_uses_fixed_final_batch() -> None:
     assert low_shape == high_shape
     assert high_shape[0] <= 64
     assert high_shape[1] <= MAX_BATCH_PARAMETERS
-    assert sum("WITH old_invocations AS" in item["sql"] for item in high_batch) == 1
+    assert sum("WITH transition_context AS" in item["sql"] for item in high_batch) == 1
     assert sum("INSERT INTO usage_global_heads" in item["sql"] for item in high_batch) == 1
     assert server.connection.execute(
         "SELECT count(*) FROM usage_global_heads WHERE ownership_class = 'task-owned'"
@@ -879,7 +994,7 @@ def test_global_transition_boundary_replacement_uses_fixed_final_batch() -> None
     assert low_shape == high_shape
     assert high_shape[0] <= 64
     assert high_shape[1] <= MAX_BATCH_PARAMETERS
-    assert sum("WITH old_invocations AS" in item["sql"] for item in high_batch) == 1
+    assert sum("WITH transition_context AS" in item["sql"] for item in high_batch) == 1
     assert sum("INSERT INTO usage_global_heads" in item["sql"] for item in high_batch) == 1
     new_usage_id = high_replacement["usage"]["generation"]["usageGenerationId"]
     assert server.connection.execute(

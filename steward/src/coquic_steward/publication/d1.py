@@ -1424,6 +1424,17 @@ _PRICE_NEXT_SELECT = (
 )
 _USAGE_GLOBAL_SELECT = "SELECT global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest, aggregate_only FROM usage_globals WHERE usage_generation_id = ? ORDER BY global_id"
 _HEAD_SELECT = "SELECT publication_id, usage_generation_id, state, updated_at FROM task_heads WHERE task_id = ?"
+_VISIBLE_TASK_GLOBAL_SELECT = (
+    "SELECT g.global_id, g.usage_generation_id, g.period_kind, g.period_key, g.model, g.ownership_class, g.coverage, "
+    "g.covered_invocations, g.expected_invocations, g.known_token_subtotal, g.known_cost_subtotal_micro_usd, "
+    "g.prompt_tokens, g.cached_tokens, g.uncached_tokens, g.completion_tokens, g.reasoning_tokens, g.total_tokens, "
+    "g.uncached_input_cost_micro_usd, g.cached_input_cost_micro_usd, g.output_cost_micro_usd, "
+    "g.total_cost_micro_usd, g.price_provenance_digest, g.aggregate_only "
+    "FROM usage_globals AS g JOIN usage_generations AS generation "
+    "ON generation.usage_generation_id = g.usage_generation_id "
+    "WHERE generation.ownership_class = 'task-owned' AND generation.state = 'visible' "
+    "AND generation.task_id <> ?"
+)
 _GLOBAL_HEAD_KEY_SELECT = (
     "SELECT h.period_kind, h.period_key, h.model, h.ownership_class, h.usage_generation_id, h.global_id, h.state, "
     "g.coverage, g.covered_invocations, g.expected_invocations, g.known_token_subtotal, "
@@ -1444,32 +1455,44 @@ _GLOBAL_UPDATE = (
     "WHERE global_id = ?"
 )
 # The global transition is deliberately expressed as two set operations.  The
-# first computes every task-owned aggregate from the visible head and the old
-# task contribution in one UPDATE; the second switches all matching heads in
-# one INSERT ... SELECT.  The old contribution is derived from invocation rows
-# because a visible usage generation's global rows may already contain a shared
-# aggregate rather than that task's original contribution.
+# first materializes one aggregate row per incoming key from all surviving
+# task-owned contributions; the second switches all matching heads in one
+# INSERT ... SELECT.  Aggregate rows have no usage-generation ownership so the
+# validated contribution rows stay immutable and exact-replayable.
 _GLOBAL_TRANSITION_UPDATE = (
-    "WITH old_invocations AS ("
-    "SELECT COALESCE(model, 'unknown') AS model, coverage, started_at, "
-    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
-    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
-    "price_entry_digest "
-    "FROM usage_invocations WHERE usage_generation_id = ? AND ownership_class = 'task-owned'"
-    "), old_period_rows AS ("
-    "SELECT 'lifetime' AS period_kind, 'lifetime' AS period_key, model, coverage, "
-    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
-    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
-    "price_entry_digest FROM old_invocations "
+    "WITH transition_context AS ("
+    "SELECT ? AS old_usage_id, ? AS old_usage_missing, ? AS task_id"
+    "), new_rows AS ("
+    "SELECT period_kind, period_key, model, ownership_class, coverage, "
+    "covered_invocations, expected_invocations, prompt_tokens, cached_tokens, "
+    "uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
+    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, "
+    "output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest, global_id "
+    "FROM usage_globals WHERE usage_generation_id = ? AND ownership_class = 'task-owned'"
+    "), contributions AS ("
+    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.coverage, "
+    "g.covered_invocations, g.expected_invocations, g.prompt_tokens, g.cached_tokens, "
+    "g.uncached_tokens, g.completion_tokens, g.reasoning_tokens, g.total_tokens, "
+    "g.uncached_input_cost_micro_usd, g.cached_input_cost_micro_usd, "
+    "g.output_cost_micro_usd, g.total_cost_micro_usd, g.price_provenance_digest "
+    "FROM usage_globals AS g "
+    "JOIN usage_generations AS generation ON generation.usage_generation_id = g.usage_generation_id "
+    "WHERE generation.ownership_class = 'task-owned' AND generation.state = 'visible' "
     "UNION ALL "
-    "SELECT 'daily', substr(started_at, 1, 10), model, coverage, "
-    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
-    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
-    "price_entry_digest FROM old_invocations WHERE started_at IS NOT NULL"
-    "), old_contributions AS ("
-    "SELECT period_kind, period_key, model, 'task-owned' AS ownership_class, "
-    "SUM(CASE WHEN coverage <> 'unavailable' THEN 1 ELSE 0 END) AS covered_invocations, "
-    "COUNT(*) AS expected_invocations, "
+    "SELECT period_kind, period_key, model, ownership_class, coverage, "
+    "covered_invocations, expected_invocations, prompt_tokens, cached_tokens, "
+    "uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
+    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, "
+    "output_cost_micro_usd, total_cost_micro_usd, price_provenance_digest "
+    "FROM new_rows"
+    "), grouped AS ("
+    "SELECT period_kind, period_key, model, ownership_class, "
+    "CASE WHEN SUM(CASE WHEN coverage = 'unavailable' THEN 1 ELSE 0 END) > 0 "
+    "THEN 'unavailable' "
+    "WHEN SUM(CASE WHEN coverage = 'complete' THEN 1 ELSE 0 END) = COUNT(*) "
+    "THEN 'complete' ELSE 'partial' END AS coverage, "
+    "SUM(covered_invocations) AS covered_invocations, "
+    "SUM(expected_invocations) AS expected_invocations, "
     "CASE WHEN COUNT(prompt_tokens) = COUNT(*) THEN SUM(prompt_tokens) END AS prompt_tokens, "
     "CASE WHEN COUNT(cached_tokens) = COUNT(*) THEN SUM(cached_tokens) END AS cached_tokens, "
     "CASE WHEN COUNT(uncached_tokens) = COUNT(*) THEN SUM(uncached_tokens) END AS uncached_tokens, "
@@ -1480,115 +1503,16 @@ _GLOBAL_TRANSITION_UPDATE = (
     "CASE WHEN COUNT(cached_input_cost_micro_usd) = COUNT(*) THEN SUM(cached_input_cost_micro_usd) END AS cached_input_cost_micro_usd, "
     "CASE WHEN COUNT(output_cost_micro_usd) = COUNT(*) THEN SUM(output_cost_micro_usd) END AS output_cost_micro_usd, "
     "CASE WHEN COUNT(total_cost_micro_usd) = COUNT(*) THEN SUM(total_cost_micro_usd) END AS total_cost_micro_usd, "
-    "CASE WHEN COUNT(price_entry_digest) = COUNT(*) AND COUNT(DISTINCT price_entry_digest) = 1 "
-    "THEN MIN(price_entry_digest) END AS price_provenance_digest "
-    "FROM old_period_rows GROUP BY period_kind, period_key, model"
-    "), transition_context AS ("
-    "SELECT ? AS old_usage_id, ? AS old_usage_missing, ? AS task_id"
-    "), current_aggregates AS ("
-    "SELECT h.period_kind, h.period_key, h.model, h.ownership_class, g.global_id, "
-    "g.coverage, g.covered_invocations, g.expected_invocations, g.known_token_subtotal, "
-    "g.known_cost_subtotal_micro_usd, g.prompt_tokens, g.cached_tokens, g.uncached_tokens, "
-    "g.completion_tokens, g.reasoning_tokens, g.total_tokens, g.uncached_input_cost_micro_usd, "
-    "g.cached_input_cost_micro_usd, g.output_cost_micro_usd, g.total_cost_micro_usd, "
-    "g.price_provenance_digest "
-    "FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id "
-    "WHERE h.state = 'visible'"
-    "), raw_values AS ("
-    "SELECT n.global_id, n.usage_generation_id, n.coverage AS new_coverage, "
-    "CASE WHEN a.global_id IS NULL THEN 1 ELSE 0 END AS no_current_aggregate, "
-    "n.price_provenance_digest AS new_price_provenance_digest, "
-    "a.price_provenance_digest AS old_price_provenance_digest, "
-    "CASE WHEN n.uncached_input_cost_micro_usd IS NOT NULL AND n.cached_input_cost_micro_usd IS NOT NULL "
-    "AND n.output_cost_micro_usd IS NOT NULL AND n.total_cost_micro_usd IS NOT NULL THEN 1 ELSE 0 END AS new_numeric, "
-    "CASE WHEN a.global_id IS NULL THEN n.covered_invocations ELSE "
-    "a.covered_invocations - COALESCE(o.covered_invocations, 0) + n.covered_invocations END AS covered_invocations, "
-    "CASE WHEN a.global_id IS NULL THEN n.expected_invocations ELSE "
-    "a.expected_invocations - COALESCE(o.expected_invocations, 0) + n.expected_invocations END AS expected_invocations, "
-    "CASE WHEN a.global_id IS NULL THEN n.prompt_tokens WHEN a.prompt_tokens IS NULL THEN "
-    "CASE WHEN COALESCE(o.prompt_tokens, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.prompt_tokens END ELSE "
-    "a.prompt_tokens - COALESCE(o.prompt_tokens, 0) + COALESCE(n.prompt_tokens, 0) END AS prompt_tokens, "
-    "CASE WHEN a.global_id IS NULL THEN n.cached_tokens WHEN a.cached_tokens IS NULL THEN "
-    "CASE WHEN COALESCE(o.cached_tokens, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.cached_tokens END ELSE "
-    "a.cached_tokens - COALESCE(o.cached_tokens, 0) + COALESCE(n.cached_tokens, 0) END AS cached_tokens, "
-    "CASE WHEN a.global_id IS NULL THEN n.uncached_tokens WHEN a.uncached_tokens IS NULL THEN "
-    "CASE WHEN COALESCE(o.uncached_tokens, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.uncached_tokens END ELSE "
-    "a.uncached_tokens - COALESCE(o.uncached_tokens, 0) + COALESCE(n.uncached_tokens, 0) END AS uncached_tokens, "
-    "CASE WHEN a.global_id IS NULL THEN n.completion_tokens WHEN a.completion_tokens IS NULL THEN "
-    "CASE WHEN COALESCE(o.completion_tokens, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.completion_tokens END ELSE "
-    "a.completion_tokens - COALESCE(o.completion_tokens, 0) + COALESCE(n.completion_tokens, 0) END AS completion_tokens, "
-    "CASE WHEN a.global_id IS NULL THEN n.reasoning_tokens WHEN a.reasoning_tokens IS NULL THEN "
-    "CASE WHEN COALESCE(o.reasoning_tokens, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.reasoning_tokens END ELSE "
-    "a.reasoning_tokens - COALESCE(o.reasoning_tokens, 0) + COALESCE(n.reasoning_tokens, 0) END AS reasoning_tokens, "
-    "CASE WHEN a.global_id IS NULL THEN n.total_tokens WHEN a.total_tokens IS NULL THEN "
-    "CASE WHEN COALESCE(o.total_tokens, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.total_tokens END ELSE "
-    "a.total_tokens - COALESCE(o.total_tokens, 0) + COALESCE(n.total_tokens, 0) END AS total_tokens, "
-    "CASE WHEN a.global_id IS NULL THEN n.uncached_input_cost_micro_usd WHEN a.uncached_input_cost_micro_usd IS NULL THEN "
-    "CASE WHEN COALESCE(o.uncached_input_cost_micro_usd, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.uncached_input_cost_micro_usd END ELSE "
-    "a.uncached_input_cost_micro_usd - COALESCE(o.uncached_input_cost_micro_usd, 0) + COALESCE(n.uncached_input_cost_micro_usd, 0) END AS uncached_input_cost_micro_usd, "
-    "CASE WHEN a.global_id IS NULL THEN n.cached_input_cost_micro_usd WHEN a.cached_input_cost_micro_usd IS NULL THEN "
-    "CASE WHEN COALESCE(o.cached_input_cost_micro_usd, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.cached_input_cost_micro_usd END ELSE "
-    "a.cached_input_cost_micro_usd - COALESCE(o.cached_input_cost_micro_usd, 0) + COALESCE(n.cached_input_cost_micro_usd, 0) END AS cached_input_cost_micro_usd, "
-    "CASE WHEN a.global_id IS NULL THEN n.output_cost_micro_usd WHEN a.output_cost_micro_usd IS NULL THEN "
-    "CASE WHEN COALESCE(o.output_cost_micro_usd, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.output_cost_micro_usd END ELSE "
-    "a.output_cost_micro_usd - COALESCE(o.output_cost_micro_usd, 0) + COALESCE(n.output_cost_micro_usd, 0) END AS output_cost_micro_usd, "
-    "CASE WHEN a.global_id IS NULL THEN n.total_cost_micro_usd WHEN a.total_cost_micro_usd IS NULL THEN "
-    "CASE WHEN COALESCE(o.total_cost_micro_usd, CASE WHEN context.old_usage_missing = 1 THEN 0 END) IS NULL THEN n.total_cost_micro_usd END ELSE "
-    "a.total_cost_micro_usd - COALESCE(o.total_cost_micro_usd, 0) + COALESCE(n.total_cost_micro_usd, 0) END AS total_cost_micro_usd "
-    "FROM usage_globals AS n CROSS JOIN transition_context AS context "
-    "LEFT JOIN current_aggregates AS a ON a.period_kind = n.period_kind AND a.period_key = n.period_key "
-    "AND a.model = n.model AND a.ownership_class = n.ownership_class "
-    "LEFT JOIN old_contributions AS o ON o.period_kind = n.period_kind AND o.period_key = n.period_key "
-    "AND o.model = n.model AND o.ownership_class = n.ownership_class "
-    "WHERE n.usage_generation_id = ? AND n.ownership_class = 'task-owned'"
+    "CASE WHEN COUNT(DISTINCT price_provenance_digest) = 1 THEN MIN(price_provenance_digest) END AS price_provenance_digest "
+    "FROM contributions GROUP BY period_kind, period_key, model, ownership_class"
     "), calculated AS ("
-    "SELECT global_id, usage_generation_id, covered_invocations, expected_invocations, "
-    "CASE WHEN no_current_aggregate = 1 THEN new_coverage "
-    "WHEN prompt_tokens IS NULL AND cached_tokens IS NULL AND uncached_tokens IS NULL "
-    "AND completion_tokens IS NULL AND reasoning_tokens IS NULL AND total_tokens IS NULL "
-    "AND uncached_input_cost_micro_usd IS NULL AND cached_input_cost_micro_usd IS NULL "
-    "AND output_cost_micro_usd IS NULL AND total_cost_micro_usd IS NULL THEN 'unavailable' "
-    "WHEN new_coverage = 'complete' AND covered_invocations = expected_invocations THEN 'complete' "
-    "WHEN covered_invocations = expected_invocations AND prompt_tokens IS NOT NULL AND cached_tokens IS NOT NULL "
-    "AND uncached_tokens IS NOT NULL AND completion_tokens IS NOT NULL AND reasoning_tokens IS NOT NULL "
-    "AND total_tokens IS NOT NULL AND uncached_input_cost_micro_usd IS NOT NULL "
-    "AND cached_input_cost_micro_usd IS NOT NULL AND output_cost_micro_usd IS NOT NULL "
-    "AND total_cost_micro_usd IS NOT NULL THEN 'complete' ELSE 'partial' END AS coverage, "
-    "total_tokens AS known_token_subtotal, total_cost_micro_usd AS known_cost_subtotal_micro_usd, "
-    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
-    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
-    "CASE WHEN new_numeric = 1 THEN new_price_provenance_digest "
-    "WHEN uncached_input_cost_micro_usd IS NOT NULL AND cached_input_cost_micro_usd IS NOT NULL "
-    "AND output_cost_micro_usd IS NOT NULL AND total_cost_micro_usd IS NOT NULL THEN old_price_provenance_digest END "
-    "AS price_provenance_digest "
-    "FROM raw_values"
-    ") UPDATE usage_globals AS target SET "
-    "coverage = (SELECT coverage FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "covered_invocations = (SELECT covered_invocations FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "expected_invocations = (SELECT expected_invocations FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "known_token_subtotal = (SELECT known_token_subtotal FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "known_cost_subtotal_micro_usd = (SELECT known_cost_subtotal_micro_usd FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "prompt_tokens = (SELECT prompt_tokens FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "cached_tokens = (SELECT cached_tokens FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "uncached_tokens = (SELECT uncached_tokens FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "completion_tokens = (SELECT completion_tokens FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "reasoning_tokens = (SELECT reasoning_tokens FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "total_tokens = (SELECT total_tokens FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "uncached_input_cost_micro_usd = (SELECT uncached_input_cost_micro_usd FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "cached_input_cost_micro_usd = (SELECT cached_input_cost_micro_usd FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "output_cost_micro_usd = (SELECT output_cost_micro_usd FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "total_cost_micro_usd = (SELECT total_cost_micro_usd FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "price_provenance_digest = (SELECT price_provenance_digest FROM calculated AS c WHERE c.global_id = target.global_id), "
-    "aggregate_only = 1 "
-    "WHERE target.usage_generation_id = ? AND target.ownership_class = 'task-owned' "
-    "AND EXISTS ("
-    "SELECT 1 FROM usage_generations AS target_generation "
-    "WHERE target_generation.usage_generation_id = target.usage_generation_id "
-    "AND target_generation.state = 'staged'"
-    ") "
-    "AND EXISTS ("
-    "SELECT 1 FROM transition_context AS context "
-    "WHERE (context.old_usage_missing = 1 AND NOT EXISTS ("
+    "SELECT ? || ':' || new.global_id AS global_id, grouped.* "
+    "FROM grouped JOIN new_rows AS new ON new.period_kind = grouped.period_kind "
+    "AND new.period_key = grouped.period_key AND new.model = grouped.model "
+    "AND new.ownership_class = grouped.ownership_class "
+    "CROSS JOIN transition_context AS context "
+    "WHERE ("
+    "(context.old_usage_missing = 1 AND NOT EXISTS ("
     "SELECT 1 FROM task_heads AS current_task "
     "WHERE current_task.task_id = context.task_id AND current_task.state = 'visible'"
     ")) OR (context.old_usage_missing = 0 AND EXISTS ("
@@ -1600,14 +1524,24 @@ _GLOBAL_TRANSITION_UPDATE = (
     "AND current_task.usage_generation_id = context.old_usage_id "
     "AND current_task.state = 'visible'"
     "))"
-    ") "
-    "AND EXISTS (SELECT 1 FROM calculated AS c WHERE c.global_id = target.global_id)"
+    ")"
+    ") INSERT INTO usage_globals ("
+    "global_id, usage_generation_id, period_kind, period_key, model, ownership_class, coverage, "
+    "covered_invocations, expected_invocations, known_token_subtotal, known_cost_subtotal_micro_usd, "
+    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
+    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
+    "price_provenance_digest, aggregate_only) "
+    "SELECT global_id, NULL, period_kind, period_key, model, ownership_class, coverage, "
+    "covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd, "
+    "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
+    "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
+    "price_provenance_digest, 1 FROM calculated"
 )
 _GLOBAL_HEAD_UPSERT_SET = (
     "INSERT INTO usage_global_heads "
     "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
-    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
-    "FROM usage_globals AS g WHERE g.usage_generation_id = ? AND g.ownership_class = 'task-owned' "
+    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, ?, g.global_id, 'visible', ? "
+    "FROM usage_globals AS g WHERE g.usage_generation_id IS NULL AND g.global_id LIKE ? "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -1615,14 +1549,12 @@ _GLOBAL_HEAD_UPSERT_SET = (
 _GLOBAL_HEAD_UPSERT_SET_GUARDED = (
     "INSERT INTO usage_global_heads "
     "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
-    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
+    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, ?, g.global_id, 'visible', ? "
     "FROM usage_globals AS g "
-    "JOIN usage_generations AS n ON n.usage_generation_id = g.usage_generation_id "
-    "JOIN task_heads AS t ON t.task_id = n.task_id "
-    "AND t.usage_generation_id = ? AND t.state = 'visible' "
+    "JOIN task_heads AS t ON t.task_id = ? AND t.usage_generation_id = ? AND t.state = 'visible' "
     "JOIN usage_heads AS h ON h.task_id = t.task_id AND h.usage_generation_id = t.usage_generation_id "
     "AND h.state = 'visible' "
-    "WHERE g.usage_generation_id = ? AND g.ownership_class = 'task-owned' "
+    "WHERE g.usage_generation_id IS NULL AND g.global_id LIKE ? "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -1630,8 +1562,9 @@ _GLOBAL_HEAD_UPSERT_SET_GUARDED = (
 _GLOBAL_HEAD_UPSERT = (
     "INSERT INTO usage_global_heads "
     "(period_kind, period_key, model, ownership_class, usage_generation_id, global_id, state, updated_at) "
-    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
-    "FROM usage_globals AS g WHERE g.global_id = ? AND g.usage_generation_id = ? "
+    "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, ?, g.global_id, 'visible', ? "
+    "FROM usage_globals AS g WHERE g.global_id = ? "
+    "AND (g.usage_generation_id = ? OR g.usage_generation_id IS NULL) "
     "ON CONFLICT(period_kind, period_key, model, ownership_class) DO UPDATE SET "
     "usage_generation_id = excluded.usage_generation_id, global_id = excluded.global_id, "
     "state = 'visible', updated_at = excluded.updated_at"
@@ -2879,6 +2812,36 @@ class D1PublicationClient:
         empty["aggregateOnly"] = True
         return empty
 
+    @classmethod
+    def _aggregate_global_rows(cls, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            _invalid(D1ErrorCode.generation_conflict)
+        first = dict(rows[0])
+        result = {
+            "periodKind": first.get("periodKind"),
+            "periodKey": first.get("periodKey"),
+            "model": first.get("model"),
+            "ownershipClass": first.get("ownershipClass"),
+            "coveredInvocations": sum(row.get("coveredInvocations", 0) for row in rows),
+            "expectedInvocations": sum(row.get("expectedInvocations", 0) for row in rows),
+            "aggregateOnly": True,
+        }
+        for field in _USAGE_FIELDS:
+            values = [row.get(field) for row in rows]
+            result[field] = sum(values) if all(value is not None for value in values) else None
+        result["knownTokenSubtotal"] = result["totalTokens"]
+        result["knownCostSubtotalMicroUsd"] = result["totalCostMicroUsd"]
+        result["coverage"] = (
+            "unavailable"
+            if any(row.get("coverage") == "unavailable" for row in rows)
+            else "complete"
+            if all(row.get("coverage") == "complete" for row in rows)
+            else "partial"
+        )
+        price_digests = {row.get("priceProvenanceDigest") for row in rows if row.get("priceProvenanceDigest") is not None}
+        result["priceProvenanceDigest"] = next(iter(price_digests)) if len(price_digests) == 1 else None
+        return result
+
     def _usage_global_contributions(self, usage_generation_id: str) -> dict[tuple[Any, ...], dict[str, Any]]:
         grouped: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
         rows = self._query(_statement(_USAGE_INVOCATION_SELECT, usage_generation_id))
@@ -2958,19 +2921,26 @@ class D1PublicationClient:
         # the generation IDs.  Validation has already restricted new_rows to
         # the task-owned global shape.
         del publication_id, new_rows
+        rollup_prefix = f"global-rollup-{new_usage_id}"
         update = _statement(
             _GLOBAL_TRANSITION_UPDATE,
-            old_usage_id,
             old_usage_id,
             int(old_usage_id is None),
             task_id,
             new_usage_id,
-            new_usage_id,
+            rollup_prefix,
         )
         if guarded:
-            heads = _statement(_GLOBAL_HEAD_UPSERT_SET_GUARDED, updated_at, old_usage_id, new_usage_id)
+            heads = _statement(
+                _GLOBAL_HEAD_UPSERT_SET_GUARDED,
+                new_usage_id,
+                updated_at,
+                task_id,
+                old_usage_id,
+                f"{rollup_prefix}:%",
+            )
         else:
-            heads = _statement(_GLOBAL_HEAD_UPSERT_SET, updated_at, new_usage_id)
+            heads = _statement(_GLOBAL_HEAD_UPSERT_SET, new_usage_id, updated_at, f"{rollup_prefix}:%")
         return update, heads
 
     def stage(self, source: Mapping[str, Any]) -> StageReceipt:
@@ -4154,18 +4124,30 @@ class D1PublicationClient:
                     removed_globals[key] = unavailable
                 else:
                     removed_globals[key] = row
-            for key, removed in sorted(removed_globals.items()):
+
+            remaining_globals: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+            for raw in self._query(_statement(_VISIBLE_TASK_GLOBAL_SELECT, task_id)):
+                row = self._global_db_row(raw)
+                remaining_globals.setdefault(self._global_key(row), []).append(row)
+
+            for key in sorted(removed_globals):
                 current_rows = self._query(_statement(_GLOBAL_HEAD_KEY_SELECT, *key))
                 if not current_rows:
                     continue
-                target = stored_globals.get(key)
-                if target is None:
-                    _invalid(D1ErrorCode.generation_conflict)
-                aggregate = self._global_db_row(current_rows[0])
-                corrected = self._global_remove(aggregate, removed)
-                corrected["usageGenerationId"] = target["usageGenerationId"]
-                corrected["globalId"] = target["globalId"]
-                correction_rows.append((current_rows[0], target, corrected))
+                # Rebuild from the surviving immutable task contributions. The
+                # current head can be NULL because an unavailable contribution
+                # was present, so subtraction alone would turn known survivors
+                # into zero instead of restoring their evidence.
+                current_row = current_rows[0]
+                aggregate = self._global_db_row(current_row)
+                corrected = (
+                    self._aggregate_global_rows(remaining_globals[key])
+                    if remaining_globals.get(key)
+                    else self._empty_global_contribution(aggregate)
+                )
+                corrected["usageGenerationId"] = aggregate["usageGenerationId"]
+                corrected["globalId"] = aggregate["globalId"]
+                correction_rows.append((current_row, aggregate, corrected))
 
             statements.append(_statement(_HIDE_USAGE_GENERATION, usage_generation_id, task_id))
             for current_row, target, corrected in correction_rows:
@@ -4188,6 +4170,7 @@ class D1PublicationClient:
                     statements.append(
                         _statement(
                             _GLOBAL_HEAD_UPSERT,
+                            target["usageGenerationId"],
                             _timestamp_now(),
                             target["globalId"],
                             target["usageGenerationId"],

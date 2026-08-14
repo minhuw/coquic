@@ -4,7 +4,6 @@ import remarkGfm from "remark-gfm";
 import type {
   AtifArtifactAction,
   AtifDisplayContent,
-  AtifDisplayContentValue,
   AtifSafeRecord,
 } from "@/lib/steward-archive/atif-view-model";
 
@@ -227,19 +226,18 @@ function ContentPart({ part }: { part: AtifDisplayContent }) {
 }
 
 export interface TranscriptMessageProps {
-  /** Legacy plain text remains supported while normalized content migrates. */
+  /** Explicit textual notes and reasoning use the direct text renderer. */
   text?: string | null;
-  content?: AtifDisplayContentValue;
-  parts?: readonly AtifDisplayContent[];
+  /** Trajectory content is always normalized into canonical display parts. */
+  content?: readonly AtifDisplayContent[];
 }
 
-export function TranscriptMessage({ text, content, parts }: TranscriptMessageProps) {
-  const typedParts = parts && parts.length > 0 ? parts : (Array.isArray(content) ? content : undefined);
-  if (typedParts) {
+export function TranscriptMessage({ text, content }: TranscriptMessageProps) {
+  if (content !== undefined) {
     return (
       <div className="mt-4 min-w-0 space-y-5">
-        {typedParts.length > 0
-          ? typedParts.map((part, index) => (
+        {content.length > 0
+          ? content.map((part, index) => (
             <ContentPart key={`${part.kind}-${index}`} part={part} />
           ))
           : <p className="text-sm text-unavailable">Unavailable</p>}
@@ -247,7 +245,7 @@ export function TranscriptMessage({ text, content, parts }: TranscriptMessagePro
     );
   }
 
-  const value = text !== undefined ? text : typeof content === "string" ? content : null;
+  const value = text !== undefined ? text : null;
   if (value === null || value === undefined) return <p className="mt-4 text-sm text-unavailable">Unavailable</p>;
   const blocks = parseMessage(value);
   return (

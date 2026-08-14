@@ -57,9 +57,7 @@ test("renders typed records in source order with safe Markdown and stable anchor
   const generic = { kind: "generic" as const, type: "generic" as const, record: { detail: "safe block", count: 2 } };
   first.source = "system";
   first.role = "system";
-  first.message = [textPart(text), generic];
-  first.parts = [textPart(text), generic];
-  first.content = first.parts;
+  first.content = [textPart(text), generic];
 
   const html = render(model);
   assert.match(html, /data-atif-trajectory/);
@@ -80,12 +78,10 @@ test("renders every tool result, opens failed tools, and exposes metrics and lin
   const model = modelCopy();
   const step = model.steps[1] as any;
   step.calls[0].extensions = { status: "failed", durationMs: 12 };
-  step.tools = step.calls;
   step.observations = [
     ...step.observations,
     {
-      content: "Unpaired operation result",
-      parts: [textPart("Unpaired operation result")],
+      content: [textPart("Unpaired operation result")],
       matchedCallId: null,
       sourceCallId: null,
       extensions: null,
@@ -125,8 +121,7 @@ test("renders an empty validated run as completed without progressive controls",
 test("keeps paired observations in source-record order and associated with their call", () => {
   const model = modelCopy() as any;
   const observation = {
-    content: "F001-order-sentinel",
-    parts: [textPart("F001-order-sentinel")],
+    content: [textPart("F001-order-sentinel")],
     matchedCallId: "call-order",
     sourceCallId: "call-order",
     extensions: null,
@@ -144,15 +139,10 @@ test("keeps paired observations in source-record order and associated with their
   owner.stepId = 3;
   owner.id = "step-3";
   owner.anchor = "step-3";
-  owner.message = "F001-owner-record";
   owner.content = [textPart("F001-owner-record")];
-  owner.parts = owner.content;
   owner.calls = [];
-  owner.tools = [];
   owner.observations = [observation];
-  owner.observation = { results: [observation] };
   model.steps[1].calls = [call];
-  model.steps[1].tools = [call];
   model.steps = [model.steps[0], model.steps[1], owner];
 
   const html = render(model);
@@ -172,9 +162,7 @@ test("renders safe run facts and recursively bounded child trajectories", () => 
   const child = structuredClone(model);
   child.trajectoryId = "child-f002";
   child.steps = [structuredClone(model.steps[0])];
-  child.steps[0].message = "F002-child-record";
   child.steps[0].content = [textPart("F002-child-record")];
-  child.steps[0].parts = child.steps[0].content;
   child.lineage = { trajectoryId: "child-f002", sessionId: null, references: [], trajectories: [] };
   model.lineage.trajectories = [child];
 
@@ -201,9 +189,7 @@ test("renders supported image evidence in a stable frame with an unchanged downl
   });
   model.artifacts = [model.artifacts[0], ...imageParts.map(({ descriptor }) => descriptor)];
   model.metadata.artifacts = model.artifacts;
-  model.steps[1].parts = [textPart("Four image formats."), ...imageParts.map(({ part }) => part)];
-  model.steps[1].content = model.steps[1].parts;
-  model.steps[1].message = model.steps[1].parts;
+  model.steps[1].content = [textPart("Four image formats."), ...imageParts.map(({ part }) => part)];
 
   const html = render(model);
   assert.equal((html.match(/data-artifact-image/g) ?? []).length, imageMediaTypes.length * 2);
@@ -223,9 +209,7 @@ test("renders supported image evidence in a stable frame with an unchanged downl
 test("renders compact downloads and explicit unavailable media fallbacks", () => {
   const model = modelCopy() as any;
   const missing = { kind: "image" as const, type: "image" as const, mediaType: "image/jpeg" as const, artifactId: "artifact-missing", action: { kind: "unavailable" as const, artifactId: "artifact-missing", reason: "missing" as const } };
-  model.steps[1].parts = [...model.steps[1].parts, missing];
-  model.steps[1].content = model.steps[1].parts;
-  model.steps[1].message = model.steps[1].parts;
+  model.steps[1].content = [...model.steps[1].content, missing];
 
   const html = render(model);
   assert.match(html, /data-artifact-download-row/);

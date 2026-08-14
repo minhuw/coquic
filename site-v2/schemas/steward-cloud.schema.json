@@ -302,12 +302,6 @@
         { "$ref": "#/$defs/displayGenericContent" }
       ]
     },
-    "displayContentValue": {
-      "anyOf": [
-        { "$ref": "#/$defs/displayString" }, { "type": "null" },
-        { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } }
-      ]
-    },
     "lineageReference": {
       "type": "object", "additionalProperties": false,
       "properties": {
@@ -317,10 +311,9 @@
       }
     },
     "displayObservation": {
-      "type": "object", "additionalProperties": false, "required": ["parts", "matchedCallId"],
+      "type": "object", "additionalProperties": false, "required": ["content", "matchedCallId"],
       "properties": {
-        "content": { "$ref": "#/$defs/displayContentValue" },
-        "parts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
+        "content": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
         "sourceCallId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
         "matchedCallId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
         "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] },
@@ -339,14 +332,12 @@
     },
     "displayStep": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "anchor", "stepId", "source", "role", "content", "parts", "calls", "tools", "observations"],
+      "required": ["id", "anchor", "stepId", "source", "role", "content", "calls", "observations"],
       "properties": {
         "id": { "$ref": "#/$defs/id" }, "anchor": { "$ref": "#/$defs/id" },
         "stepId": { "type": "integer", "minimum": 1, "maximum": 1000000 },
         "source": { "enum": ["system", "user", "agent"] }, "role": { "enum": ["system", "user", "agent"] },
-        "message": { "$ref": "#/$defs/displayContentValue" },
         "content": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
-        "parts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayContent" } },
         "timestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
         "reasoning": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] },
         "modelName": { "anyOf": [{ "$ref": "#/$defs/displayString" }, { "type": "null" }] },
@@ -354,10 +345,7 @@
         "copiedContext": { "anyOf": [{ "type": "boolean" }, { "type": "null" }] },
         "llmCallCount": { "anyOf": [{ "type": "integer", "minimum": 0, "maximum": 1000000 }, { "type": "null" }] },
         "metrics": { "anyOf": [{ "$ref": "#/$defs/displayMetrics" }, { "type": "null" }] },
-        "toolCalls": { "anyOf": [{ "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayToolCall" } }, { "type": "null" }] },
         "calls": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayToolCall" } },
-        "tools": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayToolCall" } },
-        "observation": { "anyOf": [{ "type": "object", "additionalProperties": false, "required": ["results"], "properties": { "results": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayObservation" } } } }, { "type": "null" }] },
         "observations": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/displayObservation" } },
         "extensions": { "anyOf": [{ "$ref": "#/$defs/safeRecord" }, { "type": "null" }] }
       }

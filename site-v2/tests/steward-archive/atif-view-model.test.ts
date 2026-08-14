@@ -163,6 +163,8 @@ test("projects roles, content, settings, metrics, lineage, order, and stable anc
   assert.deepEqual(value.steps.map((step) => step.stepId), [1, 2, 3]);
   assert.deepEqual(value.steps.map((step) => step.anchor), ["step-1", "step-2", "step-3"]);
   assert.equal(value.steps[0]!.content[1]!.kind, "generic");
+  assert.deepEqual(value.steps[2]!.content, [{ kind: "text", type: "text", text: "A delayed result." }]);
+  for (const field of ["message", "parts", "tools", "toolCalls", "observation"]) assert.equal(Object.hasOwn(value.steps[0]!, field), false);
   assert.equal(value.steps[1]!.reasoning, null);
   assert.equal(value.steps[1]!.modelName, "model-x");
   assert.equal(value.steps[1]!.reasoningEffort, "medium");
@@ -277,26 +279,26 @@ test("pairs tools by canonical call id while preserving delayed and unpaired res
   assert.deepEqual(calls.map((call) => call.callId), ["call-1", "call-2"]);
   assert.equal(calls[0]!.observations[0]!.matchedCallId, "call-1");
   assert.equal(calls[1]!.observations[0]!.matchedCallId, "call-2");
-  assert.equal(value.steps[2]!.observation?.results[0]!.matchedCallId, "call-2");
-  assert.equal(value.steps[2]!.observation?.results[1]!.matchedCallId, null);
-  assert.equal(value.steps[1]!.toolCalls?.[1]!.anchor, "call-call-2");
+  assert.equal(value.steps[2]!.observations[0]!.matchedCallId, "call-2");
+  assert.equal(value.steps[2]!.observations[1]!.matchedCallId, null);
+  assert.equal(value.steps[1]!.calls[1]!.anchor, "call-call-2");
 });
 
 test("keeps absent, null, and empty subagent lineage distinct", () => {
   const nullDocument = fixtureDocument();
   nullDocument.steps[2].observation.results[0].subagent_trajectory_ref = null;
   const nullValue = buildAtifViewModel(nullDocument as unknown as AtifDocument, { artifacts: artifacts() });
-  assert.equal(nullValue.steps[2]!.observation?.results[0]!.lineage, null);
+  assert.equal(nullValue.steps[2]!.observations[0]!.lineage, null);
 
   const emptyDocument = fixtureDocument();
   emptyDocument.steps[2].observation.results[0].subagent_trajectory_ref = [];
   const emptyValue = buildAtifViewModel(emptyDocument as unknown as AtifDocument, { artifacts: artifacts() });
-  assert.deepEqual(emptyValue.steps[2]!.observation?.results[0]!.lineage, []);
+  assert.deepEqual(emptyValue.steps[2]!.observations[0]!.lineage, []);
 
   const absentDocument = fixtureDocument();
   delete absentDocument.steps[2].observation.results[0].subagent_trajectory_ref;
   const absentValue = buildAtifViewModel(absentDocument as unknown as AtifDocument, { artifacts: artifacts() });
-  assert.equal(Object.hasOwn(absentValue.steps[2]!.observation?.results[0] ?? {}, "lineage"), false);
+  assert.equal(Object.hasOwn(absentValue.steps[2]!.observations[0] ?? {}, "lineage"), false);
 });
 
 test("derives valid timing, preserves explicit zero, and never invents missing duration", () => {

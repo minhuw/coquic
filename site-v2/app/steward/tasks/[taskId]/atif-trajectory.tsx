@@ -77,13 +77,8 @@ function validateTrajectoryResponse(value: unknown): CloudCompleteTrajectory {
       stepId: 1,
       source: "agent",
       role: "agent",
-      message: null,
       content: [],
-      parts: [],
-      toolCalls: null,
       calls: [],
-      tools: [],
-      observation: null,
       observations: [],
     };
     const validated = validateCloudCompleteTrajectoryResponse({

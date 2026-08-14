@@ -340,3 +340,13 @@ historical R2 backfill, request-time pricing, fuzzy model matching, a Site
 cache/write path, actual catalog rates in public rows, and individual overhead
 detail. Direction 1 stages this contract on a new D1 database; live Cloudflare
 mutation and credential installation remain outside this decision.
+
+## D-027: Canonical trajectory display arrays
+
+Complete trajectory display models expose each step's content, tool calls, and
+observations once, and each observation exposes one normalized content array.
+The projector converts raw ATIF strings and standard content fields at the
+validation boundary; renderers do not retain parallel aliases or infer between
+old and new shapes. Explicit notes and reasoning remain text fields, while
+empty arrays render honestly as unavailable. Raw ATIF validation and its
+standard input fields remain unchanged.

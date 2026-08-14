@@ -78,10 +78,8 @@ function failedToolTrajectory(): JsonObject {
   const payload = cloneJson(cleanTrajectory);
   const data = trajectoryData(payload);
   const steps = data.steps as JsonObject[];
-  for (const key of ["calls", "toolCalls", "tools"] as const) {
-    const calls = (steps[1]?.[key] ?? []) as JsonObject[];
-    if (calls[0]) calls[0].extensions = { status: "failed", error: "command failed" };
-  }
+  const calls = (steps[1]?.calls ?? []) as JsonObject[];
+  if (calls[0]) calls[0].extensions = { status: "failed", error: "command failed" };
   return payload;
 }
 
@@ -101,8 +99,7 @@ function toolHeavyTrajectory(): JsonObject {
   const calls = Array.from({ length: 8 }, (_, index) => {
     const callId = `call-${index + 1}`;
     const observation = {
-      content: `Inspection ${callId}.`,
-      parts: [{ kind: "text", type: "text", text: `Inspection ${callId}.` }],
+      content: [{ kind: "text", type: "text", text: `Inspection ${callId}.` }],
       sourceCallId: callId,
       matchedCallId: callId,
       extensions: null,
@@ -118,8 +115,7 @@ function toolHeavyTrajectory(): JsonObject {
       extensions: null,
     };
   });
-  for (const key of ["toolCalls", "calls", "tools"] as const) step[key] = structuredClone(calls);
-  step.observation = { results: calls.map((call) => call.observations[0]) };
+  step.calls = structuredClone(calls);
   step.observations = calls.map((call) => call.observations[0]);
   return payload;
 }
@@ -144,9 +140,7 @@ function multimodalTrajectory(): JsonObject {
       action,
     };
   });
-  for (const key of ["message", "content", "parts"] as const) {
-    step[key] = [...((step[key] ?? []) as unknown[]), ...structuredClone(images)];
-  }
+  step.content = [...((step.content ?? []) as unknown[]), ...structuredClone(images)];
   const artifacts = formats.map(([mediaType, artifactId, logicalPath, digestByte]) => ({
     artifactId,
     mediaType,

@@ -362,9 +362,9 @@ test("accepts complete normalized trajectories and preserves their public displa
   assert(!serializeCloudCompleteTrajectory(cleanTrajectory).includes("://"));
 });
 
-test("requires every call alias to mirror matched step observations in source order", () => {
+test("requires canonical call observations and rejects removed display aliases", () => {
   const missing = structuredClone(cleanTrajectory) as Record<string, any>;
-  for (const alias of ["toolCalls", "calls", "tools"]) missing.data.steps[1][alias][0].observations = [];
+  missing.data.steps[1].calls[0].observations = [];
   rejectsComplete(missing);
 
   const delayed = structuredClone(cleanTrajectory) as Record<string, any>;
@@ -378,12 +378,26 @@ test("requires every call alias to mirror matched step observations in source or
   followUp.id = "step-3";
   followUp.anchor = "step-3";
   followUp.stepId = 3;
-  followUp.observation = { results: [later, unmatched] };
-  followUp.observations = followUp.observation.results;
+  followUp.observations = [later, unmatched];
   steps.push(followUp);
   delayed.data.finalMetrics.totalSteps = 3;
-  for (const alias of ["toolCalls", "calls", "tools"]) delayed.data.steps[1][alias][0].observations = [matched, later];
+  delayed.data.steps[1].calls[0].observations = [matched, later];
   assert.equal(validateCloudCompleteTrajectory(delayed).data.steps[2]!.observations[1]!.matchedCallId, null);
+
+  for (const [field, value] of [
+    ["message", "legacy"],
+    ["parts", []],
+    ["tools", []],
+    ["toolCalls", null],
+    ["observation", null],
+  ] as const) {
+    const stale = structuredClone(cleanTrajectory) as Record<string, any>;
+    stale.data.steps[0][field] = value;
+    rejectsComplete(stale);
+  }
+  const staleObservation = structuredClone(cleanTrajectory) as Record<string, any>;
+  staleObservation.data.steps[1].observations[0].parts = [];
+  rejectsComplete(staleObservation);
 });
 
 test("rejects complete trajectory order, private shape, direct locator, and partial mutations", () => {
@@ -438,14 +452,17 @@ test("accepts bounded mapper-preserved strings without truncation", () => {
     artifacts: publicationArtifacts,
   });
   const model = buildAtifViewModel(document, { artifacts: viewArtifacts });
-  assert.equal(model.steps[0]!.message, message);
+  assert.deepEqual(model.steps[0]!.content, [{ kind: "text", type: "text", text: message }]);
+  assert.equal(Object.hasOwn(model.steps[0]!, "message"), false);
   const response = { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, data: model };
-  assert.equal(validateCloudCompleteTrajectory(response).data.steps[0]!.message, message);
+  const validatedContent = validateCloudCompleteTrajectory(response).data.steps[0]!.content[0]!;
+  assert.equal(validatedContent.kind, "text");
+  if (validatedContent.kind === "text") assert.equal(validatedContent.text, message);
 });
 
 test("rejects mapper-impossible duplicate identities, media, ownership, timing, lineage, disclosure, and actions", () => {
   const imageIdentity = structuredClone(cleanTrajectory) as Record<string, any>;
-  for (const field of ["message", "content", "parts"]) imageIdentity.data.steps[1][field][1].action.artifactId = "artifact-log";
+  imageIdentity.data.steps[1].content[1].action.artifactId = "artifact-log";
   rejectsComplete(imageIdentity);
 
   const mutations: Array<(candidate: Record<string, any>) => void> = [
@@ -477,8 +494,6 @@ test("keeps public object-key text accepted in task detail while complete trajec
 
   const v4 = structuredClone(cleanTrajectory) as Record<string, any>;
   const objectKey = `v1/tasks/${v4.data.taskId}/objects/sha256/aa/${"a".repeat(64)}`;
-  v4.data.steps[0].message = objectKey;
   v4.data.steps[0].content = [{ kind: "text", type: "text", text: objectKey }];
-  v4.data.steps[0].parts = [{ kind: "text", type: "text", text: objectKey }];
   rejectsComplete(v4);
 });

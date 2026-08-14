@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type {
-  AtifDisplayContentValue,
   AtifDisplayLineageReference,
   AtifDisplayMetrics,
   AtifDisplayModel,
@@ -227,8 +226,6 @@ function statusFromCall(call: AtifDisplayToolCall): { label: string; failed: boo
 
 function Observation({ observation, index, anchorPrefix }: { observation: AtifDisplayObservation; index: number; anchorPrefix: string }) {
   const paired = observation.matchedCallId !== null;
-  const content: AtifDisplayContentValue = observation.content;
-  const parts = observation.parts.length > 0 ? observation.parts : undefined;
   const observationId = `${anchorPrefix}-${normalizeAnchor(observation.sourceCallId ?? `observation-${index + 1}`)}-${index + 1}`;
   return (
     <li id={observationId} className="border-t border-line py-4" data-observation data-paired={paired ? "true" : "false"} data-observation-source={observation.sourceCallId ?? "unavailable"}>
@@ -236,7 +233,7 @@ function Observation({ observation, index, anchorPrefix }: { observation: AtifDi
         <span className={paired ? "text-muted" : "font-medium text-warning"}>{paired ? "Paired observation" : "Unpaired observation"}</span>
         <span className="data-text text-faint">{observation.sourceCallId ?? `observation-${index + 1}`}</span>
       </div>
-      <TranscriptMessage content={content} parts={parts} />
+      <TranscriptMessage content={observation.content} />
       {observation.lineage ? <LineageReferences references={observation.lineage} label="Observation lineage" /> : null}
       <SafeRecordBlock record={observation.extensions} label="Observation extensions" present={hasOwn(observation, "extensions")} />
     </li>
@@ -275,7 +272,6 @@ function LineageReferences({ references, label = "Lineage references" }: { refer
 }
 
 function StepRecord({ step, eventId }: { step: AtifDisplayStep; eventId: string }) {
-  const observations = step.observations.length > 0 ? step.observations : step.observation?.results ?? [];
   const configured = step.modelName || step.reasoningEffort !== undefined;
   return (
     <li id={eventId} data-trajectory-anchor={step.anchor} className="scroll-mt-24 border-b border-line-strong py-8 first:pt-0" data-step-source={step.source}>
@@ -291,14 +287,14 @@ function StepRecord({ step, eventId }: { step: AtifDisplayStep; eventId: string 
           </div>
         </header>
 
-        <TranscriptMessage content={step.message} parts={step.parts.length > 0 ? step.parts : undefined} />
+        <TranscriptMessage content={step.content} />
 
         {step.reasoning !== undefined && step.reasoning !== null ? <details data-reasoning className="mt-6 max-w-3xl border-y border-line py-3"><summary className="cursor-pointer list-none text-sm font-medium text-muted">Reasoning</summary><div className="mt-3 text-sm leading-6 text-muted [overflow-wrap:anywhere]"><TranscriptMessage text={step.reasoning} /></div></details> : null}
         <MetricRows metrics={step.metrics} titleId={`${eventId}-metrics`} />
 
         {step.calls.length > 0 ? <section aria-labelledby={`${eventId}-tools`} className="mt-6 max-w-4xl border-t border-line"><h4 id={`${eventId}-tools`} className="flex items-center gap-2 py-3 text-sm font-semibold text-ink"><Wrench aria-hidden="true" size={15} />Tool calls <span className="text-xs font-normal text-muted data-text">{step.calls.length}</span></h4>{step.calls.map((call) => <ToolCall key={call.anchor} call={call} />)}</section> : null}
 
-        {observations.length > 0 ? <section aria-labelledby={`${eventId}-observations`} className="mt-6 max-w-4xl border-t border-line"><h4 id={`${eventId}-observations`} className="flex items-center gap-2 py-3 text-sm font-semibold text-ink"><AlertCircle aria-hidden="true" size={15} />Observations <span className="text-xs font-normal text-muted data-text">{observations.length}</span></h4><ol>{observations.map((observation, index) => <Observation key={`${eventId}-observation-${index}`} observation={observation} index={index} anchorPrefix={`${eventId}-observation`} />)}</ol></section> : null}
+        {step.observations.length > 0 ? <section aria-labelledby={`${eventId}-observations`} className="mt-6 max-w-4xl border-t border-line"><h4 id={`${eventId}-observations`} className="flex items-center gap-2 py-3 text-sm font-semibold text-ink"><AlertCircle aria-hidden="true" size={15} />Observations <span className="text-xs font-normal text-muted data-text">{step.observations.length}</span></h4><ol>{step.observations.map((observation, index) => <Observation key={`${eventId}-observation-${index}`} observation={observation} index={index} anchorPrefix={`${eventId}-observation`} />)}</ol></section> : null}
         {step.copiedContext !== undefined && step.copiedContext !== null ? <p className="mt-5 text-xs text-muted">{step.copiedContext ? "Copied context" : "Original context"}</p> : null}
         {step.llmCallCount !== undefined ? <p className="mt-2 text-xs text-muted data-text">LLM calls: {asDisplayText(step.llmCallCount)}</p> : null}
         <SafeRecordBlock record={step.extensions} label="Record extensions" present={hasOwn(step, "extensions")} />

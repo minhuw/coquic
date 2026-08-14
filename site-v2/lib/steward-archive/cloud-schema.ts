@@ -168,18 +168,7 @@ function checkObservation(observation: AtifDisplayObservation, calls: ReadonlySe
   if (!Object.prototype.hasOwnProperty.call(observation, "sourceCallId") && observation.matchedCallId !== null) invalid();
   if (observation.sourceCallId === null && observation.matchedCallId !== null) invalid();
   if (typeof observation.sourceCallId === "string" && observation.matchedCallId !== null && observation.sourceCallId !== observation.matchedCallId) invalid();
-  if (!Object.prototype.hasOwnProperty.call(observation, "content")) {
-    if (observation.parts.length !== 0) invalid();
-  } else if (typeof observation.content === "string") {
-    if (!same(observation.parts, [{ kind: "text", type: "text", text: observation.content }])) invalid();
-  } else if (observation.content === null) {
-    if (observation.parts.length !== 0) invalid();
-  } else if (Array.isArray(observation.content)) {
-    if (!same(observation.content, observation.parts)) invalid();
-  } else {
-    invalid();
-  }
-  observation.parts.forEach((content) => checkContent(content, taskId, runId, artifacts, stepId, usedArtifactSteps));
+  observation.content.forEach((content) => checkContent(content, taskId, runId, artifacts, stepId, usedArtifactSteps));
 }
 
 function checkToolCall(call: AtifDisplayToolCall, seenCalls: Set<string>, anchors: Set<string>, calls: ReadonlySet<string>, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>, stepId: number, usedArtifactSteps: Map<string, Set<number>>): void {
@@ -201,23 +190,6 @@ function checkSafe(value: unknown): void {
 function checkStep(step: AtifDisplayStep, expectedStepId: number, anchors: Set<string>, seenCalls: Set<string>, calls: ReadonlySet<string>, taskId: string, runId: string, artifacts: ReadonlyMap<string, AtifDisplayArtifact>, usedArtifactSteps: Map<string, Set<number>>): void {
   if (step.stepId !== expectedStepId || step.id !== step.anchor || anchors.has(step.anchor) || step.role !== step.source) invalid();
   anchors.add(step.anchor);
-  if (!Object.prototype.hasOwnProperty.call(step, "message")) {
-    if (step.content.length !== 0) invalid();
-  } else if (typeof step.message === "string") {
-    if (!same(step.content, [{ kind: "text", type: "text", text: step.message }])) invalid();
-  } else if (step.message === null) {
-    if (step.content.length !== 0) invalid();
-  } else if (Array.isArray(step.message)) {
-    if (!same(step.message, step.content)) invalid();
-  } else {
-    invalid();
-  }
-  if (!same(step.content, step.parts) || !same(step.tools, step.calls)) invalid();
-  if (step.toolCalls !== undefined && step.toolCalls !== null && !same(step.toolCalls, step.calls)) invalid();
-  if (step.toolCalls === null && step.calls.length !== 0) invalid();
-  if (!Object.prototype.hasOwnProperty.call(step, "observation") && step.observations.length !== 0) invalid();
-  if (step.observation === null && step.observations.length !== 0) invalid();
-  if (step.observation !== undefined && step.observation !== null && !same(step.observation.results, step.observations)) invalid();
   step.content.forEach((content) => checkContent(content, taskId, runId, artifacts, step.stepId, usedArtifactSteps));
   step.calls.forEach((call) => checkToolCall(call, seenCalls, anchors, calls, taskId, runId, artifacts, step.stepId, usedArtifactSteps));
   step.observations.forEach((observation) => checkObservation(observation, calls, taskId, runId, artifacts, step.stepId, usedArtifactSteps));

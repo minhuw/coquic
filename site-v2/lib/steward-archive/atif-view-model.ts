@@ -139,11 +139,9 @@ export interface AtifGenericContent {
 }
 
 export type AtifDisplayContent = AtifTextContent | AtifImageContent | AtifGenericContent;
-export type AtifDisplayContentValue = string | null | undefined | readonly AtifDisplayContent[];
 
 export interface AtifDisplayObservation {
-  readonly content: AtifDisplayContentValue | undefined;
-  readonly parts: readonly AtifDisplayContent[];
+  readonly content: readonly AtifDisplayContent[];
   readonly sourceCallId?: string | null;
   readonly matchedCallId: string | null;
   readonly extensions?: AtifSafeRecord | null;
@@ -166,9 +164,7 @@ export interface AtifDisplayStep {
   readonly stepId: number;
   readonly source: "system" | "user" | "agent";
   readonly role: "system" | "user" | "agent";
-  readonly message: AtifDisplayContentValue;
   readonly content: readonly AtifDisplayContent[];
-  readonly parts: readonly AtifDisplayContent[];
   readonly timestamp?: string | null;
   readonly reasoning?: string | null;
   readonly modelName?: string | null;
@@ -176,12 +172,7 @@ export interface AtifDisplayStep {
   readonly copiedContext?: boolean | null;
   readonly llmCallCount?: number | null;
   readonly metrics?: AtifDisplayMetrics | null;
-  readonly toolCalls?: readonly AtifDisplayToolCall[] | null;
   readonly calls: readonly AtifDisplayToolCall[];
-  readonly tools: readonly AtifDisplayToolCall[];
-  readonly observation?: {
-    readonly results: readonly AtifDisplayObservation[];
-  } | null;
   readonly observations: readonly AtifDisplayObservation[];
   readonly extensions?: AtifSafeRecord | null;
 }
@@ -558,33 +549,24 @@ function mapContentPart(value: unknown, context: ProjectionContext): AtifDisplay
   return { kind: "generic", type: "generic", record: safeRecord(value) };
 }
 
-function mapContent(value: unknown, context: ProjectionContext): { value: AtifDisplayContentValue; parts: readonly AtifDisplayContent[] } {
-  if (value === undefined) return { value: undefined, parts: [] };
+function mapContent(value: unknown, context: ProjectionContext): readonly AtifDisplayContent[] {
+  if (value === undefined || value === null) return [];
   if (typeof value === "string") {
-    const safe = safeString(value);
-    const part: AtifTextContent = { kind: "text", type: "text", text: safe };
-    return { value: safe, parts: [part] };
+    return [{ kind: "text", type: "text", text: safeString(value) }];
   }
-  if (value === null) return { value: null, parts: [] };
-  if (Array.isArray(value)) {
-    const parts = value.map((part) => mapContentPart(part, context));
-    return { value: parts, parts };
-  }
-  const generic = mapContentPart(value, context);
-  return { value: [generic], parts: [generic] };
+  if (Array.isArray(value)) return value.map((part) => mapContentPart(part, context));
+  return [mapContentPart(value, context)];
 }
 
 function mapObservation(value: RawRecord, context: ProjectionContext, calls: ReadonlyMap<string, CallEntry>): AtifDisplayObservation {
-  const mapped = mapContent(value.content, context);
   const sourceCallId = has(value, "source_call_id")
     ? value.source_call_id === null || typeof value.source_call_id === "string" ? value.source_call_id : undefined
     : undefined;
   const matchedCallId = typeof sourceCallId === "string" && calls.has(sourceCallId) ? sourceCallId : null;
   const result: Record<string, unknown> = {
-    parts: mapped.parts,
+    content: mapContent(value.content, context),
     matchedCallId,
   };
-  if (has(value, "content")) result.content = mapped.value;
   const extensions = extensionRecord(value, ["content", "source_call_id", "subagent_trajectory_ref"]);
   if (extensions !== undefined) result.extensions = extensions;
   if (has(value, "source_call_id")) (result as { sourceCallId?: string | null }).sourceCallId = sourceCallId ?? null;
@@ -655,7 +637,6 @@ function mapCall(value: RawRecord, stepId: number, context: ProjectionContext, c
 function mapStep(value: RawRecord, context: ProjectionContext, calls: ReadonlyMap<string, CallEntry>): AtifDisplayStep | null {
   if (typeof value.step_id !== "number" || (value.source !== "system" && value.source !== "user" && value.source !== "agent")) return null;
   const stepId = value.step_id;
-  const mapped = mapContent(value.message, context);
   const rawCalls = Array.isArray(value.tool_calls) ? value.tool_calls.map((item) => isRecord(item) ? mapCall(item, stepId, context, calls) : null).filter((item): item is AtifDisplayToolCall => item !== null) : [];
   const result: AtifDisplayStep = {
     id: anchor(`step-${stepId}`, context),
@@ -663,11 +644,8 @@ function mapStep(value: RawRecord, context: ProjectionContext, calls: ReadonlyMa
     stepId,
     source: value.source,
     role: value.source,
-    message: mapped.value,
-    content: mapped.parts,
-    parts: mapped.parts,
+    content: mapContent(value.message, context),
     calls: rawCalls,
-    tools: rawCalls,
     observations: [],
   };
   const extensions = extensionRecord(value, ["step_id", "source", "message", "timestamp", "reasoning_content", "model_name", "reasoning_effort", "is_copied_context", "llm_call_count", "metrics", "tool_calls", "observation"]);
@@ -689,16 +667,11 @@ function mapStep(value: RawRecord, context: ProjectionContext, calls: ReadonlyMa
     (result as { llmCallCount?: number | null }).llmCallCount = count === null || typeof count === "number" ? count : null;
   }
   if (has(value, "metrics")) (result as { metrics?: AtifDisplayMetrics | null }).metrics = mapMetrics(value.metrics) ?? null;
-  if (has(value, "tool_calls")) (result as { toolCalls?: readonly AtifDisplayToolCall[] | null }).toolCalls = value.tool_calls === null ? null : rawCalls;
-  if (has(value, "observation")) {
-    if (value.observation === null) (result as { observation?: { readonly results: readonly AtifDisplayObservation[] } | null }).observation = null;
-    else if (isRecord(value.observation)) {
-      const results = Array.isArray(value.observation.results)
-        ? value.observation.results.filter(isRecord).map((item) => mapObservation(item, context, calls))
-        : [];
-      (result as { observation?: { readonly results: readonly AtifDisplayObservation[] } | null }).observation = { results };
-      (result as { observations: readonly AtifDisplayObservation[] }).observations = results;
-    }
+  if (isRecord(value.observation)) {
+    const results = Array.isArray(value.observation.results)
+      ? value.observation.results.filter(isRecord).map((item) => mapObservation(item, context, calls))
+      : [];
+    (result as { observations: readonly AtifDisplayObservation[] }).observations = results;
   }
   return result;
 }

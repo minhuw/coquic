@@ -99,15 +99,7 @@
         "stepId": 1,
         "source": "user",
         "role": "user",
-        "message": "Inspect the task.",
         "content": [
-          {
-            "kind": "text",
-            "type": "text",
-            "text": "Inspect the task."
-          }
-        ],
-        "parts": [
           {
             "kind": "text",
             "type": "text",
@@ -121,10 +113,7 @@
         "copiedContext": null,
         "llmCallCount": null,
         "metrics": null,
-        "toolCalls": null,
         "calls": [],
-        "tools": [],
-        "observation": null,
         "observations": [],
         "extensions": null
       },
@@ -134,51 +123,7 @@
         "stepId": 2,
         "source": "agent",
         "role": "agent",
-        "message": [
-          {
-            "kind": "text",
-            "type": "text",
-            "text": "The result is ready."
-          },
-          {
-            "kind": "image",
-            "type": "image",
-            "mediaType": "image/png",
-            "artifactId": "artifact-plot",
-            "action": {
-              "kind": "image",
-              "artifactId": "artifact-plot",
-              "taskId": "task-clean",
-              "runId": "run-clean",
-              "mediaType": "image/png",
-              "logicalPath": "steps/2/plot.png",
-              "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
-            }
-          }
-        ],
         "content": [
-          {
-            "kind": "text",
-            "type": "text",
-            "text": "The result is ready."
-          },
-          {
-            "kind": "image",
-            "type": "image",
-            "mediaType": "image/png",
-            "artifactId": "artifact-plot",
-            "action": {
-              "kind": "image",
-              "artifactId": "artifact-plot",
-              "taskId": "task-clean",
-              "runId": "run-clean",
-              "mediaType": "image/png",
-              "logicalPath": "steps/2/plot.png",
-              "href": "/api/steward/tasks/task-clean/artifact?path=steps%2F2%2Fplot.png"
-            }
-          }
-        ],
-        "parts": [
           {
             "kind": "text",
             "type": "text",
@@ -219,34 +164,6 @@
           "logprobs": null,
           "extensions": null
         },
-        "toolCalls": [
-          {
-            "anchor": "call-call-1",
-            "callId": "call-1",
-            "id": "call-1",
-            "functionName": "inspect",
-            "arguments": {
-              "scope": "task"
-            },
-            "observations": [
-              {
-                "content": "Inspection complete.",
-                "parts": [
-                  {
-                    "kind": "text",
-                    "type": "text",
-                    "text": "Inspection complete."
-                  }
-                ],
-                "sourceCallId": "call-1",
-                "matchedCallId": "call-1",
-                "extensions": null,
-                "lineage": null
-              }
-            ],
-            "extensions": null
-          }
-        ],
         "calls": [
           {
             "anchor": "call-call-1",
@@ -258,8 +175,7 @@
             },
             "observations": [
               {
-                "content": "Inspection complete.",
-                "parts": [
+                "content": [
                   {
                     "kind": "text",
                     "type": "text",
@@ -275,56 +191,9 @@
             "extensions": null
           }
         ],
-        "tools": [
-          {
-            "anchor": "call-call-1",
-            "callId": "call-1",
-            "id": "call-1",
-            "functionName": "inspect",
-            "arguments": {
-              "scope": "task"
-            },
-            "observations": [
-              {
-                "content": "Inspection complete.",
-                "parts": [
-                  {
-                    "kind": "text",
-                    "type": "text",
-                    "text": "Inspection complete."
-                  }
-                ],
-                "sourceCallId": "call-1",
-                "matchedCallId": "call-1",
-                "extensions": null,
-                "lineage": null
-              }
-            ],
-            "extensions": null
-          }
-        ],
-        "observation": {
-          "results": [
-            {
-              "content": "Inspection complete.",
-              "parts": [
-                {
-                  "kind": "text",
-                  "type": "text",
-                  "text": "Inspection complete."
-                }
-              ],
-              "sourceCallId": "call-1",
-              "matchedCallId": "call-1",
-              "extensions": null,
-              "lineage": null
-            }
-          ]
-        },
         "observations": [
           {
-            "content": "Inspection complete.",
-            "parts": [
+            "content": [
               {
                 "kind": "text",
                 "type": "text",

@@ -1309,6 +1309,14 @@ async function main() {
     const data = payload.data;
     if (!("kind" in data) || data.kind !== "atif-display") throw new Error("expected complete trajectory");
     assert.equal(data.taskId, DETAIL_TASK_ID);
+    for (const step of data.steps) {
+      assert(Array.isArray(step.content));
+      assert(Array.isArray(step.calls));
+      assert(Array.isArray(step.observations));
+      for (const removed of ["message", "parts", "tools", "toolCalls", "observation"]) assert(!Object.hasOwn(step, removed), `transcript emitted ${removed}`);
+      for (const observation of step.observations) assert(!Object.hasOwn(observation, "parts"), "transcript emitted observation parts");
+      for (const call of step.calls) for (const observation of call.observations) assert(!Object.hasOwn(observation, "parts"), "transcript emitted observation parts");
+    }
     for (const forbidden of ["publicKey", "publicUrl", "private://", "https://objects.example.test/public/", "records", "cursor", "prefix", "partial"]) {
       assert(!body.includes(forbidden), `transcript emitted ${forbidden}`);
     }

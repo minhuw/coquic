@@ -679,7 +679,7 @@ def diagnostics() -> None:
             ]
     except Exception as exc:
         invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
-    retry = ledger.pending_retry("planner")
+    retry = ledger.pending_retry("planner") if ledger is not None else None
     active_run = None
     last_materialized_sequence = None
     last_materialized_at = None
@@ -706,17 +706,19 @@ def diagnostics() -> None:
             ).fetchone()
             planning_block_reason = blocked[0] if blocked is not None else None
     payload = {
-        "epochId": ledger.epoch_id,
+        "epochId": ledger.epoch_id if ledger is not None else None,
         "archiveFormatVersion": (
             archive_epoch.format_version if archive_epoch is not None else None
         ),
         "taskFormatVersion": (
             archive_epoch.task_format_version if archive_epoch is not None else None
         ),
-        "planningBlocked": ledger.planning_blocked,
+        "planningBlocked": ledger.planning_blocked if ledger is not None else False,
         "planningBlockReason": planning_block_reason,
         "ledgerEventCount": event_count,
-        "pendingArchiveEvents": len(ledger.outbox(limit=10_000)),
+        "pendingArchiveEvents": (
+            len(ledger.outbox(limit=10_000)) if ledger is not None else 0
+        ),
         "lastMaterializedSequence": last_materialized_sequence,
         "lastMaterializedAt": last_materialized_at,
         "activePlannerRunId": active_run,
@@ -755,8 +757,9 @@ def health() -> None:
                 cleanup_pending += 1
         publication_health = publication_health_view(store)
         ledger = store.control_loop_ledger
-        planner_active = bool(ledger.list_planner_runs(include_terminal=False))
-        archive_pending = bool(ledger.outbox(limit=1))
+        if ledger is not None:
+            planner_active = bool(ledger.list_planner_runs(include_terminal=False))
+            archive_pending = bool(ledger.outbox(limit=1))
         persisted_pressure = store.get_resource_pressure()
         references = store.list_container_references()
         container_counts["owned"] = len(references)

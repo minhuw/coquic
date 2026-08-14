@@ -15,15 +15,18 @@ Site does not accept or proxy a caller-supplied object URL.
 
 Unrelated first-party resources retain their existing major versions. Steward
 cloud status, task page, task detail, trajectory descriptor, and problem
-responses use `schemaVersion: "4.0"`:
+responses use `schemaVersion: "3.0"`:
 
 ```json
 {
-  "schemaVersion": "4.0",
+  "schemaVersion": "3.0",
   "generatedAt": "2026-07-19T12:00:00Z",
   "data": {}
 }
 ```
+
+Complete trajectory responses are a separate contract and use
+`schemaVersion: "4.0"`.
 
 Collection responses MAY add pagination data; generated evidence SHOULD add
 `provenance`. Cloud problems use the `problem` member in
@@ -175,10 +178,10 @@ translate an earlier shape or infer omitted evidence.
 
 ### Interop
 
-- Emit the normalized result values `pass`, `unsupported`, `peer_failure`,
-  `known_peer_issue`, `fail`, and `not_reported` directly.
+- Emit the normalized result values `pass`, `unsupported`, `peerFailure`,
+  `knownPeerIssue`, `fail`, and `notReported` directly.
 - Publish explicit lane and testcase IDs. Omitted matrix cells are
-  `not_reported`; they are never synthesized as pass or unsupported.
+  `notReported`; they are never synthesized as pass or unsupported.
 - Preserve the raw producer result and known-peer evidence beside the normalized
   result.
 
@@ -205,10 +208,11 @@ translate an earlier shape or infer omitted evidence.
   complete within its bounded page; task detail validates exact expected counts,
   ownership, event sequence, run duration, artifact identity, and disclosure
   consistency before returning any field.
-- Cloud envelopes use version `4.0`. The detail `trajectory` is either a complete
-  validated descriptor for an available immutable JSON artifact or `null`; the
-  reader does not expose partial ATIF/JSONL records, offsets, cursors, or raw
-  transcript content.
+- Status, task-page, task-detail, trajectory-descriptor, and problem envelopes use
+  version `3.0`; complete trajectory responses use the separate `4.0` envelope.
+  The detail `trajectory` is either a complete validated descriptor for an
+  available immutable JSON artifact or `null`; the reader does not expose
+  partial ATIF/JSONL records, offsets, cursors, or raw transcript content.
 - Artifact identity remains public and deterministic: `logicalPath` identifies
   the producer-declared artifact, while `publicKey` is the validated
   content-addressed R2 key. Both are returned with media type, byte size, digest,

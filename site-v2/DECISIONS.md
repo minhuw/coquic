@@ -188,8 +188,8 @@ and unavailable planning telemetry remains unavailable rather than zero.
 
 ## D-019: Preview access is an explicit construction notice
 
-On 2026-07-22, V2 gained an optional shared-password gate for preview
-deployments. When configured, every application route redirects to one
+Site V2 has an optional shared-password gate for its construction preview. When
+enabled by deployment configuration, every application route redirects to one
 under-construction screen and returns reviewers to their requested URL after
 entry. The screen uses the established product identity, status language,
 form controls, and responsive design tokens rather than introducing a separate

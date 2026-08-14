@@ -32,7 +32,7 @@ export default async function PreviewPage({ searchParams }: PreviewPageProps) {
           <CoquicLogo className="size-10 shrink-0" />
           <div>
             <p className="text-sm font-medium text-ink">CoQUIC Observatory</p>
-            <p className="mt-1 text-xs text-muted">V2 compatibility preview</p>
+            <p className="mt-1 text-xs text-muted">V2 construction preview</p>
           </div>
         </header>
 
@@ -48,9 +48,9 @@ export default async function PreviewPage({ searchParams }: PreviewPageProps) {
             CoQUIC V2 is under construction
           </h1>
           <p className="mt-5 max-w-lg text-base leading-7 text-muted">
-            This is a working compatibility preview. Routes, evidence adapters,
-            and interaction details are still being verified before public
-            release.
+            This is a working construction preview for reviewers. Routes,
+            evidence adapters, and interaction details are still being verified
+            before public release.
           </p>
 
           <form className="mt-8 max-w-md" method="post" action="/api/preview-access">
@@ -84,8 +84,9 @@ export default async function PreviewPage({ searchParams }: PreviewPageProps) {
 
         <footer className="border-t border-line pt-6">
           <p id="preview-note" className="max-w-lg text-xs leading-5 text-muted">
-            The shared password is a preview notice, not an account or security
-            boundary. Access lasts for seven days in this browser.
+            The shared password is a preview notice, not authentication, an
+            account, or a security boundary. Access lasts for seven days in this
+            browser.
           </p>
         </footer>
       </div>

@@ -123,19 +123,24 @@ jobs:
           COQUIC_DEMO_VERIFICATION_PATH: /preview
           COQUIC_DEMO_PAGE_MARKER: CoQUIC V2 is under construction
           COQUIC_DEMO_VERIFY_WASM: "false"
-          COQUIC_V2_PREVIEW_PASSWORD: happyquic
-        run: site/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"
+          COQUIC_V2_PREVIEW_PASSWORD: ${{ secrets.COQUIC_V2_PREVIEW_PASSWORD }}
+        run: |
+          test -n "${COQUIC_V2_PREVIEW_PASSWORD}"
+          site/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"
 
       - name: Check deployed V2 preview
+        env:
+          COQUIC_V2_PREVIEW_PASSWORD: ${{ secrets.COQUIC_V2_PREVIEW_PASSWORD }}
         run: |
+          test -n "${COQUIC_V2_PREVIEW_PASSWORD}"
           headers="$(curl --fail --silent --show-error --head https://coquic.minhuw.dev/)"
           grep -Eiq '^location:.*\/preview' <<<"${headers}"
           page="$(curl --fail --silent --show-error https://coquic.minhuw.dev/preview)"
           grep -Fq 'CoQUIC V2 is under construction' <<<"${page}"
-          curl --fail --silent --show-error \
+          printf '%s' "${COQUIC_V2_PREVIEW_PASSWORD}" | curl --fail --silent --show-error \
             --cookie-jar "${RUNNER_TEMP}/v2-preview.cookies" \
             --output /dev/null \
-            --data-urlencode 'password=happyquic' \
+            --data-urlencode 'password@-' \
             --data-urlencode 'next=/' \
             https://coquic.minhuw.dev/api/preview-access
           status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \

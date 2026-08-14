@@ -5,7 +5,7 @@ const previewPassword = process.env.COQUIC_V2_PREVIEW_PASSWORD;
 test.describe("V2 preview access", () => {
   test.skip(!previewPassword, "preview password is not configured");
 
-  test("explains the preview and returns to the requested route", async ({ page }) => {
+  test("explains the construction preview and returns to the requested route", async ({ page }) => {
     await page.goto("/steward?view=signals");
 
     await expect(page).toHaveURL(/\/preview\?next=/);
@@ -13,6 +13,12 @@ test.describe("V2 preview access", () => {
       page.getByRole("heading", { name: "CoQUIC V2 is under construction" }),
     ).toBeVisible();
     await expect(page.getByText("Preview in progress")).toBeVisible();
+    await expect(page.getByText("V2 construction preview")).toBeVisible();
+    await expect(
+      page.getByText(
+        "The shared password is a preview notice, not authentication, an account, or a security boundary.",
+      ),
+    ).toBeVisible();
 
     const password = page.getByLabel("Shared preview password");
     await password.fill("incorrect-preview-password");

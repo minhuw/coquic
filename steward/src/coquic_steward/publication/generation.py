@@ -1000,19 +1000,6 @@ class PublicationComposer:
             idempotency_key=idempotency_key,
         )
 
-    def invoke(
-        self,
-        source: object,
-        *,
-        task_id: str,
-        kwargs: Mapping[str, object],
-    ) -> GenerationOutcome | object:
-        """Preserve the caller's explicit production keyword shape."""
-
-        selected = {"task_id": task_id, **dict(kwargs)}
-        return self.callback(source, **selected)
-
-
 def _extract_items(value: object) -> list[object]:
     if value is None:
         return []

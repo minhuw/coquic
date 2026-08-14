@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from coquic_steward.publication import (
     FailClosed,
     ReasonCode,
@@ -23,6 +25,7 @@ from coquic_steward.publication.d1 import (
 from coquic_steward.publication.generation import (
     GenerationObject,
     GenerationOriginal,
+    PublicationComposer,
     compose_publication_generation,
 )
 from coquic_steward.publication.outbox import (
@@ -39,6 +42,7 @@ from coquic_steward.publication.publisher import (
     CloudPublisher,
     PublicationHideStatus,
     PublicationStatus,
+    _call_composer,
 )
 from coquic_steward.publication.r2 import (
     R2Error,
@@ -472,13 +476,17 @@ class _StageBarrierProvider(_SQLitePublicationProvider):
         return super().expose(payload)
 
 
+def _composer(callback) -> PublicationComposer:
+    return callback if isinstance(callback, PublicationComposer) else PublicationComposer(callback)
+
+
 def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> CloudPublisher:
     return CloudPublisher(
         store,
         provider,
         provider,
         "worker-1",
-        compose=compose or compose_publication_generation,
+        compose=_composer(compose or compose_publication_generation),
         now=lambda: NOW,
     )
 
@@ -551,7 +559,7 @@ def _returning_composer(result: object):
     ) -> object:
         return result
 
-    return compose
+    return _composer(compose)
 
 
 def _compose_generation(
@@ -587,7 +595,24 @@ def _compose_generation(
             metadata_digest=metadata_digest,
         )
 
-    return compose
+    return _composer(compose)
+
+
+def test_partial_composer_is_rejected_at_canonical_boundary() -> None:
+    calls = 0
+
+    def partial(_source: object, *, task_id: str) -> object:
+        nonlocal calls
+        calls += 1
+        return task_id
+
+    with pytest.raises(TypeError, match="PublicationComposer"):
+        _call_composer(partial, {"stable": True}, task_id="task-1", kwargs={})
+    assert calls == 0
+
+    with pytest.raises(TypeError):
+        _call_composer(PublicationComposer(partial), {"stable": True}, task_id="task-1", kwargs={})
+    assert calls == 0
 
 
 def _sqlite_generation() -> PublicationGeneration:
@@ -1121,7 +1146,7 @@ def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> N
         provider,
         provider,
         "worker-2",
-        compose=compose,
+        compose=_composer(compose),
         now=expired_at,
     ).publish(IDENTITY.publication_id, source={"stable": True})
 

@@ -46,6 +46,9 @@ from .outbox import (
 from .r2 import R2Client, R2Error, R2ErrorCategory, R2ObjectClass, private_original_key
 
 
+_DEFAULT_COMPOSER = PublicationComposer(compose_publication_generation)
+
+
 class PublicationStatus(StrEnum):
     """The closed outcomes of one publication attempt."""
 
@@ -627,8 +630,11 @@ def _call_composer(
 ) -> GenerationOutcome | object:
     """Call one composer once through the canonical composition contract."""
 
-    selected = composer if isinstance(composer, PublicationComposer) else PublicationComposer(composer)
-    return selected.invoke(source, task_id=task_id, kwargs=kwargs)
+    if not isinstance(composer, PublicationComposer):
+        raise TypeError("composer must be a PublicationComposer")
+    selected = dict(kwargs)
+    selected["task_id"] = task_id
+    return composer(source, **selected)
 
 
 class CloudPublisher:
@@ -641,7 +647,7 @@ class CloudPublisher:
         d1: D1PublicationClient,
         worker_id: str = "publication-worker",
         *,
-        compose: PublicationComposer = compose_publication_generation,
+        compose: PublicationComposer = _DEFAULT_COMPOSER,
         now: Callable[[], datetime] | datetime | None = None,
         lease_seconds: int = MAX_LEASE_SECONDS,
         retry_backoff_seconds: int = 1,
@@ -1807,7 +1813,7 @@ def publish_generation(
     r2: R2Client,
     d1: D1PublicationClient,
     worker_id: str = "publication-worker",
-    compose: PublicationComposer = compose_publication_generation,
+    compose: PublicationComposer = _DEFAULT_COMPOSER,
     now: Callable[[], datetime] | datetime | None = None,
     lease_seconds: int = MAX_LEASE_SECONDS,
     retry_backoff_seconds: int = 1,
@@ -1840,7 +1846,7 @@ def retry_publication(
     publication_id: str,
     source: object | None = None,
     *,
-    compose: PublicationComposer = compose_publication_generation,
+    compose: PublicationComposer = _DEFAULT_COMPOSER,
     compose_kwargs: Mapping[str, object] | None = None,
     now: Callable[[], datetime] | datetime | None = None,
 ) -> PublicationResult:

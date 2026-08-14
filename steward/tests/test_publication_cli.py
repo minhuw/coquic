@@ -10,6 +10,7 @@ from coquic_steward import cli
 from coquic_steward.cli import app
 from coquic_steward.publication.d1 import HideReceipt
 from coquic_steward.publication.models import FailClosed, ReasonCode
+from coquic_steward.publication.generation import PublicationComposer
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     PublicationGeneration,
@@ -77,7 +78,7 @@ def _returning_composer(result: object):
     ) -> object:
         return result
 
-    return compose
+    return PublicationComposer(compose)
 
 
 def _blocked_store(tmp_path):

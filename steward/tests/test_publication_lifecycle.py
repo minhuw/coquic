@@ -20,7 +20,7 @@ from coquic_steward.execution.session import load_publication_snapshot
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.publication.atif import AtifSource
-from coquic_steward.publication.generation import PublicationGeneration
+from coquic_steward.publication.generation import PublicationComposer, PublicationGeneration
 from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
 from coquic_steward.publication.outbox import (
     CleanupIntent,
@@ -168,6 +168,53 @@ def _publication_graph(title: str) -> dict[str, object]:
             }
         ],
     }
+
+
+def _scanner_composer(scanner: object) -> PublicationComposer:
+    def compose(
+        source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
+        del scanner_runner
+        return session_module.compose_publication_generation(
+            source,
+            task=task,
+            completed_runs=completed_runs,
+            task_id=task_id,
+            run_builder=run_builder,
+            builder=builder,
+            credential_sources=credential_sources,
+            known_secrets=known_secrets,
+            scanner_runner=scanner,
+            scanner_timeout=scanner_timeout,
+            max_repair_passes=max_repair_passes,
+            ocr_runner=ocr_runner,
+            ocr_timeout=ocr_timeout,
+            run_scanner=run_scanner,
+            price_catalog=price_catalog,
+            generation_boundary=generation_boundary,
+            publication_id=publication_id,
+            idempotency_key=idempotency_key,
+        )
+
+    return PublicationComposer(compose)
 
 
 def test_source_scanner_keeps_patch_and_tree_categories(
@@ -713,11 +760,7 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
         R2(),
         d1,
         worker_id="publication-test",
-        compose=lambda source, **kwargs: compose_publication_generation(
-            source,
-            scanner_runner=scanner,
-            **kwargs,
-        ),
+        compose=_scanner_composer(scanner),
     )
     daemon = object.__new__(StewardDaemon)
     daemon.config = SimpleNamespace(publication=config)
@@ -1064,11 +1107,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
         r2,
         d1,
         worker_id="publication-restart-provider",
-        compose=lambda source, **kwargs: session_module.compose_publication_generation(
-            source,
-            scanner_runner=scanner,
-            **kwargs,
-        ),
+        compose=_scanner_composer(scanner),
     )
 
     assert daemon._publish_next_generation(publisher) is True

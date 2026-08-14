@@ -283,6 +283,20 @@ def test_retry_missing_publication_configuration_is_bounded(monkeypatch) -> None
         def get_publication_generation(self, publication_id):
             return current if publication_id == current.publication_id else None
 
+        def begin_publication_hide(
+            self,
+            task_id,
+            reason="operator_blocked",
+            *,
+            now=None,
+            generation_boundary=None,
+        ):
+            assert task_id == current.task_id
+            return SimpleNamespace(
+                status=PublicationOperationStatus.enqueued,
+                fence=SimpleNamespace(state="pending"),
+            )
+
     config = SimpleNamespace(publication=SimpleNamespace(enabled=False))
     monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
     monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
@@ -304,6 +318,59 @@ def test_retry_missing_publication_configuration_is_bounded(monkeypatch) -> None
             "changed": False,
         },
     }
+
+
+def test_retry_without_provider_fences_all_same_task_generations(tmp_path) -> None:
+    store = TaskStore(tmp_path / "steward.sqlite")
+    generations = []
+    for index in range(2):
+        identity = GenerationIdentity("task-disabled", f"boundary-disabled-{index}")
+        generation = PublicationGeneration(
+            publication_id=identity.publication_id,
+            task_id="task-disabled",
+            run_id=f"run-disabled-{index}",
+            generation_boundary=identity.generation_boundary,
+            metadata_digest=f"{index:064x}",
+            idempotency_key=identity.idempotency_key,
+            created_at=NOW + timedelta(seconds=index),
+            updated_at=NOW + timedelta(seconds=index),
+        )
+        assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
+        generations.append(generation)
+
+    assert store.claim_publication(
+        "worker-1",
+        publication_id=generations[0].publication_id,
+        now=NOW,
+    ).status is PublicationOperationStatus.claimed
+    assert store.block_publication(
+        generations[0].publication_id,
+        expected_state=PublicationState.claimed,
+        lease_owner="worker-1",
+        reason="missing",
+        now=NOW + timedelta(seconds=1),
+    ).status is PublicationOperationStatus.blocked
+
+    result = CloudPublisher(
+        store,
+        None,
+        None,
+        now=NOW + timedelta(seconds=2),
+    ).retry_publication(generations[0].publication_id, None)
+
+    assert result.status is PublicationStatus.blocked
+    assert result.reason == "missing"
+    assert result.hide_result is not None
+    assert result.hide_result.reason == "precondition"
+    fence = store.get_publication_hide("task-disabled")
+    assert fence is not None
+    assert fence.state.value == "pending"
+    persisted = store.list_publication_generations(task_id="task-disabled", limit=None)
+    assert [item.state for item in persisted] == [PublicationState.blocked, PublicationState.blocked]
+    assert store.claim_publication(
+        "worker-2",
+        now=NOW + timedelta(seconds=3),
+    ).status is PublicationOperationStatus.empty
 
 
 def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:

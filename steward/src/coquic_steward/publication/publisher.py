@@ -1185,12 +1185,6 @@ class CloudPublisher:
                 task_id=task_id,
                 reason="invalid_metadata",
             )
-        if self.d1 is None:
-            return PublicationHideResult(
-                PublicationHideStatus.blocked,
-                task_id=task_id,
-                reason="precondition",
-            )
         try:
             started = self.store.begin_publication_hide(
                 task_id,
@@ -1240,6 +1234,13 @@ class CloudPublisher:
                 publication_id=publication_id,
                 reason=reason,
                 changed=False,
+            )
+
+        if self.d1 is None:
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason="precondition",
             )
 
         try:

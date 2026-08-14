@@ -48,6 +48,23 @@ def test_publication_exports_use_canonical_names() -> None:
         "CloudPublisher",
         "publish_generation",
     } <= exported
+    from coquic_steward.publication import (
+        AtifSource,
+        SanitizationResult,
+        MediaInspection,
+        inspect_media,
+        build_publication_bundle,
+        CloudPublisher,
+        publish_generation,
+    )
+    assert publication.AtifSource is AtifSource
+    assert publication.SanitizationResult is SanitizationResult
+    assert publication.UsageTokens is UsageTokens
+    assert publication.MediaInspection is MediaInspection
+    assert publication.inspect_media is inspect_media
+    assert publication.build_publication_bundle is build_publication_bundle
+    assert publication.CloudPublisher is CloudPublisher
+    assert publication.publish_generation is publish_generation
     removed = {
         "CompletedRun",
         "AtifResult",

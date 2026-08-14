@@ -157,6 +157,24 @@ class _CallbackDaemonCancellation(DaemonCancellation):
         self._callback()
 
 
+def _close_r2_provider_client(client: R2Client) -> None:
+    """Close the daemon-owned botocore client without discovering fallbacks."""
+
+    try:
+        client._client.close()
+    except Exception:
+        pass
+
+
+def _close_d1_provider_client(client: D1PublicationClient) -> None:
+    """Close the daemon-owned httpx client through its concrete owner."""
+
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
 class BotocoreR2TransportAdapter(DaemonCancellation):
     """Cancel botocore 1.43.58 through its observed private transport shape."""
 
@@ -186,6 +204,15 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
                 put_connection(connection)
             self._install_manager(manager)
             self._install_pool(pool)
+
+            def tracked_get_manager(
+                url: str, proxy_url: str | None = None
+            ) -> object:
+                selected_manager = get_manager(url, proxy_url)
+                self._install_manager(selected_manager)
+                return selected_manager
+
+            session._get_connection_manager = tracked_get_manager
         except PublicationTransportSetupError:
             raise
         except Exception:
@@ -263,6 +290,8 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
                 return
         try:
             connect = connection.connect
+            if not isinstance(connect, Callable):
+                raise PublicationTransportSetupError()
 
             def guarded_connect() -> None:
                 if self._is_cancelled():
@@ -382,12 +411,23 @@ class _PublicationTransportCancellation(DaemonCancellation):
     """Own both provider adapters behind the daemon cancellation boundary."""
 
     def __init__(self, r2: R2Client, d1: D1PublicationClient) -> None:
-        self._r2 = BotocoreR2TransportAdapter(r2)
+        r2_adapter: BotocoreR2TransportAdapter | None = None
+        d1_adapter: HttpxD1TransportAdapter | None = None
         try:
-            self._d1 = HttpxD1TransportAdapter(d1)
+            r2_adapter = BotocoreR2TransportAdapter(r2)
+            d1_adapter = HttpxD1TransportAdapter(d1)
         except Exception:
-            self._r2.close()
+            if r2_adapter is not None:
+                try:
+                    r2_adapter.close()
+                except Exception:
+                    pass
+            else:
+                _close_r2_provider_client(r2)
+            _close_d1_provider_client(d1)
             raise
+        self._r2 = r2_adapter
+        self._d1 = d1_adapter
 
     def cancel(self) -> None:
         self._r2.close()
@@ -1176,15 +1216,9 @@ class StewardDaemon:
             )
         except Exception:
             if r2 is not None:
-                try:
-                    BotocoreR2TransportAdapter(r2).close()
-                except Exception:
-                    pass
+                _close_r2_provider_client(r2)
             if d1 is not None:
-                try:
-                    d1.close()
-                except Exception:
-                    pass
+                _close_d1_provider_client(d1)
             raise
         lease_seconds = max(1, int(publication.lease_duration_seconds))
         retry_backoff_seconds = max(1, int(publication.retry_backoff_seconds))

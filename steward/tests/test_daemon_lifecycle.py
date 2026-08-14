@@ -1458,6 +1458,114 @@ def test_botocore_transport_adapter_rejects_missing_connection_hook():
     assert str(error.value) == "unsupported publication transport shape"
 
 
+@pytest.mark.parametrize("connect", [None, object()])
+def test_botocore_transport_adapter_rejects_non_callable_connection_hook(connect):
+    r2 = _botocore_transport_double()
+    session = r2._client._endpoint.http_session
+    manager = session._get_connection_manager("http://publication.example.test")
+    pool = manager.connection_from_url("http://publication.example.test")
+    pool._get_conn().connect = connect
+
+    with pytest.raises(PublicationTransportSetupError) as error:
+        BotocoreR2TransportAdapter(r2)
+    assert str(error.value) == "unsupported publication transport shape"
+
+
+def test_botocore_transport_adapter_instruments_proxy_manager():
+    direct_connection = SimpleNamespace(
+        sock=None,
+        connect=lambda: None,
+        close=lambda: None,
+    )
+    proxy_socket = SimpleNamespace(
+        shutdown_calls=[],
+        close_calls=0,
+    )
+
+    def shutdown(how):
+        proxy_socket.shutdown_calls.append(how)
+
+    def close_socket():
+        proxy_socket.close_calls += 1
+
+    proxy_socket.shutdown = shutdown
+    proxy_socket.close = close_socket
+    proxy_connection = SimpleNamespace(
+        sock=proxy_socket,
+        connect=lambda: None,
+        close=lambda: None,
+    )
+    direct_pool = SimpleNamespace(
+        _get_conn=lambda timeout=None: direct_connection,
+        _put_conn=lambda _connection: None,
+    )
+    proxy_pool = SimpleNamespace(
+        _get_conn=lambda timeout=None: proxy_connection,
+        _put_conn=lambda _connection: None,
+    )
+    direct_manager = SimpleNamespace(
+        connection_from_url=lambda _url, _pool_kwargs=None: direct_pool,
+    )
+    proxy_manager = SimpleNamespace(
+        connection_from_url=lambda _url, _pool_kwargs=None: proxy_pool,
+    )
+    session = SimpleNamespace()
+    session._get_connection_manager = (
+        lambda _url, proxy_url=None: proxy_manager
+        if proxy_url is not None
+        else direct_manager
+    )
+    endpoint = SimpleNamespace(
+        host="https://publication.example.test",
+        http_session=session,
+    )
+    provider_client = SimpleNamespace(_endpoint=endpoint, close=lambda: None)
+    r2 = SimpleNamespace(_client=provider_client)
+    adapter = BotocoreR2TransportAdapter(r2)
+
+    try:
+        selected_manager = session._get_connection_manager(
+            endpoint.host,
+            "http://proxy.example.test:8080",
+        )
+        selected_pool = selected_manager.connection_from_url(endpoint.host)
+        selected_pool._get_conn(timeout=0.0)
+
+        adapter.cancel()
+
+        assert proxy_socket.shutdown_calls == [socket.SHUT_RDWR]
+        assert proxy_socket.close_calls == 1
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("failure", ["r2", "d1"])
+def test_publication_transport_cancellation_closes_clients_on_setup_failure(failure):
+    r2 = _botocore_transport_double()
+    r2_closed = threading.Event()
+    r2._client.close = r2_closed.set
+    d1_closed = threading.Event()
+    d1 = _d1_transport_double(d1_closed.set)
+
+    if failure == "r2":
+        session = r2._client._endpoint.http_session
+        manager = session._get_connection_manager("http://publication.example.test")
+        pool = manager.connection_from_url("http://publication.example.test")
+        del pool._get_conn
+    else:
+        pool = d1._client._transport._pool
+        del pool._connections
+
+    try:
+        with pytest.raises(PublicationTransportSetupError) as error:
+            daemon_module._PublicationTransportCancellation(r2, d1)
+        assert str(error.value) == "unsupported publication transport shape"
+        assert r2_closed.is_set()
+        assert d1_closed.is_set()
+    finally:
+        d1.close()
+
+
 @pytest.mark.parametrize("missing_hook", ["transport", "pool", "connections"])
 def test_httpx_transport_adapter_rejects_missing_shape(missing_hook):
     d1 = _d1_transport_double()

@@ -1484,7 +1484,7 @@ _GLOBAL_TRANSITION_UPDATE = (
     "THEN MIN(price_entry_digest) END AS price_provenance_digest "
     "FROM old_period_rows GROUP BY period_kind, period_key, model"
     "), transition_context AS ("
-    "SELECT ? AS old_usage_missing"
+    "SELECT ? AS old_usage_id, ? AS old_usage_missing, ? AS task_id"
     "), current_aggregates AS ("
     "SELECT h.period_kind, h.period_key, h.model, h.ownership_class, g.global_id, "
     "g.coverage, g.covered_invocations, g.expected_invocations, g.known_token_subtotal, "
@@ -1495,7 +1495,9 @@ _GLOBAL_TRANSITION_UPDATE = (
     "FROM usage_global_heads AS h JOIN usage_globals AS g ON g.global_id = h.global_id "
     "WHERE h.state = 'visible'"
     "), raw_values AS ("
-    "SELECT n.global_id, n.usage_generation_id, n.price_provenance_digest AS new_price_provenance_digest, "
+    "SELECT n.global_id, n.usage_generation_id, n.coverage AS new_coverage, "
+    "CASE WHEN a.global_id IS NULL THEN 1 ELSE 0 END AS no_current_aggregate, "
+    "n.price_provenance_digest AS new_price_provenance_digest, "
     "a.price_provenance_digest AS old_price_provenance_digest, "
     "CASE WHEN n.uncached_input_cost_micro_usd IS NOT NULL AND n.cached_input_cost_micro_usd IS NOT NULL "
     "AND n.output_cost_micro_usd IS NOT NULL AND n.total_cost_micro_usd IS NOT NULL THEN 1 ELSE 0 END AS new_numeric, "
@@ -1541,15 +1543,12 @@ _GLOBAL_TRANSITION_UPDATE = (
     "WHERE n.usage_generation_id = ? AND n.ownership_class = 'task-owned'"
     "), calculated AS ("
     "SELECT global_id, usage_generation_id, covered_invocations, expected_invocations, "
-    "CASE WHEN prompt_tokens IS NULL AND cached_tokens IS NULL AND uncached_tokens IS NULL "
+    "CASE WHEN no_current_aggregate = 1 THEN new_coverage "
+    "WHEN prompt_tokens IS NULL AND cached_tokens IS NULL AND uncached_tokens IS NULL "
     "AND completion_tokens IS NULL AND reasoning_tokens IS NULL AND total_tokens IS NULL "
     "AND uncached_input_cost_micro_usd IS NULL AND cached_input_cost_micro_usd IS NULL "
     "AND output_cost_micro_usd IS NULL AND total_cost_micro_usd IS NULL THEN 'unavailable' "
-    "WHEN covered_invocations = expected_invocations AND prompt_tokens IS NOT NULL AND cached_tokens IS NOT NULL "
-    "AND uncached_tokens IS NOT NULL AND completion_tokens IS NOT NULL AND reasoning_tokens IS NOT NULL "
-    "AND total_tokens IS NOT NULL AND uncached_input_cost_micro_usd IS NOT NULL "
-    "AND cached_input_cost_micro_usd IS NOT NULL AND output_cost_micro_usd IS NOT NULL "
-    "AND total_cost_micro_usd IS NOT NULL THEN 'complete' ELSE 'partial' END AS coverage, "
+    "WHEN covered_invocations = expected_invocations THEN 'complete' ELSE 'partial' END AS coverage, "
     "total_tokens AS known_token_subtotal, total_cost_micro_usd AS known_cost_subtotal_micro_usd, "
     "prompt_tokens, cached_tokens, uncached_tokens, completion_tokens, reasoning_tokens, total_tokens, "
     "uncached_input_cost_micro_usd, cached_input_cost_micro_usd, output_cost_micro_usd, total_cost_micro_usd, "
@@ -1577,6 +1576,26 @@ _GLOBAL_TRANSITION_UPDATE = (
     "price_provenance_digest = (SELECT price_provenance_digest FROM calculated AS c WHERE c.global_id = target.global_id), "
     "aggregate_only = 1 "
     "WHERE target.usage_generation_id = ? AND target.ownership_class = 'task-owned' "
+    "AND EXISTS ("
+    "SELECT 1 FROM usage_generations AS target_generation "
+    "WHERE target_generation.usage_generation_id = target.usage_generation_id "
+    "AND target_generation.state = 'staged'"
+    ") "
+    "AND EXISTS ("
+    "SELECT 1 FROM transition_context AS context "
+    "WHERE (context.old_usage_missing = 1 AND NOT EXISTS ("
+    "SELECT 1 FROM task_heads AS current_task "
+    "WHERE current_task.task_id = context.task_id AND current_task.state = 'visible'"
+    ")) OR (context.old_usage_missing = 0 AND EXISTS ("
+    "SELECT 1 FROM task_heads AS current_task "
+    "JOIN usage_heads AS current_usage ON current_usage.task_id = current_task.task_id "
+    "AND current_usage.usage_generation_id = current_task.usage_generation_id "
+    "AND current_usage.state = 'visible' "
+    "WHERE current_task.task_id = context.task_id "
+    "AND current_task.usage_generation_id = context.old_usage_id "
+    "AND current_task.state = 'visible'"
+    "))"
+    ") "
     "AND EXISTS (SELECT 1 FROM calculated AS c WHERE c.global_id = target.global_id)"
 )
 _GLOBAL_HEAD_UPSERT_SET = (
@@ -1594,7 +1613,7 @@ _GLOBAL_HEAD_UPSERT_SET_GUARDED = (
     "SELECT g.period_kind, g.period_key, g.model, g.ownership_class, g.usage_generation_id, g.global_id, 'visible', ? "
     "FROM usage_globals AS g "
     "JOIN usage_generations AS n ON n.usage_generation_id = g.usage_generation_id "
-    "JOIN task_heads AS t ON t.task_id = n.task_id AND t.publication_id = n.publication_id "
+    "JOIN task_heads AS t ON t.task_id = n.task_id "
     "AND t.usage_generation_id = ? AND t.state = 'visible' "
     "JOIN usage_heads AS h ON h.task_id = t.task_id AND h.usage_generation_id = t.usage_generation_id "
     "AND h.state = 'visible' "
@@ -2933,11 +2952,13 @@ class D1PublicationClient:
         # identities used by callers even though the set-based SQL only needs
         # the generation IDs.  Validation has already restricted new_rows to
         # the task-owned global shape.
-        del task_id, publication_id, new_rows
+        del publication_id, new_rows
         update = _statement(
             _GLOBAL_TRANSITION_UPDATE,
             old_usage_id,
+            old_usage_id,
             int(old_usage_id is None),
+            task_id,
             new_usage_id,
             new_usage_id,
         )

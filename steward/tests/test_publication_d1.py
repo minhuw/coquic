@@ -119,6 +119,27 @@ class HideExposureInterposer(ScriptedD1):
         return response
 
 
+class UsageReplacementInterposer(ScriptedD1):
+    """Commit a duplicate replacement after its rows have been staged."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.callback: Any = None
+        self.interposed = False
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        statements = body.get("batch")
+        if statements is None:
+            statements = [{"sql": body["sql"], "params": body.get("params", [])}]
+        staged_usage_rows = any("INSERT INTO usage_invocations" in item["sql"] for item in statements)
+        response = super().__call__(request)
+        if staged_usage_rows and not self.interposed and self.callback is not None:
+            self.interposed = True
+            self.callback()
+        return response
+
+
 def client(server: ScriptedD1) -> D1PublicationClient:
     return D1PublicationClient(
         account_id=ACCOUNT,
@@ -934,6 +955,43 @@ def test_stage_is_hidden_until_verified_exposure_and_replays() -> None:
     assert d1.expose(payload).publication_id == payload["publicationId"]
 
 
+def test_partial_global_coverage_survives_exposure_and_replay() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    payload = publication("publication-partial-global", run_id="run-partial-global", task_id="task-partial-global")
+    for row in payload["usage"]["globals"]:
+        if row["ownershipClass"] == "task-owned":
+            row["coverage"] = "partial"
+    refresh_metadata_digest(payload)
+
+    d1.publish(payload)
+
+    stored = {
+        row["period_kind"]: tuple(row[column] for column in ("coverage", "covered_invocations", "expected_invocations"))
+        for row in server.connection.execute(
+            "SELECT period_kind, coverage, covered_invocations, expected_invocations "
+            "FROM usage_globals WHERE ownership_class = 'task-owned'"
+        )
+    }
+    assert stored == {
+        "daily": ("partial", 1, 1),
+        "lifetime": ("partial", 1, 1),
+    }
+    before_heads = tuple(server.connection.execute(
+        "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?",
+        (payload["taskId"],),
+    ).fetchone())
+
+    replay = d1.expose(copy.deepcopy(payload))
+
+    assert replay.publication_id == payload["publicationId"]
+    assert tuple(server.connection.execute(
+        "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?",
+        (payload["taskId"],),
+    ).fetchone()) == before_heads
+    assert server.connection.execute("SELECT count(*) FROM usage_generations").fetchone()[0] == 1
+
+
 def test_usage_replacement_preserves_task_identity_and_replays() -> None:
     server = ScriptedD1()
     d1 = client(server)
@@ -959,6 +1017,48 @@ def test_usage_replacement_preserves_task_identity_and_replays() -> None:
         "SELECT usage_generation_id, state FROM usage_global_heads WHERE ownership_class = 'task-owned'"
     ).fetchone()) == (new_usage_id, "visible")
     assert d1.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=new_usage_id).usage_generation_id == new_usage_id
+
+
+def test_duplicate_usage_replacement_converges_after_winner_commit() -> None:
+    server = UsageReplacementInterposer()
+    loser = client(server)
+    winner = client(server)
+    first = publication(
+        "publication-duplicate-replace",
+        run_id="run-duplicate-replace",
+        task_id="task-duplicate-replace",
+    )
+    loser.publish(first)
+    replacement = usage_replacement(first, "refresh")
+    old_usage_id = first["usage"]["generation"]["usageGenerationId"]
+    new_usage_id = replacement["usage"]["generation"]["usageGenerationId"]
+    server.callback = lambda: winner.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=old_usage_id)
+
+    try:
+        receipt = loser.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=old_usage_id)
+    except D1Error as error:
+        assert error.code == D1ErrorCode.generation_conflict
+    else:
+        assert receipt.usage_generation_id == new_usage_id
+
+    assert server.interposed is True
+    assert tuple(server.connection.execute(
+        "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?",
+        (first["taskId"],),
+    ).fetchone()) == (first["publicationId"], new_usage_id, "visible")
+    assert tuple(server.connection.execute(
+        "SELECT usage_generation_id, state FROM usage_heads WHERE task_id = ?",
+        (first["taskId"],),
+    ).fetchone()) == (new_usage_id, "visible")
+    assert {tuple(row) for row in server.connection.execute(
+        "SELECT usage_generation_id, state FROM usage_global_heads WHERE ownership_class = 'task-owned'"
+    )} == {(new_usage_id, "visible")}
+    assert server.connection.execute(
+        "SELECT state FROM usage_generations WHERE usage_generation_id = ?", (old_usage_id,)
+    ).fetchone()[0] == "superseded"
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_generations WHERE task_id = ? AND state = 'visible'", (first["taskId"],)
+    ).fetchone()[0] == 1
 
 
 def test_usage_replacement_rejects_numeric_cost_mutation_and_stale_base() -> None:
@@ -1464,11 +1564,28 @@ def test_supersession_and_hide_are_atomic_and_idempotent() -> None:
     first = publication()
     d1.publish(first)
     second = publication("publication-next", run_id="run-next")
+    first_usage_id = first["usage"]["generation"]["usageGenerationId"]
+    second_usage_id = second["usage"]["generation"]["usageGenerationId"]
     d1.stage(second)
     assert server.connection.execute("SELECT state FROM publication_generations WHERE publication_id = ?", (first["publicationId"],)).fetchone()[0] == "visible"
     d1.expose(second)
     states = dict(server.connection.execute("SELECT publication_id, state FROM publication_generations"))
     assert states == {first["publicationId"]: "superseded", second["publicationId"]: "visible"}
+    assert server.connection.execute(
+        "SELECT state FROM usage_generations WHERE usage_generation_id = ?", (first_usage_id,)
+    ).fetchone()[0] == "superseded"
+    assert server.connection.execute(
+        "SELECT state FROM usage_generations WHERE usage_generation_id = ?", (second_usage_id,)
+    ).fetchone()[0] == "visible"
+    assert tuple(server.connection.execute(
+        "SELECT publication_id, usage_generation_id, state FROM task_heads WHERE task_id = ?", (first["taskId"],)
+    ).fetchone()) == (second["publicationId"], second_usage_id, "visible")
+    assert tuple(server.connection.execute(
+        "SELECT usage_generation_id, state FROM usage_heads WHERE task_id = ?", (first["taskId"],)
+    ).fetchone()) == (second_usage_id, "visible")
+    assert {tuple(row) for row in server.connection.execute(
+        "SELECT usage_generation_id, state FROM usage_global_heads WHERE ownership_class = 'task-owned'"
+    )} == {(second_usage_id, "visible")}
     hidden = d1.hide_task("task-clean", "unsafe_content")
     assert hidden.changed is True
     assert d1.hide_task("task-clean", "unsafe_content").changed is False

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, ValidationError
 
+from ..agents.catalog import (
+    AGENTS,
+    REMOTE_WRITE_AUTHORITY,
+    CanonicalRemoteWrite,
+    RemoteWriteAuthorityKey,
+    RemoteWriteIdentity,
+)
 from ..core.models import (
     Priority,
     ProjectSignals,
@@ -50,6 +58,12 @@ class ProposedTask(BaseModel):
     risk: Risk = Risk.medium
     evidence: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _VerifiedProposal:
+    proposed: ProposedTask
+    canonical_remote_write: CanonicalRemoteWrite | None = None
 
 
 class ProposalDisposition(BaseModel):
@@ -151,6 +165,7 @@ class PlanVerifier:
                     )
                 )
                 continue
+            proposed_task = proposed.proposed
             if len(accepted) >= limit:
                 dispositions.append(
                     ProposalDisposition(
@@ -158,27 +173,31 @@ class PlanVerifier:
                         outcome="capacity_skipped",
                         reason_code="capacity_exhausted",
                         signal_ids=evidence,
-                        dedupe_key=proposed.dedupe_key,
-                        proposal=proposed.model_dump(mode="json"),
+                        dedupe_key=proposed_task.dedupe_key,
+                        proposal=proposed_task.model_dump(mode="json"),
                     )
                 )
                 continue
-            task_spec = _task_spec_from_proposal(proposed, signals)
+            task_spec = _task_spec_from_proposal(
+                proposed_task,
+                signals,
+                canonical_remote_write=proposed.canonical_remote_write,
+            )
             accepted.append(
                 (
                     task_spec,
-                    proposed.dedupe_key,
+                    proposed_task.dedupe_key,
                 )
             )
-            seen.add(proposed.dedupe_key)
+            seen.add(proposed_task.dedupe_key)
             dispositions.append(
                 ProposalDisposition(
                     ordinal=ordinal,
                     outcome="accepted",
                     reason_code="accepted",
                     signal_ids=evidence,
-                    dedupe_key=proposed.dedupe_key,
-                    proposal=proposed.model_dump(mode="json"),
+                    dedupe_key=proposed_task.dedupe_key,
+                    proposal=proposed_task.model_dump(mode="json"),
                 )
             )
         non_consuming = {"invalid", "policy_rejected", "capacity_skipped", "duplicate"}
@@ -272,20 +291,75 @@ def _verified_proposal(
     evidence_ids: set[str],
     signals: ProjectSignals,
 ) -> ProposedTask | None:
-    try:
-        proposed = ProposedTask.model_validate(item)
-    except ValidationError:
-        return None
-    if not _proposal_is_acceptable(
-        proposed,
+    verified, _ = _verified_proposal_with_reason(
+        item,
         seen=seen,
         active_dedupes=active_dedupes,
         active_kinds=active_kinds,
         evidence_ids=evidence_ids,
         signals=signals,
+    )
+    return verified.proposed if verified is not None else None
+
+
+def _remote_write_identity_for_proposal(
+    proposed: ProposedTask, signals: ProjectSignals
+) -> tuple[RemoteWriteAuthorityKey, RemoteWriteIdentity] | None:
+    if "selected_signal_item_ids" in proposed.metadata:
+        selected_ids = proposed.metadata.get("selected_signal_item_ids")
+        if not isinstance(selected_ids, list) or not selected_ids:
+            return None
+    else:
+        selected_ids = list(proposed.evidence)
+    if (
+        len(selected_ids) != 1
+        or len(proposed.evidence) != 1
+        or selected_ids != proposed.evidence
+        or not isinstance(selected_ids[0], str)
     ):
         return None
-    return proposed
+    matches = [item for item in signals.items if item.id == selected_ids[0]]
+    if len(matches) != 1:
+        return None
+    item = matches[0]
+    values = (item.id, item.provider, item.kind, signals.repository)
+    if any(not value or value != value.strip() for value in values):
+        return None
+    key = RemoteWriteAuthorityKey(
+        provider=item.provider,
+        kind=item.kind,
+        worker=proposed.worker,
+    )
+    return key, RemoteWriteIdentity(
+        provider=item.provider,
+        kind=item.kind,
+        worker=proposed.worker,
+        source_id=item.id,
+        repository=signals.repository,
+    )
+
+
+def _canonical_remote_write_for_proposal(
+    proposed: ProposedTask, signals: ProjectSignals
+) -> CanonicalRemoteWrite | None:
+    identity_pair = _remote_write_identity_for_proposal(proposed, signals)
+    if identity_pair is None:
+        return None
+    key, identity = identity_pair
+    authority = REMOTE_WRITE_AUTHORITY.get(key)
+    if authority is None or not authority.canonicalizer_name.strip():
+        return None
+    try:
+        operation = authority.canonicalizer(identity)
+    except Exception:
+        return None
+    if not isinstance(operation, CanonicalRemoteWrite):
+        return None
+    if not _valid_text(operation.title, 200) or not _valid_text(
+        operation.prompt, 10_000
+    ):
+        return None
+    return operation
 
 
 def _verified_proposal_with_reason(
@@ -296,7 +370,7 @@ def _verified_proposal_with_reason(
     active_kinds: set[str],
     evidence_ids: set[str],
     signals: ProjectSignals,
-) -> tuple[ProposedTask | None, str]:
+) -> tuple[_VerifiedProposal | None, str]:
     try:
         proposed = ProposedTask.model_validate(item)
     except ValidationError:
@@ -319,11 +393,21 @@ def _verified_proposal_with_reason(
         return None, "invalid_evidence_id"
     if not _metadata_is_bounded(proposed.metadata):
         return None, "policy_metadata_too_large"
-    if not _feature_issue_proposal_is_safe(proposed, signals):
-        return None, "policy_feature_issue_scope"
     if proposed.worker not in PLANNABLE_WORKERS:
         return None, "policy_worker"
-    return proposed, "accepted"
+    agent = AGENTS.get(proposed.worker)
+    canonical_remote_write = None
+    if agent is None:
+        return None, "policy_worker"
+    if agent.remote_writes:
+        canonical_remote_write = _canonical_remote_write_for_proposal(
+            proposed, signals
+        )
+        if canonical_remote_write is None:
+            return None, "policy_remote_write_authority"
+    if not _feature_issue_proposal_is_safe(proposed, signals):
+        return None, "policy_feature_issue_scope"
+    return _VerifiedProposal(proposed, canonical_remote_write), "accepted"
 
 
 def _proposal_is_acceptable(
@@ -387,7 +471,10 @@ def _feature_issue_proposal_is_safe(
 
 
 def _task_spec_from_proposal(
-    proposed: ProposedTask, signals: ProjectSignals
+    proposed: ProposedTask,
+    signals: ProjectSignals,
+    *,
+    canonical_remote_write: CanonicalRemoteWrite | None = None,
 ) -> TaskSpec:
     metadata = dict(proposed.metadata)
     metadata["dedupe_key"] = proposed.dedupe_key
@@ -397,7 +484,10 @@ def _task_spec_from_proposal(
         metadata["source_context"] = source_context
     title = proposed.title.strip()
     prompt = proposed.prompt.strip()
-    if proposed.kind == TaskKind.feature:
+    if canonical_remote_write is not None:
+        title = canonical_remote_write.title.strip()
+        prompt = canonical_remote_write.prompt.strip()
+    elif proposed.kind == TaskKind.feature:
         selected = _selected_signal_items(proposed, signals.items)
         identity = (
             _feature_issue_identity(selected[0], signals.repository)

@@ -11,6 +11,7 @@ import threading
 
 from typer.testing import CliRunner
 
+from coquic_steward.agents.catalog import AGENTS, REMOTE_WRITE_AUTHORITY
 from coquic_steward.cli import app
 from coquic_steward.core.models import (
     ProjectSignals,
@@ -24,7 +25,11 @@ from coquic_steward.execution.session import (
     _InvocationLaunchGate,
 )
 from coquic_steward.planning import PlannerRun
-from coquic_steward.planning.verifier import ActiveTaskSummary, PlanVerifier
+from coquic_steward.planning.verifier import (
+    PLANNABLE_WORKERS,
+    ActiveTaskSummary,
+    PlanVerifier,
+)
 from coquic_steward.storage import TaskStore
 
 
@@ -45,11 +50,16 @@ def _signals() -> ProjectSignals:
     )
 
 
-def _proposal(dedupe: str, *, evidence: list[str] | None = None) -> dict[str, object]:
+def _proposal(
+    dedupe: str,
+    *,
+    evidence: list[str] | None = None,
+    worker: str = "custom",
+) -> dict[str, object]:
     return {
         "dedupe_key": dedupe,
         "kind": "custom",
-        "worker": "custom",
+        "worker": worker,
         "title": "Handle synthetic alert",
         "prompt": "Investigate the synthetic alert and add focused validation.",
         "priority": "medium",
@@ -57,6 +67,27 @@ def _proposal(dedupe: str, *, evidence: list[str] | None = None) -> dict[str, ob
         "evidence": evidence or ["signal-item-1"],
         "metadata": {"selected_signal_item_ids": ["signal-item-1"]},
     }
+
+
+def test_zero_entry_remote_authority_rejects_remote_workers() -> None:
+    assert not REMOTE_WRITE_AUTHORITY
+    remote_workers = [
+        worker
+        for worker, agent in AGENTS.items()
+        if worker in PLANNABLE_WORKERS and agent.remote_writes
+    ]
+    assert remote_workers
+
+    for ordinal, worker in enumerate(remote_workers):
+        item = _proposal(f"remote-{ordinal}", worker=worker.value)
+        result = PlanVerifier().verify_plan(
+            json.dumps({"tasks": [item]}),
+            _signals(),
+            [],
+        )
+        assert result.planned == []
+        assert result.consumed_item_ids == []
+        assert result.dispositions[0].reason_code == "policy_remote_write_authority"
 
 
 def test_verifier_preserves_invalid_duplicate_and_capacity_dispositions() -> None:

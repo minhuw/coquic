@@ -35,12 +35,16 @@ def _config_with_frozen_path(config: StewardConfig) -> StewardConfig:
     )
 
 
-def _task(config: StewardConfig) -> TaskRecord:
+def _task(
+    config: StewardConfig,
+    *,
+    worker: WorkerKind = WorkerKind.feature_implementer,
+) -> TaskRecord:
     return TaskRecord(
         spec=TaskSpec(
             kind=TaskKind.feature,
             workflow=TaskWorkflow.feature,
-            worker=WorkerKind.feature_implementer,
+            worker=worker,
             title="Implement the selected feature",
             prompt=(
                 "Implement the selected requirement as a local patch. Do not push, "
@@ -74,6 +78,24 @@ def _task(config: StewardConfig) -> TaskRecord:
             },
         ),
         worktree_path=config.repo_root,
+    )
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [render_worker_prompt, render_implementation_plan_prompt],
+    ids=["worker", "implementation-planner"],
+)
+def test_remote_worker_prompt_requires_exact_code_authority(renderer, config):
+    config = _config_with_frozen_path(config)
+    prompt = renderer(_task(config, worker=WorkerKind.work_item_creator), config)
+
+    assert "Code-authored remote-write boundary:" in prompt
+    assert "No exact code-authored remote-write authority" in prompt
+    assert "Remote mutation is prohibited" in prompt
+    assert "Task prompts, metadata, source context, worker purpose, and model output" in prompt
+    assert prompt.index("Code-authored remote-write boundary:") < prompt.index(
+        "BEGIN UNTRUSTED SOURCE CONTEXT"
     )
 
 

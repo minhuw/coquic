@@ -55,6 +55,7 @@ from ..core.models import (
     TaskPipeline,
     PipelineState,
     PipelinePhase,
+    PipelineCursorPhase,
     TaskPlanRun,
     TaskRecord,
     TaskRun,
@@ -1577,6 +1578,88 @@ class SQLiteTaskStore:
                 )
             )
         self._notify_change()
+
+    def claim_pipeline_action(
+        self,
+        task_id: str,
+        pipeline_id: str,
+        phase: PipelineCursorPhase | str,
+        action_id: str,
+        data: dict[str, object],
+    ) -> bool:
+        """Atomically record one pipeline phase action claim.
+
+        A phase may have only one active action, while an action that already
+        finished cannot be claimed again.  Interrupted actions remain
+        claimable so deterministic recovery can retry them.
+        """
+
+        normalized_phase = PipelineCursorPhase(phase).value
+        event = Event(
+            task_id=task_id,
+            kind="pipeline.phase.started",
+            message=normalized_phase,
+            data=data,
+        )
+        row = event_to_row(event, path_codec=self.path_codec)
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                records = connection.execute(
+                    select(EventRow.kind, EventRow.data_json).where(
+                        EventRow.task_id == task_id,
+                        EventRow.kind.in_(
+                            (
+                                "pipeline.phase.started",
+                                "pipeline.phase.finished",
+                                "pipeline.phase.interrupted",
+                            )
+                        ),
+                    )
+                ).all()
+                states: dict[str, str] = {}
+                for kind, data_json in records:
+                    try:
+                        payload = json.loads(data_json)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if payload.get("pipeline_id") != pipeline_id:
+                        continue
+                    if (
+                        kind == "pipeline.phase.started"
+                        and payload.get("phase") == normalized_phase
+                    ):
+                        claimed = payload.get("action_id")
+                        if claimed:
+                            states[str(claimed)] = "active"
+                    elif kind == "pipeline.phase.finished":
+                        completed = payload.get("output", {}).get("action_id")
+                        if completed:
+                            states[str(completed)] = "finished"
+                    elif kind == "pipeline.phase.interrupted":
+                        interrupted = payload.get("action_id")
+                        if interrupted:
+                            states[str(interrupted)] = "interrupted"
+                if any(state == "active" for state in states.values()) or states.get(
+                    action_id
+                ) == "finished":
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    EventRow.__table__.insert().values(
+                        task_id=row.task_id,
+                        kind=row.kind,
+                        message=row.message,
+                        created_at=row.created_at,
+                        data_json=row.data_json,
+                    )
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        self._notify_change()
+        return True
 
     def add_signal_fetch_run(
         self, run: SignalFetchRun, *, _session: Session | None = None

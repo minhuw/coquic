@@ -13,6 +13,7 @@ import pytest
 import coquic_steward.core.config as config_module
 from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.models import (
+    PipelineCursorPhase,
     TaskKind,
     TaskSpec,
     WorkerKind,
@@ -271,6 +272,215 @@ def test_ledger_allocates_ordered_lineage_and_private_fields(config: StewardConf
     assert recovery.session_id == session.id
     assert store.get_session(session.id).provider_session_id == "provider-private"
     assert [item.role_ordinal for item in store.list_runs(task.id)] == [1, 2]
+
+
+def _pipeline_claim_data(
+    task_id: str,
+    pipeline_id: str,
+    action_id: str,
+    phase: PipelineCursorPhase = PipelineCursorPhase.implementation,
+) -> dict[str, object]:
+    return {
+        "pipeline_id": pipeline_id,
+        "phase": phase.value,
+        "action_id": action_id,
+        "input": {"payload": {"attempt": 1}},
+    }
+
+
+def test_pipeline_action_claim_persists_event_after_commit(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    action = f"{task.id}:{pipeline.id}:implementation"
+    data = _pipeline_claim_data(task.id, pipeline.id, action)
+    observed_event_counts: list[int] = []
+
+    def on_change() -> None:
+        with sqlite3.connect(config.db_path) as connection:
+            observed_event_counts.append(
+                connection.execute(
+                    "SELECT count(*) FROM events WHERE kind = ?", (
+                        "pipeline.phase.started",
+                    )
+                ).fetchone()[0]
+            )
+
+    store.on_change = on_change
+
+    assert store.claim_pipeline_action(
+        task.id, pipeline.id, PipelineCursorPhase.implementation, action, data
+    ) is True
+    assert observed_event_counts == [1]
+    starts = [
+        event
+        for event in store.events(task.id)
+        if event.kind == "pipeline.phase.started"
+    ]
+    assert len(starts) == 1
+    assert starts[0].message == "implementation"
+    assert starts[0].data == data
+
+
+def test_pipeline_action_claim_rejects_active_phase_without_notification(
+    config: StewardConfig,
+) -> None:
+    notifications: list[str] = []
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    action = f"{task.id}:{pipeline.id}:implementation"
+    store.on_change = lambda: notifications.append("changed")
+    data = _pipeline_claim_data(task.id, pipeline.id, action)
+
+    assert store.claim_pipeline_action(
+        task.id, pipeline.id, PipelineCursorPhase.implementation, action, data
+    ) is True
+    notifications.clear()
+    assert store.claim_pipeline_action(
+        task.id, pipeline.id, PipelineCursorPhase.implementation, action, data
+    ) is False
+    assert store.claim_pipeline_action(
+        task.id,
+        pipeline.id,
+        PipelineCursorPhase.implementation,
+        f"{action}:other",
+        _pipeline_claim_data(
+            task.id, pipeline.id, f"{action}:other"
+        ),
+    ) is False
+    assert notifications == []
+
+
+def test_pipeline_action_claim_allows_interrupted_retry(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    action = f"{task.id}:{pipeline.id}:implementation"
+    data = _pipeline_claim_data(task.id, pipeline.id, action)
+
+    assert store.claim_pipeline_action(
+        task.id, pipeline.id, PipelineCursorPhase.implementation, action, data
+    ) is True
+    store.add_event(
+        task.id,
+        "pipeline.phase.interrupted",
+        "implementation interrupted",
+        {
+            "pipeline_id": pipeline.id,
+            "phase": PipelineCursorPhase.implementation.value,
+            "action_id": action,
+        },
+    )
+
+    assert store.claim_pipeline_action(
+        task.id, pipeline.id, "implementation", action, data
+    ) is True
+    starts = [
+        event
+        for event in store.events(task.id)
+        if event.kind == "pipeline.phase.started"
+    ]
+    assert len(starts) == 2
+    assert all(event.data == data for event in starts)
+
+
+def test_pipeline_action_claim_rejects_finished_action(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    action = f"{task.id}:{pipeline.id}:implementation"
+    store.add_event(
+        task.id,
+        "pipeline.phase.finished",
+        "implementation",
+        {
+            "pipeline_id": pipeline.id,
+            "phase": PipelineCursorPhase.implementation.value,
+            "output": {"action_id": action},
+        },
+    )
+
+    assert store.claim_pipeline_action(
+        task.id,
+        pipeline.id,
+        PipelineCursorPhase.implementation,
+        action,
+        _pipeline_claim_data(task.id, pipeline.id, action),
+    ) is False
+    assert not any(
+        event.kind == "pipeline.phase.started" for event in store.events(task.id)
+    )
+
+
+def test_pipeline_action_claim_skips_malformed_history(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    action = f"{task.id}:{pipeline.id}:implementation"
+    with sqlite3.connect(config.db_path) as connection:
+        connection.execute(
+            "INSERT INTO events (task_id, kind, message, created_at, data_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                task.id,
+                "pipeline.phase.started",
+                "implementation",
+                "2026-01-01T00:00:00+00:00",
+                "{malformed",
+            ),
+        )
+
+    assert store.claim_pipeline_action(
+        task.id,
+        pipeline.id,
+        PipelineCursorPhase.implementation,
+        action,
+        _pipeline_claim_data(task.id, pipeline.id, action),
+    ) is True
+
+
+def test_pipeline_action_claim_rolls_back_without_notification_on_error(
+    config: StewardConfig,
+) -> None:
+    notifications: list[str] = []
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    action = f"{task.id}:{pipeline.id}:implementation"
+    store.on_change = lambda: notifications.append("changed")
+
+    with patch(
+        "coquic_steward.storage.sqlite.EventRow.__table__.insert",
+        side_effect=RuntimeError("insert failed"),
+    ), pytest.raises(RuntimeError, match="insert failed"):
+        store.claim_pipeline_action(
+            task.id,
+            pipeline.id,
+            PipelineCursorPhase.implementation,
+            action,
+            _pipeline_claim_data(task.id, pipeline.id, action),
+        )
+
+    assert notifications == []
+    with sqlite3.connect(config.db_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM events WHERE kind = ?", ("pipeline.phase.started",)
+        ).fetchone() == (0,)
 
 
 def test_concurrent_pipeline_ordinals_are_unique(config: StewardConfig) -> None:

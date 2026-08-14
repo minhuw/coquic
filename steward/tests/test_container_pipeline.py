@@ -216,6 +216,23 @@ def test_phase_claim_is_atomic_across_executor_instances(config) -> None:
     ]
     assert len(starts) == 1
     assert len(errors) == 1
+    action = f"{task.id}:{pipeline.id}:implementation"
+    assert starts[0].data == {
+        "pipeline_id": pipeline.id,
+        "phase": "implementation",
+        "action_id": action,
+        "input": {
+            "task_id": task.id,
+            "pipeline_id": pipeline.id,
+            "action_id": action,
+            "phase": "implementation",
+            "base_identity": None,
+            "input_identity": None,
+            "patch_identity": None,
+            "expected_tree": None,
+            "payload": {},
+        },
+    }
 
 
 def test_repair_prompt_inherits_plan_and_exact_child_packet(config, monkeypatch) -> None:

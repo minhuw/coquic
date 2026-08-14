@@ -13,24 +13,23 @@ import {
   serializeCloudCompleteTrajectory,
   serializeCloudTrajectoryDescriptor,
   validateCloudArtifact,
-  validateCloudCompleteTrajectory,
-  validateCloudProblem,
-  validateCloudStatus,
-  validateCloudTaskDetail,
-  validateCloudTaskPage,
-  validateCloudTrajectoryDescriptor,
-  validateCloudUsage,
+  validateCloudCompleteTrajectoryResponse,
+  validateCloudProblemResponse,
+  validateCloudStatusResponse,
+  validateCloudTaskDetailResponse,
+  validateCloudTaskPageResponse,
+  validateCloudTrajectoryDescriptorResponse,
   validateCloudUsageCostTotals,
   validateCloudUsageData,
   validateCloudUsageGlobal,
   validateCloudUsageGlobalGroup,
   validateCloudUsageInvocation,
-  validateCloudUsageInvocationPage,
+  validateCloudUsageInvocationPageData,
   validateCloudUsagePrice,
   validateCloudUsageSummary,
   validateCloudUsageTokenTotals,
   validateCloudUsageTurn,
-  validateCloudUsageTurnPage,
+  validateCloudUsageTurnPageData,
   validateCloudUsageUnavailable,
   type CloudArtifact,
   type CloudTaskDetail,
@@ -59,8 +58,8 @@ function detail(): CloudTaskDetail {
 }
 function response<T>(data: T) { return { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, data }; }
 function copy<T>(value: T): T { return structuredClone(value); }
-function rejects(value: unknown) { assert.throws(() => validateCloudTaskDetail(value), /invalid Steward cloud response/); }
-function rejectsComplete(value: unknown) { assert.throws(() => validateCloudCompleteTrajectory(value), /invalid Steward cloud response/); }
+function rejects(value: unknown) { assert.throws(() => validateCloudTaskDetailResponse(value), /invalid Steward cloud response/); }
+function rejectsComplete(value: unknown) { assert.throws(() => validateCloudCompleteTrajectoryResponse(value), /invalid Steward cloud response/); }
 
 const usageGenerationId = "usage-generation";
 const usagePublicationId = "publication-usage";
@@ -126,12 +125,12 @@ test("accepts version-4 status, page, detail, descriptor, artifact, and problem 
   const task = graph.task;
   const page = { items: [task], pagination: { page: 1, pageSize: 25, total: 1, hasNextPage: false } };
   const descriptor = graph.trajectory;
-  assert.equal(validateCloudStatus(response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt })).schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
-  assert.equal(validateCloudTaskPage(response(page)).data.items[0].taskId, taskId);
-  assert.equal(validateCloudTaskDetail(response(graph)).data.runs[0].runId, runId);
-  assert.equal(validateCloudTrajectoryDescriptor(response(descriptor)).data.sha256, digest);
+  assert.equal(validateCloudStatusResponse(response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt })).schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
+  assert.equal(validateCloudTaskPageResponse(response(page)).data.items[0].taskId, taskId);
+  assert.equal(validateCloudTaskDetailResponse(response(graph)).data.runs[0].runId, runId);
+  assert.equal(validateCloudTrajectoryDescriptorResponse(response(descriptor)).data.sha256, digest);
   assert.equal(validateCloudArtifact(graph.artifacts[0]).artifactId, "artifact-atif");
-  assert.equal(validateCloudProblem({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, problem: { code: "UNAVAILABLE", message: "Cloud data is unavailable", retryable: true, status: 503, type: null } }).problem.retryable, true);
+  assert.equal(validateCloudProblemResponse({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, problem: { code: "UNAVAILABLE", message: "Cloud data is unavailable", retryable: true, status: 503, type: null } }).problem.retryable, true);
 });
 
 test("accepts only the version-4 envelope across every response family", () => {
@@ -205,7 +204,7 @@ test("validates global groups, prices, complete usage, and bounded turn pages", 
     effectiveAt: "2026-01-01T00:00:00Z", effectiveUntil: null,
   }).model, "gpt-fixture");
   assert.equal(validateCloudUsageData(completeUsage()).invocations[0]!.invocationId, usageInvocationId);
-  const page = validateCloudUsageTurnPage({ turns: [usageTurn()], nextCursor: "opaque-next", previousCursor: null, total: 1 });
+  const page = validateCloudUsageTurnPageData({ turns: [usageTurn()], nextCursor: "opaque-next", previousCursor: null, total: 1 });
   assert.equal(page.total, 1);
   assert.deepEqual(validateCloudUsageUnavailable({ kind: "unavailable", reason: "missing" }), { kind: "unavailable", reason: "missing" });
 });
@@ -233,9 +232,9 @@ test("preserves partial counters and cached parent totals without child arithmet
 });
 
 test("validates bounded invocation pages and rejects unavailable rows", () => {
-  const page = validateCloudUsageInvocationPage({ invocations: [usageInvocation()], nextCursor: "next", previousCursor: null, total: 129 });
+  const page = validateCloudUsageInvocationPageData({ invocations: [usageInvocation()], nextCursor: "next", previousCursor: null, total: 129 });
   assert.equal(page.total, 129);
-  assert.throws(() => validateCloudUsageInvocationPage({ invocations: [usageInvocation({ coverage: "unavailable", invocationId: null, publicationId: null, taskId: null, pipelineId: null, runId: null, coveredTurns: 0, expectedTurns: 0, startedAt: null, completedAt: null, model: null, billingMode: null, processOutcome: null, promptTokens: null, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null, uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null, priceEntryDigest: null })], nextCursor: null, previousCursor: null, total: 1 }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageInvocationPageData({ invocations: [usageInvocation({ coverage: "unavailable", invocationId: null, publicationId: null, taskId: null, pipelineId: null, runId: null, coveredTurns: 0, expectedTurns: 0, startedAt: null, completedAt: null, model: null, billingMode: null, processOutcome: null, promptTokens: null, cachedTokens: null, uncachedTokens: null, completionTokens: null, reasoningTokens: null, totalTokens: null, uncachedInputCostMicroUsd: null, cachedInputCostMicroUsd: null, outputCostMicroUsd: null, totalCostMicroUsd: null, priceEntryDigest: null })], nextCursor: null, previousCursor: null, total: 1 }), /invalid Steward cloud response/);
 });
 
 test("rejects private keys, unsafe integers, malformed coverage, ownership, and cursor rows", () => {
@@ -249,7 +248,7 @@ test("rejects private keys, unsafe integers, malformed coverage, ownership, and 
     priceEntryDigest: usageDigest, usageGenerationId, catalogDigest: "d".repeat(64), model: null,
     effectiveAt: generatedAt, effectiveUntil: null,
   }), /invalid Steward cloud response/);
-  assert.throws(() => validateCloudUsageTurnPage({ turns: [usageTurn({ ordinal: 0 })], nextCursor: null, previousCursor: null, total: 1 }), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudUsageTurnPageData({ turns: [usageTurn({ ordinal: 0 })], nextCursor: null, previousCursor: null, total: 1 }), /invalid Steward cloud response/);
   assert.throws(() => validateCloudUsageData({ ...completeUsage(), summaries: [usageSummary(), usageSummary({ summaryId: "summary-task" })] }), /invalid Steward cloud response/);
   assert.throws(() => validateCloudUsageData({
     ...completeUsage(), summaries: [usageSummary({ totalTokens: 19, knownTokenSubtotal: 19 })],
@@ -266,14 +265,14 @@ test("serializes only validated closed envelopes and parses them back", () => {
 
 test("accepts only available standalone trajectory descriptors on every path", () => {
   const value = response(detail().trajectory!);
-  assert.equal(validateCloudTrajectoryDescriptor(value).data.availability, "available");
+  assert.equal(validateCloudTrajectoryDescriptorResponse(value).data.availability, "available");
   assert.deepEqual(JSON.parse(serializeCloudTrajectoryDescriptor(value)), value);
   assert.deepEqual(parseCloudResponse(JSON.stringify(value)), value);
 
   const unavailable = copy(value) as { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: string; data: Record<string, unknown> };
   unavailable.data.availability = "unavailable";
   const attempts = [
-    () => validateCloudTrajectoryDescriptor(unavailable),
+    () => validateCloudTrajectoryDescriptorResponse(unavailable),
     () => serializeCloudTrajectoryDescriptor(unavailable),
     () => parseCloudResponse(JSON.stringify(unavailable)),
   ];
@@ -283,14 +282,14 @@ test("accepts only available standalone trajectory descriptors on every path", (
 test("requires exact major and rejects private, legacy, and global-only fields", () => {
   const badVersion = response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }) as { schemaVersion: string; generatedAt: string; data: unknown };
   badVersion.schemaVersion = "2.0";
-  assert.throws(() => validateCloudStatus(badVersion), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudStatusResponse(badVersion), /invalid Steward cloud response/);
   const legacyVersion = response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }) as { schemaVersion: string; generatedAt: string; data: unknown };
   legacyVersion.schemaVersion = "3.0";
-  assert.throws(() => validateCloudStatus(legacyVersion), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudStatusResponse(legacyVersion), /invalid Steward cloud response/);
   for (const field of ["privateBucket", "objectKey", "url", "credentialPath", "cursor", "filePath", "revision", "signals", "plannerRuns"]) {
     const value = response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }) as Record<string, unknown>;
     (value.data as Record<string, unknown>)[field] = "private-value";
-    assert.throws(() => validateCloudStatus(value), /invalid Steward cloud response/);
+    assert.throws(() => validateCloudStatusResponse(value), /invalid Steward cloud response/);
   }
 });
 
@@ -302,16 +301,16 @@ test("rejects relationship, time, key, count, and partial-record mutations", () 
   const partial = copy(graph); (partial.task as unknown as { completeness: string }).completeness = "partial"; rejects(response(partial));
   const legacyFile = copy(graph) as Record<string, unknown>; legacyFile.filePath = "/private/archive"; rejects(response(legacyFile));
   const page = { items: [graph.task], pagination: { page: 1, pageSize: 101, total: 1, hasNextPage: false } };
-  assert.throws(() => validateCloudTaskPage(response(page)), /invalid Steward cloud response/);
+  assert.throws(() => validateCloudTaskPageResponse(response(page)), /invalid Steward cloud response/);
 });
 
 test("uses run and content identity when ATIF artifact aliases are ambiguous", () => {
   const graph = detail();
   graph.artifacts.push({ ...artifact(), artifactId: "artifact-alias", logicalPath: "runs/run-main/trajectory-copy.json" });
   graph.task.artifactCount = 2; graph.runs[0].atifArtifactId = null; graph.trajectory!.artifactId = null;
-  assert.equal(validateCloudTaskDetail(response(graph)).data.trajectory!.artifactId, null);
+  assert.equal(validateCloudTaskDetailResponse(response(graph)).data.trajectory!.artifactId, null);
   const arbitrary = detail(); arbitrary.artifacts.push({ ...artifact(), artifactId: "artifact-alias", logicalPath: "runs/run-main/trajectory-copy.json" });
-  arbitrary.task.artifactCount = 2; arbitrary.runs[0].atifArtifactId = null; assert.throws(() => validateCloudTaskDetail(response(arbitrary)), /invalid Steward cloud response/);
+  arbitrary.task.artifactCount = 2; arbitrary.runs[0].atifArtifactId = null; assert.throws(() => validateCloudTaskDetailResponse(response(arbitrary)), /invalid Steward cloud response/);
 });
 
 test("rejects lifecycle, duration, availability, identity, size, and sub-millisecond mutations", () => {
@@ -326,8 +325,8 @@ test("rejects lifecycle, duration, availability, identity, size, and sub-millise
 
 test("bounds UTC fractional precision and rejects private problem locators", () => {
   const precise = response({ state: "empty", taskCount: 0, latestPublicationAt: "2026-07-28T00:00:00.123456789Z" });
-  assert.equal(validateCloudStatus(precise).data.latestPublicationAt, precise.data.latestPublicationAt);
-  const tooPrecise = copy(precise); tooPrecise.generatedAt = "2026-07-28T00:00:00.1234567890Z"; assert.throws(() => validateCloudStatus(tooPrecise), /invalid Steward cloud response/);
+  assert.equal(validateCloudStatusResponse(precise).data.latestPublicationAt, precise.data.latestPublicationAt);
+  const tooPrecise = copy(precise); tooPrecise.generatedAt = "2026-07-28T00:00:00.1234567890Z"; assert.throws(() => validateCloudStatusResponse(tooPrecise), /invalid Steward cloud response/);
   const problem = { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, problem: { code: "BAD", message: "file:///srv/private/credential.json", retryable: false, status: 500, type: null } };
   assert.throws(() => serializeCloudProblem(problem), /invalid Steward cloud response/);
 });
@@ -338,21 +337,21 @@ test("validation errors are stable and never contain rejected values", () => {
   (first.task as Record<string, unknown>).title = "first title";
   (second.task as Record<string, unknown>).title = "second title";
   let firstMessage = ""; let secondMessage = "";
-  try { validateCloudTaskDetail(response(first)); } catch (error) { firstMessage = (error as Error).message; }
-  try { validateCloudTaskDetail(response(second)); } catch (error) { secondMessage = (error as Error).message; }
+  try { validateCloudTaskDetailResponse(response(first)); } catch (error) { firstMessage = (error as Error).message; }
+  try { validateCloudTaskDetailResponse(response(second)); } catch (error) { secondMessage = (error as Error).message; }
   assert.equal(firstMessage, ""); assert.equal(secondMessage, "");
   const invalidFirst = copy(detail()); const invalidSecond = copy(detail());
   invalidFirst.artifacts[0].publicKey = "private://first-secret";
   invalidSecond.artifacts[0].publicKey = "private://second-secret";
-  try { validateCloudTaskDetail(response(invalidFirst)); } catch (error) { firstMessage = (error as Error).message; }
-  try { validateCloudTaskDetail(response(invalidSecond)); } catch (error) { secondMessage = (error as Error).message; }
+  try { validateCloudTaskDetailResponse(response(invalidFirst)); } catch (error) { firstMessage = (error as Error).message; }
+  try { validateCloudTaskDetailResponse(response(invalidSecond)); } catch (error) { secondMessage = (error as Error).message; }
   assert.equal(firstMessage, secondMessage); assert.equal(firstMessage, "invalid Steward cloud response");
   assert(!firstMessage.includes("secret"));
 });
 
 test("accepts complete normalized trajectories and preserves their public display model", () => {
-  const clean = validateCloudCompleteTrajectory(cleanTrajectory);
-  const redacted = validateCloudCompleteTrajectory(redactedTrajectory);
+  const clean = validateCloudCompleteTrajectoryResponse(cleanTrajectory);
+  const redacted = validateCloudCompleteTrajectoryResponse(redactedTrajectory);
   assert.equal(clean.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
   assert.equal(redacted.data.disclosure.redactionApplied, true);
   assert.equal(redacted.data.steps[1]!.content[2]!.kind, "image");
@@ -382,7 +381,7 @@ test("requires canonical call observations and rejects removed display aliases",
   steps.push(followUp);
   delayed.data.finalMetrics.totalSteps = 3;
   delayed.data.steps[1].calls[0].observations = [matched, later];
-  assert.equal(validateCloudCompleteTrajectory(delayed).data.steps[2]!.observations[1]!.matchedCallId, null);
+  assert.equal(validateCloudCompleteTrajectoryResponse(delayed).data.steps[2]!.observations[1]!.matchedCallId, null);
 
   for (const [field, value] of [
     ["message", "legacy"],
@@ -455,7 +454,7 @@ test("accepts bounded mapper-preserved strings without truncation", () => {
   assert.deepEqual(model.steps[0]!.content, [{ kind: "text", type: "text", text: message }]);
   assert.equal(Object.hasOwn(model.steps[0]!, "message"), false);
   const response = { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, data: model };
-  const validatedContent = validateCloudCompleteTrajectory(response).data.steps[0]!.content[0]!;
+  const validatedContent = validateCloudCompleteTrajectoryResponse(response).data.steps[0]!.content[0]!;
   assert.equal(validatedContent.kind, "text");
   if (validatedContent.kind === "text") assert.equal(validatedContent.text, message);
 });
@@ -482,7 +481,7 @@ test("rejects mapper-impossible duplicate identities, media, ownership, timing, 
   for (const [index, mutate] of mutations.entries()) {
     const candidate = structuredClone(cleanTrajectory) as Record<string, any>;
     mutate(candidate);
-    assert.throws(() => validateCloudCompleteTrajectory(candidate), /invalid Steward cloud response/, `mutation ${index} must be rejected`);
+    assert.throws(() => validateCloudCompleteTrajectoryResponse(candidate), /invalid Steward cloud response/, `mutation ${index} must be rejected`);
   }
 });
 
@@ -490,7 +489,7 @@ test("keeps public object-key text accepted in task detail while complete trajec
   const graph = detail();
   const summary = `Published ${graph.artifacts[0].publicKey}`;
   graph.events[0]!.summary = summary;
-  assert.equal(validateCloudTaskDetail(response(graph)).data.events[0]!.summary, summary);
+  assert.equal(validateCloudTaskDetailResponse(response(graph)).data.events[0]!.summary, summary);
 
   const v4 = structuredClone(cleanTrajectory) as Record<string, any>;
   const objectKey = `v1/tasks/${v4.data.taskId}/objects/sha256/aa/${"a".repeat(64)}`;

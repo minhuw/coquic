@@ -35,10 +35,8 @@ const {
   USAGE_GLOBAL_STATEMENT,
   USAGE_INVOCATION_CONTEXT_STATEMENT,
   USAGE_INVOCATION_BOUNDARY_STATEMENT,
-  USAGE_INVOCATION_COUNT_STATEMENT,
   USAGE_INVOCATION_TOTAL_STATEMENT,
   USAGE_INVOCATION_RUN_STATEMENT,
-  USAGE_INVOCATION_RUN_COUNT_STATEMENT,
   USAGE_INVOCATION_RUN_TOTAL_STATEMENT,
   USAGE_INVOCATION_RUN_NEXT_STATEMENT,
   USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT,
@@ -423,7 +421,6 @@ test("uses a bounded cached summary for invocation totals", async () => {
   assert(page && !Array.isArray(page) && !("kind" in page));
   assert.equal(page.total, 129);
   assert.equal(client.calls[2]!.statement, USAGE_INVOCATION_TOTAL_STATEMENT);
-  assert.equal(client.calls[2]!.statement, USAGE_INVOCATION_COUNT_STATEMENT);
   assert.match(client.calls[2]!.statement, /expected_invocations/);
   assert.match(client.calls[2]!.statement, /LIMIT 1/);
   assert.doesNotMatch(client.calls[2]!.statement, /COUNT\s*\(/i);
@@ -503,7 +500,7 @@ test("pages task invocations beyond the legacy 128-row cap", async () => {
   assert.equal(first.total, 129);
   assert(first.nextCursor);
   assert.equal(first.previousCursor, null);
-  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_STATEMENT, USAGE_INVOCATION_COUNT_STATEMENT]);
+  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_STATEMENT, USAGE_INVOCATION_TOTAL_STATEMENT]);
   assert.equal(firstClient.calls[1]!.params.at(-1), 3);
 
   const nextClient = new FakeClient(
@@ -514,7 +511,7 @@ test("pages task invocations beyond the legacy 128-row cap", async () => {
   assert.deepEqual(next.invocations.map((invocation) => invocation.invocationId), ["invocation-c"]);
   assert.equal(next.nextCursor, null);
   assert(next.previousCursor);
-  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_NEXT_STATEMENT, USAGE_INVOCATION_COUNT_STATEMENT]);
+  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_NEXT_STATEMENT, USAGE_INVOCATION_TOTAL_STATEMENT]);
   assert.deepEqual(nextClient.calls[2]!.params, [usageTaskId, "run-a", "run-a", 1, 1, "invocation-b", 3]);
 });
 
@@ -526,7 +523,7 @@ test("pages run-scoped invocations backward and rejects generation or run drift"
   assert(first && !Array.isArray(first) && !("kind" in first));
   assert.deepEqual(first.invocations.map((invocation) => invocation.invocationId), ["invocation-a"]);
   assert(first.nextCursor);
-  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_RUN_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+  assert.deepEqual(firstClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_RUN_STATEMENT, USAGE_INVOCATION_RUN_TOTAL_STATEMENT]);
   assert.equal(firstClient.calls[2]!.statement, USAGE_INVOCATION_RUN_TOTAL_STATEMENT);
   assert.deepEqual(firstClient.calls[2]!.params, [usageTaskId, usageRunId]);
 
@@ -537,7 +534,7 @@ test("pages run-scoped invocations backward and rejects generation or run drift"
   assert(next && !Array.isArray(next) && !("kind" in next));
   assert.deepEqual(next.invocations.map((invocation) => invocation.invocationId), ["invocation-b"]);
   assert(next.previousCursor);
-  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_RUN_NEXT_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+  assert.deepEqual(nextClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_RUN_NEXT_STATEMENT, USAGE_INVOCATION_RUN_TOTAL_STATEMENT]);
 
   const previousClient = new FakeClient(
     response([usageContextRow()]), response([usageInvocationAt(usageRunId, 1, "invocation-b")]), response([usageInvocationAt(usageRunId, 0, "invocation-a")]), response([{ invocation_count: 3 }]),
@@ -545,7 +542,7 @@ test("pages run-scoped invocations backward and rejects generation or run drift"
   const previous = await new CloudRepository({ client: previousClient }).getUsageInvocationPage(usageTaskId, usageRunId, { cursor: next.previousCursor, limit: 1 });
   assert(previous && !Array.isArray(previous) && !("kind" in previous));
   assert.deepEqual(previous.invocations.map((invocation) => invocation.invocationId), ["invocation-a"]);
-  assert.deepEqual(previousClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT, USAGE_INVOCATION_RUN_COUNT_STATEMENT]);
+  assert.deepEqual(previousClient.calls.map((call) => call.statement), [USAGE_CONTEXT_STATEMENT, USAGE_INVOCATION_BOUNDARY_STATEMENT, USAGE_INVOCATION_RUN_PREVIOUS_STATEMENT, USAGE_INVOCATION_RUN_TOTAL_STATEMENT]);
 
   const stale = encodeUsageInvocationCursor({ publicationId: usagePublicationId, usageGenerationId: "usage-old", taskId: usageTaskId, runId: usageRunId, sort: [usageRunId, 0, "invocation-a"], direction: "next" });
   await assert.rejects(
@@ -748,7 +745,7 @@ test("assembles one visible task publication as an all-or-nothing detail graph",
 });
 
 test("keeps an active-after-planning task complete while exposing its completed trajectory", async () => {
-  const detail = await new CloudRepository({ client: new FakeClient(...detailResponses({ lifecycleState: "active" })) }).loadTaskDetail(detailTaskId);
+  const detail = await new CloudRepository({ client: new FakeClient(...detailResponses({ lifecycleState: "active" })) }).getTaskDetail(detailTaskId);
   assert(detail);
   assert.equal(detail.task.lifecycleState, "active");
   assert.equal(detail.task.completedAt, null);

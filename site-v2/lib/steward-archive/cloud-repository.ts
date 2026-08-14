@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { CloudReaderConfig } from "./cloud-config";
-import { getCloudReaderConfig } from "./cloud-config";
+import { parseCloudReaderConfig } from "./cloud-config";
 import {
   createCloudflareD1Client,
   type D1ClientOptions,
@@ -805,10 +805,9 @@ ${USAGE_INVOCATION_FROM}
  LIMIT 1
 `;
 /**
- * Invocation totals are cached on the task/run summary rows.  Keep the
- * lookup bounded to one visible summary rather than scanning child rows at
- * request time.  The legacy COUNT names remain aliases for callers that
- * already dispatch on the exported statement identity.
+ * Invocation totals are cached on the task/run summary rows. Keep the lookup
+ * bounded to one visible summary rather than scanning child rows at request
+ * time.
  */
 export const USAGE_INVOCATION_TOTAL_STATEMENT = `
 SELECT s.expected_invocations AS invocation_count
@@ -824,8 +823,6 @@ ${USAGE_VISIBLE_FROM}
   AND s.run_id = ?
  LIMIT 1
 `;
-export const USAGE_INVOCATION_COUNT_STATEMENT = USAGE_INVOCATION_TOTAL_STATEMENT;
-export const USAGE_INVOCATION_RUN_COUNT_STATEMENT = USAGE_INVOCATION_RUN_TOTAL_STATEMENT;
 
 const USAGE_GLOBAL_VISIBLE_FROM = `
   FROM (
@@ -1870,7 +1867,7 @@ export class CloudRepository {
 
   private client(): CloudD1QueryClient {
     if (this.configuredClient) return this.configuredClient;
-    if (!this.runtimeClient) this.runtimeClient = createCloudflareD1Client(this.configuredConfig ?? getCloudReaderConfig(), this.d1Options);
+    if (!this.runtimeClient) this.runtimeClient = createCloudflareD1Client(this.configuredConfig ?? parseCloudReaderConfig(), this.d1Options);
     return this.runtimeClient;
   }
 
@@ -2079,7 +2076,7 @@ export class CloudRepository {
       return usageUnavailable("invalid");
     }
 
-    const countStatement = runScoped ? USAGE_INVOCATION_RUN_COUNT_STATEMENT : USAGE_INVOCATION_COUNT_STATEMENT;
+    const countStatement = runScoped ? USAGE_INVOCATION_RUN_TOTAL_STATEMENT : USAGE_INVOCATION_TOTAL_STATEMENT;
     const countParams: D1Scalar[] = runScoped ? [taskId, runId!] : [taskId];
     const countRows = await queryUsageRows(this.client(), countStatement, countParams);
     if (isUsageUnavailable(countRows)) return countRows;
@@ -2348,10 +2345,6 @@ export class CloudRepository {
     return buildTaskDetail(base, pipelines, runs, events, artifacts);
   }
 
-  async loadTaskDetail(taskId: string): Promise<CloudTaskDetail | null> {
-    return this.getTaskDetail(taskId);
-  }
-
   async getArtifactDescriptor(taskId: string, logicalPath: string): Promise<CloudArtifactDescriptor | null> {
     if (!validIdentifier(taskId) || !validLogicalPath(logicalPath)) return null;
     const response = await this.client().query(ARTIFACT_DESCRIPTOR_STATEMENT, [taskId, logicalPath]);
@@ -2360,13 +2353,9 @@ export class CloudRepository {
     if (rows.length !== 1) invalidData();
     const artifact = parseDetailArtifact(rows[0]);
     if (artifact.task_id !== taskId) invalidData();
-    const config = this.configuredConfig ?? getCloudReaderConfig();
+    const config = this.configuredConfig ?? parseCloudReaderConfig();
     const publicUrl = safeValidate(() => resolvePublicObjectUrl(config.publicR2BaseUrl, artifact.public_key));
     return { ...toCloudArtifact(artifact), publicUrl };
-  }
-
-  async getArtifact(taskId: string, logicalPath: string): Promise<CloudArtifactDescriptor | null> {
-    return this.getArtifactDescriptor(taskId, logicalPath);
   }
 
   async resolveArtifactUrl(taskId: string, logicalPath: string): Promise<string | null> {
@@ -2403,10 +2392,6 @@ export class CloudRepository {
       disclosure: artifact.disclosure,
     }));
   }
-
-  async getTrajectory(taskId: string, runId?: string): Promise<CloudTrajectoryDescriptor | null> {
-    return this.getTrajectoryDescriptor(taskId, runId);
-  }
 }
 
 let repository: CloudRepository | null = null;
@@ -2428,10 +2413,6 @@ export function resetCloudRepository(): void {
 }
 
 export {
-  CloudRepository as CloudStewardArchiveRepository,
-  CloudRepository as StewardCloudRepository,
-  createCloudRepository as createCloudStewardArchiveRepository,
-  getCloudRepository as getCloudStewardArchiveRepository,
   decodePublicationCursor,
   decodeUsageInvocationCursor,
   decodeUsageCursor,

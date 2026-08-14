@@ -1,12 +1,18 @@
 import { CloudReaderConfigError } from "@/lib/steward-archive/cloud-config";
 import { CloudflareD1Error } from "@/lib/steward-archive/cloudflare";
 import {
+  CloudRepository,
   CloudRepositoryDataError,
   getCloudRepository,
 } from "@/lib/steward-archive/cloud-repository";
 import { AtifLoaderError, loadVerifiedAtif } from "@/lib/steward-archive/atif-loader";
 import { buildAtifViewModel } from "@/lib/steward-archive/atif-view-model";
-import { serializeCloudCompleteTrajectory, serializeCloudProblem, STEWARD_CLOUD_SCHEMA_VERSION } from "@/lib/steward-archive/cloud-schema";
+import {
+  serializeCloudCompleteTrajectory,
+  serializeCloudProblem,
+  STEWARD_CLOUD_SCHEMA_VERSION,
+  type CloudTaskDetail,
+} from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -91,6 +97,16 @@ function parseRunId(value: string | null): string | undefined {
   return value;
 }
 
+class CachedCloudRepository extends CloudRepository {
+  constructor(private readonly detail: CloudTaskDetail) {
+    super();
+  }
+
+  override async getTaskDetail(_taskId: string): Promise<CloudTaskDetail> {
+    return this.detail;
+  }
+}
+
 function resolveRunId(
   detail: Awaited<ReturnType<ReturnType<typeof getCloudRepository>["getTaskDetail"]>>,
   requestedRunId: string | undefined,
@@ -121,9 +137,7 @@ export async function GET(request: Request, context: { params: Promise<{ taskId:
     const document = await loadVerifiedAtif({
       taskId,
       runId,
-      options: {
-        repository: { getTaskDetail: async () => detail },
-      },
+      options: { repository: new CachedCloudRepository(detail) },
     });
     const data = buildAtifViewModel(document, {
       artifacts: detail.artifacts.filter((artifact) => artifact.runId === runId),

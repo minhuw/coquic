@@ -166,8 +166,3 @@ export function parseCloudReaderConfig(env: CloudReaderEnvironment = process.env
   const publicR2BaseUrl = parsePublicR2BaseUrl(env.COQUIC_STEWARD_PUBLIC_R2_BASE_URL);
   return makeConfig(accountId, databaseId, d1ReadToken, publicR2BaseUrl);
 }
-
-/** Runtime alias with lazy default environment loading. */
-export function getCloudReaderConfig(env: CloudReaderEnvironment = process.env) {
-  return parseCloudReaderConfig(env);
-}

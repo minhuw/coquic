@@ -12,6 +12,9 @@ import {
 } from "@/lib/steward-archive/atif";
 
 type LoaderModule = typeof import("../../lib/steward-archive/atif-loader");
+type RepositoryModule = typeof import("../../lib/steward-archive/cloud-repository");
+type CloudArtifact = import("../../lib/steward-archive/cloud-schema").CloudArtifact;
+type CloudTaskDetail = import("../../lib/steward-archive/cloud-schema").CloudTaskDetail;
 const requireForTest = createRequire(resolve(process.cwd(), "tests/steward-archive/atif-loader.test.ts"));
 const runtimeModule = Module as unknown as { _resolveFilename: (request: string, parent?: unknown, isMain?: boolean, options?: unknown) => string };
 
@@ -26,7 +29,20 @@ function loadLoader(): LoaderModule {
   finally { runtimeModule._resolveFilename = previous; }
 }
 
+function loadRepository(): RepositoryModule {
+  const empty = resolve(dirname(requireForTest.resolve("next/package.json")), "dist/compiled/server-only/empty.js");
+  const previous = runtimeModule._resolveFilename;
+  runtimeModule._resolveFilename = function (request, parent, isMain, options) {
+    if (request === "server-only") return empty;
+    return previous.call(this, request, parent, isMain, options);
+  };
+  try { return requireForTest(resolve(process.cwd(), "lib/steward-archive/cloud-repository.ts")) as RepositoryModule; }
+  finally { runtimeModule._resolveFilename = previous; }
+}
+
 const loader = loadLoader();
+const repositoryModule = loadRepository();
+const { CloudRepository } = repositoryModule;
 const {
   AtifLoaderError,
   DEFAULT_ATIF_LOADER_MAX_BYTES,
@@ -47,7 +63,7 @@ function descriptorFor(fixture: Fixture, document: AtifDocument = fixture.atif a
   const publication = fixture.publication as FixturePublication;
   const trajectory = publication.artifacts.find((artifact) => artifact.artifactId === "artifact-atif")!;
   const metadata = (document.extra as Record<string, any>).coquic;
-  const artifacts = publication.artifacts.map((artifact) => ({
+  const artifacts: CloudArtifact[] = publication.artifacts.map((artifact) => ({
     artifactId: artifact.artifactId,
     taskId: artifact.taskId,
     runId: artifact.runId,
@@ -56,7 +72,7 @@ function descriptorFor(fixture: Fixture, document: AtifDocument = fixture.atif a
     mediaType: artifact.mediaType,
     byteSize: artifact.byteSize,
     sha256: artifact.sha256,
-    availability: artifact.availability,
+    availability: artifact.availability as CloudArtifact["availability"],
     disclosure: artifact.disclosure,
   }));
   return {
@@ -98,10 +114,42 @@ function descriptorForBytes(fixture: Fixture, bytes: Uint8Array): ReturnType<typ
   };
 }
 
-function repositoryFor(descriptor: ReturnType<typeof descriptorFor>) {
+function detailFor(descriptor: ReturnType<typeof descriptorFor>): CloudTaskDetail {
+  const { artifacts, ...trajectory } = descriptor;
   return {
-    getTrajectoryDescriptor: async () => descriptor,
+    task: {
+      taskId: descriptor.taskId,
+      title: "Fixture task",
+      lifecycleState: "completed",
+      createdAt: descriptor.startedAt,
+      completedAt: descriptor.completedAt,
+      completeness: "complete",
+      pipelineId: descriptor.pipelineId,
+      completedRunId: descriptor.runId,
+      eventCount: 0,
+      artifactCount: artifacts.length,
+      disclosure: descriptor.disclosure,
+    },
+    pipelines: [],
+    runs: [],
+    events: [],
+    artifacts,
+    trajectory,
   };
+}
+
+class FixtureRepository extends CloudRepository {
+  constructor(private readonly detail: CloudTaskDetail | null) {
+    super();
+  }
+
+  override async getTaskDetail(_taskId: string): Promise<CloudTaskDetail | null> {
+    return this.detail;
+  }
+}
+
+function repositoryFor(descriptor: ReturnType<typeof descriptorFor>) {
+  return new FixtureRepository(detailFor(descriptor));
 }
 
 function responseFor(bytes: Uint8Array, headers?: Record<string, string>): Response {

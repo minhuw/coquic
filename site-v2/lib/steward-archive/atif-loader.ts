@@ -12,6 +12,7 @@ import {
   type CloudTaskDetail,
   type CloudTrajectoryDescriptor,
 } from "./cloud-schema";
+import type { CloudRepository } from "./cloud-repository";
 import { resolvePublicObjectUrl } from "./publication";
 
 export const DEFAULT_ATIF_LOADER_MAX_BYTES = 16 * 1024 * 1024;
@@ -43,18 +44,12 @@ export interface AtifLoaderClock {
   readonly clearTimeout?: AtifClearTimeout;
 }
 
-export interface AtifTrajectoryRepository {
-  readonly getTaskDetail?: (taskId: string) => Promise<CloudTaskDetail | null>;
-  readonly getTrajectoryDescriptor?: (taskId: string, runId?: string) => Promise<CloudTrajectoryDescriptor | null>;
-  readonly getTrajectory?: (taskId: string, runId?: string) => Promise<CloudTrajectoryDescriptor | null>;
-}
-
 export interface AtifLoaderConfig {
   readonly publicR2BaseUrl: string;
 }
 
 export interface AtifLoaderOptions {
-  readonly repository?: AtifTrajectoryRepository;
+  readonly repository?: CloudRepository;
   readonly config?: AtifLoaderConfig;
   readonly publicR2BaseUrl?: string;
   readonly fetch?: AtifFetch;
@@ -85,11 +80,6 @@ interface ResolvedArguments {
 interface ResolvedSelection {
   readonly descriptor: CloudTrajectoryDescriptor;
   readonly artifacts: readonly CloudArtifact[];
-  readonly source: "detail" | "descriptor";
-}
-
-interface DescriptorWithArtifacts extends CloudTrajectoryDescriptor {
-  readonly artifacts?: readonly CloudArtifact[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -324,11 +314,6 @@ async function digestHex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function artifactsFromDescriptor(descriptor: CloudTrajectoryDescriptor): readonly CloudArtifact[] {
-  const candidate = descriptor as DescriptorWithArtifacts;
-  return candidate.artifacts ?? [];
-}
-
 function descriptorFromDetail(detail: CloudTaskDetail, runId: string | undefined): CloudTrajectoryDescriptor | null {
   if (runId === undefined) return detail.trajectory;
   const run = detail.runs.find((candidate) => candidate.runId === runId);
@@ -356,36 +341,26 @@ function descriptorFromDetail(detail: CloudTaskDetail, runId: string | undefined
   });
 }
 
-async function defaultRepository(): Promise<AtifTrajectoryRepository> {
+async function defaultRepository(): Promise<CloudRepository> {
   const module = await import("./cloud-repository");
   return module.getCloudRepository();
 }
 
 async function defaultConfig(): Promise<AtifLoaderConfig> {
   const module = await import("./cloud-config");
-  return module.getCloudReaderConfig();
+  return module.parseCloudReaderConfig();
 }
 
 async function resolveSelection(
   taskId: string,
   runId: string | undefined,
-  repository: AtifTrajectoryRepository,
+  repository: CloudRepository,
 ): Promise<ResolvedSelection | null> {
-  if (repository.getTaskDetail) {
-    const detail = await repository.getTaskDetail(taskId);
-    if (detail) {
-      const descriptor = descriptorFromDetail(detail, runId);
-      if (descriptor) return { descriptor, artifacts: detail.artifacts, source: "detail" };
-      return null;
-    }
-    return null;
-  }
-
-  const resolver = repository.getTrajectoryDescriptor ?? repository.getTrajectory;
-  if (!resolver) throw loaderError("integrity");
-  const descriptor = await resolver(taskId, runId);
+  const detail = await repository.getTaskDetail(taskId);
+  if (!detail) return null;
+  const descriptor = descriptorFromDetail(detail, runId);
   if (!descriptor) return null;
-  return { descriptor, artifacts: artifactsFromDescriptor(descriptor), source: "descriptor" };
+  return { descriptor, artifacts: detail.artifacts };
 }
 
 function publicArtifactDescriptors(
@@ -427,9 +402,7 @@ async function loadInternal(args: ResolvedArguments): Promise<AtifDocument> {
 
   let descriptor: CloudTrajectoryDescriptor;
   try {
-    const candidate = selection.descriptor as DescriptorWithArtifacts;
-    const { artifacts: _artifacts, ...descriptorFields } = candidate;
-    descriptor = validateCloudTrajectoryDescriptorData(descriptorFields);
+    descriptor = validateCloudTrajectoryDescriptorData(selection.descriptor);
   } catch {
     throw loaderError("integrity");
   }
@@ -439,9 +412,7 @@ async function loadInternal(args: ResolvedArguments): Promise<AtifDocument> {
   const maximum = validLimit(options.maxBytes, DEFAULT_ATIF_LOADER_MAX_BYTES);
   if (descriptor.byteSize > maximum) throw loaderError("resource");
   if (!Number.isSafeInteger(descriptor.byteSize) || descriptor.byteSize < 0) throw loaderError("integrity");
-  const selectedArtifacts = selection.source === "detail"
-    ? selection.artifacts.filter((artifact) => artifact.runId === descriptor.runId)
-    : selection.artifacts;
+  const selectedArtifacts = selection.artifacts.filter((artifact) => artifact.runId === descriptor.runId);
   const artifacts = publicArtifactDescriptors(descriptor, selectedArtifacts);
   const config = options.config ?? (options.publicR2BaseUrl ? { publicR2BaseUrl: options.publicR2BaseUrl } : await defaultConfig());
   let url: string;

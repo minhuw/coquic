@@ -269,13 +269,6 @@ export function validateCloudTrajectoryDescriptorResponse(value: unknown): Cloud
 export function validateCloudCompleteTrajectoryResponse(value: unknown): CloudCompleteTrajectoryResponse { const result = validateDefinition<CloudCompleteTrajectoryResponse>(value, "completeTrajectoryResponse"); checkCompleteTrajectory(result.data); return result; }
 export function validateCloudProblemResponse(value: unknown): CloudProblemResponse { return validateDefinition<CloudProblemResponse>(value, "problemResponse"); }
 
-export const validateCloudStatus = validateCloudStatusResponse;
-export const validateCloudTaskPage = validateCloudTaskPageResponse;
-export const validateCloudTaskDetail = validateCloudTaskDetailResponse;
-export const validateCloudTrajectoryDescriptor = validateCloudTrajectoryDescriptorResponse;
-export const validateCloudCompleteTrajectory = validateCloudCompleteTrajectoryResponse;
-export const validateCloudProblem = validateCloudProblemResponse;
-
 export function validateCloudResponse(value: unknown): CloudResponse {
   if (!isRecord(value) || value.schemaVersion !== STEWARD_CLOUD_SCHEMA_VERSION) invalid();
   if ("problem" in value) return validateCloudProblemResponse(value);
@@ -797,14 +790,7 @@ export function validateCloudUsageInvocationPageData(value: unknown): CloudUsage
   return { invocations, nextCursor: row.nextCursor, previousCursor: row.previousCursor, total };
 }
 
-export const validateCloudUsageTokens = validateCloudUsageTokenTotals;
-export const validateCloudUsageCosts = validateCloudUsageCostTotals;
-export const validateCloudTokenTotals = validateCloudUsageTokenTotals;
-export const validateCloudCostTotals = validateCloudUsageCostTotals;
-export const validateCloudUsage = validateCloudUsageData;
 export const validateCloudUsageGlobalGroups = (value: unknown): CloudUsageGlobalGroup[] => {
   if (!Array.isArray(value) || value.length > 4096) usageInvalid();
   return value.map((item) => validateCloudUsageGlobalGroup(item));
 };
-export const validateCloudUsageTurnPage = validateCloudUsageTurnPageData;
-export const validateCloudUsageInvocationPage = validateCloudUsageInvocationPageData;

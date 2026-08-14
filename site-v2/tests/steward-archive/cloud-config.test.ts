@@ -28,7 +28,7 @@ function loadCloudConfig(): CloudConfigModule {
   }
 }
 
-const { CloudReaderConfigError, getCloudReaderConfig, parseCloudReaderConfig } = loadCloudConfig();
+const { CloudReaderConfigError, parseCloudReaderConfig } = loadCloudConfig();
 
 const ACCOUNT_ID = "ABCDEF0123456789ABCDEF0123456789";
 const DATABASE_ID = "12345678-1234-4abc-8def-1234567890AB";
@@ -60,8 +60,8 @@ test("valid cloud values normalize and remain server-only", () => {
   assert(!JSON.stringify(config).includes(READ_TOKEN));
 });
 
-test("runtime loading is lazy and accepts only the four canonical names", () => {
-  const config = getCloudReaderConfig(environment());
+test("config parsing remains lazy and accepts only the four canonical names", () => {
+  const config = parseCloudReaderConfig(environment());
   assert.equal(config.d1ReadToken, READ_TOKEN);
 
   errorCode(

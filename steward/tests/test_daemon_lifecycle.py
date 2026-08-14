@@ -15,6 +15,8 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+
+from botocore.awsrequest import AWSHTTPConnection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,6 +102,20 @@ from coquic_steward.storage import TaskStore
 IMAGE = "sha256:" + "a" * 64
 
 
+class _TestAWSHTTPConnection(AWSHTTPConnection):
+    def connect(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _botocore_connection(*, sock=None) -> _TestAWSHTTPConnection:
+    connection = _TestAWSHTTPConnection("publication.example.test", 443)
+    connection.sock = sock
+    return connection
+
+
 def _d1_transport_double(on_close=None) -> D1PublicationClient:
     client = D1PublicationClient(
         account_id="a" * 32,
@@ -119,9 +135,7 @@ def _d1_transport_double(on_close=None) -> D1PublicationClient:
 
 
 def _botocore_transport_double() -> SimpleNamespace:
-    connection = SimpleNamespace(sock=None)
-    connection.connect = lambda: None
-    connection.close = lambda: None
+    connection = _botocore_connection()
     pool = SimpleNamespace()
     pool._get_conn = lambda timeout=None: connection
     pool._put_conn = lambda _connection: None
@@ -898,18 +912,9 @@ def test_publication_worker_shutdown_closes_nested_r2_transport_before_deadline(
     r2_closed = threading.Event()
     d1_closed = threading.Event()
 
-    class Connection:
-        sock = None
-
-        def connect(self):
-            return None
-
-        def close(self):
-            return None
-
     class Pool:
         def __init__(self):
-            self.connection = Connection()
+            self.connection = _botocore_connection()
 
         def _get_conn(self, timeout=None):
             del timeout
@@ -1450,8 +1455,10 @@ def test_botocore_transport_adapter_rejects_missing_connection_hook():
     session = r2._client._endpoint.http_session
     manager = session._get_connection_manager("http://publication.example.test")
     pool = manager.connection_from_url("http://publication.example.test")
-    connection = pool._get_conn()
-    del connection.connect
+    pool._get_conn = lambda timeout=None: SimpleNamespace(
+        sock=None,
+        close=lambda: None,
+    )
 
     with pytest.raises(PublicationTransportSetupError) as error:
         BotocoreR2TransportAdapter(r2)
@@ -1464,7 +1471,11 @@ def test_botocore_transport_adapter_rejects_non_callable_connection_hook(connect
     session = r2._client._endpoint.http_session
     manager = session._get_connection_manager("http://publication.example.test")
     pool = manager.connection_from_url("http://publication.example.test")
-    pool._get_conn().connect = connect
+    pool._get_conn = lambda timeout=None: SimpleNamespace(
+        sock=None,
+        connect=connect,
+        close=lambda: None,
+    )
 
     with pytest.raises(PublicationTransportSetupError) as error:
         BotocoreR2TransportAdapter(r2)
@@ -1472,11 +1483,7 @@ def test_botocore_transport_adapter_rejects_non_callable_connection_hook(connect
 
 
 def test_botocore_transport_adapter_instruments_proxy_manager():
-    direct_connection = SimpleNamespace(
-        sock=None,
-        connect=lambda: None,
-        close=lambda: None,
-    )
+    direct_connection = _botocore_connection()
     proxy_socket = SimpleNamespace(
         shutdown_calls=[],
         close_calls=0,
@@ -1490,11 +1497,7 @@ def test_botocore_transport_adapter_instruments_proxy_manager():
 
     proxy_socket.shutdown = shutdown
     proxy_socket.close = close_socket
-    proxy_connection = SimpleNamespace(
-        sock=proxy_socket,
-        connect=lambda: None,
-        close=lambda: None,
-    )
+    proxy_connection = _botocore_connection(sock=proxy_socket)
     direct_pool = SimpleNamespace(
         _get_conn=lambda timeout=None: direct_connection,
         _put_conn=lambda _connection: None,

@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from botocore.awsrequest import AWSHTTPConnection
+
 from ..core.config import StewardConfig
 from ..core.lifecycle import (
     DaemonLifecycleState,
@@ -289,9 +291,9 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
             if connection_id in self._connection_methods:
                 return
         try:
-            connect = connection.connect
-            if not isinstance(connect, Callable):
+            if not isinstance(connection, AWSHTTPConnection):
                 raise PublicationTransportSetupError()
+            connect = connection.connect
 
             def guarded_connect() -> None:
                 if self._is_cancelled():

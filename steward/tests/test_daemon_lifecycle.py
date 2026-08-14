@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import gc
+import httpx
 import json
 import signal
 import socket
@@ -59,10 +60,17 @@ from coquic_steward.execution.session import (
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.cli import _run_until_stopped
 from coquic_steward.orchestration import daemon as daemon_module
-from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
+from coquic_steward.orchestration.contracts import PublicationTransportSetupError
+from coquic_steward.orchestration.daemon import (
+    BotocoreR2TransportAdapter,
+    HttpxD1TransportAdapter,
+    StewardDaemon,
+    TickResult,
+)
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.d1 import (
     D1Error,
+    D1PublicationClient,
     OverheadReceipt,
     UsageBackfillReceipt,
 )
@@ -90,6 +98,40 @@ from coquic_steward.storage import TaskStore
 
 
 IMAGE = "sha256:" + "a" * 64
+
+
+def _d1_transport_double(on_close=None) -> D1PublicationClient:
+    client = D1PublicationClient(
+        account_id="a" * 32,
+        database_id="00000000-0000-4000-8000-000000000000",
+        token="test-token",
+        http_client=httpx.Client(),
+    )
+    original_close = client.close
+
+    def close() -> None:
+        if on_close is not None:
+            on_close()
+        original_close()
+
+    client.close = close
+    return client
+
+
+def _botocore_transport_double() -> SimpleNamespace:
+    connection = SimpleNamespace(sock=None)
+    connection.connect = lambda: None
+    connection.close = lambda: None
+    pool = SimpleNamespace()
+    pool._get_conn = lambda timeout=None: connection
+    pool._put_conn = lambda _connection: None
+    manager = SimpleNamespace()
+    manager.connection_from_url = lambda _url, _pool_kwargs=None: pool
+    session = SimpleNamespace()
+    session._get_connection_manager = lambda _url, _proxy_url=None: manager
+    endpoint = SimpleNamespace(host="http://publication.example.test", http_session=session)
+    provider_client = SimpleNamespace(_endpoint=endpoint, close=lambda: None)
+    return SimpleNamespace(_client=provider_client)
 
 
 def _enabled_publication_config(
@@ -856,20 +898,64 @@ def test_publication_worker_shutdown_closes_nested_r2_transport_before_deadline(
     r2_closed = threading.Event()
     d1_closed = threading.Event()
 
-    class Transport:
+    class Connection:
+        sock = None
+
+        def connect(self):
+            return None
+
+        def close(self):
+            return None
+
+    class Pool:
+        def __init__(self):
+            self.connection = Connection()
+
+        def _get_conn(self, timeout=None):
+            del timeout
+            return self.connection
+
+        def _put_conn(self, connection):
+            self.connection = connection
+
+    class Manager:
+        def __init__(self):
+            self.pool = Pool()
+
+        def connection_from_url(self, url, pool_kwargs=None):
+            del url, pool_kwargs
+            return self.pool
+
+    class Session:
+        def __init__(self):
+            self.manager = Manager()
+
+        def _get_connection_manager(self, url, proxy_url=None):
+            del url, proxy_url
+            return self.manager
+
+    class Endpoint:
+        host = "http://publication.example.test"
+
+        def __init__(self):
+            self.http_session = Session()
+
+    class ProviderClient:
+        def __init__(self):
+            self._endpoint = Endpoint()
+
         def close(self):
             r2_closed.set()
             released.set()
 
     class ConcreteR2:
         def __init__(self):
-            self._client = Transport()
+            self._client = ProviderClient()
 
-    class D1:
-        def close(self):
-            d1_closed.set()
-
-    publisher = SimpleNamespace(r2=ConcreteR2(), d1=D1())
+    publisher = SimpleNamespace(
+        r2=ConcreteR2(),
+        d1=_d1_transport_double(d1_closed.set),
+    )
     daemon = object.__new__(StewardDaemon)
     daemon._publication_stop = threading.Event()
     daemon._publication_wakeup = threading.Event()
@@ -960,7 +1046,7 @@ def test_publication_worker_shutdown_interrupts_inflight_botocore_request():
             private_bucket="publication-private",
             client=client,
         )
-        publisher = SimpleNamespace(r2=r2, d1=SimpleNamespace())
+        publisher = SimpleNamespace(r2=r2, d1=_d1_transport_double())
         daemon = object.__new__(StewardDaemon)
         daemon.config = SimpleNamespace(
             publication=SimpleNamespace(enabled=True)
@@ -1069,6 +1155,8 @@ def test_publication_worker_shutdown_linearizes_connection_checkout(monkeypatch)
 
     def paused_get_conn(pool, *args, **kwargs):
         connection = original_get_conn(pool, *args, **kwargs)
+        if kwargs.get("timeout") == 0.0 or (args and args[0] == 0.0):
+            return connection
         checkout_returned.set()
         release_checkout.wait(timeout=2.0)
         return connection
@@ -1099,7 +1187,7 @@ def test_publication_worker_shutdown_linearizes_connection_checkout(monkeypatch)
             private_bucket="publication-private",
             client=client,
         )
-        publisher = SimpleNamespace(r2=r2, d1=SimpleNamespace())
+        publisher = SimpleNamespace(r2=r2, d1=_d1_transport_double())
         daemon = object.__new__(StewardDaemon)
         daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
         daemon._publication_stop = threading.Event()
@@ -1182,7 +1270,7 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
     import boto3
     from botocore.config import Config as BotoConfig
 
-    from coquic_steward.orchestration.daemon import _PublicationTransportTracker
+    from coquic_steward.orchestration.daemon import BotocoreR2TransportAdapter
     from coquic_steward.publication.r2 import R2Client, public_object_key
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1219,7 +1307,7 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
         except OSError:
             return
 
-    original_track_connection = _PublicationTransportTracker._track_connection
+    original_track_connection = BotocoreR2TransportAdapter._track_connection
 
     def paused_track_connection(tracker, transport_connection):
         accepted = original_track_connection(tracker, transport_connection)
@@ -1229,7 +1317,7 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
         return accepted
 
     monkeypatch.setattr(
-        _PublicationTransportTracker,
+        BotocoreR2TransportAdapter,
         "_track_connection",
         paused_track_connection,
     )
@@ -1258,7 +1346,7 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
             private_bucket="publication-private",
             client=client,
         )
-        publisher = SimpleNamespace(r2=r2, d1=SimpleNamespace())
+        publisher = SimpleNamespace(r2=r2, d1=_d1_transport_double())
         daemon = object.__new__(StewardDaemon)
         daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
         daemon._publication_stop = threading.Event()
@@ -1328,6 +1416,172 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
             stop_thread.join(timeout=1.0)
         if client is not None:
             client.close()
+        if connection is not None:
+            connection.close()
+        listener.close()
+        server.join(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    "missing_hook",
+    ["session", "manager", "pool_get", "pool_put"],
+)
+def test_botocore_transport_adapter_rejects_missing_shape(missing_hook):
+    r2 = _botocore_transport_double()
+    session = r2._client._endpoint.http_session
+    manager = session._get_connection_manager("http://publication.example.test")
+    pool = manager.connection_from_url("http://publication.example.test")
+    if missing_hook == "session":
+        del session._get_connection_manager
+    elif missing_hook == "manager":
+        del manager.connection_from_url
+    elif missing_hook == "pool_get":
+        del pool._get_conn
+    else:
+        del pool._put_conn
+
+    with pytest.raises(PublicationTransportSetupError) as error:
+        BotocoreR2TransportAdapter(r2)
+    assert str(error.value) == "unsupported publication transport shape"
+
+
+def test_botocore_transport_adapter_rejects_missing_connection_hook():
+    r2 = _botocore_transport_double()
+    session = r2._client._endpoint.http_session
+    manager = session._get_connection_manager("http://publication.example.test")
+    pool = manager.connection_from_url("http://publication.example.test")
+    connection = pool._get_conn()
+    del connection.connect
+
+    with pytest.raises(PublicationTransportSetupError) as error:
+        BotocoreR2TransportAdapter(r2)
+    assert str(error.value) == "unsupported publication transport shape"
+
+
+@pytest.mark.parametrize("missing_hook", ["transport", "pool", "connections"])
+def test_httpx_transport_adapter_rejects_missing_shape(missing_hook):
+    d1 = _d1_transport_double()
+    try:
+        http_client = d1._client
+        transport = http_client._transport
+        pool = transport._pool
+        if missing_hook == "transport":
+            del http_client._transport
+        elif missing_hook == "pool":
+            del transport._pool
+        else:
+            del pool._connections
+
+        with pytest.raises(PublicationTransportSetupError) as error:
+            HttpxD1TransportAdapter(d1)
+        assert str(error.value) == "unsupported publication transport shape"
+    finally:
+        d1.close()
+
+
+def test_publication_worker_shutdown_interrupts_inflight_httpx_d1_request(monkeypatch):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(0.1)
+    endpoint = f"http://127.0.0.1:{listener.getsockname()[1]}/query"
+    accepted = threading.Event()
+    connection_closed = threading.Event()
+    server_stop = threading.Event()
+    connection: socket.socket | None = None
+
+    def serve() -> None:
+        nonlocal connection
+        try:
+            while not server_stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                accepted.set()
+                connection.settimeout(0.1)
+                while not server_stop.is_set():
+                    try:
+                        if not connection.recv(65536):
+                            connection_closed.set()
+                            return
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        connection_closed.set()
+                        return
+                return
+        except OSError:
+            return
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    d1 = D1PublicationClient(
+        account_id="a" * 32,
+        database_id="00000000-0000-4000-8000-000000000000",
+        token="test-token",
+        http_client=httpx.Client(timeout=60.0),
+    )
+    monkeypatch.setattr(
+        D1PublicationClient,
+        "endpoint",
+        property(lambda _client: endpoint),
+    )
+    r2 = _botocore_transport_double()
+    publisher = SimpleNamespace(r2=r2, d1=d1)
+    daemon = object.__new__(StewardDaemon)
+    daemon._publication_stop = threading.Event()
+    daemon._publication_wakeup = threading.Event()
+    daemon._publication_cancel = None
+    daemon._publication_thread = None
+    daemon._publication_retry_interval = lambda: 0.01
+    daemon._build_publication_publisher = lambda: publisher
+    daemon._log = lambda _message: None
+    started = threading.Event()
+    outcomes: list[BaseException] = []
+
+    def publish(_publisher: object) -> bool:
+        started.set()
+        try:
+            d1._post([("SELECT 1", ())])
+        except BaseException as error:
+            outcomes.append(error)
+        return False
+
+    daemon._publish_next_generation = publish
+    worker = threading.Thread(target=daemon._publication_worker_loop, daemon=True)
+    daemon._publication_thread = worker
+    try:
+        worker.start()
+        assert started.wait(timeout=1.0)
+        assert accepted.wait(timeout=1.0)
+        cancellation = daemon._publication_cancel
+        assert cancellation is not None
+        deadline = time.monotonic() + 0.5
+        started_stopping = time.monotonic()
+        assert daemon._stop_publication_worker(deadline=deadline) is True
+        assert time.monotonic() - started_stopping < 0.5
+        assert not worker.is_alive()
+        assert daemon._publication_thread is None
+        assert connection_closed.wait(timeout=1.0)
+        assert outcomes
+        assert isinstance(outcomes[0], D1Error)
+        cancellation.cancel()
+        cancellation.cancel()
+    finally:
+        server_stop.set()
+        daemon._publication_stop.set()
+        daemon._publication_wakeup.set()
+        if worker.is_alive():
+            if connection is not None:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
+            worker.join(timeout=1.0)
+        d1.close()
         if connection is not None:
             connection.close()
         listener.close()

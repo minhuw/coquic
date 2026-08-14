@@ -282,26 +282,6 @@ def _valid_text(value: str, max_length: int) -> bool:
     return bool(stripped) and len(stripped) <= max_length
 
 
-def _verified_proposal(
-    item: object,
-    *,
-    seen: set[str],
-    active_dedupes: set[str],
-    active_kinds: set[str],
-    evidence_ids: set[str],
-    signals: ProjectSignals,
-) -> ProposedTask | None:
-    verified, _ = _verified_proposal_with_reason(
-        item,
-        seen=seen,
-        active_dedupes=active_dedupes,
-        active_kinds=active_kinds,
-        evidence_ids=evidence_ids,
-        signals=signals,
-    )
-    return verified.proposed if verified is not None else None
-
-
 def _remote_write_identity_for_proposal(
     proposed: ProposedTask, signals: ProjectSignals
 ) -> tuple[RemoteWriteAuthorityKey, RemoteWriteIdentity] | None:
@@ -408,32 +388,6 @@ def _verified_proposal_with_reason(
     if not _feature_issue_proposal_is_safe(proposed, signals):
         return None, "policy_feature_issue_scope"
     return _VerifiedProposal(proposed, canonical_remote_write), "accepted"
-
-
-def _proposal_is_acceptable(
-    proposed: ProposedTask,
-    *,
-    seen: set[str],
-    active_dedupes: set[str],
-    active_kinds: set[str],
-    evidence_ids: set[str],
-    signals: ProjectSignals,
-) -> bool:
-    return not any(
-        (
-            proposed.worker not in PLANNABLE_WORKERS,
-            not _valid_text(proposed.dedupe_key, 160),
-            proposed.dedupe_key in seen,
-            proposed.dedupe_key in active_dedupes,
-            proposed.kind.value in active_kinds,
-            not _valid_text(proposed.title, 200),
-            not _valid_text(proposed.prompt, 10_000),
-            not proposed.evidence,
-            any(evidence not in evidence_ids for evidence in proposed.evidence),
-            not _metadata_is_bounded(proposed.metadata),
-            not _feature_issue_proposal_is_safe(proposed, signals),
-        )
-    )
 
 
 def _feature_issue_proposal_is_safe(

@@ -149,6 +149,65 @@ def client(server: ScriptedD1) -> D1PublicationClient:
     )
 
 
+class CompleteHttpAdapter:
+    """Focused fake implementing the complete D1 adapter contract."""
+
+    def __init__(self, server: ScriptedD1) -> None:
+        self._client = httpx.Client(transport=httpx.MockTransport(server))
+        self.close_calls = 0
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        content: bytes,
+        timeout: float,
+    ) -> httpx.Response:
+        return self._client.post(url, headers=headers, content=content, timeout=timeout)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._client.close()
+
+
+class SerializerLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def public_dict(self) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("serializer discovery is not allowed")
+
+    def model_dump(self, **_: object) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("serializer discovery is not allowed")
+
+    def as_dict(self) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("serializer discovery is not allowed")
+
+
+class PriceEntryLookalike:
+    def __init__(self) -> None:
+        self.called = False
+
+    def to_public_dict(self, **_: object) -> dict[str, object]:
+        self.called = True
+        raise AssertionError("price serializer discovery is not allowed")
+
+
+class PriceCatalogLookalike:
+    catalog_digest = "a" * 64
+
+    def __init__(self) -> None:
+        self.called = False
+
+    def find(self, *_: object) -> object:
+        self.called = True
+        raise AssertionError("catalog method discovery is not allowed")
+
+
 def publication(
     publication_id: str = "publication-clean",
     *,
@@ -1795,6 +1854,81 @@ def test_overhead_batch_limit_rejects_more_than_32_rows() -> None:
     assert error.value.code == D1ErrorCode.count_mismatch
 
 
+def test_serializer_lookalikes_are_rejected_without_invocation_or_transport() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    lookalike = SerializerLookalike()
+
+    with pytest.raises(D1Error) as error:
+        d1.upsert_overhead(lookalike, digest="a" * 64)
+
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert lookalike.called is False
+    assert server.requests == []
+
+
+def test_price_entry_lookalike_is_rejected_without_invocation() -> None:
+    lookalike = PriceEntryLookalike()
+
+    with pytest.raises(D1Error) as error:
+        D1PublicationClient._price_digest(lookalike, "a" * 64)  # type: ignore[arg-type]
+
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert lookalike.called is False
+
+
+def test_price_catalog_lookalike_is_rejected_before_transport() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    lookalike = PriceCatalogLookalike()
+
+    with pytest.raises(D1Error) as error:
+        d1.backfill_na_costs(lookalike)  # type: ignore[arg-type]
+
+    assert error.value.code == D1ErrorCode.generation_conflict
+    assert lookalike.called is False
+    assert server.requests == []
+
+
+def test_http_adapter_ownership_is_explicit_and_owned_close_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = ScriptedD1()
+    injected = CompleteHttpAdapter(server)
+    injected_client = D1PublicationClient(
+        account_id=ACCOUNT,
+        database_id=DATABASE,
+        token=TOKEN,
+        http_client=injected,
+    )
+    injected_client.close()
+    injected_client.close()
+    assert injected.close_calls == 0
+    injected.close()
+    assert injected.close_calls == 1
+
+    close_calls = 0
+    original_close = httpx.Client.close
+
+    def counted_close(instance: httpx.Client) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        original_close(instance)
+
+    monkeypatch.setattr(httpx.Client, "close", counted_close)
+    owned_client = D1PublicationClient(
+        account_id=ACCOUNT,
+        database_id=DATABASE,
+        token=TOKEN,
+        transport=httpx.MockTransport(server),
+    )
+    owned_client.close()
+    owned_client.close()
+
+    assert close_calls == 1
+    assert owned_client._closed is True
+
+
 def test_catalog_backfill_changes_only_na_turns_and_replays_from_cached_d1() -> None:
     server = ScriptedD1()
     d1 = client(server)
@@ -1850,6 +1984,7 @@ def test_catalog_backfill_changes_only_na_turns_and_replays_from_cached_d1() -> 
         }
     )
     old_usage_id = missing_usage["generation"]["usageGenerationId"]
+    expected_price_digest = D1PublicationClient._price_digest(catalog.entries[0], catalog.digest)
     receipt = d1.backfill_na_costs(catalog, limit=1)
     assert receipt.changed is True
     assert receipt.processed_turns == 1
@@ -1858,6 +1993,10 @@ def test_catalog_backfill_changes_only_na_turns_and_replays_from_cached_d1() -> 
         "SELECT usage_generation_id FROM task_heads WHERE task_id = ?", (missing["taskId"],)
     ).fetchone()[0]
     assert new_usage_id != old_usage_id
+    assert server.connection.execute(
+        "SELECT price_entry_digest FROM usage_prices WHERE usage_generation_id = ?",
+        (new_usage_id,),
+    ).fetchone()[0] == expected_price_digest
     assert tuple(
         server.connection.execute(
             "SELECT uncached_input_cost_micro_usd, cached_input_cost_micro_usd, "

@@ -23,6 +23,14 @@ from urllib.parse import quote
 
 import httpx
 
+from ..agents.telemetry import (
+    CostStatus,
+    PriceCatalog,
+    PriceEntry,
+    TelemetryTurn,
+    estimate_cost,
+)
+
 
 MAX_BATCH_PARAMETERS = 99
 MAX_BATCH_BYTES = 100_000
@@ -115,7 +123,18 @@ class D1Response(Protocol):
 
 
 class D1HttpClient(Protocol):
-    def post(self, url: str, **kwargs: Any) -> D1Response: ...
+    """The complete adapter surface used at the third-party HTTP boundary."""
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        content: bytes,
+        timeout: float,
+    ) -> D1Response: ...
+
+    def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,24 +576,10 @@ def _verified_global_rollups(invocations: Sequence[Mapping[str, Any]]) -> dict[t
 
 
 def _object_mapping(value: object) -> Mapping[str, Any] | None:
-    """Detach a small model-like value without importing control-loop types."""
+    """Accept only the owner-detached mapping contract."""
 
-    if isinstance(value, Mapping):
+    if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
         return value
-    for name in ("public_dict", "model_dump", "as_dict"):
-        method = getattr(value, name, None)
-        if callable(method):
-            try:
-                candidate = method(by_alias=True, mode="json") if name == "model_dump" else method()
-            except TypeError:
-                try:
-                    candidate = method()
-                except Exception:
-                    continue
-            except Exception:
-                continue
-            if isinstance(candidate, Mapping):
-                return candidate
     return None
 
 
@@ -1762,7 +1767,12 @@ class D1PublicationClient:
         self.timeout_seconds = float(timeout_seconds)
         self.max_response_bytes = max_response_bytes
         self._owned_client = http_client is None
-        self._client: D1HttpClient = http_client or httpx.Client(transport=transport, timeout=self.timeout_seconds)
+        self._closed = False
+        self._client: D1HttpClient = (
+            http_client
+            if http_client is not None
+            else httpx.Client(transport=transport, timeout=self.timeout_seconds)
+        )
 
     @staticmethod
     def _config_values(config: object | None, account_id: str | None, database_id: str | None, token: str | None) -> tuple[object, object, object]:
@@ -1802,8 +1812,9 @@ class D1PublicationClient:
         )
 
     def close(self) -> None:
-        if self._owned_client and hasattr(self._client, "close"):
-            self._client.close()  # type: ignore[attr-defined]
+        if self._owned_client and not self._closed:
+            self._client.close()
+            self._closed = True
 
     def __enter__(self) -> "D1PublicationClient":
         return self
@@ -1839,7 +1850,7 @@ class D1PublicationClient:
             raise D1Error(D1ErrorCode.network) from None
         except (TimeoutError, OSError):
             raise D1Error(D1ErrorCode.network) from None
-        status = int(getattr(response, "status_code", 0))
+        status = int(response.status_code)
         if status in {401, 403}:
             _invalid(D1ErrorCode.authentication)
         if status == 408:
@@ -3294,15 +3305,10 @@ class D1PublicationClient:
         return payload
 
     @staticmethod
-    def _price_digest(entry: object, catalog_digest: str) -> str:
-        public = getattr(entry, "to_public_dict", None)
-        if callable(public):
-            value = public(catalog_digest=catalog_digest)
-        elif isinstance(entry, Mapping):
-            value = dict(entry)
-            value.setdefault("catalog_digest", catalog_digest)
-        else:
+    def _price_digest(entry: PriceEntry, catalog_digest: str) -> str:
+        if not isinstance(entry, PriceEntry):
             _invalid(D1ErrorCode.generation_conflict)
+        value = entry.to_public_dict(catalog_digest=catalog_digest)
         canonical = (json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
@@ -3320,20 +3326,17 @@ class D1PublicationClient:
             return _timestamp(value)
         _invalid(D1ErrorCode.generation_conflict)
 
-    def _build_price_backfill(self, payload: dict[str, Any], *, catalog: object, selected_turn_ids: set[str]) -> tuple[dict[str, Any], int]:
-        try:
-            catalog_digest_value = getattr(catalog, "digest", None)
-            if catalog_digest_value is None:
-                catalog_digest_value = getattr(catalog, "catalog_digest", None)
-            catalog_digest = str(catalog_digest_value)
-            find = getattr(catalog, "find")
-        except Exception:
+    def _build_price_backfill(
+        self,
+        payload: dict[str, Any],
+        *,
+        catalog: PriceCatalog,
+        selected_turn_ids: set[str],
+    ) -> tuple[dict[str, Any], int]:
+        if not isinstance(catalog, PriceCatalog):
             _invalid(D1ErrorCode.generation_conflict)
-        if _DIGEST.fullmatch(catalog_digest) is None or not callable(find):
-            _invalid(D1ErrorCode.generation_conflict)
-        try:
-            from ..agents.telemetry import TelemetryTurn, estimate_cost
-        except Exception:
+        catalog_digest = catalog.digest
+        if _DIGEST.fullmatch(catalog_digest) is None:
             _invalid(D1ErrorCode.generation_conflict)
         usage = payload["usage"]
         old_usage_id = usage["generation"]["usageGenerationId"]
@@ -3354,14 +3357,14 @@ class D1PublicationClient:
                 continue
             try:
                 started = datetime.fromisoformat(str(invocation["startedAt"]).replace("Z", "+00:00"))
-                entry = find(invocation["model"], started)
+                entry = catalog.find(invocation["model"], started)
                 if entry is None:
                     continue
                 telemetry_turn = TelemetryTurn.from_usage({"input_tokens": turn["promptTokens"], "cached_input_tokens": turn["cachedTokens"], "output_tokens": turn["completionTokens"], "reasoning_output_tokens": turn["reasoningTokens"]}, ordinal=turn["ordinal"])
                 estimate = estimate_cost([telemetry_turn], billing_mode=invocation["billingMode"], configured_model=invocation["model"], started_at=started, catalog=catalog)
             except Exception:
                 continue
-            if getattr(estimate, "status", None).value != "estimated":
+            if estimate.status is not CostStatus.estimated:
                 continue
             turn.update({"uncachedInputCostMicroUsd": estimate.uncached_input_micro_usd, "cachedInputCostMicroUsd": estimate.cached_input_micro_usd, "outputCostMicroUsd": estimate.output_micro_usd, "totalCostMicroUsd": estimate.micro_usd})
             price_digest = self._price_digest(entry, catalog_digest)
@@ -3431,13 +3434,15 @@ class D1PublicationClient:
 
     def backfill_na_costs(
         self,
-        catalog: object,
+        catalog: PriceCatalog,
         *,
         cursor: str | None = None,
         limit: int = 64,
     ) -> UsageBackfillReceipt:
         """Fill only newly priceable N.A. turns from cached public evidence."""
 
+        if not isinstance(catalog, PriceCatalog):
+            _invalid(D1ErrorCode.generation_conflict)
         rows, next_cursor = self.list_visible_na_turns(cursor=cursor, limit=limit)
         if not rows:
             return UsageBackfillReceipt(next_cursor=None)
@@ -3445,10 +3450,9 @@ class D1PublicationClient:
         if marker is None:
             marker = set()
             self._backfill_completed = marker
-        catalog_digest_value = getattr(catalog, "digest", None)
-        if catalog_digest_value is None:
-            catalog_digest_value = getattr(catalog, "catalog_digest", "")
-        catalog_digest = str(catalog_digest_value)
+        catalog_digest = catalog.digest
+        if _DIGEST.fullmatch(catalog_digest) is None:
+            _invalid(D1ErrorCode.generation_conflict)
         processed = 0
         changed = False
         first_task_id: str | None = None
@@ -3976,7 +3980,7 @@ class D1PublicationClient:
         if not values or len(values) > 32:
             _invalid(D1ErrorCode.count_mismatch)
         supplied_digest = archive_digest if archive_digest is not None else digest
-        batch_digest = _overhead_digest(tuple(_object_mapping(value) or value for value in values), supplied_digest)
+        batch_digest = _overhead_digest(values, supplied_digest)
         normalized = tuple(_overhead_row(value) for value in values)
         if updated_at is None:
             updated_at = _timestamp_now()

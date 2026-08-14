@@ -16,7 +16,7 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
-from botocore.awsrequest import AWSHTTPConnection
+from botocore.awsrequest import AWSHTTPConnection, AWSHTTPSConnection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -110,8 +110,19 @@ class _TestAWSHTTPConnection(AWSHTTPConnection):
         return None
 
 
-def _botocore_connection(*, sock=None) -> _TestAWSHTTPConnection:
-    connection = _TestAWSHTTPConnection("publication.example.test", 443)
+class _TestAWSHTTPSConnection(AWSHTTPSConnection):
+    def connect(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _botocore_connection(
+    *, sock=None, https=False
+) -> AWSHTTPConnection | AWSHTTPSConnection:
+    connection_type = _TestAWSHTTPSConnection if https else _TestAWSHTTPConnection
+    connection = connection_type("publication.example.test", 443)
     connection.sock = sock
     return connection
 
@@ -134,8 +145,8 @@ def _d1_transport_double(on_close=None) -> D1PublicationClient:
     return client
 
 
-def _botocore_transport_double() -> SimpleNamespace:
-    connection = _botocore_connection()
+def _botocore_transport_double(*, https=False) -> SimpleNamespace:
+    connection = _botocore_connection(https=https)
     pool = SimpleNamespace()
     pool._get_conn = lambda timeout=None: connection
     pool._put_conn = lambda _connection: None
@@ -143,7 +154,10 @@ def _botocore_transport_double() -> SimpleNamespace:
     manager.connection_from_url = lambda _url, _pool_kwargs=None: pool
     session = SimpleNamespace()
     session._get_connection_manager = lambda _url, _proxy_url=None: manager
-    endpoint = SimpleNamespace(host="http://publication.example.test", http_session=session)
+    scheme = "https" if https else "http"
+    endpoint = SimpleNamespace(
+        host=f"{scheme}://publication.example.test", http_session=session
+    )
     provider_client = SimpleNamespace(_endpoint=endpoint, close=lambda: None)
     return SimpleNamespace(_client=provider_client)
 
@@ -1427,6 +1441,13 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
         server.join(timeout=1.0)
 
 
+@pytest.mark.parametrize("https", [False, True])
+def test_botocore_transport_adapter_accepts_pinned_connection_classes(https):
+    r2 = _botocore_transport_double(https=https)
+    adapter = BotocoreR2TransportAdapter(r2)
+    adapter.close()
+
+
 @pytest.mark.parametrize(
     "missing_hook",
     ["session", "manager", "pool_get", "pool_put"],
@@ -1585,6 +1606,48 @@ def test_httpx_transport_adapter_rejects_missing_shape(missing_hook):
 
         with pytest.raises(PublicationTransportSetupError) as error:
             HttpxD1TransportAdapter(d1)
+        assert str(error.value) == "unsupported publication transport shape"
+    finally:
+        d1.close()
+
+
+@pytest.mark.parametrize(
+    "connection",
+    [
+        SimpleNamespace(close=lambda: None),
+        SimpleNamespace(
+            _connection=SimpleNamespace(
+                _network_stream=SimpleNamespace(_socket=object())
+            ),
+            close=lambda: None,
+        ),
+    ],
+)
+def test_httpx_transport_adapter_rejects_unsupported_connection_shape(connection):
+    d1 = _d1_transport_double()
+    try:
+        d1._client._transport._pool._connections.append(connection)
+        with pytest.raises(PublicationTransportSetupError) as error:
+            HttpxD1TransportAdapter(d1)
+        assert str(error.value) == "unsupported publication transport shape"
+    finally:
+        d1.close()
+
+
+def test_httpx_transport_adapter_rejects_unsupported_connection_during_cancellation():
+    d1 = _d1_transport_double()
+    adapter = HttpxD1TransportAdapter(d1)
+    d1._client._transport._pool._connections.append(
+        SimpleNamespace(
+            _connection=SimpleNamespace(
+                _network_stream=SimpleNamespace(_socket=object())
+            ),
+            close=lambda: None,
+        )
+    )
+    try:
+        with pytest.raises(PublicationTransportSetupError) as error:
+            adapter.cancel()
         assert str(error.value) == "unsupported publication transport shape"
     finally:
         d1.close()

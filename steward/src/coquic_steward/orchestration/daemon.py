@@ -15,7 +15,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
-from botocore.awsrequest import AWSHTTPConnection
+import httpx
+from botocore.awsrequest import AWSHTTPConnection, AWSHTTPSConnection
+from httpcore import ConnectionPool, HTTPConnection
 
 from ..core.config import StewardConfig
 from ..core.lifecycle import (
@@ -291,7 +293,7 @@ class BotocoreR2TransportAdapter(DaemonCancellation):
             if connection_id in self._connection_methods:
                 return
         try:
-            if not isinstance(connection, AWSHTTPConnection):
+            if not isinstance(connection, (AWSHTTPConnection, AWSHTTPSConnection)):
                 raise PublicationTransportSetupError()
             connect = connection.connect
 
@@ -362,34 +364,50 @@ class HttpxD1TransportAdapter(DaemonCancellation):
     def __init__(self, client: D1PublicationClient) -> None:
         try:
             http_client = client._client
+            if not isinstance(http_client, httpx.Client):
+                raise PublicationTransportSetupError()
             transport = http_client._transport
+            if not isinstance(transport, httpx.HTTPTransport):
+                raise PublicationTransportSetupError()
             pool = transport._pool
-            tuple(pool.connections)
+            if not isinstance(pool, ConnectionPool):
+                raise PublicationTransportSetupError()
+            connections = tuple(pool.connections)
+            for connection in connections:
+                self._connection_socket(connection)
             client.close
             self._owner = client
             self._pool = pool
+        except PublicationTransportSetupError:
+            raise
         except Exception:
             raise PublicationTransportSetupError() from None
 
     @staticmethod
-    def _abort_connection(connection: object) -> None:
+    def _connection_socket(connection: object) -> socket.socket:
+        if not isinstance(connection, HTTPConnection):
+            raise PublicationTransportSetupError()
         try:
             raw_socket = connection._connection._network_stream._sock
-        except AttributeError:
-            raw_socket = None
-        if raw_socket is not None:
-            try:
-                raw_socket.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                raw_socket.close()
-            except Exception:
-                pass
+        except Exception:
+            raise PublicationTransportSetupError() from None
+        if not isinstance(raw_socket, socket.socket):
+            raise PublicationTransportSetupError()
+        return raw_socket
+
+    @classmethod
+    def _abort_connection(cls, connection: object) -> None:
+        raw_socket = cls._connection_socket(connection)
+        try:
+            raw_socket.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            raw_socket.close()
+        except Exception:
+            pass
         try:
             connection.close()
-        except AttributeError:
-            raise PublicationTransportSetupError() from None
         except Exception:
             pass
 

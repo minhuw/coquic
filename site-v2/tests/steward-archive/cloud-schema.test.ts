@@ -7,6 +7,7 @@ import { canonicalAtifBytes, validateAtifBytes, type AtifPublicationArtifactDesc
 import { buildAtifViewModel, type AtifViewArtifactDescriptor } from "@/lib/steward-archive/atif-view-model";
 import {
   parseCloudResponse,
+  STEWARD_CLOUD_SCHEMA_VERSION,
   serializeCloudProblem,
   serializeCloudResponse,
   serializeCloudCompleteTrajectory,
@@ -56,7 +57,7 @@ function detail(): CloudTaskDetail {
     trajectory: { taskId, pipelineId, runId, role: "planning", runState: "completed", startedAt: generatedAt, completedAt: generatedAt, durationMs: 0, artifactId: "artifact-atif", publicKey: key, mediaType: "application/json", byteSize: 128, sha256: digest, availability: "available", disclosure },
   };
 }
-function response<T>(data: T) { return { schemaVersion: "3.0" as const, generatedAt, data }; }
+function response<T>(data: T) { return { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, data }; }
 function copy<T>(value: T): T { return structuredClone(value); }
 function rejects(value: unknown) { assert.throws(() => validateCloudTaskDetail(value), /invalid Steward cloud response/); }
 function rejectsComplete(value: unknown) { assert.throws(() => validateCloudCompleteTrajectory(value), /invalid Steward cloud response/); }
@@ -120,17 +121,37 @@ function completeUsage() {
   };
 }
 
-test("accepts version-3 status, page, detail, descriptor, artifact, and problem envelopes", () => {
+test("accepts version-4 status, page, detail, descriptor, artifact, and problem envelopes", () => {
   const graph = detail();
   const task = graph.task;
   const page = { items: [task], pagination: { page: 1, pageSize: 25, total: 1, hasNextPage: false } };
   const descriptor = graph.trajectory;
-  assert.equal(validateCloudStatus(response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt })).schemaVersion, "3.0");
+  assert.equal(validateCloudStatus(response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt })).schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
   assert.equal(validateCloudTaskPage(response(page)).data.items[0].taskId, taskId);
   assert.equal(validateCloudTaskDetail(response(graph)).data.runs[0].runId, runId);
   assert.equal(validateCloudTrajectoryDescriptor(response(descriptor)).data.sha256, digest);
   assert.equal(validateCloudArtifact(graph.artifacts[0]).artifactId, "artifact-atif");
-  assert.equal(validateCloudProblem({ schemaVersion: "3.0", generatedAt, problem: { code: "UNAVAILABLE", message: "Cloud data is unavailable", retryable: true, status: 503, type: null } }).problem.retryable, true);
+  assert.equal(validateCloudProblem({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, problem: { code: "UNAVAILABLE", message: "Cloud data is unavailable", retryable: true, status: 503, type: null } }).problem.retryable, true);
+});
+
+test("accepts only the version-4 envelope across every response family", () => {
+  const graph = detail();
+  const page = { items: [graph.task], pagination: { page: 1, pageSize: 25, total: 1, hasNextPage: false } };
+  const problem = { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, problem: { code: "UNAVAILABLE", message: "Cloud data is unavailable", retryable: true, status: 503, type: null } };
+  const envelopes: unknown[] = [
+    response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }),
+    response(page),
+    response(graph),
+    response(graph.trajectory),
+    problem,
+    cleanTrajectory,
+  ];
+  for (const envelope of envelopes) {
+    assert.doesNotThrow(() => parseCloudResponse(JSON.stringify(envelope)));
+    const legacy = copy(envelope) as Record<string, unknown>;
+    legacy.schemaVersion = "3.0";
+    assert.throws(() => parseCloudResponse(JSON.stringify(legacy)), /invalid Steward cloud response/);
+  }
 });
 
 test("validates complete, partial, unavailable, and zero-token usage rows", () => {
@@ -249,7 +270,7 @@ test("accepts only available standalone trajectory descriptors on every path", (
   assert.deepEqual(JSON.parse(serializeCloudTrajectoryDescriptor(value)), value);
   assert.deepEqual(parseCloudResponse(JSON.stringify(value)), value);
 
-  const unavailable = copy(value) as { schemaVersion: "3.0"; generatedAt: string; data: Record<string, unknown> };
+  const unavailable = copy(value) as { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: string; data: Record<string, unknown> };
   unavailable.data.availability = "unavailable";
   const attempts = [
     () => validateCloudTrajectoryDescriptor(unavailable),
@@ -263,6 +284,9 @@ test("requires exact major and rejects private, legacy, and global-only fields",
   const badVersion = response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }) as { schemaVersion: string; generatedAt: string; data: unknown };
   badVersion.schemaVersion = "2.0";
   assert.throws(() => validateCloudStatus(badVersion), /invalid Steward cloud response/);
+  const legacyVersion = response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }) as { schemaVersion: string; generatedAt: string; data: unknown };
+  legacyVersion.schemaVersion = "3.0";
+  assert.throws(() => validateCloudStatus(legacyVersion), /invalid Steward cloud response/);
   for (const field of ["privateBucket", "objectKey", "url", "credentialPath", "cursor", "filePath", "revision", "signals", "plannerRuns"]) {
     const value = response({ state: "available", taskCount: 1, latestPublicationAt: generatedAt }) as Record<string, unknown>;
     (value.data as Record<string, unknown>)[field] = "private-value";
@@ -304,7 +328,7 @@ test("bounds UTC fractional precision and rejects private problem locators", () 
   const precise = response({ state: "empty", taskCount: 0, latestPublicationAt: "2026-07-28T00:00:00.123456789Z" });
   assert.equal(validateCloudStatus(precise).data.latestPublicationAt, precise.data.latestPublicationAt);
   const tooPrecise = copy(precise); tooPrecise.generatedAt = "2026-07-28T00:00:00.1234567890Z"; assert.throws(() => validateCloudStatus(tooPrecise), /invalid Steward cloud response/);
-  const problem = { schemaVersion: "3.0" as const, generatedAt, problem: { code: "BAD", message: "file:///srv/private/credential.json", retryable: false, status: 500, type: null } };
+  const problem = { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, problem: { code: "BAD", message: "file:///srv/private/credential.json", retryable: false, status: 500, type: null } };
   assert.throws(() => serializeCloudProblem(problem), /invalid Steward cloud response/);
 });
 
@@ -329,7 +353,7 @@ test("validation errors are stable and never contain rejected values", () => {
 test("accepts complete normalized trajectories and preserves their public display model", () => {
   const clean = validateCloudCompleteTrajectory(cleanTrajectory);
   const redacted = validateCloudCompleteTrajectory(redactedTrajectory);
-  assert.equal(clean.schemaVersion, "4.0");
+  assert.equal(clean.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
   assert.equal(redacted.data.disclosure.redactionApplied, true);
   assert.equal(redacted.data.steps[1]!.content[2]!.kind, "image");
   assert.equal((redacted.data.steps[1]!.content[2] as { action: { kind: string } }).action.kind, "unavailable");
@@ -415,7 +439,7 @@ test("accepts bounded mapper-preserved strings without truncation", () => {
   });
   const model = buildAtifViewModel(document, { artifacts: viewArtifacts });
   assert.equal(model.steps[0]!.message, message);
-  const response = { schemaVersion: "4.0" as const, generatedAt, data: model };
+  const response = { schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt, data: model };
   assert.equal(validateCloudCompleteTrajectory(response).data.steps[0]!.message, message);
 });
 
@@ -445,7 +469,7 @@ test("rejects mapper-impossible duplicate identities, media, ownership, timing, 
   }
 });
 
-test("keeps public object-key text accepted in v3 while v4 denies it", () => {
+test("keeps public object-key text accepted in task detail while complete trajectories deny it", () => {
   const graph = detail();
   const summary = `Published ${graph.artifacts[0].publicKey}`;
   graph.events[0]!.summary = summary;

@@ -6,7 +6,7 @@ import {
 } from "@/lib/steward-archive/cloud-repository";
 import { AtifLoaderError, loadVerifiedAtif } from "@/lib/steward-archive/atif-loader";
 import { buildAtifViewModel } from "@/lib/steward-archive/atif-view-model";
-import { serializeCloudCompleteTrajectory, serializeCloudProblem } from "@/lib/steward-archive/cloud-schema";
+import { serializeCloudCompleteTrajectory, serializeCloudProblem, STEWARD_CLOUD_SCHEMA_VERSION } from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -34,7 +34,7 @@ function response(body: string, status: number): Response {
 
 function problemResponse(problem: Problem): Response {
   return response(serializeCloudProblem({
-    schemaVersion: "3.0",
+    schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     problem: {
       code: problem.code,
@@ -130,7 +130,7 @@ export async function GET(request: Request, context: { params: Promise<{ taskId:
       taskId,
       runId,
     });
-    return response(serializeCloudCompleteTrajectory({ schemaVersion: "4.0", generatedAt: new Date().toISOString(), data }), 200);
+    return response(serializeCloudCompleteTrajectory({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt: new Date().toISOString(), data }), 200);
   } catch (error) {
     return problemResponse(mapError(error));
   }

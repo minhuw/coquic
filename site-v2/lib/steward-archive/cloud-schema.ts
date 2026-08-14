@@ -11,6 +11,8 @@ import type {
   AtifDisplayToolCall,
 } from "./atif-view-model";
 
+export const STEWARD_CLOUD_SCHEMA_VERSION = "4.0" as const;
+
 export type CloudTimestamp = string;
 export type CloudLifecycleState = "active" | "completed" | "failed" | "cancelled";
 export type CloudRunState = "completed" | "failed" | "cancelled";
@@ -28,13 +30,13 @@ export type CloudTaskSummary = { taskId: string; title: string; lifecycleState: 
 export type CloudPagination = { page: number; pageSize: number; total: number; hasNextPage: boolean };
 export type CloudTaskPage = { items: CloudTaskSummary[]; pagination: CloudPagination };
 export type CloudTaskDetail = { task: CloudTaskSummary; pipelines: CloudPipeline[]; runs: CloudRun[]; events: CloudEvent[]; artifacts: CloudArtifact[]; trajectory: CloudTrajectoryDescriptor | null };
-export type CloudStatusResponse = { schemaVersion: "3.0"; generatedAt: CloudTimestamp; data: CloudStatus };
-export type CloudTaskPageResponse = { schemaVersion: "3.0"; generatedAt: CloudTimestamp; data: CloudTaskPage };
-export type CloudTaskDetailResponse = { schemaVersion: "3.0"; generatedAt: CloudTimestamp; data: CloudTaskDetail };
-export type CloudTrajectoryDescriptorResponse = { schemaVersion: "3.0"; generatedAt: CloudTimestamp; data: CloudTrajectoryDescriptor };
-export type CloudProblemResponse = { schemaVersion: "3.0"; generatedAt: CloudTimestamp; problem: CloudProblem };
+export type CloudStatusResponse = { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: CloudTimestamp; data: CloudStatus };
+export type CloudTaskPageResponse = { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: CloudTimestamp; data: CloudTaskPage };
+export type CloudTaskDetailResponse = { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: CloudTimestamp; data: CloudTaskDetail };
+export type CloudTrajectoryDescriptorResponse = { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: CloudTimestamp; data: CloudTrajectoryDescriptor };
+export type CloudProblemResponse = { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: CloudTimestamp; problem: CloudProblem };
 export type CloudCompleteTrajectory = AtifDisplayModel;
-export type CloudCompleteTrajectoryResponse = { schemaVersion: "4.0"; generatedAt: CloudTimestamp; data: CloudCompleteTrajectory };
+export type CloudCompleteTrajectoryResponse = { schemaVersion: typeof STEWARD_CLOUD_SCHEMA_VERSION; generatedAt: CloudTimestamp; data: CloudCompleteTrajectory };
 export type CloudResponse = CloudStatusResponse | CloudTaskPageResponse | CloudTaskDetailResponse | CloudTrajectoryDescriptorResponse | CloudCompleteTrajectoryResponse | CloudProblemResponse;
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -303,10 +305,10 @@ export const validateCloudCompleteTrajectory = validateCloudCompleteTrajectoryRe
 export const validateCloudProblem = validateCloudProblemResponse;
 
 export function validateCloudResponse(value: unknown): CloudResponse {
-  if (!isRecord(value) || (value.schemaVersion !== "3.0" && value.schemaVersion !== "4.0")) invalid();
-  if (value.schemaVersion === "4.0") return validateCloudCompleteTrajectoryResponse(value);
+  if (!isRecord(value) || value.schemaVersion !== STEWARD_CLOUD_SCHEMA_VERSION) invalid();
   if ("problem" in value) return validateCloudProblemResponse(value);
   if (!isRecord(value.data)) invalid();
+  if ("kind" in value.data) return validateCloudCompleteTrajectoryResponse(value);
   if ("items" in value.data) return validateCloudTaskPageResponse(value);
   if ("pipelines" in value.data) return validateCloudTaskDetailResponse(value);
   if ("runId" in value.data && "pipelineId" in value.data && "publicKey" in value.data) return validateCloudTrajectoryDescriptorResponse(value);

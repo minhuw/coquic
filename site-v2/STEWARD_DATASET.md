@@ -95,9 +95,10 @@ an active lifecycle and still expose its completed planning trajectory.
 
 ## Responses and failure states
 
-Steward cloud status, task-page, task-detail, trajectory-descriptor, and
-problem responses use `schemaVersion: "3.0"`. Unrelated Site APIs retain their
-own versions. A valid empty publication is distinct from unavailable data.
+All Steward cloud status, task-page, task-detail, trajectory-descriptor,
+complete trajectory, and problem responses use `schemaVersion: "4.0"`.
+Unrelated Site APIs retain their own versions. A valid empty publication is
+distinct from unavailable data.
 
 The reader distinguishes transient D1/R2/network/timeout/server failures from
 terminal missing, resource, integrity, schema, ownership, and configuration

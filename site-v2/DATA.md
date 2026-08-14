@@ -13,20 +13,20 @@ Site does not accept or proxy a caller-supplied object URL.
 
 ## Envelope
 
-Unrelated first-party resources retain their existing major versions. Steward
-cloud status, task page, task detail, trajectory descriptor, and problem
-responses use `schemaVersion: "3.0"`:
+Unrelated first-party resources retain their existing major versions. Every
+Steward cloud response family uses `schemaVersion: "4.0"`:
 
 ```json
 {
-  "schemaVersion": "3.0",
+  "schemaVersion": "4.0",
   "generatedAt": "2026-07-19T12:00:00Z",
   "data": {}
 }
 ```
 
-Complete trajectory responses are a separate contract and use
-`schemaVersion: "4.0"`.
+Complete trajectory responses keep their distinct closed data shape within the
+same envelope. The nested display model retains its separate `ATIF-v1.7`
+schema version.
 
 Collection responses MAY add pagination data; generated evidence SHOULD add
 `provenance`. Cloud problems use the `problem` member in
@@ -208,10 +208,10 @@ translate an earlier shape or infer omitted evidence.
   complete within its bounded page; task detail validates exact expected counts,
   ownership, event sequence, run duration, artifact identity, and disclosure
   consistency before returning any field.
-- Status, task-page, task-detail, trajectory-descriptor, and problem envelopes use
-  version `3.0`; complete trajectory responses use the separate `4.0` envelope.
-  The detail `trajectory` is either a complete validated descriptor for an
-  available immutable JSON artifact or `null`; the reader does not expose
+- Status, task-page, task-detail, trajectory-descriptor, complete trajectory, and
+  problem envelopes all use version `4.0`. The detail `trajectory` is either a
+  complete validated descriptor for an available immutable JSON artifact or
+  `null`; the reader does not expose
   partial ATIF/JSONL records, offsets, cursors, or raw transcript content.
 - Artifact identity remains public and deterministic: `logicalPath` identifies
   the producer-declared artifact, while `publicKey` is the validated

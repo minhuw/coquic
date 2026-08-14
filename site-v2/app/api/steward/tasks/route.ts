@@ -7,7 +7,7 @@ import {
   PublicationCursorError,
   type CloudTaskScope,
 } from "@/lib/steward-archive/cloud-repository";
-import { serializeCloudProblem, serializeCloudTaskPage } from "@/lib/steward-archive/cloud-schema";
+import { serializeCloudProblem, serializeCloudTaskPage, STEWARD_CLOUD_SCHEMA_VERSION } from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -35,7 +35,7 @@ function response(body: string, status: number, cursors?: { next: string | null;
 
 function problemResponse(problem: Problem): NextResponse {
   const body = serializeCloudProblem({
-    schemaVersion: "3.0",
+    schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     problem: {
       code: problem.code,
@@ -96,7 +96,7 @@ function pageEnvelope(page: Awaited<ReturnType<ReturnType<typeof getCloudReposit
   // while another page exists and the terminal page otherwise.
   const pageNumber = page.nextCursor === null ? Math.max(1, Math.ceil(page.total / pageSize)) : 1;
   return {
-    schemaVersion: "3.0" as const,
+    schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     data: {
       items: [...page.tasks],

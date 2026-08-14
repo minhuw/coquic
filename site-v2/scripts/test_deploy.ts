@@ -86,7 +86,7 @@ url="\${!#}"
 echo "\${url}" >>"\${FAKE_CURL_LOG}"
 if [[ "\${url}" == */api/steward/status ]]; then
   if [[ -n "\${FAKE_STEWARD_STATUS:-}" ]]; then printf '%s\\n' "\${FAKE_STEWARD_STATUS}";
-  else printf '%s\\n' '{"schemaVersion":"3.0","generatedAt":"2026-07-31T00:00:00Z","data":{"state":"empty","taskCount":0,"latestPublicationAt":null}}'; fi
+  else printf '%s\\n' '{"schemaVersion":"4.0","generatedAt":"2026-07-31T00:00:00Z","data":{"state":"empty","taskCount":0,"latestPublicationAt":null}}'; fi
 else printf '%s\\n' ready; fi
 `);
     const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, COQUIC_DEMO_RELEASE_DIR: release, COQUIC_DEMO_APP_ENV_FILE: appEnv, COQUIC_DEMO_NEXT_PORT: "39111", COQUIC_DEMO_PORT: "39443", COQUIC_DEMO_BOOTSTRAP_PORT: "39443", FAKE_PROCESS_LOG: processLog, FAKE_CURL_LOG: curlLog, FAKE_REAL_NODE: process.execPath };

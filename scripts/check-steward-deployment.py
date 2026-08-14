@@ -24,8 +24,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 ROOT = Path(__file__).resolve().parents[1]
 CLOUD_SCHEMA_PATH = ROOT / "site-v2" / "schemas" / "steward-cloud.schema.json"
 
-CLOUD_SCHEMA_VERSION = "3.0"
-TRAJECTORY_SCHEMA_VERSION = "4.0"
+CLOUD_SCHEMA_VERSION = "4.0"
 DEFAULT_MAX_LATENCY_MS = 2_000.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -826,10 +825,7 @@ def _record_page(
         document = _decode_json(response.body)
         if document is None:
             _add_check(result, f"{label}_schema", "fail", detail="malformed_json")
-        elif not isinstance(document, dict) or document.get("schemaVersion") not in {
-            CLOUD_SCHEMA_VERSION,
-            TRAJECTORY_SCHEMA_VERSION,
-        }:
+        elif not isinstance(document, dict) or document.get("schemaVersion") != CLOUD_SCHEMA_VERSION:
             _add_check(result, f"{label}_schema", "fail", detail="schema_incompatible")
         elif not _validate_document(document, schema, definition):
             _add_check(result, f"{label}_schema", "fail", detail="schema_invalid")
@@ -1059,7 +1055,7 @@ def run_check(
     result: dict[str, Any] = {
         "ok": False,
         "checked_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "schemaVersions": {"cloud": CLOUD_SCHEMA_VERSION, "trajectory": TRAJECTORY_SCHEMA_VERSION},
+        "schemaVersions": {"cloud": CLOUD_SCHEMA_VERSION, "trajectory": CLOUD_SCHEMA_VERSION},
         "thresholds": {
             "max_latency_ms": max_latency_ms,
             "timeout_seconds": timeout_seconds,

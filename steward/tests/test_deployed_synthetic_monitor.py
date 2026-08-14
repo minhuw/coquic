@@ -126,7 +126,7 @@ def _dashboard() -> ResponseSpec:
 
 def _status(*, empty: bool) -> dict:
     return {
-        "schemaVersion": "3.0",
+        "schemaVersion": "4.0",
         "generatedAt": NOW,
         "data": {
             "state": "empty" if empty else "available",
@@ -139,7 +139,7 @@ def _status(*, empty: bool) -> dict:
 def _task_page(detail: dict | None) -> dict:
     task = detail["data"]["task"] if detail is not None else None
     return {
-        "schemaVersion": "3.0",
+        "schemaVersion": "4.0",
         "generatedAt": NOW,
         "data": {
             "items": [] if task is None else [copy.deepcopy(task)],

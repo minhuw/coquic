@@ -142,23 +142,23 @@
     },
     "statusResponse": {
       "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "data"],
-      "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/status" } }
+      "properties": { "schemaVersion": { "const": "4.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/status" } }
     },
     "taskPageResponse": {
       "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "data"],
-      "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/taskPage" } }
+      "properties": { "schemaVersion": { "const": "4.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/taskPage" } }
     },
     "taskDetailResponse": {
       "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "data"],
-      "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/taskDetail" } }
+      "properties": { "schemaVersion": { "const": "4.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/taskDetail" } }
     },
     "trajectoryDescriptorResponse": {
       "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "data"],
-      "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/trajectoryDescriptor" } }
+      "properties": { "schemaVersion": { "const": "4.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "data": { "$ref": "#/$defs/trajectoryDescriptor" } }
     },
     "problemResponse": {
       "type": "object", "additionalProperties": false, "required": ["schemaVersion", "generatedAt", "problem"],
-      "properties": { "schemaVersion": { "const": "3.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "problem": { "$ref": "#/$defs/problem" } }
+      "properties": { "schemaVersion": { "const": "4.0" }, "generatedAt": { "$ref": "#/$defs/timestamp" }, "problem": { "$ref": "#/$defs/problem" } }
     },
     "displayString": {
       "type": "string", "maxLength": 4194304,

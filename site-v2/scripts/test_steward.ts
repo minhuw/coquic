@@ -11,7 +11,7 @@ import createNext from "next";
 import cleanPublication from "../../contracts/steward-cloud/fixtures/clean-publication.json";
 import redactedPublication from "../../contracts/steward-cloud/fixtures/redacted-publication.json";
 import { canonicalAtifBytes, type AtifDocument } from "../lib/steward-archive/atif";
-import { parseCloudResponse, type CloudCompleteTrajectory, type CloudResponse } from "../lib/steward-archive/cloud-schema";
+import { parseCloudResponse, STEWARD_CLOUD_SCHEMA_VERSION, type CloudCompleteTrajectory, type CloudResponse } from "../lib/steward-archive/cloud-schema";
 
 type CloudRepositoryModule = typeof import("../lib/steward-archive/cloud-repository");
 const requireForTest = createRequire(import.meta.url);
@@ -1203,7 +1203,7 @@ async function main() {
     const response = await getStatus();
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
-    assert.equal(payload.schemaVersion, "3.0");
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
     assert("state" in payload.data);
     assert.equal(payload.data.state, "empty");
   });
@@ -1222,7 +1222,7 @@ async function main() {
     const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=1"));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
-    assert.equal(payload.schemaVersion, "3.0");
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
     if (!("items" in payload.data)) throw new Error("expected task page");
     assert.equal(payload.data.items.length, 1);
     assert.equal(payload.data.items[0]?.taskId, "task-active");
@@ -1236,7 +1236,7 @@ async function main() {
     const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=active&limit=10"));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
-    assert.equal(payload.schemaVersion, "3.0");
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
     if (!("items" in payload.data)) throw new Error("expected task page");
     assert.deepEqual(payload.data.items, []);
     assert.deepEqual(payload.data.pagination, { page: 1, pageSize: 10, total: 0, hasNextPage: false });
@@ -1248,7 +1248,7 @@ async function main() {
     const response = await getTasks(new Request("https://site.test/api/steward/tasks?scope=history&limit=10"));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
-    assert.equal(payload.schemaVersion, "3.0");
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
     if (!("items" in payload.data)) throw new Error("expected task page");
     assert.deepEqual(payload.data.items, []);
     assert.deepEqual(payload.data.pagination, { page: 1, pageSize: 10, total: 0, hasNextPage: false });
@@ -1299,19 +1299,20 @@ async function main() {
 
   const taskContext = (taskId: string) => ({ params: Promise.resolve({ taskId }) });
 
-  async function transcriptSuccess(response: Response) {
+  async function transcriptSuccess(response: Response): Promise<CloudCompleteTrajectory> {
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("Cache-Control"), "no-store");
     assert.equal(response.headers.get("Content-Type"), "application/json; charset=utf-8");
     const body = await response.text();
     const payload = dataResponse(parseCloudResponse(body));
-    assert.equal(payload.schemaVersion, "4.0");
-    assert.equal(payload.data.kind, "atif-display");
-    assert.equal(payload.data.taskId, DETAIL_TASK_ID);
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
+    const data = payload.data;
+    if (!("kind" in data) || data.kind !== "atif-display") throw new Error("expected complete trajectory");
+    assert.equal(data.taskId, DETAIL_TASK_ID);
     for (const forbidden of ["publicKey", "publicUrl", "private://", "https://objects.example.test/public/", "records", "cursor", "prefix", "partial"]) {
       assert(!body.includes(forbidden), `transcript emitted ${forbidden}`);
     }
-    return payload.data;
+    return data;
   }
 
   let completeModel: CloudCompleteTrajectory | null = null;
@@ -1320,13 +1321,13 @@ async function main() {
 
   await runCase("trajectory boundary complete fixture", scenario([], [], undefined, [], detailScenario()), async () => {
     completeModel = (await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)))) as CloudCompleteTrajectory;
-    completeBody = JSON.stringify({ schemaVersion: "4.0", generatedAt: EXPOSED_AT, data: completeModel });
+    completeBody = JSON.stringify({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt: EXPOSED_AT, data: completeModel });
   }, VALID_ENV, 6);
 
   await runCase("trajectory boundary empty fixture", scenario([], [], undefined, [], detailScenario({}, EMPTY_DETAIL_TRAJECTORY)), async () => {
     const model = (await transcriptSuccess(await getTranscript(new Request("https://site.test/api/steward/tasks/task-detail/transcript"), taskContext(DETAIL_TASK_ID)))) as CloudCompleteTrajectory;
     const emptyModel: CloudCompleteTrajectory = { ...model, steps: [], artifacts: [], metadata: { ...model.metadata, artifacts: [] } };
-    emptyBody = JSON.stringify({ schemaVersion: "4.0", generatedAt: EXPOSED_AT, data: emptyModel });
+    emptyBody = JSON.stringify({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt: EXPOSED_AT, data: emptyModel });
   }, VALID_ENV, 6);
 
   await runCase("trajectory boundary lifecycle", scenario([], []), async () => {
@@ -1364,7 +1365,7 @@ async function main() {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     };
     const transientBody = JSON.stringify({
-      schemaVersion: "3.0",
+      schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
       generatedAt: EXPOSED_AT,
       problem: { code: "UNAVAILABLE", message: "The transcript is temporarily unavailable.", retryable: true, status: 503, type: null },
     });
@@ -1480,7 +1481,7 @@ async function main() {
     assert.equal(response.headers.get("Content-Type"), "application/json; charset=utf-8");
     const body = await response.text();
     const payload = problemResponse(parseCloudResponse(body));
-    assert.equal(payload.schemaVersion, "3.0");
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
     if (expectedMessage === undefined) {
       assert.deepEqual(payload.problem, { code, message: payload.problem.message, retryable, status, type: null });
     } else {
@@ -1496,7 +1497,7 @@ async function main() {
     const response = await getTaskDetail(new Request("https://site.test/api/steward/tasks/task-detail"), taskContext(DETAIL_TASK_ID));
     assert.equal(response.status, 200);
     const payload = dataResponse(parseCloudResponse(await response.text()));
-    assert.equal(payload.schemaVersion, "3.0");
+    assert.equal(payload.schemaVersion, STEWARD_CLOUD_SCHEMA_VERSION);
     if (!("pipelines" in payload.data)) throw new Error("expected task detail");
     assert.equal(payload.data.task.taskId, DETAIL_TASK_ID);
     assert.equal(payload.data.trajectory?.runId, DETAIL_RUN_ID);

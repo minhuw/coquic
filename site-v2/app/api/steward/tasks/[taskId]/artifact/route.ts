@@ -4,7 +4,7 @@ import {
   CloudRepositoryDataError,
   getCloudRepository,
 } from "@/lib/steward-archive/cloud-repository";
-import { serializeCloudProblem } from "@/lib/steward-archive/cloud-schema";
+import { serializeCloudProblem, STEWARD_CLOUD_SCHEMA_VERSION } from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -32,7 +32,7 @@ function response(body: string, status: number): Response {
 
 function problemResponse(problem: Problem): Response {
   return response(serializeCloudProblem({
-    schemaVersion: "3.0",
+    schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     problem: {
       code: problem.code,

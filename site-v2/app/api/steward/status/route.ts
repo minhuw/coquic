@@ -6,7 +6,7 @@ import {
   getCloudRepository,
   PublicationCursorError,
 } from "@/lib/steward-archive/cloud-repository";
-import { serializeCloudProblem, serializeCloudStatus } from "@/lib/steward-archive/cloud-schema";
+import { serializeCloudProblem, serializeCloudStatus, STEWARD_CLOUD_SCHEMA_VERSION } from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -30,7 +30,7 @@ function response(body: string, status: number): NextResponse {
 
 function problemResponse(problem: Problem): NextResponse {
   const body = serializeCloudProblem({
-    schemaVersion: "3.0",
+    schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     problem: {
       code: problem.code,
@@ -71,7 +71,7 @@ function mapError(error: unknown): Problem {
 export async function GET() {
   try {
     const status = await getCloudRepository().getStatus();
-    return response(serializeCloudStatus({ schemaVersion: "3.0", generatedAt: new Date().toISOString(), data: status }), 200);
+    return response(serializeCloudStatus({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt: new Date().toISOString(), data: status }), 200);
   } catch (error) {
     return problemResponse(mapError(error));
   }

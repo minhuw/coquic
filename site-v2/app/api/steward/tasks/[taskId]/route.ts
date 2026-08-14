@@ -4,7 +4,7 @@ import {
   CloudRepositoryDataError,
   getCloudRepository,
 } from "@/lib/steward-archive/cloud-repository";
-import { serializeCloudProblem, serializeCloudTaskDetail } from "@/lib/steward-archive/cloud-schema";
+import { serializeCloudProblem, serializeCloudTaskDetail, STEWARD_CLOUD_SCHEMA_VERSION } from "@/lib/steward-archive/cloud-schema";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -32,7 +32,7 @@ function response(body: string, status: number): Response {
 
 function problemResponse(problem: Problem): Response {
   return response(serializeCloudProblem({
-    schemaVersion: "3.0",
+    schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     problem: {
       code: problem.code,
@@ -80,7 +80,7 @@ export async function GET(_request: Request, context: { params: Promise<{ taskId
     if (!data) {
       return problemResponse({ code: "NOT_FOUND", status: 404, message: "The requested task is not indexed.", retryable: false });
     }
-    return response(serializeCloudTaskDetail({ schemaVersion: "3.0", generatedAt: new Date().toISOString(), data }), 200);
+    return response(serializeCloudTaskDetail({ schemaVersion: STEWARD_CLOUD_SCHEMA_VERSION, generatedAt: new Date().toISOString(), data }), 200);
   } catch (error) {
     return problemResponse(mapError(error));
   }

@@ -250,7 +250,7 @@ for _ in $(seq 1 50); do
       const data = payload.data;
       const timestamp = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z$/;
       const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
-      if (!exactKeys(payload, ["schemaVersion", "generatedAt", "data"]) || payload.schemaVersion !== "3.0" || typeof payload.generatedAt !== "string" || !timestamp.test(payload.generatedAt)) process.exit(1);
+      if (!exactKeys(payload, ["schemaVersion", "generatedAt", "data"]) || payload.schemaVersion !== "4.0" || typeof payload.generatedAt !== "string" || !timestamp.test(payload.generatedAt)) process.exit(1);
       if (!exactKeys(data, ["state", "taskCount", "latestPublicationAt"]) || !["available", "empty"].includes(data.state)) process.exit(1);
       if (!Number.isSafeInteger(data.taskCount) || data.taskCount < 0 || data.taskCount > 1000000) process.exit(1);
       if ((data.state === "empty") !== (data.taskCount === 0)) process.exit(1);

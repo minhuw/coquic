@@ -172,7 +172,7 @@ function multimodalTrajectory(): JsonObject {
 
 function problemBody(retryable: boolean) {
   return JSON.stringify({
-    schemaVersion: "3.0",
+    schemaVersion: "4.0",
     generatedAt: "2026-07-28T00:00:02Z",
     problem: {
       code: "UNAVAILABLE",

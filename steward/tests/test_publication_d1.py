@@ -992,6 +992,64 @@ def test_partial_global_coverage_survives_exposure_and_replay() -> None:
     assert server.connection.execute("SELECT count(*) FROM usage_generations").fetchone()[0] == 1
 
 
+def test_partial_global_cost_coverage_survives_replacement_and_replay() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    first = publication(
+        "publication-partial-cost-replace",
+        run_id="run-partial-cost-replace",
+        task_id="task-partial-cost-replace",
+    )
+    usage = first["usage"]
+    for collection in ("summaries", "invocations", "turns", "globals"):
+        for row in usage[collection]:
+            for field in ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"):
+                row[field] = None
+            if collection == "summaries":
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+            elif collection == "invocations":
+                row.update({"coverage": "partial", "priceEntryDigest": None})
+            elif collection == "turns":
+                row["priceEntryDigest"] = None
+            elif row["ownershipClass"] == "task-owned":
+                row.update({"coverage": "partial", "knownCostSubtotalMicroUsd": None, "priceProvenanceDigest": None})
+    usage["prices"] = []
+    usage["generation"]["expectedCounts"]["prices"] = 0
+    refresh_metadata_digest(first)
+
+    d1.publish(first)
+    old_usage_id = usage["generation"]["usageGenerationId"]
+    assert [
+        tuple(row)
+        for row in server.connection.execute(
+            "SELECT period_kind, coverage, covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd "
+            "FROM usage_globals WHERE usage_generation_id = ? AND ownership_class = 'task-owned' ORDER BY period_kind",
+            (old_usage_id,),
+        )
+    ] == [
+        ("daily", "partial", 1, 1, 18, None),
+        ("lifetime", "partial", 1, 1, 18, None),
+    ]
+
+    replacement = usage_replacement(first, "same-shape")
+    new_usage_id = replacement["usage"]["generation"]["usageGenerationId"]
+    result = d1.replace_usage(replacement, base_usage_generation_id=old_usage_id)
+
+    assert result.usage_generation_id == new_usage_id
+    assert [
+        tuple(row)
+        for row in server.connection.execute(
+            "SELECT period_kind, coverage, covered_invocations, expected_invocations, total_tokens, total_cost_micro_usd "
+            "FROM usage_globals WHERE usage_generation_id = ? AND ownership_class = 'task-owned' ORDER BY period_kind",
+            (new_usage_id,),
+        )
+    ] == [
+        ("daily", "partial", 1, 1, 18, None),
+        ("lifetime", "partial", 1, 1, 18, None),
+    ]
+    assert d1.replace_usage(copy.deepcopy(replacement), base_usage_generation_id=new_usage_id).usage_generation_id == new_usage_id
+
+
 def test_usage_replacement_preserves_task_identity_and_replays() -> None:
     server = ScriptedD1()
     d1 = client(server)

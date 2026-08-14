@@ -265,7 +265,16 @@ def _fake_codex(tmp_path: Path, *, invalid_plan: bool) -> Path:
     return fake
 
 
-def _passing_gates(config, task_id, cwd, *, label=None):
+def _passing_gates(
+    config,
+    task_id,
+    cwd,
+    *,
+    label=None,
+    on_gate_start=None,
+    on_gate_result=None,
+    command_runner=None,
+):
     output = config.logs_dir / task_id / (label or "validation") / "fake.txt"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("ok\n", encoding="utf-8")

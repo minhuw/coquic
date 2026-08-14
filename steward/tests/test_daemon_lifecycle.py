@@ -24,9 +24,11 @@ from types import SimpleNamespace
 import pytest
 
 from coquic_steward.agents.invocation import InvocationOutcome
+from coquic_steward.agents.runner import CodexRunner
 from coquic_steward.control_loop.models import StewardOverheadUsage
 from coquic_steward.core.models import (
     CodexRunState,
+    CodexStage,
     PipelineCursorPhase,
     TaskKind,
     TaskSpec,
@@ -46,7 +48,11 @@ from coquic_steward.core.config import (
     StewardContainerConfig,
     StewardPublicationConfig,
 )
-from coquic_steward.execution.container import TaskContainerRuntime
+from coquic_steward.execution.container import (
+    ContainerInspection,
+    SubprocessDockerClient,
+    TaskContainerRuntime,
+)
 from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import (
@@ -54,6 +60,7 @@ from coquic_steward.execution.session import (
     InvocationStatus,
     ResumeCategory,
     ResumeResult,
+    LocalSessionInvoker,
     SessionResult,
     SessionSupervisor,
     runtime_factory_for_config,
@@ -100,6 +107,28 @@ from coquic_steward.storage import TaskStore
 
 
 IMAGE = "sha256:" + "a" * 64
+
+
+def _test_runtime_config(config: StewardConfig, task_id: str, suffix: str) -> TaskContainerConfig:
+    root = config.private_dir / "test-runtimes" / f"{task_id}-{suffix}"
+    paths = {
+        name: root / name
+        for name in ("archive", "sessions", "git", "common", "scratch")
+    }
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return TaskContainerConfig(
+        task_id=task_id,
+        image="coquic-steward-task",
+        image_digest=IMAGE,
+        worktree=config.repo_root,
+        archive=paths["archive"],
+        private_sessions=paths["sessions"],
+        git_dir=paths["git"],
+        git_common_dir=paths["common"],
+        repo_root=config.repo_root,
+        scratch=paths["scratch"],
+    )
 
 
 class _TestAWSHTTPConnection(AWSHTTPConnection):
@@ -2104,15 +2133,27 @@ def test_shutdown_after_planner_claim_prevents_launch_and_preserves_signal(
     store = TaskStore(config.db_path)
     item = _planner_signal(store, "claim-window-interrupt")
 
-    class RecordingInvoker:
+    class RecordingInvoker(LocalSessionInvoker):
         def __init__(self):
+            super().__init__()
             self.requests: list[object] = []
             self.interrupt_calls: list[bool] = []
 
         def interrupt(self, *, force=False):
             self.interrupt_calls.append(force)
 
-        def invoke(self, request, **_kwargs):
+        def invoke(
+            self,
+            request,
+            *,
+            api_key,
+            append,
+            observe=None,
+            on_started=None,
+            timeout_seconds,
+            interrupt_grace_seconds,
+            launch_gate=None,
+        ):
             self.requests.append(request)
             return InvocationOutcome(
                 exit_code=0,
@@ -2887,7 +2928,7 @@ def test_fresh_recovery_lineage_is_durable_before_process_returns(
     supervisor = SessionSupervisor(
         config,
         store,
-        invoker=object(),
+        invoker=LocalSessionInvoker(),
         image_digest=IMAGE,
         codex_identity="codex-test",
     )
@@ -2948,7 +2989,7 @@ def test_resume_rejects_worktree_mutation_after_interruption(config):
     supervisor = SessionSupervisor(
         config,
         store,
-        invoker=object(),
+        invoker=LocalSessionInvoker(),
         image_digest=IMAGE,
         codex_identity="codex-test",
     )
@@ -3185,13 +3226,29 @@ def test_shutdown_interrupted_implementation_preserves_restart_state(config):
     task.worktree_path = config.repo_root
     store.save(task)
 
-    class InterruptedRunner:
+    class InterruptedRunner(CodexRunner):
+        def __init__(self):
+            super().__init__(config)
+
         def paths(self, task, *, name="worker"):
             root = config.logs_dir / task.id / name
             return root / "codex.jsonl", root / "last-message.md"
 
-        def run(self, task, _prompt, cwd, **_kwargs):
-            transcript, message = self.paths(task)
+        def run(
+            self,
+            task,
+            _prompt,
+            cwd,
+            *,
+            name="worker",
+            output_schema=None,
+            resume_session=None,
+            stage=CodexStage.code,
+            sandbox=None,
+            task_role=None,
+            idempotency_key=None,
+        ):
+            transcript, message = self.paths(task, name=name)
             transcript.parent.mkdir(parents=True, exist_ok=True)
             transcript.write_text("{}\n", encoding="utf-8")
             message.write_text("interrupted\n", encoding="utf-8")
@@ -3510,17 +3567,27 @@ def test_shutdown_discovers_and_stops_uncached_owned_container(config):
         json.dumps({"taskId": "different-task"}), encoding="utf-8"
     )
 
-    class ExistingRuntime:
+    class ExistingRuntime(TaskContainerRuntime):
         def __init__(self):
+            super().__init__(
+                _test_runtime_config(config, task.id, "uncached-owned"),
+                client=SubprocessDockerClient(),
+            )
             self.running = True
             self.stop_calls = 0
 
-        def stop(self, *, timeout=None):
+        def stop(self, container_id=None, *, timeout=None):
             self.stop_calls += 1
             self.running = False
 
         def inspect(self):
-            return SimpleNamespace(running=self.running)
+            return ContainerInspection(
+                container_id=self.config.container_name,
+                name=self.config.container_name,
+                state="running" if self.running else "exited",
+                running=self.running,
+                labels=self.config.labels,
+            )
 
     runtime = ExistingRuntime()
     supervisor = SessionSupervisor(
@@ -3591,17 +3658,27 @@ def test_shutdown_skips_uncached_cleaned_terminal_container(
 
     factory_calls = []
 
-    class RecreatedRuntime:
+    class RecreatedRuntime(TaskContainerRuntime):
         def __init__(self):
+            super().__init__(
+                _test_runtime_config(config, task.id, "cleaned-terminal"),
+                client=SubprocessDockerClient(),
+            )
             self.running = True
             self.stop_calls = 0
 
-        def stop(self, *, timeout=None):
+        def stop(self, container_id=None, *, timeout=None):
             self.stop_calls += 1
             self.running = False
 
         def inspect(self):
-            return SimpleNamespace(running=self.running)
+            return ContainerInspection(
+                container_id=self.config.container_name,
+                name=self.config.container_name,
+                state="running" if self.running else "exited",
+                running=self.running,
+                labels=self.config.labels,
+            )
 
     runtime = RecreatedRuntime()
 
@@ -3642,17 +3719,27 @@ def test_shutdown_discovers_terminal_container_without_cleanup_proof(config):
 
     factory_calls = []
 
-    class ExistingRuntime:
+    class ExistingRuntime(TaskContainerRuntime):
         def __init__(self):
+            super().__init__(
+                _test_runtime_config(config, task.id, "unproven-terminal"),
+                client=SubprocessDockerClient(),
+            )
             self.running = True
             self.stop_calls = 0
 
-        def stop(self, *, timeout=None):
+        def stop(self, container_id=None, *, timeout=None):
             self.stop_calls += 1
             self.running = False
 
         def inspect(self):
-            return SimpleNamespace(running=self.running)
+            return ContainerInspection(
+                container_id=self.config.container_name,
+                name=self.config.container_name,
+                state="running" if self.running else "exited",
+                running=self.running,
+                labels=self.config.labels,
+            )
 
     runtime = ExistingRuntime()
 
@@ -3750,14 +3837,14 @@ def test_recovery_does_not_adopt_before_wrapper_is_published(config):
     store = TaskStore(config.db_path)
     task, pipeline, predecessor = _interrupted_run(config, store)
 
-    class SlowRuntime:
+    class SlowRuntime(TaskContainerRuntime):
         def __init__(self):
+            super().__init__(
+                _test_runtime_config(config, task.id, "slow-launch"),
+                client=SubprocessDockerClient(),
+            )
             self.entered = threading.Event()
             self.release = threading.Event()
-            self.config = SimpleNamespace(
-                container_name="steward-test",
-                container_path=lambda path, _role: path,
-            )
 
         def ensure_started(self):
             self.entered.set()
@@ -3765,7 +3852,13 @@ def test_recovery_does_not_adopt_before_wrapper_is_published(config):
             raise RuntimeError("launch stopped before wrapper creation")
 
         def inspect(self):
-            return SimpleNamespace(running=True, container_id="container-test")
+            return ContainerInspection(
+                container_id=self.config.container_name,
+                name=self.config.container_name,
+                state="running",
+                running=True,
+                labels=self.config.labels,
+            )
 
     runtime = SlowRuntime()
     supervisor = SessionSupervisor(
@@ -4146,8 +4239,15 @@ def test_terminal_container_remove_requires_stopped_identity(config):
     runtime_config.private_sessions.mkdir(parents=True, exist_ok=True)
     calls = []
 
-    class Client:
-        def run(self, argv, **_kwargs):
+    class Client(SubprocessDockerClient):
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
             calls.append(argv)
             if argv[0] == "inspect":
                 value = {

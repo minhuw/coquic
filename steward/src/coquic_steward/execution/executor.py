@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -73,6 +74,7 @@ from .implementation_plan import (
 from . import validation as validation_module
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
+from .container import SubprocessDockerClient, TaskContainerRuntime, ValidationContainerRuntime
 from .session import (
     InvocationStatus,
     SessionResult,
@@ -109,10 +111,10 @@ PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS = 30.0
 
 
-class _BoundedDockerClient:
+class _BoundedDockerClient(SubprocessDockerClient):
     """Apply the validation cap while retaining the runtime's boundary checks."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: SubprocessDockerClient) -> None:
         self._client = client
 
     def run(
@@ -122,7 +124,7 @@ class _BoundedDockerClient:
         input: bytes | None = None,
         timeout: float | None = None,
         max_output_bytes: int | None = None,
-    ) -> Any:
+    ) -> subprocess.CompletedProcess[bytes]:
         return self._client.run(
             argv,
             input=input,
@@ -130,16 +132,15 @@ class _BoundedDockerClient:
             max_output_bytes=validation_module.MAX_VALIDATION_OUTPUT_BYTES,
         )
 
-    def popen(self, argv: list[str]) -> Any:
+    def popen(self, argv: list[str]) -> subprocess.Popen[bytes]:
         return self._client.popen(argv)
 
 
 def _run_with_bounded_container_capture(
-    runtime: Any, operation: Callable[[], Any]
+    runtime: TaskContainerRuntime | ValidationContainerRuntime,
+    operation: Callable[[], Any],
 ) -> Any:
-    client = getattr(runtime, "client", None)
-    if client is None or not callable(getattr(client, "run", None)):
-        return operation()
+    client = runtime.client
     bounded_client = _BoundedDockerClient(client)
     runtime.client = bounded_client
     try:
@@ -153,6 +154,26 @@ class PublicationPreflightClean:
     """Transport-free clean result for a publication-disabled preflight."""
 
     status: str = field(init=False, default="clean")
+
+
+class _ValidationCommandRunner:
+    """Concrete command boundary with explicit lifecycle cleanup."""
+
+    def __init__(
+        self,
+        execute: Callable[[list[str], Path, float], CommandResult],
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
+        self._execute = execute
+        self._cleanup = cleanup or (lambda: None)
+
+    def __call__(
+        self, command: list[str], cwd: Path, timeout: float
+    ) -> CommandResult:
+        return self._execute(command, cwd, timeout)
+
+    def cleanup(self) -> None:
+        self._cleanup()
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _GTEST_DURATION_RE = re.compile(
@@ -274,9 +295,9 @@ class _SessionRunnerAdapter:
                 else ""
             ),
             thread_id=result.provider_session_id,
-            session_id=getattr(result, "session_id", None),
-            run_id=getattr(result, "run_id", None),
-            pipeline_id=getattr(result, "pipeline_id", None),
+            session_id=result.session_id,
+            run_id=result.run_id,
+            pipeline_id=result.pipeline_id,
             stage=stage,
             model=settings.model,
             reasoning_effort=settings.reasoning_effort,
@@ -327,7 +348,7 @@ class StewardExecutor:
         store: TaskStore,
         *,
         session_supervisor: SessionSupervisor | None = None,
-        runner: CodexRunner | None = None,
+        runner: CodexRunner | _SessionRunnerAdapter | None = None,
     ):
         self.config = config
         self.store = store
@@ -1560,21 +1581,12 @@ class StewardExecutor:
         )
         self._archive_write(task, pipeline, f"phases/{phase.value}-{_safe_filename(selected_action)}-output.json", output.as_dict())
         if next_phase != phase:
-            try:
-                self.store.transition_pipeline(
-                    pipeline.id,
-                    PipelineState.active.value,
-                    expected_state=PipelineState.active.value,
-                    phase=coarse_phase(next_phase).value,
-                )
-            except (TypeError, ValueError):
-                # A narrow fake store used by unit tests may expose only the
-                # basic transition signature; the event remains authoritative.
-                self.store.transition_pipeline(
-                    pipeline.id,
-                    PipelineState.active.value,
-                    phase=coarse_phase(next_phase).value,
-                )
+            self.store.transition_pipeline(
+                pipeline.id,
+                PipelineState.active.value,
+                expected_state=PipelineState.active.value,
+                phase=coarse_phase(next_phase).value,
+            )
         return AdvanceResult(
             task.id,
             pipeline.id,
@@ -1788,15 +1800,32 @@ class StewardExecutor:
             raise RuntimeError(f"durable worktree is unavailable: {path}")
         return path
 
-    def _durable_runner(self, task: TaskRecord, prompt: str, cwd: Path, **kwargs: Any) -> WorkerResult:
-        try:
-            return self.runner.run(task, prompt, cwd, **kwargs)
-        except TypeError as exc:
-            unsupported = {"idempotency_key", "task_role"}
-            if not any(name in str(exc) for name in unsupported):
-                raise
-            kwargs = {key: value for key, value in kwargs.items() if key not in unsupported}
-            return self.runner.run(task, prompt, cwd, **kwargs)
+    def _durable_runner(
+        self,
+        task: TaskRecord,
+        prompt: str,
+        cwd: Path,
+        *,
+        name: str = "worker",
+        output_schema: Path | None = None,
+        resume_session: str | None = None,
+        stage: CodexStage = CodexStage.code,
+        sandbox: str | None = None,
+        task_role: TaskRole | str | None = None,
+        idempotency_key: str | None = None,
+    ) -> WorkerResult:
+        return self.runner.run(
+            task,
+            prompt,
+            cwd,
+            name=name,
+            output_schema=output_schema,
+            resume_session=resume_session,
+            stage=stage,
+            sandbox=sandbox,
+            task_role=task_role,
+            idempotency_key=idempotency_key,
+        )
 
     def _implementation_prompt(self, task: TaskRecord, pipeline: Any) -> str:
         plan = self._latest_plan(task.id, pipeline.id)
@@ -2036,9 +2065,9 @@ class StewardExecutor:
 
     def _container_validation_runner(
         self, task: TaskRecord, pipeline: Any
-    ) -> Callable[[list[str], Path, float], CommandResult]:
-        validation_digest = getattr(self.config, "validation_image_digest", None)
-        if validation_digest and getattr(self.config, "validation_runtime", "") == "validation-container-v1":
+    ) -> _ValidationCommandRunner:
+        validation_digest = self.config.validation_image_digest
+        if validation_digest and self.config.validation_runtime == "validation-container-v1":
             return self._isolated_validation_runner(task, pipeline, validation_digest)
         if self.session_supervisor is None:
             raise RuntimeError("durable validation requires a task container")
@@ -2047,10 +2076,10 @@ class StewardExecutor:
             raise RuntimeError("durable validation has no task container runtime")
         runtime.ensure_started()
         role = TaskRole.validation
-        scratch = getattr(runtime.config, "scratch", None)
+        scratch = runtime.config.scratch
         if scratch is None:
             raise RuntimeError("validation role requires task scratch storage")
-        scratch_path = Path(scratch) / "validation" / pipeline.id
+        scratch_path = scratch / "validation" / pipeline.id
         object_directory = scratch_path / "objects"
         object_directory.mkdir(parents=True, exist_ok=True)
         alternate = Path(runtime.config.git_common_dir) / "objects"
@@ -2060,11 +2089,11 @@ class StewardExecutor:
         session_uid = 10_000 + int(
             sha256(task.id.encode()).hexdigest()[:8], 16
         ) % 50_001
-        validation_gid = getattr(runtime.config, "validation_gid", session_uid)
-        validation_home = getattr(runtime.config, "private_sessions", None)
+        validation_gid = runtime.config.validation_gid
+        validation_home = runtime.config.private_sessions
         writable_paths = [scratch_path, object_directory]
         if validation_home is not None:
-            home = Path(validation_home) / session_id
+            home = validation_home / session_id
             home.mkdir(parents=True, exist_ok=True)
             writable_paths.append(home)
         for path in writable_paths:
@@ -2101,11 +2130,11 @@ class StewardExecutor:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
-        return execute
+        return _ValidationCommandRunner(execute)
 
     def _isolated_validation_runner(
         self, task: TaskRecord, pipeline: Any, image_digest: str
-    ) -> Callable[[list[str], Path, float], CommandResult]:
+    ) -> _ValidationCommandRunner:
         """Create one disposable validation sibling and route every gate through it."""
         from .container import ValidationContainerRuntime
         from .container_config import ContainerLimits, ValidationContainerConfig
@@ -2225,8 +2254,7 @@ class StewardExecutor:
                 stderr=result.stderr.decode("utf-8", errors="replace"),
             )
 
-        setattr(execute, "cleanup", cleanup)
-        return execute
+        return _ValidationCommandRunner(execute, cleanup)
 
     def _remove_validation_root(self, record: dict[str, object]) -> None:
         task_id = str(record["task_id"])
@@ -2330,15 +2358,10 @@ class StewardExecutor:
     def retry_validation_cleanup_pending(self) -> int:
         """Retry ready or previous-daemon validation cleanup records."""
 
-        pending_provider = getattr(self.store, "list_validation_cleanup_pending", None)
-        if not callable(pending_provider):
-            return 0
-        daemon_state_provider = getattr(self.store, "get_daemon_state", None)
-        daemon_state = daemon_state_provider() if callable(daemon_state_provider) else {}
-        daemon_state = daemon_state or {}
+        daemon_state = self.store.get_daemon_state() or {}
         current_instance = str(daemon_state.get("instance_id") or "standalone")
         completed = 0
-        for record in pending_provider():
+        for record in self.store.list_validation_cleanup_pending():
             if (
                 not bool(record["cleanup_ready"])
                 and record["owner_instance_id"] == current_instance
@@ -3851,59 +3874,23 @@ class StewardExecutor:
                 },
             )
 
-        gate_kwargs: dict[str, object] = {
-            "label": label,
-            "on_gate_start": on_gate_start,
-            "on_gate_result": on_gate_result,
-        }
-        if command_runner is not None:
-            gate_kwargs["command_runner"] = command_runner
-        compatibility_fallback = False
         try:
-            while True:
-                try:
-                    validations = run_gates(
-                        self.config,
-                        task_id,
-                        worktree,
-                        **gate_kwargs,
-                    )
-                    break
-                except TypeError as exc:
-                    message = str(exc)
-                    unsupported = next(
-                        (
-                            name
-                            for name in (
-                                "command_runner",
-                                "on_gate_start",
-                                "on_gate_result",
-                                "label",
-                            )
-                            if name in message
-                        ),
-                        None,
-                    )
-                    if unsupported is None:
-                        raise
-                    compatibility_fallback = True
-                    gate_kwargs.pop(unsupported, None)
-                    if not gate_kwargs:
-                        validations = run_gates(self.config, task_id, worktree)
-                        break
-            validations = [
+            validations = run_gates(
+                self.config,
+                task_id,
+                worktree,
+                label=label,
+                on_gate_start=on_gate_start,
+                on_gate_result=on_gate_result,
+                command_runner=command_runner,
+            )
+            return [
                 validation.model_copy(update={"iteration": iteration})
                 for validation in validations
             ]
-            if compatibility_fallback:
-                self.store.record_iteration_validations(
-                    task_id, iteration, validations
-                )
-            return validations
         finally:
-            cleanup = getattr(command_runner, "cleanup", None)
-            if callable(cleanup):
-                cleanup()
+            if command_runner is not None:
+                command_runner.cleanup()
 
     def _handle_integration_validation_failure(
         self,
@@ -4825,11 +4812,14 @@ def _publication_credential_sources(publication: object) -> tuple[object, ...]:
         if enabled:
             sources.append(value)
             continue
-        try:
-            present = Path(value).exists()
-        except (OSError, TypeError, ValueError):
+        if not isinstance(value, (str, bytes, os.PathLike)):
             # Preserve malformed values so the scanner fails closed rather
             # than silently accepting an invalid configured source.
+            sources.append(value)
+            continue
+        try:
+            present = Path(value).exists()
+        except (OSError, ValueError):
             sources.append(value)
             continue
         if present:

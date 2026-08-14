@@ -88,6 +88,8 @@ class CodexRunner:
         resume_session: str | None = None,
         stage: CodexStage = CodexStage.code,
         sandbox: str | None = None,
+        task_role: str | None = None,
+        idempotency_key: str | None = None,
     ) -> WorkerResult:
         stage = CodexStage(stage)
         transcript_path, last_message_path = self.paths(task, name=name)
@@ -344,7 +346,7 @@ class CodexRunner:
                     value = json.loads(capture_summary.read_text(encoding="utf-8"))
                     if isinstance(value, dict):
                         diagnostics_json["tool_change_capture"] = _bounded_capture_diagnostics(value)
-            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
                 diagnostics_json["tool_change_capture"] = {
                     "schema_version": 1,
                     "state": "unavailable",
@@ -1020,7 +1022,7 @@ def _communicate_streaming(
                         if dispatcher is not None:
                             try:
                                 decoded = json.loads(line)
-                            except (json.JSONDecodeError, TypeError, ValueError):
+                            except (json.JSONDecodeError, ValueError):
                                 decoded = None
                                 if malformed_observer is not None:
                                     try:

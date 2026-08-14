@@ -28,17 +28,19 @@ from coquic_steward.execution import ResumeCategory, SessionSupervisor
 from coquic_steward.execution.container import (
     ContainerInspection,
     ExecIdentity,
+    SubprocessDockerClient,
     TaskContainerRuntime,
 )
 from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
-from coquic_steward.execution.session import runtime_factory_for_config
+from coquic_steward.execution.session import LocalSessionInvoker, runtime_factory_for_config
 from coquic_steward.planning.planner import CodexPlanner
 from coquic_steward.storage import TaskStore
 
 
-class FakeInvoker:
+class FakeInvoker(LocalSessionInvoker):
     def __init__(self) -> None:
+        super().__init__()
         self.requests = []
 
     def invoke(
@@ -51,6 +53,7 @@ class FakeInvoker:
         on_started,
         timeout_seconds,
         interrupt_grace_seconds,
+        launch_gate=None,
     ):
         assert api_key == "fake-key"
         self.requests.append(request)
@@ -81,6 +84,7 @@ class InterruptedInvoker(FakeInvoker):
         on_started,
         timeout_seconds,
         interrupt_grace_seconds,
+        launch_gate=None,
     ):
         outcome = super().invoke(
             request,
@@ -90,6 +94,7 @@ class InterruptedInvoker(FakeInvoker):
             on_started=on_started,
             timeout_seconds=timeout_seconds,
             interrupt_grace_seconds=interrupt_grace_seconds,
+            launch_gate=launch_gate,
         )
         return InvocationOutcome(
             exit_code=130,
@@ -227,7 +232,27 @@ def test_runtime_factory_is_scoped_per_task(config: StewardConfig) -> None:
     created = []
 
     def factory(task):
-        runtime = object()
+        root = config.private_dir / "runtime-factory" / task.id
+        roots = {
+            name: root / name
+            for name in ("archive", "sessions", "git", "common", "scratch")
+        }
+        for path in roots.values():
+            path.mkdir(parents=True, exist_ok=True)
+        runtime = TaskContainerRuntime(
+            TaskContainerConfig(
+                task_id=task.id,
+                image="coquic-steward-task",
+                image_digest="sha256:" + "a" * 64,
+                worktree=config.repo_root,
+                archive=roots["archive"],
+                private_sessions=roots["sessions"],
+                git_dir=roots["git"],
+                git_common_dir=roots["common"],
+                scratch=roots["scratch"],
+            ),
+            client=SubprocessDockerClient(),
+        )
         created.append((task.id, runtime))
         return runtime
 
@@ -298,10 +323,27 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
     )
     store.update_run(run.id, wrapper_pid=4321, exec_identity="docker-exec-one")
 
-    class RecoverableRuntime:
+    class RecoverableRuntime(TaskContainerRuntime):
         def __init__(self) -> None:
-            self.config = SimpleNamespace(
-                container_name=f"coquic-steward-task-{task.id}"
+            roots = {
+                name: config.private_dir / "recoverable-runtime" / name
+                for name in ("archive", "sessions", "git", "common", "scratch")
+            }
+            for path in roots.values():
+                path.mkdir(parents=True, exist_ok=True)
+            super().__init__(
+                TaskContainerConfig(
+                    task_id=task.id,
+                    image="coquic-steward-task",
+                    image_digest="sha256:" + "a" * 64,
+                    worktree=config.repo_root,
+                    archive=roots["archive"],
+                    private_sessions=roots["sessions"],
+                    git_dir=roots["git"],
+                    git_common_dir=roots["common"],
+                    scratch=roots["scratch"],
+                ),
+                client=SubprocessDockerClient(),
             )
             self.probed = None
             self.live = True
@@ -328,7 +370,7 @@ def test_inspect_and_interrupt_recover_persisted_container_identity(
             if sig == signal.SIGKILL:
                 self.live = False
 
-        def stop(self, *args, **kwargs):
+        def stop(self, container_id=None, *, timeout=None):
             self.stopped = True
 
     created = []
@@ -418,13 +460,20 @@ def test_interrupt_does_not_treat_runtime_probe_failure_as_process_exit(
     )
     store.update_run(run.id, wrapper_pid=4321, exec_identity="docker-exec-one")
 
-    class TransientDockerFailure:
+    class TransientDockerFailure(SubprocessDockerClient):
         def __init__(self) -> None:
             self.live = True
             self.signals: list[int] = []
             self.live_when_probe_failed = False
 
-        def run(self, argv, **_kwargs):
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
             signal_value = int(
                 next(
                     argv[index + 1].split("=", 1)[1]

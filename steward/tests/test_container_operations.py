@@ -16,6 +16,9 @@ from coquic_steward.core.subprocesses import CommandResult
 from coquic_steward.execution.container import (
     ContainerBoundaryError,
     ContainerErrorCategory,
+    ExecIdentity,
+    ExecResult,
+    SubprocessDockerClient,
     TaskContainerRuntime,
     ValidationContainerRuntime,
     bind_deployment_identity,
@@ -27,6 +30,7 @@ from coquic_steward.execution.container_config import (
 )
 from coquic_steward.execution.container_config import ValidationContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
+from coquic_steward.execution.session import SessionSupervisor
 from coquic_steward.execution.validation import (
     MAX_VALIDATION_OUTPUT_BYTES,
     _docker_validation_runner,
@@ -170,11 +174,18 @@ def test_validation_container_refuses_same_name_foreign_image(tmp_path: Path) ->
     payload = _validation_inspection(config)
     payload["Image"] = "sha256:" + "f" * 64
 
-    class ForeignDocker:
+    class ForeignDocker(SubprocessDockerClient):
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
-        def run(self, argv: list[str], **_kwargs):
+        def run(
+            self,
+            argv: list[str],
+            *,
+            input: bytes | None = None,
+            timeout: float | None = None,
+            max_output_bytes: int | None = None,
+        ):
             self.calls.append(argv)
             return subprocess.CompletedProcess(
                 argv, 0, json.dumps(payload).encode(), b""
@@ -207,8 +218,15 @@ def test_validation_container_refuses_same_image_with_foreign_runtime(
     payload = _validation_inspection(config)
     payload["HostConfig"]["Memory"] = config.limits.memory_bytes // 2
 
-    class ForeignDocker:
-        def run(self, argv: list[str], **_kwargs):
+    class ForeignDocker(SubprocessDockerClient):
+        def run(
+            self,
+            argv: list[str],
+            *,
+            input: bytes | None = None,
+            timeout: float | None = None,
+            max_output_bytes: int | None = None,
+        ):
             return subprocess.CompletedProcess(
                 argv, 0, json.dumps(payload).encode(), b""
             )
@@ -234,8 +252,15 @@ def test_validation_exec_returns_the_canonical_gate_exit_code(tmp_path: Path) ->
         store=paths[2],
     )
 
-    class NonzeroGateDocker:
-        def run(self, argv: list[str], **_kwargs):
+    class NonzeroGateDocker(SubprocessDockerClient):
+        def run(
+            self,
+            argv: list[str],
+            *,
+            input: bytes | None = None,
+            timeout: float | None = None,
+            max_output_bytes: int | None = None,
+        ):
             return subprocess.CompletedProcess(argv, 23, b"gate output", b"gate failed")
 
     result = ValidationContainerRuntime(
@@ -260,11 +285,18 @@ def test_validation_container_waits_for_entrypoint_readiness(tmp_path: Path) -> 
         store=paths[2],
     )
 
-    class RecordingDocker:
+    class RecordingDocker(SubprocessDockerClient):
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
 
-        def run(self, argv: list[str], **_kwargs):
+        def run(
+            self,
+            argv: list[str],
+            *,
+            input: bytes | None = None,
+            timeout: float | None = None,
+            max_output_bytes: int | None = None,
+        ):
             self.calls.append(argv)
             if argv[0] == "inspect":
                 return subprocess.CompletedProcess(argv, 1, b"", b"No such container")
@@ -373,12 +405,28 @@ def test_direct_validation_runner_uses_bootstrap_and_writable_nix_boundary(
     )
     argv_calls: list[tuple[list[str], dict[str, object]]] = []
 
-    class RecordingDockerClient:
+    class RecordingDockerClient(SubprocessDockerClient):
         def __init__(self, _docker_bin):
             pass
 
-        def run(self, argv, **kwargs):
-            argv_calls.append((argv, kwargs))
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
+            argv_calls.append(
+                (
+                    argv,
+                    {
+                        "input": input,
+                        "timeout": timeout,
+                        "max_output_bytes": max_output_bytes,
+                    },
+                )
+            )
             return subprocess.CompletedProcess(
                 argv, 17, b"", b"canonical gate failed"
             )
@@ -415,14 +463,28 @@ def test_direct_validation_runner_bounds_dual_stream_output_and_timeout(
     )
     clients = []
 
-    class RecordingDockerClient:
+    class RecordingDockerClient(SubprocessDockerClient):
         def __init__(self, _docker_bin):
             self.calls: list[dict[str, object]] = []
             clients.append(self)
 
-        def run(self, argv, **kwargs):
-            self.calls.append({"argv": argv, **kwargs})
-            limit = kwargs["max_output_bytes"]
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
+            self.calls.append(
+                {
+                    "argv": argv,
+                    "input": input,
+                    "timeout": timeout,
+                    "max_output_bytes": max_output_bytes,
+                }
+            )
+            limit = max_output_bytes
             return subprocess.CompletedProcess(
                 argv,
                 23,
@@ -452,12 +514,19 @@ def test_direct_validation_runner_bounds_dual_stream_output_and_timeout(
     assert clients[0].calls[-1]["max_output_bytes"] == MAX_VALIDATION_OUTPUT_BYTES
     _assert_bounded_validation_artifact(result, expected_exit_code=23)
 
-    class TimeoutDockerClient:
+    class TimeoutDockerClient(SubprocessDockerClient):
         def __init__(self, _docker_bin):
             pass
 
-        def run(self, argv, **kwargs):
-            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
+            raise subprocess.TimeoutExpired(argv, timeout)
 
     monkeypatch.setattr(
         "coquic_steward.execution.validation.SubprocessDockerClient",
@@ -493,12 +562,26 @@ def test_task_container_validation_runner_propagates_cap_and_statuses(
         scratch=roots["scratch"],
     )
 
-    class RecordingClient:
+    class RecordingClient(SubprocessDockerClient):
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
-        def run(self, argv, **kwargs):
-            self.calls.append({"argv": argv, **kwargs})
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
+            self.calls.append(
+                {
+                    "argv": argv,
+                    "input": input,
+                    "timeout": timeout,
+                    "max_output_bytes": max_output_bytes,
+                }
+            )
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -506,31 +589,36 @@ def test_task_container_validation_runner_propagates_cap_and_statuses(
                 b"stderr:" + b"e" * (MAX_VALIDATION_OUTPUT_BYTES + 128),
             )
 
-    class RecordingRuntime:
+    class RecordingRuntime(TaskContainerRuntime):
         def __init__(self) -> None:
-            self.config = task_config
-            self.client = RecordingClient()
+            super().__init__(task_config, client=RecordingClient())
             self.exit_code = 17
 
         def ensure_started(self) -> str:
             return self.config.container_name
 
-        def exec(self, _role, *, command, timeout, **_kwargs):
+        def exec(
+            self,
+            role,
+            *,
+            session_uid,
+            session_id,
+            command,
+            env=None,
+            workdir=None,
+            timeout=None,
+        ) -> ExecResult:
             captured = self.client.run(command, timeout=timeout)
-            return SimpleNamespace(
-                exit_code=self.exit_code,
-                stdout=captured.stdout,
-                stderr=captured.stderr,
+            return ExecResult(
+                ExecIdentity(self.config.container_name, "validation-exec", 4321, session_uid),
+                self.exit_code,
+                captured.stdout,
+                captured.stderr,
             )
 
     runtime = RecordingRuntime()
-
-    class RecordingSupervisor:
-        def _boundary_for(self, _task):
-            return runtime, None
-
     executor = StewardExecutor(
-        config, store, session_supervisor=RecordingSupervisor()
+        config, store, session_supervisor=SessionSupervisor(config, store, runtime=runtime)
     )
     runner = executor._container_validation_runner(task, pipeline)
     for exit_code in (17, 124):
@@ -556,34 +644,48 @@ def test_isolated_validation_runner_propagates_cap_and_statuses(
     digest = "sha256:" + "b" * 64
     runtimes = []
 
-    class RecordingRuntime:
-        def __init__(self, runtime_config, **_kwargs) -> None:
-            self.config = runtime_config
-            self.client = RecordingClient()
+    class RecordingRuntime(ValidationContainerRuntime):
+        def __init__(self, runtime_config, *, docker_bin="docker") -> None:
+            super().__init__(runtime_config, client=RecordingClient(), docker_bin=docker_bin)
             self.exit_code = 23
             self.cleaned = False
             runtimes.append(self)
 
         def ensure_started(self) -> str:
-            return "d" * 64
+            return self.config.container_name
 
-        def exec(self, command, *, timeout, **_kwargs):
+        def exec(self, command, *, workdir="/validation/worktree", timeout=None):
             captured = self.client.run(command, timeout=timeout)
-            return SimpleNamespace(
-                exit_code=self.exit_code,
-                stdout=captured.stdout,
-                stderr=captured.stderr,
+            return ExecResult(
+                ExecIdentity(self.config.container_name, "validation-exec", 4321, self.config.uid),
+                self.exit_code,
+                captured.stdout,
+                captured.stderr,
             )
 
         def cleanup_owned(self, *, timeout=5) -> None:
             self.cleaned = True
 
-    class RecordingClient:
+    class RecordingClient(SubprocessDockerClient):
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
-        def run(self, argv, **kwargs):
-            self.calls.append({"argv": argv, **kwargs})
+        def run(
+            self,
+            argv,
+            *,
+            input=None,
+            timeout=None,
+            max_output_bytes=None,
+        ):
+            self.calls.append(
+                {
+                    "argv": argv,
+                    "input": input,
+                    "timeout": timeout,
+                    "max_output_bytes": max_output_bytes,
+                }
+            )
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -657,9 +759,9 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     cleaned: list[str] = []
     runtime_configs: list[ValidationContainerConfig] = []
 
-    class RecordingValidationRuntime:
-        def __init__(self, runtime_config, **_kwargs) -> None:
-            self.config = runtime_config
+    class RecordingValidationRuntime(ValidationContainerRuntime):
+        def __init__(self, runtime_config, *, docker_bin="docker") -> None:
+            super().__init__(runtime_config, docker_bin=docker_bin)
             runtime_configs.append(runtime_config)
 
         def ensure_started(self) -> str:

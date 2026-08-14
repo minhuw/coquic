@@ -30,11 +30,18 @@ from coquic_steward.execution.executor import _SessionRunnerAdapter
 from coquic_steward.storage import TaskStore
 
 
-class FakeDocker:
+class FakeDocker(SubprocessDockerClient):
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
-    def run(self, argv: list[str], **_kwargs):
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: bytes | None = None,
+        timeout: float | None = None,
+        max_output_bytes: int | None = None,
+    ):
         self.calls.append(argv)
         if argv[0] == "create":
             return subprocess.CompletedProcess(argv, 0, b"container-id\n", b"")
@@ -254,7 +261,14 @@ def test_create_persists_every_configured_label_for_restart_adoption(
             self.created = False
             self.labels: dict[str, str] = {}
 
-        def run(self, argv: list[str], **_kwargs):
+        def run(
+            self,
+            argv: list[str],
+            *,
+            input: bytes | None = None,
+            timeout: float | None = None,
+            max_output_bytes: int | None = None,
+        ):
             self.calls.append(argv)
             if argv[0] == "inspect" and not self.created:
                 return subprocess.CompletedProcess(
@@ -307,6 +321,9 @@ def test_commit_message_stage_reaches_wrapper_without_worktree_group(
                 transcript_path=config.private_dir / "commit-message.jsonl",
                 last_message_path=last_message,
                 provider_session_id=None,
+                session_id="commit-message-session",
+                run_id="commit-message-run",
+                pipeline_id=store.list_pipelines(task.id)[0].id,
                 diagnostics={},
             )
 
@@ -508,9 +525,9 @@ def _invocation_request(container_config: TaskContainerConfig) -> InvocationRequ
     )
 
 
-class _FailureRuntime:
+class _FailureRuntime(TaskContainerRuntime):
     def __init__(self, config: TaskContainerConfig, process: _TrackedStreamProcess):
-        self.config = config
+        super().__init__(config, client=FakeDocker())
         self.process = process
         self.container_live = True
         self.signals: list[tuple[ExecIdentity, int]] = []
@@ -519,7 +536,16 @@ class _FailureRuntime:
     def ensure_started(self):
         return None
 
-    def exec_stream(self, role, **kwargs):
+    def exec_stream(
+        self,
+        role,
+        *,
+        session_uid,
+        session_id,
+        command,
+        env=None,
+        workdir=None,
+    ):
         return self.process
 
     def signal(self, identity, sig):
@@ -527,7 +553,7 @@ class _FailureRuntime:
         self.container_live = False
         self.process.returncode = 128 + int(sig)
 
-    def stop(self):
+    def stop(self, container_id=None, *, timeout=None):
         self.stop_calls += 1
         self.container_live = False
         self.process.returncode = 137
@@ -537,7 +563,7 @@ class _FailureRuntime:
 
 
 class _StopFailureRuntime(_FailureRuntime):
-    def stop(self):
+    def stop(self, container_id=None, *, timeout=None):
         self.stop_calls += 1
         raise RuntimeError("task container stop failed")
 
@@ -546,7 +572,7 @@ class _StaleLivenessRuntime(_FailureRuntime):
     def signal(self, identity, sig):
         self.signals.append((identity, int(sig)))
 
-    def stop(self):
+    def stop(self, container_id=None, *, timeout=None):
         self.stop_calls += 1
         self.container_live = False
 
@@ -781,15 +807,31 @@ def test_container_invocation_translates_all_runtime_paths(
         "4321\n", encoding="ascii"
     )
 
-    class FakeRuntime:
-        config = container_config
+    class FakeRuntime(TaskContainerRuntime):
+        def __init__(self) -> None:
+            super().__init__(container_config, client=FakeDocker())
 
         def ensure_started(self):
             self.started = True
 
-        def exec_stream(self, role, **kwargs):
+        def exec_stream(
+            self,
+            role,
+            *,
+            session_uid,
+            session_id,
+            command,
+            env=None,
+            workdir=None,
+        ):
             self.role = role
-            self.kwargs = kwargs
+            self.kwargs = {
+                "session_uid": session_uid,
+                "session_id": session_id,
+                "command": command,
+                "env": env,
+                "workdir": workdir,
+            }
             return _FakeStreamProcess()
 
     runtime = FakeRuntime()

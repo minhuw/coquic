@@ -5458,7 +5458,10 @@ def test_executor_blocks_frozen_path_written_by_validation(
         )
     )
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         output = _config.logs_dir / task_id / (label or "validation") / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
@@ -5540,7 +5543,10 @@ def test_executor_patch_happy_path(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -5617,7 +5623,10 @@ def test_executor_marks_task_validation_running_before_gates(
 
     observed: dict[str, object] = {}
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         current = store.get(task_id)
@@ -5700,6 +5709,7 @@ def test_executor_records_validation_results_incrementally(
         label=None,
         on_gate_start=None,
         on_gate_result=None,
+        command_runner=None,
     ):
         assert label == "iteration-0"
         assert on_gate_start is not None
@@ -5942,7 +5952,10 @@ def test_executor_retries_invalid_review_output(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -6007,7 +6020,10 @@ def test_executor_accepts_approved_review_with_validation_gaps(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -6080,7 +6096,10 @@ def test_executor_push_main_queues_integration_task(
         )
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -6177,7 +6196,10 @@ def test_integration_manager_local_only_commits_without_push(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -6302,7 +6324,10 @@ def test_integration_manager_blocks_frozen_path_before_commit(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
@@ -6414,7 +6439,10 @@ def test_integration_manager_blocks_frozen_path_before_validation_repair(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("failed\n", encoding="utf-8")
@@ -6648,7 +6676,10 @@ def test_integration_manager_serializes_push_to_main(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -6799,7 +6830,10 @@ def test_integration_manager_preserves_branch_when_push_fails(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
@@ -6937,7 +6971,10 @@ def test_integration_manager_closes_feature_issue_after_push(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
@@ -7191,7 +7228,10 @@ def test_integration_manager_fails_on_invalid_commit_message(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
@@ -7320,7 +7360,10 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
     )
     subprocess.run(["git", "push", "origin", "main"], cwd=config.repo_root, check=True)
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / (label or "integration") / "fake.txt"
@@ -7619,7 +7662,10 @@ def test_integration_validation_failure_returns_to_worker_then_queues_retry(
     )
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
 
         gate_runs += 1
@@ -7736,7 +7782,10 @@ def test_integration_manager_records_commit_failure_without_crashing(
         dedupe_key=f"integration:{source.id}",
     )
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / "fake.txt"
@@ -7822,7 +7871,10 @@ def test_executor_routes_blocking_review_back_to_worker_session(
     )
     fake.chmod(0o755)
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         from coquic_steward.core.models import ValidationResult
 
         output = _config.logs_dir / task_id / f"fake-{len(store.get(task_id).validations)}.txt"
@@ -7901,7 +7953,10 @@ def test_executor_persists_iterations_as_first_class_records(
 
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
         from coquic_steward.core.models import ValidationResult
 
@@ -7909,15 +7964,18 @@ def test_executor_persists_iterations_as_first_class_records(
         output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(f"gate {gate_runs}\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"],
-                cwd=cwd,
-                passed=True,
-                exit_code=0,
-                output_path=output,
-            )
-        ]
+        validation = ValidationResult(
+            command=["fake"],
+            cwd=cwd,
+            passed=True,
+            exit_code=0,
+            output_path=output,
+        )
+        if on_gate_start is not None:
+            on_gate_start(0, output.name, validation.command)
+        if on_gate_result is not None:
+            on_gate_result(0, validation)
+        return [validation]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
 
@@ -7993,7 +8051,10 @@ def test_executor_routes_validation_failure_back_to_worker_session(
 
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
         from coquic_steward.core.models import ValidationResult
 
@@ -8076,7 +8137,10 @@ def test_executor_blocks_unchanged_validation_revision(
 
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
         gate_runs += 1
         output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
@@ -8271,7 +8335,10 @@ def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
 
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
         gate_runs += 1
         output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
@@ -8340,7 +8407,10 @@ def test_executor_blocks_repeated_patch_and_validation_failure(
 
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd, *, label=None):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
         gate_runs += 1
         output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
@@ -8425,7 +8495,10 @@ def test_executor_uses_shared_revision_counter_for_validation_and_review(
 
     gate_runs = 0
 
-    def fake_gates(_config, task_id, cwd):
+    def fake_gates(
+        _config, task_id, cwd, *, label=None, on_gate_start=None,
+        on_gate_result=None, command_runner=None
+    ):
         nonlocal gate_runs
         from coquic_steward.core.models import ValidationResult
 

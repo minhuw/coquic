@@ -19,9 +19,12 @@ from coquic_steward.core.models import (
     SignalFetchStatus,
     SignalItem,
 )
+from coquic_steward.execution.container import PlannerContainerRuntime, SubprocessDockerClient
+from coquic_steward.execution.container_config import PlannerContainerConfig
 from coquic_steward.execution.session import (
     ContainerSessionInvoker,
     FreshPlannerSession,
+    LocalSessionInvoker,
     _InvocationLaunchGate,
 )
 from coquic_steward.planning import PlannerRun
@@ -140,10 +143,24 @@ def test_planner_prompt_boundary_contains_current_evidence_only() -> None:
 
 
 @dataclass
-class _FakeInvoker:
+class _FakeInvoker(LocalSessionInvoker):
     requests: list[object]
 
-    def invoke(self, request, **kwargs):
+    def __post_init__(self) -> None:
+        super().__init__()
+
+    def invoke(
+        self,
+        request,
+        *,
+        api_key,
+        append,
+        observe=None,
+        on_started=None,
+        timeout_seconds,
+        interrupt_grace_seconds,
+        launch_gate=None,
+    ):
         from coquic_steward.agents.invocation import InvocationOutcome
 
         self.requests.append(request)
@@ -263,21 +280,43 @@ def test_launch_gate_establishes_state_before_interrupt_check() -> None:
 
 
 def test_fresh_planner_interrupt_during_container_startup_prevents_exec(config) -> None:
-    class BarrierRuntime:
+    class BarrierRuntime(PlannerContainerRuntime):
         def __init__(self) -> None:
+            roots = {
+                "history": config.control_loop_dir / "barrier-history",
+                "private": config.private_sessions_dir / "barrier-private",
+                "output": config.private_dir / "barrier-output",
+            }
+            for root in roots.values():
+                root.mkdir(parents=True, exist_ok=True)
+            super().__init__(
+                PlannerContainerConfig(
+                    image="coquic-steward-task",
+                    image_digest="sha256:" + "a" * 64,
+                    history_root=roots["history"],
+                    private_root=roots["private"],
+                    output_root=roots["output"],
+                ),
+                client=SubprocessDockerClient(),
+            )
             self.entered = threading.Event()
             self.release = threading.Event()
             self.exec_calls = 0
-            self.config = SimpleNamespace(
-                container_name="planner-test",
-                container_path=lambda path, _role: path,
-            )
 
         def ensure_started(self) -> None:
             self.entered.set()
             assert self.release.wait(timeout=2)
 
-        def exec_stream(self, *_args, **_kwargs):
+        def exec_stream(
+            self,
+            role,
+            *,
+            session_uid,
+            session_id,
+            command,
+            env=None,
+            workdir=None,
+        ):
             self.exec_calls += 1
             raise AssertionError("planner exec launched after interruption")
 

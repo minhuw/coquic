@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import signal
+import subprocess
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -16,7 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 from ..agents.invocation import (
     InvocationOutcome,
@@ -42,6 +43,7 @@ from ..storage import TaskStore
 from .container import (
     ContainerBoundaryError,
     ContainerErrorCategory,
+    ContainerInspection,
     ExecIdentity,
     TaskContainerRuntime,
     PlannerContainerRuntime,
@@ -604,10 +606,7 @@ class FreshPlannerSession:
         )
 
     def interrupt(self, *, force: bool = False) -> None:
-        interrupt = getattr(self.invoker, "interrupt", None)
-        self._launch_gate.interrupt(
-            lambda: interrupt(force=force) if callable(interrupt) else None
-        )
+        self._launch_gate.interrupt(lambda: self.invoker.interrupt(force=force))
 
 
 def planner_session_for_config(config: StewardConfig) -> FreshPlannerSession:
@@ -694,7 +693,7 @@ class RecoveryPacket:
 class InspectionResult:
     run_id: str
     live: bool
-    container: Any = None
+    container: ContainerInspection | None = None
     identity: ExecIdentity | None = None
 
 
@@ -707,37 +706,25 @@ class InterruptionResult:
     suffix: bytes = b""
 
 
-class SessionInvoker(Protocol):
-    def invoke(
-        self,
-        request: InvocationRequest,
-        *,
-        api_key: bytes | str | None,
-        append: Any,
-        observe: Any = None,
-        on_started: Any = None,
-        timeout_seconds: float,
-        interrupt_grace_seconds: float,
-        launch_gate: _InvocationLaunchGate | None = None,
-    ) -> InvocationOutcome: ...
-
-
 class LocalSessionInvoker:
     """Explicit unit-test harness; never selected by production construction."""
 
+    def __init__(self) -> None:
+        self.process: subprocess.Popen[bytes] | None = None
+
     def invoke(
         self,
         request: InvocationRequest,
         *,
         api_key: bytes | str | None,
-        append: Any,
-        observe: Any = None,
-        on_started: Any = None,
+        append: Callable[[bytes], None],
+        observe: Callable[[dict[str, Any]], None] | None = None,
+        on_started: Callable[[ExecIdentity], None] | None = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
         launch_gate: _InvocationLaunchGate | None = None,
     ) -> InvocationOutcome:
-        def launch() -> Any:
+        def launch() -> subprocess.Popen[bytes]:
             process = launch_local(request, api_key=api_key)
             self.process = process
             if on_started is not None:
@@ -769,7 +756,7 @@ class LocalSessionInvoker:
             self.process = None
 
     def interrupt(self, *, force: bool = False) -> None:
-        process = getattr(self, "process", None)
+        process = self.process
         if process is None:
             return
         if force:
@@ -783,7 +770,7 @@ class ContainerSessionInvoker:
 
     def __init__(self, runtime: TaskContainerRuntime):
         self.runtime = runtime
-        self.process = None
+        self.process: subprocess.Popen[bytes] | _ContainerProcess | None = None
         self.identity: ExecIdentity | None = None
 
     def invoke(
@@ -791,9 +778,9 @@ class ContainerSessionInvoker:
         request: InvocationRequest,
         *,
         api_key: bytes | str | None,
-        append: Any,
-        observe: Any = None,
-        on_started: Any = None,
+        append: Callable[[bytes], None],
+        observe: Callable[[dict[str, Any]], None] | None = None,
+        on_started: Callable[[ExecIdentity], None] | None = None,
         timeout_seconds: float,
         interrupt_grace_seconds: float,
         launch_gate: _InvocationLaunchGate | None = None,
@@ -877,7 +864,7 @@ class ContainerSessionInvoker:
             self._clear_process_refs()
 
     def _cleanup_launch_failure(
-        self, process: Any, identity: ExecIdentity | None
+        self, process: subprocess.Popen[bytes], identity: ExecIdentity | None
     ) -> bool:
         """Reap failed setup and report whether its boundary was acknowledged."""
 
@@ -902,114 +889,86 @@ class ContainerSessionInvoker:
         return stopped and reaped
 
     @staticmethod
-    def _process_is_live(process: Any) -> bool:
-        poll = getattr(process, "poll", None)
-        if not callable(poll):
-            return True
+    def _process_is_live(process: subprocess.Popen[bytes]) -> bool:
         try:
-            return poll() is None
+            return process.poll() is None
         except BaseException:
             return True
 
     @staticmethod
-    def _wait_for_process(process: Any) -> bool:
-        wait = getattr(process, "wait", None)
-        if not callable(wait):
-            return False
+    def _wait_for_process(process: subprocess.Popen[bytes]) -> bool:
         try:
-            try:
-                wait(timeout=2.0)
-            except TypeError:
-                wait()
+            process.wait(timeout=2.0)
         except BaseException:
             return False
         return not ContainerSessionInvoker._process_is_live(process)
 
-    def _terminate_raw_process(self, process: Any) -> bool:
+    def _terminate_raw_process(self, process: subprocess.Popen[bytes]) -> bool:
         if not self._process_is_live(process):
             return self._wait_for_process(process)
         try:
-            terminate = getattr(process, "terminate", None)
-            if callable(terminate):
-                terminate()
-            else:
-                send_signal = getattr(process, "send_signal", None)
-                if not callable(send_signal):
-                    return False
-                send_signal(signal.SIGTERM)
+            process.terminate()
         except BaseException:
             return False
         if self._wait_for_process(process):
             return True
         try:
-            kill = getattr(process, "kill", None)
-            if not callable(kill):
-                return False
-            kill()
+            process.kill()
         except BaseException:
             return False
         return self._wait_for_process(process)
 
     def _terminate_identified_process(
-        self, process: Any, identity: ExecIdentity
+        self, process: subprocess.Popen[bytes], identity: ExecIdentity
     ) -> bool:
-        probe = getattr(self.runtime, "exec_is_live", None)
-        has_probe = callable(probe)
-        live: bool | None = None
-        if has_probe:
-            try:
-                live = bool(probe(identity))
-            except BaseException:
-                # An unavailable probe is not proof of termination. Signal the
-                # validated PID and require a later acknowledged boundary.
-                live = None
-            if live is False:
-                return self._wait_for_process(process)
-        elif not self._process_is_live(process):
+        try:
+            live = self.runtime.exec_is_live(identity)
+        except BaseException:
+            # An unavailable probe is not proof of termination. Signal the
+            # validated PID and require a later acknowledged boundary.
+            live = None
+        if live is False:
             return self._wait_for_process(process)
         try:
             self.runtime.signal(identity, signal.SIGTERM)
         except BaseException:
             return False
-        if has_probe:
-            try:
-                live = bool(probe(identity))
-            except BaseException:
-                live = None
-            if live is False:
-                return self._wait_for_process(process)
-        elif self._wait_for_process(process):
-            return True
+        try:
+            live = self.runtime.exec_is_live(identity)
+        except BaseException:
+            live = None
+        if live is False:
+            return self._wait_for_process(process)
         try:
             self.runtime.signal(identity, signal.SIGKILL)
         except BaseException:
             return False
-        if has_probe:
-            try:
-                live = bool(probe(identity))
-            except BaseException:
-                # A failed canonical probe is not evidence that the
-                # identity disappeared; let the container fallback own it.
-                return False
-            if live is False:
-                return self._wait_for_process(process)
-            # A stale client returncode cannot override a live canonical
-            # identity. The caller must stop the task container instead.
+        try:
+            live = self.runtime.exec_is_live(identity)
+        except BaseException:
+            # A failed canonical probe is not evidence that the identity
+            # disappeared; let the container fallback own it.
             return False
-        return self._wait_for_process(process)
+        if live is False:
+            return self._wait_for_process(process)
+        # A stale client returncode cannot override a live canonical identity.
+        # The caller must stop the task container instead.
+        return False
 
     def _stop_task_container(self) -> bool:
         try:
-            result = self.runtime.stop()
+            self.runtime.stop()
         except BaseException:
             return False
-        return result is not False
+        return True
 
     def _clear_process_refs(self) -> None:
         self.process = None
         self.identity = None
 
-    def _identity(self, request: InvocationRequest, process: Any) -> ExecIdentity:
+    def _identity(
+        self, request: InvocationRequest, process: subprocess.Popen[bytes]
+    ) -> ExecIdentity:
         pid_path = request.output_last_message.parent / f"wrapper-{request.run_id}.pid"
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
@@ -1041,7 +1000,7 @@ class _ContainerProcess:
 
     def __init__(
         self,
-        process: Any,
+        process: subprocess.Popen[bytes],
         runtime: TaskContainerRuntime,
         identity: ExecIdentity,
     ) -> None:
@@ -1067,6 +1026,17 @@ class _ContainerProcess:
 
     def kill(self) -> None:
         self._runtime.signal(self._identity, signal.SIGKILL)
+
+
+SessionInvoker = LocalSessionInvoker | ContainerSessionInvoker
+
+
+@dataclass
+class _ActiveInvocation:
+    invoker: SessionInvoker | None
+    runtime: TaskContainerRuntime | None
+    process: subprocess.Popen[bytes] | _ContainerProcess | None = None
+    identity: ExecIdentity | None = None
 
 
 class SessionSupervisor:
@@ -1103,7 +1073,7 @@ class SessionSupervisor:
         self.codex_identity = codex_identity or getattr(config, "codex_identity", None)
         self.provider_store_identity = provider_store_identity or "codex-sessions-v1"
         self.runtime_identity = runtime_identity
-        self._active: dict[str, Any] = {}
+        self._active: dict[str, _ActiveInvocation] = {}
         self._active_lock = threading.RLock()
 
     def start(
@@ -1604,15 +1574,13 @@ class SessionSupervisor:
 
         if supplied is not None:
             return supplied
-        reader = getattr(self.config, "read_codex_api_key_bytes", None)
-        if callable(reader):
-            configured = reader()
-            if configured is not None:
-                return configured
+        configured = self.config.read_codex_api_key_bytes()
+        if configured is not None:
+            return configured
         # The local invoker is an explicit test-only boundary.  Preserve its
         # historical fixture contract without allowing production sessions to
         # consult the daemon environment for credentials.
-        if getattr(self.config, "local_codex_test_harness", False):
+        if self.config.local_codex_test_harness:
             return os.environ.get("CODEX_API_KEY")
         return None
 
@@ -1632,12 +1600,12 @@ class SessionSupervisor:
             if run.state != CodexRunState.running.value:
                 raise KeyError(run_id)
             runtime, identity = self._persisted_boundary(run)
-            active = {"runtime": runtime, "identity": identity}
+            active = _ActiveInvocation(None, runtime, identity=identity)
         forced = force
-        invoker = active.get("invoker")
-        runtime = active.get("runtime")
-        process = active.get("process") or getattr(invoker, "process", None)
-        identity = active.get("identity") or getattr(invoker, "identity", None)
+        invoker = active.invoker
+        runtime = active.runtime
+        process = active.process
+        identity = active.identity
         if runtime is not None and identity is not None:
             runtime.signal(identity, signal.SIGKILL if force else signal.SIGTERM)
             exited = self._wait_for_exec_exit(
@@ -1658,8 +1626,10 @@ class SessionSupervisor:
             try:
                 if process is not None:
                     process.kill() if force else process.send_signal(signal.SIGTERM)
-                elif hasattr(invoker, "interrupt"):
+                elif invoker is not None:
                     invoker.interrupt(force=force)
+                else:
+                    raise RuntimeError("active invocation has no process boundary")
                 if process is not None and not force:
                     try:
                         process.wait(timeout=grace_seconds)
@@ -1704,9 +1674,9 @@ class SessionSupervisor:
     def inspect(self, run_id: str) -> InspectionResult:
         with self._active_lock:
             active = self._active.get(run_id)
-        container = None
-        identity = active.get("identity") if active is not None else None
-        runtime = active.get("runtime") if active is not None else None
+        container: ContainerInspection | None = None
+        identity = active.identity if active is not None else None
+        runtime = active.runtime if active is not None else None
         if active is None:
             run = self.store.get_run(run_id)
             if run.state != CodexRunState.running.value:
@@ -1729,7 +1699,7 @@ class SessionSupervisor:
                 and runtime.exec_is_live(identity)
             )
             return InspectionResult(run_id, live, container, identity)
-        process = active.get("process") or getattr(active.get("invoker"), "process", None)
+        process = active.process
         live = bool(
             identity is not None
             and process is not None
@@ -1792,18 +1762,9 @@ class SessionSupervisor:
     def _container_cleanup_proven(self, task_id: str) -> bool:
         """Return whether durable task events prove the container was removed."""
 
-        event_exists = getattr(self.store, "event_exists", None)
-        if callable(event_exists):
-            return bool(
-                event_exists(task_id, "cleanup.container_removed")
-                or event_exists(task_id, "cleanup_complete")
-            )
-        events = getattr(self.store, "events", None)
-        if not callable(events):
-            return False
-        return any(
-            event.kind in {"cleanup.container_removed", "cleanup_complete"}
-            for event in events(task_id)
+        return bool(
+            self.store.event_exists(task_id, "cleanup.container_removed")
+            or self.store.event_exists(task_id, "cleanup_complete")
         )
 
     def reconcile_container(
@@ -1811,7 +1772,7 @@ class SessionSupervisor:
         task_id: str,
         *,
         ensure_running: bool = True,
-    ) -> Any:
+    ) -> ContainerInspection | None:
         """Adopt, restart, or recreate one exactly matching task container."""
 
         task = self.store.get(task_id)
@@ -2026,7 +1987,7 @@ class SessionSupervisor:
         *,
         runtime: TaskContainerRuntime | None,
         invoker: SessionInvoker,
-        api_key: str | None,
+        api_key: bytes | str | None,
         timeout_seconds: float,
     ) -> SessionResult:
         transcript = self.archive.task_path(
@@ -2060,15 +2021,11 @@ class SessionSupervisor:
             with self._active_lock:
                 active = self._active.get(run.id)
                 if active is not None:
-                    active["identity"] = identity
-                    active["process"] = getattr(invoker, "process", None)
+                    active.identity = identity
+                    active.process = invoker.process
 
         with self._active_lock:
-            self._active[run.id] = {
-                "live": True,
-                "invoker": invoker,
-                "runtime": runtime,
-            }
+            self._active[run.id] = _ActiveInvocation(invoker, runtime)
         try:
             outcome = invoker.invoke(
                 request,

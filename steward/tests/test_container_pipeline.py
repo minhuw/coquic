@@ -4,10 +4,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
-from types import SimpleNamespace
-
 import pytest
 
+from coquic_steward.agents.runner import CodexRunner
 from coquic_steward.core.models import (
     CodexStage,
     TaskKind,
@@ -21,24 +20,39 @@ from coquic_steward.core.models import (
     PipelineTrigger,
 )
 from coquic_steward.core.lifecycle import pipeline_transition_allowed
+from coquic_steward.execution.container import ExecIdentity, ExecResult, TaskContainerRuntime
+from coquic_steward.execution.container_config import TaskContainerConfig
 from coquic_steward.execution.executor import (
     StewardExecutor,
     _validation_no_progress_fingerprint,
 )
-from coquic_steward.execution.session import publication_graph_for_task
+from coquic_steward.execution.session import SessionSupervisor, publication_graph_for_task
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
 
 
-class FakeRunner:
+class FakeRunner(CodexRunner):
     def __init__(self, config):
-        self.config = config
+        super().__init__(config)
 
     def paths(self, task, *, name="worker"):
         path = self.config.transcripts_dir / task.id / name
         return path / "codex.jsonl", path / "last-message.md"
 
-    def run(self, task, prompt, cwd, *, name="worker", stage=CodexStage.code, **kwargs):
+    def run(
+        self,
+        task,
+        prompt,
+        cwd,
+        *,
+        name="worker",
+        output_schema=None,
+        resume_session=None,
+        stage=CodexStage.code,
+        sandbox=None,
+        task_role=None,
+        idempotency_key=None,
+    ):
         cwd = Path(cwd)
         transcript, last_message = self.paths(task, name=name)
         transcript.parent.mkdir(parents=True, exist_ok=True)
@@ -63,7 +77,16 @@ class FakeRunner:
         )
 
 
-def _passing_gates(config, task_id, cwd, **kwargs):
+def _passing_gates(
+    config,
+    task_id,
+    cwd,
+    *,
+    label=None,
+    on_gate_start=None,
+    on_gate_result=None,
+    command_runner=None,
+):
     output = config.logs_dir / task_id / "pipeline.txt"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("ok\n", encoding="utf-8")
@@ -383,23 +406,52 @@ def test_validation_uses_container_validation_role(config, monkeypatch) -> None:
     )
     calls = []
 
-    class Runtime:
+    class Runtime(TaskContainerRuntime):
         def __init__(self):
-            self.config = SimpleNamespace(
-                scratch=config.private_dir / "task-scratch" / task.id,
-                git_common_dir=config.repo_root / ".git",
-                container_path=lambda path, _role: "/mapped/" + Path(path).name,
+            roots = {
+                name: config.private_dir / f"task-validation-{name}-{task.id}"
+                for name in ("worktree", "archive", "sessions", "git", "common", "scratch")
+            }
+            for root in roots.values():
+                root.mkdir(parents=True, exist_ok=True)
+            super().__init__(
+                TaskContainerConfig(
+                    task_id=task.id,
+                    image="coquic-steward-task",
+                    image_digest="sha256:" + "a" * 64,
+                    worktree=config.repo_root,
+                    archive=roots["archive"],
+                    private_sessions=roots["sessions"],
+                    git_dir=roots["git"],
+                    git_common_dir=roots["common"],
+                    scratch=roots["scratch"],
+                )
             )
 
         def ensure_started(self):
-            return "container"
+            return self.config.container_name
 
-        def exec(self, role, **kwargs):
-            calls.append((role, kwargs))
-            return SimpleNamespace(exit_code=0, stdout=b"ok\n", stderr=b"")
+        def exec(
+            self,
+            role,
+            *,
+            session_uid,
+            session_id,
+            command,
+            env=None,
+            workdir=None,
+            timeout=None,
+        ):
+            calls.append((role, {"command": command, "env": env, "workdir": workdir, "timeout": timeout}))
+            return ExecResult(
+                ExecIdentity(self.config.container_name, "validation-exec", 4321, 10000),
+                0,
+                b"ok\n",
+                b"",
+            )
 
     runtime = Runtime()
-    supervisor = SimpleNamespace(_boundary_for=lambda _task: (runtime, object()))
+    supervisor = SessionSupervisor(config, store, runtime=runtime)
     executor = StewardExecutor(config, store, runner=FakeRunner(config))
     executor.session_supervisor = supervisor
     runner = executor._container_validation_runner(task, store.list_pipelines(task.id)[0])
@@ -420,15 +472,15 @@ def test_validation_uses_container_validation_role(config, monkeypatch) -> None:
     assert calls[0][0].value == "validation"
     assert "GIT_OBJECT_DIRECTORY" in calls[0][1]["env"]
     assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" in calls[0][1]["env"]
-    assert calls[0][1]["workdir"] == "/mapped/repo"
+    assert calls[0][1]["workdir"] == "/task/worktree-ro"
     assert calls[0][1]["command"] == [
         "nix",
         "develop",
-        "git+file:///mapped/repo#lint",
+        "git+file:///task/worktree-ro#lint",
         "-c",
         "bash",
-        "/mapped/repo/scripts/run-validation-with-index.sh",
-        "--root=/mapped/repo",
+        "/task/worktree-ro/scripts/run-validation-with-index.sh",
+        "--root=/task/worktree-ro",
     ]
 
 

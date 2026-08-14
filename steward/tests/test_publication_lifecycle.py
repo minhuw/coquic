@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from coquic_steward.agents.invocation import InvocationOutcome
 from coquic_steward.core.config import StewardPublicationConfig
 import coquic_steward.execution.session as session_module
 from coquic_steward.execution.executor import (
@@ -16,7 +17,7 @@ from coquic_steward.execution.executor import (
     PublicationPreflightClean,
     StewardExecutor,
 )
-from coquic_steward.execution.session import load_publication_snapshot
+from coquic_steward.execution.session import LocalSessionInvoker, load_publication_snapshot
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.publication.atif import AtifSource
@@ -1555,14 +1556,29 @@ def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path)
         def get_run(self, _run_id: str) -> SimpleNamespace:
             return self.run
 
-    class Invoker:
-        def invoke(self, _request: object, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(
+    class Invoker(LocalSessionInvoker):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def invoke(
+            self,
+            _request: object,
+            *,
+            api_key,
+            append,
+            observe=None,
+            on_started=None,
+            timeout_seconds,
+            interrupt_grace_seconds,
+            launch_gate=None,
+        ) -> InvocationOutcome:
+            return InvocationOutcome(
                 provider_session_id=None,
                 interrupted=False,
                 forced=False,
-                completed=True,
                 exit_code=0,
+                stdout=b"",
+                stderr=b"",
                 events=(),
                 incomplete_suffix=b"",
                 malformed_lines=0,

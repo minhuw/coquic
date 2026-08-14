@@ -16,8 +16,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
+from ..core.config import StewardConfig
+from ..core.models import TaskRecord
 from ..core.subprocesses import (
     _communicate_bounded,
     _validate_capture_limit,
@@ -81,17 +83,6 @@ class ExecResult:
     exit_code: int
     stdout: bytes = b""
     stderr: bytes = b""
-
-
-class DockerClient(Protocol):
-    def run(
-        self,
-        argv: list[str],
-        *,
-        input: bytes | None = None,
-        timeout: float | None = None,
-        max_output_bytes: int | None = None,
-    ) -> subprocess.CompletedProcess[bytes]: ...
 
 
 class SubprocessDockerClient:
@@ -178,7 +169,7 @@ class TaskContainerRuntime:
         self,
         config: TaskContainerConfig,
         *,
-        client: DockerClient | None = None,
+        client: SubprocessDockerClient | None = None,
         docker_bin: str = "docker",
     ):
         self.config = config
@@ -309,7 +300,7 @@ class TaskContainerRuntime:
                 pid=int(state["Pid"]) if state.get("Pid") else None,
                 raw=value,
             )
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        except (ValueError, KeyError, IndexError, AttributeError, json.JSONDecodeError) as exc:
             raise ContainerBoundaryError(
                 ContainerErrorCategory.ambiguous,
                 "Docker inspect returned malformed task identity",
@@ -417,13 +408,7 @@ class TaskContainerRuntime:
             workdir=workdir,
             interactive=True,
         )
-        popen = getattr(self.client, "popen", None)
-        if popen is None:
-            raise ContainerBoundaryError(
-                ContainerErrorCategory.runtime_unavailable,
-                "Docker client does not support streaming exec",
-            )
-        return popen(argv)
+        return self.client.popen(argv)
 
     def signal(self, identity: ExecIdentity, sig: int | signal.Signals) -> None:
         self._validate_exec_identity(identity)
@@ -609,7 +594,7 @@ class PlannerContainerRuntime(TaskContainerRuntime):
         self,
         config: PlannerContainerConfig,
         *,
-        client: DockerClient | None = None,
+        client: SubprocessDockerClient | None = None,
         docker_bin: str = "docker",
     ):
         self.config = config
@@ -716,7 +701,7 @@ class ValidationContainerRuntime:
         self,
         config: ValidationContainerConfig,
         *,
-        client: DockerClient | None = None,
+        client: SubprocessDockerClient | None = None,
         docker_bin: str = "docker",
     ) -> None:
         self.config = config
@@ -944,7 +929,6 @@ class ValidationContainerRuntime:
         except (
             IndexError,
             ValueError,
-            TypeError,
             AttributeError,
             json.JSONDecodeError,
         ) as exc:
@@ -1182,7 +1166,7 @@ DockerBoundary = TaskContainerRuntime
 
 def bind_deployment_identity(
     runtime: TaskContainerRuntime,
-    config: Any,
+    config: StewardConfig,
 ) -> TaskContainerRuntime:
     """Attach the configured Compose release identity before first use."""
 
@@ -1222,15 +1206,15 @@ def bind_deployment_identity(
 
 
 def deployment_runtime_factory(
-    config: Any,
-    factory: Callable[[Any], TaskContainerRuntime],
-) -> Callable[[Any], TaskContainerRuntime]:
+    config: StewardConfig,
+    factory: Callable[[TaskRecord], TaskContainerRuntime],
+) -> Callable[[TaskRecord], TaskContainerRuntime]:
     """Decorate task runtimes with production-only deployment identity."""
 
     if not config.deployment.enabled:
         return factory
 
-    def build(task: Any) -> TaskContainerRuntime:
+    def build(task: TaskRecord) -> TaskContainerRuntime:
         return bind_deployment_identity(factory(task), config)
 
     return build

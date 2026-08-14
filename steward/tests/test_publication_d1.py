@@ -455,6 +455,98 @@ def add_second_lifetime_model(payload: dict[str, Any]) -> None:
     refresh_metadata_digest(payload)
 
 
+def add_maximum_task_owned_globals(payload: dict[str, Any], count: int = 128) -> None:
+    """Build the producer-reachable 128-invocation/256-key usage set."""
+
+    usage = payload["usage"]
+    invocation_template = usage["invocations"][0]
+    turn_template = usage["turns"][0]
+    global_template = next(row for row in usage["globals"] if row["ownershipClass"] == "task-owned")
+    overhead_rows = [row for row in usage["globals"] if row["ownershipClass"] == "steward-overhead"]
+    invocations: list[dict[str, Any]] = []
+    turns: list[dict[str, Any]] = []
+    prices: list[dict[str, Any]] = []
+    globals_: list[dict[str, Any]] = []
+
+    for index in range(count):
+        model = f"gpt-boundary-{index}"
+        day = date(2026, 1, 1) + timedelta(days=index)
+        started_at = f"{day.isoformat()}T00:00:00Z"
+        completed_at = f"{day.isoformat()}T00:00:01Z"
+        price_digest = hashlib.sha256(f"boundary-price-{index}".encode()).hexdigest()
+        invocation_id = f"invocation-boundary-{index}"
+        invocation = copy.deepcopy(invocation_template)
+        invocation.update(
+            {
+                "invocationId": invocation_id,
+                "retryOrdinal": index,
+                "startedAt": started_at,
+                "completedAt": completed_at,
+                "model": model,
+                "priceEntryDigest": price_digest,
+            }
+        )
+        invocations.append(invocation)
+        turn = copy.deepcopy(turn_template)
+        turn.update(
+            {
+                "turnId": f"turn-boundary-{index}",
+                "invocationId": invocation_id,
+                "priceEntryDigest": price_digest,
+            }
+        )
+        turns.append(turn)
+        prices.append(
+            {
+                "priceEntryDigest": price_digest,
+                "usageGenerationId": usage["generation"]["usageGenerationId"],
+                "catalogDigest": "c" * 64,
+                "model": model,
+                "effectiveAt": "2026-01-01T00:00:00Z",
+                "effectiveUntil": None,
+            }
+        )
+        for period_kind, period_key in (("lifetime", "lifetime"), ("daily", day.isoformat())):
+            global_row = copy.deepcopy(global_template)
+            global_row.update(
+                {
+                    "globalId": f"global-boundary-{index}-{period_kind}",
+                    "periodKind": period_kind,
+                    "periodKey": period_key,
+                    "model": model,
+                    "priceProvenanceDigest": price_digest,
+                }
+            )
+            globals_.append(global_row)
+
+    token_fields = ("promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens")
+    cost_fields = ("uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd")
+    for summary in usage["summaries"]:
+        summary.update(
+            {
+                "coverage": "complete",
+                "coveredInvocations": count,
+                "expectedInvocations": count,
+                "knownTokenSubtotal": invocation_template["totalTokens"] * count,
+                "knownCostSubtotalMicroUsd": invocation_template["totalCostMicroUsd"] * count,
+                "priceProvenanceDigest": None,
+            }
+        )
+        for field in token_fields:
+            summary[field] = invocation_template[field] * count
+        for field in cost_fields:
+            summary[field] = invocation_template[field] * count
+
+    usage["invocations"] = invocations
+    usage["turns"] = turns
+    usage["prices"] = prices
+    usage["globals"] = [*globals_, *overhead_rows]
+    usage["generation"]["expectedCounts"].update(
+        {"invocations": count, "turns": count, "prices": count, "globals": len(usage["globals"])}
+    )
+    refresh_metadata_digest(payload)
+
+
 def mark_usage_unavailable(payload: dict[str, Any]) -> None:
     usage = payload["usage"]
     nullable_fields = (
@@ -607,6 +699,39 @@ def test_hide_unavailable_task_preserves_known_shared_totals() -> None:
     assert tuple(row) == (18, 60, "complete", 1, hashlib.sha256(b"price-gpt-fixture").hexdigest(), "visible")
 
 
+def test_exposure_after_unavailable_task_preserves_unknown_shared_totals() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+    unavailable = publication(
+        "publication-global-unavailable-first",
+        run_id="run-global-unavailable-first",
+        task_id="task-global-unavailable-first",
+    )
+    mark_usage_unavailable(unavailable)
+    d1.publish(unavailable)
+    complete = publication(
+        "publication-global-complete-second",
+        run_id="run-global-complete-second",
+        task_id="task-global-complete-second",
+    )
+    d1.publish(complete)
+
+    row = server.connection.execute(
+        "SELECT g.coverage, g.covered_invocations, g.expected_invocations, g.total_tokens, "
+        "g.price_provenance_digest FROM usage_global_heads AS h "
+        "JOIN usage_globals AS g ON g.global_id = h.global_id "
+        "WHERE h.period_kind = 'lifetime' AND h.model = 'gpt-fixture' "
+        "AND h.ownership_class = 'task-owned'"
+    ).fetchone()
+    assert tuple(row) == (
+        "unavailable",
+        1,
+        2,
+        None,
+        complete["usage"]["globals"][0]["priceProvenanceDigest"],
+    )
+
+
 def test_usage_replacement_with_daily_and_lifetime_keys_stays_below_batch_limit() -> None:
     server = ScriptedD1()
     d1 = client(server)
@@ -652,6 +777,94 @@ def test_three_shared_global_keys_fit_one_bounded_replacement_batch() -> None:
     assert len(replacement_batches) == 1
     assert len(replacement_batches[0]["batch"]) <= 64
     assert sum(len(item["params"]) for item in replacement_batches[0]["batch"]) <= MAX_BATCH_PARAMETERS
+
+
+def test_global_transition_boundary_exposure_uses_fixed_final_batch() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+
+    low = publication("publication-boundary-low", task_id="task-boundary-low", run_id="run-boundary-low")
+    low_start = len(server.requests)
+    d1.publish(low)
+    low_batches = [
+        request
+        for request in server.requests[low_start:]
+        if "batch" in request
+        and any("UPDATE publication_generations SET state = 'visible'" in item["sql"] for item in request["batch"])
+    ]
+    assert len(low_batches) == 1
+
+    high = publication("publication-boundary-high", task_id="task-boundary-high", run_id="run-boundary-high")
+    add_maximum_task_owned_globals(high)
+    high_start = len(server.requests)
+    d1.publish(high)
+    high_batches = [
+        request
+        for request in server.requests[high_start:]
+        if "batch" in request
+        and any("UPDATE publication_generations SET state = 'visible'" in item["sql"] for item in request["batch"])
+    ]
+    assert len(high_batches) == 1
+
+    low_batch = low_batches[0]["batch"]
+    high_batch = high_batches[0]["batch"]
+    low_shape = (len(low_batch), sum(len(item["params"]) for item in low_batch))
+    high_shape = (len(high_batch), sum(len(item["params"]) for item in high_batch))
+    assert low_shape == high_shape
+    assert high_shape[0] <= 64
+    assert high_shape[1] <= MAX_BATCH_PARAMETERS
+    assert sum("WITH old_invocations AS" in item["sql"] for item in high_batch) == 1
+    assert sum("INSERT INTO usage_global_heads" in item["sql"] for item in high_batch) == 1
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_global_heads WHERE ownership_class = 'task-owned'"
+    ).fetchone()[0] == 2 + 256
+
+
+def test_global_transition_boundary_replacement_uses_fixed_final_batch() -> None:
+    server = ScriptedD1()
+    d1 = client(server)
+
+    low = publication("publication-replace-boundary-low", task_id="task-replace-boundary-low", run_id="run-replace-boundary-low")
+    d1.publish(low)
+    low_replacement = usage_replacement(low, "refresh")
+    low_start = len(server.requests)
+    d1.replace_usage(low_replacement, base_usage_generation_id=low["usage"]["generation"]["usageGenerationId"])
+    low_batches = [
+        request
+        for request in server.requests[low_start:]
+        if "batch" in request
+        and any("UPDATE usage_generations SET state = 'superseded'" in item["sql"] for item in request["batch"])
+    ]
+    assert len(low_batches) == 1
+
+    high = publication("publication-replace-boundary-high", task_id="task-replace-boundary-high", run_id="run-replace-boundary-high")
+    add_maximum_task_owned_globals(high)
+    d1.publish(high)
+    high_replacement = usage_replacement(high, "refresh")
+    high_start = len(server.requests)
+    d1.replace_usage(high_replacement, base_usage_generation_id=high["usage"]["generation"]["usageGenerationId"])
+    high_batches = [
+        request
+        for request in server.requests[high_start:]
+        if "batch" in request
+        and any("UPDATE usage_generations SET state = 'superseded'" in item["sql"] for item in request["batch"])
+    ]
+    assert len(high_batches) == 1
+
+    low_batch = low_batches[0]["batch"]
+    high_batch = high_batches[0]["batch"]
+    low_shape = (len(low_batch), sum(len(item["params"]) for item in low_batch))
+    high_shape = (len(high_batch), sum(len(item["params"]) for item in high_batch))
+    assert low_shape == high_shape
+    assert high_shape[0] <= 64
+    assert high_shape[1] <= MAX_BATCH_PARAMETERS
+    assert sum("WITH old_invocations AS" in item["sql"] for item in high_batch) == 1
+    assert sum("INSERT INTO usage_global_heads" in item["sql"] for item in high_batch) == 1
+    new_usage_id = high_replacement["usage"]["generation"]["usageGenerationId"]
+    assert server.connection.execute(
+        "SELECT count(*) FROM usage_global_heads WHERE ownership_class = 'task-owned' AND usage_generation_id = ?",
+        (new_usage_id,),
+    ).fetchone()[0] == 256
 
 
 def test_price_overlap_with_distinct_digest_is_rejected_before_staging() -> None:

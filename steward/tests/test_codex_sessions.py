@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import io
+import os
+import selectors
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -637,6 +640,26 @@ class _HeldOpenPipe:
         self.closed.set()
 
 
+class _ErrorPipe:
+    def __init__(self) -> None:
+        self._reads = 0
+        self.reader_threads: list[threading.Thread] = []
+        self.close_calls = 0
+
+    def fileno(self) -> int:
+        raise io.UnsupportedOperation("selector unsupported")
+
+    def read(self, _size: int) -> bytes:
+        self.reader_threads.append(threading.current_thread())
+        self._reads += 1
+        if self._reads == 1:
+            return b'{"type":"prefix"}\n'
+        raise OSError("reader failed")
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 class _FallbackProcess:
     def __init__(self, stdout, stderr, *, live: bool = False, graceful: bool = False):
         self.stdout = stdout
@@ -772,6 +795,72 @@ def test_fallback_shared_stream_is_read_and_closed_once(tmp_path: Path) -> None:
     assert len(stream.reader_threads) == 1
     assert not stream.reader_threads[0].daemon
     assert not stream.reader_threads[0].is_alive()
+
+
+def test_fallback_reader_error_is_raised_after_cleanup(tmp_path: Path) -> None:
+    stdout = _ErrorPipe()
+    records: list[bytes] = []
+
+    with pytest.raises(OSError, match="reader failed"):
+        stream_process(
+            _FallbackProcess(stdout, io.BytesIO()),
+            _request(tmp_path),
+            append=records.append,
+            timeout_seconds=1,
+        )
+
+    assert records == [b'{"type":"prefix"}\n']
+    assert stdout.close_calls == 1
+    threads = {*stdout.reader_threads}
+    assert len(threads) == 1
+    assert all(not thread.daemon and not thread.is_alive() for thread in threads)
+
+
+def test_fallback_real_pipe_readers_stop_when_descendant_keeps_writers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class UnsupportedSelector(selectors.SelectSelector):
+        def register(self, *_args, **_kwargs):
+            raise TypeError("selector unsupported")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", UnsupportedSelector)
+    descendant_pid_path = tmp_path / "descendant.pid"
+    child_code = (
+        "import pathlib, signal, subprocess, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "descendant = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(1)']); "
+        f"pathlib.Path({str(descendant_pid_path)!r}).write_text(str(descendant.pid)); "
+        "time.sleep(10)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    started = time.monotonic()
+    try:
+        outcome = stream_process(
+            process,
+            _request(tmp_path),
+            append=lambda _chunk: None,
+            timeout_seconds=0.05,
+            interrupt_grace_seconds=0.02,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        if descendant_pid_path.exists():
+            try:
+                os.kill(int(descendant_pid_path.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+    assert elapsed < 0.5
+    assert outcome.interrupted
+    assert outcome.forced
+    assert process.poll() is not None
 
 
 def test_streaming_result_does_not_retain_complete_stdout(tmp_path: Path) -> None:

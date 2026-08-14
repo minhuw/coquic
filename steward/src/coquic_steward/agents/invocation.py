@@ -11,6 +11,7 @@ import io
 import json
 import os
 import queue
+import select
 import selectors
 import signal
 import subprocess  # nosec B404 - explicit argv and shell=False
@@ -202,6 +203,7 @@ def launch_local(request: InvocationRequest, *, api_key: str | None = None) -> s
 _STREAM_CHUNK_SIZE = 64 * 1024
 _STDERR_TAIL_SIZE = 64 * 1024
 _HANDOFF_WAIT_SECONDS = 0.05
+_READER_POLL_SECONDS = 0.01
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,7 @@ def stream_process(
     deadline = time.monotonic() + timeout_seconds
     selector = selectors.DefaultSelector()
     fallback_threads: list[threading.Thread] = []
+    reader_error: Exception | None = None
     try:
         selector_supported = True
         try:
@@ -258,7 +261,7 @@ def stream_process(
             )
         else:
             selector.close()
-            exit_code, forced, interrupted = _drain_with_fallback(
+            exit_code, forced, interrupted, reader_error = _drain_with_fallback(
                 process,
                 streams,
                 decoder,
@@ -273,6 +276,8 @@ def stream_process(
         _close_streams(streams)
         for thread in fallback_threads:
             thread.join()
+    if reader_error is not None:
+        raise reader_error
     return InvocationOutcome(
         exit_code=exit_code,
         stdout=b"",
@@ -417,12 +422,40 @@ def _read_pipe(
     stop: threading.Event,
 ) -> None:
     try:
+        try:
+            fileno = stream.fileno()
+        except (AttributeError, io.UnsupportedOperation):
+            fileno = None
+        if fileno is None:
+            while not stop.is_set():
+                data = stream.read(_STREAM_CHUNK_SIZE)
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                if not isinstance(data, bytes):
+                    raise TypeError("invocation streams must return bytes")
+                if not data:
+                    _publish_pipe_result(
+                        handoff,
+                        _PipeReadResult(stream_index, "eof"),
+                        stop,
+                    )
+                    return
+                if not _publish_pipe_result(
+                    handoff,
+                    _PipeReadResult(stream_index, "data", data),
+                    stop,
+                ):
+                    return
+            return
         while not stop.is_set():
-            data = stream.read(_STREAM_CHUNK_SIZE)
-            if isinstance(data, str):
-                data = data.encode("utf-8")
-            if not isinstance(data, bytes):
-                raise TypeError("invocation streams must return bytes")
+            ready, _, _ = select.select(
+                (fileno,), (), (), _READER_POLL_SECONDS
+            )
+            if stop.is_set():
+                return
+            if not ready:
+                continue
+            data = os.read(fileno, _STREAM_CHUNK_SIZE)
             if not data:
                 _publish_pipe_result(
                     handoff,
@@ -454,7 +487,7 @@ def _drain_with_fallback(
     interrupt_grace_seconds: float,
     interrupted: bool,
     reader_threads: list[threading.Thread],
-) -> tuple[int, bool, bool]:
+) -> tuple[int, bool, bool, Exception | None]:
     handoff: queue.Queue[_PipeReadResult] = queue.Queue(maxsize=max(1, len(streams)))
     stop = threading.Event()
     threads = tuple(
@@ -473,6 +506,7 @@ def _drain_with_fallback(
     completed: set[int] = set()
     exit_code: int | None = None
     forced = False
+    reader_error: Exception | None = None
     try:
         while len(completed) < len(streams) or process.poll() is None:
             remaining = deadline - time.monotonic()
@@ -502,13 +536,24 @@ def _drain_with_fallback(
                     decoder.feed(result.data)
                 else:
                     stderr_data.extend(result.data)
-            elif result.kind in {"eof", "error"}:
+            elif result.kind == "eof":
                 completed.add(result.stream_index)
+            elif result.kind == "error":
+                completed.add(result.stream_index)
+                reader_error = result.error or RuntimeError(
+                    "invocation stream reader failed"
+                )
+                stop.set()
+                exit_code, forced = _terminate_after_deadline(
+                    process,
+                    interrupt_grace_seconds=interrupt_grace_seconds,
+                )
+                break
     finally:
         stop.set()
     if exit_code is None:
         exit_code = process.wait()
-    return exit_code, forced, interrupted
+    return exit_code, forced, interrupted, reader_error
 
 
 class _BoundedBytes:

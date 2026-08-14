@@ -1401,7 +1401,7 @@ class StewardDaemon:
                             "publication overhead reconciliation failed "
                             f"error={exc.__class__.__name__}"
                         )
-                        return True
+                        return False
                     if not isinstance(receipt, OverheadReceipt):
                         self._log("publication overhead reconciliation returned an invalid receipt")
                         return True
@@ -1432,7 +1432,7 @@ class StewardDaemon:
             )
         except Exception as exc:
             self._log(f"publication usage backfill failed error={exc.__class__.__name__}")
-            return True
+            return False
         if not isinstance(receipt, UsageBackfillReceipt):
             self._log("publication usage backfill returned an invalid receipt")
             return True
@@ -1530,7 +1530,7 @@ class StewardDaemon:
                 "publication generation listing failed "
                 f"error={exc.__class__.__name__}"
             )
-            return True
+            return False
         if not generations:
             # A daemon can crash after the publisher fail-closes the old
             # credential-free staging identity but before retry_publication
@@ -1549,7 +1549,7 @@ class StewardDaemon:
                     "publication blocked-generation listing failed "
                     f"error={exc.__class__.__name__}"
                 )
-                return True
+                return False
         if not generations:
             return False
         compose_kwargs = self._publication_compose_kwargs()

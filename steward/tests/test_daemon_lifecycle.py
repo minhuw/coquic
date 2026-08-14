@@ -6,6 +6,7 @@ import gc
 import json
 import signal
 import socket
+import sqlite3
 import shutil
 import subprocess
 import threading
@@ -13,7 +14,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,7 +61,11 @@ from coquic_steward.cli import _run_until_stopped
 from coquic_steward.orchestration import daemon as daemon_module
 from coquic_steward.orchestration.daemon import StewardDaemon, TickResult
 from coquic_steward.publication.atif import AtifSource
-from coquic_steward.publication.d1 import OverheadReceipt
+from coquic_steward.publication.d1 import (
+    D1Error,
+    OverheadReceipt,
+    UsageBackfillReceipt,
+)
 from coquic_steward.publication.models import RunIdentity, RunMetadata
 from coquic_steward.publication.generation import compose_publication_generation
 from coquic_steward.publication.outbox import (
@@ -315,6 +320,60 @@ def test_publication_worker_wakes_from_committed_change_and_waits_for_retry():
     assert callable(daemon.store.on_change)
     daemon.store.on_change()
     assert daemon._publication_wakeup.is_set()
+
+
+def test_publication_worker_waits_after_queued_generation_listing_failure():
+    class Store:
+        def list_pending_publication_hides(self) -> list[PublicationHideFence]:
+            return []
+
+        def expire_publication_leases(self) -> list[PublicationGeneration]:
+            return []
+
+        def list_publication_generations(
+            self,
+            *,
+            states: set[PublicationState | str] | None = None,
+            limit: int | None = None,
+        ) -> list[PublicationGeneration]:
+            raise sqlite3.OperationalError("database is locked")
+
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = Store()
+    daemon._log = lambda *_args, **_kwargs: None
+
+    assert daemon._publish_next_generation(object()) is False
+
+
+def test_publication_worker_waits_after_blocked_generation_listing_failure():
+    class Store:
+        def __init__(self) -> None:
+            self.list_calls = 0
+
+        def list_pending_publication_hides(self) -> list[PublicationHideFence]:
+            return []
+
+        def expire_publication_leases(self) -> list[PublicationGeneration]:
+            return []
+
+        def list_publication_generations(
+            self,
+            *,
+            states: set[PublicationState | str] | None = None,
+            limit: int | None = None,
+        ) -> list[PublicationGeneration]:
+            self.list_calls += 1
+            if self.list_calls == 1:
+                return []
+            raise sqlite3.OperationalError("database is locked")
+
+    store = Store()
+    daemon = object.__new__(StewardDaemon)
+    daemon.store = store
+    daemon._log = lambda *_args, **_kwargs: None
+
+    assert daemon._publish_next_generation(object()) is False
+    assert store.list_calls == 2
 
 
 def test_publication_worker_drains_pending_hides_before_exposure_claim():
@@ -683,42 +742,84 @@ def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):
 
 def test_publication_worker_reclaims_expired_lease_on_recurring_cycle():
     generation = _publication_generation("task-expired")
+    events: list[str] = []
 
     class Store:
-        def __init__(self):
+        def __init__(self) -> None:
+            now = datetime.now(timezone.utc)
+            self.generation = replace(
+                generation,
+                state=PublicationState.claimed,
+                updated_at=now - timedelta(seconds=2),
+                lease_owner="publication-worker",
+                lease_expires_at=now - timedelta(seconds=1),
+            )
             self.expire_calls = 0
 
-        def list_pending_publication_hides(self):
+        def list_pending_publication_hides(self) -> list[PublicationHideFence]:
+            events.append("list-hides")
             return []
 
-        def expire_publication_leases(self):
+        def expire_publication_leases(self) -> list[PublicationGeneration]:
+            events.append("expire-leases")
             self.expire_calls += 1
-            return []
+            assert self.generation.state is PublicationState.claimed
+            now = datetime.now(timezone.utc)
+            self.generation = replace(
+                self.generation,
+                state=PublicationState.retry_wait,
+                updated_at=now,
+                lease_owner=None,
+                lease_expires_at=None,
+                retry_at=now,
+                reason="lease_expired",
+            )
+            return [self.generation]
 
-        def list_publication_generations(self, **_kwargs):
-            return [generation]
+        def list_publication_generations(
+            self,
+            *,
+            states: set[PublicationState | str] | None = None,
+            limit: int | None = None,
+        ) -> list[PublicationGeneration]:
+            events.append("list-generations")
+            assert states == {PublicationState.queued, PublicationState.retry_wait}
+            assert limit == 1
+            if self.generation.state not in states:
+                return []
+            return [self.generation]
 
     class Publisher:
-        def __init__(self):
-            self.calls: list[tuple[object, ...]] = []
+        def __init__(self, store: Store) -> None:
+            self.store = store
+            self.calls: list[str] = []
 
-        def publish(self, *args, **_kwargs):
-            self.calls.append(args)
+        def publish(
+            self,
+            publication_id: str,
+            *,
+            source: object,
+            compose_kwargs: dict[str, object],
+        ) -> PublicationResult:
+            del source, compose_kwargs
+            events.append("publish")
+            assert self.store.generation.state is PublicationState.retry_wait
+            self.calls.append(publication_id)
             return PublicationResult(
                 PublicationStatus.exposed,
-                publication_id=generation.publication_id,
+                publication_id=publication_id,
             )
 
     daemon = object.__new__(StewardDaemon)
     daemon.store = Store()
-    daemon.config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
     daemon.logger = None
     daemon._publication_source = lambda _generation: {}
 
-    publisher = Publisher()
+    publisher = Publisher(daemon.store)
     assert daemon._publish_next_generation(publisher) is True
     assert daemon.store.expire_calls == 1
-    assert publisher.calls == [(generation.publication_id,)]
+    assert publisher.calls == [generation.publication_id]
+    assert events == ["list-hides", "expire-leases", "list-generations", "publish"]
 
 
 def test_publication_worker_shutdown_cancels_clients_before_deadline():
@@ -3802,3 +3903,50 @@ def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> N
     assert daemon._reconcile_publication_usage(Publisher()) is True
     assert received == [row.public_dict()]
     assert received[0] is not row
+
+
+def test_reconcile_publication_usage_waits_after_overhead_provider_failure() -> None:
+    daemon = object.__new__(StewardDaemon)
+    row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
+    daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [row])
+    daemon._publication_overhead_digest = None
+    daemon._publication_overhead_position = 0
+    daemon._log = lambda *_args, **_kwargs: None
+
+    class Publisher:
+        def reconcile_overhead(
+            self, source: object, *, digest: str | None = None
+        ) -> OverheadReceipt:
+            del source, digest
+            raise D1Error("network")
+
+    assert daemon._reconcile_publication_usage(Publisher()) is False
+    assert daemon._publication_overhead_digest is None
+    assert daemon._publication_overhead_position == 0
+
+
+def test_reconcile_publication_usage_waits_after_backfill_provider_failure() -> None:
+    daemon = object.__new__(StewardDaemon)
+    daemon._control_loop_ledger = SimpleNamespace(list_overhead_usage=lambda: [])
+    daemon._control_loop_usage = SimpleNamespace(
+        catalog=SimpleNamespace(digest="catalog-digest")
+    )
+    daemon._publication_backfill_catalog_digest = "catalog-digest"
+    daemon._publication_backfill_cursor = "cursor-before"
+    daemon._publication_backfill_blocked = False
+    daemon._log = lambda *_args, **_kwargs: None
+
+    class Publisher:
+        def backfill_usage(
+            self,
+            catalog: object,
+            *,
+            cursor: str | None,
+            limit: int,
+        ) -> UsageBackfillReceipt:
+            del catalog, cursor, limit
+            raise D1Error("network")
+
+    assert daemon._reconcile_publication_usage(Publisher()) is False
+    assert daemon._publication_backfill_cursor == "cursor-before"
+    assert daemon._publication_backfill_blocked is False

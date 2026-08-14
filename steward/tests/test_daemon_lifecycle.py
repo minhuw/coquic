@@ -838,7 +838,9 @@ def test_publication_worker_shutdown_cancels_clients_before_deadline():
     daemon._publication_thread = worker
     daemon._publication_stop = threading.Event()
     daemon._publication_wakeup = threading.Event()
-    daemon._publication_cancel = client.close
+    daemon._publication_cancel = daemon_module._CallbackDaemonCancellation(
+        client.close
+    )
 
     deadline = time.monotonic() + 2.0
     daemon._stop_publication_worker(deadline=deadline)
@@ -1129,10 +1131,12 @@ def test_publication_worker_shutdown_linearizes_connection_checkout(monkeypatch)
         assert cancel is not None
 
         def cancel_and_signal() -> None:
-            cancel()
+            cancel.cancel()
             cancellation_called.set()
 
-        daemon._publication_cancel = cancel_and_signal
+        daemon._publication_cancel = daemon_module._CallbackDaemonCancellation(
+            cancel_and_signal
+        )
         deadline = time.monotonic() + 0.25
         stop_thread = threading.Thread(
             target=daemon._stop_publication_worker,
@@ -1285,10 +1289,12 @@ def test_publication_worker_shutdown_cancels_registered_connection_handoff(
         assert cancel is not None
 
         def cancel_and_signal() -> None:
-            cancel()
+            cancel.cancel()
             cancellation_called.set()
 
-        daemon._publication_cancel = cancel_and_signal
+        daemon._publication_cancel = daemon_module._CallbackDaemonCancellation(
+            cancel_and_signal
+        )
         deadline = time.monotonic() + 0.25
         stop_thread = threading.Thread(
             target=daemon._stop_publication_worker,
@@ -1619,7 +1625,7 @@ def test_signal_shutdown_interrupts_active_planner_and_persists_interruption(
     started = threading.Event()
     released = threading.Event()
 
-    class BlockingPlannerSession:
+    class BlockingPlannerSession(FreshPlannerSession):
         def __init__(self):
             self.interrupt_calls: list[bool] = []
 
@@ -1894,7 +1900,7 @@ def _interrupted_run(config, store, *, role="implementation", checkpoint=None):
     return task, pipeline, store.get_run(run.id)
 
 
-class FakeSupervisor:
+class FakeSupervisor(SessionSupervisor):
     def __init__(self, config, store, *, live=False, resume=ResumeCategory.success):
         self.config = config
         self.store = store
@@ -2035,6 +2041,17 @@ def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):
     assert "epoch" in daemon.preflight_report.checks
     assert "private" not in daemon.preflight_report.summary
     assert config.epoch_path.exists()
+
+
+def test_daemon_rejects_unsupported_collaborators(config):
+    with pytest.raises(TypeError, match="SQLiteTaskStore"):
+        StewardDaemon(config, object())
+
+    store = TaskStore(config.db_path)
+    with pytest.raises(TypeError, match="SessionSupervisor"):
+        StewardDaemon(config, store, session_supervisor=object())
+    with pytest.raises(TypeError, match="FreshPlannerSession"):
+        StewardDaemon(config, store, planner_session=object())
 
 
 def _task_image_labels(*, runtime_protocol="task-container-v1"):
@@ -2249,7 +2266,7 @@ def test_shutdown_interrupts_oldest_running_run_from_direct_query(
 
     monkeypatch.setattr(store, "running_runs", running_runs)
 
-    class Supervisor:
+    class Supervisor(SessionSupervisor):
         def __init__(self):
             self.interrupted: list[str] = []
             self.stopped: list[str] = []
@@ -2908,7 +2925,10 @@ def test_session_runner_preserves_interrupted_run_identity(config):
     transcript.write_text("{}\n", encoding="utf-8")
     message.write_text("interrupted\n", encoding="utf-8")
 
-    class InterruptedSupervisor:
+    class InterruptedSupervisor(SessionSupervisor):
+        def __init__(self):
+            pass
+
         def start(self, *_args, **_kwargs):
             return SessionResult(
                 task.id,

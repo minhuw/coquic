@@ -100,6 +100,7 @@ from ..control_loop import (
     ArchiveConflictError,
     ArchiveError,
     ControlLoopArchive,
+    ControlLoopLedger,
     CurrentState,
     Cycle as ControlLoopCycle,
     PlannerRun as ControlPlannerRun,
@@ -114,6 +115,7 @@ from ..planning import PlannerRun as PlanningPlannerRun, run_planner
 from ..planning.planner import render_planner_prompt
 from ..planning.verifier import summarize_active_tasks
 from ..storage import (
+    SQLiteTaskStore,
     TaskStore,
     idle_fetch_provider_names,
     scheduler_state,
@@ -124,6 +126,7 @@ from ..signals import (
     project_signals_from_items,
     revalidate_signal_items,
 )
+from .contracts import DaemonCancellation
 from .preflight import PreflightReport, preflight_remote_push, run_preflight
 
 DAEMON_EVENT_TASK_ID = "daemon"
@@ -213,6 +216,16 @@ def _abort_publication_connection(connection: object) -> None:
 
 class _PublicationTransportCancelled(RuntimeError):
     """Signal a checkout that lost the cancellation race before handoff."""
+
+
+class _CallbackDaemonCancellation(DaemonCancellation):
+    """Bridge the existing publication cleanup callback to the typed boundary."""
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self._callback = callback
+
+    def cancel(self) -> None:
+        self._callback()
 
 
 class _PublicationTransportTracker:
@@ -442,12 +455,22 @@ class StewardDaemon:
     def __init__(
         self,
         config: StewardConfig,
-        store: TaskStore,
+        store: SQLiteTaskStore,
         *,
         logger: Callable[[str], None] | None = None,
         session_supervisor: SessionSupervisor | None = None,
         planner_session: FreshPlannerSession | None = None,
     ):
+        if not isinstance(store, SQLiteTaskStore):
+            raise TypeError("StewardDaemon requires a SQLiteTaskStore")
+        if session_supervisor is not None and not isinstance(
+            session_supervisor, SessionSupervisor
+        ):
+            raise TypeError("session_supervisor must be a SessionSupervisor")
+        if planner_session is not None and not isinstance(
+            planner_session, FreshPlannerSession
+        ):
+            raise TypeError("planner_session must be a FreshPlannerSession")
         self.config = config
         self.store = store
         self.logger = logger
@@ -468,7 +491,7 @@ class StewardDaemon:
         self._publication_lock = threading.RLock()
         self._publication_previous_callback: object | None = None
         self._publication_callback: Callable[[], None] | None = None
-        self._publication_cancel: Callable[[], None] | None = None
+        self._publication_cancel: DaemonCancellation | None = None
         self._publication_deadline: float | None = None
         self._publication_overhead_position = 0
         self._publication_overhead_digest: str | None = None
@@ -478,7 +501,9 @@ class StewardDaemon:
         self._subprocess_owner = ProcessGroupCancellationOwner("steward-daemon")
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
-        self._control_loop_ledger = getattr(store, "control_loop_ledger", None)
+        self._control_loop_ledger: ControlLoopLedger | None = (
+            store.control_loop_ledger
+        )
         self._control_loop_archive = ControlLoopArchive(config, task_root=config)
         usage_catalog = None
         try:
@@ -517,16 +542,14 @@ class StewardDaemon:
                 return self._docker_resources.owned_usage()
 
         initial_pressure_state = ResourcePressureState.normal
-        pressure_provider = getattr(store, "get_resource_pressure", None)
-        if callable(pressure_provider):
-            try:
-                persisted_pressure = pressure_provider()
-                if persisted_pressure is not None:
-                    initial_pressure_state = ResourcePressureState(
-                        str(persisted_pressure.get("state"))
-                    )
-            except (OSError, TypeError, ValueError):
-                initial_pressure_state = ResourcePressureState.pressure
+        try:
+            persisted_pressure = store.get_resource_pressure()
+            if persisted_pressure is not None:
+                initial_pressure_state = ResourcePressureState(
+                    str(persisted_pressure.get("state"))
+                )
+        except (OSError, TypeError, ValueError):
+            initial_pressure_state = ResourcePressureState.pressure
         self._resource_pressure = ResourcePressureController(
             config,
             usage_provider=usage_provider,
@@ -582,11 +605,10 @@ class StewardDaemon:
                 warnings=report.warnings,
             )
         self._preflight_report = report
-        if hasattr(store, "claim_daemon_instance"):
-            store.claim_daemon_instance(
-                self.runtime.instance_id if hasattr(self, "runtime") else "pending",
-                lifecycle=DaemonLifecycleState.starting.value,
-            )
+        store.claim_daemon_instance(
+            self.runtime.instance_id,
+            lifecycle=DaemonLifecycleState.starting.value,
+        )
 
     @property
     def lifecycle_state(self) -> DaemonLifecycleState:
@@ -622,83 +644,69 @@ class StewardDaemon:
             report = self._resource_pressure.measure(reconciled_usage)
         report_dict = report.as_dict()
         try:
-            cleanup_count = None
-            for method_name in (
-                "cleanup_pending_count",
-                "count_cleanup_pending",
-                "pending_cleanup_count",
-            ):
-                candidate = getattr(self.store, method_name, None)
-                if callable(candidate):
-                    cleanup_count = int(candidate())
-                    break
-            report_dict["cleanupPending"] = cleanup_count
+            report_dict["cleanupPending"] = int(self.store.cleanup_pending_count())
         except Exception:
             report_dict["cleanupPending"] = None
-        publication_health = getattr(self.store, "get_publication_health", None)
-        if callable(publication_health):
-            try:
-                health = publication_health()
-                if isinstance(health, PublicationHealth):
-                    health_dict = PublicationHealth.as_dict(health)
-                elif isinstance(health, Mapping):
-                    health_dict = dict(health)
-                elif type(health) is SimpleNamespace and "as_dict" in health.__dict__:
-                    # Keep the bounded test/provider adapter explicit; do not
-                    # discover serializers on arbitrary health values.
-                    health_dict = health.as_dict()
+        try:
+            health = self.store.get_publication_health()
+            if isinstance(health, PublicationHealth):
+                health_dict = PublicationHealth.as_dict(health)
+            elif isinstance(health, Mapping):
+                health_dict = dict(health)
+            elif type(health) is SimpleNamespace and "as_dict" in health.__dict__:
+                # Keep the bounded test/provider adapter explicit; do not
+                # discover serializers on arbitrary health values.
+                health_dict = health.as_dict()
+            else:
+                health_dict = {}
+            bounded_health: dict[str, object] = {}
+            for key, value in health_dict.items():
+                if isinstance(value, bool):
+                    bounded_health[key] = value
+                elif isinstance(value, int):
+                    bounded_health[key] = max(0, min(value, 2**31 - 1))
                 else:
-                    health_dict = {}
-                bounded_health: dict[str, object] = {}
-                for key, value in health_dict.items():
-                    if isinstance(value, bool):
-                        bounded_health[key] = value
-                    elif isinstance(value, int):
-                        bounded_health[key] = max(0, min(value, 2**31 - 1))
-                    else:
-                        bounded_health[key] = value
-                report_dict["publication"] = bounded_health
-                report_dict["publicationHealth"] = bounded_health
-                aliases = {
-                    "queuedCount": "publicationQueuedCount",
-                    "blockedCount": "publicationBlockedCount",
-                    "cleanupPendingCount": "publicationCleanupPendingCount",
-                    "cleanupPendingBytes": "publicationCleanupPendingBytes",
-                    "oldestQueuedAt": "publicationOldestQueuedAt",
-                    "oldestQueuedAgeSeconds": "publicationOldestQueuedAgeSeconds",
-                    "lastCategory": "publicationLastCategory",
-                }
-                for key, alias in aliases.items():
-                    if key in bounded_health:
-                        report_dict[alias] = bounded_health[key]
-                if "queuedCount" in bounded_health:
-                    report_dict["publicationQueueCount"] = bounded_health["queuedCount"]
-                if "cleanupPendingCount" in bounded_health:
-                    report_dict["publicationCleanupCount"] = bounded_health[
-                        "cleanupPendingCount"
-                    ]
-                if "cleanupPendingBytes" in bounded_health:
-                    report_dict["publicationRetainedBytes"] = bounded_health[
-                        "cleanupPendingBytes"
-                    ]
-            except Exception:
-                report_dict["publication"] = None
-        recorder = getattr(self.store, "record_resource_pressure", None)
-        if callable(recorder):
-            try:
-                cleanup_count = int(report_dict.get("cleanupPending") or 0)
-                publication_cleanup = report_dict.get("publicationCleanupPendingCount")
-                if isinstance(publication_cleanup, int):
-                    cleanup_count = max(cleanup_count, publication_cleanup)
-                recorder(
-                    state=report_dict["state"],
-                    home_free_bytes=report_dict.get("homeFreeBytes"),
-                    owned_docker_bytes=report_dict.get("ownedBytes"),
-                    cleanup_pending_count=cleanup_count,
-                    reason=report_dict.get("reason"),
-                )
-            except Exception as exc:
-                self._log(f"resource pressure health write failed error={exc.__class__.__name__}")
+                    bounded_health[key] = value
+            report_dict["publication"] = bounded_health
+            report_dict["publicationHealth"] = bounded_health
+            aliases = {
+                "queuedCount": "publicationQueuedCount",
+                "blockedCount": "publicationBlockedCount",
+                "cleanupPendingCount": "publicationCleanupPendingCount",
+                "cleanupPendingBytes": "publicationCleanupPendingBytes",
+                "oldestQueuedAt": "publicationOldestQueuedAt",
+                "oldestQueuedAgeSeconds": "publicationOldestQueuedAgeSeconds",
+                "lastCategory": "publicationLastCategory",
+            }
+            for key, alias in aliases.items():
+                if key in bounded_health:
+                    report_dict[alias] = bounded_health[key]
+            if "queuedCount" in bounded_health:
+                report_dict["publicationQueueCount"] = bounded_health["queuedCount"]
+            if "cleanupPendingCount" in bounded_health:
+                report_dict["publicationCleanupCount"] = bounded_health[
+                    "cleanupPendingCount"
+                ]
+            if "cleanupPendingBytes" in bounded_health:
+                report_dict["publicationRetainedBytes"] = bounded_health[
+                    "cleanupPendingBytes"
+                ]
+        except Exception:
+            report_dict["publication"] = None
+        try:
+            cleanup_count = int(report_dict.get("cleanupPending") or 0)
+            publication_cleanup = report_dict.get("publicationCleanupPendingCount")
+            if isinstance(publication_cleanup, int):
+                cleanup_count = max(cleanup_count, publication_cleanup)
+            self.store.record_resource_pressure(
+                state=report_dict["state"],
+                home_free_bytes=report_dict.get("homeFreeBytes"),
+                owned_docker_bytes=report_dict.get("ownedBytes"),
+                cleanup_pending_count=cleanup_count,
+                reason=report_dict.get("reason"),
+            )
+        except Exception as exc:
+            self._log(f"resource pressure health write failed error={exc.__class__.__name__}")
         return report_dict
 
     def _reconcile_docker_resources(self) -> OwnedDockerUsage | None:
@@ -736,11 +744,10 @@ class StewardDaemon:
             with self._runtime_lock:
                 self.runtime.lifecycle = DaemonLifecycleState.reconciling
                 self.runtime.state = DaemonRuntimeState.active
-            if hasattr(self.store, "set_daemon_lifecycle"):
-                self.store.set_daemon_lifecycle(
-                    DaemonLifecycleState.reconciling.value,
-                    instance_id=self.runtime.instance_id,
-                )
+            self.store.set_daemon_lifecycle(
+                DaemonLifecycleState.reconciling.value,
+                instance_id=self.runtime.instance_id,
+            )
             outcomes: list[ReconciliationOutcome] = []
             self.executor.retry_validation_cleanup_pending()
             self._reconcile_docker_resources()
@@ -785,12 +792,11 @@ class StewardDaemon:
                 self.runtime.state = DaemonRuntimeState.idle
                 self.runtime.reconciliation_complete = True
                 self.runtime.heartbeat_at = utc_now()
-            if hasattr(self.store, "set_daemon_lifecycle"):
-                self.store.set_daemon_lifecycle(
-                    DaemonLifecycleState.running.value,
-                    instance_id=self.runtime.instance_id,
-                    state={"reconciliation_complete": True},
-                )
+            self.store.set_daemon_lifecycle(
+                DaemonLifecycleState.running.value,
+                instance_id=self.runtime.instance_id,
+                state={"reconciliation_complete": True},
+            )
             if self._control_loop_ledger is not None:
                 try:
                     self._control_loop_ledger.record_runtime(
@@ -967,7 +973,7 @@ class StewardDaemon:
         except Exception:
             return None
 
-    def _publish_control_loop_runs(self, ledger: object) -> bool:
+    def _publish_control_loop_runs(self, ledger: ControlLoopLedger) -> bool:
         """Publish queued terminal planner runs and report remaining lag."""
 
         pending = False
@@ -982,8 +988,7 @@ class StewardDaemon:
                     pending = True
             except ArchiveConflictError as exc:
                 pending = True
-                if hasattr(ledger, "set_planning_blocked"):
-                    ledger.set_planning_blocked(True, reason="visible planner-run conflict")
+                ledger.set_planning_blocked(True, reason="visible planner-run conflict")
                 self._log(f"planner archive blocked run={run_id} error={exc.__class__.__name__}")
             except (OSError, ArchiveError) as exc:
                 pending = True
@@ -1627,7 +1632,9 @@ class StewardDaemon:
                         clients = (publisher.r2, publisher.d1)
                         for client in clients:
                             transport_tracker.install(client)
-                        self._publication_cancel = close_clients
+                        self._publication_cancel = _CallbackDaemonCancellation(
+                            close_clients
+                        )
                         if self._publication_stop.is_set():
                             break
                     except Exception as exc:
@@ -1678,12 +1685,12 @@ class StewardDaemon:
         self._publication_stop.set()
         self._publication_wakeup.set()
         self._publication_deadline = deadline
-        cancel = getattr(self, "_publication_cancel", None)
-        if callable(cancel):
+        cancel = self._publication_cancel
+        if cancel is not None:
             # Closing the daemon-owned clients is the provider cancellation
             # boundary.  The worker still owns final cleanup in its finally.
             try:
-                cancel()
+                cancel.cancel()
             except Exception:
                 pass
         thread = self._publication_thread
@@ -1788,19 +1795,17 @@ class StewardDaemon:
             )
 
         if self.session_supervisor is not None and task.worktree_path is not None:
-            reconcile_container = getattr(
-                self.session_supervisor, "reconcile_container", None
-            )
-            if callable(reconcile_container):
-                try:
-                    reconcile_container(task.id, ensure_running=True)
-                except Exception as exc:
-                    return ReconciliationOutcome(
-                        task.id,
-                        ReconciliationDisposition.blocked,
-                        "task container identity could not be reconciled",
-                        evidence={"error": exc.__class__.__name__},
-                    )
+            try:
+                self.session_supervisor.reconcile_container(
+                    task.id, ensure_running=True
+                )
+            except Exception as exc:
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.blocked,
+                    "task container identity could not be reconciled",
+                    evidence={"error": exc.__class__.__name__},
+                )
 
         running = [run for run in runs if str(run.state) == "running"]
         if len(running) > 1:
@@ -3749,10 +3754,7 @@ class StewardDaemon:
         if not any(event.kind == "cleanup.container_removed" for event in events):
             try:
                 if self.session_supervisor is not None:
-                    remove = getattr(self.session_supervisor, "remove_container", None)
-                    if not callable(remove):
-                        raise RuntimeError("session boundary has no remove operation")
-                    remove(task.id)
+                    self.session_supervisor.remove_container(task.id)
                 self.store.add_event(
                     task.id,
                     "cleanup.container_removed",
@@ -3863,12 +3865,11 @@ class StewardDaemon:
             self.runtime.stopping_requested_at = utc_now()
             self.runtime.forced_stop = force
             self.runtime.heartbeat_at = utc_now()
-        if hasattr(self.store, "set_daemon_lifecycle"):
-            self.store.set_daemon_lifecycle(
-                DaemonLifecycleState.stopping.value,
-                instance_id=self.runtime.instance_id,
-                state={"forced": force},
-            )
+        self.store.set_daemon_lifecycle(
+            DaemonLifecycleState.stopping.value,
+            instance_id=self.runtime.instance_id,
+            state={"forced": force},
+        )
         if self._control_loop_ledger is not None:
             try:
                 self._control_loop_ledger.record_runtime(
@@ -4023,17 +4024,16 @@ class StewardDaemon:
             self.runtime.lifecycle = lifecycle
             self.runtime.state = DaemonRuntimeState.stopping
             self.runtime.heartbeat_at = utc_now()
-        if hasattr(self.store, "set_daemon_lifecycle"):
-            self.store.set_daemon_lifecycle(
-                lifecycle.value,
-                instance_id=self.runtime.instance_id,
-                state={
-                    "forced": force,
-                    "interrupted_runs": interrupted_runs,
-                    "container_stop_failures": len(container_stop_failures),
-                    "publication_worker_stopped": publication_worker_stopped,
-                },
-            )
+        self.store.set_daemon_lifecycle(
+            lifecycle.value,
+            instance_id=self.runtime.instance_id,
+            state={
+                "forced": force,
+                "interrupted_runs": interrupted_runs,
+                "container_stop_failures": len(container_stop_failures),
+                "publication_worker_stopped": publication_worker_stopped,
+            },
+        )
         return ShutdownResult(
             state=lifecycle,
             forced=force,
@@ -4451,11 +4451,7 @@ class StewardDaemon:
             pipeline_id = getattr(execution, "owning_pipeline_id", None)
             if pipeline_id is None:
                 return False
-            cursor = getattr(self.executor, "_pipeline_cursor", None)
-            if callable(cursor):
-                phase = cursor(task_id, pipeline_id)
-            else:
-                phase = getattr(self.store.get_pipeline(pipeline_id), "phase", None)
+            phase = self.executor._pipeline_cursor(task_id, pipeline_id)
             value = getattr(phase, "value", phase)
             return str(value) in {
                 PipelineCursorPhase.integration.value,
@@ -4554,12 +4550,7 @@ class StewardDaemon:
         )
 
     def _fetch_signals(self, result: TickResult, providers: list[str]) -> None:
-        try:
-            collections = collect_signal_items(self.config, provider_names=providers)
-        except TypeError as exc:
-            if "provider_names" not in str(exc):
-                raise
-            collections = collect_signal_items(self.config)
+        collections = collect_signal_items(self.config, provider_names=providers)
         for collection in collections:
             result.signal_fetches += 1
             fetch_run = collection.fetch.model_copy(
@@ -4573,38 +4564,17 @@ class StewardDaemon:
                     "new_item_count": 0,
                 }
             )
-            ingest = getattr(self.store, "ingest_signal_collection", None)
-            if callable(ingest):
-                provider_config = self.config.signal_providers.get(collection.provider)
-                ingested = ingest(
-                    fetch_run,
-                    collection.items,
-                    suppression_hours=(
-                        provider_config.suppression_hours if provider_config else 24
-                    ),
-                )
-                if isinstance(ingested, tuple) and len(ingested) == 3:
-                    saved_items, _signals, created_items = ingested
-                    fetch_run = fetch_run.model_copy(
-                        update={"item_count": len(saved_items), "new_item_count": created_items}
-                    )
-                else:
-                    saved_items, _signals = ingested
-                    created_items = sum(
-                        1
-                        for item in saved_items
-                        if getattr(item, "dedupe_result", "new") == "new"
-                    )
-            else:
-                provider_config = self.config.signal_providers.get(collection.provider)
-                saved_items, created_items = self.store.add_signal_items(
-                    collection.items,
-                    suppression_hours=(
-                        provider_config.suppression_hours if provider_config else 24
-                    ),
-                )
-                fetch_run = fetch_run.model_copy(update={"new_item_count": created_items})
-                self.store.add_signal_fetch_run(fetch_run)
+            provider_config = self.config.signal_providers.get(collection.provider)
+            saved_items, _signals, created_items = self.store.ingest_signal_collection(
+                fetch_run,
+                collection.items,
+                suppression_hours=(
+                    provider_config.suppression_hours if provider_config else 24
+                ),
+            )
+            fetch_run = fetch_run.model_copy(
+                update={"item_count": len(saved_items), "new_item_count": created_items}
+            )
             result.signal_items += len(saved_items)
             result.new_signal_items += created_items
             self.store.add_event(
@@ -4751,25 +4721,13 @@ class StewardDaemon:
         planner_run = None
         planner_error: Exception | None = None
         try:
-            try:
-                planner_run = run_planner(
-                    planner_config,
-                    signals,
-                    task_context,
-                    invocation=self.planner_session,
-                    run_id=control_run_id,
-                )
-            except TypeError as exc:
-                # Preserve simple test doubles from the pre-boundary API. A
-                # real invocation TypeError still propagates unchanged.
-                if "invocation" not in str(exc) and "run_id" not in str(exc):
-                    raise
-                planner_run = run_planner(
-                    planner_config,
-                    signals,
-                    task_context,
-                    run_id=control_run_id,
-                )
+            planner_run = run_planner(
+                planner_config,
+                signals,
+                task_context,
+                invocation=self.planner_session,
+                run_id=control_run_id,
+            )
         except Exception as exc:
             planner_error = exc
         run_id = control_run_id
@@ -5041,14 +4999,9 @@ class StewardDaemon:
                         thread_name_prefix="steward-task",
                     )
             while not self._shutdown_event.is_set():
-                try:
-                    trigger = wait_for_scheduler_event(
-                        self.config, self.store, stop_event=self._shutdown_event
-                    )
-                except TypeError as exc:
-                    if "stop_event" not in str(exc):
-                        raise
-                    trigger = wait_for_scheduler_event(self.config, self.store)
+                trigger = wait_for_scheduler_event(
+                    self.config, self.store, stop_event=self._shutdown_event
+                )
                 if self._shutdown_event.is_set():
                     break
                 self.run_cycle(

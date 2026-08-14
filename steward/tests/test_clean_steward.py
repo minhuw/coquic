@@ -2285,7 +2285,7 @@ def test_daemon_forever_dispatches_up_to_source_capacity_per_cycle(
 
     monkeypatch.setattr(
         "coquic_steward.orchestration.daemon.wait_for_scheduler_event",
-        lambda *_args: SchedulerTrigger(reason="wakeup", providers=[]),
+        lambda *_args, **_kwargs: SchedulerTrigger(reason="wakeup", providers=[]),
     )
 
     def fake_run_cycle(**kwargs) -> None:

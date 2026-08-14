@@ -3522,6 +3522,35 @@ def test_terminal_publication_graph_rejects_run_serializer_lookalikes() -> None:
     assert lookalike.called is False
 
 
+def test_terminal_publication_graph_rejects_nested_serializer_subtypes() -> None:
+    daemon = object.__new__(StewardDaemon)
+    task = SimpleNamespace(
+        id="task-terminal",
+        status=TaskStatus.succeeded.value,
+        updated_at=datetime(2026, 7, 28, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    executed = False
+
+    class ArmedIdentity(RunIdentity):
+        def as_dict(self) -> dict[str, object]:
+            nonlocal executed
+            executed = True
+            raise AssertionError("unsupported nested serializer executed")
+
+    base = _terminal_run_metadata()
+    run = replace(
+        base,
+        identity=ArmedIdentity("task-terminal", "pipeline-terminal", "run-original"),
+    )
+    source = AtifSource(run=run, documents={})
+    graph = {"task": {"taskId": task.id}, "runs": [source]}
+
+    result = daemon._terminal_publication_graph(task, SimpleNamespace(id="run-original"), graph, "run-terminal")
+
+    assert result is None
+    assert executed is False
+
+
 def test_publication_usage_mapping_uses_only_the_current_overhead_value() -> None:
     daemon = object.__new__(StewardDaemon)
     row = StewardOverheadUsage(date="2026-07-28", model="gpt-test")
@@ -3538,6 +3567,22 @@ def test_publication_usage_mapping_rejects_serializer_lookalikes() -> None:
     assert daemon._publication_usage_mapping(lookalike) is None
     assert lookalike.as_dict_called is False
     assert lookalike.public_dict_called is False
+
+
+def test_publication_usage_mapping_rejects_overhead_subtypes_without_execution() -> None:
+    daemon = object.__new__(StewardDaemon)
+    executed = False
+
+    class ArmedOverhead(StewardOverheadUsage):
+        def model_dump(self, *args, **kwargs):
+            nonlocal executed
+            executed = True
+            raise AssertionError("unsupported overhead serializer executed")
+
+    row = ArmedOverhead(date="2026-07-28", model="gpt-test")
+
+    assert daemon._publication_usage_mapping(row) is None
+    assert executed is False
 
 
 def test_reconcile_publication_usage_passes_detached_mapping_to_publisher() -> None:

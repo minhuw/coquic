@@ -59,7 +59,7 @@ from ..execution.session import (
 )
 from ..execution.task_archive import TaskArchiveWriter
 from ..publication.atif import AtifSource
-from ..publication.models import RunMetadata
+from ..publication.models import RunIdentity, RunLineage, RunMetadata, UsageSummary
 from ..publication.generation import (
     PublicationGeneration as ComposedPublicationGeneration,
     compose_publication_generation,
@@ -1317,7 +1317,7 @@ class StewardDaemon:
     def _publication_usage_mapping(value: object) -> Mapping[str, object] | None:
         if isinstance(value, Mapping):
             return value
-        if isinstance(value, StewardOverheadUsage):
+        if type(value) is StewardOverheadUsage:
             return StewardOverheadUsage.public_dict(value)
         return None
 
@@ -3062,6 +3062,13 @@ class StewardDaemon:
                 continue
             run_value = source.run
             if isinstance(run_value, RunMetadata):
+                if (
+                    type(run_value) is not RunMetadata
+                    or type(run_value.identity) is not RunIdentity
+                    or type(run_value.lineage) is not RunLineage
+                    or (run_value.usage is not None and type(run_value.usage) is not UsageSummary)
+                ):
+                    return None
                 run_mapping = dict(RunMetadata.as_dict(run_value))
             elif isinstance(run_value, Mapping):
                 run_mapping = dict(run_value)

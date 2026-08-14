@@ -152,6 +152,32 @@ def test_projection_accepts_detached_atif_document() -> None:
     assert projection.runs[0].run_id == "run-document"
 
 
+def test_projection_rejects_atif_document_subtypes_without_execution() -> None:
+    executed = False
+
+    class ArmedDocument(AtifDocument):
+        def __getattribute__(self, name: str):
+            try:
+                armed = object.__getattribute__(self, "_armed")
+            except AttributeError:
+                armed = False
+            if name == "document" and armed:
+                nonlocal executed
+                executed = True
+                raise AssertionError("unsupported document access executed")
+            return super().__getattribute__(name)
+
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            object.__setattr__(self, "_armed", True)
+
+    document = ArmedDocument({"extra": {}}, b"{}\n")
+
+    with pytest.raises(UsageProjectionError):
+        build_task_usage_projection(document, _catalog())
+    assert executed is False
+
+
 def test_projection_uses_exact_invocation_start_price_and_catalog_provenance() -> None:
     catalog = PriceCatalog(
         (

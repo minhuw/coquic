@@ -118,7 +118,7 @@ def _fail(message: str) -> None:
 def _mapping(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return {str(key): _usage_thaw(item) for key, item in value.items()}
-    if isinstance(value, AtifDocument):
+    if type(value) is AtifDocument:
         mapped = AtifDocument.as_dict(value)
     elif isinstance(value, PublicationCounts):
         mapped = PublicationCounts.as_dict(value)

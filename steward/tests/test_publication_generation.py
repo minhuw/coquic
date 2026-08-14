@@ -293,6 +293,35 @@ def test_generation_rejects_serializer_lookalikes_without_execution(lookalike_ty
     assert lookalike.called is False
 
 
+def test_generation_rejects_nested_serializer_subtypes_without_execution() -> None:
+    executed = False
+
+    class ArmedIdentity(RunIdentity):
+        def as_dict(self) -> dict[str, object]:
+            nonlocal executed
+            executed = True
+            raise AssertionError("unsupported nested serializer executed")
+
+    source = _source()
+    run = RunMetadata(
+        identity=ArmedIdentity("task-generation", "pipeline-generation", "run-generation"),
+        role=source.run.role,
+        state=source.run.state,
+        started_at=source.run.started_at,
+        completed_at=source.run.completed_at,
+        duration_ms=source.run.duration_ms,
+        model=source.run.model,
+        reasoning=source.run.reasoning,
+        lineage=source.run.lineage,
+        usage=source.run.usage,
+    )
+    result = _compose(_graph(AtifSource(run=run, documents=source.documents)))
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.invalid_metadata,)
+    assert executed is False
+
+
 def test_active_task_after_completed_planning_run_is_visible() -> None:
     result = _compose(_graph(_source(), lifecycle="active"))
 

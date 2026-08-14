@@ -94,12 +94,26 @@ def _known_public_mapping(value: object) -> Mapping[str, Any] | None:
     """
 
     if isinstance(value, RunIdentity):
+        if type(value) is not RunIdentity:
+            return None
         return RunIdentity.as_dict(value)
     if isinstance(value, RunLineage):
+        if type(value) is not RunLineage:
+            return None
         return RunLineage.as_dict(value)
     if isinstance(value, UsageSummary):
+        if type(value) is not UsageSummary:
+            return None
         return UsageSummary.as_dict(value)
     if isinstance(value, RunMetadata):
+        if type(value) is not RunMetadata:
+            return None
+        if (
+            type(value.identity) is not RunIdentity
+            or type(value.lineage) is not RunLineage
+            or (value.usage is not None and type(value.usage) is not UsageSummary)
+        ):
+            return None
         return RunMetadata.as_dict(value)
     if isinstance(value, SourceDocument):
         return SourceDocument.as_dict(value)

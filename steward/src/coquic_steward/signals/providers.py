@@ -5,7 +5,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Any, Protocol
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import (
@@ -32,15 +32,6 @@ class ProviderSignalResult:
     summary: str = ""
     error: str | None = None
     has_more: bool = False
-
-
-class SignalProvider(Protocol):
-    name: str
-
-    def collect(
-        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
-    ) -> ProviderSignalResult:
-        """Return current actionable signal items from one source."""
 
 
 class GitHubActionsProvider:
@@ -645,6 +636,11 @@ class CodacyProvider:
         if issues_count <= 0:
             return ProviderSignalResult(summary=summary)
         return ProviderSignalResult(summary=summary, has_more=True)
+
+    def stale_signal_reason(
+        self, config: StewardConfig, item: SignalItem
+    ) -> str | None:
+        return None
 
 
 def _open_codacy_request(request: Request, *, timeout: float):

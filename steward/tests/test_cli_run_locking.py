@@ -7,6 +7,8 @@ from typer.testing import CliRunner
 
 from coquic_steward.cli import app, run as run_command
 from coquic_steward.core.config import load_config
+from coquic_steward.core.lifecycle import ShutdownResult
+from coquic_steward.core.models import DaemonLifecycleState
 from coquic_steward.core.models import (
     TaskKind,
     TaskSpec,
@@ -17,6 +19,7 @@ from coquic_steward.core.models import (
 from coquic_steward.execution import StewardExecutor
 from coquic_steward.orchestration import (
     DaemonAlreadyRunning,
+    StewardDaemon,
     acquire_daemon_lock,
 )
 from coquic_steward.storage import TaskStore
@@ -26,7 +29,7 @@ def _task_context(repo, monkeypatch):
     monkeypatch.chdir(repo)
     monkeypatch.setattr(
         "coquic_steward.cli._configured_supervisor",
-        lambda _config, _store: object(),
+        lambda _config, _store: None,
     )
     config = load_config()
     store = TaskStore(config.db_path)
@@ -83,7 +86,7 @@ def test_run_preserves_success_output_and_releases_lock(repo, monkeypatch) -> No
     config, store, task = _task_context(repo, monkeypatch)
     events: list[str] = []
 
-    class FakeDaemon:
+    class FakeDaemon(StewardDaemon):
         def __init__(self, _config, _store, *, session_supervisor=None):
             del session_supervisor
             events.append("construct")
@@ -103,7 +106,7 @@ def test_run_preserves_success_output_and_releases_lock(repo, monkeypatch) -> No
         def shutdown(self):
             events.append("shutdown")
             _assert_lock_held(config)
-            return SimpleNamespace(state="stopped")
+            return ShutdownResult()
 
         def tick(self, **_kwargs):
             pytest.fail("run must not invoke general daemon dispatch")
@@ -130,7 +133,7 @@ def test_run_preserves_success_output_and_releases_lock(repo, monkeypatch) -> No
 def test_run_preserves_blocked_exit_and_output(repo, monkeypatch) -> None:
     config, store, task = _task_context(repo, monkeypatch)
 
-    class FakeDaemon:
+    class FakeDaemon(StewardDaemon):
         def __init__(self, _config, _store, *, session_supervisor=None):
             del session_supervisor
             _assert_lock_held(config)
@@ -145,7 +148,7 @@ def test_run_preserves_blocked_exit_and_output(repo, monkeypatch) -> None:
 
         def shutdown(self):
             _assert_lock_held(config)
-            return SimpleNamespace(state="stopped")
+            return ShutdownResult()
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
     result = _invoke_run(repo, monkeypatch, task.id)
@@ -160,7 +163,7 @@ def test_run_nonblocked_failure_exits_nonzero_after_shutdown(repo, monkeypatch) 
     config, store, task = _task_context(repo, monkeypatch)
     events: list[str] = []
 
-    class FakeDaemon:
+    class FakeDaemon(StewardDaemon):
         def __init__(self, _config, _store, *, session_supervisor=None):
             del session_supervisor
             events.append("construct")
@@ -179,7 +182,7 @@ def test_run_nonblocked_failure_exits_nonzero_after_shutdown(repo, monkeypatch) 
         def shutdown(self):
             events.append("shutdown")
             _assert_lock_held(config)
-            return SimpleNamespace(state="stopped")
+            return ShutdownResult()
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
     result = _invoke_run(repo, monkeypatch, task.id)
@@ -198,7 +201,7 @@ def test_run_releases_lock_after_worker_exception(
     config, _store, task = _task_context(repo, monkeypatch)
     events: list[str] = []
 
-    class FakeDaemon:
+    class FakeDaemon(StewardDaemon):
         def __init__(self, _config, _store, *, session_supervisor=None):
             del session_supervisor
             events.append("construct")
@@ -216,7 +219,7 @@ def test_run_releases_lock_after_worker_exception(
         def shutdown(self):
             events.append("shutdown")
             _assert_lock_held(config)
-            return SimpleNamespace(state="stopped")
+            return ShutdownResult()
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
     with pytest.raises(exception_type, match="worker stopped"):
@@ -230,7 +233,7 @@ def test_run_releases_lock_after_worker_exception(
 def test_run_incomplete_shutdown_fails_without_completion_output(repo, monkeypatch) -> None:
     config, store, task = _task_context(repo, monkeypatch)
 
-    class FakeDaemon:
+    class FakeDaemon(StewardDaemon):
         def __init__(self, _config, _store, *, session_supervisor=None):
             del session_supervisor
             _assert_lock_held(config)
@@ -245,7 +248,7 @@ def test_run_incomplete_shutdown_fails_without_completion_output(repo, monkeypat
 
         def shutdown(self):
             _assert_lock_held(config)
-            return SimpleNamespace(state="stopping")
+            return ShutdownResult(state=DaemonLifecycleState.stopping)
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
     result = _invoke_run(repo, monkeypatch, task.id)
@@ -271,7 +274,7 @@ def test_run_advances_only_selected_task_without_planning_or_dispatch(
         )
     )
 
-    class FakeDaemon:
+    class FakeDaemon(StewardDaemon):
         def __init__(self, _config, _store, *, session_supervisor=None):
             del session_supervisor
             _assert_lock_held(config)
@@ -293,7 +296,7 @@ def test_run_advances_only_selected_task_without_planning_or_dispatch(
 
         def shutdown(self):
             _assert_lock_held(config)
-            return SimpleNamespace(state="stopped")
+            return ShutdownResult()
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
     monkeypatch.setattr(

@@ -3756,10 +3756,12 @@ def make_task_legacy(store: TaskStore, task_id: str) -> None:
 
 
 def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
-    class FakeProvider:
+    class FakeProvider(GitHubActionsCiProvider):
         name = "fake"
 
-        def collect(self, _config: StewardConfig) -> ProviderSignalResult:
+        def collect(
+            self, _config: StewardConfig, *, max_items: int = 12
+        ) -> ProviderSignalResult:
             return ProviderSignalResult(
                 summary="fake signal",
                 items=[
@@ -3784,10 +3786,12 @@ def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
 def test_signal_fetch_errors_are_not_signal_items(
     config: StewardConfig,
 ) -> None:
-    class FailingProvider:
+    class FailingProvider(CodacyProvider):
         name = "codacy"
 
-        def collect(self, _config: StewardConfig) -> ProviderSignalResult:
+        def collect(
+            self, _config: StewardConfig, *, max_items: int = 12
+        ) -> ProviderSignalResult:
             raise OSError("dns failed")
 
     collection = collect_signal_items(config, providers=[FailingProvider()])[0]
@@ -4588,10 +4592,12 @@ def test_codacy_signal_records_error_after_non_2xx_issue_search(
 
 
 def test_collect_signal_items_persists_provider_items(config: StewardConfig) -> None:
-    class WorkItemProvider:
+    class WorkItemProvider(CodacyProvider):
         name = "codacy"
 
-        def collect(self, _config: StewardConfig) -> ProviderSignalResult:
+        def collect(
+            self, _config: StewardConfig, *, max_items: int = 12
+        ) -> ProviderSignalResult:
             return ProviderSignalResult(
                 summary="Codacy sampled 1 open finding(s)",
                 items=[

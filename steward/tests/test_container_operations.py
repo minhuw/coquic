@@ -1199,7 +1199,7 @@ def test_pending_selector_journal_retains_before_and_after_releases(
         encoding="utf-8",
     )
 
-    class RecordingStore:
+    class RecordingStore(TaskStore):
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict[str, object]]] = []
 
@@ -1235,7 +1235,10 @@ def test_reserved_selector_journal_requires_pending_outcome(
         json.dumps(journal), encoding="utf-8"
     )
 
-    class RecordingStore:
+    class RecordingStore(TaskStore):
+        def __init__(self) -> None:
+            pass
+
         def record_image_release(self, _release_id: str, **_kwargs: object) -> None:
             raise AssertionError("selector journal should fail before release recording")
 
@@ -1255,7 +1258,10 @@ def test_non_selector_success_journal_remains_ignorable(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    class RecordingStore:
+    class RecordingStore(TaskStore):
+        def __init__(self) -> None:
+            pass
+
         def record_image_release(self, _release_id: str, **_kwargs: object) -> None:
             raise AssertionError("there are no release records to record")
 

@@ -7,8 +7,11 @@ import json
 import os
 import re
 import subprocess  # nosec B404 - fixed Docker argv below
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, TypeAlias
 
+if TYPE_CHECKING:
+    from ..storage import TaskStore
+from .config import StewardConfig, StewardDeploymentConfig
 from .models import (
     PipelineCursorPhase,
     PipelinePhase,
@@ -22,6 +25,10 @@ from .models import (
     ResourcePressureState,
     evaluate_resource_pressure,
 )
+from .subprocesses import CommandResult
+
+
+DockerCommandResult: TypeAlias = CommandResult | subprocess.CompletedProcess[bytes]
 
 
 class ResourcePressureController:
@@ -34,9 +41,9 @@ class ResourcePressureController:
 
     def __init__(
         self,
-        config: object,
+        config: StewardConfig,
         *,
-        usage_provider: object | None = None,
+        usage_provider: Callable[[], OwnedDockerUsage | Mapping[str, Any]] | None = None,
         initial_state: ResourcePressureState = ResourcePressureState.normal,
     ):
         self.config = config
@@ -53,12 +60,12 @@ class ResourcePressureController:
     ) -> ResourcePressure:
         """Measure pressure from one supplied snapshot or the injected provider."""
 
-        deployment = getattr(self.config, "deployment", None)
-        if deployment is None or not getattr(deployment, "enabled", False):
+        deployment = self.config.deployment
+        if not deployment.enabled:
             self.last = ResourcePressure()
             self.state = self.last.state
             return self.last
-        home = getattr(self.config, "coquic_home", None)
+        home = self.config.coquic_home
         free_bytes: int | None = None
         if home is not None:
             try:
@@ -70,7 +77,7 @@ class ResourcePressureController:
         value = owned_usage
         if value is None:
             provider = self.usage_provider
-            if callable(provider):
+            if provider is not None:
                 try:
                     value = provider()
                 except Exception:
@@ -99,10 +106,10 @@ class ResourcePressureController:
                 )
         except Exception:
             owned = OwnedDockerUsage(ambiguous=True)
-        minimum = getattr(deployment, "min_free_bytes", None)
-        maximum = getattr(deployment, "max_owned_docker_bytes", None)
-        recovery_free = getattr(deployment, "recovery_free_bytes", None)
-        recovery_owned = getattr(deployment, "recovery_owned_docker_bytes", None)
+        minimum = deployment.min_free_bytes
+        maximum = deployment.max_owned_docker_bytes
+        recovery_free = deployment.recovery_free_bytes
+        recovery_owned = deployment.recovery_owned_docker_bytes
         if None in (minimum, maximum, recovery_free, recovery_owned):
             self.last = ResourcePressure(ResourcePressureState.pressure, free_bytes, owned, "threshold_unconfigured", False)
         else:
@@ -138,7 +145,7 @@ class DockerResourceManager:
         docker_bin: str = "docker",
         *,
         deployment_id: str | None = None,
-        runner: Callable[[list[str]], object] | None = None,
+        runner: Callable[[list[str]], DockerCommandResult] | None = None,
     ) -> None:
         self.docker_bin = docker_bin
         self.deployment_id = deployment_id
@@ -151,10 +158,12 @@ class DockerResourceManager:
         )
         return usage
 
-    def reconcile(self, store: object, deployment: object) -> dict[str, object]:
+    def reconcile(
+        self, store: TaskStore, deployment: StewardDeploymentConfig
+    ) -> dict[str, object]:
         """Persist complete references and reclaim exact unreferenced images."""
 
-        self.deployment_id = str(getattr(deployment, "compose_project", ""))
+        self.deployment_id = deployment.compose_project
         release_images, in_flight_releases = self._record_deployment_releases(
             store, deployment
         )
@@ -166,15 +175,8 @@ class DockerResourceManager:
         )
         if not complete or usage.ambiguous:
             return {"usage": usage, "reclaimed": (), "ambiguous": True}
-        replace = getattr(store, "replace_container_references", None)
-        if callable(replace):
-            replace(references)
-        retained_provider = getattr(store, "referenced_image_ids", None)
-        retained = (
-            frozenset(retained_provider())
-            if callable(retained_provider)
-            else frozenset()
-        )
+        store.replace_container_references(references)
+        retained = frozenset(store.referenced_image_ids())
         retained = frozenset(
             {
                 *retained,
@@ -200,7 +202,7 @@ class DockerResourceManager:
                 result = self._run(["image", "rm", image_id])
             except Exception:
                 continue
-            if int(getattr(result, "returncode", 1)) == 0:
+            if result.returncode == 0:
                 reclaimed.append(image_id)
         reclaimed_bytes = sum(image_sizes[image_id] for image_id in reclaimed)
         usage = OwnedDockerUsage(
@@ -334,7 +336,7 @@ class DockerResourceManager:
 
     def _list_ids(self, argv: list[str], pattern: re.Pattern[str]) -> list[str]:
         result = self._run(argv)
-        if int(getattr(result, "returncode", 1)) != 0:
+        if result.returncode != 0:
             raise OSError("Docker object listing failed")
         values = sorted(set(self._stdout(result).splitlines()))
         if any(pattern.fullmatch(value) is None for value in values):
@@ -351,7 +353,7 @@ class DockerResourceManager:
             argv.append("--size")
         argv.extend(identities)
         result = self._run(argv)
-        if int(getattr(result, "returncode", 1)) != 0:
+        if result.returncode != 0:
             raise OSError("Docker object inspection failed")
         value = json.loads(self._stdout(result))
         if not isinstance(value, list) or not all(
@@ -368,8 +370,8 @@ class DockerResourceManager:
         images: list[dict[str, Any]] = []
         for identity in sorted(identities):
             result = self._run(["image", "inspect", identity])
-            if int(getattr(result, "returncode", 1)) != 0:
-                error = getattr(result, "stderr", b"")
+            if result.returncode != 0:
+                error = result.stderr
                 text = (
                     error.decode("utf-8", "replace")
                     if isinstance(error, bytes)
@@ -392,7 +394,7 @@ class DockerResourceManager:
             images.append(value[0])
         return images
 
-    def _run(self, argv: list[str]) -> object:
+    def _run(self, argv: list[str]) -> DockerCommandResult:
         command = [self.docker_bin, *argv]
         if self.runner is not None:
             return self.runner(command)
@@ -404,19 +406,18 @@ class DockerResourceManager:
         )
 
     @staticmethod
-    def _stdout(result: object) -> str:
-        value = getattr(result, "stdout", b"")
+    def _stdout(result: DockerCommandResult) -> str:
+        value = result.stdout
         return (
             value.decode("utf-8", "strict") if isinstance(value, bytes) else str(value)
         )
 
     @staticmethod
     def _record_deployment_releases(
-        store: object, deployment: object
+        store: TaskStore, deployment: StewardDeploymentConfig
     ) -> tuple[dict[str, tuple[str, ...]], frozenset[str]]:
-        record_release = getattr(store, "record_image_release", None)
-        deployment_dir = getattr(deployment, "deployment_dir", None)
-        if not callable(record_release) or deployment_dir is None:
+        deployment_dir = deployment.deployment_dir
+        if deployment_dir is None:
             return {}, frozenset()
         selected_releases: dict[str, str] = {}
         for selector in ("current", "previous"):
@@ -459,7 +460,7 @@ class DockerResourceManager:
             if validation_id is not None:
                 image_pair = (*image_pair, str(validation_id))
             release_images[release_id] = image_pair
-            record_release(
+            store.record_image_release(
                 release_id,
                 daemon_image_id=str(daemon_id),
                 task_image_id=str(task_id),

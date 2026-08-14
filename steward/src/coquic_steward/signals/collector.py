@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeAlias
 
 from ..core.config import StewardConfig
 from ..core.models import ProjectSignals, SignalFetchRun, SignalFetchStatus, SignalItem, utc_now
 from .providers import (
     CodacyProvider,
     CodeScanningProvider,
+    GitHubActionsProvider,
     GitHubActionsCiProvider,
     GitHubActionsDeployDemoProvider,
     GitHubActionsDuvetProvider,
@@ -16,10 +18,16 @@ from .providers import (
     GitHubActionsPerfProvider,
     GitHubActionsTestProvider,
     GitHubFeatureIssuesProvider,
-    SignalProvider,
 )
 
-PROVIDER_TYPES: dict[str, type[SignalProvider]] = {
+_SignalProvider: TypeAlias = (
+    GitHubActionsProvider
+    | GitHubFeatureIssuesProvider
+    | CodeScanningProvider
+    | CodacyProvider
+)
+
+PROVIDER_TYPES: dict[str, type[_SignalProvider]] = {
     GitHubActionsCiProvider.name: GitHubActionsCiProvider,
     GitHubActionsTestProvider.name: GitHubActionsTestProvider,
     GitHubActionsDuvetProvider.name: GitHubActionsDuvetProvider,
@@ -46,8 +54,8 @@ class SignalCollection:
         return self.fetch.error
 
 
-def signal_providers(names: tuple[str, ...]) -> list[SignalProvider]:
-    providers: list[SignalProvider] = []
+def signal_providers(names: tuple[str, ...]) -> list[_SignalProvider]:
+    providers: list[_SignalProvider] = []
     for name in names:
         provider_type = PROVIDER_TYPES.get(name)
         if provider_type is None:
@@ -62,7 +70,7 @@ def signal_providers(names: tuple[str, ...]) -> list[SignalProvider]:
 def revalidate_signal_items(
     config: StewardConfig, items: list[SignalItem]
 ) -> tuple[list[SignalItem], dict[str, str]]:
-    providers: dict[str, object] = {}
+    providers: dict[str, _SignalProvider] = {}
     actionable: list[SignalItem] = []
     stale_reasons: dict[str, str] = {}
     for item in items:
@@ -71,12 +79,8 @@ def revalidate_signal_items(
             actionable.append(item)
             continue
         provider = providers.setdefault(item.provider, provider_type())
-        stale_signal_reason = getattr(provider, "stale_signal_reason", None)
-        if not callable(stale_signal_reason):
-            actionable.append(item)
-            continue
         try:
-            reason = stale_signal_reason(config, item)
+            reason = provider.stale_signal_reason(config, item)
         except Exception:  # pragma: no cover - revalidation must fail open.
             reason = None
         if reason is None:
@@ -88,7 +92,7 @@ def revalidate_signal_items(
 
 def gather_signals(
     config: StewardConfig,
-    providers: list[SignalProvider] | None = None,
+    providers: list[_SignalProvider] | None = None,
 ) -> ProjectSignals:
     collections = collect_signal_items(config, providers=providers)
     return project_signals_from_items(
@@ -101,7 +105,7 @@ def gather_signals(
 
 def collect_signal_items(
     config: StewardConfig,
-    providers: list[SignalProvider] | None = None,
+    providers: list[_SignalProvider] | None = None,
     provider_names: list[str] | None = None,
 ) -> list[SignalCollection]:
     names = tuple(provider_names) if provider_names is not None else config.enabled_signals
@@ -114,12 +118,7 @@ def collect_signal_items(
         try:
             provider_config = config.signal_providers.get(provider.name)
             max_items = provider_config.max_items if provider_config else 12
-            try:
-                result = provider.collect(config, max_items=max_items)
-            except TypeError as exc:
-                if "max_items" not in str(exc):
-                    raise
-                result = provider.collect(config)
+            result = provider.collect(config, max_items=max_items)
             items = result.items
             error = result.error
             summary = result.summary
@@ -156,35 +155,6 @@ def collect_signal_items(
             )
         )
     return collections
-
-
-def persist_signal_collections(store: object, collections: list[SignalCollection]) -> tuple[int, int]:
-    """Persist provider fetches and observations through one atomic boundary.
-
-    New stores expose ``ingest_signal_collection``; the fallback preserves the
-    older test-double API without changing provider normalization semantics.
-    """
-
-    total = 0
-    created = 0
-    for collection in collections:
-        fetch = collection.fetch.model_copy(
-            update={"item_count": len(collection.items), "new_item_count": 0}
-        )
-        ingest = getattr(store, "ingest_signal_collection", None)
-        if callable(ingest):
-            observations, _signals = ingest(fetch, collection.items)
-            total += len(observations)
-            created += sum(1 for item in observations if item.dedupe_result == "new")
-            continue
-        add_items = getattr(store, "add_signal_items")
-        saved_items, new_items = add_items(collection.items)
-        getattr(store, "add_signal_fetch_run")(
-            fetch.model_copy(update={"new_item_count": new_items})
-        )
-        total += len(saved_items)
-        created += new_items
-    return total, created
 
 
 def project_signals_from_items(

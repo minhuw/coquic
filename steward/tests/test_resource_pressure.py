@@ -10,6 +10,7 @@ from coquic_steward.core.lifecycle import (
 )
 from coquic_steward.core.models import (
     OwnedDockerUsage,
+    ResourcePressure,
     ResourcePressureState,
     TaskKind,
     TaskSpec,
@@ -81,7 +82,7 @@ def test_controller_treats_unknown_docker_usage_as_pressure(tmp_path: Path) -> N
         recovery_free_bytes=150,
         recovery_owned_docker_bytes=500,
     )
-    config = type("Config", (), {"deployment": deployment, "coquic_home": tmp_path})()
+    config = StewardConfig(repo_root=tmp_path, deployment=deployment)
     report = ResourcePressureController(config).measure()
     assert report.state is ResourcePressureState.pressure
     assert not report.admission_allowed
@@ -97,7 +98,7 @@ def test_controller_accepts_label_filtered_usage(tmp_path: Path) -> None:
         recovery_free_bytes=20,
         recovery_owned_docker_bytes=500,
     )
-    config = type("Config", (), {"deployment": deployment, "coquic_home": tmp_path})()
+    config = StewardConfig(repo_root=tmp_path, deployment=deployment)
     controller = ResourcePressureController(
         config,
         usage_provider=lambda: {"container_bytes": 1, "image_bytes": 1, "ambiguous": False},
@@ -205,37 +206,41 @@ def test_production_daemon_restores_pressure_hysteresis_after_restart(
 def test_daemon_projects_bounded_publication_health() -> None:
     recorded: list[dict[str, object]] = []
 
-    class Store:
+    class Store(TaskStore):
+        def __init__(self) -> None:
+            pass
+
         def list_tasks(self, *, limit: int):
             assert limit == 10_000
             return []
 
-        def get_publication_health(self):
-            return SimpleNamespace(
-                as_dict=lambda: {
-                    "queuedCount": 2**40,
-                    "blockedCount": 3,
-                    "cleanupPendingCount": 4,
-                    "cleanupPendingBytes": 2**40,
-                    "oldestQueuedAgeSeconds": 5,
-                }
-            )
+        def get_publication_health(self) -> dict[str, object]:
+            return {
+                "queuedCount": 2**40,
+                "blockedCount": 3,
+                "cleanupPendingCount": 4,
+                "cleanupPendingBytes": 2**40,
+                "oldestQueuedAgeSeconds": 5,
+            }
 
         def record_resource_pressure(self, **kwargs: object) -> None:
             recorded.append(kwargs)
 
-    report = SimpleNamespace(
-        as_dict=lambda: {
-            "state": "normal",
-            "homeFreeBytes": 100,
-            "ownedBytes": 1,
-            "admissionAllowed": True,
-        },
-        state="normal",
+    report = ResourcePressure(
+        home_free_bytes=100,
+        owned=OwnedDockerUsage(container_bytes=1),
     )
+
+    class Controller(ResourcePressureController):
+        def __init__(self) -> None:
+            pass
+
+        def measure(self, owned_usage=None) -> ResourcePressure:
+            return report
+
     daemon = object.__new__(StewardDaemon)
     daemon._docker_resources = None
-    daemon._resource_pressure = SimpleNamespace(measure=lambda: report)
+    daemon._resource_pressure = Controller()
     daemon.store = Store()
     daemon._log = lambda *_args, **_kwargs: None
 
@@ -260,10 +265,11 @@ def test_refresh_uses_one_reconciliation_snapshot_and_cleanup_aggregate(
         recovery_free_bytes=2,
         recovery_owned_docker_bytes=50,
     )
-    config = SimpleNamespace(deployment=deployment, coquic_home=tmp_path)
+    config = StewardConfig(repo_root=tmp_path, deployment=deployment)
 
-    class Docker:
-        snapshot_calls = 0
+    class Docker(DockerResourceManager):
+        def __init__(self) -> None:
+            self.snapshot_calls = 0
 
         def reconcile(self, _store: object, _deployment: object) -> dict[str, object]:
             self.snapshot_calls += 1
@@ -272,9 +278,12 @@ def test_refresh_uses_one_reconciliation_snapshot_and_cleanup_aggregate(
         def owned_usage(self) -> OwnedDockerUsage:
             raise AssertionError("refresh must consume reconciliation usage directly")
 
-    class Store:
-        cleanup_calls = 0
-        recorded: list[dict[str, object]] = []
+    class Store(TaskStore):
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+            self.recorded = []
+
+        recorded: list[dict[str, object]]
 
         def cleanup_pending_count(self) -> int:
             self.cleanup_calls += 1

@@ -10,11 +10,12 @@ import re
 import typer
 
 from .agents.catalog import AGENTS
-from .core.config import load_config
+from .core.config import StewardConfig, StewardPublicationConfig, load_config
 from .orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
     StewardPreflightError,
+    TickResult,
     acquire_daemon_lock,
 )
 from .execution.executor import default_worker_for_kind
@@ -26,6 +27,7 @@ from .execution.session import (
     publication_graph_for_task,
     runtime_factory_for_config,
 )
+from .core.lifecycle import ShutdownResult
 from .core.models import (
     Priority,
     Risk,
@@ -45,9 +47,13 @@ from .signals import (
 )
 from .storage import TaskStore
 from .publication.d1 import D1PublicationClient
+from .publication.models import ReasonCode
+from .publication.outbox import PublicationGeneration
 from .publication.publisher import (
     CloudPublisher,
+    PublicationHideResult,
     PublicationHideStatus,
+    PublicationResult,
     PublicationStatus,
     publication_generation_views,
     publication_health_view,
@@ -96,7 +102,7 @@ _PUBLICATION_SAFE_REASONS = _PUBLICATION_HIDE_REASONS | frozenset(
 _PUBLICATION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-def _context() -> tuple[TaskStore, object]:
+def _context() -> tuple[TaskStore, StewardConfig]:
     config = load_config()
     # A repository with no explicit container section is the historical local
     # CLI fixture. Production launches opt into the strict container boundary.
@@ -107,10 +113,12 @@ def _context() -> tuple[TaskStore, object]:
     return TaskStore(config.db_path), config
 
 
-def _configured_supervisor(config, store: TaskStore) -> SessionSupervisor | None:
+def _configured_supervisor(
+    config: StewardConfig, store: TaskStore
+) -> SessionSupervisor | None:
     """Build the production session boundary for a locked task image."""
 
-    if not getattr(config, "task_image_digest", None):
+    if not config.task_image_digest:
         return None
     return SessionSupervisor(
         config,
@@ -123,7 +131,7 @@ def _configured_supervisor(config, store: TaskStore) -> SessionSupervisor | None
     )
 
 
-def _configured_planner_session(config) -> FreshPlannerSession:
+def _configured_planner_session(config: StewardConfig) -> FreshPlannerSession:
     """Build the fresh one-shot boundary used by standalone planning."""
 
     if config.task_image_digest and not config.local_codex_test_harness:
@@ -133,25 +141,29 @@ def _configured_planner_session(config) -> FreshPlannerSession:
     return FreshPlannerSession(config)
 
 
-def _publication_compose_kwargs(config) -> dict[str, object]:
-    publication = getattr(config, "publication", None)
+def _publication_compose_kwargs(
+    config: StewardConfig,
+) -> dict[str, object]:
+    publication = config.publication
     sources = tuple(
         path
         for path in (
-            getattr(publication, "d1_token_path", None),
-            getattr(publication, "r2_access_key_id_path", None),
-            getattr(publication, "r2_secret_access_key_path", None),
+            publication.d1_token_path,
+            publication.r2_access_key_id_path,
+            publication.r2_secret_access_key_path,
         )
         if path is not None
     )
     return {"credential_sources": sources}
 
 
-def _current_publication_source(config, store: TaskStore, generation: object) -> object | None:
+def _current_publication_source(
+    config: StewardConfig, store: TaskStore, generation: PublicationGeneration
+) -> dict[str, object] | None:
     """Build a fresh graph from current private task evidence."""
 
-    task_id = getattr(generation, "task_id", None)
-    if not isinstance(task_id, str) or not task_id:
+    task_id = generation.task_id
+    if not task_id:
         return None
     try:
         task = store.get(task_id)
@@ -160,39 +172,40 @@ def _current_publication_source(config, store: TaskStore, generation: object) ->
         return None
 
 
-def _build_cli_hide_publisher(config, store: TaskStore) -> tuple[CloudPublisher, object] | None:
-    publication = getattr(config, "publication", None)
-    if not getattr(publication, "enabled", False):
+def _build_cli_hide_publisher(
+    config: StewardConfig, store: TaskStore
+) -> tuple[CloudPublisher, D1PublicationClient] | None:
+    publication: StewardPublicationConfig = config.publication
+    if not publication.enabled:
         return None
-    d1: object | None = None
+    d1: D1PublicationClient | None = None
     try:
         d1 = D1PublicationClient(
             config=publication,
-            timeout_seconds=float(getattr(publication, "network_timeout_seconds", 30.0)),
+            timeout_seconds=publication.network_timeout_seconds,
         )
         publisher = CloudPublisher(
             store,
-            object(),
+            None,
             d1,
             worker_id="publication-cli",
             retry_backoff_seconds=max(
-                1, int(getattr(publication, "retry_backoff_seconds", 1))
+                1, int(publication.retry_backoff_seconds)
             ),
         )
         return publisher, d1
     except Exception:
-        close = getattr(d1, "close", None)
-        if callable(close):
+        if d1 is not None:
             try:
-                close()
+                d1.close()
             except Exception:
                 pass
         return None
 
 
 def _build_cli_retry_publisher(
-    config, store: TaskStore
-) -> tuple[CloudPublisher, object | None]:
+    config: StewardConfig, store: TaskStore
+) -> tuple[CloudPublisher, D1PublicationClient | None]:
     """Build retry's local coordinator and optional configured D1 client.
 
     A changed clean generation is a local outbox operation and must retain the
@@ -217,38 +230,26 @@ def _safe_publication_id(value: object) -> str | None:
     return value if isinstance(value, str) and _PUBLICATION_IDENTIFIER.fullmatch(value) else None
 
 
-def _publication_result_output(result: object) -> dict[str, object]:
-    status = getattr(result, "status", "blocked")
-    if hasattr(status, "value"):
-        status = status.value
-    if not isinstance(status, str):
-        status = "blocked"
-    publication_id = getattr(result, "publication_id", None)
-    publication_id = _safe_publication_id(publication_id)
-    hide_result = getattr(result, "hide_result", None)
-    reason = getattr(result, "reason", None)
-    if not isinstance(reason, str) or reason not in _PUBLICATION_SAFE_REASONS:
-        reason = None
-    values = getattr(result, "reason_codes", ())
+def _publication_result_output(result: PublicationResult) -> dict[str, object]:
+    status = result.status.value
+    publication_id = _safe_publication_id(result.publication_id)
+    reason = result.reason if result.reason in _PUBLICATION_SAFE_REASONS else None
     reason_codes: list[str] = []
-    for value in values if isinstance(values, (tuple, list)) else ():
-        if hasattr(value, "value"):
-            value = value.value
-        if isinstance(value, str) and value in _PUBLICATION_SAFE_REASONS and value not in reason_codes:
-            reason_codes.append(value)
+    for value in result.reason_codes:
+        code = value.value if isinstance(value, ReasonCode) else str(value)
+        if code in _PUBLICATION_SAFE_REASONS and code not in reason_codes:
+            reason_codes.append(code)
     if reason is not None and reason not in reason_codes:
         reason_codes.insert(0, reason)
-    hide_status = getattr(hide_result, "status", None)
-    if hasattr(hide_status, "value"):
-        hide_status = hide_status.value
-    hide_reason = getattr(hide_result, "reason", None)
+    hide_result = result.hide_result
     if (
-        hide_status == PublicationHideStatus.blocked.value
-        and hide_reason == "precondition"
+        hide_result is not None
+        and hide_result.status is PublicationHideStatus.blocked
+        and hide_result.reason == "precondition"
     ):
         reason = "precondition"
         reason_codes = ["precondition"]
-    output = {
+    output: dict[str, object] = {
         "status": status,
         "publicationId": publication_id,
         "reason": reason,
@@ -259,24 +260,16 @@ def _publication_result_output(result: object) -> dict[str, object]:
     return output
 
 
-def _publication_hide_result_output(result: object) -> dict[str, object]:
-    status = getattr(result, "status", "blocked")
-    if hasattr(status, "value"):
-        status = status.value
-    if not isinstance(status, str):
-        status = "blocked"
-    reason = getattr(result, "reason", None)
-    if not isinstance(reason, str) or reason not in _PUBLICATION_SAFE_REASONS:
-        reason = None
-    changed = getattr(result, "changed", False)
-    if not isinstance(changed, bool):
-        changed = False
+def _publication_hide_result_output(
+    result: PublicationHideResult,
+) -> dict[str, object]:
+    reason = result.reason if result.reason in _PUBLICATION_SAFE_REASONS else None
     return {
-        "status": status,
-        "taskId": _safe_publication_id(getattr(result, "task_id", None)),
-        "publicationId": _safe_publication_id(getattr(result, "publication_id", None)),
+        "status": result.status.value,
+        "taskId": _safe_publication_id(result.task_id),
+        "publicationId": _safe_publication_id(result.publication_id),
         "reason": reason,
-        "changed": changed,
+        "changed": result.changed,
     }
 
 
@@ -368,32 +361,21 @@ def publication_retry(publication_id: str) -> None:
         )
         raise typer.Exit(1)
     finally:
-        close = getattr(client, "close", None)
-        if callable(close):
+        if client is not None:
             try:
-                close()
+                client.close()
             except Exception:
                 pass
     _emit_publication(_publication_result_output(result))
-    hide_result = getattr(result, "hide_result", None)
-    hide_confirmed = getattr(hide_result, "status", None) in {
+    hide_result = result.hide_result
+    hide_confirmed = hide_result is not None and hide_result.status in {
         PublicationHideStatus.hidden,
         PublicationHideStatus.unchanged,
-    } or getattr(getattr(hide_result, "status", None), "value", None) in {
-        PublicationHideStatus.hidden.value,
-        PublicationHideStatus.unchanged.value,
     }
-    if (
-        getattr(result, "status", None) in {
-            PublicationStatus.blocked,
-            PublicationStatus.repair_required,
-        }
-        or getattr(getattr(result, "status", None), "value", None)
-        in {
-            PublicationStatus.blocked.value,
-            PublicationStatus.repair_required.value,
-        }
-    ) and not hide_confirmed:
+    if result.status in {
+        PublicationStatus.blocked,
+        PublicationStatus.repair_required,
+    } and not hide_confirmed:
         raise typer.Exit(1)
 
 
@@ -436,20 +418,15 @@ def publication_hide(
         )
         raise typer.Exit(1)
     finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:
-                pass
+        try:
+            client.close()
+        except Exception:
+            pass
     payload = _publication_hide_result_output(result)
     _emit_publication(payload)
-    if getattr(result, "status", None) in {
+    if result.status in {
         PublicationHideStatus.blocked,
         PublicationHideStatus.missing,
-    } or getattr(getattr(result, "status", None), "value", None) in {
-        PublicationHideStatus.blocked.value,
-        PublicationHideStatus.missing.value,
     }:
         raise typer.Exit(1)
 
@@ -482,7 +459,7 @@ def run(task_id: str) -> None:
                 store,
                 session_supervisor=_configured_supervisor(config, store),
             )
-            shutdown_result: object | None = None
+            shutdown_result: ShutdownResult | None = None
             shutdown_error: BaseException | None = None
             shutdown_incomplete = False
             output: str | None = None
@@ -502,17 +479,7 @@ def run(task_id: str) -> None:
                         err=True,
                     )
                 else:
-                    state = getattr(shutdown_result, "state", None)
-                    if hasattr(state, "value"):
-                        state = state.value
-                    if state is None:
-                        try:
-                            state = daemon_.lifecycle_state
-                        except BaseException:
-                            state = None
-                        if hasattr(state, "value"):
-                            state = state.value
-                    shutdown_incomplete = state != "stopped"
+                    shutdown_incomplete = shutdown_result.state.value != "stopped"
                     if shutdown_incomplete:
                         typer.echo(
                             "Steward daemon shutdown incomplete; owned containers may still be running.",
@@ -549,7 +516,7 @@ def daemon(
             daemon_ = StewardDaemon(config, store, logger=typer.echo)
             if once:
                 daemon_.startup_reconcile()
-                result = daemon_.tick(
+                result: TickResult = daemon_.tick(
                     plan=not no_plan,
                     dispatch=not no_dispatch,
                     max_dispatch=max_dispatch,
@@ -694,7 +661,7 @@ def diagnostics() -> None:
     """Print bounded local scheduler and raw archive diagnostics."""
 
     store, config = _context()
-    ledger = getattr(store, "control_loop_ledger", None)
+    ledger = store.control_loop_ledger
     archive = ControlLoopArchive(config, task_root=config)
     visible_runs: list[str] = []
     invalid_runs: list[str] = []
@@ -712,7 +679,7 @@ def diagnostics() -> None:
             ]
     except Exception as exc:
         invalid_runs = [f"archive-error:{exc.__class__.__name__}"]
-    retry = ledger.pending_retry("planner") if ledger else None
+    retry = ledger.pending_retry("planner")
     active_run = None
     last_materialized_sequence = None
     last_materialized_at = None
@@ -739,17 +706,17 @@ def diagnostics() -> None:
             ).fetchone()
             planning_block_reason = blocked[0] if blocked is not None else None
     payload = {
-        "epochId": ledger.epoch_id if ledger is not None else None,
+        "epochId": ledger.epoch_id,
         "archiveFormatVersion": (
             archive_epoch.format_version if archive_epoch is not None else None
         ),
         "taskFormatVersion": (
             archive_epoch.task_format_version if archive_epoch is not None else None
         ),
-        "planningBlocked": bool(ledger and ledger.planning_blocked),
+        "planningBlocked": ledger.planning_blocked,
         "planningBlockReason": planning_block_reason,
         "ledgerEventCount": event_count,
-        "pendingArchiveEvents": len(ledger.outbox(limit=10_000)) if ledger else 0,
+        "pendingArchiveEvents": len(ledger.outbox(limit=10_000)),
         "lastMaterializedSequence": last_materialized_sequence,
         "lastMaterializedAt": last_materialized_at,
         "activePlannerRunId": active_run,
@@ -786,11 +753,10 @@ def health() -> None:
                 event.kind == "cleanup_complete" for event in events
             ):
                 cleanup_pending += 1
-        if callable(getattr(store, "get_publication_health", None)):
-            publication_health = publication_health_view(store)
-        ledger = getattr(store, "control_loop_ledger", None)
-        planner_active = bool(ledger and ledger.list_planner_runs(include_terminal=False))
-        archive_pending = bool(ledger and ledger.outbox(limit=1))
+        publication_health = publication_health_view(store)
+        ledger = store.control_loop_ledger
+        planner_active = bool(ledger.list_planner_runs(include_terminal=False))
+        archive_pending = bool(ledger.outbox(limit=1))
         persisted_pressure = store.get_resource_pressure()
         references = store.list_container_references()
         container_counts["owned"] = len(references)

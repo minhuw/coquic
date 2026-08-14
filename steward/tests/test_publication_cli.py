@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from coquic_steward import cli
+from coquic_steward.core.config import StewardConfig
 from coquic_steward.cli import app
 from coquic_steward.publication.d1 import HideReceipt
 from coquic_steward.publication.models import FailClosed, ReasonCode
@@ -14,6 +16,7 @@ from coquic_steward.publication.generation import PublicationComposer
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     PublicationGeneration,
+    PublicationHealth,
     PublicationOperationStatus,
     PublicationState,
     ReceiptClass,
@@ -33,14 +36,17 @@ from coquic_steward.storage import TaskStore
 NOW = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
 
-def _generation(*, publication_id: str = "pub-current", state: str = "blocked"):
-    return SimpleNamespace(
-        publication_id=publication_id,
-        task_id="task-current",
+def _generation(*, state: str = "blocked") -> PublicationGeneration:
+    identity = GenerationIdentity("task-current", "boundary-current")
+    return PublicationGeneration(
+        publication_id=identity.publication_id,
+        task_id=identity.task_id,
         run_id="run-current",
+        generation_boundary=identity.generation_boundary,
+        metadata_digest="a" * 64,
+        idempotency_key=identity.idempotency_key,
         state=state,
         reason="unsafe_content" if state == "blocked" else None,
-        metadata_digest="a" * 64,
         attempt=2,
         rows=5,
         objects=2,
@@ -49,8 +55,8 @@ def _generation(*, publication_id: str = "pub-current", state: str = "blocked"):
         runs=1,
         events=1,
         artifacts=1,
+        created_at=NOW - timedelta(minutes=3),
         updated_at=NOW - timedelta(minutes=2),
-        lease_owner=None,
     )
 
 
@@ -107,23 +113,15 @@ def _blocked_store(tmp_path):
 
 
 def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
-    health = SimpleNamespace(
+    health = PublicationHealth(
         queued_count=1,
         blocked_count=2,
         cleanup_pending_count=3,
         cleanup_pending_bytes=4,
         oldest_queued_at=NOW - timedelta(seconds=30),
         updated_at=NOW - timedelta(seconds=10),
-        reason=None,
-        last_category="success",
     )
     generation = _generation()
-
-    class CountsProbe:
-        def __call__(self):
-            raise AssertionError("reflected count execution")
-
-    generation.counts = CountsProbe()
 
     class Store:
         def get_publication_health(self, *, now: datetime | None = None):
@@ -149,7 +147,9 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
                 ),
             ]
 
-    monkeypatch.setattr(cli, "_context", lambda: (Store(), SimpleNamespace()))
+    monkeypatch.setattr(
+        cli, "_context", lambda: (Store(), StewardConfig(repo_root=Path.cwd()))
+    )
     status = CliRunner().invoke(app, ["publication", "status"])
     assert status.exit_code == 0, status.output
     status_payload = json.loads(status.output)
@@ -238,7 +238,7 @@ def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(monkeypatch) -> N
             )
         )
     )
-    config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    config = StewardConfig(repo_root=Path.cwd())
     monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
     monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
     monkeypatch.setattr(cli, "_build_cli_hide_publisher", lambda *_args: (publisher, Client()))
@@ -331,7 +331,7 @@ def test_retry_missing_publication_configuration_is_bounded(monkeypatch) -> None
                 fence=SimpleNamespace(state="pending"),
             )
 
-    config = SimpleNamespace(publication=SimpleNamespace(enabled=False))
+    config = StewardConfig(repo_root=Path.cwd())
     monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
     monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
 

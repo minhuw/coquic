@@ -9,7 +9,6 @@ is performed while a local SQLite transaction is open.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,6 +29,7 @@ from .generation import (
     GenerationObject,
     GenerationOriginal,
     PUBLICATION_SCHEMA_VERSION,
+    PublicationComposer,
     PublicationGeneration as ComposedGeneration,
     compose_publication_generation,
 )
@@ -37,6 +37,7 @@ from .models import FailClosed, PublicationError, ReasonCode, RepairRequired
 from .outbox import (
     GenerationIdentity,
     MAX_LEASE_SECONDS,
+    PublicationCounts,
     PublicationOperationStatus,
     PublicationReceipt,
     PublicationState,
@@ -497,8 +498,8 @@ def publication_generation_views(
             state = PublicationState.blocked.value
         reason = _view_reason(_view_value(generation, "reason"))
         counts = _view_value(generation, "counts", default=None)
-        if callable(counts):
-            counts = counts()
+        if not isinstance(counts, (PublicationCounts, Mapping)):
+            counts = None
         count_view = {
             "rows": _view_int(_view_value(generation, "rows", "row_count", default=_view_value(counts, "rows", default=0))),
             "objects": _view_int(_view_value(generation, "objects", "object_count", default=_view_value(counts, "objects", default=0))),
@@ -618,45 +619,16 @@ def _hide_reconciliation_reason(generation: object | None, now: datetime) -> str
 
 
 def _call_composer(
-    composer: Callable[..., GenerationOutcome],
+    composer: PublicationComposer,
     source: object,
     *,
     task_id: str,
     kwargs: Mapping[str, object],
 ) -> GenerationOutcome | object:
-    """Call injected composition functions without passing private identity data."""
+    """Call one composer once through the canonical composition contract."""
 
-    selected: dict[str, object] = {"task_id": task_id, **dict(kwargs)}
-    try:
-        signature = inspect.signature(composer)
-    except (TypeError, ValueError):
-        signature = None
-    if signature is not None:
-        parameters = signature.parameters
-        accepts_var_kw = any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values())
-        if not accepts_var_kw:
-            selected = {
-                key: value
-                for key, value in selected.items()
-                if key in parameters
-                and parameters[key].kind
-                in {
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    inspect.Parameter.KEYWORD_ONLY,
-                }
-            }
-    if signature is not None:
-        # Signature filtering above makes this one invocation deterministic;
-        # a TypeError raised by the builder itself is a bounded composition
-        # failure and must not trigger a second side-effecting build.
-        return composer(source, **selected)
-    try:
-        return composer(source, **selected)
-    except TypeError:
-        # A few opaque callables do not expose a signature.  Retry only for
-        # the argument-shape error that can be established without a second
-        # inspected invocation.
-        return composer(source)
+    selected = composer if isinstance(composer, PublicationComposer) else PublicationComposer(composer)
+    return selected.invoke(source, task_id=task_id, kwargs=kwargs)
 
 
 class CloudPublisher:
@@ -669,7 +641,7 @@ class CloudPublisher:
         d1: D1PublicationClient,
         worker_id: str = "publication-worker",
         *,
-        compose: Callable[..., GenerationOutcome] = compose_publication_generation,
+        compose: PublicationComposer = compose_publication_generation,
         now: Callable[[], datetime] | datetime | None = None,
         lease_seconds: int = MAX_LEASE_SECONDS,
         retry_backoff_seconds: int = 1,
@@ -1835,7 +1807,7 @@ def publish_generation(
     r2: R2Client,
     d1: D1PublicationClient,
     worker_id: str = "publication-worker",
-    compose: Callable[..., GenerationOutcome] = compose_publication_generation,
+    compose: PublicationComposer = compose_publication_generation,
     now: Callable[[], datetime] | datetime | None = None,
     lease_seconds: int = MAX_LEASE_SECONDS,
     retry_backoff_seconds: int = 1,
@@ -1868,7 +1840,7 @@ def retry_publication(
     publication_id: str,
     source: object | None = None,
     *,
-    compose: Callable[..., GenerationOutcome] = compose_publication_generation,
+    compose: PublicationComposer = compose_publication_generation,
     compose_kwargs: Mapping[str, object] | None = None,
     now: Callable[[], datetime] | datetime | None = None,
 ) -> PublicationResult:

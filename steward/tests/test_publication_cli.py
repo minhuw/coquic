@@ -53,6 +53,33 @@ def _generation(*, publication_id: str = "pub-current", state: str = "blocked"):
     )
 
 
+def _returning_composer(result: object):
+    def compose(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
+        return result
+
+    return compose
+
+
 def _blocked_store(tmp_path):
     store = TaskStore(tmp_path / "steward.sqlite")
     identity = GenerationIdentity("task-retry-hide", "boundary-retry-hide")
@@ -90,6 +117,12 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
         last_category="success",
     )
     generation = _generation()
+
+    class CountsProbe:
+        def __call__(self):
+            raise AssertionError("reflected count execution")
+
+    generation.counts = CountsProbe()
 
     class Store:
         def get_publication_health(self, *, now: datetime | None = None):
@@ -160,13 +193,13 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
         generation_boundary="boundary-repaired",
         idempotency_key="gen-repaired",
     )
-    publisher = CloudPublisher(Store(), object(), object(), compose=lambda *_a, **_k: changed)
+    publisher = CloudPublisher(Store(), object(), object(), compose=_returning_composer(changed))
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.queued
     assert replaced == [(current.publication_id, changed.outbox_record)]
 
     unchanged = SimpleNamespace(**{**changed.__dict__, "publication_id": current.publication_id, "metadata_digest": "a" * 64})
-    publisher = CloudPublisher(Store(), object(), object(), compose=lambda *_a, **_k: unchanged)
+    publisher = CloudPublisher(Store(), object(), object(), compose=_returning_composer(unchanged))
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.blocked
     assert result.reason == "unchanged"
@@ -237,7 +270,7 @@ def test_retry_hide_provider_failure_is_typed_and_pending(tmp_path) -> None:
         object(),
         D1(),
         now=NOW + timedelta(seconds=2),
-        compose=lambda *_args, **_kwargs: FailClosed((ReasonCode.unsafe_content,)),
+        compose=_returning_composer(FailClosed((ReasonCode.unsafe_content,))),
     )
     result = publisher.retry_publication(generation.publication_id, {"fresh": True})
 
@@ -266,7 +299,7 @@ def test_retry_hide_invalid_receipt_is_typed_and_pending(tmp_path) -> None:
         object(),
         D1(),
         now=NOW + timedelta(seconds=2),
-        compose=lambda *_args, **_kwargs: FailClosed((ReasonCode.unsafe_content,)),
+        compose=_returning_composer(FailClosed((ReasonCode.unsafe_content,))),
     )
     result = publisher.retry_publication(generation.publication_id, {"fresh": True})
 
@@ -424,7 +457,7 @@ def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
         store,
         object(),
         object(),
-        compose=lambda *_args, **_kwargs: composed,
+        compose=_returning_composer(composed),
     )
     result = publisher.retry_publication(old.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.queued
@@ -541,7 +574,7 @@ def test_retry_fail_closed_and_hide_are_safe_and_idempotent() -> None:
                 changed=True,
             )
         ),
-        compose=lambda *_a, **_k: FailClosed((ReasonCode.unsafe_content,)),
+        compose=_returning_composer(FailClosed((ReasonCode.unsafe_content,))),
     )
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.blocked

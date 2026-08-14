@@ -432,8 +432,29 @@ def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
         else:
             graph["events"][1]["summary"] = "changed after build"
 
-    def builder(source: object, **kwargs: object):
-        outcome = build_publication_bundle(source, **kwargs)
+    def builder(
+        source: object,
+        *,
+        credential_sources: object,
+        known_secrets: object,
+        scanner_runner: object,
+        scanner_timeout: float,
+        max_repair_passes: int,
+        ocr_runner: object,
+        ocr_timeout: float,
+        run_scanner: bool,
+    ):
+        outcome = build_publication_bundle(
+            source,
+            credential_sources=credential_sources,
+            known_secrets=known_secrets,
+            scanner_runner=scanner_runner,
+            scanner_timeout=scanner_timeout,
+            max_repair_passes=max_repair_passes,
+            ocr_runner=ocr_runner,
+            ocr_timeout=ocr_timeout,
+            run_scanner=run_scanner,
+        )
         mutate()
         return outcome
 
@@ -541,17 +562,69 @@ def test_detached_capture_must_match_source_bookends(section: str) -> None:
     assert not hasattr(result, "payload")
 
 
+def test_builder_type_error_is_reduced_after_one_invocation() -> None:
+    calls = 0
+
+    def builder(
+        _source: object,
+        *,
+        credential_sources: object,
+        known_secrets: object,
+        scanner_runner: object,
+        scanner_timeout: float,
+        max_repair_passes: int,
+        ocr_runner: object,
+        ocr_timeout: float,
+        run_scanner: bool,
+    ):
+        nonlocal calls
+        calls += 1
+        raise TypeError("builder body failed")
+
+    result = compose_publication_generation(
+        _graph(_source()),
+        run_builder=builder,
+        scanner_runner=_scanner,
+    )
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.invalid_metadata,)
+    assert calls == 1
+
+
 def test_repair_and_fail_closed_outcomes_never_emit_generation(monkeypatch) -> None:
     source = _source()
 
-    def repair_builder(*args, **kwargs):
+    def repair_builder(
+        _source: object,
+        *,
+        credential_sources: object,
+        known_secrets: object,
+        scanner_runner: object,
+        scanner_timeout: float,
+        max_repair_passes: int,
+        ocr_runner: object,
+        ocr_timeout: float,
+        run_scanner: bool,
+    ):
         return RepairRequired((ReasonCode.source_finding,), ())
 
     result = compose_publication_generation(_graph(source), run_builder=repair_builder, scanner_runner=_scanner)
     assert isinstance(result, RepairRequired)
     assert result.reason_codes == (ReasonCode.source_finding,)
 
-    def fail_builder(*args, **kwargs):
+    def fail_builder(
+        _source: object,
+        *,
+        credential_sources: object,
+        known_secrets: object,
+        scanner_runner: object,
+        scanner_timeout: float,
+        max_repair_passes: int,
+        ocr_runner: object,
+        ocr_timeout: float,
+        run_scanner: bool,
+    ):
         return FailClosed((ReasonCode.unsafe_content,), ())
 
     result = compose_publication_generation(_graph(source), run_builder=fail_builder, scanner_runner=_scanner)

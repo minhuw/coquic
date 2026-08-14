@@ -527,13 +527,60 @@ def test_usage_delegates_use_canonical_d1_operations() -> None:
     ]
 
 
+def _returning_composer(result: object):
+    def compose(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
+        return result
+
+    return compose
+
+
 def _compose_generation(
     *,
     private: bool = False,
     private_count: int = 1,
     metadata_digest: str = "a" * 64,
 ):
-    def compose(_source: object, **_kwargs: object):
+    def compose(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
         return _composed(
             private=private,
             private_count=private_count,
@@ -645,7 +692,27 @@ def test_reused_public_object_key_is_uploaded_once() -> None:
     store = _FakeStore(object_count=2)
     provider = _FakeProvider(store)
 
-    def compose(_source: object, **_kwargs: object):
+    def compose(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
         generated = _composed()
         generated.objects = (generated.objects[0], generated.objects[0])
         return generated
@@ -662,7 +729,27 @@ def test_repair_required_keeps_claim_and_does_not_hide() -> None:
     store = _FakeStore()
     provider = _FakeProvider(store)
 
-    def repair(_source: object, **kwargs: object):
+    def repair(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
         return RepairRequired((ReasonCode.source_finding,), ())
 
     result = _publisher(store, provider, compose=repair).publish(IDENTITY.publication_id, source={"task": {}})
@@ -672,6 +759,47 @@ def test_repair_required_keeps_claim_and_does_not_hide() -> None:
     assert store.generation.state is PublicationState.building
     assert provider.calls == []
     assert "d1:hide" not in store.events
+
+
+def test_composer_type_error_is_reduced_after_one_invocation() -> None:
+    calls = 0
+
+    def compose(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
+        nonlocal calls
+        calls += 1
+        raise TypeError("composer body failed")
+
+    store = _FakeStore()
+    provider = _FakeProvider(store)
+    result = _publisher(store, provider, compose=compose).publish(
+        IDENTITY.publication_id,
+        source={"stable": True},
+    )
+
+    assert result.status is PublicationStatus.blocked
+    assert result.reason == ReasonCode.invalid_metadata.value
+    assert calls == 1
+    assert provider.calls == []
 
 
 def test_transient_provider_failure_is_retry_wait_without_hiding() -> None:
@@ -703,7 +831,27 @@ def test_fail_closed_composition_is_blocked_and_hides() -> None:
     store = _FakeStore()
     provider = _FakeProvider(store)
 
-    def fail(_source: object, **kwargs: object):
+    def fail(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
         return FailClosed((ReasonCode.unsafe_content,), ())
 
     result = _publisher(store, provider, compose=fail).publish(IDENTITY.publication_id, source={"task": {}})
@@ -719,7 +867,27 @@ def test_transient_hide_failure_replays_before_blocking() -> None:
     provider = _TransientHideProvider(store)
     compose_calls: list[object] = []
 
-    def fail(_source: object, **kwargs: object):
+    def fail(
+        _source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
         compose_calls.append(_source)
         return FailClosed((ReasonCode.unsafe_content,), ())
 
@@ -756,7 +924,7 @@ def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> No
         provider,
         provider,
         "worker-1",
-        compose=lambda _source, **_kwargs: FailClosed((ReasonCode.unsafe_content,), ()),
+        compose=_returning_composer(FailClosed((ReasonCode.unsafe_content,), ())),
         now=lambda: clock[0],
     )
 
@@ -803,7 +971,7 @@ def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
         provider,
         provider,
         "worker-1",
-        compose=lambda _source, **_kwargs: _composed(),
+        compose=_returning_composer(_composed()),
         now=lambda: clock[0],
     )
 
@@ -844,7 +1012,7 @@ def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
         provider,
         provider,
         "worker-1",
-        compose=lambda _source, **_kwargs: _composed(),
+        compose=_returning_composer(_composed()),
         now=lambda: NOW,
     )
     results: list[object] = []
@@ -924,7 +1092,27 @@ def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> N
     provider = _SQLitePublicationProvider()
     compose_calls: list[object] = []
 
-    def compose(source: object, **_kwargs: object):
+    def compose(
+        source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: object = None,
+        builder: object = None,
+        credential_sources: object = None,
+        known_secrets: object = None,
+        scanner_runner: object = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: object = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: object = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> object:
         compose_calls.append(source)
         return _composed()
 

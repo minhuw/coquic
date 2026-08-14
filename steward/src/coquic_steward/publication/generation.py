@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -573,7 +573,7 @@ def _builder_kwargs(
 def _invoke_builder(
     entry: object,
     *,
-    builder: Callable[..., PublicationOutcome],
+    builder: PublicationBuilder,
     kwargs: Mapping[str, Any],
 ) -> PublicationOutcome:
     if isinstance(entry, (Publishable, RepairRequired, FailClosed)):
@@ -591,20 +591,9 @@ def _invoke_builder(
             for key in selected_kwargs:
                 if key in extra:
                     selected_kwargs[key] = extra[key]
+    selected_builder = builder if isinstance(builder, PublicationBuilder) else PublicationBuilder(builder)
     try:
-        result = builder(source, **selected_kwargs)
-    except TypeError:
-        # Small test doubles and callers that already captured policy may
-        # expose only the source positional argument.  Retrying without stage
-        # options does not broaden the boundary or retain any diagnostics.
-        try:
-            result = builder(source)
-        except PublicationError as error:
-            return _failure(error.code)
-        except (MemoryError, OSError, TypeError, ValueError, KeyError, RecursionError):
-            return _failure(ReasonCode.invalid_metadata)
-        except Exception:
-            return _failure(ReasonCode.invalid_metadata)
+        result = selected_builder(source, **selected_kwargs)
     except PublicationError as error:
         return _failure(error.code)
     except (MemoryError, OSError, TypeError, ValueError, KeyError, RecursionError):
@@ -928,6 +917,100 @@ PublishableGeneration = PublicationGeneration
 TaskPublicationGeneration = PublicationGeneration
 GenerationObjectDescriptor = GenerationObject
 PrivateOriginalDescriptor = GenerationOriginal
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationBuilder:
+    """One run-builder callback with the canonical stage contract."""
+
+    callback: Any
+
+    def __call__(
+        self,
+        source: object,
+        *,
+        credential_sources: object,
+        known_secrets: Sequence[str] | str | None,
+        scanner_runner: Any,
+        scanner_timeout: float,
+        max_repair_passes: int,
+        ocr_runner: Any,
+        ocr_timeout: float,
+        run_scanner: bool,
+    ) -> PublicationOutcome:
+        return self.callback(
+            source,
+            credential_sources=credential_sources,
+            known_secrets=known_secrets,
+            scanner_runner=scanner_runner,
+            scanner_timeout=scanner_timeout,
+            max_repair_passes=max_repair_passes,
+            ocr_runner=ocr_runner,
+            ocr_timeout=ocr_timeout,
+            run_scanner=run_scanner,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationComposer:
+    """One composer callback with the canonical composition contract."""
+
+    callback: Any
+
+    def __call__(
+        self,
+        source: object,
+        *,
+        task: object = None,
+        completed_runs: object = None,
+        task_id: str | None = None,
+        run_builder: PublicationBuilder | None = None,
+        builder: PublicationBuilder | None = None,
+        credential_sources: object = None,
+        known_secrets: Sequence[str] | str | None = None,
+        scanner_runner: Any = None,
+        scanner_timeout: float = 30.0,
+        max_repair_passes: int = 2,
+        ocr_runner: Any = None,
+        ocr_timeout: float = 30.0,
+        run_scanner: bool = True,
+        price_catalog: Any = None,
+        generation_boundary: str | None = None,
+        publication_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> GenerationOutcome:
+        return self.callback(
+            source,
+            task=task,
+            completed_runs=completed_runs,
+            task_id=task_id,
+            run_builder=run_builder,
+            builder=builder,
+            credential_sources=credential_sources,
+            known_secrets=known_secrets,
+            scanner_runner=scanner_runner,
+            scanner_timeout=scanner_timeout,
+            max_repair_passes=max_repair_passes,
+            ocr_runner=ocr_runner,
+            ocr_timeout=ocr_timeout,
+            run_scanner=run_scanner,
+            price_catalog=price_catalog,
+            generation_boundary=generation_boundary,
+            publication_id=publication_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def invoke(
+        self,
+        source: object,
+        *,
+        task_id: str,
+        kwargs: Mapping[str, object],
+    ) -> GenerationOutcome | object:
+        """Preserve the caller's explicit production keyword shape."""
+
+        selected = {"task_id": task_id, **dict(kwargs)}
+        return self.callback(source, **selected)
 
 
 def _extract_items(value: object) -> list[object]:
@@ -1642,7 +1725,7 @@ def _build_generation(
     event_values: Sequence[object],
     run_entries: Sequence[object],
     explicit_task_id: str | None,
-    builder: Callable[..., PublicationOutcome],
+    builder: PublicationBuilder,
     builder_kwargs: Mapping[str, Any],
     mutation_watch: object,
     source_fingerprint: str,
@@ -1947,8 +2030,8 @@ def compose_publication_generation(
     task: object = None,
     completed_runs: object = None,
     task_id: str | None = None,
-    run_builder: Callable[..., PublicationOutcome] | None = None,
-    builder: Callable[..., PublicationOutcome] | None = None,
+    run_builder: PublicationBuilder | None = None,
+    builder: PublicationBuilder | None = None,
     credential_sources: object = None,
     known_secrets: Sequence[str] | str | None = None,
     scanner_runner: Any = None,
@@ -2020,6 +2103,8 @@ def compose_publication_generation(
     except (MemoryError, OSError, TypeError, ValueError, RecursionError):
         return _failure(ReasonCode.invalid_metadata)
     selected_builder = run_builder or builder or build_publication_bundle
+    if not isinstance(selected_builder, PublicationBuilder):
+        selected_builder = PublicationBuilder(selected_builder)
     kwargs = _builder_kwargs(
         credential_sources=credential_sources,
         known_secrets=selected_secrets,

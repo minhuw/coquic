@@ -132,9 +132,9 @@ from ..publication.outbox import (
     CleanupIntent,
     CleanupState,
     GenerationIdentity,
-    MAX_ATTEMPTS,
     MAX_LEASE_SECONDS,
     MAX_RETRY_DELAY_SECONDS,
+    PublicationRetryPolicy,
     OutboxValidationError,
     PublicationGeneration,
     PublicationHealth,
@@ -3163,6 +3163,7 @@ class SQLiteTaskStore:
         self,
         worker_id: str,
         *,
+        retry_policy: PublicationRetryPolicy,
         publication_id: str | None = None,
         now: datetime | None = None,
         lease_seconds: int = MAX_LEASE_SECONDS,
@@ -3175,6 +3176,8 @@ class SQLiteTaskStore:
         """
 
         worker = _publication_identifier(worker_id)
+        if not isinstance(retry_policy, PublicationRetryPolicy):
+            raise OutboxValidationError("invalid_metadata")
         timestamp = _publication_now(now)
         lease_seconds = _bounded_publication_seconds(
             lease_seconds, MAX_LEASE_SECONDS, minimum=1
@@ -3203,7 +3206,7 @@ class SQLiteTaskStore:
                 + _PUBLICATION_HIDE_RETRY_SQL
                 + "))"
             )
-            parameters["max_attempts"] = MAX_ATTEMPTS
+            parameters["max_attempts"] = retry_policy.max_attempts
             if publication_id is not None:
                 selector += " AND publication_id=:publication_id"
                 parameters["publication_id"] = publication_id
@@ -3223,7 +3226,7 @@ class SQLiteTaskStore:
                     + _PUBLICATION_HIDE_RETRY_SQL
                     + ")"
                 )
-                exhausted_parameters["max_attempts"] = MAX_ATTEMPTS
+                exhausted_parameters["max_attempts"] = retry_policy.max_attempts
                 if publication_id is not None:
                     exhausted_selector += " AND publication_id=:publication_id"
                     exhausted_parameters["publication_id"] = publication_id
@@ -3241,7 +3244,7 @@ class SQLiteTaskStore:
                         {
                             "updated_at": now_text,
                             "publication_id": exhausted[0],
-                            "max_attempts": MAX_ATTEMPTS,
+                            "max_attempts": retry_policy.max_attempts,
                         },
                     )
                     self._refresh_publication_health(
@@ -3295,7 +3298,7 @@ class SQLiteTaskStore:
                         "updated_at": now_text,
                         "publication_id": current.publication_id,
                         "expected_state": current.state.value,
-                        "max_attempts": MAX_ATTEMPTS,
+                        "max_attempts": retry_policy.max_attempts,
                     },
                 )
                 updated_row = connection.exec_driver_sql(
@@ -3843,6 +3846,7 @@ class SQLiteTaskStore:
         expected_state: PublicationState | str | None = None,
         lease_owner: str | None = None,
         worker_id: str | None = None,
+        retry_policy: PublicationRetryPolicy,
         retry_at: datetime | None = None,
         backoff_seconds: int | None = None,
         reason: str = "network",
@@ -3852,6 +3856,8 @@ class SQLiteTaskStore:
 
         safe_reason = _publication_reason(reason)
         assert safe_reason is not None
+        if not isinstance(retry_policy, PublicationRetryPolicy):
+            raise OutboxValidationError("invalid_metadata")
         timestamp = _publication_now(now)
         current = self.get_publication_generation(publication_id)
         if current is None:
@@ -3874,7 +3880,7 @@ class SQLiteTaskStore:
             retry_at = _publication_datetime(retry_at)
             if retry_at < timestamp or retry_at > timestamp + timedelta(seconds=MAX_RETRY_DELAY_SECONDS):
                 raise OutboxValidationError("invalid_metadata")
-        if current.attempt >= MAX_ATTEMPTS:
+        if current.attempt >= retry_policy.max_attempts:
             if hide_pending:
                 retained = self.advance_publication(
                     publication_id,

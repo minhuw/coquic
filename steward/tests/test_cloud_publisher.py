@@ -35,6 +35,7 @@ from coquic_steward.publication.outbox import (
     PublicationOperationStatus,
     PublicationGeneration,
     PublicationReceipt,
+    PublicationRetryPolicy,
     PublicationState,
     ReceiptClass,
 )
@@ -55,6 +56,7 @@ from coquic_steward.storage import TaskStore
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+POLICY = PublicationRetryPolicy()
 IDENTITY = GenerationIdentity("task-1", "boundary-1")
 
 
@@ -215,6 +217,7 @@ class _FakeStore:
         self,
         worker_id: str,
         *,
+        retry_policy: PublicationRetryPolicy,
         publication_id: str | None = None,
         now: datetime,
         lease_seconds: int = MAX_LEASE_SECONDS,
@@ -312,6 +315,7 @@ class _FakeStore:
         expected_state: PublicationState | str | None = None,
         lease_owner: str | None = None,
         worker_id: str | None = None,
+        retry_policy: PublicationRetryPolicy,
         retry_at: datetime | None = None,
         backoff_seconds: int | None = None,
         reason: str = "network",
@@ -488,6 +492,7 @@ def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> C
         "worker-1",
         compose=_composer(compose or compose_publication_generation),
         now=lambda: NOW,
+        retry_policy=POLICY,
     )
 
 
@@ -526,7 +531,9 @@ def test_usage_delegates_use_canonical_d1_operations() -> None:
             assert limit == 8
             return backfill
 
-    publisher = CloudPublisher(_FakeStore(), object(), D1())
+    publisher = CloudPublisher(
+        _FakeStore(), object(), D1(), retry_policy=POLICY
+    )
     assert publisher.reconcile_overhead({"model": "model"}, digest="row-digest") is overhead
     assert publisher.backfill_usage("catalog", cursor="cursor", limit=8) is backfill
     assert calls == [
@@ -951,6 +958,7 @@ def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> No
         "worker-1",
         compose=_returning_composer(FailClosed((ReasonCode.unsafe_content,), ())),
         now=lambda: clock[0],
+        retry_policy=POLICY,
     )
 
     first = publisher.publish(IDENTITY.publication_id, source={"task": {}})
@@ -998,6 +1006,7 @@ def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
         "worker-1",
         compose=_returning_composer(_composed()),
         now=lambda: clock[0],
+        retry_policy=POLICY,
     )
 
     first = publisher.publish(IDENTITY.publication_id, source={"stable": True})
@@ -1039,6 +1048,7 @@ def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
         "worker-1",
         compose=_returning_composer(_composed()),
         now=lambda: NOW,
+        retry_policy=POLICY,
     )
     results: list[object] = []
     worker = threading.Thread(
@@ -1075,6 +1085,7 @@ def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
         failing,
         "worker-1",
         now=lambda: NOW,
+        retry_policy=POLICY,
     ).hide_task("task-1", "unsafe_content")
 
     assert first.status.value == "blocked"
@@ -1090,6 +1101,7 @@ def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
         healthy,
         "worker-2",
         now=lambda: NOW + timedelta(seconds=1),
+        retry_policy=POLICY,
     ).hide_task("task-1", "unsafe_content")
 
     assert second.status.value == "hidden"
@@ -1099,7 +1111,7 @@ def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
 def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     assert store.advance_publication(
         IDENTITY.publication_id,
         PublicationState.claimed,
@@ -1148,6 +1160,7 @@ def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> N
         "worker-2",
         compose=_composer(compose),
         now=expired_at,
+        retry_policy=POLICY,
     ).publish(IDENTITY.publication_id, source={"stable": True})
 
     current = store.get_publication_generation(IDENTITY.publication_id)

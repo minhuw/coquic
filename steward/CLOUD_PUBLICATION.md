@@ -85,6 +85,21 @@ failures leave the hide fence pending for the next worker cycle.
 Conflicting identity, digest, count, schema, permission, or other permanent
 failures stop publication and retain local evidence.
 
+### Retry policy
+
+`[steward.publication].max_retries` is an immutable runtime policy for one
+publication worker or CLI operation. It defaults to `3` and accepts values from
+`0` through `20`. The value counts retries after the initial claim, so `N`
+permits at most `N + 1` normal claims/provider attempts. Retry backoff is a
+separate timing setting and does not change that budget.
+
+The outbox keeps `32` as the structural decoding bound for current-schema
+rows. A later process may load rows written with a larger earlier policy and
+apply a lower current policy without resetting their persisted attempts. Normal
+rows at or above the current ceiling become blocked with `retry_exhausted`;
+pending hide reconciliation remains claimable at that ceiling so a safety hide
+cannot be stranded.
+
 The bounded local recovery surface is available without exposing provider
 responses or private paths:
 

@@ -78,6 +78,7 @@ from ..publication.outbox import (
     PublicationOperationResult,
     PublicationOperationStatus,
     PublicationReceipt,
+    PublicationRetryPolicy,
     PublicationState,
     ReceiptClass,
 )
@@ -1306,6 +1307,7 @@ class StewardDaemon:
             raise
         lease_seconds = max(1, int(publication.lease_duration_seconds))
         retry_backoff_seconds = max(1, int(publication.retry_backoff_seconds))
+        retry_policy = PublicationRetryPolicy(publication.max_retries)
         return CloudPublisher(
             self.store,
             r2,
@@ -1313,6 +1315,7 @@ class StewardDaemon:
             worker_id=f"publication-{self.runtime.instance_id}",
             lease_seconds=lease_seconds,
             retry_backoff_seconds=retry_backoff_seconds,
+            retry_policy=retry_policy,
         )
 
     def _publication_retry_interval(self) -> float:

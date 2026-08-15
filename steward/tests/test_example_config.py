@@ -90,6 +90,35 @@ def test_enabled_publication_validates_metadata_without_reading_credentials(
     assert config.publication.staging_root == staging
 
 
+@pytest.mark.parametrize(("retries", "attempts"), ((0, 1), (3, 4), (20, 21)))
+def test_publication_retry_configuration_preserves_attempt_semantics(
+    repo: Path, tmp_path: Path, retries: int, attempts: int
+) -> None:
+    config_path, _credentials, _staging = _write_publication_config(
+        tmp_path,
+        publication_overrides=f"max_retries = {retries}",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.publication.max_retries == retries
+    assert config.publication.max_retries + 1 == attempts
+
+
+@pytest.mark.parametrize("value", (True, 21, -1))
+def test_publication_retry_configuration_rejects_invalid_budgets(
+    repo: Path, tmp_path: Path, value: object
+) -> None:
+    toml_value = "true" if value is True else str(value)
+    config_path, _credentials, _staging = _write_publication_config(
+        tmp_path,
+        publication_overrides=f"max_retries = {toml_value}",
+    )
+
+    with pytest.raises(ValueError):
+        load_config(repo_root=repo, config_path=config_path)
+
+
 @pytest.mark.parametrize("unsafe_kind", ("symlink", "directory", "permissive"))
 def test_enabled_publication_rejects_unsafe_credential_files(
     repo: Path, tmp_path: Path, unsafe_kind: str

@@ -20,6 +20,7 @@ from coquic_steward.publication.outbox import (
     PublicationHideState,
     PublicationOperationStatus,
     PublicationReceipt,
+    PublicationRetryPolicy,
     PublicationState,
     ReceiptClass,
     allowed_transition,
@@ -30,9 +31,31 @@ from coquic_steward.storage.schema import Base
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+POLICY = PublicationRetryPolicy()
 DIGEST = "a" * 64
 PUBLIC_KEY = f"v1/tasks/task-1/objects/sha256/{DIGEST[:2]}/{DIGEST}"
 PRIVATE_KEY = f"v1/originals/task-1/run-1/sha256/{DIGEST}.jsonl"
+
+
+@pytest.mark.parametrize(
+    ("retries", "attempts"),
+    ((0, 1), (3, 4), (20, 21)),
+)
+def test_retry_policy_counts_initial_claim_and_retries(
+    retries: int, attempts: int
+) -> None:
+    policy = PublicationRetryPolicy(retries)
+
+    assert policy.max_retries == retries
+    assert policy.max_attempts == attempts
+
+
+@pytest.mark.parametrize("value", (True, False, 21, -1, "3"))
+def test_retry_policy_rejects_invalid_retry_budgets(value: object) -> None:
+    with pytest.raises(OutboxValidationError):
+        PublicationRetryPolicy(value)  # type: ignore[arg-type]
+
+
 EXPECTED_LEGAL_EDGES = frozenset(
     {
         (PublicationState.queued, PublicationState.claimed),
@@ -71,6 +94,116 @@ def _generation(**overrides: object) -> PublicationGeneration:
     }
     values.update(overrides)
     return PublicationGeneration(**values)
+
+
+@pytest.mark.parametrize("retry_policy", (PublicationRetryPolicy(0), POLICY))
+def test_store_uses_configured_policy_for_normal_attempts(
+    tmp_path, retry_policy: PublicationRetryPolicy
+) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    now = NOW
+
+    for attempt in range(1, retry_policy.max_attempts + 1):
+        worker = f"worker-{attempt}"
+        claimed = store.claim_publication(
+            worker,
+            retry_policy=retry_policy,
+            publication_id=generation.publication_id,
+            now=now,
+        )
+        assert claimed.status is PublicationOperationStatus.claimed
+        assert claimed.generation is not None
+        assert claimed.generation.attempt == attempt
+        if attempt < retry_policy.max_attempts:
+            retry = store.schedule_publication_retry(
+                generation.publication_id,
+                expected_state=claimed.generation.state,
+                lease_owner=worker,
+                retry_policy=retry_policy,
+                retry_at=now + timedelta(seconds=1),
+                reason="network",
+                now=now,
+            )
+            assert retry.status is PublicationOperationStatus.retry_wait
+            now += timedelta(seconds=1)
+        else:
+            exhausted = store.schedule_publication_retry(
+                generation.publication_id,
+                expected_state=claimed.generation.state,
+                lease_owner=worker,
+                retry_policy=retry_policy,
+                reason="network",
+                now=now,
+            )
+            assert exhausted.status is PublicationOperationStatus.retry_exhausted
+            assert exhausted.generation is not None
+            assert exhausted.generation.state is PublicationState.blocked
+
+
+def test_lowered_policy_blocks_existing_attempts_without_resetting_them(tmp_path) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+    generation = _generation()
+    store.enqueue_publication(generation)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE publication_generations SET state='retry_wait',attempt=4,"
+            "retry_at=:retry_at,updated_at=:updated_at,reason='network' "
+            "WHERE publication_id=:publication_id",
+            {
+                "retry_at": "2026-07-28T12:00:00.000Z",
+                "updated_at": "2026-07-28T12:00:00.000Z",
+                "publication_id": generation.publication_id,
+            },
+        )
+
+    exhausted = store.claim_publication(
+        "worker-1",
+        retry_policy=PublicationRetryPolicy(0),
+        publication_id=generation.publication_id,
+        now=NOW,
+    )
+
+    assert exhausted.status is PublicationOperationStatus.retry_exhausted
+    current = store.get_publication_generation(generation.publication_id)
+    assert current is not None
+    assert current.attempt == 4
+    assert current.state is PublicationState.blocked
+
+
+def test_hide_retry_remains_claimable_at_normal_ceiling(tmp_path) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+    generation = _generation()
+    policy = PublicationRetryPolicy(0)
+    store.enqueue_publication(generation)
+    claimed = store.claim_publication(
+        "worker-1",
+        retry_policy=policy,
+        now=NOW,
+    )
+    assert claimed.generation is not None
+    retry = store.schedule_publication_retry(
+        generation.publication_id,
+        expected_state=claimed.generation.state,
+        lease_owner="worker-1",
+        retry_policy=policy,
+        retry_at=NOW + timedelta(seconds=1),
+        reason="unsafe_content",
+        now=NOW,
+    )
+
+    assert retry.status is PublicationOperationStatus.retry_wait
+    resumed = store.claim_publication(
+        "worker-2",
+        retry_policy=policy,
+        publication_id=generation.publication_id,
+        now=NOW + timedelta(seconds=1),
+    )
+    assert resumed.status is PublicationOperationStatus.claimed
+    assert resumed.generation is not None
+    assert resumed.generation.attempt == 1
+    assert resumed.generation.state is PublicationState.building
 
 
 def _generation_for_state(state: PublicationState) -> PublicationGeneration:
@@ -881,6 +1014,7 @@ def test_store_queued_hide_requires_explicit_expectation_and_replays(tmp_path) -
     assert (
         store.claim_publication(
             "worker-1",
+            retry_policy=POLICY,
             publication_id=generation.publication_id,
             now=NOW + timedelta(seconds=3),
         ).status
@@ -892,7 +1026,7 @@ def _blocked_generation_store(path):
     store = TaskStore.create(path)
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     blocked = store.block_publication(
         generation.publication_id,
         expected_state=PublicationState.claimed,
@@ -985,7 +1119,7 @@ def test_store_replace_blocked_publication_refuses_proof_and_identity_guards(tmp
         store2 = TaskStore.create(tmp_path / "receipt-source.sqlite")
         receipt_old = _generation()
         store2.enqueue_publication(receipt_old)
-        store2.claim_publication("worker-1", now=NOW)
+        store2.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
         store2.advance_publication(
             receipt_old.publication_id,
             PublicationState.claimed,
@@ -1060,7 +1194,9 @@ def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
             pool.map(
-                lambda item: item[0].claim_publication(item[1], now=NOW),
+                lambda item: item[0].claim_publication(
+                    item[1], retry_policy=POLICY, now=NOW
+                ),
                 ((first_store, "worker-1"), (second_store, "worker-2")),
             )
         )
@@ -1145,12 +1281,16 @@ def test_store_claim_skips_later_generation_for_task_with_live_lease(tmp_path) -
         store.enqueue_publication(item)
 
     claim_at = NOW + timedelta(seconds=3)
-    first = store.claim_publication("worker-1", now=claim_at)
+    first = store.claim_publication(
+        "worker-1", retry_policy=POLICY, now=claim_at
+    )
     assert first.status is PublicationOperationStatus.claimed
     assert first.generation is not None
     assert first.generation.publication_id == first_generation.publication_id
 
-    second = store.claim_publication("worker-2", now=claim_at)
+    second = store.claim_publication(
+        "worker-2", retry_policy=POLICY, now=claim_at
+    )
     assert second.status is PublicationOperationStatus.claimed
     assert second.generation is not None
     assert second.generation.publication_id == other_task_generation.publication_id
@@ -1178,7 +1318,9 @@ def test_store_claim_edges_cannot_bypass_attempt_accounting(tmp_path) -> None:
     assert unchanged.state is PublicationState.queued
     assert unchanged.attempt == 0
 
-    claimed = store.claim_publication("worker-1", now=NOW)
+    claimed = store.claim_publication(
+        "worker-1", retry_policy=POLICY, now=NOW
+    )
     assert claimed.status is PublicationOperationStatus.claimed
     assert claimed.generation is not None
     assert claimed.generation.attempt == 1
@@ -1189,7 +1331,9 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
     store = TaskStore.create(path)
     generation = _generation()
     store.enqueue_publication(generation)
-    first = store.claim_publication("worker-1", now=NOW)
+    first = store.claim_publication(
+        "worker-1", retry_policy=POLICY, now=NOW
+    )
     assert first.status is PublicationOperationStatus.claimed
 
     expired = store.expire_publication_leases(
@@ -1198,7 +1342,10 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
     assert store.get_publication_generation(generation.publication_id).state is PublicationState.retry_wait
     assert any(item.publication_id == generation.publication_id for item in expired)
     resumed = store.claim_publication(
-        "worker-2", publication_id=generation.publication_id, now=NOW + timedelta(seconds=MAX_LEASE_SECONDS)
+        "worker-2",
+        retry_policy=POLICY,
+        publication_id=generation.publication_id,
+        now=NOW + timedelta(seconds=MAX_LEASE_SECONDS)
     )
     assert resumed.status is PublicationOperationStatus.claimed
     assert resumed.generation.attempt == 2
@@ -1208,6 +1355,7 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
         generation.publication_id,
         expected_state=PublicationState.building,
         lease_owner="worker-2",
+        retry_policy=POLICY,
         retry_at=retry_at,
         reason="network",
         now=NOW + timedelta(seconds=MAX_LEASE_SECONDS + 1),
@@ -1215,12 +1363,18 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
     assert retry.status is PublicationOperationStatus.retry_wait
     assert (
         store.claim_publication(
-            "worker-3", publication_id=generation.publication_id, now=retry_at - timedelta(seconds=1)
+            "worker-3",
+            retry_policy=POLICY,
+            publication_id=generation.publication_id,
+            now=retry_at - timedelta(seconds=1)
         ).status
         is PublicationOperationStatus.empty
     )
     resumed_again = store.claim_publication(
-        "worker-3", publication_id=generation.publication_id, now=retry_at
+        "worker-3",
+        retry_policy=POLICY,
+        publication_id=generation.publication_id,
+        now=retry_at
     )
     assert resumed_again.status is PublicationOperationStatus.claimed
 
@@ -1245,7 +1399,10 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
             },
         )
     exhausted = store.claim_publication(
-        "worker-4", publication_id=generation.publication_id, now=NOW
+        "worker-4",
+        retry_policy=POLICY,
+        publication_id=generation.publication_id,
+        now=NOW
     )
     assert exhausted.status is PublicationOperationStatus.retry_exhausted
     assert store.get_publication_generation(generation.publication_id).state is PublicationState.blocked
@@ -1262,7 +1419,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
     store = TaskStore.create(path)
     store.enqueue_publication(generation)
     claimed = store.claim_publication(
-        "worker-1", now=started_at, lease_seconds=1
+        "worker-1", retry_policy=POLICY, now=started_at, lease_seconds=1
     )
     assert claimed.generation is not None
     building_at = started_at + timedelta(milliseconds=100)
@@ -1312,7 +1469,7 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
     assert queued.status is PublicationOperationStatus.precondition
     assert store.list_publication_receipts(generation.publication_id) == []
 
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1401,7 +1558,9 @@ def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_pat
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW, lease_seconds=1)
+    store.claim_publication(
+        "worker-1", retry_policy=POLICY, now=NOW, lease_seconds=1
+    )
     store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1442,7 +1601,7 @@ def test_receipt_replay_requires_the_current_unexpired_owner(tmp_path) -> None:
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1489,7 +1648,9 @@ def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) ->
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW, lease_seconds=1)
+    store.claim_publication(
+        "worker-1", retry_policy=POLICY, now=NOW, lease_seconds=1
+    )
     store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1515,7 +1676,10 @@ def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) ->
     reclaimed_at = NOW + timedelta(seconds=1)
     store.expire_publication_leases(now=reclaimed_at)
     reclaimed = store.claim_publication(
-        "worker-2", publication_id=generation.publication_id, now=reclaimed_at
+        "worker-2",
+        retry_policy=POLICY,
+        publication_id=generation.publication_id,
+        now=reclaimed_at
     )
     assert reclaimed.status is PublicationOperationStatus.claimed
     replay = _record(
@@ -1532,7 +1696,7 @@ def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_pa
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation(run_id="run-2")
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1572,7 +1736,7 @@ def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
     generation = _generation()
     store.enqueue_publication(generation)
     owner = "worker-1"
-    store.claim_publication(owner, now=NOW)
+    store.claim_publication(owner, retry_policy=POLICY, now=NOW)
     assert store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1699,7 +1863,7 @@ def test_store_cleanup_intents_reject_unsafe_replay_and_remain_in_health(tmp_pat
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     store.advance_publication(
         generation.publication_id,
         PublicationState.claimed,
@@ -1788,7 +1952,11 @@ def test_store_health_tracks_current_age_and_last_outcome(tmp_path) -> None:
     assert initial.oldest_queued_age_seconds == 10
     assert initial.last_category == "success"
 
-    store.claim_publication("worker-1", now=started_at + timedelta(seconds=10))
+    store.claim_publication(
+        "worker-1",
+        retry_policy=POLICY,
+        now=started_at + timedelta(seconds=10),
+    )
     blocked = store.block_publication(
         generation.publication_id,
         expected_state=PublicationState.claimed,
@@ -1820,7 +1988,7 @@ def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
             "UPDATE publication_generations SET state='uploading',attempt=:attempt,"
@@ -1837,6 +2005,7 @@ def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path
         generation.publication_id,
         expected_state=PublicationState.uploading,
         lease_owner="worker-1",
+        retry_policy=POLICY,
         reason="network",
         now=NOW + timedelta(seconds=2),
     )
@@ -1849,7 +2018,7 @@ def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> N
     store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
             "UPDATE publication_generations SET state='building',attempt=:attempt,"
@@ -1867,6 +2036,7 @@ def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> N
         generation.publication_id,
         expected_state=PublicationState.building,
         lease_owner="worker-1",
+        retry_policy=POLICY,
         reason="unsafe_content",
         now=NOW + timedelta(seconds=2),
     )
@@ -1878,6 +2048,7 @@ def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> N
 
     resumed = store.claim_publication(
         "worker-2",
+        retry_policy=POLICY,
         publication_id=generation.publication_id,
         now=NOW + timedelta(seconds=3),
     )
@@ -1990,7 +2161,9 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
     assert pending.state is PublicationHideState.pending
     assert restarted.list_pending_publication_hides(task_id=original.task_id) == [pending]
     assert (
-        restarted.claim_publication("worker-1", now=NOW + timedelta(seconds=2)).status
+        restarted.claim_publication(
+            "worker-1", retry_policy=POLICY, now=NOW + timedelta(seconds=2)
+        ).status
         is PublicationOperationStatus.empty
     )
 
@@ -2030,7 +2203,10 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
     assert restarted.get_publication_generation(repaired.publication_id).state is PublicationState.queued
     assert (
         restarted.claim_publication(
-            "worker-1", publication_id=repaired.publication_id, now=NOW + timedelta(seconds=5)
+            "worker-1",
+            retry_policy=POLICY,
+            publication_id=repaired.publication_id,
+            now=NOW + timedelta(seconds=5)
         ).status
         is PublicationOperationStatus.claimed
     )
@@ -2042,7 +2218,7 @@ def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_e
     store = TaskStore.create(tmp_path / "enqueue-repair.sqlite")
     original = _generation()
     store.enqueue_publication(original)
-    store.claim_publication("worker-1", now=NOW)
+    store.claim_publication("worker-1", retry_policy=POLICY, now=NOW)
     for source, target, offset in (
         (PublicationState.claimed, PublicationState.building, 1),
         (PublicationState.building, PublicationState.uploading, 2),

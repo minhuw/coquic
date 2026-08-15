@@ -29,6 +29,7 @@ from coquic_steward.publication.outbox import (
     PublicationOperationResult,
     PublicationOperationStatus,
     PublicationReceipt,
+    PublicationRetryPolicy,
     ReceiptClass,
 )
 from coquic_steward.publication.publisher import (
@@ -772,6 +773,7 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
         d1,
         worker_id="publication-test",
         compose=_scanner_composer(scanner),
+        retry_policy=PublicationRetryPolicy(config.max_retries),
     )
     daemon = object.__new__(StewardDaemon)
     daemon.config = SimpleNamespace(publication=config)
@@ -1131,6 +1133,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
         d1,
         worker_id="publication-restart-provider",
         compose=_scanner_composer(scanner),
+        retry_policy=PublicationRetryPolicy(config.max_retries),
     )
 
     assert daemon._publish_next_generation(publisher) is True

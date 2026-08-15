@@ -48,7 +48,7 @@ from .signals import (
 from .storage import TaskStore
 from .publication.d1 import D1PublicationClient
 from .publication.models import ReasonCode
-from .publication.outbox import PublicationGeneration
+from .publication.outbox import PublicationGeneration, PublicationRetryPolicy
 from .publication.publisher import (
     CloudPublisher,
     PublicationHideResult,
@@ -184,6 +184,7 @@ def _build_cli_hide_publisher(
             config=publication,
             timeout_seconds=publication.network_timeout_seconds,
         )
+        retry_policy = PublicationRetryPolicy(publication.max_retries)
         publisher = CloudPublisher(
             store,
             None,
@@ -192,6 +193,7 @@ def _build_cli_hide_publisher(
             retry_backoff_seconds=max(
                 1, int(publication.retry_backoff_seconds)
             ),
+            retry_policy=retry_policy,
         )
         return publisher, d1
     except Exception:
@@ -217,7 +219,13 @@ def _build_cli_retry_publisher(
     if built is not None:
         return built
     return (
-        CloudPublisher(store, None, None, worker_id="publication-cli"),
+        CloudPublisher(
+            store,
+            None,
+            None,
+            worker_id="publication-cli",
+            retry_policy=PublicationRetryPolicy(config.publication.max_retries),
+        ),
         None,
     )
 

@@ -24,6 +24,8 @@ MAX_IDENTIFIER_LENGTH: Final = 128
 MAX_DIGEST_LENGTH: Final = 64
 MAX_CONTENT_KEY_LENGTH: Final = 1024
 MAX_REASON_LENGTH: Final = 64
+MAX_RETRIES: Final = 20
+# Structural bound for decoding current-schema rows. Runtime policy may be lower.
 MAX_ATTEMPTS: Final = 32
 MAX_COUNT: Final = 2**31 - 1
 MAX_OBJECT_BYTES: Final = 64 * 1024 * 1024
@@ -59,6 +61,33 @@ class OutboxValidationError(PublicationError):
 
     def __init__(self, code: ReasonCode | str = ReasonCode.invalid_metadata) -> None:
         super().__init__(code)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationRetryPolicy:
+    """Immutable operator policy for normal publication attempts.
+
+    ``max_retries`` counts retries after the initial claim. Therefore a policy
+    of ``N`` permits ``N + 1`` total normal claims. The structural
+    :data:`MAX_ATTEMPTS` bound remains independent so rows written under an
+    earlier runtime policy remain decodable after configuration changes.
+    """
+
+    max_retries: int = 3
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_retries, bool)
+            or not isinstance(self.max_retries, int)
+            or not 0 <= self.max_retries <= MAX_RETRIES
+        ):
+            _fail()
+
+    @property
+    def max_attempts(self) -> int:
+        """Return the initial claim plus the configured retry budget."""
+
+        return self.max_retries + 1
 
 
 class PublicationState(StrEnum):
@@ -1068,7 +1097,9 @@ __all__ = [
     "MAX_LEASE_SECONDS",
     "MAX_OBJECT_BYTES",
     "MAX_REASON_LENGTH",
+    "MAX_RETRIES",
     "MAX_RETRY_DELAY_SECONDS",
+    "PublicationRetryPolicy",
     "OutboxValidationError",
     "PublicationCounts",
     "PublicationGeneration",

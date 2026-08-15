@@ -14,6 +14,7 @@ from coquic_steward.execution.task_archive import TaskArchive
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     PublicationGeneration,
+    PublicationRetryPolicy,
     PublicationState,
 )
 from coquic_steward.storage import SQLiteStoreLifecycleError, StoreRecoveryResult, TaskStore
@@ -386,7 +387,9 @@ def test_open_defers_stale_lease_recovery_to_explicit_recover(tmp_path: Path) ->
     store = TaskStore.create(database)
     generation, now = _stale_publication_generation()
     store.enqueue_publication(generation)
-    store.claim_publication("recovery-worker", now=now)
+    store.claim_publication(
+        "recovery-worker", retry_policy=PublicationRetryPolicy(), now=now
+    )
     store.engine.dispose()
 
     opened = TaskStore.open(database)
@@ -464,7 +467,9 @@ def test_recover_rolls_back_lease_and_health_changes_on_failure(
     store = TaskStore.create(database)
     generation, now = _stale_publication_generation()
     store.enqueue_publication(generation)
-    store.claim_publication("recovery-worker", now=now)
+    store.claim_publication(
+        "recovery-worker", retry_policy=PublicationRetryPolicy(), now=now
+    )
     before_health = store.get_publication_health()
 
     def fail_refresh(*_args, **_kwargs):

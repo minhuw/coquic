@@ -39,6 +39,7 @@ from .outbox import (
     MAX_LEASE_SECONDS,
     PublicationCounts,
     PublicationOperationStatus,
+    PublicationRetryPolicy,
     PublicationReceipt,
     PublicationState,
     ReceiptClass,
@@ -639,6 +640,7 @@ class CloudPublisher:
         now: Callable[[], datetime] | datetime | None = None,
         lease_seconds: int = MAX_LEASE_SECONDS,
         retry_backoff_seconds: int = 1,
+        retry_policy: PublicationRetryPolicy,
     ) -> None:
         if _identifier(worker_id) is None:
             raise PublicationError(ReasonCode.invalid_identifier)
@@ -652,8 +654,11 @@ class CloudPublisher:
         self.worker_id = worker_id
         self.compose = compose
         self._clock = (lambda: now) if isinstance(now, datetime) else (now or _now)
+        if not isinstance(retry_policy, PublicationRetryPolicy):
+            raise PublicationError(ReasonCode.invalid_metadata)
         self.lease_seconds = lease_seconds
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.retry_policy = retry_policy
 
     def _time(self) -> datetime:
         return _timestamp(self._clock(), _now())
@@ -716,6 +721,7 @@ class CloudPublisher:
                 publication_id=publication_id,
                 now=timestamp,
                 lease_seconds=self.lease_seconds,
+                retry_policy=self.retry_policy,
             )
             if _operation_is(claimed, PublicationOperationStatus.claimed):
                 return _record_generation(claimed, current), None
@@ -897,6 +903,7 @@ class CloudPublisher:
                 publication_id,
                 expected_state=getattr(generation, "state", None),
                 lease_owner=self.worker_id,
+                retry_policy=self.retry_policy,
                 retry_at=self._time() + timedelta(seconds=self.retry_backoff_seconds),
                 reason=persisted_reason,
                 now=self._time(),
@@ -1784,6 +1791,7 @@ def publish_generation(
     now: Callable[[], datetime] | datetime | None = None,
     lease_seconds: int = MAX_LEASE_SECONDS,
     retry_backoff_seconds: int = 1,
+    retry_policy: PublicationRetryPolicy = PublicationRetryPolicy(),
     generation: object | None = None,
     claimed_generation: object | None = None,
     compose_kwargs: Mapping[str, object] | None = None,
@@ -1799,6 +1807,7 @@ def publish_generation(
         now=now,
         lease_seconds=lease_seconds,
         retry_backoff_seconds=retry_backoff_seconds,
+        retry_policy=retry_policy,
     ).publish(
         publication_id,
         source,
@@ -1816,6 +1825,7 @@ def retry_publication(
     compose: PublicationComposer = _DEFAULT_COMPOSER,
     compose_kwargs: Mapping[str, object] | None = None,
     now: Callable[[], datetime] | datetime | None = None,
+    retry_policy: PublicationRetryPolicy = PublicationRetryPolicy(),
 ) -> PublicationResult:
     """Compose, inspect, and enqueue one changed deterministic generation."""
 
@@ -1825,6 +1835,7 @@ def retry_publication(
         object(),
         compose=compose,
         now=now,
+        retry_policy=retry_policy,
     ).retry_publication(
         publication_id,
         source,
@@ -1839,10 +1850,17 @@ def hide_publication(
     *,
     d1: D1PublicationClient,
     now: Callable[[], datetime] | datetime | None = None,
+    retry_policy: PublicationRetryPolicy = PublicationRetryPolicy(),
 ) -> PublicationHideResult:
     """Hide one task head through typed D1 and local durable state."""
 
-    return CloudPublisher(store, object(), d1, now=now).hide_task(task_id, reason)
+    return CloudPublisher(
+        store,
+        object(),
+        d1,
+        now=now,
+        retry_policy=retry_policy,
+    ).hide_task(task_id, reason)
 
 
 __all__ = [

@@ -4436,19 +4436,20 @@ class StewardDaemon:
             for task_id, future in list(self._active_futures.items()):
                 if future.done():
                     self._active_futures.pop(task_id, None)
-        available = max(0, self.config.limits.max_active_tasks - len(self._active_futures))
+            active_future_ids = set(self._active_futures)
+        available = max(0, self.config.limits.max_active_tasks - len(active_future_ids))
         budget = min(capacity, available)
         snapshot = self.store.dispatch_snapshot(
             source_limit=budget,
             integration_limit=1 if budget > 0 else 0,
-            resumable_limit=budget,
+            resumable_limit=(budget + len(active_future_ids)) if budget > 0 else 0,
         )
         source_capacity = max(
             0,
             self.config.limits.max_active_tasks - snapshot.source_active_count,
         )
         integration_capacity = max(0, 1 - snapshot.integration_active_count)
-        seen = set(self._active_futures)
+        seen = active_future_ids
         for task in [*snapshot.queued_tasks, *snapshot.resumable_tasks]:
             if budget <= 0 or task.id in seen:
                 continue

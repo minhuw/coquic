@@ -3379,6 +3379,64 @@ def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(
     pool.shutdown(wait=True)
 
 
+def test_worker_pool_recovers_older_active_task_after_future_deduplication(
+    config, monkeypatch
+):
+    config = replace(config, limits=replace(config.limits, max_active_tasks=2))
+    store = TaskStore.create(config.db_path)
+    older, _ = _task(store, "older active pool task")
+    store.start_worker(older.id, "running")
+    newer, _ = _task(store, "newer active pool task")
+    store.start_worker(newer.id, "running")
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE tasks SET created_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00+00:00", older.id),
+        )
+        connection.exec_driver_sql(
+            "UPDATE tasks SET created_at = ? WHERE id = ?",
+            ("2026-01-02T00:00:00+00:00", newer.id),
+        )
+
+    snapshot_calls = []
+    original_snapshot = store.dispatch_snapshot
+
+    def snapshot(**kwargs):
+        snapshot_calls.append(kwargs)
+        return original_snapshot(**kwargs)
+
+    monkeypatch.setattr(store, "dispatch_snapshot", snapshot)
+    daemon = StewardDaemon(config, store)
+    release = threading.Event()
+    started = threading.Event()
+    scheduled: list[str] = []
+    pool = ThreadPoolExecutor(max_workers=2)
+    existing_future = pool.submit(release.wait, 30)
+    daemon._active_futures[newer.id] = existing_future
+
+    def worker(task_id):
+        scheduled.append(task_id)
+        started.set()
+        release.wait(2)
+        return True
+
+    daemon._run_task_worker = worker
+    try:
+        result = TickResult()
+        daemon._dispatch_queued_pool(result, pool, max_dispatch=1)
+
+        assert started.wait(1)
+        assert scheduled == [older.id]
+        assert result.dispatched == 1
+        assert snapshot_calls == [
+            {"source_limit": 1, "integration_limit": 1, "resumable_limit": 2}
+        ]
+        assert set(daemon._active_futures) == {newer.id, older.id}
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+
 def test_worker_pool_dispatches_old_active_task_beyond_legacy_window(
     config, monkeypatch
 ):

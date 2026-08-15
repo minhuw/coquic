@@ -3318,10 +3318,40 @@ def test_ledger_backed_stale_task_uses_identity_reconciliation(config):
     assert store.get(task.id).status == TaskStatus.running
 
 
-def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(config):
+def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(
+    config, monkeypatch
+):
     store = TaskStore.create(config.db_path)
     _task(store, "pool one")
     _task(store, "pool two")
+    snapshot_calls = []
+    original_snapshot = store.dispatch_snapshot
+
+    def snapshot(**kwargs):
+        snapshot_calls.append(kwargs)
+        return original_snapshot(**kwargs)
+
+    monkeypatch.setattr(store, "dispatch_snapshot", snapshot)
+    monkeypatch.setattr(
+        store,
+        "queued_tasks",
+        lambda **_kwargs: pytest.fail("pool dispatch used a legacy queue read"),
+    )
+    monkeypatch.setattr(
+        store,
+        "iter_tasks",
+        lambda **_kwargs: pytest.fail("pool dispatch used a legacy resumable read"),
+    )
+    monkeypatch.setattr(
+        store,
+        "source_active_count",
+        lambda: pytest.fail("pool dispatch used a legacy source count"),
+    )
+    monkeypatch.setattr(
+        store,
+        "integration_active_count",
+        lambda: pytest.fail("pool dispatch used a legacy integration count"),
+    )
     daemon = StewardDaemon(config, store)
     release = threading.Event()
     started = threading.Event()
@@ -3341,6 +3371,7 @@ def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(confi
     assert started.wait(1)
     assert result.dispatched == 1
     assert elapsed < 0.5
+    assert len(snapshot_calls) == 1
     daemon._begin_cycle("heartbeat")
     assert daemon.runtime.heartbeat_at is not None
     daemon._complete_cycle(TickResult(), "heartbeat")
@@ -3460,10 +3491,33 @@ def test_shutdown_interrupted_implementation_preserves_restart_state(config):
     assert finalized == []
 
 
-def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config):
+def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config, monkeypatch):
     store = TaskStore.create(config.db_path)
     first, _ = _task(store, "once progress")
     second, _ = _task(store, "once max dispatch")
+    snapshot_calls = []
+    original_snapshot = store.dispatch_snapshot
+
+    def snapshot(**kwargs):
+        snapshot_calls.append(kwargs)
+        return original_snapshot(**kwargs)
+
+    monkeypatch.setattr(store, "dispatch_snapshot", snapshot)
+    monkeypatch.setattr(
+        store,
+        "queued_tasks",
+        lambda **_kwargs: pytest.fail("serial dispatch used a legacy queue read"),
+    )
+    monkeypatch.setattr(
+        store,
+        "source_active_count",
+        lambda: pytest.fail("serial dispatch used a legacy source count"),
+    )
+    monkeypatch.setattr(
+        store,
+        "integration_active_count",
+        lambda: pytest.fail("serial dispatch used a legacy integration count"),
+    )
     daemon = StewardDaemon(config, store)
     outcomes = {
         first.id: iter(
@@ -3508,6 +3562,7 @@ def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config):
 
     assert result.dispatched == 1
     assert result.skipped == 0
+    assert len(snapshot_calls) == 1
     assert calls == [first.id, first.id]
     assert serialized_calls == calls
     assert finalized == [first.id]

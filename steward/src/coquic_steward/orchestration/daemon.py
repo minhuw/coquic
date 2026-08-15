@@ -4328,31 +4328,45 @@ class StewardDaemon:
         if concurrent_pool is not None:
             self._dispatch_queued_pool(result, concurrent_pool, max_dispatch=max_dispatch)
             return
-        source_limit = max_dispatch or self.config.limits.max_active_tasks
+        source_limit = (
+            max_dispatch
+            if max_dispatch is not None
+            else self.config.limits.max_active_tasks
+        )
         total_limit = max_dispatch
+        snapshot = self.store.dispatch_snapshot(
+            source_limit=max(0, source_limit),
+            integration_limit=1,
+            resumable_limit=0,
+        )
+        queued = list(snapshot.queued_tasks)
+        source_capacity = max(
+            0,
+            self.config.limits.max_active_tasks - snapshot.source_active_count,
+        )
+        integration_active = snapshot.integration_active_count
         source_attempts = 0
         integration_attempted = False
         seen: set[str] = set()
-        while True:
+        while queued:
             if total_limit is not None and result.dispatched + result.skipped >= total_limit:
                 return
-            task = self._next_dispatchable_task(seen)
-            if task is None:
-                return
+            task = queued.pop(0)
+            if task.id in seen:
+                continue
             is_integration = _is_integration_manager_task(task)
             if is_integration:
-                if integration_attempted or self.store.integration_active_count() > 0:
+                if integration_attempted or integration_active > 0:
                     seen.add(task.id)
                     continue
                 integration_attempted = True
+                integration_active += 1
             else:
-                if source_attempts >= source_limit:
-                    seen.add(task.id)
-                    continue
-                if self.store.source_active_count() >= self.config.limits.max_active_tasks:
+                if source_attempts >= source_limit or source_capacity <= 0:
                     seen.add(task.id)
                     continue
                 source_attempts += 1
+                source_capacity -= 1
             seen.add(task.id)
             self._log(f"dispatch start {task.id} {_task_label(task)}")
             try:
@@ -4382,6 +4396,24 @@ class StewardDaemon:
                 self._log(
                     f"dispatch finish {task.id} status={finished.status} ok=true"
                 )
+                if (
+                    not is_integration
+                    and (
+                        total_limit is None
+                        or result.dispatched + result.skipped < total_limit
+                    )
+                    and not self._shutdown_event.is_set()
+                ):
+                    continuation = self.store.find_active_dedupe(
+                        f"integration:{task.id}"
+                    )
+                    if (
+                        continuation is not None
+                        and continuation.id not in seen
+                        and TaskStatus(continuation.status) == TaskStatus.queued
+                        and _is_integration_manager_task(continuation)
+                    ):
+                        queued.insert(0, continuation)
                 if plan:
                     self._plan_until_idle(result)
             else:
@@ -4399,28 +4431,37 @@ class StewardDaemon:
         max_dispatch: int | None,
     ) -> None:
         capacity = max_dispatch if max_dispatch is not None else self.config.limits.max_active_tasks
+        capacity = max(0, capacity)
         with self._worker_pool_lock:
             for task_id, future in list(self._active_futures.items()):
                 if future.done():
                     self._active_futures.pop(task_id, None)
         available = max(0, self.config.limits.max_active_tasks - len(self._active_futures))
         budget = min(capacity, available)
+        snapshot = self.store.dispatch_snapshot(
+            source_limit=budget,
+            integration_limit=1 if budget > 0 else 0,
+            resumable_limit=budget,
+        )
+        source_capacity = max(
+            0,
+            self.config.limits.max_active_tasks - snapshot.source_active_count,
+        )
+        integration_capacity = max(0, 1 - snapshot.integration_active_count)
         seen = set(self._active_futures)
-        queued = self.store.queued_tasks()
-        active = [
-            task
-            for task in self.store.iter_tasks(statuses=_RESUMABLE_TASK_STATUSES)
-            if not TaskStatus(task.status).terminal
-            and TaskStatus(task.status) != TaskStatus.queued
-        ]
-        for task in [*queued, *active]:
+        for task in [*snapshot.queued_tasks, *snapshot.resumable_tasks]:
             if budget <= 0 or task.id in seen:
                 continue
-            if _is_integration_manager_task(task):
-                if self.store.integration_active_count() > 0:
-                    continue
-            elif TaskStatus(task.status) == TaskStatus.queued and self.store.source_active_count() >= self.config.limits.max_active_tasks:
-                continue
+            queued = TaskStatus(task.status) == TaskStatus.queued
+            if queued:
+                if _is_integration_manager_task(task):
+                    if integration_capacity <= 0:
+                        continue
+                    integration_capacity -= 1
+                else:
+                    if source_capacity <= 0:
+                        continue
+                    source_capacity -= 1
             future = pool.submit(self._run_task_worker, task.id)
             with self._worker_pool_lock:
                 self._active_futures[task.id] = future
@@ -4627,13 +4668,6 @@ class StewardDaemon:
         if self.executor.clean_finished_task_worktree(task):
             task = self.store.get(task_id)
         return task
-
-    def _next_dispatchable_task(self, seen: set[str]) -> TaskRecord | None:
-        for task in self.store.queued_tasks():
-            if task.id in seen:
-                continue
-            return task
-        return None
 
     def _should_fetch_signals_when_idle(self) -> bool:
         return store_is_idle_for_signal_fetch(self.store)

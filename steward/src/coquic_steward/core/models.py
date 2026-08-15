@@ -476,6 +476,69 @@ class TaskRecord(BaseModel):
         return self.spec.id
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class DispatchSnapshot:
+    """One bounded, transactionally consistent dispatch read."""
+
+    queued: tuple[TaskRecord, ...]
+    resumable: tuple[TaskRecord, ...]
+    source_active: int
+    integration_active: int
+
+    def __init__(
+        self,
+        queued: tuple[TaskRecord, ...] = (),
+        resumable: tuple[TaskRecord, ...] = (),
+        source_active: int = 0,
+        integration_active: int = 0,
+        *,
+        queued_tasks: tuple[TaskRecord, ...] | None = None,
+        resumable_tasks: tuple[TaskRecord, ...] | None = None,
+        source_active_count: int | None = None,
+        integration_active_count: int | None = None,
+    ) -> None:
+        object.__setattr__(
+            self,
+            "queued",
+            tuple(queued if queued_tasks is None else queued_tasks),
+        )
+        object.__setattr__(
+            self,
+            "resumable",
+            tuple(resumable if resumable_tasks is None else resumable_tasks),
+        )
+        object.__setattr__(
+            self,
+            "source_active",
+            source_active if source_active_count is None else source_active_count,
+        )
+        object.__setattr__(
+            self,
+            "integration_active",
+            (
+                integration_active
+                if integration_active_count is None
+                else integration_active_count
+            ),
+        )
+
+    @property
+    def queued_tasks(self) -> tuple[TaskRecord, ...]:
+        return self.queued
+
+    @property
+    def resumable_tasks(self) -> tuple[TaskRecord, ...]:
+        return self.resumable
+
+    @property
+    def source_active_count(self) -> int:
+        return self.source_active
+
+    @property
+    def integration_active_count(self) -> int:
+        return self.integration_active
+
+
 class WorktreeCheckpoint(BaseModel):
     """Private proof used before a recovery may adopt a disposable worktree."""
 

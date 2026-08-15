@@ -824,6 +824,91 @@ def test_store_dispatches_integration_tasks_first(config: StewardConfig) -> None
     assert [task.id for task in queued] == [integration.id, normal.id]
 
 
+def test_store_dispatch_snapshot_is_bounded_and_deterministic(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+
+    def add(
+        task_id: str,
+        *,
+        worker: WorkerKind,
+        kind: TaskKind,
+        priority: Priority,
+    ) -> TaskRecord:
+        task, _ = store.add_task(
+            TaskSpec(
+                id=task_id,
+                kind=kind,
+                worker=worker,
+                title=task_id,
+                prompt=task_id,
+                priority=priority,
+            )
+        )
+        return task
+
+    integration_b = add(
+        "task-integration-b",
+        worker=WorkerKind.integration_manager,
+        kind=TaskKind.integration,
+        priority=Priority.high,
+    )
+    integration_a = add(
+        "task-integration-a",
+        worker=WorkerKind.integration_manager,
+        kind=TaskKind.integration,
+        priority=Priority.high,
+    )
+    source_b = add(
+        "task-source-b",
+        worker=WorkerKind.custom,
+        kind=TaskKind.custom,
+        priority=Priority.urgent,
+    )
+    source_a = add(
+        "task-source-a",
+        worker=WorkerKind.custom,
+        kind=TaskKind.custom,
+        priority=Priority.urgent,
+    )
+    active_source = add(
+        "task-active-source",
+        worker=WorkerKind.custom,
+        kind=TaskKind.custom,
+        priority=Priority.low,
+    )
+    store.start_worker(active_source.id, "running")
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE tasks SET created_at = ? WHERE id IN (?, ?, ?, ?, ?)",
+            (
+                "2026-01-01T00:00:00+00:00",
+                integration_b.id,
+                integration_a.id,
+                source_b.id,
+                source_a.id,
+                active_source.id,
+            ),
+        )
+
+    snapshot = store.dispatch_snapshot(
+        source_limit=1,
+        integration_limit=2,
+        resumable_limit=1,
+    )
+
+    assert [task.id for task in snapshot.queued] == [
+        integration_a.id,
+        integration_b.id,
+        source_a.id,
+    ]
+    assert [task.id for task in snapshot.resumable] == [active_source.id]
+    assert snapshot.source_active == 1
+    assert snapshot.integration_active == 0
+    assert source_b.id not in {task.id for task in snapshot.queued}
+
+
 def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     item, created = store.add_signal_item(

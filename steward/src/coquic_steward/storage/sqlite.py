@@ -18,6 +18,7 @@ from sqlalchemy import (
     Connection,
     Select,
     and_,
+    case,
     create_engine,
     delete as sql_delete,
     event,
@@ -44,6 +45,7 @@ from ..core.lifecycle import (
 from ..core.models import (
     ACTIVE_STATUSES,
     CleanupStatus,
+    DispatchSnapshot,
     CodexRunState,
     CodexSession,
     Event,
@@ -705,7 +707,7 @@ class SQLiteTaskStore:
             self._ensure_archive_epoch()
         metadata = dict(spec.metadata)
         if dedupe_key is not None:
-            existing = self._find_active_dedupe(dedupe_key)
+            existing = self.find_active_dedupe(dedupe_key)
             if existing is not None:
                 return existing, False
             metadata["dedupe_key"] = dedupe_key
@@ -747,7 +749,7 @@ class SQLiteTaskStore:
         except IntegrityError:
             if dedupe_key is None:
                 raise
-            existing = self._find_active_dedupe(dedupe_key)
+            existing = self.find_active_dedupe(dedupe_key)
             if existing is None:
                 raise
             return existing, False
@@ -5612,6 +5614,89 @@ class SQLiteTaskStore:
                 return
             cursor = page.next_cursor
 
+    def dispatch_snapshot(
+        self,
+        *,
+        source_limit: int | None = None,
+        integration_limit: int | None = 1,
+        queued_limit: int | None = None,
+        resumable_limit: int | None = None,
+    ) -> DispatchSnapshot:
+        """Read one bounded dispatch snapshot in one SQLite transaction.
+
+        Queued lanes are selected independently so a saturated integration lane
+        cannot consume the source candidate bound.  ``queued_limit`` is kept as
+        a descriptive alias for callers that use one queued bound; the daemon
+        passes the source and integration bounds explicitly.
+        """
+
+        if source_limit is None:
+            source_limit = queued_limit if queued_limit is not None else 0
+        if resumable_limit is None:
+            resumable_limit = queued_limit if queued_limit is not None else source_limit
+        if integration_limit is None:
+            integration_limit = 1
+        source_limit = _validate_dispatch_limit(source_limit, "source")
+        integration_limit = _validate_dispatch_limit(integration_limit, "integration")
+        resumable_limit = _validate_dispatch_limit(resumable_limit, "resumable")
+        active_statuses = [
+            TaskStatus.running.value,
+            TaskStatus.reviewing.value,
+            TaskStatus.integrating.value,
+        ]
+        integration_worker = WorkerKind.integration_manager.value
+
+        with Session(self.engine) as session, session.begin():
+            source_active = _count_tasks(
+                session,
+                statuses=active_statuses,
+                integration=False,
+            )
+            integration_active = _count_tasks(
+                session,
+                statuses=active_statuses,
+                integration=True,
+            )
+            integration_rows = session.scalars(
+                _task_query()
+                .where(
+                    TaskRow.status == TaskStatus.queued.value,
+                    TaskRow.worker == integration_worker,
+                )
+                .order_by(*_queued_dispatch_order())
+                .limit(integration_limit)
+            ).all()
+            source_rows = session.scalars(
+                _task_query()
+                .where(
+                    TaskRow.status == TaskStatus.queued.value,
+                    TaskRow.worker != integration_worker,
+                )
+                .order_by(*_queued_dispatch_order())
+                .limit(source_limit)
+            ).all()
+            resumable_rows = session.scalars(
+                _task_query()
+                .where(TaskRow.status.in_(active_statuses))
+                .order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
+                .limit(resumable_limit)
+            ).all()
+            queued = [
+                row_to_task(row, path_codec=self.path_codec)
+                for row in [*integration_rows, *source_rows]
+            ]
+            resumable = [
+                row_to_task(row, path_codec=self.path_codec)
+                for row in resumable_rows
+            ]
+
+        return DispatchSnapshot(
+            queued_tasks=tuple(queued),
+            resumable_tasks=tuple(resumable),
+            source_active_count=source_active,
+            integration_active_count=integration_active,
+        )
+
     def queued_tasks(self, *, limit: int | None = None) -> list[TaskRecord]:
         tasks = self._tasks_by_status(TaskStatus.queued)
         tasks.sort(
@@ -5619,6 +5704,7 @@ class SQLiteTaskStore:
                 0 if task.spec.worker == "integration-manager" else 1,
                 PRIORITY_ORDER.get(str(task.spec.priority), 99),
                 task.created_at,
+                task.id,
             )
         )
         return tasks if limit is None else tasks[:limit]
@@ -5917,7 +6003,9 @@ class SQLiteTaskStore:
             ).all()
             return [row_to_task(row, path_codec=self.path_codec) for row in rows]
 
-    def _find_active_dedupe(self, dedupe_key: str) -> TaskRecord | None:
+    def find_active_dedupe(self, dedupe_key: str) -> TaskRecord | None:
+        """Return the active task for one indexed dedupe key, if present."""
+
         with Session(self.engine) as session:
             row = session.scalar(
                 _task_query()
@@ -5928,6 +6016,9 @@ class SQLiteTaskStore:
                 .limit(1)
             )
             return row_to_task(row, path_codec=self.path_codec) if row is not None else None
+
+    def _find_active_dedupe(self, dedupe_key: str) -> TaskRecord | None:
+        return self.find_active_dedupe(dedupe_key)
 
     def _migrate_legacy_json(self) -> None:
         legacy = self.path.with_suffix(".json")
@@ -6478,6 +6569,30 @@ def _run_fields(fields: dict[str, object]) -> dict[str, object]:
 
 def _task_query() -> Select[tuple[TaskRow]]:
     return select(TaskRow).options(selectinload(TaskRow.validations))
+
+
+def _queued_dispatch_order():
+    return (
+        case(
+            (TaskRow.worker == WorkerKind.integration_manager.value, 0),
+            else_=1,
+        ),
+        case(
+            (TaskRow.priority == "urgent", 0),
+            (TaskRow.priority == "high", 1),
+            (TaskRow.priority == "medium", 2),
+            (TaskRow.priority == "low", 3),
+            else_=99,
+        ),
+        TaskRow.created_at,
+        TaskRow.id,
+    )
+
+
+def _validate_dispatch_limit(value: int, lane: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{lane} dispatch limit must be a non-negative integer")
+    return value
 
 
 def _normalize_task_statuses(

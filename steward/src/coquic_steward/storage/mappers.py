@@ -462,15 +462,23 @@ def signal_workflow_identity(item: SignalItem) -> SignalWorkflowIdentity | None:
     return SignalWorkflowIdentity(run_id=run_id, run_attempt=run_attempt)
 
 
-def signal_item_to_row(item: SignalItem, *, path_codec: PathCodec) -> SignalItemRow:
-    identity = signal_workflow_identity(item)
+def signal_item_to_row(
+    item: SignalItem,
+    *,
+    path_codec: PathCodec,
+    workflow_identity: SignalWorkflowIdentity | None,
+) -> SignalItemRow:
     return SignalItemRow(
         id=item.id,
         provider=item.provider,
         kind=item.kind,
         fingerprint=item.fingerprint,
-        workflow_run_id=identity.run_id if identity is not None else None,
-        workflow_run_attempt=(identity.run_attempt if identity is not None else None),
+        workflow_run_id=(
+            workflow_identity.run_id if workflow_identity is not None else None
+        ),
+        workflow_run_attempt=(
+            workflow_identity.run_attempt if workflow_identity is not None else None
+        ),
         title=item.title,
         summary=item.summary,
         severity=item.severity,

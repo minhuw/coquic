@@ -476,6 +476,34 @@ def test_create_rejects_sqlite_only_deleted_root_without_mutation(
     assert _file_snapshot(tmp_path) == before
 
 
+def test_create_rejects_populated_deleted_target_with_a_valid_sibling(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.sqlite"
+    target_store = TaskStore.create(target)
+    target_store.control_loop.record_runtime("running", {"evidence": "durable-evidence"})
+    sibling = tmp_path / "sibling.sqlite"
+    sibling_store = TaskStore.create(sibling)
+    target_store.engine.dispose()
+    sibling_store.engine.dispose()
+
+    for path in (
+        target,
+        target.with_name(target.name + "-wal"),
+        target.with_name(target.name + "-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+    before = _file_snapshot(tmp_path)
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(target)
+
+    assert _file_snapshot(tmp_path) == before
+    assert not target.exists()
+    reopened_sibling = TaskStore.open(sibling)
+    reopened_sibling.engine.dispose()
+
+
 def test_create_rejects_populated_control_loop_root_without_mutation(
     tmp_path: Path,
 ) -> None:

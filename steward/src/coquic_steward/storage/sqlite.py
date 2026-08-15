@@ -100,6 +100,7 @@ from .mappers import (
     session_to_row,
     signal_fetch_run_to_row,
     signal_item_to_row,
+    SignalWorkflowIdentity,
     signal_workflow_identity,
     task_to_row,
     update_iteration_row,
@@ -253,6 +254,17 @@ CURRENT_SCHEMA_VERSION = SQLITE_USER_VERSION
 CURRENT_SCHEMA_CATALOG_DIGEST = "8960dbc8bca84606c640e452f1928093e56e11afbfd46265ca64358d79f32165"
 SCHEMA_CATALOG_DIGEST = CURRENT_SCHEMA_CATALOG_DIGEST
 _CONTROL_LOOP_META_SEED_KEYS = frozenset({"epoch_id", "next_sequence", "planning_blocked"})
+_STORE_RECEIPT_FORMAT_VERSION = 1
+_STORE_RECEIPT_PREFIX = ".store-receipt-"
+_STORE_RECEIPT_SUFFIX = ".json"
+_STORE_RECEIPT_STATES = frozenset({"creating", "committed"})
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreCreationReceipt:
+    epoch_id: str
+    database_name: str
+    state: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +342,7 @@ class SQLiteTaskStore:
         keep_temporary = False
         publication_conflict = False
         try:
+            _reserve_store_receipt(database, epoch_id)
             cls._build_current_database(temporary, epoch_id)
             cls._durabilize_database(temporary)
             cls._validate_current_database(temporary, epoch_id)
@@ -357,6 +370,7 @@ class SQLiteTaskStore:
                     # The adopter must establish durability independently of
                     # the creator that won the link race.
                     _fsync_directory(database.parent)
+                    _commit_store_receipt(database, epoch_id)
                     return cls._open_validated(database, epoch_id, on_change)
                 _fsync_directory(database.parent)
             except BaseException:
@@ -369,6 +383,7 @@ class SQLiteTaskStore:
                         temporary, database
                     )
                 raise
+            _commit_store_receipt(database, epoch_id)
             return cls.open(database, on_change=on_change)
         finally:
             if not keep_temporary:
@@ -506,6 +521,8 @@ class SQLiteTaskStore:
                     if entry.name.startswith(f".{epoch_path.name}.tmp-"):
                         _require_regular_file(entry, "epoch temporary")
                         epoch_temporaries.append(entry)
+                    elif entry.name.startswith(_STORE_RECEIPT_PREFIX):
+                        _read_store_receipt_file(entry, str(epoch["epochId"]))
                     else:
                         raise SQLiteStoreLifecycleError(
                             "task archive root contains extra visible state"
@@ -516,6 +533,11 @@ class SQLiteTaskStore:
                 )
 
         expected_epoch_id = None if epoch is None else str(epoch["epochId"])
+        store_receipt = (
+            None
+            if expected_epoch_id is None
+            else _read_store_receipt(database, expected_epoch_id)
+        )
         if epoch is None:
             # Refuse all visible target state before publishing a new epoch.
             # A hidden database temporary without an epoch is a reverse orphan,
@@ -549,17 +571,19 @@ class SQLiteTaskStore:
             sibling_store_exists = _validated_sibling_store_exists(
                 database, expected_epoch_id
             )
-            if (
-                not any(
-                    os.path.lexists(path)
-                    for path in _database_publication_paths(database)
-                )
-                and not database_temporaries
-                and not sibling_store_exists
-            ):
-                raise SQLiteStoreLifecycleError(
-                    "task archive exists without a Store database"
-                )
+            target_present = any(
+                os.path.lexists(path)
+                for path in _database_publication_paths(database)
+            )
+            if not target_present and not database_temporaries:
+                if store_receipt is not None:
+                    raise SQLiteStoreLifecycleError(
+                        "Store creation receipt exists without its database"
+                    )
+                if not sibling_store_exists:
+                    raise SQLiteStoreLifecycleError(
+                        "task archive exists without a Store database"
+                    )
 
         assert expected_epoch_id is not None
         # Visible database and sidecar paths are never a retry prefix.  Refuse
@@ -2055,7 +2079,10 @@ class SQLiteTaskStore:
                     fetch_run = row_to_signal_fetch_run(existing_fetch)
                     saved_items = []
                     for item in items:
-                        row = _matching_signal_row(session, item)
+                        workflow_identity = signal_workflow_identity(item)
+                        row = _matching_signal_row(
+                            session, item, workflow_identity=workflow_identity
+                        )
                         if row is None:
                             raise ValueError(
                                 f"replayed fetch {fetch.id} is missing scheduler signal {item.id}"
@@ -2097,7 +2124,10 @@ class SQLiteTaskStore:
                 update={"created_at": source.created_at, "updated_at": now}
             )
             saved_item: SignalItem | None = None
-            existing = _matching_signal_row(session, item)
+            workflow_identity = signal_workflow_identity(item)
+            existing = _matching_signal_row(
+                session, item, workflow_identity=workflow_identity
+            )
             if existing is not None:
                 if _signal_row_suppressed(
                     session,
@@ -2113,7 +2143,13 @@ class SQLiteTaskStore:
                 else:
                     item = item.model_copy(update={"id": new_signal_item_id()})
             if saved_item is None:
-                session.add(signal_item_to_row(item, path_codec=self.path_codec))
+                session.add(
+                    signal_item_to_row(
+                        item,
+                        path_codec=self.path_codec,
+                        workflow_identity=workflow_identity,
+                    )
+                )
                 session.add(
                     scheduler_wakeup_to_row(
                         SchedulerWakeup(
@@ -2385,7 +2421,10 @@ class SQLiteTaskStore:
         saved_item: SignalItem | None = None
         was_created = False
         with Session(self.engine) as session, session.begin():
-            existing = _matching_signal_row(session, item)
+            workflow_identity = signal_workflow_identity(item)
+            existing = _matching_signal_row(
+                session, item, workflow_identity=workflow_identity
+            )
             if existing is not None:
                 if _signal_row_suppressed(
                     session,
@@ -2399,7 +2438,13 @@ class SQLiteTaskStore:
                 else:
                     item = item.model_copy(update={"id": new_signal_item_id()})
             if saved_item is None:
-                session.add(signal_item_to_row(item, path_codec=self.path_codec))
+                session.add(
+                    signal_item_to_row(
+                        item,
+                        path_codec=self.path_codec,
+                        workflow_identity=workflow_identity,
+                    )
+                )
                 was_created = True
         if was_created:
             self.request_wakeup(
@@ -6514,7 +6559,12 @@ def _signal_row_suppressed(
     return datetime.fromisoformat(planned_at) >= cutoff
 
 
-def _matching_signal_row(session: Session, item: SignalItem) -> SignalItemRow | None:
+def _matching_signal_row(
+    session: Session,
+    item: SignalItem,
+    *,
+    workflow_identity: SignalWorkflowIdentity | None,
+) -> SignalItemRow | None:
     exact = session.scalar(
         select(SignalItemRow)
         .where(
@@ -6526,15 +6576,14 @@ def _matching_signal_row(session: Session, item: SignalItem) -> SignalItemRow | 
     )
     if exact is not None:
         return exact
-    identity = signal_workflow_identity(item)
-    if identity is None:
+    if workflow_identity is None:
         return None
     return session.scalar(
         select(SignalItemRow)
         .where(
             SignalItemRow.provider == item.provider,
-            SignalItemRow.workflow_run_id == identity.run_id,
-            SignalItemRow.workflow_run_attempt == identity.run_attempt,
+            SignalItemRow.workflow_run_id == workflow_identity.run_id,
+            SignalItemRow.workflow_run_attempt == workflow_identity.run_attempt,
         )
         .order_by(SignalItemRow.updated_at.desc())
         .limit(1)
@@ -7278,8 +7327,152 @@ def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
     )
 
 
+def _valid_store_database_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 255
+        and value not in {".", ".."}
+        and "\x00" not in value
+        and "/" not in value
+        and "\\" not in value
+        and Path(value).name == value
+    )
+
+
+def _store_receipt_path(database: Path) -> Path:
+    digest = hashlib.sha256(database.name.encode("utf-8")).hexdigest()
+    return database.parent / "tasks" / (
+        f"{_STORE_RECEIPT_PREFIX}{digest}{_STORE_RECEIPT_SUFFIX}"
+    )
+
+
+def _store_receipt_value(
+    *, epoch_id: str, database_name: str, state: str
+) -> bytes:
+    return json.dumps(
+        {
+            "database": database_name,
+            "epochId": epoch_id,
+            "formatVersion": _STORE_RECEIPT_FORMAT_VERSION,
+            "state": state,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _read_store_receipt_file(
+    path: Path, epoch_id: str
+) -> _StoreCreationReceipt:
+    _require_regular_file(path, "Store creation receipt")
+    name = path.name
+    if not (
+        name.startswith(_STORE_RECEIPT_PREFIX)
+        and name.endswith(_STORE_RECEIPT_SUFFIX)
+    ):
+        raise SQLiteStoreLifecycleError("Store creation receipt name is invalid")
+    digest = name[len(_STORE_RECEIPT_PREFIX) : -len(_STORE_RECEIPT_SUFFIX)]
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SQLiteStoreLifecycleError("Store creation receipt is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {
+        "database",
+        "epochId",
+        "formatVersion",
+        "state",
+    }:
+        raise SQLiteStoreLifecycleError("Store creation receipt is invalid")
+    database_name = value["database"]
+    if (
+        not _valid_store_database_name(database_name)
+        or hashlib.sha256(database_name.encode("utf-8")).hexdigest() != digest
+        or value["epochId"] != epoch_id
+        or value["formatVersion"] != _STORE_RECEIPT_FORMAT_VERSION
+        or value["state"] not in _STORE_RECEIPT_STATES
+    ):
+        raise SQLiteStoreLifecycleError("Store creation receipt is invalid")
+    return _StoreCreationReceipt(
+        epoch_id=epoch_id,
+        database_name=database_name,
+        state=value["state"],
+    )
+
+
+def _read_store_receipt(
+    database: Path, epoch_id: str
+) -> _StoreCreationReceipt | None:
+    path = _store_receipt_path(database)
+    if not os.path.lexists(path):
+        return None
+    receipt = _read_store_receipt_file(path, epoch_id)
+    if receipt.database_name != database.name:
+        raise SQLiteStoreLifecycleError("Store creation receipt targets another database")
+    return receipt
+
+
+def _reserve_store_receipt(database: Path, epoch_id: str) -> None:
+    tasks_root = database.parent / "tasks"
+    _require_directory(tasks_root, "task archive root")
+    path = _store_receipt_path(database)
+    if os.path.lexists(path):
+        receipt = _read_store_receipt(database, epoch_id)
+        assert receipt is not None
+        if receipt.state != "creating":
+            raise SQLiteStoreLifecycleError(
+                "Store creation receipt already commits another database state"
+            )
+        return
+    try:
+        with path.open("xb") as handle:
+            handle.write(
+                _store_receipt_value(
+                    epoch_id=epoch_id,
+                    database_name=database.name,
+                    state="creating",
+                )
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(tasks_root)
+    except OSError as exc:
+        raise SQLiteStoreLifecycleError(
+            "unable to reserve Store creation receipt"
+        ) from exc
+
+
+def _commit_store_receipt(database: Path, epoch_id: str) -> None:
+    path = _store_receipt_path(database)
+    receipt = _read_store_receipt(database, epoch_id)
+    if receipt is None:
+        raise SQLiteStoreLifecycleError("Store creation receipt is missing")
+    if receipt.state == "committed":
+        return
+    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(
+                _store_receipt_value(
+                    epoch_id=epoch_id,
+                    database_name=database.name,
+                    state="committed",
+                )
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise SQLiteStoreLifecycleError(
+            "unable to commit Store creation receipt"
+        ) from exc
+
+
 def _validated_sibling_store_exists(database: Path, epoch_id: str) -> bool:
-    """Recognize only a complete current sibling sharing the task epoch."""
+    """Recognize only a complete current sibling with a committed receipt."""
 
     target_names = {path.name for path in _database_publication_paths(database)}
     for candidate in _directory_entries(database.parent, "database parent"):
@@ -7287,9 +7480,11 @@ def _validated_sibling_store_exists(database: Path, epoch_id: str) -> bool:
             continue
         try:
             SQLiteTaskStore._validate_current_database(candidate, epoch_id)
+            receipt = _read_store_receipt(candidate, epoch_id)
         except SQLiteStoreLifecycleError:
             continue
-        return True
+        if receipt is not None and receipt.state == "committed":
+            return True
     return False
 
 

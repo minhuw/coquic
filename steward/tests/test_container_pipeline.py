@@ -26,6 +26,10 @@ from coquic_steward.execution.executor import (
     StewardExecutor,
     _validation_no_progress_fingerprint,
 )
+from coquic_steward.execution.worktree import (
+    PATH_POLICY_STATUS_PARSE_SUMMARY,
+    _PathPolicyStatusParseError,
+)
 from coquic_steward.execution.session import SessionSupervisor, publication_graph_for_task
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
@@ -124,6 +128,69 @@ def test_advance_once_is_idempotent_and_stops_at_ready_to_seal(config, monkeypat
     assert repeated.status == "ready_to_seal"
     assert len(store.list_pipelines(task.id)) == 1
     assert not any(event.kind == "pipeline.blocked" for event in store.events(task.id))
+
+
+def test_durable_validation_status_parse_failure_blocks_pipeline(config, monkeypatch) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="status parse",
+            prompt="change README",
+        )
+    )
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    executor.advance_once(task.id)
+    executor.advance_once(task.id)
+
+    failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
+
+    def fail_status(_path):
+        raise failure
+
+    monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_status)
+    result = executor.advance_once(task.id)
+
+    assert result.status == "blocked"
+    assert store.get(task.id).status == "blocked"
+    event = next(
+        event for event in store.events(task.id) if event.kind == "path_policy.blocked"
+    )
+    assert event.message == PATH_POLICY_STATUS_PARSE_SUMMARY
+    assert event.data["diagnostic"] == failure.diagnostic
+
+
+def test_durable_validation_rechecks_path_policy_after_gates(config, monkeypatch) -> None:
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", _passing_gates)
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="post-gate policy",
+            prompt="change README",
+        )
+    )
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    executor.advance_once(task.id)
+    executor.advance_once(task.id)
+    frozen_calls = 0
+
+    def frozen_paths(_path, _task):
+        nonlocal frozen_calls
+        frozen_calls += 1
+        return [] if frozen_calls == 1 else ["flake.nix"]
+
+    monkeypatch.setattr(executor.worktrees, "frozen_paths", frozen_paths)
+    result = executor.advance_once(task.id)
+
+    assert result.status == "blocked"
+    assert store.get(task.id).status == "blocked"
+    assert store.get(task.id).summary == "frozen paths changed: flake.nix"
+    assert frozen_calls == 2
 
 
 def test_implementation_validation_patch_tree_full_gate_is_recorded(config, monkeypatch) -> None:

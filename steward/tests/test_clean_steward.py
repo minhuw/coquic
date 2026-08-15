@@ -66,6 +66,11 @@ from coquic_steward.execution.executor import (
     parse_commit_message,
     render_commit_message_prompt,
 )
+from coquic_steward.execution.worktree import (
+    PATH_POLICY_STATUS_PARSE_SUMMARY,
+    _PathPolicyStatusParseError,
+    _changed_paths_from_porcelain,
+)
 from coquic_steward.execution.review import (
     parse_review,
     render_review_revision_prompt,
@@ -5220,6 +5225,109 @@ def test_worktree_reports_frozen_file_and_directory_changes(
     ]
 
 
+def test_porcelain_z_parser_preserves_structural_utf8_paths() -> None:
+    output = (
+        "??  leading and trailing  \0"
+        " M tab\tinside\t \0"
+        "?? line\nbreak\0"
+        '?? "quoted -> name"\0'
+        "?? directory\\name\0"
+        "?? literal -> arrow\0"
+        "?? leading and trailing\0"
+    )
+
+    assert _changed_paths_from_porcelain(output) == [
+        "leading and trailing",
+        "tab\tinside",
+        "line\nbreak",
+        '"quoted -> name"',
+        "directory/name",
+        "literal -> arrow",
+    ]
+
+
+@pytest.mark.parametrize("status", ["R  ", "C  "])
+def test_porcelain_z_parser_returns_rename_source_then_destination(status: str) -> None:
+    assert _changed_paths_from_porcelain(
+        f"{status}destination -> name\0source\\name\0"
+    ) == ["source/name", "destination -> name"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["ZZ path\0", "  path\0", "?M path\0", "!M path\0"],
+)
+def test_porcelain_z_parser_rejects_invalid_status_fields(output: str) -> None:
+    with pytest.raises(_PathPolicyStatusParseError):
+        _changed_paths_from_porcelain(output)
+
+
+def test_porcelain_z_parser_rejects_truncated_records_with_bounded_diagnostic() -> None:
+    output = "?? " + ("x" * 300)
+
+    with pytest.raises(_PathPolicyStatusParseError) as raised:
+        _changed_paths_from_porcelain(output)
+
+    error = raised.value
+    assert str(error) == PATH_POLICY_STATUS_PARSE_SUMMARY
+    assert error.diagnostic == {
+        "raw_prefix": repr(output.encode("utf-8")[:256]),
+        "byte_length": len(output.encode("utf-8")),
+    }
+
+
+def test_porcelain_z_parser_rejects_truncated_rename_record() -> None:
+    with pytest.raises(_PathPolicyStatusParseError) as raised:
+        _changed_paths_from_porcelain("R  destination\0")
+
+    assert raised.value.diagnostic == {
+        "raw_prefix": repr(b"R  destination\0"),
+        "byte_length": len(b"R  destination\0"),
+    }
+
+
+def test_git_porcelain_z_reports_rename_destination_before_source(tmp_path: Path) -> None:
+    repo = tmp_path / "status-repo"
+    run_command(["git", "init", "-q", str(repo)], cwd=tmp_path, check=True)
+    run_command(
+        ["git", "config", "user.email", "steward@example.test"],
+        cwd=repo,
+        check=True,
+    )
+    run_command(
+        ["git", "config", "user.name", "Steward Test"], cwd=repo, check=True
+    )
+    (repo / "source name.txt").write_text("source\n", encoding="utf-8")
+    run_command(["git", "add", "source name.txt"], cwd=repo, check=True)
+    run_command(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+    run_command(
+        ["git", "mv", "source name.txt", "destination -> name.txt"],
+        cwd=repo,
+        check=True,
+    )
+
+    output = run_command(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ],
+        cwd=repo,
+        check=True,
+    ).stdout
+
+    assert output.split("\0")[:2] == [
+        "R  destination -> name.txt",
+        "source name.txt",
+    ]
+    assert _changed_paths_from_porcelain(output) == [
+        "source name.txt",
+        "destination -> name.txt",
+    ]
+
+
 def test_frozen_patch_paths_match_renamed_files(config: StewardConfig) -> None:
     config = config.__class__(
         **{
@@ -5529,6 +5637,51 @@ def test_executor_blocks_frozen_path_written_by_validation(
     assert saved.summary == "frozen paths changed: flake.nix"
     assert saved.patch_path is None
     assert any(event.kind == "path_policy.blocked" for event in store.events(task.id))
+
+
+@pytest.mark.parametrize("failure", ["malformed", "decode"])
+def test_executor_blocks_status_parse_failure_with_fixed_summary(
+    config: StewardConfig, monkeypatch, failure: str
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree, branch = Worktrees(config).create(task)
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    task.worktree_path = worktree
+    task.branch_name = branch
+    store.save(task)
+
+    if failure == "malformed":
+        error: BaseException = _PathPolicyStatusParseError("?? " + ("x" * 300))
+    else:
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    def fail_status(_path: Path) -> list[str]:
+        raise error
+
+    executor = StewardExecutor(config, store)
+    monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_status)
+
+    result = executor._prepare_patch(
+        task.id,
+        "initial",
+        iteration=0,
+        no_changes_status=TaskStatus.no_changes,
+    )
+
+    assert result.value == "terminal_failure"
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == PATH_POLICY_STATUS_PARSE_SUMMARY
+    event = next(
+        event for event in store.events(task.id) if event.kind == "path_policy.blocked"
+    )
+    if failure == "malformed":
+        assert event.data["diagnostic"] == error.diagnostic
+    else:
+        assert "diagnostic" not in event.data
 
 
 def test_executor_heartbeats_active_worker(
@@ -6522,6 +6675,58 @@ def test_integration_manager_blocks_frozen_path_before_validation_repair(
     assert not any(event.kind == "integration.validation_failed" for event in events)
     assert not any(event.kind == "worker.validation_revision_requested" for event in events)
     assert not any(event.kind == "integration.retry_requested" for event in events)
+
+
+def test_integration_status_parse_failure_blocks_only_integration_task(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P")
+    )
+    store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate Source",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    executor = StewardExecutor(config, store)
+    failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
+
+    def fail_status(_path: Path, _task: TaskRecord) -> list[str]:
+        raise failure
+
+    monkeypatch.setattr(executor.worktrees, "frozen_paths", fail_status)
+    transcript_messages: list[tuple[str, str]] = []
+
+    class Transcript:
+        def write(self, stage: str, message: str) -> None:
+            transcript_messages.append((stage, message))
+
+    assert (
+        executor._block_integration_for_frozen_paths(
+            integration, source, config.repo_root, Transcript()
+        )
+        is False
+    )
+    assert store.get(integration.id).status == TaskStatus.blocked
+    assert store.get(integration.id).summary == PATH_POLICY_STATUS_PARSE_SUMMARY
+    assert store.get(source.id).status == TaskStatus.integrating
+    event = next(
+        event
+        for event in store.events(integration.id)
+        if event.kind == "path_policy.blocked"
+    )
+    assert event.data["integration_task_id"] == integration.id
+    assert event.data["diagnostic"] == failure.diagnostic
+    assert ("path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY) in transcript_messages
+    assert not any(
+        event.kind == "path_policy.blocked" for event in store.events(source.id)
+    )
 
 
 def test_integration_manager_counts_main_push_budget_per_utc_day(

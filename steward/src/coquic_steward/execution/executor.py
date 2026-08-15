@@ -68,7 +68,11 @@ from .implementation_plan import (
 )
 from . import validation as validation_module
 from .validation import render_validation_revision_prompt, run_gates
-from .worktree import Worktrees
+from .worktree import (
+    PATH_POLICY_STATUS_PARSE_SUMMARY,
+    Worktrees,
+    _PathPolicyStatusParseError,
+)
 from .container import SubprocessDockerClient, TaskContainerRuntime, ValidationContainerRuntime
 from .session import (
     InvocationStatus,
@@ -104,6 +108,24 @@ MAX_REVIEW_RUN_ATTEMPTS = 2
 WORKER_HEARTBEAT_SECONDS = 30
 PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS = 30.0
+
+
+def _path_policy_status_event_data(
+    error: _PathPolicyStatusParseError | UnicodeDecodeError,
+    **fields: object,
+) -> dict[str, object]:
+    data = dict(fields)
+    if isinstance(error, _PathPolicyStatusParseError) and error.diagnostic is not None:
+        data["diagnostic"] = dict(error.diagnostic)
+    return data
+
+
+def _path_policy_changed_summary(
+    forbidden: list[str], frozen: list[str]
+) -> str:
+    if forbidden:
+        return "forbidden paths changed: " + ", ".join(forbidden)
+    return "frozen paths changed: " + ", ".join(frozen)
 
 
 class _BoundedDockerClient(SubprocessDockerClient):
@@ -1071,11 +1093,25 @@ class StewardExecutor:
         action = action_identity(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=action, payload={"iteration": iteration})
         self.store.start_validation(task.id, "durable validation")
-        forbidden = self.worktrees.forbidden_paths(worktree)
-        frozen = self.worktrees.frozen_paths(worktree, task)
+        try:
+            forbidden = self.worktrees.forbidden_paths(worktree)
+            frozen = self.worktrees.frozen_paths(worktree, task)
+        except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
+            self.store.add_event(
+                task.id,
+                "path_policy.blocked",
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+                _path_policy_status_event_data(exc, pipeline_id=pipeline.id),
+            )
+            return self._block_pipeline(
+                task, pipeline, PATH_POLICY_STATUS_PARSE_SUMMARY
+            )
         if forbidden or frozen:
-            message = "forbidden paths changed: " + ", ".join(forbidden or frozen)
-            return self._block_pipeline(task, pipeline, message)
+            return self._block_pipeline(
+                task,
+                pipeline,
+                _path_policy_changed_summary(forbidden, frozen),
+            )
         validations = self._run_gates_for_iteration(
             task.id,
             worktree,
@@ -1083,6 +1119,25 @@ class StewardExecutor:
             pipeline=pipeline,
         )
         task = self.store.get(task.id)
+        try:
+            forbidden = self.worktrees.forbidden_paths(worktree)
+            frozen = self.worktrees.frozen_paths(worktree, task)
+        except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
+            self.store.add_event(
+                task.id,
+                "path_policy.blocked",
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+                _path_policy_status_event_data(exc, pipeline_id=pipeline.id),
+            )
+            return self._block_pipeline(
+                task, pipeline, PATH_POLICY_STATUS_PARSE_SUMMARY
+            )
+        if forbidden or frozen:
+            return self._block_pipeline(
+                task,
+                pipeline,
+                _path_policy_changed_summary(forbidden, frozen),
+            )
         failed = [item for item in validations if not item.passed]
         base, output_tree, patch = self.worktrees.snapshot(worktree)
         patch_path = self.config.patches_dir / task.id / f"pipeline-{pipeline.ordinal}-iteration-{iteration}.patch"
@@ -2706,7 +2761,21 @@ class StewardExecutor:
             )
             return PatchPreparationResult.no_changes
 
-        forbidden = self.worktrees.forbidden_paths(task.worktree_path)
+        try:
+            forbidden = self.worktrees.forbidden_paths(task.worktree_path)
+        except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
+            self._finish_task(
+                task.id,
+                TaskStatus.blocked,
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+            )
+            self.store.add_event(
+                task.id,
+                "path_policy.blocked",
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+                _path_policy_status_event_data(exc),
+            )
+            return PatchPreparationResult.terminal_failure
         if forbidden:
             self._finish_task(
                 task.id,
@@ -2781,7 +2850,21 @@ class StewardExecutor:
             return
 
     def _block_task_for_frozen_paths(self, task: TaskRecord, worktree: Path) -> bool:
-        frozen = self.worktrees.frozen_paths(worktree, task)
+        try:
+            frozen = self.worktrees.frozen_paths(worktree, task)
+        except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
+            self._finish_task(
+                task.id,
+                TaskStatus.blocked,
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+            )
+            self.store.add_event(
+                task.id,
+                "path_policy.blocked",
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+                _path_policy_status_event_data(exc),
+            )
+            return True
         if not frozen:
             return False
         message = "frozen paths changed: " + ", ".join(frozen)
@@ -3723,7 +3806,24 @@ class StewardExecutor:
         worktree: Path,
         transcript: "IntegrationTranscript",
     ) -> bool | None:
-        frozen = self.worktrees.frozen_paths(worktree, source)
+        try:
+            frozen = self.worktrees.frozen_paths(worktree, source)
+        except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
+            transcript.write(
+                "path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY
+            )
+            self._finish_task(
+                task.id,
+                TaskStatus.blocked,
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+            )
+            self.store.add_event(
+                task.id,
+                "path_policy.blocked",
+                PATH_POLICY_STATUS_PARSE_SUMMARY,
+                _path_policy_status_event_data(exc, integration_task_id=task.id),
+            )
+            return False
         if not frozen:
             return None
         message = "frozen paths changed: " + ", ".join(frozen)

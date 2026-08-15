@@ -21,6 +21,20 @@ FORBIDDEN_PATH_PARTS = {
 }
 
 
+PATH_POLICY_STATUS_PARSE_SUMMARY = "path policy status could not be parsed"
+_PORCELAIN_STATUS_CODES = frozenset(" MADRCUT?!")
+
+
+class _PathPolicyStatusParseError(ValueError):
+    """A bounded, stable failure while decoding Git status records."""
+
+    def __init__(self, output: str | None = None) -> None:
+        super().__init__(PATH_POLICY_STATUS_PARSE_SUMMARY)
+        self.diagnostic = (
+            _path_policy_status_diagnostic(output) if output is not None else None
+        )
+
+
 @dataclass(frozen=True)
 class WorktreeIdentity:
     task_id: str
@@ -484,11 +498,7 @@ class Worktrees:
         return result.ok and bool(result.stdout.strip())
 
     def forbidden_paths(self, path: Path) -> list[str]:
-        output = run_command(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=path,
-            check=True,
-        ).stdout
+        output = self._status_output(path)
         forbidden: list[str] = []
         for changed in _changed_paths_from_porcelain(output):
             parts = set(Path(changed).parts)
@@ -500,12 +510,21 @@ class Worktrees:
         patterns = self.config.path_policy.frozen_for_kind(task.spec.kind)
         if not patterns:
             return []
-        output = run_command(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
+        return _matching_paths(_changed_paths_from_porcelain(self._status_output(path)), patterns)
+
+    @staticmethod
+    def _status_output(path: Path) -> str:
+        return run_command(
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
             cwd=path,
             check=True,
         ).stdout
-        return _matching_paths(_changed_paths_from_porcelain(output), patterns)
 
     def remove(self, path: Path, branch: str | None = None) -> None:
         if path.exists():
@@ -548,13 +567,39 @@ def _slug(value: object) -> str:
 
 
 def _changed_paths_from_porcelain(output: str) -> list[str]:
+    if not output:
+        return []
+    records = output.split("\0")
+    if records[-1] != "":
+        raise _PathPolicyStatusParseError(output)
+
     paths: list[str] = []
     seen: set[str] = set()
-    for line in output.splitlines():
-        if not line:
-            continue
-        changed = line[3:] if len(line) > 3 else line
-        for path in _porcelain_paths(changed):
+    index = 0
+    while index < len(records) - 1:
+        record = records[index]
+        if len(record) < 4 or record[2] != " " or not record[3:]:
+            raise _PathPolicyStatusParseError(output)
+        status = record[:2]
+        if (
+            status == "  "
+            or not all(code in _PORCELAIN_STATUS_CODES for code in status)
+            or ("?" in status and status != "??")
+            or ("!" in status and status != "!!")
+        ):
+            raise _PathPolicyStatusParseError(output)
+        destination = record[3:]
+        if status[0] in {"R", "C"}:
+            if index + 1 >= len(records) - 1 or not records[index + 1]:
+                raise _PathPolicyStatusParseError(output)
+            raw_paths = (records[index + 1], destination)
+            index += 2
+        else:
+            raw_paths = (destination,)
+            index += 1
+
+        for raw_path in raw_paths:
+            path = _normalize_policy_path(raw_path)
             if not path or path in seen:
                 continue
             paths.append(path)
@@ -562,11 +607,16 @@ def _changed_paths_from_porcelain(output: str) -> list[str]:
     return paths
 
 
-def _porcelain_paths(changed: str) -> list[str]:
-    return [
-        part.strip().strip('"').replace("\\", "/")
-        for part in changed.split(" -> ")
-    ]
+def _normalize_policy_path(path: str) -> str:
+    return path.strip().replace("\\", "/")
+
+
+def _path_policy_status_diagnostic(output: str) -> dict[str, object]:
+    raw = output.encode("utf-8")
+    return {
+        "raw_prefix": repr(raw[:256]),
+        "byte_length": len(raw),
+    }
 
 
 def _matching_paths(paths: list[str], patterns: tuple[str, ...]) -> list[str]:
@@ -578,8 +628,8 @@ def _matching_paths(paths: list[str], patterns: tuple[str, ...]) -> list[str]:
 
 
 def _path_matches_pattern(path: str, pattern: str) -> bool:
-    normalized_path = path.strip().replace("\\", "/")
-    normalized_pattern = pattern.strip().replace("\\", "/").rstrip("/")
+    normalized_path = _normalize_policy_path(path)
+    normalized_pattern = _normalize_policy_path(pattern).rstrip("/")
     if not normalized_path or not normalized_pattern:
         return False
     if any(char in normalized_pattern for char in "*?["):

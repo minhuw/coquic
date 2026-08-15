@@ -6729,6 +6729,86 @@ def test_integration_status_parse_failure_blocks_only_integration_task(
     )
 
 
+@pytest.mark.parametrize("repair", ["conflict", "validation"])
+def test_integration_repair_status_parse_failure_preserves_source(
+    config: StewardConfig, monkeypatch, repair: str
+) -> None:
+    store = TaskStore.create(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P")
+    )
+    worktree, branch = Worktrees(config).create(source)
+    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
+    source.worktree_path = worktree
+    source.branch_name = branch
+    store.save(source)
+    source = store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate Source",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    store.finish_task(integration.id, TaskStatus.blocked, "integration repair started")
+
+    executor = StewardExecutor(config, store)
+    failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
+
+    monkeypatch.setattr(executor.worktrees, "reset_to_main", lambda _path: None)
+    monkeypatch.setattr(executor.worktrees, "apply_patch", lambda _path, _patch: None)
+
+    def fail_forbidden(_path: Path) -> list[str]:
+        raise failure
+
+    monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_forbidden)
+    if repair == "conflict":
+        monkeypatch.setattr(
+            executor, "_revise_from_integration_conflict", lambda *_args: True
+        )
+    else:
+        monkeypatch.setattr(
+            executor, "_revise_from_validation", lambda *_args: True
+        )
+
+    transcript_messages: list[tuple[str, str]] = []
+
+    class Transcript:
+        def write(self, stage: str, message: str) -> None:
+            transcript_messages.append((stage, message))
+
+    if repair == "conflict":
+        result = executor._repair_integration_conflict(
+            source.id, "conflict", "rebased patch", integration.id, Transcript()
+        )
+    else:
+        result = executor._repair_integration_validation_failure(
+            source.id, [], "rebased patch", integration.id, Transcript()
+        )
+
+    assert result is False
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    assert saved_source.status == TaskStatus.integrating
+    assert saved_source.worktree_path == worktree
+    assert worktree.exists()
+    assert saved_integration.status == TaskStatus.blocked
+    assert saved_integration.summary == PATH_POLICY_STATUS_PARSE_SUMMARY
+    event = next(
+        event
+        for event in store.events(integration.id)
+        if event.kind == "path_policy.blocked"
+    )
+    assert event.data["integration_task_id"] == integration.id
+    assert event.data["diagnostic"] == failure.diagnostic
+    assert ("path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY) in transcript_messages
+    assert not any(
+        event.kind == "path_policy.blocked" for event in store.events(source.id)
+    )
+
+
 def test_integration_manager_counts_main_push_budget_per_utc_day(
     config: StewardConfig, tmp_path: Path
 ) -> None:

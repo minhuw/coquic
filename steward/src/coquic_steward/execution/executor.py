@@ -2647,7 +2647,12 @@ class StewardExecutor:
         return None
 
     def _review_and_revise_until_approved(
-        self, task_id: str, revisions: int
+        self,
+        task_id: str,
+        revisions: int,
+        *,
+        path_policy_task_id: str | None = None,
+        path_policy_transcript: "IntegrationTranscript | None" = None,
     ) -> int | None:
         while True:
             review = self._review(task_id, attempt=revisions)
@@ -2672,6 +2677,8 @@ class StewardExecutor:
                 revisions,
                 iteration=revisions,
                 no_changes_status=TaskStatus.failed,
+                path_policy_task_id=path_policy_task_id,
+                path_policy_transcript=path_policy_transcript,
             )
             if not prepared:
                 return None
@@ -2741,6 +2748,27 @@ class StewardExecutor:
             and task.summary == "push failed"
         )
 
+    def _block_path_policy_status(
+        self,
+        task_id: str,
+        error: _PathPolicyStatusParseError | UnicodeDecodeError,
+        *,
+        transcript: "IntegrationTranscript | None" = None,
+        integration_task_id: str | None = None,
+    ) -> None:
+        if transcript is not None:
+            transcript.write("path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY)
+        self._finish_task(task_id, TaskStatus.blocked, PATH_POLICY_STATUS_PARSE_SUMMARY)
+        fields: dict[str, object] = {}
+        if integration_task_id is not None:
+            fields["integration_task_id"] = integration_task_id
+        self.store.add_event(
+            task_id,
+            "path_policy.blocked",
+            PATH_POLICY_STATUS_PARSE_SUMMARY,
+            _path_policy_status_event_data(error, **fields),
+        )
+
     def _prepare_patch(
         self,
         task_id: str,
@@ -2748,6 +2776,8 @@ class StewardExecutor:
         *,
         iteration: int,
         no_changes_status: TaskStatus,
+        path_policy_task_id: str | None = None,
+        path_policy_transcript: "IntegrationTranscript | None" = None,
     ) -> PatchPreparationResult:
         task = self.store.get(task_id)
         if task.worktree_path is None:
@@ -2764,16 +2794,12 @@ class StewardExecutor:
         try:
             forbidden = self.worktrees.forbidden_paths(task.worktree_path)
         except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
-            self._finish_task(
-                task.id,
-                TaskStatus.blocked,
-                PATH_POLICY_STATUS_PARSE_SUMMARY,
-            )
-            self.store.add_event(
-                task.id,
-                "path_policy.blocked",
-                PATH_POLICY_STATUS_PARSE_SUMMARY,
-                _path_policy_status_event_data(exc),
+            blocked_task_id = path_policy_task_id or task.id
+            self._block_path_policy_status(
+                blocked_task_id,
+                exc,
+                transcript=path_policy_transcript,
+                integration_task_id=path_policy_task_id,
             )
             return PatchPreparationResult.terminal_failure
         if forbidden:
@@ -2783,7 +2809,12 @@ class StewardExecutor:
                 "generated state changed: " + ", ".join(forbidden),
             )
             return PatchPreparationResult.terminal_failure
-        if self._block_task_for_frozen_paths(task, task.worktree_path):
+        if self._block_task_for_frozen_paths(
+            task,
+            task.worktree_path,
+            path_policy_task_id=path_policy_task_id,
+            path_policy_transcript=path_policy_transcript,
+        ):
             return PatchPreparationResult.terminal_failure
 
         patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
@@ -2794,7 +2825,12 @@ class StewardExecutor:
             task.id, task.worktree_path, iteration
         )
         task = self.store.get(task.id)
-        if self._block_task_for_frozen_paths(task, task.worktree_path):
+        if self._block_task_for_frozen_paths(
+            task,
+            task.worktree_path,
+            path_policy_task_id=path_policy_task_id,
+            path_policy_transcript=path_policy_transcript,
+        ):
             return PatchPreparationResult.terminal_failure
         if any(not validation.passed for validation in validations):
             self._save_authoritative_patch(task, iteration, patch_path)
@@ -2849,20 +2885,23 @@ class StewardExecutor:
             # ownership, validation, retries, or task state.
             return
 
-    def _block_task_for_frozen_paths(self, task: TaskRecord, worktree: Path) -> bool:
+    def _block_task_for_frozen_paths(
+        self,
+        task: TaskRecord,
+        worktree: Path,
+        *,
+        path_policy_task_id: str | None = None,
+        path_policy_transcript: "IntegrationTranscript | None" = None,
+    ) -> bool:
         try:
             frozen = self.worktrees.frozen_paths(worktree, task)
         except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
-            self._finish_task(
-                task.id,
-                TaskStatus.blocked,
-                PATH_POLICY_STATUS_PARSE_SUMMARY,
-            )
-            self.store.add_event(
-                task.id,
-                "path_policy.blocked",
-                PATH_POLICY_STATUS_PARSE_SUMMARY,
-                _path_policy_status_event_data(exc),
+            blocked_task_id = path_policy_task_id or task.id
+            self._block_path_policy_status(
+                blocked_task_id,
+                exc,
+                transcript=path_policy_transcript,
+                integration_task_id=path_policy_task_id,
             )
             return True
         if not frozen:
@@ -2885,12 +2924,16 @@ class StewardExecutor:
         *,
         iteration: int,
         no_changes_status: TaskStatus = TaskStatus.no_changes,
+        path_policy_task_id: str | None = None,
+        path_policy_transcript: "IntegrationTranscript | None" = None,
     ) -> tuple[bool, int]:
         prepared = self._prepare_patch(
             task_id,
             initial_label,
             iteration=iteration,
             no_changes_status=no_changes_status,
+            path_policy_task_id=path_policy_task_id,
+            path_policy_transcript=path_policy_transcript,
         )
         if prepared == PatchPreparationResult.ready:
             return True, revisions
@@ -2926,6 +2969,8 @@ class StewardExecutor:
                 f"validation revision {revisions}",
                 iteration=revisions,
                 no_changes_status=TaskStatus.failed,
+                path_policy_task_id=path_policy_task_id,
+                path_policy_transcript=path_policy_transcript,
             )
             if prepared == PatchPreparationResult.ready:
                 return True, revisions
@@ -3323,6 +3368,7 @@ class StewardExecutor:
         conflict: str,
         failed_patch: str,
         integration_task_id: str,
+        transcript: "IntegrationTranscript | None" = None,
     ) -> bool:
         revisions = _next_revision(self.store, source_task_id)
         if revisions > MAX_TASK_REVISIONS:
@@ -3342,6 +3388,8 @@ class StewardExecutor:
             revisions,
             iteration=revisions,
             no_changes_status=TaskStatus.no_changes,
+            path_policy_task_id=integration_task_id,
+            path_policy_transcript=transcript,
         )
         if not prepared:
             return (
@@ -3349,7 +3397,10 @@ class StewardExecutor:
                 == TaskStatus.no_changes
             )
         approved_revision = self._review_and_revise_until_approved(
-            source_task_id, revisions
+            source_task_id,
+            revisions,
+            path_policy_task_id=integration_task_id,
+            path_policy_transcript=transcript,
         )
         if approved_revision is None:
             return False
@@ -3371,6 +3422,7 @@ class StewardExecutor:
         failed_validations: list[ValidationResult],
         rebased_patch: str,
         integration_task_id: str,
+        transcript: "IntegrationTranscript | None" = None,
     ) -> bool:
         revisions = _next_revision(self.store, source_task_id)
         if revisions > MAX_TASK_REVISIONS:
@@ -3401,11 +3453,16 @@ class StewardExecutor:
             revisions,
             iteration=revisions,
             no_changes_status=TaskStatus.failed,
+            path_policy_task_id=integration_task_id,
+            path_policy_transcript=transcript,
         )
         if not prepared:
             return False
         approved_revision = self._review_and_revise_until_approved(
-            source_task_id, revisions
+            source_task_id,
+            revisions,
+            path_policy_task_id=integration_task_id,
+            path_policy_transcript=transcript,
         )
         if approved_revision is None:
             return False
@@ -3776,7 +3833,7 @@ class StewardExecutor:
                 "repair", "requesting source worker integration conflict repair"
             )
             return patch_text, self._repair_integration_conflict(
-                source.id, conflict, patch_text, task.id
+                source.id, conflict, patch_text, task.id, transcript
             )
         return patch_text, None
 
@@ -3809,19 +3866,11 @@ class StewardExecutor:
         try:
             frozen = self.worktrees.frozen_paths(worktree, source)
         except (_PathPolicyStatusParseError, UnicodeDecodeError) as exc:
-            transcript.write(
-                "path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY
-            )
-            self._finish_task(
+            self._block_path_policy_status(
                 task.id,
-                TaskStatus.blocked,
-                PATH_POLICY_STATUS_PARSE_SUMMARY,
-            )
-            self.store.add_event(
-                task.id,
-                "path_policy.blocked",
-                PATH_POLICY_STATUS_PARSE_SUMMARY,
-                _path_policy_status_event_data(exc, integration_task_id=task.id),
+                exc,
+                transcript=transcript,
+                integration_task_id=task.id,
             )
             return False
         if not frozen:
@@ -3944,7 +3993,7 @@ class StewardExecutor:
             "repair", "requesting source worker integration validation repair"
         )
         return self._repair_integration_validation_failure(
-            source.id, failed_validations, rebased_patch, task.id
+            source.id, failed_validations, rebased_patch, task.id, transcript
         )
 
     def _integration_publication_preflight(
@@ -4076,6 +4125,7 @@ class StewardExecutor:
                     [failed],
                     rebased_patch,
                     task.id,
+                    transcript,
                 )
             except Exception:
                 self._finish_task(source.id, TaskStatus.blocked, "publication source repair failed")

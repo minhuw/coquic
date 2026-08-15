@@ -789,6 +789,28 @@ class SchedulerWakeup(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class SchedulerStoreSnapshot:
+    """One bounded, transactionally consistent scheduler read."""
+
+    source_active: int = 0
+    source_queued: int = 0
+    integration_active: int = 0
+    integration_queued: int = 0
+    pending_wakeups: tuple[SchedulerWakeup, ...] = ()
+    recent_wakeups: tuple[SchedulerWakeup, ...] = ()
+    pending_signal: bool = False
+    latest_fetches: dict[str, SignalFetchRun | None] = field(default_factory=dict)
+
+    @property
+    def has_pending_signal(self) -> bool:
+        return self.pending_signal
+
+    @property
+    def pending_signal_exists(self) -> bool:
+        return self.pending_signal
+
+
 class SchedulerProviderState(BaseModel):
     provider: str
     poll_interval_minutes: int
@@ -814,6 +836,14 @@ class SchedulerState(BaseModel):
     pending_wakeups: list[SchedulerWakeup] = Field(default_factory=list)
     recent_wakeups: list[SchedulerWakeup] = Field(default_factory=list)
     providers: list[SchedulerProviderState] = Field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerPollResult:
+    """The scheduler state and idle decision from one store snapshot."""
+
+    state: SchedulerState
+    idle: bool
 
 
 class DaemonCycleResult(BaseModel):

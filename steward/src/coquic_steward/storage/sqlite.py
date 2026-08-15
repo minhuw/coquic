@@ -46,6 +46,7 @@ from ..core.models import (
     ACTIVE_STATUSES,
     CleanupStatus,
     DispatchSnapshot,
+    SchedulerStoreSnapshot,
     CodexRunState,
     CodexSession,
     Event,
@@ -5057,6 +5058,109 @@ class SQLiteTaskStore:
         if row is None:
             return {"state": "normal", "home_free_bytes": None, "owned_docker_bytes": None, "cleanup_pending_count": 0, "reason": None, "updated_at": None}
         return {"state": row[0], "home_free_bytes": row[1], "owned_docker_bytes": row[2], "cleanup_pending_count": row[3], "reason": row[4], "updated_at": row[5]}
+
+    def scheduler_snapshot(
+        self, providers: Iterable[str] = ()
+    ) -> SchedulerStoreSnapshot:
+        """Read bounded scheduler inputs in one SQLite transaction."""
+
+        provider_names = tuple(dict.fromkeys(providers))
+        active_statuses = [
+            TaskStatus.running.value,
+            TaskStatus.reviewing.value,
+            TaskStatus.integrating.value,
+        ]
+        latest_fetches: dict[str, SignalFetchRun | None] = {
+            provider: None for provider in provider_names
+        }
+        with Session(self.engine) as session, session.begin():
+            source_active = _count_tasks(
+                session,
+                statuses=active_statuses,
+                integration=False,
+            )
+            source_queued = _count_tasks(
+                session,
+                statuses=[TaskStatus.queued.value],
+                integration=False,
+            )
+            integration_active = _count_tasks(
+                session,
+                statuses=active_statuses,
+                integration=True,
+            )
+            integration_queued = _count_tasks(
+                session,
+                statuses=[TaskStatus.queued.value],
+                integration=True,
+            )
+            pending_wakeup_rows = session.scalars(
+                select(SchedulerWakeupRow)
+                .where(SchedulerWakeupRow.status == SchedulerWakeupStatus.pending.value)
+                .order_by(SchedulerWakeupRow.created_at)
+                .limit(20)
+            ).all()
+            recent_wakeup_rows = session.scalars(
+                select(SchedulerWakeupRow)
+                .order_by(SchedulerWakeupRow.created_at.desc())
+                .limit(20)
+            ).all()
+            pending_signal = (
+                session.scalar(
+                    select(SignalItemRow.id)
+                    .where(
+                        SignalItemRow.status == SignalItemStatus.pending.value,
+                        SignalItemRow.kind != "signal-error",
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            if provider_names:
+                ranked_fetches = (
+                    select(
+                        SignalFetchRunRow,
+                        func.row_number()
+                        .over(
+                            partition_by=SignalFetchRunRow.provider,
+                            order_by=SignalFetchRunRow.completed_at.desc(),
+                        )
+                        .label("provider_rank"),
+                    )
+                    .where(SignalFetchRunRow.provider.in_(provider_names))
+                    .subquery()
+                )
+                latest_fetch_row = aliased(SignalFetchRunRow, ranked_fetches)
+                latest_rows = session.scalars(
+                    select(latest_fetch_row).where(
+                        ranked_fetches.c.provider_rank == 1
+                    )
+                ).all()
+                latest_fetches.update(
+                    {
+                        row.provider: row_to_signal_fetch_run(row)
+                        for row in latest_rows
+                    }
+                )
+            pending_wakeups = tuple(
+                row_to_scheduler_wakeup(row, path_codec=self.path_codec)
+                for row in pending_wakeup_rows
+            )
+            recent_wakeups = tuple(
+                row_to_scheduler_wakeup(row, path_codec=self.path_codec)
+                for row in recent_wakeup_rows
+            )
+
+        return SchedulerStoreSnapshot(
+            source_active=source_active,
+            source_queued=source_queued,
+            integration_active=integration_active,
+            integration_queued=integration_queued,
+            pending_wakeups=pending_wakeups,
+            recent_wakeups=recent_wakeups,
+            pending_signal=pending_signal,
+            latest_fetches=latest_fetches,
+        )
 
     def pending_wakeups(self, *, limit: int | None = None) -> list[SchedulerWakeup]:
         statement = (

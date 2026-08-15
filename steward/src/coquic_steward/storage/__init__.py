@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 from ..core.config import SignalProviderConfig, StewardConfig
 from ..core.models import (
+    SchedulerPollResult,
     SchedulerProviderState,
     SchedulerState,
+    SignalFetchRun,
     SignalFetchStatus,
 )
 from .sqlite import (
@@ -49,57 +51,66 @@ from .schema import (
 TaskStore = SQLiteTaskStore
 
 
-def scheduler_state(config: StewardConfig, store: TaskStore) -> SchedulerState:
-    source_active = store.source_active_count()
-    return SchedulerState(
+def scheduler_state(config: StewardConfig, store: TaskStore) -> SchedulerPollResult:
+    snapshot = store.scheduler_snapshot(config.enabled_signals)
+    now = _now()
+    source_active = snapshot.source_active
+    state = SchedulerState(
         source_active=source_active,
         source_capacity=max(0, config.limits.max_active_tasks - source_active),
-        source_queued=store.source_queued_count(),
-        integration_active=store.integration_active_count(),
-        integration_queued=store.integration_queued_count(),
-        pending_wakeups=store.pending_wakeups(limit=20),
-        recent_wakeups=store.recent_wakeups(limit=20),
+        source_queued=snapshot.source_queued,
+        integration_active=snapshot.integration_active,
+        integration_queued=snapshot.integration_queued,
+        pending_wakeups=list(snapshot.pending_wakeups),
+        recent_wakeups=list(snapshot.recent_wakeups),
         providers=[
-            _provider_state(config, store, name) for name in config.enabled_signals
+            _provider_state(
+                config,
+                name,
+                snapshot.latest_fetches.get(name),
+                now,
+            )
+            for name in config.enabled_signals
         ],
+    )
+    return SchedulerPollResult(
+        state=state,
+        idle=(
+            snapshot.source_active == 0
+            and snapshot.source_queued == 0
+            and not snapshot.pending_signal
+        ),
     )
 
 
-def due_provider_names(config: StewardConfig, store: TaskStore) -> list[str]:
+def due_provider_names(result: SchedulerPollResult) -> list[str]:
     return [
-        provider.provider
-        for provider in scheduler_state(config, store).providers
-        if provider.due
+        provider.provider for provider in result.state.providers if provider.due
     ]
 
 
-def store_is_idle_for_signal_fetch(store: TaskStore) -> bool:
-    return (
-        store.source_active_count() == 0
-        and store.source_queued_count() == 0
-        and not store.pending_signal_items(limit=1)
-    )
-
-
 def idle_fetch_provider_names(
-    state: SchedulerState, *, coalesce_window: timedelta = timedelta(0)
+    result: SchedulerPollResult, *, coalesce_window: timedelta = timedelta(0)
 ) -> list[str]:
+    if not result.idle:
+        return []
     now = _now()
     cutoff = now + coalesce_window
     return [
         provider.provider
-        for provider in state.providers
+        for provider in result.state.providers
         if provider.idle_next_due_at is not None
         and provider.idle_next_due_at <= cutoff
     ]
 
 
 def _provider_state(
-    config: StewardConfig, store: TaskStore, provider: str
+    config: StewardConfig,
+    provider: str,
+    latest: SignalFetchRun | None,
+    now: datetime,
 ) -> SchedulerProviderState:
     provider_config = config.signal_providers[provider]
-    latest = store.latest_signal_fetch_run(provider)
-    now = _now()
     if latest is None:
         next_due = now
         return SchedulerProviderState(
@@ -210,5 +221,5 @@ __all__ = [
     "due_provider_names",
     "idle_fetch_provider_names",
     "scheduler_state",
-    "store_is_idle_for_signal_fetch",
+    "SchedulerPollResult",
 ]

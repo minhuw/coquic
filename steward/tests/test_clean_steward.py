@@ -2727,8 +2727,19 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
 
     initial = scheduler_state(config, store)
 
-    assert due_provider_names(config, store) == list(config.enabled_signals)
-    assert all(provider.due for provider in initial.providers)
+    assert due_provider_names(initial) == list(config.enabled_signals)
+    assert initial.idle is True
+    assert set(initial.state.model_dump()) == {
+        "source_active",
+        "source_capacity",
+        "source_queued",
+        "integration_active",
+        "integration_queued",
+        "pending_wakeups",
+        "recent_wakeups",
+        "providers",
+    }
+    assert all(provider.due for provider in initial.state.providers)
 
     store.add_signal_fetch_run(
         SignalFetchRun(
@@ -2740,7 +2751,11 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
         )
     )
     state = scheduler_state(config, store)
-    codacy = next(provider for provider in state.providers if provider.provider == "codacy")
+    codacy = next(
+        provider
+        for provider in state.state.providers
+        if provider.provider == "codacy"
+    )
 
     assert codacy.due is False
     assert codacy.poll_interval_minutes == 360
@@ -2748,6 +2763,209 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
     assert codacy.next_due_at > codacy.last_fetch_at
     assert codacy.idle_next_due_at == codacy.last_fetch_at + timedelta(minutes=30)
     assert codacy.idle_due is False
+
+
+def test_scheduler_snapshot_bounds_wakeups_and_provider_fetches(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy", "code-scanning"),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+
+    for index in range(25):
+        store.request_wakeup(f"scheduler-{index}")
+    old_fetch = utc_now() - timedelta(hours=2)
+    new_fetch = utc_now() - timedelta(minutes=1)
+    for provider in config.enabled_signals:
+        store.add_signal_fetch_run(
+            SignalFetchRun(
+                provider=provider,
+                status=SignalFetchStatus.ok,
+                started_at=old_fetch,
+                completed_at=old_fetch,
+            )
+        )
+        store.add_signal_fetch_run(
+            SignalFetchRun(
+                provider=provider,
+                status=SignalFetchStatus.ok,
+                started_at=new_fetch,
+                completed_at=new_fetch,
+            )
+        )
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="disabled-provider",
+            status=SignalFetchStatus.ok,
+            started_at=new_fetch,
+            completed_at=new_fetch,
+        )
+    )
+
+    snapshot = store.scheduler_snapshot(config.enabled_signals)
+
+    assert len(snapshot.pending_wakeups) == 20
+    assert len(snapshot.recent_wakeups) == 20
+    assert list(snapshot.latest_fetches) == list(config.enabled_signals)
+    assert all(
+        fetch is not None and fetch.completed_at == new_fetch
+        for fetch in snapshot.latest_fetches.values()
+    )
+    assert all(
+        left.created_at <= right.created_at
+        for left, right in zip(snapshot.pending_wakeups, snapshot.pending_wakeups[1:])
+    )
+    assert all(
+        left.created_at >= right.created_at
+        for left, right in zip(snapshot.recent_wakeups, snapshot.recent_wakeups[1:])
+    )
+
+
+def test_scheduler_idle_excludes_signal_error_rows(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy",),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    store.add_signal_item(
+        SignalItem(
+            provider="codacy",
+            kind="signal-error",
+            fingerprint="error-only",
+            title="Provider error",
+        )
+    )
+
+    assert scheduler_state(config, store).idle is True
+
+    store.add_signal_item(
+        SignalItem(
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="ordinary-pending",
+            title="Pending finding",
+        )
+    )
+
+    assert scheduler_state(config, store).idle is False
+
+
+def test_scheduler_idle_suppressed_by_active_source_task(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy",),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.update_status(task.id, TaskStatus.running, "started")
+
+    result = scheduler_state(config, store)
+
+    assert result.idle is False
+
+
+def test_scheduler_state_uses_error_retry_timing(config: StewardConfig) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy",),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    fetched_at = utc_now() - timedelta(minutes=2)
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="codacy",
+            status=SignalFetchStatus.error,
+            started_at=fetched_at,
+            completed_at=fetched_at,
+            error="temporary",
+        )
+    )
+
+    result = scheduler_state(config, store)
+    provider = result.state.providers[0]
+
+    retry_minutes = config.signal_providers["codacy"].error_retry_minutes
+    regular_delta = provider.next_due_at - fetched_at
+    assert provider.last_status == SignalFetchStatus.error
+    assert timedelta(minutes=retry_minutes) <= regular_delta < timedelta(
+        minutes=retry_minutes + 17
+    )
+    assert provider.idle_next_due_at == fetched_at + timedelta(minutes=retry_minutes)
+
+
+def test_wait_for_scheduler_event_uses_one_snapshot_per_iteration(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy",),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    fetched_at = utc_now() + timedelta(hours=1)
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="codacy",
+            status=SignalFetchStatus.ok,
+            started_at=fetched_at,
+            completed_at=fetched_at,
+        )
+    )
+    snapshot_calls: list[tuple[str, ...]] = []
+    original_snapshot = store.scheduler_snapshot
+
+    def scheduler_snapshot(providers=()):
+        snapshot_calls.append(tuple(providers))
+        return original_snapshot(providers)
+
+    monkeypatch.setattr(store, "scheduler_snapshot", scheduler_snapshot)
+
+    def fail_legacy_query(*_args, **_kwargs):
+        raise AssertionError("scheduler wait used a legacy store query")
+
+    for method in (
+        "source_active_count",
+        "source_queued_count",
+        "integration_active_count",
+        "integration_queued_count",
+        "pending_wakeups",
+        "recent_wakeups",
+        "pending_signal_items",
+        "latest_signal_fetch_run",
+    ):
+        monkeypatch.setattr(store, method, fail_legacy_query)
+
+    def fake_sleep(_seconds: float) -> None:
+        store.request_wakeup("scheduler-test")
+
+    monkeypatch.setattr("coquic_steward.orchestration.daemon.time.sleep", fake_sleep)
+
+    trigger = wait_for_scheduler_event(config, store)
+
+    assert trigger.reason == "wakeup"
+    assert snapshot_calls == [config.enabled_signals, config.enabled_signals]
 
 
 def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -> None:

@@ -124,9 +124,9 @@ from ..planning.verifier import summarize_active_tasks
 from ..storage import (
     SQLiteTaskStore,
     TaskStore,
+    due_provider_names,
     idle_fetch_provider_names,
     scheduler_state,
-    store_is_idle_for_signal_fetch,
 )
 from ..signals import (
     collect_signal_items,
@@ -1017,7 +1017,8 @@ class StewardDaemon:
         if ledger is None:
             return None
         try:
-            state = scheduler_state(self.config, self.store)
+            poll_result = scheduler_state(self.config, self.store)
+            state = poll_result.state
             pending = self.store.pending_signal_items(limit=200)
             pending_ids = [
                 signal_id
@@ -4670,15 +4671,8 @@ class StewardDaemon:
             task = self.store.get(task_id)
         return task
 
-    def _should_fetch_signals_when_idle(self) -> bool:
-        return store_is_idle_for_signal_fetch(self.store)
-
     def _idle_fetch_provider_names(self) -> list[str]:
-        if not self._should_fetch_signals_when_idle():
-            return []
-        return idle_fetch_provider_names(
-            scheduler_state(self.config, self.store)
-        )
+        return idle_fetch_provider_names(scheduler_state(self.config, self.store))
 
     def _fetch_signals(self, result: TickResult, providers: list[str]) -> None:
         collections = collect_signal_items(self.config, provider_names=providers)
@@ -5245,30 +5239,30 @@ def wait_for_scheduler_event(
     while True:
         if stop_event is not None and stop_event.is_set():
             return SchedulerTrigger(reason="stopping", providers=[])
-        if store.pending_wakeups(limit=1):
+        poll_result = scheduler_state(config, store)
+        state = poll_result.state
+        if state.pending_wakeups:
             return SchedulerTrigger(reason="wakeup", providers=[])
-        state = scheduler_state(config, store)
-        due_providers = [provider.provider for provider in state.providers if provider.due]
+        due_providers = due_provider_names(poll_result)
         if due_providers:
             return SchedulerTrigger(reason="provider-due", providers=due_providers)
-        if store_is_idle_for_signal_fetch(store):
-            idle_providers = idle_fetch_provider_names(
-                state,
-                coalesce_window=timedelta(
-                    seconds=config.scheduler_wait_interval_sec
-                ),
-            )
-            if idle_providers:
-                return SchedulerTrigger(reason="idle-fetch", providers=idle_providers)
+        idle_providers = idle_fetch_provider_names(
+            poll_result,
+            coalesce_window=timedelta(seconds=config.scheduler_wait_interval_sec),
+        )
+        if idle_providers:
+            return SchedulerTrigger(reason="idle-fetch", providers=idle_providers)
         next_due = min((provider.next_due_at for provider in state.providers), default=None)
-        if store_is_idle_for_signal_fetch(store):
+        if poll_result.idle:
             idle_due_at = [
                 provider.idle_next_due_at
                 for provider in state.providers
                 if provider.idle_next_due_at is not None
             ]
             if idle_due_at:
-                next_due = min([due for due in (next_due, min(idle_due_at)) if due is not None])
+                next_due = min(
+                    [due for due in (next_due, min(idle_due_at)) if due is not None]
+                )
         sleep_for = config.scheduler_wait_interval_sec
         if next_due is not None:
             sleep_for = min(

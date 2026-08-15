@@ -50,9 +50,6 @@ class TaskRole(StrEnum):
         return self in {TaskRole.validation, TaskRole.implementation}
 
 
-Role = TaskRole
-
-
 @dataclass(frozen=True)
 class ContainerLimits:
     """Kernel-enforced bounds applied at container creation."""
@@ -287,9 +284,6 @@ class TaskContainerConfig:
         raise ValueError(f"path is outside task container mounts: {host_path}")
 
 
-ContainerConfig = TaskContainerConfig
-
-
 @dataclass(frozen=True)
 class PlannerContainerConfig:
     """Mount/identity contract for the daemon-owned global planner container."""
@@ -485,9 +479,6 @@ class ValidationContainerConfig:
                 continue
             return target if relative == Path(".") else f"{target}/{relative.as_posix()}"
         raise ValueError(f"path is outside validation mounts: {host_path}")
-
-
-PlannerConfig = PlannerContainerConfig
 
 
 def _validate_container_path(value: str) -> str:

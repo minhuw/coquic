@@ -3,20 +3,15 @@ from .validation import run_gates, run_validation
 from .worktree import Worktrees
 from .container import (
     ContainerBoundaryError,
-    ContainerError,
     ContainerErrorCategory,
     ContainerInspection,
-    ContainerRuntime,
-    DockerBoundary,
     ExecIdentity,
     ExecResult,
     TaskContainerRuntime,
 )
 from .container_config import (
-    ContainerConfig,
     ContainerLimits,
     ContainerMount,
-    Role,
     TaskContainerConfig,
     TaskRole,
 )
@@ -30,8 +25,6 @@ from .session import (
     ResumeResult,
     SessionResult,
     SessionSupervisor,
-    CodexSessionSupervisor,
-    SessionRuntime,
     runtime_factory_for_config,
 )
 from .task_archive import (
@@ -51,18 +44,13 @@ __all__ = [
     "StewardExecutor",
     "Worktrees",
     "ContainerBoundaryError",
-    "ContainerError",
     "ContainerErrorCategory",
     "ContainerInspection",
-    "ContainerRuntime",
-    "DockerBoundary",
     "ExecIdentity",
     "ExecResult",
     "TaskContainerRuntime",
-    "ContainerConfig",
     "ContainerLimits",
     "ContainerMount",
-    "Role",
     "TaskContainerConfig",
     "TaskRole",
     "ContainerSessionInvoker",
@@ -74,8 +62,6 @@ __all__ = [
     "ResumeResult",
     "SessionResult",
     "SessionSupervisor",
-    "CodexSessionSupervisor",
-    "SessionRuntime",
     "runtime_factory_for_config",
     "default_worker_for_kind",
     "run_gates",

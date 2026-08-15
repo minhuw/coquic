@@ -2231,11 +2231,6 @@ class SessionSupervisor:
         return minutes * 60
 
 
-SessionSupervisorError = RuntimeError
-CodexSessionSupervisor = SessionSupervisor
-SessionRuntime = SessionSupervisor
-
-
 def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], TaskContainerRuntime]:
     """Return a lazy task-scoped runtime constructor for daemon/CLI wiring."""
 

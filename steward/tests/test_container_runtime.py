@@ -10,11 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import coquic_steward.execution as execution
 import coquic_steward.execution.session as session_module
 
 from coquic_steward.execution import (
+    ContainerBoundaryError,
     ContainerErrorCategory,
     ExecIdentity,
+    SessionSupervisor,
     TaskContainerConfig,
     TaskContainerRuntime,
     TaskRole,
@@ -58,6 +61,33 @@ class FakeDocker(SubprocessDockerClient):
             }
             return subprocess.CompletedProcess(argv, 0, json.dumps([payload]).encode(), b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+def test_execution_package_exports_current_types_without_aliases() -> None:
+    canonical = {
+        "ContainerBoundaryError": ContainerBoundaryError,
+        "TaskContainerRuntime": TaskContainerRuntime,
+        "TaskContainerConfig": TaskContainerConfig,
+        "TaskRole": TaskRole,
+        "SessionSupervisor": SessionSupervisor,
+    }
+    for name, expected in canonical.items():
+        assert execution.__dict__[name] is expected
+    assert set(canonical).issubset(execution.__all__)
+
+    removed = {
+        "ContainerError",
+        "ContainerRuntime",
+        "DockerBoundary",
+        "Role",
+        "ContainerConfig",
+        "PlannerConfig",
+        "SessionSupervisorError",
+        "CodexSessionSupervisor",
+        "SessionRuntime",
+    }
+    assert removed.isdisjoint(execution.__dict__)
+    assert removed.isdisjoint(execution.__all__)
 
 
 def test_host_capture_is_unlimited_by_default(tmp_path: Path) -> None:

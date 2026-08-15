@@ -53,9 +53,6 @@ class ContainerBoundaryError(RuntimeError):
         self.category = category
 
 
-ContainerError = ContainerBoundaryError
-
-
 @dataclass(frozen=True)
 class ContainerInspection:
     container_id: str
@@ -1158,10 +1155,6 @@ class ValidationContainerRuntime:
         if inspection.running:
             self.stop(identifier=inspection.container_id, timeout=timeout)
         self.remove(identifier=inspection.container_id)
-
-
-ContainerRuntime = TaskContainerRuntime
-DockerBoundary = TaskContainerRuntime
 
 
 def bind_deployment_identity(

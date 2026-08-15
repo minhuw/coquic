@@ -1100,7 +1100,10 @@ class StewardConfig:
 
 
 def load_config(
-    repo_root: Path | None = None, config_path: Path | None = None
+    repo_root: Path | None = None,
+    config_path: Path | None = None,
+    *,
+    allow_legacy_migration: bool = True,
 ) -> StewardConfig:
     if config_path is None:
         configured_path = os.getenv("COQUIC_STEWARD_CONFIG_PATH") or os.getenv("STEWARD_CONFIG_PATH")
@@ -1236,10 +1239,12 @@ def load_config(
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
         resume_attempt_limit=int(steward.get("resume_attempt_limit", 2)),
     )
-    # Configuration loading is the ordinary process-start boundary. The
-    # migrator performs a read-only completeness check before requiring the
-    # offline boundary for any pending legacy handoff.
-    if config.legacy_db_path.exists() or config.legacy_backup_path.exists():
+    # Configuration loading keeps its historical migration behavior by
+    # default. Production process-start callers explicitly disable this side
+    # effect and must use the stopped-only migration command instead.
+    if allow_legacy_migration and (
+        config.legacy_db_path.exists() or config.legacy_backup_path.exists()
+    ):
         config.migrate_legacy_database()
     config.ensure_dirs()
     return config

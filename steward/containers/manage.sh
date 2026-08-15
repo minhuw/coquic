@@ -589,7 +589,52 @@ config_check() {
   printf 'compose valid service=steward socket=local-unix secrets=individual\n'
 }
 
-start_service() { require_paths; validate_socket; with_lock; [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'; local release; release="$(tr -d '\n' <"$deployment/current")"; select_release "$release"; journal start; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then : >"$deployment/service.running"; printf '%s\n' "$release" >"$deployment/service.release"; else compose_run up -d steward >/dev/null; fi; journal complete success; record_outcome start success; }
+validate_store() {
+  local marker="$deployment/store.initialized"
+  if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
+    [[ -f "$marker" && ! -L "$marker" ]] || die 'Store is not initialized'
+    [[ "$(cat "$marker")" == initialized ]] || die 'Store validation failed'
+    return 0
+  fi
+  local health
+  health="$(compose_run run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward health 2>/dev/null)" || \
+    die 'Store validation failed before start'
+  python - "$health" <<'PY' || die 'Store validation failed before start'
+import json
+import sys
+
+value = json.loads(sys.argv[1])
+if value.get("lifecycle") != "running" or value.get("heartbeat") != "ok":
+    raise SystemExit(1)
+PY
+}
+
+init_service() {
+  require_paths; require_numeric_config; validate_credentials; validate_socket; with_lock
+  [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'
+  local release marker="$deployment/store.initialized"
+  release="$(tr -d '\n' <"$deployment/current")"
+  select_release "$release"
+  journal init
+  if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then
+    [[ ! -e "$deployment/service.running" ]] || die 'daemon is running'
+    if [[ -e "$marker" ]]; then
+      [[ -f "$marker" && ! -L "$marker" ]] || die 'Store validation failed'
+      [[ "$(cat "$marker")" == initialized ]] || die 'Store validation failed'
+    else
+      printf 'initialized\n' >"$marker"
+      chmod 600 "$marker"
+    fi
+  else
+    compose_run run --rm --no-deps --entrypoint /usr/bin/env steward coquic-steward init >/dev/null || \
+      die 'Store initialization failed'
+  fi
+  journal complete success
+  record_outcome init success
+  printf 'init complete release=%s store=verified\n' "$release"
+}
+
+start_service() { require_paths; validate_socket; with_lock; [[ -f "$deployment/current" ]] || die 'bootstrap is incomplete'; local release; release="$(tr -d '\n' <"$deployment/current")"; select_release "$release"; validate_store; journal start; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then : >"$deployment/service.running"; printf '%s\n' "$release" >"$deployment/service.release"; else compose_run up -d steward >/dev/null; fi; journal complete success; record_outcome start success; }
 stop_service() { require_paths; validate_socket; with_lock; journal stop; if [[ "${STEWARD_MANAGE_FAKE:-0}" == 1 ]]; then rm -f "$deployment/service.running"; else compose_run stop --timeout "${STEWARD_STOP_GRACE:-45}" steward >/dev/null; fi; journal complete success; record_outcome stop success; }
 
 status_service() {
@@ -712,7 +757,7 @@ rollback_service() {
   record_outcome rollback success
 }
 
-usage() { printf 'usage: %s {config|bootstrap|build|start|stop|status|logs|upgrade [--force]|rollback}\n' "$0"; }
+usage() { printf 'usage: %s {config|bootstrap|build|init|start|stop|status|logs|upgrade [--force]|rollback}\n' "$0"; }
 
 command="${1:-}"
 shift || true
@@ -720,6 +765,7 @@ case "$command" in
   config|--config) config_check ;;
   build) require_paths; require_numeric_config; with_lock; build_release >/dev/null ;;
   bootstrap) bootstrap ;;
+  init) init_service ;;
   start) start_service ;;
   stop) stop_service ;;
   status) status_service ;;

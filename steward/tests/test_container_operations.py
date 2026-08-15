@@ -1277,10 +1277,11 @@ def test_health_fails_closed_when_database_state_is_unavailable(
     config.ensure_dirs()
 
     class BrokenStore:
-        def __init__(self, _path: Path):
+        @classmethod
+        def open(cls, _path: Path):
             raise OSError("private database detail")
 
-    monkeypatch.setattr(cli_module, "load_config", lambda: config)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: config)
     monkeypatch.setattr(cli_module, "TaskStore", BrokenStore)
     result = CliRunner().invoke(cli_module.app, ["health"])
     payload = json.loads(result.stdout)
@@ -1296,11 +1297,11 @@ def test_health_is_not_quiescent_with_pending_archive_outbox(
 ) -> None:
     config = StewardConfig(repo_root=tmp_path, local_codex_test_harness=True)
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.control_loop_ledger.record_runtime("running")
     assert store.control_loop_ledger.outbox(limit=1)
 
-    monkeypatch.setattr(cli_module, "load_config", lambda: config)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: config)
     result = CliRunner().invoke(cli_module.app, ["health"])
     payload = json.loads(result.stdout)
 
@@ -1329,7 +1330,8 @@ def test_cli_treats_absent_control_loop_ledger_as_idle(
     assert diagnostics_payload["pendingArchiveEvents"] == 0
     assert diagnostics_payload["activePlannerRunId"] is None
 
-    monkeypatch.setattr(cli_module, "load_config", lambda: config)
+    monkeypatch.setattr(cli_module, "load_config", lambda **_kwargs: config)
+    monkeypatch.setattr(cli_module.TaskStore, "open", lambda _path: store)
     health = CliRunner().invoke(cli_module.app, ["health"])
     health_payload = json.loads(health.stdout)
     assert health.exit_code == 0

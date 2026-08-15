@@ -53,11 +53,13 @@ Build the pinned images without changing host state:
 nix build --no-link .#steward-daemon-image .#steward-task-image .#steward-validation-image
 ```
 
-The checked-in management wrapper is the only bootstrap and lifecycle command:
+The checked-in management wrapper is the only bootstrap and lifecycle command.
+Production launch is the explicit `bootstrap → init → start` sequence:
 
 ```text
 bash steward/containers/manage.sh config
 bash steward/containers/manage.sh bootstrap
+bash steward/containers/manage.sh init
 bash steward/containers/manage.sh build
 bash steward/containers/manage.sh start
 bash steward/containers/manage.sh stop
@@ -73,8 +75,12 @@ private files, creates only the daemon-owned
 directory skeleton, clones the configured `main` remote only when the canonical
 clone is absent, builds/releases the three images, and records an atomic
 selector. It does not initialize SQLite, create credentials, contact a
-receiver, or start normal processing. `start` is the explicit Compose launch;
-`stop` preserves task state and never calls `docker compose down`.
+receiver, or start normal processing. `init` runs `coquic-steward init` in the
+selected daemon image with the production configuration, secrets, identity,
+and mounts. It refuses a running daemon, creates the exact current Store once,
+and verifies exact repeats without repairing mismatches. `start` validates the
+exact Store before the explicit Compose launch; `stop` preserves task state and
+never calls `docker compose down`.
 
 `upgrade` requires proven quiescence unless `--force` is supplied, verifies a
 candidate health/release identity, and restores the prior selector if health

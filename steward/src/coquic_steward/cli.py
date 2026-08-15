@@ -103,14 +103,14 @@ _PUBLICATION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _context() -> tuple[TaskStore, StewardConfig]:
-    config = load_config()
+    config = load_config(allow_legacy_migration=False)
     # A repository with no explicit container section is the historical local
     # CLI fixture. Production launches opt into the strict container boundary.
     if not config.container.enabled and not config.local_codex_test_harness:
         config = config.__class__(
             **{**config.__dict__, "local_codex_test_harness": True}
         )
-    return TaskStore(config.db_path), config
+    return TaskStore.open(config.db_path), config
 
 
 def _configured_supervisor(
@@ -432,6 +432,34 @@ def publication_hide(
 
 
 @app.command()
+def init() -> None:
+    """Create or verify the exact current SQLite store while stopped."""
+
+    config = load_config(allow_legacy_migration=False)
+    store: TaskStore | None = None
+    try:
+        with acquire_daemon_lock(config):
+            if os.path.lexists(config.db_path):
+                store = TaskStore.open(config.db_path)
+                outcome = "already initialized"
+            else:
+                store = TaskStore.create(config.db_path)
+                outcome = "initialized"
+    except DaemonAlreadyRunning as exc:
+        typer.echo(f"Steward daemon already running: {exc.lock_path}", err=True)
+        if exc.owner:
+            typer.echo(exc.owner, err=True)
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        typer.echo(f"Steward store initialization refused: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if store is not None:
+            store.engine.dispose()
+    typer.echo(f"Steward store {outcome}: {config.db_path}")
+
+
+@app.command()
 def agents() -> None:
     for agent in AGENTS.values():
         skills = ", ".join(agent.skills) if agent.skills else "-"
@@ -737,7 +765,7 @@ def diagnostics() -> None:
 def health() -> None:
     """Return bounded local health facts for Compose and operators."""
 
-    config = load_config()
+    config = load_config(allow_legacy_migration=False)
     active_tasks = 0
     cleanup_pending = 0
     publication_health = None
@@ -747,7 +775,7 @@ def health() -> None:
     persisted_pressure: dict[str, object] | None = None
     container_counts = {"owned": 0, "active": 0, "cleanupPending": 0, "unknown": 0}
     try:
-        store = TaskStore(config.db_path)
+        store = TaskStore.open(config.db_path)
         active_tasks = int(store.active_count())
         for task in store.list_tasks(limit=10_000):
             events = store.events(task.id, limit=200)

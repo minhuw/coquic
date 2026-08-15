@@ -31,8 +31,8 @@ def _task_context(repo, monkeypatch):
         "coquic_steward.cli._configured_supervisor",
         lambda _config, _store: None,
     )
-    config = load_config()
-    store = TaskStore(config.db_path)
+    config = load_config(allow_legacy_migration=False)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,

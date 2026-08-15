@@ -46,7 +46,7 @@ fail() {
 
 if [[ "$mode" == production-compose ]]; then
   bash "$root/steward/containers/test-manage.sh" --config
-  bash "$root/steward/containers/test-manage.sh" --bootstrap
+  bash "$root/steward/containers/test-manage.sh" --init
   bash "$root/steward/containers/test-manage.sh" --lifecycle
   bash "$root/steward/containers/smoke-test.sh" --planner
   echo "steward container smoke test passed (production-compose; fake state only)"

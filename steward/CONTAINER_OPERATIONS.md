@@ -3,8 +3,9 @@
 This is the canonical manual runbook for the Steward 2.0 host. Docker Compose
 is the outer lifecycle manager. It starts one trusted daemon; the daemon starts
 task, planner, and validation containers as siblings through the local Unix
-Docker socket. Starting Steward is an operator action. Bootstrap never starts
-the service, creates credentials, initializes SQLite, or contacts a receiver.
+Docker socket. Starting Steward is an operator action. Production launch is
+`bootstrap → init → start`; bootstrap never starts the service, creates
+credentials, initializes SQLite, or contacts a receiver.
 
 ## Authority and private paths
 
@@ -131,20 +132,29 @@ gate applies Pulumi destructively or fabricates a task.
    bash steward/containers/manage.sh bootstrap
    ```
 
-5. Inspect bounded state before starting the service:
+5. Initialize the exact current Store while the daemon is stopped. The wrapper
+   runs `coquic-steward init` in the selected daemon image with the production
+   configuration, secrets, identity, and mounts. Repeating an exact init opens
+   the Store without repairing or rewriting it; mismatches remain unchanged:
+
+   ```sh
+   bash steward/containers/manage.sh init
+   ```
+
+6. Inspect bounded state before starting the service:
 
    ```sh
    bash steward/containers/manage.sh status
    ```
 
-6. Start Compose explicitly and confirm the daemon health and release:
+7. Start Compose explicitly and confirm the daemon health and release:
 
    ```sh
    bash steward/containers/manage.sh start
    bash steward/containers/manage.sh status
    ```
 
-7. After Site is activated, run the read-only checker once for the empty state
+8. After Site is activated, run the read-only checker once for the empty state
    or for the first real published task. The checker proves global and task
    usage surfaces, including run, invocation/retry, one bounded turn page,
    ownership, coverage, Token fields, and numeric/N.A. cost state. It is never
@@ -152,6 +162,8 @@ gate applies Pulumi destructively or fabricates a task.
 
 Bootstrap is idempotent. A successful repeat verifies the same clone and keeps
 the current release; it does not initialize a database or begin processing.
+Store initialization is a separate stopped-only transition; start validates the
+exact Store and never invokes init.
 
 ## Lifecycle and recovery
 
@@ -160,6 +172,7 @@ The management wrapper is the only lifecycle interface:
 ```text
 bash steward/containers/manage.sh config
 bash steward/containers/manage.sh bootstrap
+bash steward/containers/manage.sh init
 bash steward/containers/manage.sh build
 bash steward/containers/manage.sh start
 bash steward/containers/manage.sh stop
@@ -300,7 +313,7 @@ and fake Docker state only:
 
 ```sh
 nix develop -c bash steward/containers/test-manage.sh --config
-nix develop -c bash steward/containers/test-manage.sh --bootstrap
+nix develop -c bash steward/containers/test-manage.sh --init
 nix develop -c bash steward/containers/test-manage.sh --lifecycle
 ```
 

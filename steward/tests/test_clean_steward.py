@@ -8578,6 +8578,9 @@ def test_executor_uses_shared_revision_counter_for_validation_and_review(
 
 def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
+    config = load_config(allow_legacy_migration=False)
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
     runner = CliRunner()
 
     result = runner.invoke(app, ["enqueue", "custom", "demo", "--prompt", "hello"])
@@ -8593,7 +8596,8 @@ def test_cli_plan_supersedes_stale_signals_before_planning(
     repo: Path, monkeypatch
 ) -> None:
     monkeypatch.chdir(repo)
-    store = TaskStore(load_config().db_path)
+    config = load_config(allow_legacy_migration=False)
+    store = TaskStore.create(config.db_path)
     signal, _ = store.add_signal_item(
         SignalItem(
             id="wi-codeql-42",
@@ -8626,6 +8630,9 @@ def test_cli_plan_supersedes_stale_signals_before_planning(
 
 def test_cli_daemon_forever_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
+    config = load_config(allow_legacy_migration=False)
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
     started = []
 
     def fake_run_forever(self) -> None:
@@ -8660,6 +8667,9 @@ def test_cli_rejects_removed_web_command() -> None:
 
 def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
+    config = load_config(allow_legacy_migration=False)
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
 
     result = CliRunner().invoke(app, ["daemon", "--once", "--no-plan", "--no-dispatch"])
 
@@ -8682,6 +8692,9 @@ github_repository = "minhuw/coquic"
 """,
         encoding="utf-8",
     )
+    config = load_config(allow_legacy_migration=False)
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
 
     result = CliRunner().invoke(app, ["daemon", "--once", "--no-plan", "--no-dispatch"])
 
@@ -8694,6 +8707,8 @@ def test_cli_daemon_refuses_second_instance(
     config: StewardConfig, monkeypatch
 ) -> None:
     monkeypatch.chdir(config.repo_root)
+    store = TaskStore.create(config.db_path)
+    store.engine.dispose()
 
     with acquire_daemon_lock(config):
         result = CliRunner().invoke(

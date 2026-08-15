@@ -18,10 +18,12 @@ credentials, or daemon configuration. See
 [CONTAINER_OPERATIONS.md](CONTAINER_OPERATIONS.md) for the durable contract.
 
 Use the checked-in wrapper for bootstrap and lifecycle; it never calls
-`docker compose down` or a global Docker prune:
+`docker compose down` or a global Docker prune. Production launch is
+`bootstrap → init → start`:
 
 ```bash
 bash steward/containers/manage.sh bootstrap
+bash steward/containers/manage.sh init
 bash steward/containers/manage.sh start
 bash steward/containers/manage.sh status
 ```
@@ -29,9 +31,12 @@ bash steward/containers/manage.sh status
 Bootstrap builds the pinned Nix `steward-daemon-image`, `steward-task-image`,
 and no-Codex `steward-validation-image`, records exact local image IDs, validates the private
 layout and credentials, and clones only an absent canonical repository. It
-does not create credentials, initialize SQLite/epochs, or start work. Upgrades
-require proven quiescence unless the operator explicitly
-uses `--force`; ordinary stop preserves recoverable state.
+does not create credentials, initialize SQLite/epochs, or start work. `init` runs
+`coquic-steward init` in the selected daemon image with production mounts and
+secrets, refuses a running daemon, and verifies exact repeats without repairing
+mismatches. Start validates the exact Store before launch. Upgrades require
+proven quiescence unless the operator explicitly uses `--force`; ordinary stop
+preserves recoverable state.
 
 ## Quick start
 
@@ -42,6 +47,7 @@ export COQUIC_HOME="${COQUIC_HOME:-$HOME/.coquic}"
 install -d -m 700 "$COQUIC_HOME"
 cp steward/steward.example.toml "$COQUIC_HOME/steward.toml"
 chmod 600 "$COQUIC_HOME/steward.toml"
+uv run --project steward coquic-steward init
 uv run --project steward coquic-steward diagnostics
 uv run --project steward coquic-steward daemon
 ```

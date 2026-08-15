@@ -17,3 +17,14 @@ failure categories while rejecting unsupported values without executing their
 methods.
 
 Later architecture plans share ownership of this decision log.
+
+## Explicit Store initialization
+
+Production startup is the migration-free `bootstrap → init → start` sequence.
+Bootstrap verifies the repository, credentials, and selected release without
+creating SQLite. `coquic-steward init` is the sole intentional production Store
+creation entry point: it runs stopped, opens an exact existing current Store for
+idempotent repeats, and refuses invalid or mismatched state without repair.
+Ordinary CLI loads disable legacy migration and open the exact Store; start
+validates it before launching Compose. Recovery and daemon restart own no hidden
+initialization transition.

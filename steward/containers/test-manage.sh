@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 manage="$script_dir/manage.sh"
 mode="${1:-}"
-[[ "$mode" == --config || "$mode" == --bootstrap || "$mode" == --lifecycle ]] || {
-  printf 'usage: %s --config|--bootstrap|--lifecycle\n' "$0" >&2
+[[ "$mode" == --config || "$mode" == --bootstrap || "$mode" == --init || "$mode" == --lifecycle ]] || {
+  printf 'usage: %s --config|--bootstrap|--init|--lifecycle\n' "$0" >&2
   exit 64
 }
 
@@ -358,9 +358,29 @@ PY
     cmp "$tmp/journal.before" "$home/private/deployment/operation.journal"
     [[ -d "$home/worktrees/unexpected" && "$(cat "$home/private/deployment/current")" == "$first" ]]
     ;;
+  --init)
+    "$manage" bootstrap >/dev/null
+    [[ ! -e "$home/steward.sqlite" ]]
+    expect_manage_refusal start
+    "$manage" init
+    marker="$home/private/deployment/store.initialized"
+    [[ "$(cat "$marker")" == initialized ]]
+    before="$(stat -c '%s:%Y:%i' "$marker")"
+    "$manage" init >/dev/null
+    [[ "$(stat -c '%s:%Y:%i' "$marker")" == "$before" ]]
+    printf 'invalid\n' >"$marker"
+    expect_manage_refusal init
+    [[ "$(cat "$marker")" == invalid ]]
+    printf 'initialized\n' >"$marker"
+    "$manage" start >/dev/null
+    expect_manage_refusal init
+    "$manage" stop >/dev/null
+    ;;
   --lifecycle)
     "$manage" bootstrap >/dev/null
     old="$(cat "$home/private/deployment/current")"
+    expect_manage_refusal start
+    "$manage" init >/dev/null
     "$manage" start
     "$manage" status | rg 'state=running'
     "$manage" stop

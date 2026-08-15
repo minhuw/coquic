@@ -1010,6 +1010,39 @@ def test_materializes_typed_ledger_with_real_ids_and_exact_terminal_retries(
         )
 
 
+def test_materialize_run_rejects_model_dump_lookalike_without_mutation(
+    tmp_path: Path,
+) -> None:
+    class ModelDumpLookalike:
+        called = False
+
+        def model_dump(self, **_kwargs: object) -> dict[str, object]:
+            self.called = True
+            raise AssertionError("unsupported serializer executed")
+
+    archive = TaskArchive(tmp_path / "tasks")
+    archive.create_task("task-safe", "prompt", pipeline_id="pipeline-initial")
+    before = {
+        path.relative_to(archive.root): path.read_bytes()
+        for path in archive.root.rglob("*")
+        if path.is_file()
+    }
+    lookalike = ModelDumpLookalike()
+
+    with pytest.raises(TypeError, match="expected mapping or pydantic model"):
+        archive.materialize_run(  # type: ignore[arg-type]
+            "task-safe", "pipeline-initial", lookalike
+        )
+
+    after = {
+        path.relative_to(archive.root): path.read_bytes()
+        for path in archive.root.rglob("*")
+        if path.is_file()
+    }
+    assert lookalike.called is False
+    assert after == before
+
+
 def test_task_materialization_requires_a_ledger_pipeline_id(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
 

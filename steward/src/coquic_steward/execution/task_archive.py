@@ -378,11 +378,17 @@ def _private_filtered(value: Any) -> Any:
     return value
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
-    if hasattr(value, "model_dump"):
-        return dict(value.model_dump(mode="json", by_alias=True))
+def _as_dict(
+    value: Mapping[str, Any] | TaskRecord | TaskPipeline | TaskRun,
+) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
+    if type(value) is TaskRecord:
+        return dict(TaskRecord.model_dump(value, mode="json", by_alias=True))
+    if type(value) is TaskPipeline:
+        return dict(TaskPipeline.model_dump(value, mode="json", by_alias=True))
+    if type(value) is TaskRun:
+        return dict(TaskRun.model_dump(value, mode="json", by_alias=True))
     raise TypeError(f"expected mapping or pydantic model, got {type(value).__name__}")
 
 

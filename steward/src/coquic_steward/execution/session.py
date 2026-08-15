@@ -1118,6 +1118,10 @@ class SessionSupervisor:
         selected_role = _normalize_role(role)
         api_key = self._configured_api_key(api_key)
         task = self.store.get(task_id)
+        self.store.validate_execution_ownership(
+            task_id,
+            pipeline_id=pipeline_id,
+        )
         runtime, invoker = self._boundary_for(task)
         pipeline = self.store.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
@@ -2114,10 +2118,15 @@ class SessionSupervisor:
                     "completed" if outcome.completed else "forced termination" if outcome.forced else "interrupted" if outcome.interrupted else "Codex invocation failed"
                 ),
             )
+        except TaskLedgerOwnershipError:
+            raise
         except ValueError:
             # A concurrent interrupt() may have won the compare-and-set. Keep
-            # its terminal outcome and preserve the completed transcript prefix.
-            self.store.get_run(run.id)
+            # its terminal outcome and preserve the completed transcript prefix,
+            # but never treat a still-running run as an idempotent terminal race.
+            current_run = self.store.get_run(run.id)
+            if current_run.state == CodexRunState.running.value:
+                raise
         if outcome.interrupted or outcome.forced:
             if session.private_home_path is not None:
                 control = session.private_home_path / "interruption.json"

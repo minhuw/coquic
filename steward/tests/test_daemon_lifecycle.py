@@ -51,6 +51,7 @@ from coquic_steward.core.config import (
 )
 from coquic_steward.execution.container import (
     ContainerInspection,
+    ExecIdentity,
     SubprocessDockerClient,
     TaskContainerRuntime,
 )
@@ -105,6 +106,7 @@ from coquic_steward.orchestration.preflight import (
     run_preflight,
 )
 from coquic_steward.storage import TaskStore
+from coquic_steward.storage.sqlite import TaskLedgerOwnershipError
 
 
 IMAGE = "sha256:" + "a" * 64
@@ -2371,6 +2373,117 @@ def _interrupted_run(config, store, *, role="implementation", checkpoint=None):
     store.update_session(session.id, provider_session_id="private-provider-id")
     store.mark_run_interrupted(run.id, reason="test interruption")
     return task, pipeline, store.get_run(run.id)
+
+
+def test_session_completion_ownership_loss_propagates_without_evidence(config):
+    store = TaskStore.create(config.db_path)
+    task, pipeline = _task(store, "completion ownership loss")
+
+    class ClearingInvoker(LocalSessionInvoker):
+        def invoke(
+            self,
+            request,
+            *,
+            api_key,
+            append,
+            observe,
+            on_started,
+            timeout_seconds,
+            interrupt_grace_seconds,
+            launch_gate=None,
+        ):
+            on_started(
+                ExecIdentity(
+                    "fake",
+                    request.run_id,
+                    4321,
+                    request.session_uid,
+                )
+            )
+            with store.engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE task_executions "
+                    "SET owning_pipeline_id = NULL, active_session_id = NULL, "
+                    "active_run_id = NULL WHERE task_id = ?",
+                    (task.id,),
+                )
+            return InvocationOutcome(
+                exit_code=0,
+                stdout=b"",
+                stderr=b"",
+                incomplete_suffix=b"",
+                events=(),
+                provider_session_id=None,
+            )
+
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        invoker=ClearingInvoker(),
+        image_digest=IMAGE,
+    )
+
+    with pytest.raises(TaskLedgerOwnershipError, match="owning pipeline"):
+        supervisor.start(
+            task.id,
+            pipeline.id,
+            role="implementation",
+            prompt="complete",
+            cwd=config.repo_root,
+        )
+
+    run = store.list_runs(task.id)[0]
+    assert run.state == "running"
+    assert not (
+        config.tasks_dir
+        / task.id
+        / "pipelines"
+        / pipeline.id
+        / "runs"
+        / run.id
+        / "result.json"
+    ).exists()
+
+
+def test_session_start_validates_ownership_before_runtime_factory(config):
+    store = TaskStore.create(config.db_path)
+    task, pipeline = _task(store, "start ownership preflight")
+    execution = store.get_execution(task.id)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE task_executions SET owning_pipeline_id = NULL WHERE id = ?",
+            (execution.id,),
+        )
+
+    factory_calls = []
+    marker = config.private_dir / "runtime-factory-called"
+
+    def factory(record):
+        factory_calls.append(record.id)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("created\n", encoding="utf-8")
+        return SimpleNamespace()
+
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        runtime_factory=factory,
+        image_digest=IMAGE,
+    )
+
+    with pytest.raises(TaskLedgerOwnershipError, match="owning pipeline"):
+        supervisor.start(
+            task.id,
+            pipeline.id,
+            role="implementation",
+            prompt="start",
+            cwd=config.repo_root,
+        )
+
+    assert factory_calls == []
+    assert not marker.exists()
+    assert store.list_sessions(task.id) == []
+    assert store.list_runs(task.id) == []
 
 
 class FakeSupervisor(SessionSupervisor):

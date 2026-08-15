@@ -868,6 +868,18 @@ class SQLiteTaskStore:
             )
         return execution, selected
 
+    def validate_execution_ownership(
+        self, task_id: str, *, pipeline_id: str | None = None
+    ) -> None:
+        """Validate execution and selected pipeline ownership without mutation."""
+
+        with Session(self.engine) as session:
+            self._require_execution_owner(
+                session,
+                task_id,
+                pipeline_id=pipeline_id,
+            )
+
     def get_execution(self, task_id_or_execution_id: str) -> TaskExecution:
         with Session(self.engine) as session:
             row = session.get(TaskExecutionRow, task_id_or_execution_id)

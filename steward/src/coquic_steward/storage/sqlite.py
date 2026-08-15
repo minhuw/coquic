@@ -140,6 +140,7 @@ from ..publication.outbox import (
     MAX_RETRY_DELAY_SECONDS,
     PublicationRetryPolicy,
     OutboxValidationError,
+    PublicationCounts,
     PublicationGeneration,
     PublicationHealth,
     PublicationHideFence,
@@ -3061,7 +3062,7 @@ class SQLiteTaskStore:
         metadata_digest: str | None = None,
         publication_id: str | None = None,
         idempotency_key: str | None = None,
-        counts: object | None = None,
+        counts: PublicationCounts | Mapping[str, object] | None = None,
         rows: int = 0,
         objects: int = 0,
         tasks: int = 1,
@@ -6992,7 +6993,7 @@ def _publication_hide_from_row(row: Mapping[str, object]) -> PublicationHideFenc
 
 
 def _publication_counts_values(
-    counts: object | None,
+    counts: PublicationCounts | Mapping[str, object] | None,
     *,
     rows: int,
     objects: int,
@@ -7012,15 +7013,20 @@ def _publication_counts_values(
         "artifacts": artifacts,
     }
     if counts is not None:
-        if isinstance(counts, Mapping):
-            source = counts
-        elif hasattr(counts, "as_dict"):
-            source = counts.as_dict()  # type: ignore[union-attr]
-        else:
-            source = {
-                name: getattr(counts, name, values[name])
-                for name in values
+        if isinstance(counts, PublicationCounts):
+            source: Mapping[str, object] = {
+                "rows": counts.rows,
+                "objects": counts.objects,
+                "tasks": counts.tasks,
+                "pipelines": counts.pipelines,
+                "runs": counts.runs,
+                "events": counts.events,
+                "artifacts": counts.artifacts,
             }
+        elif isinstance(counts, Mapping):
+            source = counts
+        else:
+            raise OutboxValidationError("invalid_metadata")
         for name in values:
             if name in source:
                 values[name] = source[name]
@@ -7039,7 +7045,7 @@ def _coerce_publication_generation(
     metadata_digest: str | None,
     publication_id: str | None,
     idempotency_key: str | None,
-    counts: object | None,
+    counts: PublicationCounts | Mapping[str, object] | None,
     rows: int,
     objects: int,
     tasks: int,

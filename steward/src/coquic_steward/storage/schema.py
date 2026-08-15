@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -81,13 +83,15 @@ def _publication_identity_digest(task_id: object, generation_boundary: object) -
 
 @event.listens_for(Engine, "connect")
 def _register_publication_identity_digest(
-    dbapi_connection: object, _connection_record: object
+    dbapi_connection: sqlite3.Connection, _connection_record: object
 ) -> None:
     """Make the identity digest available to every SQLAlchemy SQLite connection."""
 
-    create_function = getattr(dbapi_connection, "create_function", None)
-    if callable(create_function):
-        create_function("coquic_publication_digest", 2, _publication_identity_digest)
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        raise TypeError("publication digest registration requires SQLite")
+    dbapi_connection.create_function(
+        "coquic_publication_digest", 2, _publication_identity_digest
+    )
 
 
 def _publication_timestamp_check(column: str) -> str:

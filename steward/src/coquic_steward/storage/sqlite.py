@@ -482,7 +482,6 @@ class SQLiteTaskStore:
         store = cls.__new__(cls)
         store.path = database
         store.on_change = on_change
-        store._legacy_database = False
         store.path_codec = PathCodec(
             database.parent, legacy_dir=database.parent / "steward"
         )
@@ -704,8 +703,7 @@ class SQLiteTaskStore:
     def add_task(
         self, spec: TaskSpec, *, dedupe_key: str | None = None
     ) -> tuple[TaskRecord, bool]:
-        if not self._legacy_database:
-            self._ensure_archive_epoch()
+        self._ensure_archive_epoch()
         metadata = dict(spec.metadata)
         if dedupe_key is not None:
             existing = self.find_active_dedupe(dedupe_key)
@@ -6123,21 +6121,6 @@ class SQLiteTaskStore:
 
     def _find_active_dedupe(self, dedupe_key: str) -> TaskRecord | None:
         return self.find_active_dedupe(dedupe_key)
-
-    def _migrate_legacy_json(self) -> None:
-        legacy = self.path.with_suffix(".json")
-        if not legacy.exists() or self.list_tasks():
-            return
-        raw = json.loads(legacy.read_text(encoding="utf-8"))
-        tasks = [TaskRecord.model_validate(item) for item in raw.get("tasks", [])]
-        events = [Event.model_validate(item) for item in raw.get("events", [])]
-        with Session(self.engine) as session, session.begin():
-            session.add_all(
-                task_to_row(task, path_codec=self.path_codec) for task in tasks
-            )
-            session.add_all(
-                event_to_row(item, path_codec=self.path_codec) for item in events
-            )
 
     def _upsert_iteration(
         self, item: TaskIteration, *, running_summary: str | None = None

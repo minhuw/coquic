@@ -378,6 +378,50 @@ def test_open_validation_does_not_repair_or_write(tmp_path: Path) -> None:
     assert after == before
 
 
+def test_open_ignores_valid_sibling_json_without_mutation(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    created = TaskStore.create(database)
+    created.engine.dispose()
+
+    sibling = database.parent / "steward.json"
+    sibling.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "spec": {
+                            "id": "task-legacy-import",
+                            "kind": "custom",
+                            "workflow": "fix",
+                            "worker": "custom",
+                            "title": "legacy task",
+                            "prompt": "legacy prompt",
+                        }
+                    }
+                ],
+                "events": [
+                    {
+                        "task_id": "task-legacy-import",
+                        "kind": "task.created",
+                        "message": "legacy task",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = sibling.read_bytes()
+
+    opened = TaskStore.open(database)
+    try:
+        assert opened.list_tasks() == []
+        assert opened.events("task-legacy-import") == []
+    finally:
+        opened.engine.dispose()
+
+    assert sibling.read_bytes() == before
+
+
 def test_create_rejects_existing_target_and_extra_archive_state(tmp_path: Path) -> None:
     database = tmp_path / "steward.sqlite"
     TaskStore.create(database).engine.dispose()

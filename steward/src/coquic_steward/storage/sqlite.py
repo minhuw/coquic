@@ -866,6 +866,10 @@ class SQLiteTaskStore:
             raise TaskLedgerOwnershipError(
                 "pipeline does not belong to task execution"
             )
+        if pipeline_id is not None and pipeline_id != owner_id:
+            raise TaskLedgerOwnershipError(
+                "pipeline is not the current execution owner"
+            )
         return execution, selected
 
     def validate_execution_ownership(
@@ -1705,6 +1709,8 @@ class SQLiteTaskStore:
         exit_signal: str | None = None,
         exit_reason: str | None = None,
         result_summary: str | None = None,
+        provider_session_id: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> TaskRun:
         valid_states = {item.value for item in CodexRunState}
         if state not in valid_states:
@@ -1731,7 +1737,24 @@ class SQLiteTaskStore:
             ):
                 raise TaskLedgerOwnershipError("run session ownership is invalid")
             if row.state == state and row.state != CodexRunState.running.value:
+                if (
+                    execution.active_run_id == row.id
+                    or (
+                        execution.active_run_id is None
+                        and execution.active_session_id == row.session_id
+                    )
+                ):
+                    execution.active_run_id = None
+                    execution.active_session_id = None
+                    execution.updated_at = now
                 return row_to_run(row)
+            if provider_session_id is not None:
+                session_row.provider_session_id = provider_session_id
+                session_row.updated_at = now
+            if checkpoint_id is not None:
+                session_row.checkpoint_id = checkpoint_id
+                session_row.updated_at = now
+                row.checkpoint_id = checkpoint_id
             row.state = state
             row.updated_at = now
             if exit_code is not None:
@@ -1743,8 +1766,15 @@ class SQLiteTaskStore:
             if state == CodexRunState.interrupted.value:
                 session_row.state = "interrupted"
                 session_row.updated_at = now
-            if state != CodexRunState.running.value and execution.active_run_id == row.id:
+            if state != CodexRunState.running.value and (
+                execution.active_run_id == row.id
+                or (
+                    execution.active_run_id is None
+                    and execution.active_session_id == row.session_id
+                )
+            ):
                 execution.active_run_id = None
+                execution.active_session_id = None
                 execution.updated_at = now
         return self.get_run(run_id)
 

@@ -3242,6 +3242,44 @@ def test_corrupt_resume_falls_back_to_fresh_recovery_packet(config, monkeypatch)
     assert store.get_run(outcome.run_id).retry_of_run_id == run.id
 
 
+def test_recovery_ownership_preflight_preserves_archive_evidence(config):
+    store = TaskStore.create(config.db_path)
+    task, pipeline, predecessor = _interrupted_run(config, store)
+    (config.repo_root / "README.md").write_text(
+        "changed before recovery\n", encoding="utf-8"
+    )
+    execution = store.get_execution(task.id)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE task_executions SET owning_pipeline_id = NULL, "
+            "active_session_id = NULL, active_run_id = NULL WHERE id = ?",
+            (execution.id,),
+        )
+
+    supervisor = SessionSupervisor(
+        config,
+        store,
+        invoker=LocalSessionInvoker(),
+        image_digest=IMAGE,
+        codex_identity="codex-test",
+    )
+    recovery_path = (
+        config.tasks_dir
+        / task.id
+        / "pipelines"
+        / pipeline.id
+        / "runs"
+        / predecessor.id
+        / "recovery"
+        / "current.diff"
+    )
+
+    with pytest.raises(TaskLedgerOwnershipError, match="owning pipeline"):
+        supervisor.recover(predecessor.id, cwd=config.repo_root)
+
+    assert not recovery_path.exists()
+
+
 def test_fresh_recovery_lineage_is_durable_before_process_returns(
     config, monkeypatch
 ):

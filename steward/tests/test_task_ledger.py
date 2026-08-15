@@ -138,6 +138,97 @@ def test_ledger_allocates_ordered_lineage_and_private_fields(config: StewardConf
     assert [item.role_ordinal for item in store.list_runs(task.id)] == [1, 2]
 
 
+def test_terminal_run_releases_active_session_before_child_transfer(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="child", prompt="p")
+    )
+    parent = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, parent.id)
+    run = store.create_run(task.id, parent.id, session.id, role="implementation")
+
+    store.transition_run(
+        run.id,
+        "succeeded",
+        expected_state="running",
+        exit_code=0,
+        result_summary="done",
+    )
+
+    execution = store.get_execution(task.id)
+    assert execution.owning_pipeline_id == parent.id
+    assert execution.active_session_id is None
+    assert execution.active_run_id is None
+
+    store.transition_pipeline(parent.id, "superseded")
+    child = store.create_pipeline(
+        task.id,
+        execution_id=parent.execution_id,
+        trigger="validation-repair",
+        parent_pipeline_id=parent.id,
+    )
+    assert child.parent_pipeline_id == parent.id
+    assert store.get_execution(task.id).owning_pipeline_id == child.id
+
+
+def test_stale_pipeline_cannot_reclaim_execution_owner(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="owner", prompt="p")
+    )
+    parent = store.list_pipelines(task.id)[0]
+    child = store.create_pipeline(
+        task.id,
+        execution_id=parent.execution_id,
+        trigger="validation-repair",
+        parent_pipeline_id=parent.id,
+    )
+
+    with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
+        store.create_session(task.id, parent.id)
+
+    assert store.get_execution(task.id).owning_pipeline_id == child.id
+    assert store.list_sessions(task.id, pipeline_id=parent.id) == []
+
+
+def test_terminal_finalization_persists_provider_and_checkpoint_atomically(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="finalize", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id, checkpoint_id="before")
+    run = store.create_run(
+        task.id,
+        pipeline.id,
+        session.id,
+        role="implementation",
+        checkpoint_id="before",
+    )
+
+    store.transition_run(
+        run.id,
+        "interrupted",
+        expected_state="running",
+        exit_code=130,
+        provider_session_id="provider-final",
+        checkpoint_id="after",
+    )
+
+    saved_session = store.get_session(session.id)
+    saved_run = store.get_run(run.id)
+    assert saved_session.provider_session_id == "provider-final"
+    assert saved_session.checkpoint_id == "after"
+    assert saved_run.checkpoint_id == "after"
+    assert saved_run.state == "interrupted"
+
+
 def _pipeline_claim_data(
     task_id: str,
     pipeline_id: str,

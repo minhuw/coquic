@@ -1391,6 +1391,10 @@ class SessionSupervisor:
 
     def build_recovery_packet(self, predecessor_run_id: str) -> RecoveryPacket:
         predecessor = self.store.get_run(predecessor_run_id)
+        self.store.validate_execution_ownership(
+            predecessor.task_id,
+            pipeline_id=predecessor.pipeline_id,
+        )
         task = self.store.get(predecessor.task_id)
         session = self.store.get_session(predecessor.session_id)
         transcript: Path | None = None
@@ -1482,8 +1486,12 @@ class SessionSupervisor:
         """Build an evidence-rich fresh session after resume is unavailable."""
 
         api_key = self._configured_api_key(api_key)
-        packet = self.build_recovery_packet(predecessor_run_id)
         predecessor = self.store.get_run(predecessor_run_id)
+        self.store.validate_execution_ownership(
+            predecessor.task_id,
+            pipeline_id=predecessor.pipeline_id,
+        )
+        packet = self.build_recovery_packet(predecessor_run_id)
         session = self.store.get_session(predecessor.session_id)
         task = self.store.get(predecessor.task_id)
         recovery_key = f"fresh-recovery:{predecessor.id}"
@@ -2111,6 +2119,8 @@ class SessionSupervisor:
                 result_summary=(
                     "completed" if outcome.completed else "forced termination" if outcome.forced else "interrupted" if outcome.interrupted else "Codex invocation failed"
                 ),
+                provider_session_id=provider_id,
+                checkpoint_id=checkpoint_id,
             )
         except TaskLedgerOwnershipError:
             raise
@@ -2121,13 +2131,6 @@ class SessionSupervisor:
             current_run = self.store.get_run(run.id)
             if current_run.state == CodexRunState.running.value:
                 raise
-        if provider_id:
-            session = self.store.update_session(session.id, provider_session_id=provider_id)
-        if checkpoint_id is not None:
-            session = self.store.update_session(
-                session.id, checkpoint_id=checkpoint_id
-            )
-            run = self.store.update_run(run.id, checkpoint_id=checkpoint_id)
         if outcome.interrupted or outcome.forced:
             if session.private_home_path is not None:
                 control = session.private_home_path / "interruption.json"

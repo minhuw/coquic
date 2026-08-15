@@ -2084,8 +2084,6 @@ class SessionSupervisor:
                 diagnostics={"error": str(exc)},
             )
         provider_id = outcome.provider_session_id
-        if provider_id:
-            session = self.store.update_session(session.id, provider_session_id=provider_id)
         state = (
             CodexRunState.interrupted.value
             if outcome.interrupted or outcome.forced
@@ -2093,6 +2091,7 @@ class SessionSupervisor:
             if outcome.completed
             else CodexRunState.failed.value
         )
+        checkpoint_id: str | None = None
         if (
             (outcome.interrupted or outcome.forced)
             and session.checkpoint_id is not None
@@ -2102,11 +2101,6 @@ class SessionSupervisor:
                 checkpoint_id = worktree_checkpoint(self.config, request.cwd)
             except (OSError, RuntimeError):
                 checkpoint_id = None
-            if checkpoint_id is not None:
-                session = self.store.update_session(
-                    session.id, checkpoint_id=checkpoint_id
-                )
-                run = self.store.update_run(run.id, checkpoint_id=checkpoint_id)
         try:
             self.store.transition_run(
                 run.id,
@@ -2127,6 +2121,13 @@ class SessionSupervisor:
             current_run = self.store.get_run(run.id)
             if current_run.state == CodexRunState.running.value:
                 raise
+        if provider_id:
+            session = self.store.update_session(session.id, provider_session_id=provider_id)
+        if checkpoint_id is not None:
+            session = self.store.update_session(
+                session.id, checkpoint_id=checkpoint_id
+            )
+            run = self.store.update_run(run.id, checkpoint_id=checkpoint_id)
         if outcome.interrupted or outcome.forced:
             if session.private_home_path is not None:
                 control = session.private_home_path / "interruption.json"

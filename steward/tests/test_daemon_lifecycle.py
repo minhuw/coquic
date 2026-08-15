@@ -2379,6 +2379,8 @@ def test_session_completion_ownership_loss_propagates_without_evidence(config):
     store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "completion ownership loss")
 
+    session_before_loss = []
+
     class ClearingInvoker(LocalSessionInvoker):
         def invoke(
             self,
@@ -2400,6 +2402,7 @@ def test_session_completion_ownership_loss_propagates_without_evidence(config):
                     request.session_uid,
                 )
             )
+            session_before_loss.append(store.get_session(request.session_id))
             with store.engine.begin() as connection:
                 connection.exec_driver_sql(
                     "UPDATE task_executions "
@@ -2413,7 +2416,7 @@ def test_session_completion_ownership_loss_propagates_without_evidence(config):
                 stderr=b"",
                 incomplete_suffix=b"",
                 events=(),
-                provider_session_id=None,
+                provider_session_id="provider-after-loss",
             )
 
     supervisor = SessionSupervisor(
@@ -2434,6 +2437,8 @@ def test_session_completion_ownership_loss_propagates_without_evidence(config):
 
     run = store.list_runs(task.id)[0]
     assert run.state == "running"
+    assert session_before_loss
+    assert store.get_session(session_before_loss[0].id) == session_before_loss[0]
     assert not (
         config.tasks_dir
         / task.id

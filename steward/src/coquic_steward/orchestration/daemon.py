@@ -27,7 +27,6 @@ from ..core.lifecycle import (
     ReconciliationDisposition,
     ReconciliationOutcome,
     ShutdownResult,
-    TaskPhase,
 )
 from ..core.models import (
     ACTIVE_STATUSES,
@@ -49,6 +48,7 @@ from ..core.models import (
     WorkerKind,
 )
 from ..execution.executor import StewardExecutor
+from ..storage.sqlite import TaskLedgerOwnershipError
 from ..execution.container import bind_deployment_identity, deployment_runtime_factory
 from ..execution.session import (
     FreshPlannerSession,
@@ -463,7 +463,6 @@ class _PublicationTransportCancellation(DaemonCancellation):
 
 @dataclass
 class TickResult:
-    recovered: int = 0
     signal_fetches: int = 0
     signal_items: int = 0
     new_signal_items: int = 0
@@ -820,19 +819,21 @@ class StewardDaemon:
                 for task in tasks:
                     outcome = self._reconcile_task(task)
                     outcomes.append(outcome)
-                    try:
-                        self.store.add_event(
-                            task.id,
-                            "daemon.reconciled",
-                            outcome.disposition.value,
-                            outcome.as_dict(),
-                        )
-                    except Exception:
-                        # Reconciliation evidence must not hide the identity result.
-                        pass
+                    if "ownership" not in outcome.detail.lower():
+                        try:
+                            self.store.add_event(
+                                task.id,
+                                "daemon.reconciled",
+                                outcome.disposition.value,
+                                outcome.as_dict(),
+                            )
+                        except Exception:
+                            # Reconciliation evidence must not hide the identity result.
+                            pass
                     if (
                         outcome.disposition is ReconciliationDisposition.blocked
                         and _is_identity_conflict(outcome.detail)
+                        and "ownership" not in outcome.detail.lower()
                         and not TaskStatus(task.status).terminal
                     ):
                         try:
@@ -1836,6 +1837,25 @@ class StewardDaemon:
     def _reconcile_task(self, task: TaskRecord) -> ReconciliationOutcome:
         """Reconcile archive, ledger, process, Git, and cleanup identities."""
 
+        try:
+            execution = self.store.get_execution(task.id)
+            owner_id = execution.owning_pipeline_id
+            if owner_id is None:
+                raise TaskLedgerOwnershipError(
+                    "task execution has no owning pipeline"
+                )
+            owner = self.store.get_pipeline(owner_id)
+            if owner.task_id != task.id or owner.execution_id != execution.id:
+                raise TaskLedgerOwnershipError("task execution owner is invalid")
+            runs = self.store.list_runs(task.id)
+        except (KeyError, TaskLedgerOwnershipError) as exc:
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "task execution ownership is invalid",
+                evidence={"error": exc.__class__.__name__},
+            )
+
         cleanup_state = self.store.cleanup_obligation_state(task.id)
         terminal = TaskStatus(task.status).terminal
         if terminal and cleanup_state is CleanupStatus.complete:
@@ -1856,18 +1876,6 @@ class StewardDaemon:
                 ReconciliationDisposition.blocked,
                 "terminal cleanup remains pending",
             )
-        try:
-            execution = self.store.get_execution(task.id)
-            runs = self.store.list_runs(task.id)
-        except (AttributeError, KeyError):
-            # Rows without the normalized execution ledger retain the legacy
-            # stale-task policy and have no 2.0 identities to reconcile here.
-            return ReconciliationOutcome(
-                task.id,
-                ReconciliationDisposition.unchanged,
-                "legacy task has no execution ledger",
-            )
-
         conflict, evidence = self._reconcile_identity_matrix(task, execution, runs)
         if conflict is not None:
             return ReconciliationOutcome(
@@ -1992,7 +2000,13 @@ class StewardDaemon:
             pipelines = self.store.list_pipelines(task.id)
             by_pipeline = {pipeline.id: pipeline for pipeline in pipelines}
             owner = getattr(execution, "owning_pipeline_id", None)
-            if owner is not None and owner not in by_pipeline:
+            if owner is None:
+                return "execution ownership is missing", evidence
+            owner_pipeline = by_pipeline.get(owner)
+            if (
+                owner_pipeline is None
+                or owner_pipeline.execution_id != execution.id
+            ):
                 return "execution points at an unknown pipeline", evidence
             for run in runs:
                 pipeline = by_pipeline.get(run.pipeline_id)
@@ -2056,7 +2070,7 @@ class StewardDaemon:
             elif runs:
                 archive.create_task_from_record(
                     task,
-                    pipeline=by_pipeline.get(owner) if owner else pipelines[-1],
+                    pipeline=owner_pipeline,
                 )
                 for pipeline in pipelines:
                     pipeline_runs = [
@@ -2122,7 +2136,11 @@ class StewardDaemon:
     ) -> ReconciliationOutcome | None:
         pipeline_id = getattr(execution, "owning_pipeline_id", None)
         if pipeline_id is None:
-            return None
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "execution ownership is missing",
+            )
         active = self._unfinished_phase_event(task.id, pipeline_id)
         if active is None:
             return None
@@ -3658,6 +3676,21 @@ class StewardDaemon:
         task = self.store.get(task_id)
         if not TaskStatus(task.status).terminal:
             return False
+        try:
+            execution = self.store.get_execution(task.id)
+            pipeline_id = execution.owning_pipeline_id
+            if pipeline_id is None:
+                raise TaskLedgerOwnershipError(
+                    "task execution has no owning pipeline"
+                )
+            owner_pipeline = self.store.get_pipeline(pipeline_id)
+            if (
+                owner_pipeline.task_id != task.id
+                or owner_pipeline.execution_id != execution.id
+            ):
+                raise TaskLedgerOwnershipError("task execution owner is invalid")
+        except (KeyError, TaskLedgerOwnershipError):
+            return False
         cleanup_state = self.store.cleanup_obligation_state(task.id)
         events = self.store.events(task.id)
         existing_intent = self._cleanup_intent_for_task(task.id)
@@ -3674,11 +3707,7 @@ class StewardDaemon:
             return True
         if existing_state is CleanupState.blocked:
             return False
-        pipelines = []
-        try:
-            pipelines = self.store.list_pipelines(task.id)
-        except (AttributeError, KeyError):
-            pass
+        pipelines = self.store.list_pipelines(task.id)
         for pipeline in pipelines:
             active = self._unfinished_phase_event(task.id, pipeline.id)
             if active is not None:
@@ -3696,23 +3725,20 @@ class StewardDaemon:
             event.kind in {"pipeline.ready_to_seal", "pipeline.blocked"}
             for event in events
         )
-        if pipelines and not explicit_terminal:
+        if not explicit_terminal:
             self.store.add_event(
                 task.id,
                 "cleanup_blocked",
                 "terminal cleanup requires an explicit pipeline outcome",
             )
             return False
-        try:
-            if any(str(run.state) == "running" for run in self.store.list_runs(task.id)):
-                self.store.add_event(
-                    task.id,
-                    "cleanup_blocked",
-                    "terminal cleanup requires all runs to stop",
-                )
-                return False
-        except (AttributeError, KeyError):
-            pass
+        if any(str(run.state) == "running" for run in self.store.list_runs(task.id)):
+            self.store.add_event(
+                task.id,
+                "cleanup_blocked",
+                "terminal cleanup requires all runs to stop",
+            )
+            return False
 
         if self.session_supervisor is not None:
             try:
@@ -3745,15 +3771,10 @@ class StewardDaemon:
         if not archive_absent_after_intent:
             try:
                 if not manifest.exists():
-                    pipeline_id = None
-                    try:
-                        pipeline_id = self.store.get_execution(task.id).owning_pipeline_id
-                    except Exception:
-                        pass
-                    completion_identity = f"completion-{task.id}-{pipeline_id or 'legacy'}"
+                    completion_identity = f"completion-{task.id}-{pipeline_id}"
                     archive.create_task_from_record(
                         task,
-                        pipeline=self.store.get_pipeline(pipeline_id) if pipeline_id else None,
+                        pipeline=owner_pipeline,
                     )
                     for pipeline in pipelines:
                         runs = self.store.list_runs(
@@ -4234,16 +4255,6 @@ class StewardDaemon:
                 f"dispatch={str(dispatch).lower()} "
                 f"max_dispatch={max_dispatch or '-'}"
             )
-            for task_id in self.store.recover_stale_active_tasks(
-                stale_after_minutes=stale_task_minutes(self.config),
-                status_stale_after_minutes=status_stale_minutes(self.config),
-            ):
-                result.recovered += 1
-                self.executor.clean_finished_task_worktree(self.store.get(task_id))
-                self.store.add_event(
-                    task_id, "daemon.recovered_stale", "released stale active task"
-                )
-                self._log(f"recovered stale task {task_id}")
             if plan:
                 requeued = self.store.requeue_failed_signal_items()
                 if requeued:
@@ -4275,7 +4286,6 @@ class StewardDaemon:
                     self._log("resource pressure: task admission paused")
             self._log(
                 "cycle finish "
-                f"recovered={result.recovered} "
                 f"signal_fetches={result.signal_fetches} "
                 f"signal_items={result.signal_items} "
                 f"new_signal_items={result.new_signal_items} "
@@ -4373,6 +4383,12 @@ class StewardDaemon:
             try:
                 task_ok = self.drive_selected_task(task.id)
             except Exception as exc:  # pragma: no cover - daemon boundary guard.
+                if isinstance(exc, TaskLedgerOwnershipError):
+                    result.skipped += 1
+                    self._log(
+                        f"dispatch blocked {task.id} ownership={exc.__class__.__name__}"
+                    )
+                    continue
                 if self._shutdown_event.is_set():
                     self.store.add_event(
                         task.id,
@@ -4514,13 +4530,18 @@ class StewardDaemon:
         except KeyError:
             return False
         while not self._shutdown_event.is_set():
-            serialized = integration or self._task_phase_requires_serialization(task_id)
+            try:
+                serialized = integration or self._task_phase_requires_serialization(task_id)
+            except TaskLedgerOwnershipError:
+                return False
             if serialized:
                 self._integration_lock.acquire()
             try:
                 with use_subprocess_owner(self._subprocess_owner):
                     outcome = self.executor.advance_once(task_id)
             except Exception as exc:
+                if isinstance(exc, TaskLedgerOwnershipError):
+                    return False
                 if self._shutdown_event.is_set():
                     try:
                         self.store.add_event(
@@ -4540,13 +4561,13 @@ class StewardDaemon:
             status = str(getattr(outcome, "status", ""))
             if status == "interrupted":
                 return False
-            if status in {"ready_to_seal", "terminal", "blocked", "legacy_terminal"}:
+            if status in {"ready_to_seal", "terminal", "blocked"}:
                 if (
-                    status in {"ready_to_seal", "blocked", "legacy_terminal"}
+                    status in {"ready_to_seal", "blocked"}
                     and not self._shutdown_event.is_set()
                 ):
                     self.finalize_terminal_task(task_id)
-                return status in {"ready_to_seal", "terminal", "legacy_terminal"}
+                return status in {"ready_to_seal", "terminal"}
             if status == "in_progress":
                 self._shutdown_event.wait(0.05)
                 continue
@@ -4587,18 +4608,25 @@ class StewardDaemon:
 
         try:
             execution = self.store.get_execution(task_id)
-            pipeline_id = getattr(execution, "owning_pipeline_id", None)
-            if pipeline_id is None:
-                return False
+        except KeyError as exc:
+            raise TaskLedgerOwnershipError(
+                "task execution ownership is unavailable"
+            ) from exc
+        pipeline_id = execution.owning_pipeline_id
+        if pipeline_id is None:
+            raise TaskLedgerOwnershipError(
+                "task execution has no owning pipeline"
+            )
+        try:
             phase = self.executor._pipeline_cursor(task_id, pipeline_id)
-            value = getattr(phase, "value", phase)
-            return str(value) in {
-                PipelineCursorPhase.integration.value,
-                PipelineCursorPhase.commit.value,
-                PipelineCursorPhase.push.value,
-            }
         except (AttributeError, KeyError, IndexError, TypeError, ValueError):
             return False
+        value = getattr(phase, "value", phase)
+        return str(value) in {
+            PipelineCursorPhase.integration.value,
+            PipelineCursorPhase.commit.value,
+            PipelineCursorPhase.push.value,
+        }
 
     def _poll_adopted_runs(self) -> None:
         """Reconcile adopted wrappers until their durable result is consumable."""
@@ -5213,22 +5241,6 @@ class StewardDaemon:
     def _heartbeat_interval_seconds(self) -> int:
         with self._runtime_lock:
             return self.runtime.heartbeat_interval_seconds
-
-def stale_task_minutes(config: StewardConfig) -> int:
-    if config.limits.stale_task_minutes is not None:
-        return config.limits.stale_task_minutes
-    return config.limits.worker_timeout_minutes + 5
-
-
-def status_stale_minutes(config: StewardConfig) -> dict[str, int]:
-    if config.limits.stale_task_minutes is not None:
-        return {}
-    return {
-        TaskStatus.reviewing.value: config.limits.review_timeout_minutes + 5,
-        TaskPhase.implementation_plan.value: config.limits.plan_timeout_minutes + 5,
-        "validation": config.limits.validation_timeout_minutes + 5,
-    }
-
 
 def wait_for_scheduler_event(
     config: StewardConfig,

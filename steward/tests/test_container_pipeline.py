@@ -11,6 +11,7 @@ from coquic_steward.core.models import (
     CodexStage,
     TaskKind,
     TaskSpec,
+    TaskStatus,
     TaskRun,
     TaskWorkflow,
     ValidationResult,
@@ -128,6 +129,36 @@ def test_advance_once_is_idempotent_and_stops_at_ready_to_seal(config, monkeypat
     assert repeated.status == "ready_to_seal"
     assert len(store.list_pipelines(task.id)) == 1
     assert not any(event.kind == "pipeline.blocked" for event in store.events(task.id))
+
+
+def test_advance_once_rejects_missing_pipeline_owner_without_repair(
+    config,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="missing owner",
+            prompt="change README",
+        )
+    )
+    execution = store.get_execution(task.id)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE task_executions SET owning_pipeline_id = NULL WHERE id = ?",
+            (execution.id,),
+        )
+    events_before = store.events(task.id)
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+
+    with pytest.raises(ValueError, match="owning pipeline"):
+        executor.advance_once(task.id)
+
+    assert store.get(task.id).status == TaskStatus.queued
+    assert store.events(task.id) == events_before
+    assert len(store.list_pipelines(task.id)) == 1
 
 
 def test_durable_validation_status_parse_failure_blocks_pipeline(config, monkeypatch) -> None:
@@ -773,7 +804,10 @@ def test_child_pipeline_budget_and_no_progress_fingerprint_are_explicit(config) 
     parent = store.list_pipelines(task.id)[0]
     child = executor._new_child_pipeline(task, parent, PipelineTrigger.validation_repair, {"fingerprint": "same"})
     assert child.parent_pipeline_id == parent.id
-    assert store.list_pipelines(task.id)[-1].trigger == PipelineTrigger.validation_repair.value
+    saved_child = next(
+        pipeline for pipeline in store.list_pipelines(task.id) if pipeline.id == child.id
+    )
+    assert saved_child.trigger == PipelineTrigger.validation_repair.value
 
 
 def test_integration_latest_main_rebase_conflict_remains_source_task() -> None:

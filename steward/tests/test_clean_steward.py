@@ -92,7 +92,6 @@ from coquic_steward.orchestration import (
 from coquic_steward.orchestration.daemon import (
     DAEMON_EVENT_TASK_ID,
     SchedulerTrigger,
-    status_stale_minutes,
     wait_for_scheduler_event,
 )
 from coquic_steward.planning import (
@@ -493,30 +492,6 @@ def test_store_dedupes_active_tasks(config: StewardConfig) -> None:
     assert store.get(first.id).status == TaskStatus.queued
 
 
-def test_store_recovers_stale_active_tasks(config: StewardConfig) -> None:
-    store = TaskStore.create(config.db_path)
-    spec = TaskSpec(
-        kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P"
-    )
-    task, _ = store.add_task(spec, dedupe_key="same")
-    make_task_legacy(store, task.id)
-    store.update_status(task.id, TaskStatus.running, "started")
-    make_task_stale(store, task.id)
-
-    recovered = store.recover_stale_active_tasks(stale_after_minutes=10)
-
-    assert recovered == [task.id]
-    recovered_task = store.get(task.id)
-    assert recovered_task.status == TaskStatus.failed
-    assert "stale active task recovered" in recovered_task.summary
-    replacement, created = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P"),
-        dedupe_key="same",
-    )
-    assert created
-    assert replacement.id != task.id
-
-
 def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
     changes = 0
 
@@ -534,115 +509,6 @@ def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
 
     assert changes > before
     assert store.get(task.id).status == TaskStatus.running
-
-
-def test_daemon_cleans_recovered_stale_task_worktree(config: StewardConfig) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree = config.worktrees_dir / task.id
-    worktree.mkdir(parents=True)
-    (worktree / "README.md").write_text("stale\n", encoding="utf-8")
-    task.worktree_path = worktree
-    store.save(task)
-    make_task_legacy(store, task.id)
-    store.start_worker(task.id, "worker started")
-    make_task_stale(store, task.id)
-
-    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
-
-    assert result.recovered == 1
-    assert store.get(task.id).status == TaskStatus.failed
-    assert not worktree.exists()
-    assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
-
-
-def test_daemon_preserves_recovered_stale_integration_commit(
-    config: StewardConfig, tmp_path: Path
-) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id},
-        )
-    )
-    worktree, branch = Worktrees(config).create(integration)
-    (worktree / "README.md").write_text("interrupted integration\n", encoding="utf-8")
-    integration.worktree_path = worktree
-    integration.branch_name = branch
-    store.save(integration)
-    integration = store.start_integration(integration.id, "integration started")
-
-    # Simulate termination after Git commits but before the database event is written.
-    sha = Worktrees(config).commit_all(
-        worktree,
-        "fix(docs): preserve interrupted integration",
-        "Keep the commit reachable.",
-    )
-    assert sha is not None
-    assert not any(
-        event.kind == "integration.commit_created"
-        for event in store.events(integration.id)
-    )
-    make_task_legacy(store, integration.id)
-    store.start_integration(integration.id, "pushing to main")
-    make_task_stale(store, integration.id)
-
-    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
-
-    saved = store.get(integration.id)
-    cleaned = next(
-        event for event in store.events(integration.id) if event.kind == "worktree.cleaned"
-    )
-    assert result.recovered == 1
-    assert saved.status == TaskStatus.failed
-    assert saved.summary.startswith("stale active task recovered")
-    assert saved.worktree_path is not None
-    assert not saved.worktree_path.exists()
-    assert git_branch_head(config.repo_root, branch) == sha
-    assert cleaned.data["branch_preserved"] is True
-
-
-def test_daemon_does_not_clean_external_recovered_stale_worktree(
-    config: StewardConfig, tmp_path: Path
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    external = tmp_path / "external-worktree"
-    external.mkdir()
-    task.worktree_path = external
-    store.save(task)
-    make_task_legacy(store, task.id)
-    store.start_worker(task.id, "worker started")
-    make_task_stale(store, task.id)
-
-    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
-
-    assert result.recovered == 1
-    assert store.get(task.id).status == TaskStatus.failed
-    assert external.exists()
-    assert not any(event.kind == "worktree.cleaned" for event in store.events(task.id))
 
 
 def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypatch) -> None:
@@ -704,33 +570,6 @@ def test_daemon_marks_early_dispatch_exception_failed(
     assert saved.status == TaskStatus.failed
     assert saved.summary == "dispatch failed: codex failed before start"
     assert any(event.kind == "dispatch.failed" for event in store.events(task.id))
-
-
-def test_store_keeps_integrating_source_with_queued_integration(
-    config: StewardConfig,
-) -> None:
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id},
-        )
-    )
-    make_task_stale(store, source.id)
-    make_task_stale(store, integration.id)
-
-    recovered = store.recover_stale_active_tasks(stale_after_minutes=10)
-
-    assert recovered == []
-    assert store.get(source.id).status == TaskStatus.integrating
-    assert store.get(integration.id).status == TaskStatus.queued
 
 
 def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
@@ -1685,68 +1524,6 @@ def test_daemon_supersedes_stale_signals_before_planning(
     }
 
 
-def test_daemon_tick_recovers_stale_task_before_planning(
-    config: StewardConfig, monkeypatch
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.code_quality,
-            worker=WorkerKind.code_quality_janitor,
-            title="old",
-            prompt="old",
-        ),
-        dedupe_key="code-quality:current",
-    )
-    make_task_legacy(store, task.id)
-    store.update_status(task.id, TaskStatus.running, "started")
-    make_task_stale(store, task.id)
-
-    monkeypatch.setattr(
-        "coquic_steward.orchestration.daemon.collect_signal_items",
-        lambda _config: [],
-    )
-    ingest_test_signal(
-        store,
-        SignalItem(
-            id="wi-codeql-1",
-            provider="code-scanning",
-            kind="code-scanning.alert",
-            fingerprint="wi-codeql-1",
-            title="Open CodeQL findings",
-        ),
-    )
-    monkeypatch.setattr(
-        "coquic_steward.orchestration.daemon.run_planner",
-        lambda _config, _signals, _active, **_kwargs: PlannerRun(
-            planned=[
-                (
-                    TaskSpec(
-                        kind=TaskKind.code_quality,
-                        worker=WorkerKind.code_quality_janitor,
-                        title="new",
-                        prompt="new",
-                    ),
-                    "code-quality:current",
-                )
-            ],
-            accepted_count=1,
-            proposed_count=1,
-            completed=True,
-            exit_code=0,
-            prompt_path=None,
-            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
-            thread_id=None,
-        ),
-    )
-
-    result = StewardDaemon(config, store).tick(dispatch=False)
-
-    assert result.recovered == 1
-    assert result.enqueued == 1
-    assert store.get(task.id).status == TaskStatus.failed
-
-
 def test_daemon_replans_expired_failed_signal_without_refetch(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -1820,92 +1597,6 @@ def test_daemon_replans_expired_failed_signal_without_refetch(
     )
 
 
-def test_daemon_recovers_stale_reviewing_task_with_review_timeout(
-    config: StewardConfig, monkeypatch
-) -> None:
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "limits": StewardLimits(
-                worker_timeout_minutes=120,
-                review_timeout_minutes=20,
-            ),
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    reviewing, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
-    )
-    running, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="W", prompt="W")
-    )
-    make_task_legacy(store, reviewing.id)
-    make_task_legacy(store, running.id)
-    store.start_worker(reviewing.id, "worker started")
-    store.start_review(reviewing.id, "review started")
-    store.start_worker(running.id, "worker started")
-    make_task_stale(store, reviewing.id)
-    make_task_stale(store, running.id)
-
-    monkeypatch.setattr(
-        "coquic_steward.orchestration.daemon.collect_signal_items",
-        lambda _config: [],
-    )
-    monkeypatch.setattr(
-        "coquic_steward.orchestration.daemon.run_planner",
-        lambda _config, _signals, _active: PlannerRun(
-            planned=[],
-            accepted_count=0,
-            proposed_count=0,
-            completed=True,
-            exit_code=0,
-            prompt_path=None,
-            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
-            thread_id=None,
-        ),
-    )
-
-    result = StewardDaemon(config, store).tick(dispatch=False)
-
-    assert result.recovered == 1
-    assert store.get(reviewing.id).status == TaskStatus.failed
-    assert store.get(reviewing.id).summary == "stale active task recovered after 25 minutes"
-    assert store.get(running.id).status == TaskStatus.running
-    recovered = next(
-        event for event in store.events(reviewing.id) if event.kind == "task.recovered_stale"
-    )
-    assert recovered.data["previous_status"] == "reviewing"
-    assert recovered.data["stale_after_minutes"] == 25
-
-
-def test_store_treats_unfinished_review_revision_as_worker_active(
-    config: StewardConfig,
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
-    )
-    store.start_worker(task.id, "worker started")
-    store.start_review(task.id, "review started")
-    store.add_event(task.id, "review.finished", "{}")
-    store.add_event(task.id, "worker.revision_requested", "needs revision")
-    with Session(store.engine) as session, session.begin():
-        row = session.get(TaskRow, task.id)
-        assert row is not None
-        row.status = TaskStatus.reviewing.value
-    make_task_legacy(store, task.id)
-    make_task_stale(store, task.id, minutes=30)
-
-    recovered = store.recover_stale_active_tasks(
-        stale_after_minutes=125,
-        status_stale_after_minutes={TaskStatus.reviewing.value: 25},
-    )
-
-    assert recovered == []
-    assert store.get(task.id).status == TaskStatus.reviewing
-
-
 def test_store_marks_task_running_when_revision_iteration_begins(
     config: StewardConfig,
 ) -> None:
@@ -1940,124 +1631,6 @@ def test_store_marks_task_running_when_revision_iteration_begins(
     assert events[-1].kind == "task.status"
     assert events[-1].message == "running"
     assert events[-1].data["source"] == "begin_iteration"
-
-
-def test_store_recovers_unfinished_review_revision_with_worker_timeout(
-    config: StewardConfig,
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
-    )
-    store.start_worker(task.id, "worker started")
-    store.start_review(task.id, "review started")
-    store.add_event(task.id, "review.finished", "{}")
-    store.add_event(task.id, "worker.revision_requested", "needs revision")
-    with Session(store.engine) as session, session.begin():
-        row = session.get(TaskRow, task.id)
-        assert row is not None
-        row.status = TaskStatus.reviewing.value
-    make_task_legacy(store, task.id)
-    make_task_stale(store, task.id, minutes=130)
-
-    recovered = store.recover_stale_active_tasks(
-        stale_after_minutes=125,
-        status_stale_after_minutes={TaskStatus.reviewing.value: 25},
-    )
-
-    assert recovered == [task.id]
-    assert store.get(task.id).status == TaskStatus.failed
-    recovered_event = next(
-        event for event in store.events(task.id) if event.kind == "task.recovered_stale"
-    )
-    assert {
-        key: recovered_event.data[key]
-        for key in ("previous_status", "effective_status", "stale_after_minutes")
-    } == {
-        "previous_status": "reviewing",
-        "effective_status": "running",
-        "stale_after_minutes": 125,
-    }
-
-
-def test_store_recovers_validation_phase_with_validation_timeout(
-    config: StewardConfig,
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="V", prompt="V")
-    )
-    store.start_worker(task.id, "worker started")
-    store.start_validation(task.id, "validation running: retry")
-    make_task_legacy(store, task.id)
-    validation_started_at = utc_now() - timedelta(minutes=40)
-    with Session(store.engine) as session, session.begin():
-        task_row = session.get(TaskRow, task.id)
-        assert task_row is not None
-        task_row.updated_at = utc_now().isoformat()
-        event = (
-            session.query(EventRow)
-            .filter_by(task_id=task.id, kind="task.status", message="running")
-            .order_by(EventRow.id.desc())
-            .first()
-        )
-        assert event is not None
-        event.created_at = validation_started_at.isoformat()
-
-    recovered = store.recover_stale_active_tasks(
-        stale_after_minutes=125,
-        status_stale_after_minutes={"validation": 35},
-    )
-
-    assert recovered == [task.id]
-    assert store.get(task.id).status == TaskStatus.failed
-    recovered_event = next(
-        event for event in store.events(task.id) if event.kind == "task.recovered_stale"
-    )
-    assert {
-        key: recovered_event.data[key]
-        for key in ("previous_status", "effective_status", "stale_after_minutes")
-    } == {
-        "previous_status": "running",
-        "effective_status": "validation",
-        "stale_after_minutes": 35,
-    }
-
-
-def test_status_stale_minutes_includes_validation_timeout(
-    config: StewardConfig,
-) -> None:
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "limits": StewardLimits(
-                worker_timeout_minutes=120,
-                review_timeout_minutes=20,
-                validation_timeout_minutes=30,
-            ),
-        }
-    )
-
-    assert status_stale_minutes(config) == {
-        "implementation_plan": 35,
-        "reviewing": 25,
-        "validation": 35,
-    }
-
-
-def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfig) -> None:
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "limits": StewardLimits(
-                worker_timeout_minutes=120,
-                review_timeout_minutes=20,
-                stale_task_minutes=7,
-            ),
-        }
-    )
-
-    assert status_stale_minutes(config) == {}
 
 
 def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
@@ -4188,20 +3761,6 @@ def make_task_stale(store: TaskStore, task_id: str, *, minutes: int = 30) -> Non
         row = session.get(TaskRow, task_id)
         assert row is not None
         row.updated_at = old.isoformat()
-
-
-def make_task_legacy(store: TaskStore, task_id: str) -> None:
-    """Remove the 2.0 ledger so a fixture exercises legacy stale recovery."""
-
-    with store.engine.begin() as connection:
-        connection.exec_driver_sql(
-            "DELETE FROM task_pipelines WHERE task_id = ?",
-            (task_id,),
-        )
-        connection.exec_driver_sql(
-            "DELETE FROM task_executions WHERE task_id = ?",
-            (task_id,),
-        )
 
 
 def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
@@ -7314,7 +6873,6 @@ def test_integration_manager_counts_main_push_budget_per_utc_day(
                 worker_timeout_minutes=config.limits.worker_timeout_minutes,
                 review_timeout_minutes=config.limits.review_timeout_minutes,
                 validation_timeout_minutes=config.limits.validation_timeout_minutes,
-                stale_task_minutes=config.limits.stale_task_minutes,
             ),
         }
     )
@@ -7966,7 +7524,7 @@ def test_integration_manager_skips_terminal_source_task(
     source, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    store.finish_task(source.id, TaskStatus.failed, "stale active task recovered")
+    store.finish_task(source.id, TaskStatus.failed, "source task failed")
     integration, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.integration,
@@ -7982,7 +7540,7 @@ def test_integration_manager_skips_terminal_source_task(
     saved_source = store.get(source.id)
     saved_integration = store.get(integration.id)
     assert saved_source.status == TaskStatus.failed
-    assert saved_source.summary == "stale active task recovered"
+    assert saved_source.summary == "source task failed"
     assert saved_integration.status == TaskStatus.no_changes
     assert "integration source already failed" in saved_integration.summary
     assert any(event.kind == "integration.skipped" for event in store.events(source.id))

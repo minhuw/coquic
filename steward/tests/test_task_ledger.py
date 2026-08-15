@@ -13,10 +13,12 @@ from coquic_steward.core.models import (
     PipelineCursorPhase,
     TaskKind,
     TaskSpec,
+    TaskStatus,
     WorkerKind,
     WorktreeCheckpoint,
 )
 from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
+from coquic_steward.storage.sqlite import TaskLedgerOwnershipError
 from coquic_steward.execution.worktree import Worktrees
 
 
@@ -45,13 +47,6 @@ def test_task_store_direct_construction_is_rejected(config: StewardConfig) -> No
 @pytest.mark.parametrize(
     ("operation", "obsolete_key"),
     [
-        ("execution", "phase"),
-        ("execution", "owning_pipeline"),
-        ("execution", "pipeline_id"),
-        ("execution", "session_id"),
-        ("execution", "run_id"),
-        ("execution", "base"),
-        ("execution", "tree"),
         ("pipeline", "base"),
         ("pipeline", "input"),
         ("pipeline", "output"),
@@ -72,9 +67,7 @@ def test_store_rejects_obsolete_field_names(
     value = {obsolete_key: "obsolete"}
 
     with pytest.raises(ValueError, match=rf"unsupported {operation} fields"):
-        if operation == "execution":
-            store.ensure_execution(task.id, **value)
-        elif operation == "pipeline":
+        if operation == "pipeline":
             store.create_pipeline(task.id, **value)
         else:
             pipeline = store.list_pipelines(task.id)[0]
@@ -366,6 +359,29 @@ def test_concurrent_pipeline_ordinals_are_unique(config: StewardConfig) -> None:
     with ThreadPoolExecutor(max_workers=4) as executor:
         ordinals = list(executor.map(allocate, range(8)))
     assert sorted(ordinals) == list(range(2, 10))
+
+
+def test_pipeline_creation_requires_persisted_execution_owner(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    execution = store.get_execution(task.id)
+    before = store.list_pipelines(task.id)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE task_executions SET owning_pipeline_id = NULL WHERE id = ?",
+            (execution.id,),
+        )
+
+    with pytest.raises(TaskLedgerOwnershipError, match="owning pipeline"):
+        store.create_pipeline(task.id, execution_id=execution.id, trigger="repair")
+
+    assert store.list_pipelines(task.id) == before
+    assert store.get(task.id).status == TaskStatus.queued
+    assert store.get_execution(task.id).owning_pipeline_id is None
 
 
 def test_checkpoint_round_trip(config: StewardConfig) -> None:

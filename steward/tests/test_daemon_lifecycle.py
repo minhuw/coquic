@@ -2796,6 +2796,27 @@ def test_startup_reconcile_orders_task_identity_before_dispatch(config):
     assert daemon.runtime.reconciliation_complete
 
 
+def test_reconcile_blocks_missing_pipeline_owner_without_finalization(config):
+    store = TaskStore.create(config.db_path)
+    task, pipeline = _task(store, "missing owner")
+    execution = store.get_execution(task.id)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE task_executions SET owning_pipeline_id = NULL WHERE id = ?",
+            (execution.id,),
+        )
+    events_before = store.events(task.id)
+    daemon = StewardDaemon(config, store, session_supervisor=None)
+
+    outcome = daemon._reconcile_task(task)
+
+    assert outcome.disposition == "blocked"
+    assert "ownership" in outcome.detail
+    assert store.get(task.id).status == TaskStatus.queued
+    assert store.events(task.id) == events_before
+    assert store.get_pipeline(pipeline.id).id == pipeline.id
+
+
 def test_startup_reconciles_oldest_active_run_after_detached_pages(
     config, monkeypatch
 ):
@@ -3300,22 +3321,6 @@ def test_commit_crash_adopts_exact_tree_once_before_manifest(config):
         and event.data.get("output", {}).get("action_id") == action
     ]
     assert len(finishes) == 1
-
-
-def test_ledger_backed_stale_task_uses_identity_reconciliation(config):
-    store = TaskStore.create(config.db_path)
-    task, _ = _task(store, "stale ledger")
-    store.start_worker(task.id, "running")
-    with store.engine.begin() as connection:
-        connection.exec_driver_sql(
-            "UPDATE tasks SET updated_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
-            (task.id,),
-        )
-
-    recovered = store.recover_stale_active_tasks(stale_after_minutes=1)
-
-    assert recovered == []
-    assert store.get(task.id).status == TaskStatus.running
 
 
 def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(

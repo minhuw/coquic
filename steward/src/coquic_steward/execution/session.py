@@ -40,6 +40,7 @@ from ..publication.atif import AtifSource
 from ..publication.generation import PublicationGeneration, compose_publication_generation
 from ..publication.models import LogicalArtifact
 from ..storage import TaskStore
+from ..storage.sqlite import TaskLedgerOwnershipError
 from .container import (
     ContainerBoundaryError,
     ContainerErrorCategory,
@@ -91,6 +92,21 @@ def publication_graph_for_task(
     session completion can prepare a durable local outbox record without
     crossing the daemon/provider boundary.
     """
+
+    try:
+        execution = store.get_execution(task.id)
+        owner_id = execution.owning_pipeline_id
+        if owner_id is None:
+            raise TaskLedgerOwnershipError(
+                "task execution has no owning pipeline"
+            )
+        owner = store.get_pipeline(owner_id)
+    except KeyError as exc:
+        raise TaskLedgerOwnershipError(
+            "task execution ownership is unavailable"
+        ) from exc
+    if owner.task_id != task.id or owner.execution_id != execution.id:
+        raise TaskLedgerOwnershipError("task execution owner is invalid")
 
     archive = TaskArchiveWriter(config)
     pipelines: list[dict[str, object]] = []
@@ -1836,10 +1852,9 @@ class SessionSupervisor:
         execution = self.store.get_execution(task.id)
         pipeline_id = execution.owning_pipeline_id
         if pipeline_id is None:
-            pipelines = self.store.list_pipelines(task.id)
-            if not pipelines:
-                raise RuntimeError("planner task does not have a canonical pipeline")
-            pipeline_id = pipelines[-1].id
+            raise TaskLedgerOwnershipError(
+                "planner task execution has no owning pipeline"
+            )
         settings = self.config.codex_settings(stage)
         result = self.start(
             task.id,

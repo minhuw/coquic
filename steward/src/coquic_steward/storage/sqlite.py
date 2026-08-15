@@ -35,7 +35,6 @@ from ..core.lifecycle import (
     TaskTransition,
     integration_started,
     implementation_plan_started,
-    recovery_failed,
     require_transition_allowed,
     review_started,
     terminal_status,
@@ -155,19 +154,6 @@ from ..publication.outbox import (
 )
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
-WORKER_REVISION_STARTED_EVENTS = {
-    "worker.revision_requested",
-    "worker.validation_revision_requested",
-}
-WORKER_REVISION_FINISHED_EVENTS = {
-    "worker.revision_finished",
-    "worker.validation_revision_finished",
-}
-REVIEW_FINISHED_EVENTS = {
-    "review.failed",
-    "review.finished",
-    "review.invalid_output",
-}
 
 _PUBLICATION_ID_RE = re.compile(r"^pub-[0-9a-f]{64}$")
 _PRIVATE_RECEIPT_KEY_RE = re.compile(
@@ -288,6 +274,10 @@ class StoreRecoveryResult:
 
 class SQLiteStoreLifecycleError(RuntimeError):
     """The exact Store lifecycle precondition or validation failed."""
+
+
+class TaskLedgerOwnershipError(ValueError):
+    """A task execution cannot be used without its persisted pipeline owner."""
 
 
 # Public aliases make the failure boundary explicit without adding another
@@ -839,62 +829,44 @@ class SQLiteTaskStore:
     # ------------------------------------------------------------------
     # Steward 2.0 normalized execution ledger
 
-    def ensure_execution(
-        self,
+    @staticmethod
+    def _require_execution_owner(
+        session: Session,
         task_id: str,
         *,
         execution_id: str | None = None,
-        idempotency_key: str | None = None,
-        initialize_pipeline: bool = True,
-        **fields: object,
-    ) -> TaskExecution:
-        """Create (or return) the single execution owner for a task."""
-        normalized_fields = _execution_fields(fields)
-        with Session(self.engine) as session, session.begin():
-            existing = session.scalar(
+        pipeline_id: str | None = None,
+    ) -> tuple[TaskExecutionRow, TaskPipelineRow]:
+        execution = (
+            session.get(TaskExecutionRow, execution_id)
+            if execution_id is not None
+            else session.scalar(
                 select(TaskExecutionRow).where(TaskExecutionRow.task_id == task_id)
             )
-            if existing is not None:
-                item = row_to_execution(existing, path_codec=self.path_codec)
-                if initialize_pipeline:
-                    pipeline_exists = session.scalar(
-                        select(TaskPipelineRow.id).where(
-                            TaskPipelineRow.execution_id == existing.id
-                        )
-                    )
-                    if pipeline_exists is None:
-                        # The surrounding transaction is read-only for this
-                        # path; create the initial pipeline after it closes.
-                        pass
-                    else:
-                        return item
-                else:
-                    return item
-            else:
-                item = None
-            if item is None:
-                now = utc_now()
-                item = TaskExecution(
-                    id=execution_id or new_execution_id(),
-                    task_id=task_id,
-                    idempotency_key=idempotency_key,
-                    **normalized_fields,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(execution_to_row(item, path_codec=self.path_codec))
-                session.flush()
-        if initialize_pipeline:
-            self._insert_pipeline(
-                task_id,
-                item.id,
-                pipeline_id=None,
-                trigger="initial",
-                parent_pipeline_id=None,
-                ordinal=1,
+        )
+        if execution is None or execution.task_id != task_id:
+            raise TaskLedgerOwnershipError("task execution does not belong to task")
+        owner_id = execution.owning_pipeline_id
+        if owner_id is None:
+            raise TaskLedgerOwnershipError("task execution has no owning pipeline")
+        owner = session.get(TaskPipelineRow, owner_id)
+        if (
+            owner is None
+            or owner.task_id != task_id
+            or owner.execution_id != execution.id
+        ):
+            raise TaskLedgerOwnershipError("task execution owner is invalid")
+        selected_id = pipeline_id or owner_id
+        selected = session.get(TaskPipelineRow, selected_id)
+        if (
+            selected is None
+            or selected.task_id != task_id
+            or selected.execution_id != execution.id
+        ):
+            raise TaskLedgerOwnershipError(
+                "pipeline does not belong to task execution"
             )
-            item = self.get_execution(task_id)
-        return item
+        return execution, selected
 
     def get_execution(self, task_id_or_execution_id: str) -> TaskExecution:
         with Session(self.engine) as session:
@@ -956,8 +928,9 @@ class SQLiteTaskStore:
                 row.active_run_id = run_id
         return self.get_execution(execution_id)
 
-    @staticmethod
+    @classmethod
     def _validate_execution_ownership(
+        cls,
         session: Session,
         execution: TaskExecutionRow,
         *,
@@ -965,22 +938,19 @@ class SQLiteTaskStore:
         session_id: str | None,
         run_id: str | None,
     ) -> None:
-        selected_pipeline_id = pipeline_id or execution.owning_pipeline_id
-        if pipeline_id is not None:
-            pipeline = session.get(TaskPipelineRow, pipeline_id)
-            if (
-                pipeline is None
-                or pipeline.task_id != execution.task_id
-                or pipeline.execution_id != execution.id
-            ):
-                raise ValueError("execution pipeline does not belong to task")
+        _, selected_pipeline = cls._require_execution_owner(
+            session,
+            execution.task_id,
+            execution_id=execution.id,
+            pipeline_id=pipeline_id,
+        )
         selected_session_id = session_id or execution.active_session_id
         if session_id is not None:
             session_row = session.get(CodexSessionRow, session_id)
             if (
                 session_row is None
                 or session_row.task_id != execution.task_id
-                or session_row.pipeline_id != selected_pipeline_id
+                or session_row.pipeline_id != selected_pipeline.id
             ):
                 raise ValueError("execution session does not belong to task pipeline")
         if run_id is not None:
@@ -988,7 +958,7 @@ class SQLiteTaskStore:
             if (
                 run is None
                 or run.task_id != execution.task_id
-                or run.pipeline_id != selected_pipeline_id
+                or run.pipeline_id != selected_pipeline.id
                 or run.session_id != selected_session_id
             ):
                 raise ValueError("execution run does not belong to task session")
@@ -1011,13 +981,22 @@ class SQLiteTaskStore:
         **fields: object,
     ) -> TaskPipeline:
         normalized_fields = _pipeline_fields(fields)
-        execution = self.ensure_execution(
-            task_id, execution_id=execution_id, initialize_pipeline=False
-        )
-        if parent_pipeline_id is not None:
-            parent = self.get_pipeline(parent_pipeline_id)
-            if parent.task_id != task_id or parent.execution_id != execution.id:
-                raise ValueError("parent pipeline must belong to the same task execution")
+        with Session(self.engine) as session:
+            execution, _ = self._require_execution_owner(
+                session,
+                task_id,
+                execution_id=execution_id,
+            )
+            if parent_pipeline_id is not None:
+                parent = session.get(TaskPipelineRow, parent_pipeline_id)
+                if (
+                    parent is None
+                    or parent.task_id != task_id
+                    or parent.execution_id != execution.id
+                ):
+                    raise ValueError(
+                        "parent pipeline must belong to the same task execution"
+                    )
         return self._insert_pipeline(
             task_id,
             execution.id,
@@ -1053,6 +1032,34 @@ class SQLiteTaskStore:
                     else:
                         selected_ordinal = int(ordinal)
                     now = utc_now()
+                    execution = connection.execute(
+                        select(
+                            TaskExecutionRow.task_id,
+                            TaskExecutionRow.owning_pipeline_id,
+                        ).where(TaskExecutionRow.id == execution_id)
+                    ).mappings().first()
+                    if execution is None or execution["task_id"] != task_id:
+                        connection.exec_driver_sql("ROLLBACK")
+                        raise TaskLedgerOwnershipError(
+                            "task execution does not belong to task"
+                        )
+                    owner_id = execution["owning_pipeline_id"]
+                    owner = (
+                        connection.execute(
+                            select(TaskPipelineRow.id).where(
+                                TaskPipelineRow.id == owner_id,
+                                TaskPipelineRow.task_id == task_id,
+                                TaskPipelineRow.execution_id == execution_id,
+                            )
+                        ).scalar_one_or_none()
+                        if owner_id is not None
+                        else None
+                    )
+                    if owner is None:
+                        connection.exec_driver_sql("ROLLBACK")
+                        raise TaskLedgerOwnershipError(
+                            "task execution has no owning pipeline"
+                        )
                     item = TaskPipeline(
                         id=pipeline_id or new_pipeline_id(),
                         task_id=task_id,
@@ -1064,23 +1071,26 @@ class SQLiteTaskStore:
                         started_at=now,
                         updated_at=now,
                     )
-                    connection.execute(TaskPipelineRow.__table__.insert().values(**_row_values(pipeline_to_row(item))))
+                    connection.execute(
+                        TaskPipelineRow.__table__.insert().values(
+                            **_row_values(pipeline_to_row(item))
+                        )
+                    )
+                    connection.execute(
+                        TaskExecutionRow.__table__.update()
+                        .where(TaskExecutionRow.id == execution_id)
+                        .values(
+                            owning_pipeline_id=item.id,
+                            updated_at=item.updated_at.isoformat(),
+                        )
+                    )
                     connection.exec_driver_sql("COMMIT")
-                    self._set_pipeline_owner(item)
                     return item
             except IntegrityError:
                 if attempt == 7:
                     raise
                 time.sleep(0.005 * (attempt + 1))
         raise RuntimeError("pipeline allocation failed")
-
-    def _set_pipeline_owner(self, item: TaskPipeline) -> None:
-        now = item.updated_at.isoformat()
-        with Session(self.engine) as session, session.begin():
-            execution = session.get(TaskExecutionRow, item.execution_id)
-            if execution is not None:
-                execution.owning_pipeline_id = item.id
-                execution.updated_at = now
 
     def list_pipelines(self, task_id: str) -> list[TaskPipeline]:
         with Session(self.engine) as session:
@@ -1116,6 +1126,12 @@ class SQLiteTaskStore:
                 raise KeyError(pipeline_id)
             if expected_state is not None and row.state != expected_state:
                 raise ValueError(f"pipeline compare-and-set failed: expected {expected_state}, found {row.state}")
+            execution, _ = self._require_execution_owner(
+                session,
+                row.task_id,
+                execution_id=row.execution_id,
+                pipeline_id=row.id,
+            )
             if row.state != "active" and state != row.state:
                 raise ValueError("completed pipeline is immutable")
             if row.state == state and row.state != "active":
@@ -1126,12 +1142,10 @@ class SQLiteTaskStore:
             row.updated_at = now
             if state != "active":
                 row.completed_at = now
-            execution = session.get(TaskExecutionRow, row.execution_id)
-            if execution is not None:
-                execution.owning_pipeline_id = row.id
-                if phase is not None:
-                    execution.current_phase = phase
-                execution.updated_at = now
+            execution.owning_pipeline_id = row.id
+            if phase is not None:
+                execution.current_phase = phase
+            execution.updated_at = now
         return self.get_pipeline(pipeline_id)
 
     def create_session(
@@ -1156,6 +1170,12 @@ class SQLiteTaskStore:
         pipeline = self.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
             raise ValueError("session pipeline does not belong to task")
+        with Session(self.engine) as session:
+            self._require_execution_owner(
+                session,
+                task_id,
+                pipeline_id=pipeline_id,
+            )
 
         def existing_idempotent_session() -> CodexSession | None:
             if not idempotency_key:
@@ -1291,6 +1311,12 @@ class SQLiteTaskStore:
         pipeline = self.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
             raise ValueError("session pipeline does not belong to task")
+        with Session(self.engine) as session:
+            self._require_execution_owner(
+                session,
+                task_id,
+                pipeline_id=pipeline_id,
+            )
         if retry_of_run_id is not None:
             predecessor = self.get_run(retry_of_run_id)
             if (
@@ -1467,6 +1493,12 @@ class SQLiteTaskStore:
         session = self.get_session(session_id)
         if session.task_id != task_id or session.pipeline_id != pipeline_id:
             raise ValueError("run session does not belong to task pipeline")
+        with Session(self.engine) as ownership_session:
+            self._require_execution_owner(
+                ownership_session,
+                task_id,
+                pipeline_id=pipeline_id,
+            )
         for relation, related_run_id in (
             ("parent", parent_run_id),
             ("retry", retry_of_run_id),
@@ -1598,18 +1630,24 @@ class SQLiteTaskStore:
     def _activate_run_ownership(self, item: TaskRun) -> None:
         now = item.updated_at.isoformat()
         with Session(self.engine) as session, session.begin():
-            session_row = session.get(CodexSessionRow, item.session_id)
-            if session_row is not None:
-                session_row.state = "active"
-                session_row.updated_at = now
-            execution = session.scalar(
-                select(TaskExecutionRow).where(TaskExecutionRow.task_id == item.task_id)
+            execution, _ = self._require_execution_owner(
+                session,
+                item.task_id,
+                pipeline_id=item.pipeline_id,
             )
-            if execution is not None:
-                execution.owning_pipeline_id = item.pipeline_id
-                execution.active_session_id = item.session_id
-                execution.active_run_id = item.id
-                execution.updated_at = now
+            session_row = session.get(CodexSessionRow, item.session_id)
+            if (
+                session_row is None
+                or session_row.task_id != item.task_id
+                or session_row.pipeline_id != item.pipeline_id
+            ):
+                raise TaskLedgerOwnershipError("run session ownership is invalid")
+            session_row.state = "active"
+            session_row.updated_at = now
+            execution.owning_pipeline_id = item.pipeline_id
+            execution.active_session_id = item.session_id
+            execution.active_run_id = item.id
+            execution.updated_at = now
 
     def get_run(self, run_id: str) -> TaskRun:
         with Session(self.engine) as session:
@@ -1668,6 +1706,18 @@ class SQLiteTaskStore:
                 raise ValueError(f"run compare-and-set failed: expected {expected_state}, found {row.state}")
             if row.state != CodexRunState.running.value and state != row.state:
                 raise ValueError("terminal run is immutable")
+            execution, _ = self._require_execution_owner(
+                session,
+                row.task_id,
+                pipeline_id=row.pipeline_id,
+            )
+            session_row = session.get(CodexSessionRow, row.session_id)
+            if (
+                session_row is None
+                or session_row.task_id != row.task_id
+                or session_row.pipeline_id != row.pipeline_id
+            ):
+                raise TaskLedgerOwnershipError("run session ownership is invalid")
             if row.state == state and row.state != CodexRunState.running.value:
                 return row_to_run(row)
             row.state = state
@@ -1679,17 +1729,11 @@ class SQLiteTaskStore:
             row.result_summary = result_summary
             row.completed_at = None if state == CodexRunState.running.value else now
             if state == CodexRunState.interrupted.value:
-                session_row = session.get(CodexSessionRow, row.session_id)
-                if session_row is not None:
-                    session_row.state = "interrupted"
-                    session_row.updated_at = now
-            if state != CodexRunState.running.value:
-                execution = session.scalar(
-                    select(TaskExecutionRow).where(TaskExecutionRow.task_id == row.task_id)
-                )
-                if execution is not None and execution.active_run_id == row.id:
-                    execution.active_run_id = None
-                    execution.updated_at = now
+                session_row.state = "interrupted"
+                session_row.updated_at = now
+            if state != CodexRunState.running.value and execution.active_run_id == row.id:
+                execution.active_run_id = None
+                execution.updated_at = now
         return self.get_run(run_id)
 
     def mark_run_interrupted(self, run_id: str, *, reason: str | None = None) -> TaskRun:
@@ -1710,6 +1754,18 @@ class SQLiteTaskStore:
                 raise KeyError(run_id)
             if row.resume_of_run_id is None:
                 raise ValueError("only a session recovery run can be restarted")
+            _, _ = self._require_execution_owner(
+                session,
+                row.task_id,
+                pipeline_id=row.pipeline_id,
+            )
+            session_row = session.get(CodexSessionRow, row.session_id)
+            if (
+                session_row is None
+                or session_row.task_id != row.task_id
+                or session_row.pipeline_id != row.pipeline_id
+            ):
+                raise TaskLedgerOwnershipError("run session ownership is invalid")
             row.state = CodexRunState.running.value
             row.exit_code = None
             row.exit_signal = None
@@ -1717,11 +1773,9 @@ class SQLiteTaskStore:
             row.result_summary = None
             row.completed_at = None
             row.updated_at = now
-            session_row = session.get(CodexSessionRow, row.session_id)
-            if session_row is not None:
-                session_row.state = "active"
-                session_row.closed_at = None
-                session_row.updated_at = now
+            session_row.state = "active"
+            session_row.closed_at = None
+            session_row.updated_at = now
         self._activate_run_ownership(self.get_run(run_id))
         return self.get_run(run_id)
 
@@ -1768,16 +1822,12 @@ class SQLiteTaskStore:
 
     def upsert_checkpoint(self, checkpoint: WorktreeCheckpoint) -> WorktreeCheckpoint:
         with Session(self.engine) as session, session.begin():
-            execution = session.get(TaskExecutionRow, checkpoint.execution_id)
-            if execution is None or execution.task_id != checkpoint.task_id:
-                raise ValueError("checkpoint execution does not belong to task")
-            pipeline = session.get(TaskPipelineRow, checkpoint.owning_pipeline_id)
-            if (
-                pipeline is None
-                or pipeline.task_id != checkpoint.task_id
-                or pipeline.execution_id != checkpoint.execution_id
-            ):
-                raise ValueError("checkpoint pipeline does not belong to execution")
+            _, _ = self._require_execution_owner(
+                session,
+                checkpoint.task_id,
+                execution_id=checkpoint.execution_id,
+                pipeline_id=checkpoint.owning_pipeline_id,
+            )
             if checkpoint.active_session_id is not None:
                 active_session = session.get(
                     CodexSessionRow, checkpoint.active_session_id
@@ -1851,6 +1901,7 @@ class SQLiteTaskStore:
             row = session.scalar(_task_query().where(TaskRow.id == record.id))
             if row is None:
                 raise KeyError(record.id)
+            self._require_execution_owner(session, record.id)
             row.validations.clear()
             session.flush()
             update_task_row(row, record, path_codec=self.path_codec)
@@ -1872,6 +1923,7 @@ class SQLiteTaskStore:
             row = session.scalar(_task_query().where(TaskRow.id == task_id))
             if row is None:
                 raise KeyError(task_id)
+            self._require_execution_owner(session, task_id)
             current = TaskStatus(row.status)
             require_transition_allowed(current, transition)
             row.status = transition.status.value
@@ -1927,6 +1979,7 @@ class SQLiteTaskStore:
             row = session.get(TaskRow, task_id)
             if row is None or row.status not in active_statuses:
                 return False
+            self._require_execution_owner(session, task_id)
             row.updated_at = utc_now().isoformat()
         self._notify_change()
         return True
@@ -6011,75 +6064,6 @@ class SQLiteTaskStore:
                 or 0
             )
 
-    def recover_stale_active_tasks(
-        self,
-        *,
-        stale_after_minutes: int,
-        status_stale_after_minutes: dict[str, int] | None = None,
-    ) -> list[str]:
-        recovered: list[str] = []
-        active_statuses = [
-            status.value for status in ACTIVE_STATUSES if status != TaskStatus.queued
-        ]
-        status_stale_after_minutes = status_stale_after_minutes or {}
-        with Session(self.engine) as session, session.begin():
-            rows = session.scalars(
-                _task_query().where(TaskRow.status.in_(active_statuses))
-            ).all()
-            for row in rows:
-                # Steward 2.0 tasks have durable execution/run identities and
-                # are reconciled by the daemon. Elapsed time alone cannot
-                # distinguish a live, complete, or interrupted external action.
-                if session.scalar(
-                    select(TaskExecutionRow.id).where(
-                        TaskExecutionRow.task_id == row.id
-                    )
-                ) is not None:
-                    continue
-                if row.status == TaskStatus.integrating.value and (
-                    _has_active_integration_for_source(session, row.id)
-                ):
-                    continue
-                events = session.scalars(
-                    select(EventRow)
-                    .where(EventRow.task_id == row.id)
-                    .order_by(EventRow.id)
-                ).all()
-                effective_status = _effective_stale_status(row, events)
-                stale_after = status_stale_after_minutes.get(
-                    effective_status, stale_after_minutes
-                )
-                cutoff = utc_now() - timedelta(minutes=stale_after)
-                if _effective_stale_since(row, events) >= cutoff:
-                    continue
-                previous_status = row.status
-                summary = f"stale active task recovered after {stale_after} minutes"
-                transition = recovery_failed(summary)
-                require_transition_allowed(TaskStatus(row.status), transition)
-                row.status = transition.status.value
-                row.summary = transition.summary
-                row.updated_at = utc_now().isoformat()
-                session.add(
-                    event_to_row(
-                        Event(
-                            task_id=row.id,
-                            kind="task.recovered_stale",
-                            message=transition.summary,
-                            data={
-                                "previous_status": previous_status,
-                                "effective_status": effective_status,
-                                "phase": transition.phase.value,
-                                "stale_after_minutes": stale_after,
-                            },
-                        ),
-                        path_codec=self.path_codec,
-                    )
-                )
-                recovered.append(row.id)
-        if recovered:
-            self._notify_change()
-        return recovered
-
     def audit(self) -> list[str]:
         findings: list[str] = []
         seen: set[str] = set()
@@ -6661,24 +6645,6 @@ def _signal_duplicate_blocks_requeue(
     return retry_from > cutoff
 
 
-def _has_active_integration_for_source(session: Session, source_task_id: str) -> bool:
-    active_statuses = {status.value for status in ACTIVE_STATUSES}
-    rows = session.scalars(
-        select(TaskRow).where(
-            TaskRow.worker == WorkerKind.integration_manager.value,
-            TaskRow.status.in_(active_statuses),
-        )
-    ).all()
-    for row in rows:
-        try:
-            metadata = json.loads(row.metadata_json or "{}")
-        except json.JSONDecodeError:
-            continue
-        if metadata.get("source_task_id") == source_task_id:
-            return True
-    return False
-
-
 def _transition_for_status(status: TaskStatus, summary: str) -> TaskTransition:
     if status == TaskStatus.running:
         return worker_started(summary)
@@ -6689,90 +6655,6 @@ def _transition_for_status(status: TaskStatus, summary: str) -> TaskTransition:
     if status.terminal:
         return terminal_status(status, summary)
     return TaskTransition(status, summary, TaskPhase.dispatch)
-
-
-def _effective_stale_status(row: TaskRow, events: list[EventRow]) -> str:
-    latest_worker_start = _latest_event_id(events, WORKER_REVISION_STARTED_EVENTS)
-    latest_worker_finish = _latest_event_id(events, WORKER_REVISION_FINISHED_EVENTS)
-    if latest_worker_start is not None and (
-        latest_worker_finish is None or latest_worker_start > latest_worker_finish
-    ):
-        return TaskStatus.running.value
-
-    latest_review_start = _latest_review_start_id(events)
-    latest_review_finish = _latest_event_id(
-        events, REVIEW_FINISHED_EVENTS | WORKER_REVISION_STARTED_EVENTS
-    )
-    if latest_review_start is not None and (
-        latest_review_finish is None or latest_review_start > latest_review_finish
-    ):
-        return TaskStatus.reviewing.value
-
-    latest_phase = _latest_status_phase(events)
-    if latest_phase in {
-        TaskPhase.implementation_plan.value,
-        TaskPhase.validation.value,
-    }:
-        return latest_phase
-
-    return row.status
-
-
-def _effective_stale_since(row: TaskRow, events: list[EventRow]) -> datetime:
-    if _latest_status_phase(events) == TaskPhase.validation.value:
-        event = _latest_validation_progress_event(events)
-        if event is not None:
-            return datetime.fromisoformat(event.created_at)
-    return datetime.fromisoformat(row.updated_at)
-
-
-def _latest_event_id(events: list[EventRow], kinds: set[str]) -> int | None:
-    matching = [event.id for event in events if event.kind in kinds]
-    return max(matching) if matching else None
-
-
-def _latest_status_event(events: list[EventRow]) -> EventRow | None:
-    matching = [event for event in events if event.kind == "task.status"]
-    if not matching:
-        return None
-    return max(matching, key=lambda event: event.id)
-
-
-def _latest_status_phase(events: list[EventRow]) -> str | None:
-    event = _latest_status_event(events)
-    if event is None:
-        return None
-    try:
-        data = json.loads(event.data_json)
-    except json.JSONDecodeError:
-        return None
-    phase = data.get("phase")
-    return phase if isinstance(phase, str) else None
-
-
-def _latest_validation_progress_event(events: list[EventRow]) -> EventRow | None:
-    matching = [
-        event
-        for event in events
-        if event.kind in {"validation.command_started", "validation.command_finished"}
-        or (
-            event.kind == "task.status"
-            and event.message == TaskStatus.running.value
-            and _event_phase(event) == TaskPhase.validation.value
-        )
-    ]
-    if not matching:
-        return None
-    return max(matching, key=lambda event: event.id)
-
-
-def _event_phase(event: EventRow) -> str | None:
-    try:
-        data = json.loads(event.data_json)
-    except json.JSONDecodeError:
-        return None
-    phase = data.get("phase")
-    return phase if isinstance(phase, str) else None
 
 
 # Publication values are serialized at the store boundary instead of relying
@@ -7275,15 +7157,6 @@ def _refresh_publication_health(
         """,
         parameters,
     )
-
-
-def _latest_review_start_id(events: list[EventRow]) -> int | None:
-    matching = [
-        event.id
-        for event in events
-        if event.kind == "task.status" and event.message == TaskStatus.reviewing.value
-    ]
-    return max(matching) if matching else None
 
 
 def _configure_sqlite(dbapi_connection, _connection_record) -> None:

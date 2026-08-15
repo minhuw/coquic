@@ -44,6 +44,7 @@ from ..core.models import (
 )
 from ..core.subprocesses import CommandResult, run_command
 from ..storage import TaskStore
+from ..storage.sqlite import TaskLedgerOwnershipError
 from .review import (
     parse_review,
     render_review_prompt,
@@ -250,7 +251,9 @@ class _SessionRunnerAdapter:
 
     def paths(self, task: TaskRecord, *, name: str = "worker") -> tuple[Path, Path]:
         execution = self.store.get_execution(task.id)
-        pipeline_id = execution.owning_pipeline_id or self.store.list_pipelines(task.id)[-1].id
+        pipeline_id = execution.owning_pipeline_id
+        if pipeline_id is None:
+            raise TaskLedgerOwnershipError("task execution has no owning pipeline")
         # The session supervisor allocates the canonical run path.  This stable
         # placeholder is used only before begin_iteration records the result.
         base = self.config.tasks_dir / task.id / "pipelines" / pipeline_id / "runs" / name
@@ -284,7 +287,7 @@ class _SessionRunnerAdapter:
         settings = self.config.codex_settings(stage)
         pipeline_id = self.store.get_execution(task.id).owning_pipeline_id
         if pipeline_id is None:
-            pipeline_id = self.store.list_pipelines(task.id)[-1].id
+            raise TaskLedgerOwnershipError("task execution has no owning pipeline")
         result = self.supervisor.start(
             task.id,
             pipeline_id,
@@ -413,13 +416,13 @@ class StewardExecutor:
 
         lock = self._durable_lock(task_id)
         if not lock.acquire(blocking=False):
-            try:
-                execution = self.store.get_execution(task_id)
-                pipeline_id = execution.owning_pipeline_id or self.store.list_pipelines(task_id)[-1].id
-                phase = self._pipeline_cursor(task_id, pipeline_id)
-            except (KeyError, IndexError):
-                pipeline_id = "unknown"
-                phase = PipelineCursorPhase.provisioned
+            execution = self.store.get_execution(task_id)
+            pipeline_id = execution.owning_pipeline_id
+            if pipeline_id is None:
+                raise TaskLedgerOwnershipError(
+                    "task execution has no owning pipeline"
+                )
+            phase = self._pipeline_cursor(task_id, pipeline_id)
             return AdvanceResult(
                 task_id,
                 pipeline_id,
@@ -758,30 +761,20 @@ class StewardExecutor:
 
     def _advance_once_locked(self, task_id: str) -> AdvanceResult:
         task = self.store.get(task_id)
+        execution = self.store.get_execution(task_id)
+        pipeline_id = execution.owning_pipeline_id
+        if pipeline_id is None:
+            raise TaskLedgerOwnershipError("task execution has no owning pipeline")
         try:
-            execution = self.store.get_execution(task_id)
-        except KeyError:
-            execution = self.store.ensure_execution(task_id)
-        pipelines = self.store.list_pipelines(task_id)
-        if not pipelines:
-            pipeline = self.store.create_pipeline(task_id, execution_id=execution.id)
-        else:
-            pipeline_id = execution.owning_pipeline_id or pipelines[-1].id
             pipeline = self.store.get_pipeline(pipeline_id)
-        if TaskStatus(task.status).terminal and not any(
-            event.kind == "pipeline.phase.started"
-            and event.data.get("pipeline_id") == pipeline.id
-            for event in self.store.events(task_id)
-        ):
-            return AdvanceResult(
-                task_id,
-                pipeline.id,
-                PipelineCursorPhase.ready_to_seal,
-                None,
-                "legacy_terminal",
-                progressed=False,
-                evidence={"task_status": str(task.status)},
-            )
+        except KeyError as exc:
+            raise TaskLedgerOwnershipError(
+                "task execution owner is invalid"
+            ) from exc
+        if pipeline.task_id != task_id or pipeline.execution_id != execution.id:
+            raise TaskLedgerOwnershipError("task execution owner is invalid")
+        if TaskStatus(task.status).terminal:
+            return self._seal_ready(task, pipeline)
         cursor = self._pipeline_cursor(task_id, pipeline.id)
         if cursor == PipelineCursorPhase.ready_to_seal:
             return self._seal_ready(task, pipeline)
@@ -1679,35 +1672,64 @@ class StewardExecutor:
             return "transport budget exhausted"
         return None
 
+    def _require_pipeline_ownership(self, task_id: str, pipeline: Any) -> None:
+        try:
+            execution = self.store.get_execution(task_id)
+        except KeyError as exc:
+            raise TaskLedgerOwnershipError(
+                "task execution does not belong to task"
+            ) from exc
+        if (
+            execution.owning_pipeline_id != pipeline.id
+            or pipeline.task_id != task_id
+            or pipeline.execution_id != execution.id
+        ):
+            raise TaskLedgerOwnershipError("task execution owner is invalid")
+
     def _block_pipeline(self, task: TaskRecord, pipeline: Any, summary: str) -> AdvanceResult:
+        self._require_pipeline_ownership(task.id, pipeline)
         self.store.add_event(task.id, "pipeline.blocked", summary, {"pipeline_id": pipeline.id, "phase": self._pipeline_cursor(task.id, pipeline.id).value, "fingerprint": bounded_fingerprint(summary)})
-        try:
-            self.store.transition_pipeline(pipeline.id, PipelineState.blocked.value, phase=coarse_phase(self._pipeline_cursor(task.id, pipeline.id)).value)
-        except ValueError:
-            pass
+        self.store.transition_pipeline(
+            pipeline.id,
+            PipelineState.blocked.value,
+            phase=coarse_phase(self._pipeline_cursor(task.id, pipeline.id)).value,
+        )
         self.store.finish_task(task.id, TaskStatus.blocked, summary)
-        try:
-            execution = self.store.get_execution(task.id)
-            self.store.transition_execution(execution.id, "complete", expected_state="active", phase=PipelinePhase.complete.value, pipeline_id=pipeline.id)
-        except (KeyError, ValueError):
-            pass
+        execution = self.store.get_execution(task.id)
+        self.store.transition_execution(
+            execution.id,
+            "complete",
+            expected_state="active",
+            phase=PipelinePhase.complete.value,
+            pipeline_id=pipeline.id,
+        )
         phase = self._pipeline_cursor(task.id, pipeline.id)
         return AdvanceResult(task.id, pipeline.id, phase, None, "blocked", progressed=False, evidence={"summary": summary})
 
     def _seal_ready(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
+        self._require_pipeline_ownership(task.id, pipeline)
         status = TaskStatus(task.status)
         if status not in {TaskStatus.no_changes, TaskStatus.pushed}:
             status = TaskStatus.succeeded
             self.store.finish_task(task.id, status, "ready to seal")
-        try:
-            self.store.transition_pipeline(pipeline.id, PipelineState.succeeded.value, phase=PipelinePhase.complete.value)
-        except ValueError:
-            pass
-        try:
-            execution = self.store.get_execution(task.id)
-            self.store.transition_execution(execution.id, "complete", expected_state="active", phase=PipelinePhase.complete.value, pipeline_id=pipeline.id)
-        except (KeyError, ValueError):
-            pass
+        self.store.transition_pipeline(
+            pipeline.id,
+            PipelineState.succeeded.value,
+            phase=PipelinePhase.complete.value,
+        )
+        execution = self.store.get_execution(task.id)
+        if execution.state == "active":
+            self.store.transition_execution(
+                execution.id,
+                "complete",
+                expected_state="active",
+                phase=PipelinePhase.complete.value,
+                pipeline_id=pipeline.id,
+            )
+        elif execution.state != "complete":
+            raise TaskLedgerOwnershipError(
+                "task execution is not in a terminal ledger state"
+            )
         self.store.add_event(task.id, "pipeline.ready_to_seal", status.value, {"pipeline_id": pipeline.id, "terminal_status": status.value})
         return AdvanceResult(task.id, pipeline.id, PipelineCursorPhase.ready_to_seal, None, "ready_to_seal", progressed=True, evidence={"terminal_status": status.value})
 

@@ -28,3 +28,13 @@ idempotent repeats, and refuses invalid or mismatched state without repair.
 Ordinary CLI loads disable legacy migration and open the exact Store; start
 validates it before launching Compose. Recovery and daemon restart own no hidden
 initialization transition.
+
+## Ledger-owned task execution
+
+Every current task has one persisted execution row and one valid owning pipeline.
+This ledger-owned execution boundary is consumed directly by execution, session,
+run, checkpoint, archive, and dispatch paths; missing or invalid ownership must
+fail closed.
+Consumers never infer a pipeline from elapsed time, row order, synthetic IDs, or
+create-on-read repair, and failure handling does not finalize or mutate task
+evidence while ownership is corrupt.

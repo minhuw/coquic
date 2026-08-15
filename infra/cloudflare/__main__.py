@@ -18,10 +18,9 @@ except ImportError:  # Pulumi executes this file as a script.
 
 @dataclass(frozen=True)
 class StorageResources:
-    """Handles retained for the dependent credential configuration."""
+    """Handles for the dependent credential configuration."""
 
     database: cloudflare.D1Database
-    usage_database: cloudflare.D1Database
     public_bucket: cloudflare.R2Bucket
     private_bucket: cloudflare.R2Bucket
     public_domain: cloudflare.R2CustomDomain
@@ -146,12 +145,6 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
         name=config.database_name,
         opts=_protected_options(),
     )
-    usage_database = cloudflare.D1Database(
-        "usageDatabase",
-        account_id=config.account_id,
-        name=config.usage_database_name,
-        opts=_protected_options(),
-    )
     public_bucket = cloudflare.R2Bucket(
         "publicArtifacts",
         account_id=config.account_id,
@@ -230,8 +223,7 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
     )
     steward_config = _secret_object(
         account_id=config.account_id,
-        d1_database_id=usage_database.id,
-        rollback_d1_database_id=database.id,
+        d1_database_id=database.id,
         d1_token=steward_token.value,
         public_bucket_name=public_bucket.name,
         private_bucket_name=private_bucket.name,
@@ -240,15 +232,12 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
     )
     site_config = _secret_object(
         account_id=config.account_id,
-        d1_database_id=usage_database.id,
-        rollback_d1_database_id=database.id,
+        d1_database_id=database.id,
         d1_read_token=site_token.value,
         public_base_url=config.public_base_url,
     )
 
-    pulumi.export("d1_database_id", usage_database.id)
-    pulumi.export("usage_d1_database_id", usage_database.id)
-    pulumi.export("rollback_d1_database_id", database.id)
+    pulumi.export("d1_database_id", database.id)
     pulumi.export("public_bucket_name", public_bucket.name)
     pulumi.export("public_base_url", config.public_base_url)
     pulumi.export("steward_config", steward_config)
@@ -260,7 +249,6 @@ def build_stack(config: CloudflareConfig | None = None) -> StorageResources:
 
     return StorageResources(
         database=database,
-        usage_database=usage_database,
         public_bucket=public_bucket,
         private_bucket=private_bucket,
         public_domain=public_domain,

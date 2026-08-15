@@ -9,21 +9,21 @@ import sys
 from typing import Any
 
 import pulumi
+import pytest
 from pulumi.runtime import MockCallArgs, MockResourceArgs, Mocks, set_mocks
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from infra.cloudflare.__main__ import (
+from infra.cloudflare.__main__ import (  # noqa: E402
     SITE_TOKEN_NAME,
     STEWARD_TOKEN_NAME,
     _derive_s3_secret_access_key,
     build_stack,
 )
-from infra.cloudflare.config import (
+from infra.cloudflare.config import (  # noqa: E402
     CloudflareConfig,
-    DEFAULT_USAGE_DATABASE_NAME,
     PRIVATE_RETENTION_SECONDS,
     PUBLIC_HOSTNAME,
 )
@@ -34,7 +34,6 @@ def valid_values() -> dict[str, Any]:
         "account_id": "a" * 32,
         "zone_id": "b" * 32,
         "database_name": "coquic-publication",
-        "usage_database_name": DEFAULT_USAGE_DATABASE_NAME,
         "public_bucket_name": "coquic-public-artifacts",
         "private_bucket_name": "coquic-private-originals",
         "public_hostname": PUBLIC_HOSTNAME,
@@ -42,64 +41,57 @@ def valid_values() -> dict[str, Any]:
     }
 
 
-def test_config_accepts_valid_values() -> None:
+def test_config_accepts_only_canonical_values() -> None:
     config = CloudflareConfig.from_mapping(valid_values())
     assert config.public_base_url == "https://artifacts.coquic.minhuw.dev"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "accountId",
+        "zoneId",
+        "d1_database_name",
+        "public_r2_bucket_name",
+        "private_r2_bucket_name",
+        "hostname",
+        "private_retention_age_seconds",
+        "unexpected",
+    ],
+)
+def test_config_rejects_noncanonical_keys(key: str) -> None:
+    values = valid_values()
+    values[key] = "not-used"
+    with pytest.raises(ValueError, match="unexpected configuration"):
+        CloudflareConfig.from_mapping(values)
 
 
 def test_config_rejects_missing_values() -> None:
     values = valid_values()
     values.pop("account_id")
-    try:
+    with pytest.raises(ValueError, match="account_id"):
         CloudflareConfig.from_mapping(values)
-    except ValueError as exc:
-        assert "account_id" in str(exc)
-    else:
-        raise AssertionError("missing account ID was accepted")
 
 
 def test_config_rejects_identical_buckets() -> None:
     values = valid_values()
     values["private_bucket_name"] = values["public_bucket_name"]
-    try:
+    with pytest.raises(ValueError, match="must differ"):
         CloudflareConfig.from_mapping(values)
-    except ValueError as exc:
-        assert "must differ" in str(exc)
-    else:
-        raise AssertionError("identical bucket names were accepted")
-
-
-def test_config_rejects_usage_database_replacement() -> None:
-    values = valid_values()
-    values["usage_database_name"] = values["database_name"]
-    try:
-        CloudflareConfig.from_mapping(values)
-    except ValueError as exc:
-        assert "usage_database_name" in str(exc)
-    else:
-        raise AssertionError("usage database replacement was accepted")
 
 
 def test_config_rejects_wrong_hostname() -> None:
     values = valid_values()
     values["public_hostname"] = "objects.example.test"
-    try:
+    with pytest.raises(ValueError, match=PUBLIC_HOSTNAME):
         CloudflareConfig.from_mapping(values)
-    except ValueError as exc:
-        assert PUBLIC_HOSTNAME in str(exc)
-    else:
-        raise AssertionError("an unexpected public hostname was accepted")
 
 
 def test_config_rejects_retention_drift() -> None:
     values = valid_values()
-    values["private_retention_seconds"] = 30 * 24 * 60 * 60 + 1
-    try:
+    values["private_retention_seconds"] = PRIVATE_RETENTION_SECONDS + 1
+    with pytest.raises(ValueError, match="2592000"):
         CloudflareConfig.from_mapping(values)
-    except ValueError as exc:
-        assert "2592000" in str(exc)
-    else:
-        raise AssertionError("retention drift was accepted")
 
 
 class RecordingMocks(Mocks):
@@ -111,7 +103,7 @@ class RecordingMocks(Mocks):
         self.resources.append(args)
         state = dict(args.inputs)
         if args.typ == "cloudflare:index/d1Database:D1Database":
-            state["uuid"] = "c" * 32 if args.name == "publicationDatabase" else "d" * 32
+            state["uuid"] = "c" * 32
         if args.typ == "cloudflare:index/accountToken:AccountToken":
             state["value"] = f"mock-value-{args.name}"
         return f"mock-{len(self.resources)}", state
@@ -171,7 +163,7 @@ def run_mock_stack_with_exports() -> tuple[RecordingMocks, dict[str, Any]]:
     return mocks, exports
 
 
-def test_resources_match_storage_topology() -> None:
+def test_resources_match_single_database_topology() -> None:
     mocks = run_mock_stack()
     resources = [
         resource
@@ -182,7 +174,7 @@ def test_resources_match_storage_topology() -> None:
     assert counts == Counter(
         {
             "cloudflare:index/accountToken:AccountToken": 2,
-            "cloudflare:index/d1Database:D1Database": 2,
+            "cloudflare:index/d1Database:D1Database": 1,
             "cloudflare:index/r2Bucket:R2Bucket": 2,
             "cloudflare:index/r2CustomDomain:R2CustomDomain": 1,
             "cloudflare:index/r2BucketLifecycle:R2BucketLifecycle": 1,
@@ -194,16 +186,20 @@ def test_resources_match_storage_topology() -> None:
         for resource in resources
         if resource.typ == "cloudflare:index/d1Database:D1Database"
     ]
-    assert {resource.name for resource in databases} == {
-        "publicationDatabase",
-        "usageDatabase",
-    }
-    assert {resource.inputs["name"] for resource in databases} == {
-        "coquic-publication",
-        DEFAULT_USAGE_DATABASE_NAME,
-    }
+    assert [resource.name for resource in databases] == ["publicationDatabase"]
+    assert [resource.inputs["name"] for resource in databases] == [
+        "coquic-publication"
+    ]
 
-    by_type = {resource.typ: resource for resource in resources if resource.typ != "cloudflare:index/r2Bucket:R2Bucket"}
+    by_type = {
+        resource.typ: resource
+        for resource in resources
+        if resource.typ
+        not in {
+            "cloudflare:index/r2Bucket:R2Bucket",
+            "cloudflare:index/accountToken:AccountToken",
+        }
+    }
     domain = by_type["cloudflare:index/r2CustomDomain:R2CustomDomain"]
     assert domain.inputs["domain"] == PUBLIC_HOSTNAME
     assert domain.inputs["enabled"] is True
@@ -270,6 +266,17 @@ def test_tokens_and_outputs_derive_lower_case_sha256() -> None:
 
 def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
     _, exports = run_mock_stack_with_exports()
+    assert set(exports) == {
+        "d1_database_id",
+        "public_bucket_name",
+        "public_base_url",
+        "steward_config",
+        "site_config",
+        "steward_d1_token",
+        "steward_s3_access_key_id",
+        "steward_s3_secret_access_key",
+        "site_d1_read_token",
+    }
     secret_exports = {
         "steward_config",
         "site_config",
@@ -285,7 +292,6 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
     assert set(steward) == {
         "account_id",
         "d1_database_id",
-        "rollback_d1_database_id",
         "d1_token",
         "public_bucket_name",
         "private_bucket_name",
@@ -300,12 +306,9 @@ def test_tokens_and_outputs_are_secret_and_field_limited() -> None:
     assert set(site) == {
         "account_id",
         "d1_database_id",
-        "rollback_d1_database_id",
         "d1_read_token",
         "public_base_url",
     }
-    assert steward["d1_database_id"] != steward["rollback_d1_database_id"]
-    assert site["d1_database_id"] == steward["d1_database_id"]
-    assert site["rollback_d1_database_id"] == steward["rollback_d1_database_id"]
+    assert steward["d1_database_id"] == site["d1_database_id"]
     assert all("private" not in key.lower() for key in site)
     assert all("bucket" not in key.lower() for key in site)

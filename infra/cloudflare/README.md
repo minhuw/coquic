@@ -1,11 +1,10 @@
 # Cloudflare publication operations
 
 This stack is the provider boundary for Steward cloud publication and Site V2.
-It retains the protected legacy D1 database and creates a second protected,
-clean usage D1 for the cutover. It also creates one public R2 bucket for
-immutable sanitized objects and one private R2 bucket for optional originals.
-The private bucket has no public endpoint or development URL and expires
-objects after 2,592,000 seconds (30 days).
+It creates one protected current D1, one public R2 bucket for immutable
+sanitized objects, and one private R2 bucket for optional originals. The private
+bucket has no public endpoint and expires objects after 2,592,000 seconds
+(30 days).
 
 D1 rows and public objects contain only the validated public contract. Local
 SQLite, task archives, and the optional original remain Steward's private
@@ -14,10 +13,10 @@ the D1 database must never receive private-shaped rows.
 
 ## Inputs and authority
 
-Run the rollout from the operator's local reproducible shell. It is not a
+Run the bootstrap from the operator's local reproducible shell. It is not a
 GitHub Actions step, a Site deploy step, or a Steward lifecycle hook.
 
-Before the rollout, the operator must have:
+Before the bootstrap, the operator must have:
 
 - `nix develop`, Pulumi, Wrangler, and the repository checkout available;
 - a logged-in Pulumi CLI and the selected `production` stack;
@@ -27,15 +26,14 @@ Before the rollout, the operator must have:
 - the protected SSH key and known-hosts entry required by
   `site/deploy/install-cloud-config.sh`.
 
-The process-local bootstrap `CLOUDFLARE_API_TOKEN` authorizes both Pulumi
-provider operations and the Wrangler remote D1 inspection/bootstrap performed
-by this rollout; Wrangler inherits it for its `d1 execute --remote` calls. It
-is never persisted or logged: do not put it in Pulumi configuration, a command
-argument, `.env`, a credential file, or any captured output. It is not a
-Steward or Site runtime credential. Keep Pulumi state and any stack
-configuration containing secrets outside source control.
+The process-local bootstrap token authorizes Pulumi provider operations and the
+Wrangler remote D1 inspection/bootstrap. It is never persisted or logged: do
+not put it in Pulumi configuration, a command argument, `.env`, a credential
+file, or captured output. It is not a Steward or Site runtime credential. Keep
+Pulumi state and any stack configuration containing secrets outside source
+control.
 
-Initialize or select the stack and set only the non-secret topology values:
+Initialize or select the stack and set only these canonical non-secret values:
 
 ```sh
 nix develop
@@ -46,7 +44,6 @@ pulumi stack select production
 pulumi config set account_id <account-id>
 pulumi config set zone_id <zone-id>
 pulumi config set database_name coquic-publication
-pulumi config set usage_database_name coquic-publication-usage
 pulumi config set public_bucket_name coquic-public-artifacts
 pulumi config set private_bucket_name coquic-private-originals
 pulumi config set public_hostname artifacts.coquic.minhuw.dev
@@ -54,33 +51,27 @@ pulumi config set private_retention_seconds 2592000
 ```
 
 Use `pulumi config set --secret` for any later sensitive stack input. Token
-creation and the protected handoff are owned by this rollout; token rotation
+creation and the protected handoff are owned by this bootstrap; token rotation
 requires a separate review because the Steward R2 secret is derived from the
 Steward token.
 
-## Preview and apply
+## Preview and bootstrap
 
-Return to the repository root after setting the Pulumi configuration; the
-rollout command below is written relative to that root.
-
-`infra/cloudflare/scripts/deploy-production.sh` is the only rollout command.
-It requires an absolute credentials directory, an explicit gate, and permits
-only the `production` stack. Preview is read-only; prepare is the only mode
-that may apply the create-only candidate plan:
+Return to the repository root after setting the Pulumi configuration. The only
+rollout command is:
 
 ```sh
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --stack production \
-  --credentials-dir /srv/coquic-steward/private/credentials \
-  --mode prepare
+  --credentials-dir /srv/coquic-steward/private/credentials
 ```
 
 The default is a read-only structured Pulumi preview. Provider output is
-captured below a mode-`0700` temporary directory and reduced to operation counts;
-the temporary plan is mode `0400` and is removed on exit. Review the preview
-before continuing. Stop when the preview is malformed, contains a delete or
-replacement, proposes a broader permission, or exposes a secret. The command
-never applies a plan in its default mode.
+captured below a mode-`0700` temporary directory and reduced to operation
+counts; the temporary plan is mode `0400` and is removed on exit. Stop when the
+preview is malformed, contains a delete, replacement, or update, proposes a
+broader permission, or exposes a secret. The command never applies a plan in
+its default form.
 
 After reviewing the preview, rerun the same command with `--apply`:
 
@@ -88,39 +79,24 @@ After reviewing the preview, rerun the same command with `--apply`:
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --stack production \
   --credentials-dir /srv/coquic-steward/private/credentials \
-  --mode prepare \
   --apply
 ```
 
-The prepare invocation creates and rechecks a fresh structured preview, then
-applies that exact saved plan with Pulumi. The preview must contain creates and
-no updates, deletes, or replacements. It bootstraps the candidate schema and
-installs the three Steward files, but never invokes Site. It never destroys
-resources, rotates tokens, or starts Steward.
-
-After Steward has produced one real task in the candidate D1, rerun the same
-command in activation mode. Activation never applies Pulumi or bootstraps a
-blank database. It rechecks the exact schema and a joined task/usage sample
-covering runs, invocations, turns, globals, ownership, coverage, Token fields,
-and numeric or N.A. cost state before passing the candidate ID to Site:
-
-```sh
-nix develop -c infra/cloudflare/scripts/deploy-production.sh \
-  --stack production \
-  --credentials-dir /srv/coquic-steward/private/credentials \
-  --mode activate \
-  --apply
-```
+The bootstrap invocation creates and rechecks a fresh structured preview, then
+applies that exact saved plan with Pulumi. It validates the one protected D1,
+checks the exact schema, installs the three Steward files, and passes exactly
+four fields through the protected Site handoff. A blank D1 is initialized; an
+exact schema is a no-op; incompatible nonblank state fails without an
+unreviewed schema change. An empty Site is valid. Real-task verification stays
+with the on-demand deployment checker.
 
 ## D1 and credential handoff
 
-After a successful provider apply (or a read-only activation preview), the
-command validates the exact Pulumi `steward_config` and `site_config` objects
-from a private `--show-secrets` capture. Both objects carry the candidate
-`d1_database_id` and the old `rollback_d1_database_id`; mismatched IDs,
+After a successful provider apply, the command validates the exact Pulumi
+`steward_config` and `site_config` objects from a private `--show-secrets`
+capture. Both objects carry the same `d1_database_id`; mismatched IDs,
 malformed IDs, unexpected fields, or invalid URLs stop the run without printing
-the values. The old database is never queried or handed to either producer or
-reader during this rollout.
+values.
 
 It then queries D1 with a fixed read-only `sqlite_master` statement:
 
@@ -130,8 +106,8 @@ It then queries D1 with a fixed read-only `sqlite_master` statement:
 - malformed output or any schema drift stops before host credentials are
   written.
 
-Schema changes require a separately reviewed forward migration. Do not edit
-the schema in place or use a rollback to hide drift.
+Schema changes require a separately reviewed forward change. Do not edit the
+schema in place or use a second database to hide drift.
 
 The `--credentials-dir` target must be a real mode-`0700` directory owned by
 the invoking user. The command atomically installs exactly these three regular
@@ -143,16 +119,13 @@ files, each mode `0600`:
 | `r2-access-key-id` | `steward_config.s3_access_key_id` | `/run/secrets/r2-access-key-id` |
 | `r2-secret-access-key` | `steward_config.s3_secret_access_key` | `/run/secrets/r2-secret-access-key` |
 
-The path names are the host contract; the D1 token has the provider permission
-needed by the trusted publisher. Symlinks, non-regular files, unowned targets,
-unsafe directory modes, and unsafe replacement states are refused. Existing
-regular files are staged and restored if any part of the three-file install
-fails. Values never appear in stdout, stderr, arguments, Compose environment,
-or public publication data.
+Symlinks, non-regular files, unowned targets, unsafe directory modes, and
+unsafe replacement states are refused. Existing regular files are staged and
+restored if any part of the three-file install fails. Values never appear in
+stdout, stderr, arguments, Compose environment, or public publication data.
 
-Activation creates a mode-`0600` temporary input containing exactly these four
-Site fields and invokes the protected SSH handoff. Prepare deliberately does
-not create this file or invoke Site:
+The bootstrap creates a mode-`0600` temporary input containing exactly these
+four Site fields and invokes the protected SSH handoff:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID
@@ -162,56 +135,32 @@ COQUIC_STEWARD_PUBLIC_R2_BASE_URL
 ```
 
 `site/deploy/install-cloud-config.sh` owns remote validation, atomic app-env
-replacement, service configuration, and its rollback transaction. The rollout
-invokes that child with `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_API_KEY`, and
-`PULUMI_ACCESS_TOKEN` explicitly unset, so Site receives only the four fields
-listed above. It installs Site's cloud values but does not deploy a Site
-release or launch Steward.
+replacement, service configuration, and its local transaction. The rollout
+explicitly unsets provider credentials for that child, so Site receives only
+the four fields listed above. It installs Site's cloud values but does not
+deploy a Site release or launch Steward.
 
 ## Failure and rerun boundaries
 
-The stages are intentionally not one fictional transaction. Use this table to
-decide what is safe to inspect and rerun:
+The stages are intentionally separate:
 
 | Failure | State that may remain | Recovery |
 | --- | --- | --- |
-| Pulumi auth/preview/parse | No provider or host mutation | Correct local inputs and rerun preview. |
-| Pulumi apply during prepare | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next create-only preview, then rerun prepare. |
-| Outputs or candidate schema verification | Cloud apply may be complete; no host files were installed | Resolve the provider/schema issue under review, then rerun prepare or activation. |
-| Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership/mode/path issues and rerun prepare. |
-| Candidate sample | Steward remains on the candidate; Site is unchanged | Repair the producer/task evidence and rerun activation. |
-| Site SSH handoff | Candidate D1 and Steward files remain; old D1 is untouched | Repair the protected SSH boundary and rerun activation; no automatic cloud rollback runs. |
+| Pulumi auth/preview/parse | No provider or host mutation | Correct local inputs and rerun the preview. |
+| Pulumi apply | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next safe preview, then rerun the bootstrap. |
+| Outputs or schema verification | Cloud apply may be complete; no host files were installed | Resolve the provider or schema issue under review, then rerun. |
+| Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership, mode, or path issues and rerun. |
+| Site SSH handoff | D1 and Steward files remain | Repair the protected SSH boundary and rerun; no automatic provider reversal runs. |
 
 Every rerun repeats the destructive-plan and schema checks. An exact D1 schema
 is a no-op, and existing credential files are replaced atomically. Never use a
 manual delete, broad glob, or ad hoc secret copy to recover a partial run.
 
-Rollback before activation restores Steward's prior configuration and keeps
-Site on the old D1. After activation, rollback is a paired Site release/config
-restore followed by Steward reconfiguration to the retained
-`rollback_d1_database_id`; it does not migrate, scan, dual-write, or delete
-either database. Provider changes and token rotation remain explicit operator
-reviews. There is no routine provider rollback command.
-
-## Site replica cleanup boundary
-
-The Cloudflare rollout and ordinary Site deploy or rollback never delete local
-replicas. For this rollout, the following exact set is the sole cleanup
-authority for retired Site-host replica roots after the checker proof and the
-chosen rollback window:
-
-```text
-/opt/coquic-demo/steward/tasks
-/opt/coquic-demo/steward/control-loop
-/opt/coquic-demo/steward/cache
-```
-
-Remove at most one listed directory at a time with an operator-owned manual
-command. No other Site path or document is cleanup authority for this rollout;
-do not add or reclassify a target from another document. These are retired Site
-replicas, not Steward's private `$COQUIC_HOME/tasks`,
-`$COQUIC_HOME/control-loop`, or any source archive; never delete those private
-archives or use a recursive glob.
+Application rollback is a Site release/config concern followed by Steward
+reconfiguration to the same persistent D1 and cloud configuration. It does not
+migrate, scan private R2, dual-write, or delete provider state. Provider changes
+and token rotation remain explicit operator reviews; there is no routine
+provider reversal command.
 
 ## Local checks
 
@@ -231,4 +180,4 @@ Related operator runbooks:
 
 - [Steward container operations](../../steward/CONTAINER_OPERATIONS.md)
 - [Steward cloud publication](../../steward/CLOUD_PUBLICATION.md)
-- [Site V2 cutover and checker](../../site-v2/MIGRATION.md)
+- [Site V2 delivery and checker](../../site-v2/MIGRATION.md)

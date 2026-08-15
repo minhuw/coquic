@@ -139,7 +139,7 @@ pending; restart reconciliation retries it before any queued exposure work. D1
 hide atomically hides the current head and supersedes all staged generations,
 so a stage that races after hide cannot be exposed. A successful no-op hide is
 still proof that no visible head remains. Blocked generations and their local
-archives are evidence, never eviction candidates. There is no raw transcript
+archives are evidence, never eviction targets. There is no raw transcript
 fallback, partial publication,
 global control-loop publication, scheduled live monitor, or dedicated canary.
 
@@ -159,34 +159,34 @@ replacement, containment mismatch, missing receipt, or deletion error leaves
 the intent pending or blocked for restart reconciliation; unpublished or
 unverified evidence is never removed.
 
-## Clean-D1 cutover
+## Single-D1 bootstrap
 
-The Cloudflare stack owns two protected databases during Direction 1: the
-retained old D1 and a named clean usage D1. The old identity is rollback-only;
-Steward writes exactly one database at a time and never migrates, scans old R2,
-dual-writes, or installs a compatibility reader.
+The Cloudflare stack creates one protected current D1 with the complete
+`contracts/steward-cloud/d1.sql` schema. Steward and Site receive the same
+`d1_database_id`; there is no second database identity, compatibility reader,
+private-object scan, or dual write. Provider output is captured under a private
+temporary directory and reduced to value-free status messages.
 
-The infrastructure operator owns the two gates. `--mode prepare --apply` is the
-producer gate: it accepts only a create-only Pulumi preview, bootstraps and
-verifies the blank candidate schema, and installs the candidate D1 credentials
-for Steward. It never changes Site. After one real task is complete, the same
-operator runs `--mode activate --apply`; activation performs a read-only schema
-check and joined sample proof for task/usage heads, run, invocation/retry, turn,
-global rollup, ownership, coverage, Token fields, and numeric or N.A. cost state
-before invoking the protected Site handoff. Both modes are rerunnable and
-capture provider output under a private temporary directory.
+The infrastructure operator first reviews a read-only structured Pulumi
+preview, then reruns the command with `--apply` for the reviewed bootstrap. A
+blank D1 is initialized, an exact schema is reused, and incompatible nonblank
+state fails closed. The successful bootstrap installs the three protected
+Steward credential files and hands Site exactly four cloud fields. A valid empty
+Site is accepted; real-task proof belongs to the on-demand deployment checker.
 
-Before activation, a failed producer or sample leaves Site on the old D1. After
-activation, rollback restores the paired Site release/config first and then
-points Steward back to the retained old D1. Both databases remain protected and
-available for inspection; database retirement is a separate operator review.
+A failed provider, schema check, credential install, or Site handoff stops before
+the next boundary. Credential replacement is atomic and a Site handoff failure
+leaves the installed Steward files available for a retry. Application rollback
+restores the paired Site release/config and points Steward at the same
+persistent D1 and configuration. Provider changes and token rotation remain
+separately reviewed; no routine provider reversal runs.
 
 ## Deployment boundary
 
 Publication is disabled by default in local fixtures. The trusted daemon alone
 receives the D1 and R2 credential files; task, planner, and validation
-containers receive none. Credential creation, Cloudflare rollout, Site
+containers receive none. Credential creation, Cloudflare bootstrap, Site
 configuration, bootstrap, start, upgrades, and rollback belong to the
 [container operations runbook](CONTAINER_OPERATIONS.md) and the infrastructure
 runbooks. This document intentionally contains no credentials, host paths, or
-live deployment commands. Historical raw archives are not migrated.
+live deployment commands. Historical raw archives remain private.

@@ -68,21 +68,19 @@ remove objects that are not proven Steward-owned and unreferenced.
 
 ## Ordered launch
 
-Use this sequence after the Cloudflare operator has completed the clean-D1
-producer gate and installed the three candidate publication files. Keep
-non-secret Compose values in a private copy of
-`steward/containers/.env.example`; it contains paths and limits, not credential
-values. Before bootstrap or start, the daemon configuration must also enable
-publication and point its credential fields at the daemon's secret mounts. The
-old D1 remains retained as the rollback identity and is never dual-written.
+Use this sequence after the Cloudflare operator has completed the direct
+bootstrap and installed the three publication files. Keep non-secret Compose
+values in a private copy of `steward/containers/.env.example`; it contains
+paths and limits, not credential values. Before bootstrap or start, the daemon
+configuration must enable publication and point its credential fields at the
+daemon's secret mounts. Steward and Site use the same persistent D1 identity.
 
-The Cloudflare operator runs
-`infra/cloudflare/scripts/deploy-production.sh --mode prepare --apply` before
-this launch. Steward then completes one real task on the candidate. Only after
-that task passes the read-only usage sample does the operator run
-`--mode activate --apply` to hand the candidate reader identity to Site.
-Prepare owns producer admission; activation owns Site reader admission. Neither
-gate applies Pulumi destructively or fabricates a task.
+The Cloudflare operator reviews the read-only preview and then runs
+`infra/cloudflare/scripts/deploy-production.sh --apply` for the reviewed
+bootstrap. The command initializes or verifies the exact current schema,
+installs the Steward files, and hands Site its four cloud fields. A valid empty
+Site is accepted; real-task checking is an on-demand operator proof. The
+bootstrap never fabricates a task or applies an unreviewed provider change.
 
 1. Verify ownership and mode of the credential files, the absolute
    `COQUIC_HOME`, the canonical clone settings, pinned image inputs, and the
@@ -154,7 +152,7 @@ gate applies Pulumi destructively or fabricates a task.
    bash steward/containers/manage.sh status
    ```
 
-8. After Site is activated, run the read-only checker once for the empty state
+8. After the Site handoff, run the read-only checker once for the empty state
    or for the first real published task. The checker proves global and task
    usage surfaces, including run, invocation/retry, one bounded turn page,
    ownership, coverage, Token fields, and numeric/N.A. cost state. It is never
@@ -267,10 +265,10 @@ eligible private session. A crash, mismatch, foreign object, or missing receipt
 leaves the intent for restart reconciliation. Never use age-based deletion,
 recursive globs, or a host-wide cleanup command.
 
-## Site proof and delayed cleanup
+## Site proof
 
-An empty public D1 is healthy. Once Site is activated, run the retained checker
-manually after the first real completed publication:
+An empty public D1 is healthy. Run the retained checker manually after the
+bootstrap and, when available, after the first real completed publication:
 
 ```sh
 nix develop -c uv run --project steward python scripts/check-steward-deployment.py \
@@ -280,31 +278,17 @@ nix develop -c uv run --project steward python scripts/check-steward-deployment.
 
 The checker accepts the valid empty state with explicit skips. With a real task
 it selects the first visible task, verifies ownership, loads the complete
-trajectory, and proves one same-origin artifact action returns a safe `307`
-redirect. Missing, malformed, private, integrity, ownership, and unsafe
-redirect responses fail closed. Only transient endpoint failures are suitable
-for a manual rerun. There is no scheduled monitor, synthetic canary, polling
-loop, or fabricated task.
+trajectory, proves one same-origin artifact action returns a safe `307` redirect,
+and checks the metrics surfaces. Missing, malformed, private, integrity,
+ownership, and unsafe redirect responses fail closed. Only transient endpoint
+failures are suitable for a manual rerun. There is no scheduled monitor,
+synthetic canary, polling loop, or fabricated task.
 
 Site application deploy and rollback are owned by Site. They never alter D1,
-R2, Pulumi state, Steward credentials, or the Steward release selectors. For
-this rollout, the following exact set is the sole cleanup authority for retired
-Site replica roots; it is a separate, delayed operator cleanup after the
-checker proof and the chosen rollback window:
-
-```text
-/opt/coquic-demo/steward/tasks
-/opt/coquic-demo/steward/control-loop
-/opt/coquic-demo/steward/cache
-```
-
-Treat each listed directory as one exact target: remove at most one at a time
-with an operator-owned command after verifying cutover. No other Site path or
-document is cleanup authority for this rollout; do not add or reclassify a
-target from another document. Ordinary Site deploy, repair, and rollback
-remove none of these paths. Do not delete `$COQUIC_HOME/tasks`,
-`$COQUIC_HOME/control-loop`, or any Steward source archive; those private
-archives and their per-task verified cleanup protocol are not Site replicas.
+R2, Pulumi state, Steward credentials, or the Steward release selectors. A
+current-release rollback restores the Site pair and points Steward at the same
+persistent D1 and cloud configuration. Provider changes remain a separate
+operator action.
 
 ## Local proof
 

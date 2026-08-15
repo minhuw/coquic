@@ -1007,9 +1007,6 @@ class TaskArchive:
     def task_dir(self, task_id: str) -> Path:
         return self.root / validate_opaque_id(task_id)
 
-    task_root = task_dir
-    task_archive_path = task_dir
-
     def task_path(self, task_id: str, relative: str = "") -> Path:
         validate_opaque_id(task_id)
         if not relative:
@@ -1021,15 +1018,11 @@ class TaskArchive:
         validate_opaque_id(pipeline_id)
         return self.task_dir(task_id) / "pipelines" / pipeline_id
 
-    pipeline_path = pipeline_dir
-
     def run_dir(self, task_id: str, pipeline_id: str, run_id: str) -> Path:
         validate_opaque_id(task_id)
         validate_opaque_id(pipeline_id)
         validate_opaque_id(run_id)
         return self.pipeline_dir(task_id, pipeline_id) / "runs" / run_id
-
-    run_path = run_dir
 
     def collect_invocation_evidence(
         self,
@@ -1345,11 +1338,6 @@ class TaskArchive:
             )
         return tuple(selected)
 
-    # Names used by publication and archive callers are intentionally aliases
-    # of the same bounded implementation.
-    collect_run_invocations = collect_invocation_evidence
-    collect_invocation_telemetry = collect_invocation_evidence
-
     def collect_run_publication_evidence(
         self,
         task_id: str,
@@ -1620,8 +1608,6 @@ class TaskArchive:
             self.append_event(task_id, event)
         return directory
 
-    write_task = create_task
-
     def create_task_from_record(
         self,
         record: TaskRecord,
@@ -1652,8 +1638,6 @@ class TaskArchive:
             raise ArchiveConflictError("task metadata identity does not match archive path")
         _validate_task_document(value)
         return self.write_json(task_id, "task.json", value)
-
-    materialize_task = update_task
 
     def _task_metadata(
         self,
@@ -1739,9 +1723,6 @@ class TaskArchive:
         self._atomic_bytes(path, data)
         return path
 
-    write_metadata = write_json
-    atomic_write = write_json
-
     def write_bytes(self, task_id: str, relative: str, data: bytes) -> Path:
         path = self.task_path(task_id, relative)
         self._assert_mutable(task_id, path)
@@ -1800,8 +1781,6 @@ class TaskArchive:
         if path.read_bytes() != data:
             raise ArchiveConflictError(f"conflicting visible archive bytes: {path}")
         return "adopted"
-
-    reconcile_generation = reconcile
 
     def reconcile_expected(self, task_id: str, expected: Mapping[str, bytes | Mapping[str, Any] | list[Any]]) -> dict[str, str]:
         return {relative: self.reconcile(task_id, relative, value) for relative, value in expected.items()}
@@ -1881,8 +1860,6 @@ class TaskArchive:
         _fsync_directory(path.parent)
         return offset
 
-    append_jsonl_record = append_jsonl
-
     def append_event(self, task_id: str, event: Mapping[str, Any]) -> int:
         value = dict(event)
         value.setdefault("eventId", f"event-{secrets.token_hex(10)}")
@@ -1893,8 +1870,6 @@ class TaskArchive:
         return self.append_jsonl(
             task_id, "events.jsonl", value, generated_at=generated_at
         )
-
-    append_task_event = append_event
 
     def materialize_pipeline(
         self,
@@ -1963,9 +1938,6 @@ class TaskArchive:
         path = self.write_json(task_id, relative, value)
         self._add_task_pipeline_reference(task_id, identifier, int(value["ordinal"]))
         return path
-
-    write_pipeline = materialize_pipeline
-    materialize_pipeline_descriptor = materialize_pipeline
 
     def materialize_ledger(
         self,
@@ -2082,9 +2054,6 @@ class TaskArchive:
         self._add_pipeline_run_reference(task_id, pipeline_id, identifier, int(value["roleOrdinal"]), str(value["role"]), str(value["state"]))
         return path
 
-    write_run = materialize_run
-    materialize_run_descriptor = materialize_run
-
     def materialize_artifact(
         self,
         task_id: str,
@@ -2097,8 +2066,6 @@ class TaskArchive:
             self.append_jsonl(task_id, relative, value.encode("utf-8") if isinstance(value, str) else value)
             return self.task_path(task_id, relative)
         return self.write_bytes(task_id, relative, value.encode("utf-8") if isinstance(value, str) else value)
-
-    write_artifact = materialize_artifact
 
     def materialize_validation(
         self,
@@ -2153,8 +2120,6 @@ class TaskArchive:
             task_id, pipeline_id, identifier, int(value["ordinal"])
         )
         return path
-
-    write_validation = materialize_validation
 
     def materialize_review(
         self,
@@ -2214,8 +2179,6 @@ class TaskArchive:
         )
         return path
 
-    write_review = materialize_review
-
     def materialize_integration(
         self,
         task_id: str,
@@ -2235,8 +2198,6 @@ class TaskArchive:
             value,
         )
 
-    write_integration = materialize_integration
-
     def append_run_jsonl(
         self,
         task_id: str,
@@ -2252,10 +2213,6 @@ class TaskArchive:
             f"pipelines/{validate_opaque_id(pipeline_id)}/runs/{validate_opaque_id(run_id)}/{name}",
             record,
         )
-
-    append_codex_record = lambda self, task_id, pipeline_id, run_id, record: self.append_run_jsonl(task_id, pipeline_id, run_id, "codex.jsonl", record)
-    append_activity = lambda self, task_id, pipeline_id, run_id, record: self.append_run_jsonl(task_id, pipeline_id, run_id, "activities.jsonl", record)
-    append_tool_change = lambda self, task_id, pipeline_id, run_id, record: self.append_run_jsonl(task_id, pipeline_id, run_id, "tool-changes/manifest.jsonl", record)
 
     def write_run_file(
         self,
@@ -2276,8 +2233,6 @@ class TaskArchive:
             f"pipelines/{validate_opaque_id(pipeline_id)}/runs/{validate_opaque_id(run_id)}/{validate_relative_path(name)}",
             payload,
         )
-
-    write_codex_artifact = write_run_file
 
     def seal(
         self,
@@ -2477,10 +2432,6 @@ class TaskArchive:
             "completedAt": completed_at,
         }
 
-    seal_task = seal
-    freeze = seal
-    seal_archive = seal
-
     def verify(self, task_id: str) -> bool:
         manifest_path = self.task_dir(task_id) / "manifest.json"
         if not manifest_path.exists():
@@ -2490,9 +2441,6 @@ class TaskArchive:
         except ArchiveError:
             return False
         return True
-
-    verify_manifest = verify
-    verify_task = verify
 
     def verify_or_raise(self, task_id: str) -> bool:
         manifest_path = self.task_dir(task_id) / "manifest.json"
@@ -2573,12 +2521,6 @@ class TaskArchive:
         if task_dir.exists() or task_dir.is_symlink():
             raise ArchiveConflictError("task archive remains after deletion")
         return manifest_digest if return_digest else "deleted"
-
-    # Keep the destructive operation discoverable under the archive vocabulary
-    # used by callers while preserving one exact task-id input boundary.
-    delete = delete_verified
-    delete_task = delete_verified
-    delete_archive = delete_verified
 
     def _add_task_pipeline_reference(self, task_id: str, pipeline_id: str, ordinal: int) -> None:
         path = self.task_path(task_id, "task.json")
@@ -3176,7 +3118,6 @@ class TaskArchiveWriter(TaskArchive):
     """Explicit name for callers that distinguish the writer from verifier."""
 
 
-ArchiveWriter = TaskArchiveWriter
 
 
 def archive_for(config_or_root: Path | Any, *, epoch_id: str | None = None) -> TaskArchive:
@@ -3287,7 +3228,6 @@ __all__ = [
     "ArchiveImmutableError",
     "ArchiveSealError",
     "ArchiveValidationError",
-    "ArchiveWriter",
     "archive_for",
     "ensure_epoch",
     "verify_archive",

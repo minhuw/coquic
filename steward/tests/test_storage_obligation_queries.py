@@ -72,7 +72,7 @@ def test_running_runs_are_discovered_without_a_task_window(
 
     discovered = store.running_runs()
     assert [run.id for run in discovered] == [running.id]
-    assert [run.id for run in store.list_running_runs(task_id=oldest.id)] == [
+    assert [run.id for run in store.running_runs(task_id=oldest.id)] == [
         running.id
     ]
 
@@ -154,12 +154,12 @@ def test_cleanup_queries_use_all_events_and_latest_completion(
     } == pending_ids
     assert {task.id for task in store.cleanup_pending_tasks()} == pending_ids
     assert store.cleanup_pending_count() == 4
-    assert store.pending_cleanup_count() == 4
-    assert store.count_cleanup_pending() == 4
+    assert store.cleanup_pending_count() == 4
+    assert store.cleanup_pending_count() == 4
     assert store.has_cleanup_pending(pending_only.id)
-    assert store.has_pending_cleanup(reopened.id)
+    assert store.has_cleanup_pending(reopened.id)
     assert not store.has_cleanup_pending(completed.id)
     assert not store.has_cleanup_pending(late_completion.id)
     assert store.event_exists(late_completion.id, "cleanup_complete")
-    assert store.has_event(late_completion.id, "cleanup_complete")
+    assert store.event_exists(late_completion.id, "cleanup_complete")
     assert store.count_task_events(late_completion.id, "cleanup_pending") == 205

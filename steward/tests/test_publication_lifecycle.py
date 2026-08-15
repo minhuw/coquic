@@ -1417,7 +1417,7 @@ def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path
     tasks_dir = tmp_path / "tasks"
     archive = TaskArchiveWriter(SimpleNamespace(tasks_dir=tasks_dir))
 
-    def seal_archive(completion_identity: str) -> str:
+    def build_sealed_archive(completion_identity: str) -> str:
         archive.create_task(task_id, "prompt", pipeline_id="pipeline-cleanup")
         archive.materialize_pipeline(
             task_id,
@@ -1468,9 +1468,9 @@ def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path
         )
         return archive.manifest_digest(task_id)
 
-    expected_digest = seal_archive("completion-cleanup-a")
+    expected_digest = build_sealed_archive("completion-cleanup-a")
     archive.task_dir(task_id).rename(tmp_path / "archive-a")
-    replacement_digest = seal_archive("completion-cleanup-b")
+    replacement_digest = build_sealed_archive("completion-cleanup-b")
     assert replacement_digest != expected_digest
 
     class CleanupStore:

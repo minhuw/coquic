@@ -47,6 +47,52 @@ def test_task_store_direct_construction_is_rejected(config: StewardConfig) -> No
     assert "TaskStore.open()" in message
 
 
+@pytest.mark.parametrize(
+    ("operation", "obsolete_key"),
+    [
+        ("execution", "phase"),
+        ("execution", "owning_pipeline"),
+        ("execution", "pipeline_id"),
+        ("execution", "session_id"),
+        ("execution", "run_id"),
+        ("execution", "base"),
+        ("execution", "tree"),
+        ("pipeline", "base"),
+        ("pipeline", "input"),
+        ("pipeline", "output"),
+        ("pipeline", "patch"),
+        ("run", "provider_id"),
+        ("run", "provider_run"),
+        ("run", "reasoning_effort"),
+        ("run", "summary"),
+    ],
+)
+def test_store_rejects_obsolete_field_names(
+    config: StewardConfig, operation: str, obsolete_key: str
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
+    )
+    value = {obsolete_key: "obsolete"}
+
+    with pytest.raises(ValueError, match=rf"unsupported {operation} fields"):
+        if operation == "execution":
+            store.ensure_execution(task.id, **value)
+        elif operation == "pipeline":
+            store.create_pipeline(task.id, **value)
+        else:
+            pipeline = store.list_pipelines(task.id)[0]
+            session = store.create_session(task.id, pipeline.id)
+            store.create_run(
+                task.id,
+                pipeline.id,
+                session.id,
+                role="implementation",
+                **value,
+            )
+
+
 def test_open_rejects_a_database_without_its_durable_wal_namespace(
     tmp_path: Path,
 ) -> None:
@@ -556,7 +602,7 @@ def test_checkpoint_round_trip(config: StewardConfig) -> None:
         phase="implementation",
         owning_pipeline_id=pipeline.id,
     )
-    store.save_checkpoint(checkpoint)
+    store.upsert_checkpoint(checkpoint)
     assert store.checkpoint_matches(
         execution.id, base_commit="a" * 40, expected_tree="b" * 40
     )
@@ -598,7 +644,7 @@ def test_execution_and_checkpoint_pointers_are_task_scoped(
             run_id=second_run.id,
         )
     with pytest.raises(ValueError, match="session does not belong"):
-        store.save_checkpoint(
+        store.upsert_checkpoint(
             WorktreeCheckpoint(
                 task_id=first_task.id,
                 execution_id=first_execution.id,
@@ -610,7 +656,7 @@ def test_execution_and_checkpoint_pointers_are_task_scoped(
                 active_run_id=second_run.id,
             )
         )
-    checkpoint = store.save_checkpoint(
+    checkpoint = store.upsert_checkpoint(
         WorktreeCheckpoint(
             task_id=first_task.id,
             execution_id=first_execution.id,
@@ -663,7 +709,7 @@ def test_referenced_pipeline_cannot_be_reassigned_to_another_task(
         "active",
         pipeline_id=pipeline.id,
     )
-    store.save_checkpoint(
+    store.upsert_checkpoint(
         WorktreeCheckpoint(
             task_id=first_task.id,
             execution_id=first_execution.id,
@@ -910,7 +956,7 @@ def test_checkpoint_rejects_dirty_worktree(config: StewardConfig) -> None:
         owning_pipeline_id=pipeline.id,
         phase="implementation",
     )
-    store.save_checkpoint(
+    store.upsert_checkpoint(
         WorktreeCheckpoint(
             task_id=identity.task_id,
             execution_id=identity.execution_id,
@@ -953,7 +999,7 @@ def test_checkpoint_recovery_binds_durable_runtime_identity(
         image_version="image-v1",
         runtime_version="runtime-v1",
     )
-    store.save_checkpoint(
+    store.upsert_checkpoint(
         WorktreeCheckpoint(
             task_id=identity.task_id,
             execution_id=identity.execution_id,

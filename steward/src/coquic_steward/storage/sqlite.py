@@ -19,7 +19,7 @@ from sqlalchemy import (
     Select,
     and_,
     create_engine,
-    delete,
+    delete as sql_delete,
     event,
     func,
     or_,
@@ -803,6 +803,7 @@ class SQLiteTaskStore:
         **fields: object,
     ) -> TaskExecution:
         """Create (or return) the single execution owner for a task."""
+        normalized_fields = _execution_fields(fields)
         with Session(self.engine) as session, session.begin():
             existing = session.scalar(
                 select(TaskExecutionRow).where(TaskExecutionRow.task_id == task_id)
@@ -831,7 +832,7 @@ class SQLiteTaskStore:
                     id=execution_id or new_execution_id(),
                     task_id=task_id,
                     idempotency_key=idempotency_key,
-                    **_execution_fields(fields),
+                    **normalized_fields,
                     created_at=now,
                     updated_at=now,
                 )
@@ -848,10 +849,6 @@ class SQLiteTaskStore:
             )
             item = self.get_execution(task_id)
         return item
-
-    create_execution = ensure_execution
-    create_task_execution = ensure_execution
-    allocate_execution = ensure_execution
 
     def get_execution(self, task_id_or_execution_id: str) -> TaskExecution:
         with Session(self.engine) as session:
@@ -950,15 +947,11 @@ class SQLiteTaskStore:
             ):
                 raise ValueError("execution run does not belong to task session")
 
-    update_execution_state = transition_execution
-
     def list_executions(self, task_id: str) -> list[TaskExecution]:
         try:
             return [self.get_execution(task_id)]
         except KeyError:
             return []
-
-    execution_history = list_executions
 
     def create_pipeline(
         self,
@@ -971,6 +964,7 @@ class SQLiteTaskStore:
         ordinal: int | None = None,
         **fields: object,
     ) -> TaskPipeline:
+        normalized_fields = _pipeline_fields(fields)
         execution = self.ensure_execution(
             task_id, execution_id=execution_id, initialize_pipeline=False
         )
@@ -985,7 +979,7 @@ class SQLiteTaskStore:
             trigger=trigger,
             parent_pipeline_id=parent_pipeline_id,
             ordinal=ordinal,
-            **fields,
+            **normalized_fields,
         )
 
     def _insert_pipeline(
@@ -1051,8 +1045,6 @@ class SQLiteTaskStore:
             ).all()
             return [row_to_pipeline(row) for row in rows]
 
-    pipeline_history = list_pipelines
-
     def get_pipeline(self, pipeline_id: str) -> TaskPipeline:
         with Session(self.engine) as session:
             row = session.get(TaskPipelineRow, pipeline_id)
@@ -1095,10 +1087,6 @@ class SQLiteTaskStore:
                     execution.current_phase = phase
                 execution.updated_at = now
         return self.get_pipeline(pipeline_id)
-
-    update_pipeline_state = transition_pipeline
-    create_task_pipeline = create_pipeline
-    allocate_pipeline = create_pipeline
 
     def create_session(
         self,
@@ -1208,8 +1196,6 @@ class SQLiteTaskStore:
             rows = session.scalars(statement.order_by(CodexSessionRow.started_at, CodexSessionRow.id)).all()
             return [row_to_session(row, path_codec=self.path_codec) for row in rows]
 
-    session_history = list_sessions
-
     def close_session(
         self, session_id: str, *, state: str = "closed", expected_state: str | None = None
     ) -> CodexSession:
@@ -1228,10 +1214,6 @@ class SQLiteTaskStore:
             row.updated_at = now
             row.closed_at = now
         return self.get_session(session_id)
-
-    end_session = close_session
-    create_codex_session = create_session
-    allocate_session = create_session
 
     def create_session_with_run(
         self,
@@ -1432,6 +1414,7 @@ class SQLiteTaskStore:
         idempotency_key: str | None = None,
         **fields: object,
     ) -> TaskRun:
+        normalized_fields = _run_fields(fields)
         pipeline = self.get_pipeline(pipeline_id)
         if pipeline.task_id != task_id:
             raise ValueError("run pipeline does not belong to task")
@@ -1467,13 +1450,13 @@ class SQLiteTaskStore:
                 raise ValueError("recovery run role does not match predecessor")
             if predecessor.session_id != session_id:
                 raise ValueError("a recovery run must reuse the interrupted session")
-            expected_image = fields.get("image_version")
-            expected_runtime = fields.get("runtime_version")
+            expected_image = normalized_fields.get("image_version")
+            expected_runtime = normalized_fields.get("runtime_version")
             if predecessor.image_version != expected_image:
                 raise ValueError("recovery run image version does not match predecessor")
             if predecessor.runtime_version != expected_runtime:
                 raise ValueError("recovery run runtime version does not match predecessor")
-            expected_checkpoint = fields.get("checkpoint_id")
+            expected_checkpoint = normalized_fields.get("checkpoint_id")
             if predecessor.checkpoint_id != expected_checkpoint:
                 raise ValueError("recovery run worktree checkpoint does not match predecessor")
         if idempotency_key:
@@ -1531,7 +1514,7 @@ class SQLiteTaskStore:
                         parent_run_id=parent_run_id,
                         retry_of_run_id=retry_of_run_id,
                         idempotency_key=idempotency_key,
-                        **_run_fields(fields),
+                        **normalized_fields,
                         started_at=now,
                         updated_at=now,
                     )
@@ -1597,8 +1580,6 @@ class SQLiteTaskStore:
             rows = session.scalars(statement.order_by(TaskRunRow.started_at, TaskRunRow.id)).all()
             return [row_to_run(row) for row in rows]
 
-    run_history = list_runs
-
     def running_runs(
         self, *, task_id: str | None = None, limit: int | None = None
     ) -> list[TaskRun]:
@@ -1617,8 +1598,6 @@ class SQLiteTaskStore:
         with Session(self.engine) as session:
             rows = session.scalars(statement).all()
             return [row_to_run(row) for row in rows]
-
-    list_running_runs = running_runs
 
     def transition_run(
         self,
@@ -1667,10 +1646,6 @@ class SQLiteTaskStore:
                     execution.updated_at = now
         return self.get_run(run_id)
 
-    update_run_state = transition_run
-    create_task_run = create_run
-    allocate_run = create_run
-
     def mark_run_interrupted(self, run_id: str, *, reason: str | None = None) -> TaskRun:
         return self.transition_run(
             run_id,
@@ -1678,9 +1653,6 @@ class SQLiteTaskStore:
             expected_state=CodexRunState.running.value,
             exit_reason=reason,
         )
-
-    interrupt_run = mark_run_interrupted
-    record_run_interruption = mark_run_interrupted
 
     def restart_run(self, run_id: str, *, reason: str = "resume retry") -> TaskRun:
         """Re-arm one persisted recovery run for a bounded provider retry."""
@@ -1801,8 +1773,6 @@ class SQLiteTaskStore:
                         setattr(row, key, value)
             session.flush()
         return checkpoint
-
-    save_checkpoint = upsert_checkpoint
 
     def get_checkpoint(self, execution_id: str) -> WorktreeCheckpoint:
         with Session(self.engine) as session:
@@ -2138,8 +2108,6 @@ class SQLiteTaskStore:
             saved.append(saved_item)
         return saved, created
 
-    ingest_signal_fetch = ingest_signal_collection
-
     def claim_control_loop_planner_run(self, planner_run_id: str, signal_ids: list[str], active_task_ids: list[str] = (), *, prompt: dict[str, object] | None = None, attempt: int = 1):
         result = self.control_loop.claim_planner_run(
             planner_run_id,
@@ -2151,14 +2119,10 @@ class SQLiteTaskStore:
         self._notify_change()
         return result
 
-    claim_planner_run = claim_control_loop_planner_run
-
     def complete_control_loop_planner_run(self, planner_run_id: str, dispositions: list[object], **kwargs: object):
         result = self.control_loop.complete_planner_run(planner_run_id, dispositions, **kwargs)
         self._notify_change()
         return result
-
-    complete_planner_run = complete_control_loop_planner_run
 
     def commit_planner_decision(
         self,
@@ -2640,11 +2604,6 @@ class SQLiteTaskStore:
             fence=saved,
         )
 
-    begin_hide = begin_publication_hide
-    begin_publication_hide_fence = begin_publication_hide
-    create_publication_hide = begin_publication_hide
-    create_publication_hide_fence = begin_publication_hide
-
     def confirm_publication_hide(
         self,
         task_id: str,
@@ -2736,10 +2695,6 @@ class SQLiteTaskStore:
             fence=saved,
         )
 
-    confirm_hide = confirm_publication_hide
-    confirm_publication_hide_fence = confirm_publication_hide
-    verify_publication_hide = confirm_publication_hide
-
     def get_publication_hide(self, task_id: str) -> PublicationHideFence | None:
         task = _publication_identifier(task_id)
         with self.engine.begin() as connection:
@@ -2749,11 +2704,6 @@ class SQLiteTaskStore:
                 {"task_id": task},
             ).mappings().first()
         return None if row is None else _publication_hide_from_row(row)
-
-    get_publication_hide_fence = get_publication_hide
-    get_hide_fence = get_publication_hide
-    get_publication_hide_intent = get_publication_hide
-    get_hide_intent = get_publication_hide
 
     def list_publication_hides(
         self,
@@ -2785,20 +2735,10 @@ class SQLiteTaskStore:
             ).mappings().all()
         return [_publication_hide_from_row(row) for row in rows]
 
-    list_publication_hide_fences = list_publication_hides
-    list_hide_fences = list_publication_hides
-    list_publication_hide_intents = list_publication_hides
-    list_hide_intents = list_publication_hides
-    publication_hides = list_publication_hides
-    publication_hide_intents = list_publication_hides
-
     def list_pending_publication_hides(
         self, *, task_id: str | None = None
     ) -> list[PublicationHideFence]:
         return self.list_publication_hides(task_id=task_id, pending_only=True)
-
-    pending_publication_hides = list_pending_publication_hides
-    pending_publication_hide_fences = list_pending_publication_hides
 
     def enqueue_publication(
         self,
@@ -2934,11 +2874,6 @@ class SQLiteTaskStore:
             generation=saved,
             fence=fence,
         )
-
-    enqueue_generation = enqueue_publication
-    enqueue_outbox = enqueue_publication
-    queue_publication = enqueue_publication
-    enqueue_publication_generation = enqueue_publication
 
     def replace_blocked_publication(
         self,
@@ -3180,8 +3115,6 @@ class SQLiteTaskStore:
             fence=fence,
         )
 
-    replace_blocked_generation = replace_blocked_publication
-
     def get_publication_generation(
         self, publication_id: str
     ) -> PublicationGeneration | None:
@@ -3192,9 +3125,6 @@ class SQLiteTaskStore:
                 {"publication_id": publication_id},
             ).mappings().first()
         return None if row is None else _publication_generation_from_row(row)
-
-    publication_generation = get_publication_generation
-    get_generation = get_publication_generation
 
     def list_publication_generations(
         self,
@@ -3228,8 +3158,6 @@ class SQLiteTaskStore:
                 parameters,
             ).mappings().all()
         return [_publication_generation_from_row(row) for row in rows]
-
-    generations = list_publication_generations
 
     def claim_publication(
         self,
@@ -3393,10 +3321,6 @@ class SQLiteTaskStore:
             self._notify_change()
         return result
 
-    claim_generation = claim_publication
-    claim_outbox = claim_publication
-    claim_publication_generation = claim_publication
-
     def expire_publication_leases(
         self, *, now: datetime | None = None
     ) -> list[PublicationGeneration]:
@@ -3434,10 +3358,6 @@ class SQLiteTaskStore:
             for publication_id in expired_ids
             if (generation := self.get_publication_generation(publication_id)) is not None
         ]
-
-    expire_generation_leases = expire_publication_leases
-    reconcile_publication_leases = expire_publication_leases
-    expire_leases = expire_publication_leases
 
     def renew_publication_lease(
         self,
@@ -3556,10 +3476,6 @@ class SQLiteTaskStore:
             PublicationOperationStatus.renewed,
             generation=updated,
         )
-
-    renew_generation_lease = renew_publication_lease
-    renew_lease = renew_publication_lease
-    renew_publication = renew_publication_lease
 
     def advance_publication(
         self,
@@ -3704,12 +3620,6 @@ class SQLiteTaskStore:
             PublicationOperationStatus.advanced,
             generation=updated,
         )
-
-    transition_publication = advance_publication
-    transition_generation = advance_publication
-    advance_generation = advance_publication
-    transition_publication_state = advance_publication
-    advance_publication_generation = advance_publication
 
     def record_publication_receipt(
         self,
@@ -3903,9 +3813,6 @@ class SQLiteTaskStore:
             receipt=saved,
         )
 
-    record_receipt = record_publication_receipt
-    save_publication_receipt = record_publication_receipt
-
     def list_publication_receipts(
         self,
         publication_id: str,
@@ -3928,10 +3835,6 @@ class SQLiteTaskStore:
                 parameters,
             ).mappings().all()
         return [_publication_receipt_from_row(row) for row in rows]
-
-    publication_receipts = list_publication_receipts
-    get_publication_receipts = list_publication_receipts
-    list_receipts = list_publication_receipts
 
     def schedule_publication_retry(
         self,
@@ -4019,10 +3922,6 @@ class SQLiteTaskStore:
             if result.status is PublicationOperationStatus.advanced
             else result
         )
-
-    schedule_retry = schedule_publication_retry
-    retry_publication = schedule_publication_retry
-    schedule_publication_retry_wait = schedule_publication_retry
 
     def block_publication(
         self,
@@ -4172,9 +4071,6 @@ class SQLiteTaskStore:
             else result
         )
 
-    block_generation = block_publication
-    block_outbox = block_publication
-
     def create_cleanup_intent(
         self, intent: CleanupIntent
     ) -> PublicationOperationResult:
@@ -4282,9 +4178,6 @@ class SQLiteTaskStore:
             cleanup=saved,
         )
 
-    enqueue_cleanup_intent = create_cleanup_intent
-    record_cleanup_intent = create_cleanup_intent
-
     def get_cleanup_intent(self, intent_id: str) -> CleanupIntent | None:
         with self.engine.begin() as connection:
             row = connection.exec_driver_sql(
@@ -4293,8 +4186,6 @@ class SQLiteTaskStore:
                 {"intent_id": intent_id},
             ).mappings().first()
         return None if row is None else _publication_cleanup_from_row(row)
-
-    cleanup_intent = get_cleanup_intent
 
     def list_cleanup_intents(
         self,
@@ -4322,8 +4213,6 @@ class SQLiteTaskStore:
                 parameters,
             ).mappings().all()
         return [_publication_cleanup_from_row(row) for row in rows]
-
-    cleanup_intents = list_cleanup_intents
 
     def verify_cleanup_intent(
         self,
@@ -4409,8 +4298,6 @@ class SQLiteTaskStore:
             PublicationOperationStatus.verified,
             cleanup=updated,
         )
-
-    verify_cleanup = verify_cleanup_intent
 
     def complete_cleanup_intent(
         self,
@@ -4503,9 +4390,6 @@ class SQLiteTaskStore:
             cleanup=updated,
         )
 
-    finish_cleanup_intent = complete_cleanup_intent
-    finish_cleanup = complete_cleanup_intent
-
     def block_cleanup_intent(
         self,
         intent_id: str,
@@ -4587,8 +4471,6 @@ class SQLiteTaskStore:
             cleanup=updated,
             reason=updated.reason,
         )
-
-    block_cleanup = block_cleanup_intent
 
     def _expire_publication_leases_in_connection(
         self, connection: Connection, timestamp: datetime
@@ -4708,10 +4590,6 @@ class SQLiteTaskStore:
             oldest_queued_at=oldest,
             last_category=row["reason"],
         )
-
-    publication_health = get_publication_health
-    health_snapshot = get_publication_health
-    get_publication_health_snapshot = get_publication_health
 
     # ------------------------------------------------------------------
     # Private Compose release/container/resource facts
@@ -5158,7 +5036,7 @@ class SQLiteTaskStore:
         cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat()
         with Session(self.engine) as session, session.begin():
             result = session.execute(
-                delete(SchedulerWakeupRow).where(
+                sql_delete(SchedulerWakeupRow).where(
                     SchedulerWakeupRow.status == SchedulerWakeupStatus.consumed.value,
                     SchedulerWakeupRow.consumed_at < cutoff,
                 )
@@ -5633,7 +5511,6 @@ class SQLiteTaskStore:
 
     # A short name is useful to callers that already use ``list_*`` for
     # unpaged compatibility methods.
-    task_page = list_tasks_page
 
     def iter_tasks(
         self,
@@ -5660,8 +5537,6 @@ class SQLiteTaskStore:
             if page.next_cursor is None:
                 return
             cursor = page.next_cursor
-
-    iterate_tasks = iter_tasks
 
     def queued_tasks(self, *, limit: int | None = None) -> list[TaskRecord]:
         tasks = self._tasks_by_status(TaskStatus.queued)
@@ -5772,8 +5647,6 @@ class SQLiteTaskStore:
                 is not None
             )
 
-    has_event = event_exists
-
     def count_task_events(self, task_id: str, kind: str | None = None) -> int:
         statement = select(func.count()).select_from(EventRow).where(
             EventRow.task_id == task_id
@@ -5820,9 +5693,6 @@ class SQLiteTaskStore:
                 for row in rows
             ]
 
-    pending_cleanup_tasks = cleanup_pending_tasks
-    list_cleanup_pending_tasks = cleanup_pending_tasks
-
     def cleanup_pending_task_ids(self, *, limit: int | None = None) -> list[str]:
         statement = (
             select(TaskRow.id)
@@ -5847,9 +5717,6 @@ class SQLiteTaskStore:
                 or 0
             )
 
-    pending_cleanup_count = cleanup_pending_count
-    count_cleanup_pending = cleanup_pending_count
-
     def has_cleanup_pending(self, task_id: str) -> bool:
         with Session(self.engine) as session:
             return (
@@ -5860,8 +5727,6 @@ class SQLiteTaskStore:
                 )
                 is not None
             )
-
-    has_pending_cleanup = has_cleanup_pending
 
     def count_events(self, kind: str) -> int:
         with Session(self.engine) as session:
@@ -6465,10 +6330,19 @@ def _row_values(row: object) -> dict[str, object]:
     return {column.name: getattr(row, column.name) for column in table.columns}
 
 
+def _validated_fields(
+    fields: dict[str, object], allowed: tuple[str, ...], label: str
+) -> dict[str, object]:
+    unknown = set(fields) - set(allowed)
+    if unknown:
+        raise ValueError(f"unsupported {label} fields: {sorted(unknown)}")
+    return {key: fields[key] for key in allowed if key in fields}
+
+
 def _execution_fields(fields: dict[str, object]) -> dict[str, object]:
-    accepted = {
-        key: fields[key]
-        for key in (
+    return _validated_fields(
+        fields,
+        (
             "state",
             "current_phase",
             "owning_pipeline_id",
@@ -6480,28 +6354,15 @@ def _execution_fields(fields: dict[str, object]) -> dict[str, object]:
             "image_version",
             "runtime_version",
             "archive_generation",
-        )
-        if key in fields
-    }
-    aliases = {
-        "phase": "current_phase",
-        "owning_pipeline": "owning_pipeline_id",
-        "pipeline_id": "owning_pipeline_id",
-        "session_id": "active_session_id",
-        "run_id": "active_run_id",
-        "base": "base_commit",
-        "tree": "expected_tree",
-    }
-    for source, target in aliases.items():
-        if source in fields and target not in accepted:
-            accepted[target] = fields[source]
-    return accepted
+        ),
+        "execution",
+    )
 
 
 def _pipeline_fields(fields: dict[str, object]) -> dict[str, object]:
-    accepted = {
-        key: fields[key]
-        for key in (
+    return _validated_fields(
+        fields,
+        (
             "phase",
             "state",
             "base_identity",
@@ -6511,25 +6372,15 @@ def _pipeline_fields(fields: dict[str, object]) -> dict[str, object]:
             "metadata",
             "completed_at",
             "archive_generation",
-        )
-        if key in fields
-    }
-    aliases = {
-        "base": "base_identity",
-        "input": "input_identity",
-        "output": "output_identity",
-        "patch": "patch_identity",
-    }
-    for source, target in aliases.items():
-        if source in fields and target not in accepted:
-            accepted[target] = fields[source]
-    return accepted
+        ),
+        "pipeline",
+    )
 
 
 def _run_fields(fields: dict[str, object]) -> dict[str, object]:
-    accepted = {
-        key: fields[key]
-        for key in (
+    return _validated_fields(
+        fields,
+        (
             "state",
             "model",
             "reasoning",
@@ -6546,19 +6397,9 @@ def _run_fields(fields: dict[str, object]) -> dict[str, object]:
             "result_summary",
             "completed_at",
             "archive_generation",
-        )
-        if key in fields
-    }
-    aliases = {
-        "provider_id": "provider_run_id",
-        "provider_run": "provider_run_id",
-        "reasoning_effort": "reasoning",
-        "summary": "result_summary",
-    }
-    for source, target in aliases.items():
-        if source in fields and target not in accepted:
-            accepted[target] = fields[source]
-    return accepted
+        ),
+        "run",
+    )
 
 
 def _task_query() -> Select[tuple[TaskRow]]:

@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # This command is an operator-local boundary. It never prints provider output:
-# Pulumi, Wrangler, and the Site handoff are captured below a private
-# temporary directory and reduced to value-free status messages.
+# Pulumi, Wrangler, and the Site handoff are captured below a private temporary
+# directory and reduced to value-free status messages. Accepted plans remain in
+# a separate private review directory until the explicit apply.
 umask 077
 
 readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -13,11 +14,12 @@ readonly schema_path="${repository_root}/contracts/steward-cloud/d1.sql"
 
 usage() {
   cat >&2 <<'EOF'
-usage: deploy-production.sh --stack production --credentials-dir DIR [--apply]
+usage: deploy-production.sh --stack production --credentials-dir DIR [--plan-dir DIR] [--apply]
 
-Preview is read-only. Add --apply only after reviewing the structured preview
-when the current D1, protected credentials, and Site handoff should be bootstrapped.
-A blank D1 is initialized, an exact schema is reused, and schema drift fails closed.
+Preview is read-only and retains an accepted plan in the private plan directory.
+Review that plan, then rerun with --apply to consume exactly that plan; --apply
+never creates a replacement preview. A blank D1 is initialized, an exact schema
+is reused, and schema drift fails closed.
 EOF
 }
 
@@ -28,6 +30,8 @@ fail() {
 
 stack="${PULUMI_STACK:-}"
 credentials_dir="${COQUIC_STEWARD_CREDENTIAL_DIR:-}"
+state_home="${XDG_STATE_HOME:-${HOME:-}}"
+plan_dir="${COQUIC_CLOUDFLARE_PLAN_DIR:-${state_home}/coquic-cloudflare-bootstrap}"
 site_installer="${COQUIC_SITE_INSTALLER:-${SITE_INSTALLER:-${repository_root}/site/deploy/install-cloud-config.sh}}"
 pulumi_bin="${PULUMI_BIN:-pulumi}"
 wrangler_bin="${WRANGLER_BIN:-wrangler}"
@@ -57,6 +61,15 @@ while (($#)); do
       credentials_dir="${1#*=}"
       shift
       ;;
+    --plan-dir)
+      (($# >= 2)) || fail "--plan-dir requires a value"
+      plan_dir="$2"
+      shift 2
+      ;;
+    --plan-dir=*)
+      plan_dir="${1#*=}"
+      shift
+      ;;
     --site-installer)
       (($# >= 2)) || fail "--site-installer requires a value"
       site_installer="$2"
@@ -81,6 +94,10 @@ done
 [[ "${stack}" == "production" ]] || fail "only the production stack is allowed"
 [[ -n "${credentials_dir}" ]] || fail "--credentials-dir is required"
 [[ "${credentials_dir}" == /* ]] || fail "--credentials-dir must be absolute"
+if [[ -z "${state_home}" && -z "${COQUIC_CLOUDFLARE_PLAN_DIR:-}" ]]; then
+  fail "XDG_STATE_HOME or HOME is required"
+fi
+[[ "${plan_dir}" == /* ]] || fail "--plan-dir must be absolute"
 [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || fail "CLOUDFLARE_API_TOKEN is required"
 [[ -f "${schema_path}" && ! -L "${schema_path}" ]] || fail "canonical D1 schema is missing"
 
@@ -106,27 +123,194 @@ cleanup() {
 }
 trap cleanup EXIT
 
+operator_uid="$(id -u)" || fail "unable to determine invoking user"
+reviewed_plan="${plan_dir}/${stack}.plan"
+review_record="${plan_dir}/${stack}.review.json"
+
+ensure_plan_directory() {
+  if [[ -L "${plan_dir}" ]]; then
+    fail "reviewed plan directory must not be a symlink"
+  fi
+  if [[ ! -e "${plan_dir}" ]]; then
+    ((apply == 0)) || fail "reviewed plan directory is unavailable"
+    mkdir -p -- "${plan_dir}" || fail "unable to create reviewed plan directory"
+    chmod 700 -- "${plan_dir}" || fail "unable to secure reviewed plan directory"
+  fi
+  [[ -d "${plan_dir}" && ! -L "${plan_dir}" ]] || fail "reviewed plan directory must be a directory"
+  [[ "$(stat -c '%u' -- "${plan_dir}")" == "${operator_uid}" ]] || fail "reviewed plan directory is not owned by the invoking user"
+  [[ "$(stat -c '%a' -- "${plan_dir}")" == "700" ]] || fail "reviewed plan directory must have mode 0700"
+}
+
+validate_review_file() {
+  local path="$1"
+  local label="$2"
+  [[ -f "${path}" && ! -L "${path}" ]] || fail "${label} is missing or not a regular file"
+  [[ "$(stat -c '%u' -- "${path}")" == "${operator_uid}" ]] || fail "${label} is not owned by the invoking user"
+  [[ "$(stat -c '%a' -- "${path}")" == "400" ]] || fail "${label} must have mode 0400"
+}
+
+invalidate_review() {
+  ensure_plan_directory
+  local path
+  for path in "${reviewed_plan}" "${review_record}"; do
+    if [[ -L "${path}" ]]; then
+      fail "reviewed plan artifacts must not be symlinks"
+    fi
+    if [[ -e "${path}" ]]; then
+      [[ -f "${path}" ]] || fail "reviewed plan artifact must be a regular file"
+      [[ "$(stat -c '%u' -- "${path}")" == "${operator_uid}" ]] || fail "reviewed plan artifact is not owned by the invoking user"
+      [[ "$(stat -c '%a' -- "${path}")" == "400" ]] || fail "reviewed plan artifact must have mode 0400"
+      rm -f -- "${path}" || fail "unable to invalidate prior reviewed plan"
+    fi
+  done
+}
+
+persist_review() {
+  ensure_plan_directory
+  local stage_plan stage_record operations
+  stage_plan="$(mktemp "${plan_dir}/.${stack}.plan.XXXXXX")" || fail "unable to stage reviewed Pulumi plan"
+  stage_record="$(mktemp "${plan_dir}/.${stack}.review.XXXXXX")" || {
+    rm -f -- "${stage_plan}"
+    fail "unable to stage reviewed Pulumi metadata"
+  }
+  if ! cp -- "${saved_plan}" "${stage_plan}"; then
+    rm -f -- "${stage_plan}" "${stage_record}"
+    fail "unable to retain reviewed Pulumi plan"
+  fi
+  chmod 400 -- "${stage_plan}" || {
+    rm -f -- "${stage_plan}" "${stage_record}"
+    fail "unable to secure reviewed Pulumi plan"
+  }
+  operations="$(<"${temporary_dir}/preview-parse.out")"
+  if ! python3 - "${stage_record}" "${stack}" "${plan_digest}" "${operations}" <<'PY'
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+
+
+destination = Path(sys.argv[1])
+destination.write_text(
+    json.dumps(
+        {
+            "operations": sys.argv[4],
+            "plan_digest": sys.argv[3],
+            "stack": sys.argv[2],
+        },
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+  then
+    rm -f -- "${stage_plan}" "${stage_record}"
+    fail "unable to retain reviewed Pulumi metadata"
+  fi
+  chmod 400 -- "${stage_record}" || {
+    rm -f -- "${stage_plan}" "${stage_record}"
+    fail "unable to secure reviewed Pulumi metadata"
+  }
+  [[ "$(sha256sum -- "${stage_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || {
+    rm -f -- "${stage_plan}" "${stage_record}"
+    fail "retained Pulumi plan failed digest validation"
+  }
+  for path in "${reviewed_plan}" "${review_record}"; do
+    [[ ! -L "${path}" ]] || {
+      rm -f -- "${stage_plan}" "${stage_record}"
+      fail "reviewed plan artifacts must not be symlinks"
+    }
+  done
+  if ! mv -f -- "${stage_plan}" "${reviewed_plan}"; then
+    rm -f -- "${stage_plan}" "${stage_record}"
+    fail "unable to publish reviewed Pulumi plan"
+  fi
+  if ! mv -f -- "${stage_record}" "${review_record}"; then
+    rm -f -- "${stage_record}"
+    fail "unable to publish reviewed Pulumi metadata"
+  fi
+  validate_review_file "${reviewed_plan}" "reviewed Pulumi plan"
+  validate_review_file "${review_record}" "reviewed Pulumi metadata"
+}
+
+load_review() {
+  ensure_plan_directory
+  validate_review_file "${reviewed_plan}" "reviewed Pulumi plan"
+  validate_review_file "${review_record}" "reviewed Pulumi metadata"
+  if ! plan_digest="$(python3 - "${review_record}" "${stack}" 2>"${temporary_dir}/review-parse.err" <<'PY'
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import sys
+
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(payload, dict) or set(payload) != {"operations", "plan_digest", "stack"}:
+    raise SystemExit(2)
+if payload["stack"] != sys.argv[2]:
+    raise SystemExit(2)
+if not isinstance(payload["plan_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", payload["plan_digest"]):
+    raise SystemExit(2)
+operations = payload["operations"]
+if not isinstance(operations, str):
+    raise SystemExit(2)
+parts = operations.split()
+labels = ("create", "update", "delete", "same", "read", "refresh")
+if len(parts) != 7 or tuple(part.split("=", 1)[0] for part in parts[:6]) != labels:
+    raise SystemExit(2)
+if any(not re.fullmatch(r"[a-z]+=[0-9]+", part) for part in parts[:6]):
+    raise SystemExit(2)
+if not re.fullmatch(r"resources=[0-9]+", parts[6]):
+    raise SystemExit(2)
+print(payload["plan_digest"])
+PY
+  )"; then
+    fail "reviewed Pulumi metadata is invalid"
+  fi
+  [[ "$(sha256sum -- "${reviewed_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || fail "reviewed Pulumi plan failed digest validation"
+  saved_plan="${reviewed_plan}"
+}
+
+consume_review() {
+  ensure_plan_directory
+  validate_review_file "${reviewed_plan}" "reviewed Pulumi plan"
+  validate_review_file "${review_record}" "reviewed Pulumi metadata"
+  rm -f -- "${reviewed_plan}" "${review_record}" || fail "unable to consume reviewed Pulumi plan"
+}
+
 cd -- "${cloudflare_dir}" || fail "unable to enter the Cloudflare project directory"
+
+if ((apply == 1)); then
+  load_review
+else
+  invalidate_review
+fi
 
 if ! "${pulumi_bin}" whoami >"${temporary_dir}/pulumi-whoami.out" 2>"${temporary_dir}/pulumi-whoami.err"; then
   fail "Pulumi Cloud login is required"
 fi
 
-preview_output="${temporary_dir}/pulumi-preview.json"
-preview_error="${temporary_dir}/pulumi-preview.err"
-saved_plan="${temporary_dir}/production.plan"
-if ! "${pulumi_bin}" preview \
-  --stack "${stack}" \
-  --json \
-  --non-interactive \
-  --save-plan "${saved_plan}" \
-  >"${preview_output}" 2>"${preview_error}"; then
-  fail "Pulumi preview failed"
+if ((apply == 0)); then
+  preview_output="${temporary_dir}/pulumi-preview.json"
+  preview_error="${temporary_dir}/pulumi-preview.err"
+  saved_plan="${temporary_dir}/production.plan"
+  if ! "${pulumi_bin}" preview \
+    --stack "${stack}" \
+    --json \
+    --non-interactive \
+    --save-plan "${saved_plan}" \
+    >"${preview_output}" 2>"${preview_error}"; then
+    fail "Pulumi preview failed"
+  fi
+  [[ -f "${saved_plan}" && ! -L "${saved_plan}" && -s "${saved_plan}" ]] || fail "Pulumi did not create a saved preview plan"
+  chmod 400 "${saved_plan}"
 fi
-[[ -f "${saved_plan}" && ! -L "${saved_plan}" && -s "${saved_plan}" ]] || fail "Pulumi did not create a saved preview plan"
-chmod 400 "${saved_plan}"
 
-# Pulumi JSON is a stream of event objects in current releases, while test
+if ((apply == 0)); then
+  # Pulumi JSON is a stream of event objects in current releases, while test
 # doubles and older releases may emit one JSON array/object. Parse both forms,
 # scan all values for secret-shaped material, and admit only this exact graph.
 if ! python3 - "${preview_output}" >"${temporary_dir}/preview-parse.out" 2>"${temporary_dir}/preview-parse.err" <<'PY'
@@ -296,18 +480,22 @@ PY
 then
   fail "Pulumi preview was not a safe structured plan for the protected stack"
 fi
-
-plan_digest="$(sha256sum "${saved_plan}" | cut -d' ' -f1)"
-[[ "${plan_digest}" =~ ^[0-9a-f]{64}$ ]] || fail "saved Pulumi plan could not be verified"
-printf 'preview accepted for stack %s\n' "${stack}"
-printf 'preview operations: %s\n' "$(<"${temporary_dir}/preview-parse.out")"
+fi
 
 if ((apply == 0)); then
-  printf 'no changes applied (use --apply with this command to continue)\n'
+  plan_digest="$(sha256sum -- "${saved_plan}" | cut -d' ' -f1)"
+  [[ "${plan_digest}" =~ ^[0-9a-f]{64}$ ]] || fail "saved Pulumi plan could not be verified"
+  persist_review
+  printf 'preview accepted for stack %s\n' "${stack}"
+  printf 'preview operations: %s\n' "$(<"${temporary_dir}/preview-parse.out")"
+  printf 'reviewed plan retained with digest: %s\n' "${plan_digest}"
+  printf 'no changes applied (review the plan, then rerun with --apply)\n'
   exit 0
 fi
 
-[[ "$(sha256sum "${saved_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || fail "saved Pulumi plan changed before apply"
+printf 'reviewed plan accepted for stack %s\n' "${stack}"
+printf 'reviewed plan digest: %s\n' "${plan_digest}"
+[[ "$(sha256sum -- "${saved_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || fail "reviewed Pulumi plan changed before apply"
 if ! "${pulumi_bin}" up \
   --stack "${stack}" \
   --plan "${saved_plan}" \
@@ -316,6 +504,7 @@ if ! "${pulumi_bin}" up \
   >"${temporary_dir}/pulumi-up.out" 2>"${temporary_dir}/pulumi-up.err"; then
   fail "Pulumi apply failed; cloud state may be partial, and D1 or host changes were not attempted"
 fi
+consume_review
 
 stack_outputs="${temporary_dir}/stack-outputs.json"
 if ! "${pulumi_bin}" stack output \

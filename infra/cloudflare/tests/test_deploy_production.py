@@ -81,6 +81,10 @@ if args[:1] == ["preview"]:
             }))
     raise SystemExit(0)
 if args[:1] == ["up"]:
+    plan = Path(args[args.index("--plan") + 1])
+    Path(os.environ["PULUMI_UP_PLAN"]).write_text(
+        plan.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     Path(os.environ["PULUMI_APPLIED"]).write_text("yes", encoding="utf-8")
     if case == "apply-failure":
         print("apply output is hidden", file=sys.stderr)
@@ -306,6 +310,9 @@ def harness(tmp_path: Path) -> dict[str, Any]:
     site_input = tmp_path / "site-input"
     credentials = tmp_path / "credentials"
     credentials.mkdir(mode=0o700)
+    plan_dir = tmp_path / "reviewed-plans"
+    plan_dir.mkdir(mode=0o700)
+    up_plan = tmp_path / "pulumi-up-plan"
     real_mv = shutil.which("mv")
     assert real_mv is not None
     env = os.environ.copy()
@@ -321,7 +328,9 @@ def harness(tmp_path: Path) -> dict[str, Any]:
             "SCHEMA_ROWS": str(rows_path),
             "SCHEMA_ROWS_POPULATED": str(populated_rows_path),
             "PULUMI_APPLIED": str(applied),
+            "PULUMI_UP_PLAN": str(up_plan),
             "WRANGLER_BOOTSTRAPPED": str(bootstrapped),
+            "COQUIC_CLOUDFLARE_PLAN_DIR": str(plan_dir),
             "SITE_INPUT": str(site_input),
             "PULUMI_CASE": "ok",
             "WRANGLER_CASE": "exact",
@@ -340,6 +349,8 @@ def harness(tmp_path: Path) -> dict[str, Any]:
         "applied": applied,
         "bootstrapped": bootstrapped,
         "site_input": site_input,
+        "plan_dir": plan_dir,
+        "up_plan": up_plan,
         "values": values,
     }
 
@@ -350,6 +361,8 @@ def _run(harness: dict[str, Any], *extra: str, apply: bool = False) -> subproces
         "production",
         "--credentials-dir",
         str(harness["credentials"]),
+        "--plan-dir",
+        str(harness["plan_dir"]),
     ]
     if apply:
         args.append("--apply")
@@ -363,6 +376,12 @@ def _run(harness: dict[str, Any], *extra: str, apply: bool = False) -> subproces
         check=False,
         timeout=30,
     )
+
+
+def _reviewed_apply(harness: dict[str, Any], *extra: str) -> subprocess.CompletedProcess[str]:
+    preview = _run(harness)
+    assert preview.returncode == 0, preview.stderr
+    return _run(harness, *extra, apply=True)
 
 
 def _logs(harness: dict[str, Any]) -> list[dict[str, Any] | str]:
@@ -406,6 +425,13 @@ def test_default_preview_is_read_only(harness: dict[str, Any]) -> None:
     assert "no changes applied" in result.stdout
     assert not harness["applied"].exists()
     assert not any(harness["credentials"].iterdir())
+    reviewed_plan = harness["plan_dir"] / "production.plan"
+    review_record = harness["plan_dir"] / "production.review.json"
+    assert reviewed_plan.is_file()
+    assert review_record.is_file()
+    assert stat.S_IMODE(reviewed_plan.stat().st_mode) == 0o400
+    assert stat.S_IMODE(review_record.stat().st_mode) == 0o400
+    assert stat.S_IMODE(harness["plan_dir"].stat().st_mode) == 0o700
     logs = _logs(harness)
     pulumi = _argv(logs, "pulumi")
     assert [argv[0] for argv in pulumi] == ["whoami", "preview"]
@@ -415,6 +441,49 @@ def test_default_preview_is_read_only(harness: dict[str, Any]) -> None:
     assert _argv(logs, "wrangler") == []
     assert all(isinstance(entry, dict) for entry in logs)
     assert "bootstrap-" not in result.stdout + result.stderr
+
+
+def test_apply_requires_a_prior_reviewed_plan(harness: dict[str, Any]) -> None:
+    result = _run(harness, apply=True)
+    assert result.returncode != 0
+    assert "reviewed Pulumi plan" in result.stderr
+    assert not harness["applied"].exists()
+    assert _argv(_logs(harness), "pulumi") == []
+
+
+def test_apply_consumes_reviewed_plan_without_a_new_preview(
+    harness: dict[str, Any],
+) -> None:
+    preview = _run(harness)
+    assert preview.returncode == 0, preview.stderr
+    harness["env"]["PULUMI_CASE"] = "update"
+    result = _run(harness, apply=True)
+    assert result.returncode == 0, result.stderr
+    pulumi = _argv(_logs(harness), "pulumi")
+    assert [argv[0] for argv in pulumi] == [
+        "whoami",
+        "preview",
+        "whoami",
+        "up",
+        "stack",
+    ]
+    assert harness["up_plan"].read_text(encoding="utf-8") == "saved-plan"
+    assert not (harness["plan_dir"] / "production.plan").exists()
+    assert not (harness["plan_dir"] / "production.review.json").exists()
+
+
+def test_apply_rejects_a_changed_reviewed_plan(harness: dict[str, Any]) -> None:
+    preview = _run(harness)
+    assert preview.returncode == 0, preview.stderr
+    reviewed_plan = harness["plan_dir"] / "production.plan"
+    reviewed_plan.chmod(0o600)
+    reviewed_plan.write_text("tampered-plan", encoding="utf-8")
+    reviewed_plan.chmod(0o400)
+    result = _run(harness, apply=True)
+    assert result.returncode != 0
+    assert "digest" in result.stderr
+    assert not harness["applied"].exists()
+    assert all(argv[0] != "up" for argv in _argv(_logs(harness), "pulumi"))
 
 
 @pytest.mark.parametrize(
@@ -491,7 +560,7 @@ def test_apply_bootstraps_schema_installs_credentials_and_hands_site(
     harness: dict[str, Any],
 ) -> None:
     harness["env"]["WRANGLER_CASE"] = "blank"
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode == 0, result.stderr
     assert "cloud bootstrap complete" in result.stdout
     assert harness["applied"].exists()
@@ -528,7 +597,7 @@ def test_exact_schema_and_empty_data_are_accepted(
     harness: dict[str, Any], case: str
 ) -> None:
     harness["env"]["WRANGLER_CASE"] = case
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode == 0, result.stderr
     wrangler = _argv(_logs(harness), "wrangler")
     assert len(wrangler) == 1
@@ -542,7 +611,7 @@ def test_schema_failure_stops_before_host_mutation(
     harness: dict[str, Any], case: str
 ) -> None:
     harness["env"]["WRANGLER_CASE"] = case
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert harness["applied"].exists()
     assert not any(harness["credentials"].iterdir())
@@ -551,7 +620,7 @@ def test_schema_failure_stops_before_host_mutation(
 
 def test_pulumi_apply_failure_stops_before_d1_or_files(harness: dict[str, Any]) -> None:
     harness["env"]["PULUMI_CASE"] = "apply-failure"
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "D1" in result.stderr
     assert _argv(_logs(harness), "wrangler") == []
@@ -560,7 +629,7 @@ def test_pulumi_apply_failure_stops_before_d1_or_files(harness: dict[str, Any]) 
 
 def test_bootstrap_failure_preserves_host_state(harness: dict[str, Any]) -> None:
     harness["env"]["WRANGLER_CASE"] = "bootstrap-failure"
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "bootstrap failed" in result.stderr
     assert not any(harness["credentials"].iterdir())
@@ -574,7 +643,7 @@ def test_output_allowlist_rejects_extra_value_without_leaking_it(
     canary = "canary-" + "c" * 24
     payload["unexpected"] = canary
     harness["outputs_path"].write_text(json.dumps(payload), encoding="utf-8")
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "allowlist" in result.stderr
     assert canary not in result.stdout + result.stderr
@@ -585,7 +654,7 @@ def test_site_failure_leaves_installed_credentials_for_retry(
     harness: dict[str, Any],
 ) -> None:
     harness["env"]["SITE_CASE"] = "failure"
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "handoff failed" in result.stderr
     assert (harness["credentials"] / "d1-read-token").exists()
@@ -595,14 +664,14 @@ def test_site_failure_leaves_installed_credentials_for_retry(
 
 
 def test_rerun_replaces_existing_private_files(harness: dict[str, Any]) -> None:
-    first = _run(harness, apply=True)
+    first = _reviewed_apply(harness)
     assert first.returncode == 0, first.stderr
     old = (harness["credentials"] / "d1-read-token").read_text(encoding="utf-8")
     outputs = json.loads(harness["outputs_path"].read_text(encoding="utf-8"))
     outputs["steward_config"]["d1_token"] = "replacement-" + "r" * 20
     outputs["steward_d1_token"] = outputs["steward_config"]["d1_token"]
     harness["outputs_path"].write_text(json.dumps(outputs), encoding="utf-8")
-    second = _run(harness, apply=True)
+    second = _reviewed_apply(harness)
     assert second.returncode == 0, second.stderr
     assert (harness["credentials"] / "d1-read-token").read_text(encoding="utf-8") != old
     assert stat.S_IMODE((harness["credentials"] / "d1-read-token").stat().st_mode) == 0o600
@@ -613,7 +682,7 @@ def test_existing_credential_directory_must_be_private(
     harness: dict[str, Any], mode: int
 ) -> None:
     harness["credentials"].chmod(mode)
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "0700" in result.stderr
     assert not any(harness["credentials"].iterdir())
@@ -631,7 +700,7 @@ def test_credential_path_must_be_a_real_directory(
         target.mkdir(mode=0o700)
         harness["credentials"].symlink_to(target, target_is_directory=True)
 
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "credential directory" in result.stderr
     assert not harness["site_input"].exists()
@@ -640,6 +709,8 @@ def test_credential_path_must_be_a_real_directory(
 def test_credential_directory_must_be_owned_by_invoking_user(
     harness: dict[str, Any],
 ) -> None:
+    preview = _run(harness)
+    assert preview.returncode == 0, preview.stderr
     harness["env"]["OWNER_CASE"] = "foreign"
     result = _run(harness, apply=True)
     assert result.returncode != 0
@@ -662,7 +733,7 @@ def test_partial_credential_install_restores_prior_files(
         path.chmod(0o600)
     harness["env"]["MV_CASE"] = "fail-second-install"
 
-    result = _run(harness, apply=True)
+    result = _reviewed_apply(harness)
     assert result.returncode != 0
     assert "unable to install credential files" in result.stderr
     assert not harness["site_input"].exists()

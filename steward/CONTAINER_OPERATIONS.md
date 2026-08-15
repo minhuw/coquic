@@ -75,12 +75,15 @@ paths and limits, not credential values. Before bootstrap or start, the daemon
 configuration must enable publication and point its credential fields at the
 daemon's secret mounts. Steward and Site use the same persistent D1 identity.
 
-The Cloudflare operator reviews the read-only preview and then runs
-`infra/cloudflare/scripts/deploy-production.sh --apply` for the reviewed
-bootstrap. The command initializes or verifies the exact current schema,
-installs the Steward files, and hands Site its four cloud fields. A valid empty
-Site is accepted; real-task checking is an on-demand operator proof. The
-bootstrap never fabricates a task or applies an unreviewed provider change.
+The Cloudflare operator reviews the read-only preview, which retains the
+accepted plan privately, and then runs
+`infra/cloudflare/scripts/deploy-production.sh --apply` to consume exactly that
+reviewed plan. Apply never creates a replacement preview, and a plan that no
+longer matches provider state or configuration is rejected. The command
+initializes or verifies the exact current schema, installs the Steward files,
+and hands Site its four cloud fields. A valid empty Site is accepted; real-task
+checking is an on-demand operator proof. The bootstrap never fabricates a task
+or applies an unreviewed provider change.
 
 1. Verify ownership and mode of the credential files, the absolute
    `COQUIC_HOME`, the canonical clone settings, pinned image inputs, and the

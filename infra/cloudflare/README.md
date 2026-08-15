@@ -68,7 +68,10 @@ nix develop -c infra/cloudflare/scripts/deploy-production.sh \
 
 The default is a read-only structured Pulumi preview. Provider output is
 captured below a mode-`0700` temporary directory and reduced to operation
-counts; the temporary plan is mode `0400` and is removed on exit. Stop when the
+counts. After the safety checks pass, the exact plan and a review record are
+retained in a private mode-`0700` plan directory; both files are mode `0400`.
+The default directory is `${XDG_STATE_HOME:-$HOME/.local/state}/coquic-cloudflare-bootstrap`;
+use `--plan-dir` to select another private absolute directory. Stop when the
 preview is malformed, contains a delete, replacement, or update, proposes a
 broader permission, or exposes a secret. The command never applies a plan in
 its default form.
@@ -82,13 +85,15 @@ nix develop -c infra/cloudflare/scripts/deploy-production.sh \
   --apply
 ```
 
-The bootstrap invocation creates and rechecks a fresh structured preview, then
-applies that exact saved plan with Pulumi. It validates the one protected D1,
-checks the exact schema, installs the three Steward files, and passes exactly
-four fields through the protected Site handoff. A blank D1 is initialized; an
-exact schema is a no-op; incompatible nonblank state fails without an
-unreviewed schema change. An empty Site is valid. Real-task verification stays
-with the on-demand deployment checker.
+The bootstrap invocation authenticates, validates the retained review record
+and digest, and applies exactly that operator-reviewed plan with Pulumi. It
+never creates a replacement preview. Pulumi rejects a saved plan that no
+longer matches current provider state or configuration. The command then
+validates the one protected D1, checks the exact schema, installs the three
+Steward files, and passes exactly four fields through the protected Site
+handoff. A blank D1 is initialized; an exact schema is a no-op; incompatible
+nonblank state fails without an unreviewed schema change. An empty Site is
+valid. Real-task verification stays with the on-demand deployment checker.
 
 ## D1 and credential handoff
 
@@ -146,15 +151,17 @@ The stages are intentionally separate:
 
 | Failure | State that may remain | Recovery |
 | --- | --- | --- |
-| Pulumi auth/preview/parse | No provider or host mutation | Correct local inputs and rerun the preview. |
+| Pulumi auth/preview/parse | No provider or host mutation; no accepted apply artifact | Correct local inputs and rerun the preview. |
 | Pulumi apply | Cloud state may be partial; D1 and host were not attempted | Inspect Pulumi state, review the next safe preview, then rerun the bootstrap. |
 | Outputs or schema verification | Cloud apply may be complete; no host files were installed | Resolve the provider or schema issue under review, then rerun. |
 | Three-file credential install | Prior regular files are restored, or no new set exists | Fix ownership, mode, or path issues and rerun. |
 | Site SSH handoff | D1 and Steward files remain | Repair the protected SSH boundary and rerun; no automatic provider reversal runs. |
 
-Every rerun repeats the destructive-plan and schema checks. An exact D1 schema
-is a no-op, and existing credential files are replaced atomically. Never use a
-manual delete, broad glob, or ad hoc secret copy to recover a partial run.
+Each new preview repeats the destructive-plan and secret checks. An apply
+consumes only the retained reviewed plan, and the bootstrap repeats the D1
+schema check. An exact D1 schema is a no-op, and existing credential files are
+replaced atomically. Never use a manual delete, broad glob, or ad hoc secret
+copy to recover a partial run.
 
 Application rollback is a Site release/config concern followed by Steward
 reconfiguration to the same persistent D1 and cloud configuration. It does not

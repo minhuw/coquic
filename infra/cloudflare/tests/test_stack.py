@@ -24,6 +24,7 @@ from infra.cloudflare.__main__ import (  # noqa: E402
 )
 from infra.cloudflare.config import (  # noqa: E402
     CloudflareConfig,
+    load_config,
     PRIVATE_RETENTION_SECONDS,
     PUBLIC_HOSTNAME,
 )
@@ -64,6 +65,20 @@ def test_config_rejects_noncanonical_keys(key: str) -> None:
     values[key] = "not-used"
     with pytest.raises(ValueError, match="unexpected configuration"):
         CloudflareConfig.from_mapping(values)
+
+
+def test_runtime_config_rejects_unexpected_project_keys() -> None:
+    runtime_values = {
+        f"coquic-cloudflare:{key}": str(value)
+        for key, value in valid_values().items()
+    }
+    runtime_values["coquic-cloudflare:usage_" + "database_name"] = "legacy"
+    pulumi.runtime.set_all_config(runtime_values)
+    try:
+        with pytest.raises(ValueError, match="unexpected configuration"):
+            load_config(pulumi.Config("coquic-cloudflare"))
+    finally:
+        pulumi.runtime.set_all_config({})
 
 
 def test_config_rejects_missing_values() -> None:

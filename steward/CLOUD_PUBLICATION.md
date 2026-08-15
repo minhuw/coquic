@@ -168,11 +168,14 @@ private-object scan, or dual write. Provider output is captured under a private
 temporary directory and reduced to value-free status messages.
 
 The infrastructure operator first reviews a read-only structured Pulumi
-preview, then reruns the command with `--apply` for the reviewed bootstrap. A
-blank D1 is initialized, an exact schema is reused, and incompatible nonblank
-state fails closed. The successful bootstrap installs the three protected
-Steward credential files and hands Site exactly four cloud fields. A valid empty
-Site is accepted; real-task proof belongs to the on-demand deployment checker.
+preview, which retains the accepted plan privately, then reruns the command with
+`--apply` to consume exactly that reviewed plan. Apply never creates a
+replacement preview, and Pulumi rejects a plan that no longer matches provider
+state or configuration. A blank D1 is initialized, an exact schema is reused,
+and incompatible nonblank state fails closed. The successful bootstrap installs
+the three protected Steward credential files and hands Site exactly four cloud
+fields. A valid empty Site is accepted; real-task proof belongs to the on-demand
+deployment checker.
 
 A failed provider, schema check, credential install, or Site handoff stops before
 the next boundary. Credential replacement is atomic and a Site handoff failure

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import os
 import re
 from typing import Any
 
@@ -133,6 +134,42 @@ class CloudflareConfig:
         return f"https://{self.public_hostname}"
 
 
+def _pulumi_runtime_values(stack_config: pulumi.Config) -> Mapping[str, Any]:
+    """Enumerate the complete project bag on Pulumi versions without Config.all."""
+
+    namespace = f"{stack_config.name}:"
+    values: dict[str, Any] = {}
+    runtime_values = pulumi.runtime.config.CONFIG.get()
+    if not isinstance(runtime_values, Mapping):
+        raise ValueError("Pulumi configuration is not a mapping")
+    for full_key, value in runtime_values.items():
+        if not isinstance(full_key, str):
+            raise ValueError("Pulumi configuration contains an invalid key")
+        if full_key.startswith(namespace):
+            key = full_key[len(namespace) :]
+            if key:
+                values[key] = value
+
+    environment_prefix = pulumi.runtime.get_config_env_key(namespace)
+    for environment_key, value in os.environ.items():
+        if environment_key.startswith(environment_prefix):
+            key = environment_key[len(environment_prefix) :].lower()
+            if key:
+                values.setdefault(key, value)
+
+    environment_values = pulumi.runtime.get_config_env()
+    if not isinstance(environment_values, Mapping):
+        raise ValueError("Pulumi configuration is not a mapping")
+    for full_key, value in environment_values.items():
+        if not isinstance(full_key, str):
+            raise ValueError("Pulumi configuration contains an invalid key")
+        if full_key.startswith(namespace):
+            key = full_key[len(namespace) :]
+            if key:
+                values.setdefault(key, value)
+    return values
+
+
 def load_config(
     config: pulumi.Config | Mapping[str, Any] | None = None,
 ) -> CloudflareConfig:
@@ -145,11 +182,14 @@ def load_config(
     try:
         values = stack_config.all()
     except AttributeError:
-        values = {}
-        for field in sorted(_CANONICAL_FIELDS):
-            value = stack_config.get(field)
-            if value is not None:
-                values[field] = value
+        if isinstance(stack_config, pulumi.Config):
+            values = _pulumi_runtime_values(stack_config)
+        else:
+            values = {}
+            for field in sorted(_CANONICAL_FIELDS):
+                value = stack_config.get(field)
+                if value is not None:
+                    values[field] = value
     if not isinstance(values, Mapping):
         raise ValueError("Pulumi configuration is not a mapping")
     return CloudflareConfig.from_mapping(values)

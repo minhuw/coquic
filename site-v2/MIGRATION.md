@@ -32,8 +32,9 @@ nix develop -c infra/cloudflare/scripts/deploy-production.sh \
 ```
 
 Review the structured preview and stop for any delete, replacement, update,
-unsafe permission, malformed output, or secret. Add `--apply` only after that
-review:
+unsafe permission, malformed output, or secret. The accepted plan is retained
+privately; add `--apply` only after that review to consume exactly that plan.
+The apply invocation never creates a replacement preview:
 
 ```sh
 nix develop -c infra/cloudflare/scripts/deploy-production.sh \

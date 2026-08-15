@@ -880,22 +880,6 @@ class DaemonRuntime(BaseModel):
     forced_stop: bool = False
 
 
-class ReconciliationRecord(BaseModel):
-    task_id: str
-    disposition: str
-    detail: str = Field(default="", max_length=256)
-    run_id: str | None = None
-    container_id: str | None = None
-    evidence: dict[str, Any] = Field(default_factory=dict)
-
-
-class ShutdownStatus(BaseModel):
-    state: DaemonLifecycleState = DaemonLifecycleState.stopped
-    forced: bool = False
-    interrupted_runs: int = 0
-    stopped_containers: int = 0
-
-
 class ProjectSignals(BaseModel):
     schema_version: int = 2
     repository: str

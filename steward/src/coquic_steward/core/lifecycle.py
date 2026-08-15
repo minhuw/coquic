@@ -644,14 +644,6 @@ class ShutdownResult:
 
 
 @dataclass(frozen=True)
-class SyncScheduleState:
-    next_due_monotonic: float | None = None
-    cycle_active: bool = False
-    pending_tick: bool = False
-    final_attempted: bool = False
-
-
-@dataclass(frozen=True)
 class TaskTransition:
     status: TaskStatus
     summary: str

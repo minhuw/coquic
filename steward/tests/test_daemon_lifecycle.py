@@ -2609,8 +2609,11 @@ def test_startup_orders_validation_recovery_reconciliation_claim_and_running(
     assert daemon.lifecycle_state is DaemonLifecycleState.running
 
 
-def test_startup_failure_before_claim_never_publishes_running(config, monkeypatch):
+def test_startup_failure_before_claim_clears_existing_claim(config, monkeypatch):
     store = TaskStore.create(config.db_path)
+    store.claim_daemon_instance(
+        "previous-daemon", lifecycle=DaemonLifecycleState.running.value
+    )
     daemon = StewardDaemon(config, store)
     monkeypatch.setattr(
         daemon_module, "run_preflight", lambda *_args, **_kwargs: daemon_module.PreflightReport()
@@ -2624,8 +2627,11 @@ def test_startup_failure_before_claim_never_publishes_running(config, monkeypatc
     with pytest.raises(RuntimeError, match="recovery failed"):
         daemon.startup_reconcile()
 
-    assert store.get_daemon_state() is None
-    assert daemon.lifecycle_state is not DaemonLifecycleState.running
+    state = store.get_daemon_state()
+    assert state["instance_id"] == "previous-daemon"
+    assert state["lifecycle"] == DaemonLifecycleState.stopped.value
+    assert state["startup_failed"] is True
+    assert daemon.lifecycle_state is DaemonLifecycleState.stopped
 
 
 def test_startup_failure_after_claim_clears_running_claim(config, monkeypatch):
@@ -2652,6 +2658,39 @@ def test_startup_failure_after_claim_clears_running_claim(config, monkeypatch):
         daemon.startup_reconcile()
 
     assert store.get_daemon_state()["lifecycle"] != DaemonLifecycleState.running.value
+
+
+def test_startup_claim_callback_failure_clears_starting_claim(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(
+        daemon_module, "run_preflight", lambda *_args, **_kwargs: daemon_module.PreflightReport()
+    )
+    monkeypatch.setattr(store, "recover", lambda: SimpleNamespace())
+    monkeypatch.setattr(daemon, "_restore_resource_pressure", lambda: None)
+    monkeypatch.setattr(daemon, "_startup_reconcile_control_loop", lambda: None)
+    monkeypatch.setattr(daemon.executor, "retry_validation_cleanup_pending", lambda: None)
+    monkeypatch.setattr(daemon, "_reconcile_docker_resources", lambda: None)
+    monkeypatch.setattr(store, "iter_tasks", lambda: [])
+
+    callbacks = 0
+
+    def fail_claim_notification():
+        nonlocal callbacks
+        callbacks += 1
+        if callbacks == 1:
+            raise RuntimeError("claim notification failed")
+
+    store.on_change = fail_claim_notification
+    with pytest.raises(RuntimeError, match="claim notification failed"):
+        daemon.startup_reconcile()
+
+    state = store.get_daemon_state()
+    assert callbacks == 2
+    assert state["instance_id"] == daemon.runtime.instance_id
+    assert state["lifecycle"] == DaemonLifecycleState.stopped.value
+    assert state["startup_failed"] is True
+    assert daemon.lifecycle_state is DaemonLifecycleState.stopped
 
 
 def test_daemon_rejects_unsupported_collaborators(config):

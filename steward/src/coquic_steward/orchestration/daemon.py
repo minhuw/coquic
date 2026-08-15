@@ -751,13 +751,43 @@ class StewardDaemon:
                 continue
             self.finalize_terminal_task(task.id)
 
+    def _cleanup_startup_claim(self, *, claim_attempted: bool) -> bool:
+        """Persist a stopped lifecycle for a claim startup could have touched."""
+
+        state = self.store.get_daemon_state()
+        if not state:
+            return False
+        lifecycle = str(state.get("lifecycle") or "")
+        instance_id = state.get("instance_id")
+        if not isinstance(instance_id, str) or not instance_id:
+            return False
+        if lifecycle not in {
+            DaemonLifecycleState.starting.value,
+            DaemonLifecycleState.reconciling.value,
+            DaemonLifecycleState.running.value,
+        }:
+            return False
+        if claim_attempted and instance_id != self.runtime.instance_id:
+            return False
+        try:
+            self.store.set_daemon_lifecycle(
+                DaemonLifecycleState.stopped.value,
+                instance_id=instance_id,
+                state={"startup_failed": True},
+            )
+        except Exception:
+            # The lifecycle transaction commits before change notifications; a
+            # callback failure must not hide the durable cleanup attempt.
+            pass
+        return True
+
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Validate and recover durable ownership before dispatch is allowed."""
 
         with self._lifecycle_lock:
             if self._startup_complete:
                 return tuple(self._reconciliation)
-            claimed = False
+            claim_attempted = False
             with self._runtime_lock:
                 self.runtime.lifecycle = DaemonLifecycleState.reconciling
                 self.runtime.state = DaemonRuntimeState.active
@@ -820,11 +850,11 @@ class StewardDaemon:
                 if self._shutdown_event.is_set():
                     return tuple(outcomes)
 
+                claim_attempted = True
                 self.store.claim_daemon_instance(
                     self.runtime.instance_id,
                     lifecycle=DaemonLifecycleState.starting.value,
                 )
-                claimed = True
                 with self._runtime_lock:
                     self.runtime.lifecycle = DaemonLifecycleState.running
                     self.runtime.state = DaemonRuntimeState.idle
@@ -852,17 +882,14 @@ class StewardDaemon:
                 return tuple(outcomes)
             except BaseException:
                 self._startup_complete = False
-                if claimed:
-                    try:
-                        self.store.set_daemon_lifecycle(
-                            DaemonLifecycleState.stopped.value,
-                            instance_id=self.runtime.instance_id,
-                            state={"startup_failed": True},
-                        )
-                    except Exception:
-                        pass
+                try:
+                    claim_cleaned = self._cleanup_startup_claim(
+                        claim_attempted=claim_attempted
+                    )
+                except Exception:
+                    claim_cleaned = False
                 with self._runtime_lock:
-                    if claimed:
+                    if claim_cleaned:
                         self.runtime.lifecycle = DaemonLifecycleState.stopped
                         self.runtime.state = DaemonRuntimeState.stopping
                     else:

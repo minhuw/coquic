@@ -939,6 +939,26 @@ def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
     assert [pending.id for pending in store.pending_signal_items()] == ["wi-codacy-1"]
 
 
+def test_store_preserves_repository_relative_signal_paths(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    expected_path = "steward/src/coquic_steward/public_mirror.py"
+    store.add_signal_item(
+        SignalItem(
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="codacy-public-mirror",
+            title="Codacy issue",
+            location={"path": expected_path, "line": 203},
+        )
+    )
+
+    reopened = TaskStore.open(config.db_path)
+
+    pending = reopened.pending_signal_items()
+    assert len(pending) == 1
+    assert pending[0].location == {"path": expected_path, "line": 203}
+
+
 def test_store_records_scheduler_wakeups_for_actionable_changes(
     config: StewardConfig,
 ) -> None:

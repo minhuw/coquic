@@ -546,12 +546,16 @@ class SQLiteTaskStore:
             database_temporaries = _scan_database_temporaries(
                 database, expected_epoch_id
             )
+            sibling_store_exists = _validated_sibling_store_exists(
+                database, expected_epoch_id
+            )
             if (
                 not any(
                     os.path.lexists(path)
                     for path in _database_publication_paths(database)
                 )
                 and not database_temporaries
+                and not sibling_store_exists
             ):
                 raise SQLiteStoreLifecycleError(
                     "task archive exists without a Store database"
@@ -7272,6 +7276,21 @@ def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
         database.with_name(database.name + "-wal"),
         database.with_name(database.name + "-shm"),
     )
+
+
+def _validated_sibling_store_exists(database: Path, epoch_id: str) -> bool:
+    """Recognize only a complete current sibling sharing the task epoch."""
+
+    target_names = {path.name for path in _database_publication_paths(database)}
+    for candidate in _directory_entries(database.parent, "database parent"):
+        if candidate.name in target_names or candidate.suffix != database.suffix:
+            continue
+        try:
+            SQLiteTaskStore._validate_current_database(candidate, epoch_id)
+        except SQLiteStoreLifecycleError:
+            continue
+        return True
+    return False
 
 
 def _same_regular_file(left: Path, right: Path) -> bool:

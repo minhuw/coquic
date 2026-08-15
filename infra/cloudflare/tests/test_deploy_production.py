@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import subprocess
 import textwrap
+import time
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 
 args = sys.argv[1:]
@@ -43,7 +45,7 @@ if args[:1] == ["preview"]:
         print("provider output is hidden", file=sys.stderr)
         raise SystemExit(1)
     plan = Path(args[args.index("--save-plan") + 1])
-    plan.write_text("saved-plan", encoding="utf-8")
+    plan.write_text(os.environ.get("PULUMI_PLAN_CONTENT", "saved-plan"), encoding="utf-8")
     resources = [
         ("cloudflare:index/d1Database:D1Database", "publicationDatabase"),
         ("cloudflare:index/r2Bucket:R2Bucket", "publicArtifacts"),
@@ -82,6 +84,10 @@ if args[:1] == ["preview"]:
     raise SystemExit(0)
 if args[:1] == ["up"]:
     plan = Path(args[args.index("--plan") + 1])
+    if case == "pause-before-plan-open":
+        Path(os.environ["PULUMI_UP_READY"]).write_text("ready", encoding="utf-8")
+        while not Path(os.environ["PULUMI_UP_RELEASE"]).exists():
+            time.sleep(0.01)
     Path(os.environ["PULUMI_UP_PLAN"]).write_text(
         plan.read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -313,6 +319,8 @@ def harness(tmp_path: Path) -> dict[str, Any]:
     plan_dir = tmp_path / "reviewed-plans"
     plan_dir.mkdir(mode=0o700)
     up_plan = tmp_path / "pulumi-up-plan"
+    up_ready = tmp_path / "pulumi-up-ready"
+    up_release = tmp_path / "pulumi-up-release"
     real_mv = shutil.which("mv")
     assert real_mv is not None
     env = os.environ.copy()
@@ -329,6 +337,8 @@ def harness(tmp_path: Path) -> dict[str, Any]:
             "SCHEMA_ROWS_POPULATED": str(populated_rows_path),
             "PULUMI_APPLIED": str(applied),
             "PULUMI_UP_PLAN": str(up_plan),
+            "PULUMI_UP_READY": str(up_ready),
+            "PULUMI_UP_RELEASE": str(up_release),
             "WRANGLER_BOOTSTRAPPED": str(bootstrapped),
             "COQUIC_CLOUDFLARE_PLAN_DIR": str(plan_dir),
             "SITE_INPUT": str(site_input),
@@ -351,6 +361,8 @@ def harness(tmp_path: Path) -> dict[str, Any]:
         "site_input": site_input,
         "plan_dir": plan_dir,
         "up_plan": up_plan,
+        "up_ready": up_ready,
+        "up_release": up_release,
         "values": values,
     }
 
@@ -470,6 +482,52 @@ def test_apply_consumes_reviewed_plan_without_a_new_preview(
     assert harness["up_plan"].read_text(encoding="utf-8") == "saved-plan"
     assert not (harness["plan_dir"] / "production.plan").exists()
     assert not (harness["plan_dir"] / "production.review.json").exists()
+
+
+def test_apply_pins_the_reviewed_plan_against_concurrent_replacement(
+    harness: dict[str, Any],
+) -> None:
+    harness["env"]["PULUMI_PLAN_CONTENT"] = "replacement-plan-P"
+    preview = _run(harness)
+    assert preview.returncode == 0, preview.stderr
+
+    apply_env = harness["env"].copy()
+    apply_env["PULUMI_CASE"] = "pause-before-plan-open"
+    apply_process = subprocess.Popen(
+        [
+            "bash",
+            str(SCRIPT),
+            "--stack",
+            "production",
+            "--credentials-dir",
+            str(harness["credentials"]),
+            "--plan-dir",
+            str(harness["plan_dir"]),
+            "--apply",
+        ],
+        cwd=ROOT,
+        env=apply_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not harness["up_ready"].exists() and time.monotonic() < deadline:
+            assert apply_process.poll() is None, apply_process.stderr.read()
+            time.sleep(0.01)
+        assert harness["up_ready"].exists()
+
+        harness["env"]["PULUMI_PLAN_CONTENT"] = "replacement-plan-Q"
+        replacement = _run(harness)
+        assert replacement.returncode == 0, replacement.stderr
+    finally:
+        harness["up_release"].touch()
+        stdout, stderr = apply_process.communicate(timeout=30)
+
+    assert apply_process.returncode == 0, stdout + stderr
+    assert harness["up_plan"].read_text(encoding="utf-8") == "replacement-plan-P"
+    assert (harness["plan_dir"] / "production.plan").read_text(encoding="utf-8") == "replacement-plan-Q"
 
 
 def test_apply_rejects_a_changed_reviewed_plan(harness: dict[str, Any]) -> None:
@@ -625,6 +683,12 @@ def test_pulumi_apply_failure_stops_before_d1_or_files(harness: dict[str, Any]) 
     assert "D1" in result.stderr
     assert _argv(_logs(harness), "wrangler") == []
     assert not any(harness["credentials"].iterdir())
+    for path in (
+        harness["plan_dir"] / "production.plan",
+        harness["plan_dir"] / "production.review.json",
+    ):
+        assert path.is_file()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o400
 
 
 def test_bootstrap_failure_preserves_host_state(harness: dict[str, Any]) -> None:

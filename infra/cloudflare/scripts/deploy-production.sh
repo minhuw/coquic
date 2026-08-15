@@ -115,9 +115,13 @@ fi
 
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/coquic-cloudflare-bootstrap.XXXXXX")" || fail "unable to create private temporary directory"
 chmod 700 "${temporary_dir}"
+apply_plan_dir=""
 cleanup() {
   local status=$?
   trap - EXIT
+  if [[ -n "${apply_plan_dir}" && -d "${apply_plan_dir}" && ! -L "${apply_plan_dir}" ]]; then
+    rm -rf -- "${apply_plan_dir}"
+  fi
   rm -rf -- "${temporary_dir}"
   exit "${status}"
 }
@@ -126,6 +130,7 @@ trap cleanup EXIT
 operator_uid="$(id -u)" || fail "unable to determine invoking user"
 reviewed_plan="${plan_dir}/${stack}.plan"
 review_record="${plan_dir}/${stack}.review.json"
+review_record_digest=""
 
 ensure_plan_directory() {
   if [[ -L "${plan_dir}" ]]; then
@@ -271,13 +276,40 @@ PY
     fail "reviewed Pulumi metadata is invalid"
   fi
   [[ "$(sha256sum -- "${reviewed_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || fail "reviewed Pulumi plan failed digest validation"
+  review_record_digest="$(sha256sum -- "${review_record}" | cut -d' ' -f1)" || fail "reviewed Pulumi metadata could not be hashed"
   saved_plan="${reviewed_plan}"
+}
+
+pin_apply_plan() {
+  local directory
+  directory="$(mktemp -d "${plan_dir}/.${stack}.apply.XXXXXX")" || fail "unable to create private apply plan directory"
+  if ! chmod 700 -- "${directory}"; then
+    rm -rf -- "${directory}"
+    fail "unable to secure private apply plan directory"
+  fi
+  apply_plan_dir="${directory}"
+  saved_plan="${apply_plan_dir}/reviewed.plan"
+  if ! ln -P -- "${reviewed_plan}" "${saved_plan}"; then
+    fail "unable to pin reviewed Pulumi plan"
+  fi
+  [[ -f "${saved_plan}" && ! -L "${saved_plan}" ]] || fail "pinned Pulumi plan is not a regular file"
+  chmod 400 -- "${saved_plan}" || fail "unable to secure pinned Pulumi plan"
+  validate_review_file "${saved_plan}" "pinned Pulumi plan"
+  [[ "$(sha256sum -- "${saved_plan}" | cut -d' ' -f1)" == "${plan_digest}" ]] || fail "pinned Pulumi plan failed digest validation"
 }
 
 consume_review() {
   ensure_plan_directory
+  if [[ -L "${reviewed_plan}" || -L "${review_record}" ]]; then
+    fail "reviewed plan artifacts must not be symlinks"
+  fi
+  [[ -e "${reviewed_plan}" && -e "${review_record}" ]] || return 0
   validate_review_file "${reviewed_plan}" "reviewed Pulumi plan"
   validate_review_file "${review_record}" "reviewed Pulumi metadata"
+  local current_plan_digest current_record_digest
+  current_plan_digest="$(sha256sum -- "${reviewed_plan}" | cut -d' ' -f1)" || fail "reviewed Pulumi plan could not be hashed after apply"
+  current_record_digest="$(sha256sum -- "${review_record}" | cut -d' ' -f1)" || fail "reviewed Pulumi metadata could not be hashed after apply"
+  [[ "${current_plan_digest}" == "${plan_digest}" && "${current_record_digest}" == "${review_record_digest}" ]] || return 0
   rm -f -- "${reviewed_plan}" "${review_record}" || fail "unable to consume reviewed Pulumi plan"
 }
 
@@ -285,6 +317,7 @@ cd -- "${cloudflare_dir}" || fail "unable to enter the Cloudflare project direct
 
 if ((apply == 1)); then
   load_review
+  pin_apply_plan
 else
   invalidate_review
 fi

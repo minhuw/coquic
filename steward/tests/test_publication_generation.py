@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -418,6 +420,26 @@ def test_public_graph_strings_are_credential_inspected(section: str, index: int 
     assert not hasattr(result, "payload")
 
 
+def test_generation_string_scan_uses_configured_staging_root(tmp_path: Path) -> None:
+    live_paths: list[Path] = []
+
+    def scanner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        descriptor = kwargs["pass_fds"][0]
+        live_paths.append(Path(os.readlink(f"/proc/self/fd/{descriptor}")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    result = compose_publication_generation(
+        _graph(_source()),
+        staging_root=tmp_path,
+        scanner_runner=scanner,
+    )
+
+    assert isinstance(result, PublicationGeneration)
+    assert len(live_paths) >= 2
+    assert all(path.parent == tmp_path for path in live_paths)
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("section", ["task", "pipeline", "run", "event"])
 def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
     graph = _graph(_source())
@@ -437,6 +459,7 @@ def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
         *,
         credential_sources: object,
         known_secrets: object,
+        staging_root: object,
         scanner_runner: object,
         scanner_timeout: float,
         max_repair_passes: int,
@@ -448,6 +471,7 @@ def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
             source,
             credential_sources=credential_sources,
             known_secrets=known_secrets,
+            staging_root=staging_root,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
             max_repair_passes=max_repair_passes,
@@ -570,6 +594,7 @@ def test_builder_type_error_is_reduced_after_one_invocation() -> None:
         *,
         credential_sources: object,
         known_secrets: object,
+        staging_root: object,
         scanner_runner: object,
         scanner_timeout: float,
         max_repair_passes: int,
@@ -600,6 +625,7 @@ def test_repair_and_fail_closed_outcomes_never_emit_generation(monkeypatch) -> N
         *,
         credential_sources: object,
         known_secrets: object,
+        staging_root: object,
         scanner_runner: object,
         scanner_timeout: float,
         max_repair_passes: int,
@@ -618,6 +644,7 @@ def test_repair_and_fail_closed_outcomes_never_emit_generation(monkeypatch) -> N
         *,
         credential_sources: object,
         known_secrets: object,
+        staging_root: object,
         scanner_runner: object,
         scanner_timeout: float,
         max_repair_passes: int,

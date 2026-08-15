@@ -189,6 +189,7 @@ def _scanner_composer(scanner: object) -> PublicationComposer:
         builder: object = None,
         credential_sources: object = None,
         known_secrets: object = None,
+        staging_root: Path | None = None,
         scanner_runner: object = None,
         scanner_timeout: float = 30.0,
         max_repair_passes: int = 2,
@@ -210,6 +211,7 @@ def _scanner_composer(scanner: object) -> PublicationComposer:
             builder=builder,
             credential_sources=credential_sources,
             known_secrets=known_secrets,
+            staging_root=staging_root,
             scanner_runner=scanner,
             scanner_timeout=scanner_timeout,
             max_repair_passes=max_repair_passes,
@@ -286,6 +288,37 @@ def test_publication_preflight_inspects_configured_credentials(
     assert counts == {"source": 0, "patch": 0}
     assert credential not in repr(outcome)
     assert credential not in fingerprint
+
+
+def test_integration_composition_receives_configured_staging_root(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    config = _publication_config(tmp_path, "integration-credential")
+    executor = object.__new__(StewardExecutor)
+    executor.config = SimpleNamespace(publication=config)
+    executor._scan_integration_source = lambda *_args, **_kwargs: ScannerReport()
+    executor._integration_publication_graph = lambda _source: {"graph": True}
+    captured: dict[str, object] = {}
+
+    def compose(_source: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return FailClosed((ReasonCode.scanner_failure,))
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.compose_publication_generation",
+        compose,
+    )
+
+    outcome, counts, _fingerprint = executor._build_integration_publication_outcome(
+        SimpleNamespace(id="task-integration-staging"),
+        repo,
+        "safe patch",
+    )
+
+    assert isinstance(outcome, FailClosed)
+    assert outcome.reason_codes == (ReasonCode.scanner_failure,)
+    assert counts == {"source": 0, "patch": 0}
+    assert captured["staging_root"] == config.staging_root
 
 
 def test_source_scanner_detects_literal_configured_credentials(
@@ -1319,7 +1352,7 @@ def _enqueue_terminal(
 
 
 def test_materialized_success_enqueues_deterministically_without_transport(
-    monkeypatch,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     graph = _publication_graph("completion-boundary")
     # Build the valid immutable generation through the existing pure contract;
@@ -1329,16 +1362,22 @@ def test_materialized_success_enqueues_deterministically_without_transport(
     scanner = lambda _argv, **_kwargs: SimpleNamespace(returncode=0, stdout=b"")
     generation = compose_publication_generation(graph, scanner_runner=scanner)
     assert isinstance(generation, PublicationGeneration)
+    compose_calls: list[dict[str, object]] = []
+
+    def compose(*_args, **kwargs: object) -> object:
+        compose_calls.append(kwargs)
+        return generation
+
     monkeypatch.setattr(session_module, "publication_graph_for_task", lambda *_args: graph)
-    monkeypatch.setattr(
-        session_module,
-        "compose_publication_generation",
-        lambda *_args, **_kwargs: generation,
-    )
+    monkeypatch.setattr(session_module, "compose_publication_generation", compose)
 
     queued: list[object] = []
     store = SimpleNamespace(enqueue_publication=lambda value: queued.append(value) or value)
-    config = SimpleNamespace(publication=SimpleNamespace(enabled=True))
+    staging_root = tmp_path / "publication-staging"
+    staging_root.mkdir(mode=0o700)
+    config = SimpleNamespace(
+        publication=SimpleNamespace(enabled=True, staging_root=staging_root)
+    )
     task = SimpleNamespace(id="task-publication-preflight")
     run = SimpleNamespace(
         state="succeeded", completed_at=datetime.now(timezone.utc)
@@ -1352,6 +1391,10 @@ def test_materialized_success_enqueues_deterministically_without_transport(
     assert [item.publication_id for item in queued] == [
         generation.publication_id,
         generation.publication_id,
+    ]
+    assert [call["staging_root"] for call in compose_calls] == [
+        staging_root,
+        staging_root,
     ]
 
     run.state = "running"

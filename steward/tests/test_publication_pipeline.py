@@ -4,6 +4,7 @@ import json
 import hashlib
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 from coquic_steward.publication import (
     AtifSource,
@@ -194,6 +195,54 @@ def test_untrusted_staging_root_fails_closed(tmp_path) -> None:
     unsafe = tmp_path / "unsafe"
     unsafe.mkdir(mode=0o755)
     result = build_publication_bundle(_source(), staging_root=unsafe, run_scanner=False, scanner_runner=_clean_scanner)
+
+    assert isinstance(result, FailClosed)
+    assert result.reason_codes == (ReasonCode.staging_unsafe,)
+
+
+def test_builder_routes_configured_root_to_redaction_and_media(monkeypatch, tmp_path) -> None:
+    import importlib
+
+    module = importlib.import_module("coquic_steward.publication.pipeline")
+    captured: list[Path] = []
+
+    def sanitize(document, *args, **kwargs):
+        captured.append(kwargs["staging_root"])
+        return module.SanitizationResult.clean(document)
+
+    def inspect(content, media_type, **kwargs):
+        captured.append(kwargs["staging_root"])
+        return MediaInspection.approved_result(
+            category="text",
+            media_type=media_type,
+            content=content,
+        )
+
+    monkeypatch.setattr(module, "sanitize_publication", sanitize)
+    monkeypatch.setattr(module, "inspect_media", inspect)
+
+    result = module.build_publication_bundle(
+        _source(),
+        staging_root=tmp_path,
+        run_scanner=False,
+        scanner_runner=_clean_scanner,
+    )
+
+    assert isinstance(result, Publishable)
+    assert captured == [tmp_path, tmp_path]
+
+
+def test_nonwritable_staging_root_fails_before_materialization(tmp_path) -> None:
+    unsafe = tmp_path / "read-only"
+    unsafe.mkdir(mode=0o700)
+    unsafe.chmod(0o500)
+
+    result = build_publication_bundle(
+        _source(),
+        staging_root=unsafe,
+        run_scanner=False,
+        scanner_runner=_clean_scanner,
+    )
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.staging_unsafe,)

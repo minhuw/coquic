@@ -166,7 +166,7 @@ def _validate_staging_root(value: object) -> Path | None:
         metadata = root.lstat()
     except (OSError, TypeError, ValueError):
         raise PublicationError(ReasonCode.staging_unsafe) from None
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
         raise PublicationError(ReasonCode.staging_unsafe) from None
     return root
 
@@ -255,6 +255,7 @@ def _inspect_component(
     *,
     credential_sources: object,
     known_secrets: Sequence[str] | None,
+    staging_root: Path | None,
     scanner_runner: Any,
     scanner_timeout: float,
     ocr_runner: Any,
@@ -266,6 +267,7 @@ def _inspect_component(
             component.artifact.media_type,
             credential_sources=credential_sources,
             known_secrets=known_secrets,
+            staging_root=staging_root,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
             ocr_runner=ocr_runner,
@@ -340,7 +342,7 @@ def _build_source(
 def build_publication_bundle(
     stable_run: object = None,
     credential_sources: object = None,
-    staging_root: object = None,
+    staging_root: Path | None = None,
     *,
     run: object = _MISSING,
     completed_run: object = _MISSING,
@@ -375,7 +377,7 @@ def build_publication_bundle(
             if stable_run is not None:
                 return _failure(ReasonCode.invalid_metadata)
             stable_run = completed_run
-        _validate_staging_root(staging_root)
+        staging_path = _validate_staging_root(staging_root)
         selected_credentials = credential_sources
         if selected_credentials is None:
             selected_credentials = credentials
@@ -416,6 +418,7 @@ def build_publication_bundle(
             selected_credentials,
             secrets=selected_secrets,
             run_scanner=True,
+            staging_root=staging_path,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
             max_repair_passes=max_repair_passes,
@@ -465,6 +468,7 @@ def build_publication_bundle(
                 component,
                 credential_sources=selected_credentials,
                 known_secrets=selected_secrets,
+                staging_root=staging_path,
                 scanner_runner=scanner_runner,
                 scanner_timeout=scanner_timeout,
                 ocr_runner=ocr_runner,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 import subprocess
 import zlib
@@ -339,6 +340,34 @@ def test_ocr_text_is_scanned_without_mutating_original() -> None:
     assert result.reason == ReasonCode.unsafe_content
     assert payload == _image("image/png")
     assert secret not in repr(result)
+
+
+def test_media_ocr_and_metadata_scans_use_configured_staging_root(tmp_path: Path) -> None:
+    ocr_paths: list[Path] = []
+    scanner_paths: list[Path] = []
+
+    def ocr_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        descriptor = kwargs["pass_fds"][0]
+        ocr_paths.append(Path(os.readlink(f"/proc/self/fd/{descriptor}")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def scanner_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        descriptor = kwargs["pass_fds"][0]
+        scanner_paths.append(Path(os.readlink(f"/proc/self/fd/{descriptor}")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    result = inspect_media(
+        _image("image/png"),
+        "image/png",
+        staging_root=tmp_path,
+        ocr_runner=ocr_runner,
+        scanner_runner=scanner_runner,
+    )
+
+    assert result.approved
+    assert ocr_paths and scanner_paths
+    assert all(path.parent == tmp_path for path in (*ocr_paths, *scanner_paths))
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(

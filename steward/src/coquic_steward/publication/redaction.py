@@ -635,6 +635,7 @@ def sanitize_publication(
     credential_files: object = None,
     credential_paths: object = None,
     known_secrets: Sequence[str] | None = None,
+    staging_root: Path | None = None,
     run_scanner: bool = True,
     scanner_runner: Any = None,
     scanner_timeout: float = MAX_SCANNER_TIMEOUT_SECONDS,
@@ -662,6 +663,7 @@ def sanitize_publication(
         try:
             report: ScannerReport = run_trufflehog(
                 _corpus_entries(current),
+                staging_root=staging_root,
                 timeout=scanner_timeout,
                 runner=scanner_runner,
             )

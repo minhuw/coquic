@@ -382,6 +382,7 @@ def enqueue_materialized_publication(
             # Credential discovery is daemon-only.  The worker repeats the
             # composition with the trusted credential paths before provider I/O.
             credential_sources=(),
+            staging_root=getattr(publication, "staging_root", None),
         )
         if not isinstance(outcome, PublicationGeneration):
             return None

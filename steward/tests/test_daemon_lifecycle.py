@@ -721,10 +721,12 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
         config.r2_secret_access_key_path,
     )
     assert publisher.publish_calls[0]["compose_kwargs"] == {
-        "credential_sources": expected_sources
+        "credential_sources": expected_sources,
+        "staging_root": config.staging_root,
     }
     assert publisher.retry_calls[0]["compose_kwargs"] == {
-        "credential_sources": expected_sources
+        "credential_sources": expected_sources,
+        "staging_root": config.staging_root,
     }
 
 

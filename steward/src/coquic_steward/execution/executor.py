@@ -4240,6 +4240,7 @@ class StewardExecutor:
             graph,
             task_id=source.id,
             credential_sources=credential_sources,
+            staging_root=getattr(publication, "staging_root", None),
             scanner_runner=scanner_runner,
             scanner_timeout=PUBLICATION_PREFLIGHT_TIMEOUT_SECONDS,
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -216,6 +217,28 @@ def test_trufflehog_uses_local_json_no_update_or_verification(tmp_path: Path) ->
     assert "--no-verification" in calls[0]
 
 
+def test_configured_scanner_root_anchors_and_cleans_private_child(tmp_path: Path) -> None:
+    live_paths: list[Path] = []
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        descriptor = kwargs["pass_fds"][0]
+        live = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        live_paths.append(live)
+        assert live.parent == tmp_path
+        assert live.is_dir()
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    report = run_trufflehog(
+        (CorpusEntry("trajectory.json", b"safe text"),),
+        staging_root=tmp_path,
+        runner=runner,
+    )
+
+    assert report.clean
+    assert live_paths
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_trufflehog_repairs_and_rescans_without_exposing_raw_value() -> None:
     raw = "heuristic-secret"
     calls = 0
@@ -238,6 +261,43 @@ def test_trufflehog_repairs_and_rescans_without_exposing_raw_value() -> None:
     assert result.document is not None
     assert raw not in result.document.content.decode()
     assert calls == 2
+
+
+def test_sanitization_uses_configured_scanner_root(tmp_path: Path) -> None:
+    live_paths: list[Path] = []
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        descriptor = kwargs["pass_fds"][0]
+        live_paths.append(Path(os.readlink(f"/proc/self/fd/{descriptor}")))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    result = sanitize_publication(
+        _document(),
+        staging_root=tmp_path,
+        run_scanner=True,
+        scanner_runner=runner,
+    )
+
+    assert result.status == "clean"
+    assert live_paths
+    assert all(path.parent == tmp_path for path in live_paths)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_configured_scanner_root_cleans_after_timeout(tmp_path: Path) -> None:
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    result = sanitize_publication(
+        _document(),
+        staging_root=tmp_path,
+        run_scanner=True,
+        scanner_runner=runner,
+    )
+
+    assert result.status == "fail_closed"
+    assert result.reason_codes == (ReasonCode.scanner_failure,)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_trufflehog_nonzero_exit_fails_closed() -> None:

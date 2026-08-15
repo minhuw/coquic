@@ -154,7 +154,10 @@ def _publication_compose_kwargs(
         )
         if path is not None
     )
-    return {"credential_sources": sources}
+    return {
+        "credential_sources": sources,
+        "staging_root": publication.staging_root,
+    }
 
 
 def _current_publication_source(

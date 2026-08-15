@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +74,7 @@ def _returning_composer(result: object):
         builder: object = None,
         credential_sources: object = None,
         known_secrets: object = None,
+        staging_root: Path | None = None,
         scanner_runner: object = None,
         scanner_timeout: float = 30.0,
         max_repair_passes: int = 2,
@@ -225,7 +227,7 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
     assert result.reason == "unchanged"
 
 
-def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(monkeypatch) -> None:
+def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(tmp_path: Path, monkeypatch) -> None:
     current = _generation()
     closed: list[bool] = []
     calls: list[tuple[str, object, object]] = []
@@ -257,7 +259,17 @@ def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(monkeypatch) -> N
             )
         )
     )
-    config = StewardConfig(repo_root=Path.cwd())
+    staging_root = tmp_path / "publication-staging"
+    staging_root.mkdir(mode=0o700)
+    config = replace(
+        StewardConfig(repo_root=Path.cwd()),
+        publication=SimpleNamespace(
+            d1_token_path=None,
+            r2_access_key_id_path=None,
+            r2_secret_access_key_path=None,
+            staging_root=staging_root,
+        ),
+    )
     monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
     monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
     monkeypatch.setattr(cli, "_build_cli_hide_publisher", lambda *_args: (publisher, Client()))
@@ -275,6 +287,7 @@ def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(monkeypatch) -> N
         "changed": True,
     }
     assert calls and calls[0][0] == current.publication_id
+    assert calls[0][2]["staging_root"] == staging_root
     assert closed == [True]
 
 

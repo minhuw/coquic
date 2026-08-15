@@ -26,6 +26,16 @@ or OCR failures, and irreparable findings fail closed. Source or patch
 findings can request a bounded revision, validation, and rescan before
 integration; inspection output and matched values never enter public data.
 
+### Staging boundary
+
+Validated publication configuration supplies one private staging root to daemon,
+CLI retry, session completion, integration composition, redaction, generation
+string checks, and media metadata/OCR inspection. Each scanner creates a
+mode-restricted descriptor-anchored child below that root, removes it on success
+or failure, and never writes directly to the shared parent. Explicitly
+unconfigured library and test calls retain their private temporary fallback;
+the integration preflight source scan remains a separate source-safety boundary.
+
 ## Publication order
 
 One generation follows this order. Each boundary is verified before the next

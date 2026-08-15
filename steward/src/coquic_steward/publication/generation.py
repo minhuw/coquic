@@ -18,6 +18,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, TypeAlias
 
@@ -548,6 +549,7 @@ def _builder_kwargs(
     *,
     credential_sources: object,
     known_secrets: Sequence[str] | str | None,
+    staging_root: Path | None,
     scanner_runner: Any,
     scanner_timeout: float,
     max_repair_passes: int,
@@ -558,6 +560,7 @@ def _builder_kwargs(
     return {
         "credential_sources": credential_sources,
         "known_secrets": known_secrets,
+        "staging_root": staging_root,
         "scanner_runner": scanner_runner,
         "scanner_timeout": scanner_timeout,
         "max_repair_passes": max_repair_passes,
@@ -586,7 +589,7 @@ def _invoke_builder(
             # Caller-provided stage options are still bounded by the explicit
             # generation API; transport and staging options are never copied.
             for key in selected_kwargs:
-                if key in extra:
+                if key != "staging_root" and key in extra:
                     selected_kwargs[key] = extra[key]
     selected_builder = builder if isinstance(builder, PublicationBuilder) else PublicationBuilder(builder)
     try:
@@ -923,18 +926,20 @@ class PublicationBuilder:
         ocr_runner: Any,
         ocr_timeout: float,
         run_scanner: bool,
+        staging_root: Path | None = None,
     ) -> PublicationOutcome:
-        return self.callback(
-            source,
-            credential_sources=credential_sources,
-            known_secrets=known_secrets,
-            scanner_runner=scanner_runner,
-            scanner_timeout=scanner_timeout,
-            max_repair_passes=max_repair_passes,
-            ocr_runner=ocr_runner,
-            ocr_timeout=ocr_timeout,
-            run_scanner=run_scanner,
-        )
+        kwargs: dict[str, Any] = {
+            "credential_sources": credential_sources,
+            "known_secrets": known_secrets,
+            "staging_root": staging_root,
+            "scanner_runner": scanner_runner,
+            "scanner_timeout": scanner_timeout,
+            "max_repair_passes": max_repair_passes,
+            "ocr_runner": ocr_runner,
+            "ocr_timeout": ocr_timeout,
+            "run_scanner": run_scanner,
+        }
+        return self.callback(source, **kwargs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -954,6 +959,7 @@ class PublicationComposer:
         builder: PublicationBuilder | None = None,
         credential_sources: object = None,
         known_secrets: Sequence[str] | str | None = None,
+        staging_root: Path | None = None,
         scanner_runner: Any = None,
         scanner_timeout: float = 30.0,
         max_repair_passes: int = 2,
@@ -965,26 +971,28 @@ class PublicationComposer:
         publication_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> GenerationOutcome:
-        return self.callback(
-            source,
-            task=task,
-            completed_runs=completed_runs,
-            task_id=task_id,
-            run_builder=run_builder,
-            builder=builder,
-            credential_sources=credential_sources,
-            known_secrets=known_secrets,
-            scanner_runner=scanner_runner,
-            scanner_timeout=scanner_timeout,
-            max_repair_passes=max_repair_passes,
-            ocr_runner=ocr_runner,
-            ocr_timeout=ocr_timeout,
-            run_scanner=run_scanner,
-            price_catalog=price_catalog,
-            generation_boundary=generation_boundary,
-            publication_id=publication_id,
-            idempotency_key=idempotency_key,
-        )
+        kwargs: dict[str, Any] = {
+            "task": task,
+            "completed_runs": completed_runs,
+            "task_id": task_id,
+            "run_builder": run_builder,
+            "builder": builder,
+            "credential_sources": credential_sources,
+            "known_secrets": known_secrets,
+            "scanner_runner": scanner_runner,
+            "scanner_timeout": scanner_timeout,
+            "max_repair_passes": max_repair_passes,
+            "ocr_runner": ocr_runner,
+            "ocr_timeout": ocr_timeout,
+            "run_scanner": run_scanner,
+            "price_catalog": price_catalog,
+            "generation_boundary": generation_boundary,
+            "publication_id": publication_id,
+            "idempotency_key": idempotency_key,
+        }
+        if staging_root is not None:
+            kwargs["staging_root"] = staging_root
+        return self.callback(source, **kwargs)
 
 def _extract_items(value: object) -> list[object]:
     if value is None:
@@ -1228,6 +1236,7 @@ def _inspect_public_strings(
     *,
     credential_sources: object,
     known_secrets: Sequence[str] | str | None,
+    staging_root: Path | None,
     scanner_runner: Any,
     scanner_timeout: float,
 ) -> ReasonCode | None:
@@ -1265,6 +1274,7 @@ def _inspect_public_strings(
             content,
             "text/plain",
             known_secrets=secrets,
+            staging_root=staging_root,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
         )
@@ -1275,7 +1285,12 @@ def _inspect_public_strings(
         CorpusEntry(f"generation-string-{index:05d}.txt", content, "text")
         for index, content in enumerate(encoded_values)
     )
-    report = run_trufflehog(entries, timeout=scanner_timeout, runner=scanner_runner)
+    report = run_trufflehog(
+        entries,
+        staging_root=staging_root,
+        timeout=scanner_timeout,
+        runner=scanner_runner,
+    )
     if report.failure is not None or report.returncode != 0:
         return ReasonCode.scanner_failure
     if report.findings:
@@ -1706,6 +1721,7 @@ def _build_generation(
     detached_fingerprint: str,
     credential_sources: object,
     known_secrets: Sequence[str] | str | None,
+    staging_root: Path | None,
     scanner_runner: Any,
     scanner_timeout: float,
     price_catalog: Any,
@@ -1971,6 +1987,7 @@ def _build_generation(
         payload,
         credential_sources=credential_sources,
         known_secrets=known_secrets,
+        staging_root=staging_root,
         scanner_runner=scanner_runner,
         scanner_timeout=scanner_timeout,
     )
@@ -2007,6 +2024,7 @@ def compose_publication_generation(
     builder: PublicationBuilder | None = None,
     credential_sources: object = None,
     known_secrets: Sequence[str] | str | None = None,
+    staging_root: Path | None = None,
     scanner_runner: Any = None,
     scanner_timeout: float = 30.0,
     max_repair_passes: int = 2,
@@ -2081,6 +2099,7 @@ def compose_publication_generation(
     kwargs = _builder_kwargs(
         credential_sources=credential_sources,
         known_secrets=selected_secrets,
+        staging_root=staging_root,
         scanner_runner=scanner_runner,
         scanner_timeout=scanner_timeout,
         max_repair_passes=max_repair_passes,
@@ -2103,6 +2122,7 @@ def compose_publication_generation(
             detached_fingerprint=detached_fingerprint,
             credential_sources=credential_sources,
             known_secrets=selected_secrets,
+            staging_root=staging_root,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
             price_catalog=price_catalog,

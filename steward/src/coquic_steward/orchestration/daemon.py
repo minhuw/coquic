@@ -1341,7 +1341,8 @@ class StewardDaemon:
                     getattr(publication, "r2_secret_access_key_path", None),
                 )
                 if path is not None
-            )
+            ),
+            "staging_root": getattr(publication, "staging_root", None),
         }
 
     def _repair_staged_generation(

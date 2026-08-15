@@ -1121,10 +1121,10 @@ def _contains_secret(values: Sequence[bytes | str], secrets: Sequence[str]) -> b
     return False
 
 
-def _ocr_env(root: Path) -> dict[str, str]:
+def _ocr_env(descriptor: int) -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", ""),
-        "HOME": str(root),
+        "HOME": f"/proc/self/fd/{descriptor}",
         "LANG": "C",
         "LC_ALL": "C",
     }
@@ -1133,6 +1133,7 @@ def _ocr_env(root: Path) -> dict[str, str]:
 def _run_ocr(
     frames: Sequence[_FrameInspection],
     *,
+    staging_root: Path | None,
     runner: Callable[..., Any] | None,
     timeout: float,
 ) -> tuple[tuple[str, ...], int, ReasonCode | None]:
@@ -1140,64 +1141,70 @@ def _run_ocr(
         return (), 0, ReasonCode.ocr_failure
     texts: list[str] = []
     selected = runner or subprocess.run
+
+    def scan(root: Path) -> tuple[tuple[str, ...], int, ReasonCode | None]:
+        with private_staging(root) as staging:
+            descriptor = getattr(staging, "_fd", None)
+            if not isinstance(descriptor, int):
+                return (), 0, ReasonCode.ocr_failure
+            for index, item in enumerate(frames):
+                rendered = io.BytesIO()
+                try:
+                    item.frame.convert("RGB").save(rendered, format="PNG", optimize=False)
+                except (OSError, ValueError, MemoryError):
+                    return (), index, ReasonCode.ocr_failure
+                name = f"frame-{index:04d}.png"
+                staging.write_bytes(name, rendered.getvalue())
+                argv = [
+                    "tesseract",
+                    f"/proc/self/fd/{descriptor}/{name}",
+                    "stdout",
+                    "--psm",
+                    "6",
+                    "--oem",
+                    "1",
+                ]
+                try:
+                    result = selected(
+                        argv,
+                        capture_output=True,
+                        text=False,
+                        timeout=float(timeout),
+                        check=False,
+                        pass_fds=(descriptor,),
+                        env=_ocr_env(descriptor),
+                    )
+                    returncode = getattr(result, "returncode", _MISSING)
+                    stdout = getattr(result, "stdout", _MISSING)
+                    if isinstance(returncode, bool) or not isinstance(returncode, int) or returncode != 0:
+                        return (), index, ReasonCode.ocr_failure
+                    if isinstance(stdout, str):
+                        output = stdout.encode("utf-8")
+                    elif isinstance(stdout, bytes):
+                        output = stdout
+                    else:
+                        return (), index, ReasonCode.ocr_failure
+                    if len(output) > MAX_OCR_OUTPUT_BYTES:
+                        return (), index, ReasonCode.ocr_failure
+                    try:
+                        texts.append(output.decode("utf-8"))
+                    except UnicodeDecodeError:
+                        return (), index, ReasonCode.ocr_failure
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError, TypeError, MemoryError):
+                    return (), index, ReasonCode.ocr_failure
+                except Exception:
+                    return (), index, ReasonCode.ocr_failure
+                finally:
+                    rendered.close()
+            return tuple(texts), len(frames), None
+
     try:
+        if staging_root is not None:
+            return scan(Path(staging_root))
         with TemporaryDirectory(prefix="coquic-publication-ocr-") as temporary:
             root = Path(temporary)
             os.chmod(root, 0o700)
-            with private_staging(root) as staging:
-                descriptor = getattr(staging, "_fd", None)
-                if not isinstance(descriptor, int):
-                    return (), 0, ReasonCode.ocr_failure
-                for index, item in enumerate(frames):
-                    rendered = io.BytesIO()
-                    try:
-                        item.frame.convert("RGB").save(rendered, format="PNG", optimize=False)
-                    except (OSError, ValueError, MemoryError):
-                        return (), index, ReasonCode.ocr_failure
-                    name = f"frame-{index:04d}.png"
-                    staging.write_bytes(name, rendered.getvalue())
-                    argv = [
-                        "tesseract",
-                        f"/proc/self/fd/{descriptor}/{name}",
-                        "stdout",
-                        "--psm",
-                        "6",
-                        "--oem",
-                        "1",
-                    ]
-                    try:
-                        result = selected(
-                            argv,
-                            capture_output=True,
-                            text=False,
-                            timeout=float(timeout),
-                            check=False,
-                            pass_fds=(descriptor,),
-                            env=_ocr_env(root),
-                        )
-                        returncode = getattr(result, "returncode", _MISSING)
-                        stdout = getattr(result, "stdout", _MISSING)
-                        if isinstance(returncode, bool) or not isinstance(returncode, int) or returncode != 0:
-                            return (), index, ReasonCode.ocr_failure
-                        if isinstance(stdout, str):
-                            output = stdout.encode("utf-8")
-                        elif isinstance(stdout, bytes):
-                            output = stdout
-                        else:
-                            return (), index, ReasonCode.ocr_failure
-                        if len(output) > MAX_OCR_OUTPUT_BYTES:
-                            return (), index, ReasonCode.ocr_failure
-                        try:
-                            texts.append(output.decode("utf-8"))
-                        except UnicodeDecodeError:
-                            return (), index, ReasonCode.ocr_failure
-                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError, TypeError, MemoryError):
-                        return (), index, ReasonCode.ocr_failure
-                    except Exception:
-                        return (), index, ReasonCode.ocr_failure
-                    finally:
-                        rendered.close()
-                return tuple(texts), len(frames), None
+            return scan(root)
     except (OSError, PublicationError, MemoryError):
         return (), 0, ReasonCode.ocr_failure
 
@@ -1207,6 +1214,7 @@ def _scan_metadata_ocr(
     *,
     raw_metadata: Sequence[bytes] = (),
     secrets: Sequence[str],
+    staging_root: Path | None,
     scanner_runner: Callable[..., Any] | None,
     scanner_timeout: float,
 ) -> tuple[int, ReasonCode | None]:
@@ -1215,6 +1223,7 @@ def _scan_metadata_ocr(
     try:
         report: ScannerReport = run_trufflehog(
             entries,
+            staging_root=staging_root,
             timeout=scanner_timeout,
             runner=scanner_runner,
         )
@@ -1231,6 +1240,7 @@ def _inspect_image(
     source: _Source,
     *,
     secrets: Sequence[str],
+    staging_root: Path | None,
     scanner_runner: Callable[..., Any] | None,
     scanner_timeout: float,
     ocr_runner: Callable[..., Any] | None,
@@ -1246,7 +1256,12 @@ def _inspect_image(
         metadata_texts.extend(frame.metadata)
         raw_metadata.extend(frame.raw_metadata)
     try:
-        ocr_texts, ocr_count, ocr_reason = _run_ocr(frames, runner=ocr_runner, timeout=ocr_timeout)
+        ocr_texts, ocr_count, ocr_reason = _run_ocr(
+            frames,
+            staging_root=staging_root,
+            runner=ocr_runner,
+            timeout=ocr_timeout,
+        )
     finally:
         for frame in frames:
             try:
@@ -1278,6 +1293,7 @@ def _inspect_image(
         entries,
         raw_metadata=raw_metadata,
         secrets=secrets,
+        staging_root=staging_root,
         scanner_runner=scanner_runner,
         scanner_timeout=scanner_timeout,
     )
@@ -1320,6 +1336,7 @@ def inspect_media(
     secrets: Sequence[str] | str | None = None,
     known_secrets: Sequence[str] | str | None = None,
     credential_sources: object = None,
+    staging_root: Path | None = None,
     scanner_runner: Callable[..., Any] | None = None,
     scanner: Callable[..., Any] | None = None,
     scanner_timeout: float = MAX_SCANNER_TIMEOUT_SECONDS,
@@ -1367,6 +1384,7 @@ def inspect_media(
         return _inspect_image(
             source,
             secrets=normalized_secrets,
+            staging_root=staging_root,
             scanner_runner=scanner_runner,
             scanner_timeout=scanner_timeout,
             ocr_runner=ocr_runner,

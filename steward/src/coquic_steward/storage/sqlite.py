@@ -484,14 +484,10 @@ class SQLiteTaskStore:
         _ensure_database_parent(database.parent)
 
         tasks_root = database.parent / "tasks"
-        sibling_store_exists = _sibling_store_exists(database)
         control_loop_root = database.parent / "control-loop"
         if os.path.lexists(control_loop_root):
             _require_directory(control_loop_root, "control-loop root")
-            if (
-                _directory_entries(control_loop_root, "control-loop root")
-                and not sibling_store_exists
-            ):
+            if _directory_entries(control_loop_root, "control-loop root"):
                 raise SQLiteStoreLifecycleError(
                     "control-loop root contains existing state"
                 )
@@ -556,7 +552,6 @@ class SQLiteTaskStore:
                     for path in _database_publication_paths(database)
                 )
                 and not database_temporaries
-                and not sibling_store_exists
             ):
                 raise SQLiteStoreLifecycleError(
                     "task archive exists without a Store database"
@@ -7277,24 +7272,6 @@ def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
         database.with_name(database.name + "-wal"),
         database.with_name(database.name + "-shm"),
     )
-
-
-def _sibling_store_exists(database: Path) -> bool:
-    target_names = {path.name for path in _database_publication_paths(database)}
-    try:
-        entries = _directory_entries(database.parent, "database parent")
-    except SQLiteStoreLifecycleError:
-        return False
-    for candidate in entries:
-        if candidate.name in target_names or candidate.suffix != database.suffix:
-            continue
-        try:
-            _require_regular_file(candidate, "sibling Store database")
-            _require_wal_sidecars(candidate)
-        except SQLiteStoreLifecycleError:
-            continue
-        return True
-    return False
 
 
 def _same_regular_file(left: Path, right: Path) -> bool:

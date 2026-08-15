@@ -498,6 +498,41 @@ def test_create_rejects_populated_control_loop_root_without_mutation(
     assert _file_snapshot(tmp_path) == before
 
 
+def test_create_rejects_retained_state_despite_an_unrelated_sibling_store(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    epoch_id = store.control_loop.epoch_id
+    store.engine.dispose()
+
+    control_loop = tmp_path / "control-loop"
+    control_loop.mkdir()
+    retained_state = control_loop / "retained-state"
+    retained_state.write_bytes(b"evidence")
+    for path in (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+    sibling = tmp_path / "other.sqlite"
+    sibling.write_bytes(b"unrelated")
+    (tmp_path / "other.sqlite-wal").write_bytes(b"wal")
+    (tmp_path / "other.sqlite-shm").write_bytes(b"shm")
+    before = _file_snapshot(tmp_path)
+
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+
+    assert _file_snapshot(tmp_path) == before
+    assert json.loads(
+        (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
+    )["epochId"] == epoch_id
+    assert retained_state.read_bytes() == b"evidence"
+
+
 def test_open_rejects_version_corruption_without_repair(tmp_path: Path) -> None:
     database = tmp_path / "steward.sqlite"
     TaskStore.create(database).engine.dispose()

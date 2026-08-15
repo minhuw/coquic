@@ -1597,6 +1597,8 @@ class TaskArchive:
         pipeline_id: str | None = None,
         event: Mapping[str, Any] | None = None,
     ) -> Path:
+        if task is not None:
+            _as_dict(task)
         self.ensure_epoch()
         task_id = validate_opaque_id(task_id)
         directory = self.task_dir(task_id)
@@ -1951,12 +1953,16 @@ class TaskArchive:
         pipeline: TaskPipeline,
         runs: Sequence[TaskRun],
     ) -> Path:
-        if pipeline.task_id != task.id:
-            raise ArchiveConflictError("ledger pipeline does not belong to task")
         if not runs:
             raise ArchiveValidationError(
                 "canonical pipeline materialization requires ledger runs"
             )
+        _as_dict(task)
+        _as_dict(pipeline)
+        for run in runs:
+            _as_dict(run)
+        if pipeline.task_id != task.id:
+            raise ArchiveConflictError("ledger pipeline does not belong to task")
         task_path = self.create_task_from_record(task, pipeline=pipeline)
         for run in runs:
             if run.task_id != task.id or run.pipeline_id != pipeline.id:

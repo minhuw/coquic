@@ -1043,6 +1043,76 @@ def test_materialize_run_rejects_model_dump_lookalike_without_mutation(
     assert after == before
 
 
+def test_create_task_rejects_model_dump_lookalike_before_mutation(
+    tmp_path: Path,
+) -> None:
+    class ModelDumpLookalike:
+        called = False
+
+        def model_dump(self, **_kwargs: object) -> dict[str, object]:
+            self.called = True
+            raise AssertionError("unsupported serializer executed")
+
+    archive = TaskArchive(tmp_path / "tasks")
+    lookalike = ModelDumpLookalike()
+
+    with pytest.raises(TypeError, match="expected mapping or pydantic model"):
+        archive.create_task(  # type: ignore[arg-type]
+            "task-safe",
+            "prompt",
+            task=lookalike,
+            pipeline_id="pipeline-initial",
+        )
+
+    assert lookalike.called is False
+    assert not archive.root.exists()
+    assert not archive.epoch_path.exists()
+    assert not archive.task_dir("task-safe").exists()
+
+
+def test_materialize_ledger_rejects_model_dump_lookalike_before_mutation(
+    tmp_path: Path,
+) -> None:
+    store = TaskStore.create(tmp_path / "store.sqlite")
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="typed ledger",
+            prompt="prompt",
+        )
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id)
+    run = store.create_run(task.id, pipeline.id, session.id, role="implementation")
+
+    class ModelDumpLookalike:
+        called = False
+
+        def __init__(self) -> None:
+            self.id = pipeline.id
+            self.task_id = task.id
+
+        def model_dump(self, **_kwargs: object) -> dict[str, object]:
+            self.called = True
+            raise AssertionError("unsupported serializer executed")
+
+    archive = TaskArchive(tmp_path / "archive")
+    lookalike = ModelDumpLookalike()
+
+    with pytest.raises(TypeError, match="expected mapping or pydantic model"):
+        archive.materialize_ledger(  # type: ignore[arg-type]
+            task,
+            lookalike,
+            [run],
+        )
+
+    assert lookalike.called is False
+    assert not archive.root.exists()
+    assert not archive.epoch_path.exists()
+    assert not archive.task_dir(task.id).exists()
+
+
 def test_task_materialization_requires_a_ledger_pipeline_id(tmp_path: Path) -> None:
     archive = TaskArchive(tmp_path / "tasks")
 

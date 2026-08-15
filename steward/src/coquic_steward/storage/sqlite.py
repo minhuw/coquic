@@ -374,13 +374,11 @@ class SQLiteTaskStore:
                     return cls._open_validated(database, epoch_id, on_change)
                 _fsync_directory(database.parent)
             except BaseException:
-                if publication_conflict:
-                    _remove_matching_publication_fragments(temporary, database)
-                else:
-                    # Preserve a partially published prefix long enough for
-                    # the next creator to identify and remove only its
-                    # matching final links.  A complete final set needs no
-                    # temporary retained.
+                if not publication_conflict:
+                    # Preserve a partially published prefix for inspection, but
+                    # never remove a visible database or sidecar.  A later
+                    # creator refuses that state unchanged; only this attempt's
+                    # hidden temporary is removed below when appropriate.
                     keep_temporary = _temporary_publication_is_partial(
                         temporary, database
                     )
@@ -503,10 +501,9 @@ class SQLiteTaskStore:
             )
 
         assert expected_epoch_id is not None
-        _validate_database_namespace(database)
-        _recover_incomplete_database_publication(
-            database, database_temporaries
-        )
+        # Visible database and sidecar paths are never a retry prefix.  Refuse
+        # them unchanged instead of unlinking paths that may belong to a live
+        # creator.
         _refuse_existing_database_state(database)
         return expected_epoch_id, [*epoch_temporaries, *database_temporaries]
 
@@ -7273,42 +7270,6 @@ def _temporary_publication_is_partial(
     if not any(present) or all(present):
         return False
     return _publication_matches_temporary(temporary, database)
-
-
-def _remove_matching_publication_fragments(
-    temporary: Path, database: Path
-) -> None:
-    removed = False
-    for target, suffix in zip(
-        _database_publication_paths(database), ("", "-wal", "-shm")
-    ):
-        source = temporary if not suffix else temporary.with_name(
-            temporary.name + suffix
-        )
-        if os.path.lexists(target) and _same_regular_file(target, source):
-            _unlink_regular_remnant(target)
-            removed = True
-    if removed:
-        _fsync_directory(database.parent)
-
-
-def _recover_incomplete_database_publication(
-    database: Path, temporaries: list[Path]
-) -> None:
-    paths = _database_publication_paths(database)
-    present = [os.path.lexists(path) for path in paths]
-    if not any(present) or all(present):
-        return
-    for temporary in temporaries:
-        if not temporary.name.endswith(".tmp"):
-            continue
-        if not _publication_matches_temporary(temporary, database):
-            continue
-        for path in paths:
-            if os.path.lexists(path):
-                _unlink_regular_remnant(path)
-        _fsync_directory(database.parent)
-        return
 
 
 def _read_epoch_document(path: Path) -> dict[str, object]:

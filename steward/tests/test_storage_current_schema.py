@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -137,7 +138,7 @@ def test_publication_leaves_an_exact_store_if_database_link_is_interrupted(
         TaskStore.create(database)
 
 
-def test_create_retries_a_partial_sidecar_publication(
+def test_create_refuses_partial_sidecar_publication_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:
     database = tmp_path / "steward.sqlite"
@@ -158,10 +159,93 @@ def test_create_retries_a_partial_sidecar_publication(
 
     assert not database.exists()
     assert database.with_name(database.name + "-wal").is_file()
-    created = TaskStore.create(database)
-    assert created.control_loop.epoch_id == json.loads(
-        (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
-    )["epochId"]
+
+    def snapshot() -> dict[str, tuple[int, int, int, bytes | None]]:
+        return {
+            path.name: (
+                path.stat().st_ino,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in tmp_path.iterdir()
+        }
+
+    before = snapshot()
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+    assert snapshot() == before
+
+
+def test_concurrent_create_does_not_remove_a_live_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    wal = database.with_name(database.name + "-wal")
+    original_link = sqlite_module.os.link
+    original_new_temporary = sqlite_module.SQLiteTaskStore._new_database_temporary
+    wal_linked = threading.Event()
+    allow_creator_a = threading.Event()
+    creator_b_done = threading.Event()
+    outcomes: dict[str, object] = {}
+
+    def paused_link(source, target, *args, **kwargs):
+        result = original_link(source, target, *args, **kwargs)
+        if threading.current_thread().name == "store-creator-a" and Path(target) == wal:
+            wal_linked.set()
+            if not allow_creator_a.wait(timeout=5):
+                raise RuntimeError("timed out waiting for the competing creator")
+        return result
+
+    def stop_creator_b(cls, path, epoch_id):
+        if threading.current_thread().name == "store-creator-b":
+            raise RuntimeError("creator B stopped before publication")
+        return original_new_temporary(path, epoch_id)
+
+    monkeypatch.setattr(sqlite_module.os, "link", paused_link)
+    monkeypatch.setattr(
+        sqlite_module.SQLiteTaskStore,
+        "_new_database_temporary",
+        classmethod(stop_creator_b),
+    )
+
+    def create_store(key: str) -> None:
+        try:
+            store = TaskStore.create(database)
+            store.engine.dispose()
+            outcomes[key] = "ok"
+        except BaseException as exc:
+            outcomes[key] = exc
+        finally:
+            if key == "store-creator-b":
+                creator_b_done.set()
+
+    creator_a = threading.Thread(
+        target=create_store, args=("store-creator-a",), name="store-creator-a"
+    )
+    creator_b = threading.Thread(
+        target=create_store, args=("store-creator-b",), name="store-creator-b"
+    )
+    creator_a.start()
+    assert wal_linked.wait(timeout=5)
+    wal_inode = wal.stat().st_ino
+    try:
+        creator_b.start()
+        assert creator_b_done.wait(timeout=5)
+        assert isinstance(outcomes.get("store-creator-b"), SQLiteStoreLifecycleError)
+        assert wal.is_file()
+        assert wal.stat().st_ino == wal_inode
+    finally:
+        allow_creator_a.set()
+        creator_a.join(timeout=10)
+        creator_b.join(timeout=10)
+
+    assert not creator_a.is_alive()
+    assert not creator_b.is_alive()
+    assert outcomes["store-creator-a"] == "ok"
+    assert database.is_file()
+    assert wal.is_file()
+    assert database.with_name(database.name + "-shm").is_file()
 
 
 def test_open_validation_does_not_repair_or_write(tmp_path: Path) -> None:

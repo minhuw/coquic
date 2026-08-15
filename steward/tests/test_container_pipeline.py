@@ -34,6 +34,7 @@ from coquic_steward.execution.worktree import (
 from coquic_steward.execution.session import SessionSupervisor, publication_graph_for_task
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
+from coquic_steward.storage.sqlite import TaskLedgerOwnershipError
 
 
 class FakeRunner(CodexRunner):
@@ -793,6 +794,42 @@ def test_push_race_classifier_is_strict(detail, race) -> None:
     from coquic_steward.execution.executor import _is_non_fast_forward_push_failure
 
     assert _is_non_fast_forward_push_failure(detail) is race
+
+
+def test_stale_parent_child_creation_propagates_ownership_error(config) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="stale parent",
+            prompt="change",
+        )
+    )
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+    parent = store.list_pipelines(task.id)[0]
+    child = executor._new_child_pipeline(
+        task,
+        parent,
+        PipelineTrigger.validation_repair,
+        {"failure": "first"},
+    )
+    events_before = store.events(task.id)
+
+    with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
+        executor._new_child_pipeline(
+            task,
+            parent,
+            PipelineTrigger.validation_repair,
+            {"failure": "stale"},
+        )
+
+    saved = store.list_pipelines(task.id)
+    assert [item.id for item in saved] == [parent.id, child.id]
+    assert saved[0].state == "superseded"
+    assert saved[1].state == "active"
+    assert store.events(task.id) == events_before
 
 
 def test_child_pipeline_budget_and_no_progress_fingerprint_are_explicit(config) -> None:

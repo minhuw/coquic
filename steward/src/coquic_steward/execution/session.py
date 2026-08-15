@@ -2127,8 +2127,16 @@ class SessionSupervisor:
         except ValueError:
             # A concurrent interrupt() may have won the compare-and-set. Keep
             # its terminal outcome and preserve the completed transcript prefix,
-            # but never treat a still-running run as an idempotent terminal race.
+            # but never treat a still-running run or a conflicting provider
+            # identity as an idempotent terminal race.
             current_run = self.store.get_run(run.id)
+            if provider_id is not None:
+                current_session = self.store.get_session(run.session_id)
+                if (
+                    current_session.provider_session_id is not None
+                    and current_session.provider_session_id != provider_id
+                ):
+                    raise
             if current_run.state == CodexRunState.running.value:
                 raise
         if outcome.interrupted or outcome.forced:

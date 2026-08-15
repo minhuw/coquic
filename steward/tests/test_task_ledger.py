@@ -188,10 +188,19 @@ def test_stale_pipeline_cannot_reclaim_execution_owner(
         parent_pipeline_id=parent.id,
     )
 
+    before = store.list_pipelines(task.id)
+    with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
+        store.create_pipeline(
+            task.id,
+            execution_id=parent.execution_id,
+            trigger="validation-repair",
+            parent_pipeline_id=parent.id,
+        )
     with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
         store.create_session(task.id, parent.id)
 
     assert store.get_execution(task.id).owning_pipeline_id == child.id
+    assert store.list_pipelines(task.id) == before
     assert store.list_sessions(task.id, pipeline_id=parent.id) == []
 
 
@@ -473,6 +482,37 @@ def test_pipeline_creation_requires_persisted_execution_owner(
     assert store.list_pipelines(task.id) == before
     assert store.get(task.id).status == TaskStatus.queued
     assert store.get_execution(task.id).owning_pipeline_id is None
+
+
+def test_terminal_cas_loser_persists_exact_provider_identity(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="cas", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(task.id, pipeline.id)
+    run = store.create_run(task.id, pipeline.id, session.id, role="implementation")
+    store.mark_run_interrupted(run.id)
+
+    with pytest.raises(ValueError, match="compare-and-set"):
+        store.transition_run(
+            run.id,
+            "succeeded",
+            expected_state="running",
+            provider_session_id="provider-exact",
+        )
+
+    assert store.get_session(session.id).provider_session_id == "provider-exact"
+    with pytest.raises(ValueError, match="conflicts with persisted"):
+        store.transition_run(
+            run.id,
+            "succeeded",
+            expected_state="running",
+            provider_session_id="provider-conflict",
+        )
+    assert store.get_session(session.id).provider_session_id == "provider-exact"
 
 
 def test_checkpoint_round_trip(config: StewardConfig) -> None:
@@ -762,6 +802,58 @@ def test_session_and_first_run_allocation_rolls_back_together(
     session, run = store.create_session_with_run(task.id, pipeline.id, **arguments)
     assert run.session_id == session.id
     assert session.home_uid is not None
+
+
+def test_stale_run_allocation_rolls_back_without_ledger_rows(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="stale", prompt="p")
+    )
+    parent = store.list_pipelines(task.id)[0]
+    stale_session = store.create_session(task.id, parent.id)
+    child = store.create_pipeline(
+        task.id,
+        execution_id=parent.execution_id,
+        trigger="validation-repair",
+        parent_pipeline_id=parent.id,
+    )
+
+    with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
+        store.create_run(
+            task.id,
+            parent.id,
+            stale_session.id,
+            role="implementation",
+        )
+    assert store.list_runs(task.id, pipeline_id=parent.id) == []
+
+    arguments = {
+        "session_id": "stale-allocation-session",
+        "private_home_path": config.private_sessions_dir / task.id / "stale-allocation-session",
+        "private_home_relative_path": f"{task.id}/stale-allocation-session",
+        "image_digest": "sha256:" + "a" * 64,
+        "codex_identity": "codex-test",
+        "cwd": config.repo_root,
+        "checkpoint_id": None,
+        "provider_store_identity": "codex-sessions-v1",
+        "owner_role": "implementation",
+        "session_idempotency_key": None,
+        "role": "implementation",
+        "model": None,
+        "reasoning": None,
+        "image_version": "sha256:" + "a" * 64,
+        "runtime_version": "task-runtime-v1",
+        "run_checkpoint_id": None,
+        "run_provider_store_identity": "codex-sessions-v1",
+    }
+    with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
+        store.create_session_with_run(task.id, parent.id, **arguments)
+
+    assert store.list_sessions(task.id, pipeline_id=parent.id) == [stale_session]
+    assert store.list_runs(task.id, pipeline_id=parent.id) == []
+    assert store.get_execution(task.id).owning_pipeline_id == child.id
 
 
 def test_interrupted_run_has_only_one_recovery(config: StewardConfig) -> None:

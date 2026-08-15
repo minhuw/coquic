@@ -1766,6 +1766,8 @@ class StewardExecutor:
                 raise RuntimeError("conflict budget exhausted")
         try:
             self.store.transition_pipeline(parent.id, PipelineState.superseded.value, phase=coarse_phase(self._pipeline_cursor(task.id, parent.id)).value)
+        except TaskLedgerOwnershipError:
+            raise
         except ValueError:
             pass
         child = self.store.create_pipeline(

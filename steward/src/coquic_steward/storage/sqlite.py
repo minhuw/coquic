@@ -872,6 +872,128 @@ class SQLiteTaskStore:
             )
         return execution, selected
 
+    @staticmethod
+    def _require_execution_owner_connection(
+        connection: Connection,
+        task_id: str,
+        *,
+        execution_id: str | None = None,
+        pipeline_id: str | None = None,
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        execution_statement = select(
+            TaskExecutionRow.id,
+            TaskExecutionRow.task_id,
+            TaskExecutionRow.owning_pipeline_id,
+        )
+        if execution_id is not None:
+            execution_statement = execution_statement.where(
+                TaskExecutionRow.id == execution_id
+            )
+        else:
+            execution_statement = execution_statement.where(
+                TaskExecutionRow.task_id == task_id
+            )
+        execution = connection.execute(execution_statement).mappings().first()
+        if execution is None or execution["task_id"] != task_id:
+            raise TaskLedgerOwnershipError("task execution does not belong to task")
+        owner_id = execution["owning_pipeline_id"]
+        owner = (
+            connection.execute(
+                select(
+                    TaskPipelineRow.id,
+                    TaskPipelineRow.task_id,
+                    TaskPipelineRow.execution_id,
+                ).where(
+                    TaskPipelineRow.id == owner_id,
+                    TaskPipelineRow.task_id == task_id,
+                    TaskPipelineRow.execution_id == execution["id"],
+                )
+            )
+            .mappings()
+            .first()
+            if owner_id is not None
+            else None
+        )
+        if owner is None:
+            raise TaskLedgerOwnershipError("task execution has no owning pipeline")
+        selected_id = pipeline_id if pipeline_id is not None else owner_id
+        selected = connection.execute(
+            select(
+                TaskPipelineRow.id,
+                TaskPipelineRow.task_id,
+                TaskPipelineRow.execution_id,
+            ).where(
+                TaskPipelineRow.id == selected_id,
+                TaskPipelineRow.task_id == task_id,
+                TaskPipelineRow.execution_id == execution["id"],
+            )
+        ).mappings().first()
+        if selected is None:
+            raise TaskLedgerOwnershipError(
+                "pipeline does not belong to task execution"
+            )
+        if pipeline_id is not None and pipeline_id != owner_id:
+            raise TaskLedgerOwnershipError(
+                "pipeline is not the current execution owner"
+            )
+        return execution, selected
+
+    @staticmethod
+    def _merge_provider_session_id(
+        session_row: CodexSessionRow,
+        provider_session_id: str,
+        now: str,
+    ) -> None:
+        if (
+            session_row.provider_session_id is not None
+            and session_row.provider_session_id != provider_session_id
+        ):
+            raise ValueError("provider session identity conflicts with persisted value")
+        if session_row.provider_session_id is None:
+            session_row.provider_session_id = provider_session_id
+            session_row.updated_at = now
+
+    @classmethod
+    def _activate_run_ownership_connection(
+        cls, connection: Connection, item: TaskRun
+    ) -> None:
+        now = item.updated_at.isoformat()
+        execution, _ = cls._require_execution_owner_connection(
+            connection,
+            item.task_id,
+            pipeline_id=item.pipeline_id,
+        )
+        session_row = connection.execute(
+            select(
+                CodexSessionRow.id,
+                CodexSessionRow.task_id,
+                CodexSessionRow.pipeline_id,
+            ).where(CodexSessionRow.id == item.session_id)
+        ).mappings().first()
+        if (
+            session_row is None
+            or session_row["task_id"] != item.task_id
+            or session_row["pipeline_id"] != item.pipeline_id
+        ):
+            raise TaskLedgerOwnershipError("run session ownership is invalid")
+        connection.execute(
+            CodexSessionRow.__table__
+            .update()
+            .where(CodexSessionRow.id == item.session_id)
+            .values(state="active", updated_at=now)
+        )
+        connection.execute(
+            TaskExecutionRow.__table__
+            .update()
+            .where(TaskExecutionRow.id == execution["id"])
+            .values(
+                owning_pipeline_id=item.pipeline_id,
+                active_session_id=item.session_id,
+                active_run_id=item.id,
+                updated_at=now,
+            )
+        )
+
     def validate_execution_ownership(
         self, task_id: str, *, pipeline_id: str | None = None
     ) -> None:
@@ -1002,6 +1124,7 @@ class SQLiteTaskStore:
                 session,
                 task_id,
                 execution_id=execution_id,
+                pipeline_id=parent_pipeline_id,
             )
             if parent_pipeline_id is not None:
                 parent = session.get(TaskPipelineRow, parent_pipeline_id)
@@ -1048,34 +1171,12 @@ class SQLiteTaskStore:
                     else:
                         selected_ordinal = int(ordinal)
                     now = utc_now()
-                    execution = connection.execute(
-                        select(
-                            TaskExecutionRow.task_id,
-                            TaskExecutionRow.owning_pipeline_id,
-                        ).where(TaskExecutionRow.id == execution_id)
-                    ).mappings().first()
-                    if execution is None or execution["task_id"] != task_id:
-                        connection.exec_driver_sql("ROLLBACK")
-                        raise TaskLedgerOwnershipError(
-                            "task execution does not belong to task"
-                        )
-                    owner_id = execution["owning_pipeline_id"]
-                    owner = (
-                        connection.execute(
-                            select(TaskPipelineRow.id).where(
-                                TaskPipelineRow.id == owner_id,
-                                TaskPipelineRow.task_id == task_id,
-                                TaskPipelineRow.execution_id == execution_id,
-                            )
-                        ).scalar_one_or_none()
-                        if owner_id is not None
-                        else None
+                    self._require_execution_owner_connection(
+                        connection,
+                        task_id,
+                        execution_id=execution_id,
+                        pipeline_id=parent_pipeline_id,
                     )
-                    if owner is None:
-                        connection.exec_driver_sql("ROLLBACK")
-                        raise TaskLedgerOwnershipError(
-                            "task execution has no owning pipeline"
-                        )
                     item = TaskPipeline(
                         id=pipeline_id or new_pipeline_id(),
                         task_id=task_id,
@@ -1385,6 +1486,11 @@ class SQLiteTaskStore:
             try:
                 with self.engine.connect() as connection:
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    self._require_execution_owner_connection(
+                        connection,
+                        task_id,
+                        pipeline_id=pipeline_id,
+                    )
                     selected_uid = connection.execute(
                         select(func.coalesce(func.max(CodexSessionRow.home_uid), 9999) + 1)
                     ).scalar_one()
@@ -1443,9 +1549,9 @@ class SQLiteTaskStore:
                             **_row_values(run_to_row(run_item))
                         )
                     )
+                    self._activate_run_ownership_connection(connection, run_item)
                     connection.exec_driver_sql("COMMIT")
-                self._activate_run_ownership(run_item)
-                return session_item, run_item
+                    return session_item, run_item
             except IntegrityError:
                 existing = existing_allocation()
                 if existing is not None:
@@ -1577,6 +1683,25 @@ class SQLiteTaskStore:
             try:
                 with self.engine.connect() as connection:
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    self._require_execution_owner_connection(
+                        connection,
+                        task_id,
+                        pipeline_id=pipeline_id,
+                    )
+                    session_row = connection.execute(
+                        select(
+                            CodexSessionRow.task_id,
+                            CodexSessionRow.pipeline_id,
+                        ).where(CodexSessionRow.id == session_id)
+                    ).mappings().first()
+                    if (
+                        session_row is None
+                        or session_row["task_id"] != task_id
+                        or session_row["pipeline_id"] != pipeline_id
+                    ):
+                        raise TaskLedgerOwnershipError(
+                            "run session ownership is invalid"
+                        )
                     if resume_of_run_id is not None:
                         existing_recovery = connection.execute(
                             select(TaskRunRow.id).where(
@@ -1613,8 +1738,8 @@ class SQLiteTaskStore:
                         updated_at=now,
                     )
                     connection.execute(TaskRunRow.__table__.insert().values(**_row_values(run_to_row(item))))
+                    self._activate_run_ownership_connection(connection, item)
                     connection.exec_driver_sql("COMMIT")
-                    self._activate_run_ownership(item)
                     return item
             except IntegrityError as exc:
                 if idempotency_key:
@@ -1644,26 +1769,12 @@ class SQLiteTaskStore:
         raise RuntimeError("run allocation failed")
 
     def _activate_run_ownership(self, item: TaskRun) -> None:
-        now = item.updated_at.isoformat()
-        with Session(self.engine) as session, session.begin():
-            execution, _ = self._require_execution_owner(
-                session,
-                item.task_id,
-                pipeline_id=item.pipeline_id,
-            )
-            session_row = session.get(CodexSessionRow, item.session_id)
-            if (
-                session_row is None
-                or session_row.task_id != item.task_id
-                or session_row.pipeline_id != item.pipeline_id
-            ):
-                raise TaskLedgerOwnershipError("run session ownership is invalid")
-            session_row.state = "active"
-            session_row.updated_at = now
-            execution.owning_pipeline_id = item.pipeline_id
-            execution.active_session_id = item.session_id
-            execution.active_run_id = item.id
-            execution.updated_at = now
+        """Activate an already allocated run without a partial ownership update."""
+
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            self._activate_run_ownership_connection(connection, item)
+            connection.exec_driver_sql("COMMIT")
 
     def get_run(self, run_id: str) -> TaskRun:
         with Session(self.engine) as session:
@@ -1716,66 +1827,101 @@ class SQLiteTaskStore:
         if state not in valid_states:
             raise ValueError(f"invalid run state {state!r}")
         now = utc_now().isoformat()
+        cas_error: ValueError | None = None
         with Session(self.engine) as session, session.begin():
             row = session.get(TaskRunRow, run_id)
             if row is None:
                 raise KeyError(run_id)
             if expected_state is not None and row.state != expected_state:
-                raise ValueError(f"run compare-and-set failed: expected {expected_state}, found {row.state}")
-            if row.state != CodexRunState.running.value and state != row.state:
-                raise ValueError("terminal run is immutable")
-            execution, _ = self._require_execution_owner(
-                session,
-                row.task_id,
-                pipeline_id=row.pipeline_id,
-            )
-            session_row = session.get(CodexSessionRow, row.session_id)
-            if (
-                session_row is None
-                or session_row.task_id != row.task_id
-                or session_row.pipeline_id != row.pipeline_id
-            ):
-                raise TaskLedgerOwnershipError("run session ownership is invalid")
-            if row.state == state and row.state != CodexRunState.running.value:
                 if (
-                    execution.active_run_id == row.id
-                    or (
-                        execution.active_run_id is None
-                        and execution.active_session_id == row.session_id
-                    )
+                    row.state == CodexRunState.running.value
+                    or provider_session_id is None
                 ):
-                    execution.active_run_id = None
-                    execution.active_session_id = None
-                    execution.updated_at = now
-                return row_to_run(row)
-            if provider_session_id is not None:
-                session_row.provider_session_id = provider_session_id
-                session_row.updated_at = now
-            if checkpoint_id is not None:
-                session_row.checkpoint_id = checkpoint_id
-                session_row.updated_at = now
-                row.checkpoint_id = checkpoint_id
-            row.state = state
-            row.updated_at = now
-            if exit_code is not None:
-                row.exit_code = exit_code
-            row.exit_signal = exit_signal
-            row.exit_reason = exit_reason
-            row.result_summary = result_summary
-            row.completed_at = None if state == CodexRunState.running.value else now
-            if state == CodexRunState.interrupted.value:
-                session_row.state = "interrupted"
-                session_row.updated_at = now
-            if state != CodexRunState.running.value and (
-                execution.active_run_id == row.id
-                or (
-                    execution.active_run_id is None
-                    and execution.active_session_id == row.session_id
+                    raise ValueError(
+                        f"run compare-and-set failed: expected {expected_state}, found {row.state}"
+                    )
+                execution, _ = self._require_execution_owner(
+                    session,
+                    row.task_id,
+                    pipeline_id=row.pipeline_id,
                 )
-            ):
-                execution.active_run_id = None
-                execution.active_session_id = None
-                execution.updated_at = now
+                session_row = session.get(CodexSessionRow, row.session_id)
+                if (
+                    session_row is None
+                    or session_row.task_id != row.task_id
+                    or session_row.pipeline_id != row.pipeline_id
+                ):
+                    raise TaskLedgerOwnershipError("run session ownership is invalid")
+                self._merge_provider_session_id(session_row, provider_session_id, now)
+                cas_error = ValueError(
+                    f"run compare-and-set failed: expected {expected_state}, found {row.state}"
+                )
+            else:
+                if row.state != CodexRunState.running.value and state != row.state:
+                    raise ValueError("terminal run is immutable")
+                execution, _ = self._require_execution_owner(
+                    session,
+                    row.task_id,
+                    pipeline_id=row.pipeline_id,
+                )
+                session_row = session.get(CodexSessionRow, row.session_id)
+                if (
+                    session_row is None
+                    or session_row.task_id != row.task_id
+                    or session_row.pipeline_id != row.pipeline_id
+                ):
+                    raise TaskLedgerOwnershipError("run session ownership is invalid")
+                if row.state == state and row.state != CodexRunState.running.value:
+                    if provider_session_id is not None:
+                        self._merge_provider_session_id(
+                            session_row, provider_session_id, now
+                        )
+                    if checkpoint_id is not None:
+                        session_row.checkpoint_id = checkpoint_id
+                        session_row.updated_at = now
+                        row.checkpoint_id = checkpoint_id
+                    if (
+                        execution.active_run_id == row.id
+                        or (
+                            execution.active_run_id is None
+                            and execution.active_session_id == row.session_id
+                        )
+                    ):
+                        execution.active_run_id = None
+                        execution.active_session_id = None
+                        execution.updated_at = now
+                else:
+                    if provider_session_id is not None:
+                        self._merge_provider_session_id(
+                            session_row, provider_session_id, now
+                        )
+                    if checkpoint_id is not None:
+                        session_row.checkpoint_id = checkpoint_id
+                        session_row.updated_at = now
+                        row.checkpoint_id = checkpoint_id
+                    row.state = state
+                    row.updated_at = now
+                    if exit_code is not None:
+                        row.exit_code = exit_code
+                    row.exit_signal = exit_signal
+                    row.exit_reason = exit_reason
+                    row.result_summary = result_summary
+                    row.completed_at = None if state == CodexRunState.running.value else now
+                    if state == CodexRunState.interrupted.value:
+                        session_row.state = "interrupted"
+                        session_row.updated_at = now
+                    if state != CodexRunState.running.value and (
+                        execution.active_run_id == row.id
+                        or (
+                            execution.active_run_id is None
+                            and execution.active_session_id == row.session_id
+                        )
+                    ):
+                        execution.active_run_id = None
+                        execution.active_session_id = None
+                        execution.updated_at = now
+        if cas_error is not None:
+            raise cas_error
         return self.get_run(run_id)
 
     def mark_run_interrupted(self, run_id: str, *, reason: str | None = None) -> TaskRun:
@@ -1796,7 +1942,7 @@ class SQLiteTaskStore:
                 raise KeyError(run_id)
             if row.resume_of_run_id is None:
                 raise ValueError("only a session recovery run can be restarted")
-            _, _ = self._require_execution_owner(
+            execution, _ = self._require_execution_owner(
                 session,
                 row.task_id,
                 pipeline_id=row.pipeline_id,
@@ -1818,7 +1964,10 @@ class SQLiteTaskStore:
             session_row.state = "active"
             session_row.closed_at = None
             session_row.updated_at = now
-        self._activate_run_ownership(self.get_run(run_id))
+            execution.owning_pipeline_id = row.pipeline_id
+            execution.active_session_id = row.session_id
+            execution.active_run_id = row.id
+            execution.updated_at = now
         return self.get_run(run_id)
 
     def update_run(self, run_id: str, **fields: object) -> TaskRun:

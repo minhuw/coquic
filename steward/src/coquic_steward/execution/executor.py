@@ -2769,6 +2769,24 @@ class StewardExecutor:
             _path_policy_status_event_data(error, **fields),
         )
 
+    def _restore_integration_source_after_path_policy_status_failure(
+        self, source_task_id: str, integration_task_id: str | None
+    ) -> None:
+        if integration_task_id is None:
+            return
+        integration = self.store.get(integration_task_id)
+        if (
+            TaskStatus(integration.status) != TaskStatus.blocked
+            or integration.summary != PATH_POLICY_STATUS_PARSE_SUMMARY
+        ):
+            return
+        source = self.store.get(source_task_id)
+        if TaskStatus(source.status) == TaskStatus.running:
+            self.store.start_integration(
+                source.id,
+                "integration repair blocked by path policy status parse failure",
+            )
+
     def _prepare_patch(
         self,
         task_id: str,
@@ -2801,6 +2819,9 @@ class StewardExecutor:
                 transcript=path_policy_transcript,
                 integration_task_id=path_policy_task_id,
             )
+            self._restore_integration_source_after_path_policy_status_failure(
+                task.id, path_policy_task_id
+            )
             return PatchPreparationResult.terminal_failure
         if forbidden:
             self._finish_task(
@@ -2815,6 +2836,9 @@ class StewardExecutor:
             path_policy_task_id=path_policy_task_id,
             path_policy_transcript=path_policy_transcript,
         ):
+            self._restore_integration_source_after_path_policy_status_failure(
+                task.id, path_policy_task_id
+            )
             return PatchPreparationResult.terminal_failure
 
         patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
@@ -2831,6 +2855,9 @@ class StewardExecutor:
             path_policy_task_id=path_policy_task_id,
             path_policy_transcript=path_policy_transcript,
         ):
+            self._restore_integration_source_after_path_policy_status_failure(
+                task.id, path_policy_task_id
+            )
             return PatchPreparationResult.terminal_failure
         if any(not validation.passed for validation in validations):
             self._save_authoritative_patch(task, iteration, patch_path)

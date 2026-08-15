@@ -6730,8 +6730,14 @@ def test_integration_status_parse_failure_blocks_only_integration_task(
 
 
 @pytest.mark.parametrize("repair", ["conflict", "validation"])
+@pytest.mark.parametrize("policy", ["forbidden", "frozen"])
+@pytest.mark.parametrize("failure_kind", ["malformed", "decode"])
 def test_integration_repair_status_parse_failure_preserves_source(
-    config: StewardConfig, monkeypatch, repair: str
+    config: StewardConfig,
+    monkeypatch,
+    repair: str,
+    policy: str,
+    failure_kind: str,
 ) -> None:
     store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
@@ -6754,24 +6760,60 @@ def test_integration_repair_status_parse_failure_preserves_source(
     )
     store.finish_task(integration.id, TaskStatus.blocked, "integration repair started")
 
-    executor = StewardExecutor(config, store)
-    failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
+    class SuccessfulRunner:
+        def __init__(self, configured: StewardConfig) -> None:
+            self.config = configured
+
+        def paths(self, task: TaskRecord, *, name: str = "worker") -> tuple[Path, Path]:
+            path = self.config.transcripts_dir / task.id / name
+            return path / "codex.jsonl", path / "last-message.md"
+
+        def run(
+            self,
+            task: TaskRecord,
+            _prompt: str,
+            cwd: Path,
+            *,
+            name: str = "worker",
+            **_kwargs: object,
+        ) -> WorkerResult:
+            cwd = Path(cwd)
+            transcript_path, last_message_path = self.paths(task, name=name)
+            transcript_path.parent.mkdir(parents=True, exist_ok=True)
+            transcript_path.write_text("{}\n", encoding="utf-8")
+            last_message_path.write_text("done\n", encoding="utf-8")
+            return WorkerResult(
+                completed=True,
+                command=["fake"],
+                cwd=cwd,
+                exit_code=0,
+                transcript_path=transcript_path,
+                last_message_path=last_message_path,
+                final_message="done",
+            )
+
+    executor = StewardExecutor(config, store, runner=SuccessfulRunner(config))
+    failure: _PathPolicyStatusParseError | UnicodeDecodeError
+    if failure_kind == "malformed":
+        failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
+    else:
+        failure = UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid start byte")
 
     monkeypatch.setattr(executor.worktrees, "reset_to_main", lambda _path: None)
     monkeypatch.setattr(executor.worktrees, "apply_patch", lambda _path, _patch: None)
 
-    def fail_forbidden(_path: Path) -> list[str]:
-        raise failure
+    if policy == "forbidden":
+        def fail_forbidden(_path: Path) -> list[str]:
+            raise failure
 
-    monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_forbidden)
-    if repair == "conflict":
-        monkeypatch.setattr(
-            executor, "_revise_from_integration_conflict", lambda *_args: True
-        )
+        monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_forbidden)
     else:
-        monkeypatch.setattr(
-            executor, "_revise_from_validation", lambda *_args: True
-        )
+        monkeypatch.setattr(executor.worktrees, "forbidden_paths", lambda _path: [])
+
+        def fail_frozen(_path: Path, _task: TaskRecord) -> list[str]:
+            raise failure
+
+        monkeypatch.setattr(executor.worktrees, "frozen_paths", fail_frozen)
 
     transcript_messages: list[tuple[str, str]] = []
 
@@ -6802,11 +6844,20 @@ def test_integration_repair_status_parse_failure_preserves_source(
         if event.kind == "path_policy.blocked"
     )
     assert event.data["integration_task_id"] == integration.id
-    assert event.data["diagnostic"] == failure.diagnostic
+    if failure_kind == "malformed":
+        assert event.data["diagnostic"] == failure.diagnostic
+    else:
+        assert "diagnostic" not in event.data
     assert ("path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY) in transcript_messages
     assert not any(
         event.kind == "path_policy.blocked" for event in store.events(source.id)
     )
+    revision_event = (
+        "worker.integration_revision_finished"
+        if repair == "conflict"
+        else "worker.validation_revision_finished"
+    )
+    assert any(event.kind == revision_event for event in store.events(source.id))
 
 
 def test_integration_manager_counts_main_push_budget_per_utc_day(

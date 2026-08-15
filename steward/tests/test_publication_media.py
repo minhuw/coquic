@@ -18,15 +18,12 @@ from coquic_steward.publication import (
     MAX_MEDIA_BYTES,
     MAX_OCR_OUTPUT_BYTES,
     FileIdentity,
-    MediaInspection,
     ReasonCode,
     StableRead,
     SUPPORTED_IMAGE_MEDIA_TYPES,
     classify_media,
     inspect_media,
     inspect_publication_media,
-    register_media_handler,
-    unregister_media_handler,
 )
 
 
@@ -384,24 +381,16 @@ def test_ocr_failure_timeout_and_output_overflow_fail_closed(ocr) -> None:
     assert result.bytes is None
 
 
-def test_unknown_binary_requires_registered_handler() -> None:
+@pytest.mark.parametrize("media_type", ["application/octet-stream", "application/x-test-binary"])
+def test_unknown_binary_is_always_uninspectable(media_type: str) -> None:
     payload = b"opaque binary\x00payload"
-    assert classify_media("application/octet-stream") == "binary"
-    denied = inspect_media(payload, "application/octet-stream")
-    assert denied.reason == ReasonCode.uninspectable_binary
-
-    register_media_handler(
-        "application/x-test-binary",
-        lambda content, media_type: MediaInspection.approved_result(
-            category="handler", media_type=media_type, content=content
-        ),
-    )
-    try:
-        approved = inspect_media(payload, "application/x-test-binary")
-        assert approved.approved
-        assert approved.bytes == payload
-    finally:
-        unregister_media_handler("application/x-test-binary")
+    assert classify_media(media_type) == "binary"
+    result = inspect_media(payload, media_type)
+    assert result.category == "binary"
+    assert result.reason == ReasonCode.uninspectable_binary
+    assert result.bytes is None
+    assert result.byte_size == len(payload)
+    assert result.sha256 == hashlib.sha256(payload).hexdigest()
 
 
 def test_text_allowlist_requires_utf8_and_preserves_bytes() -> None:

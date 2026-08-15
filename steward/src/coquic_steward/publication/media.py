@@ -125,7 +125,7 @@ class MediaInspection:
     def __post_init__(self) -> None:
         if self.status not in {"approved", "fail_closed"}:
             raise MediaInspectionError(ReasonCode.invalid_metadata)
-        if self.category not in {"text", "image", "handler", "binary"}:
+        if self.category not in {"text", "image", "binary"}:
             raise MediaInspectionError(ReasonCode.invalid_metadata)
         if not isinstance(self.media_type, str) or not self.media_type or len(self.media_type) > 128:
             raise MediaInspectionError(ReasonCode.invalid_media_type)
@@ -311,10 +311,6 @@ class MediaInspectionReport:
         return value
 
 
-MediaHandler = Callable[[bytes, str], MediaInspection]
-_HANDLERS: dict[str, MediaHandler] = {}
-
-
 def _base_media_type(media_type: object) -> str | None:
     if not isinstance(media_type, str) or not media_type or len(media_type) > 128:
         return None
@@ -333,27 +329,6 @@ def classify_media(media_type: object, content: bytes | None = None) -> str:
     if base in SUPPORTED_TEXT_MEDIA_TYPES:
         return "text"
     return "binary"
-
-
-def register_media_handler(media_type: str, handler: MediaHandler) -> MediaHandler:
-    """Register a bounded handler for one otherwise opaque media type."""
-
-    base = _base_media_type(media_type)
-    if base is None or base in SUPPORTED_IMAGE_MEDIA_TYPES or classify_media(base) == "text" or not callable(handler):
-        raise MediaInspectionError(ReasonCode.invalid_metadata)
-    _HANDLERS[base] = handler
-    return handler
-
-
-def unregister_media_handler(media_type: str) -> None:
-    base = _base_media_type(media_type)
-    if base is None:
-        raise MediaInspectionError(ReasonCode.invalid_media_type)
-    _HANDLERS.pop(base, None)
-
-
-def registered_media_handlers() -> tuple[str, ...]:
-    return tuple(sorted(_HANDLERS))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1390,27 +1365,7 @@ def inspect_media(
             ocr_runner=ocr_runner,
             ocr_timeout=ocr_timeout,
         )
-    handler = _HANDLERS.get(source.media_type)
-    if handler is None:
-        return _failure(source.content, source.media_type, "binary", ReasonCode.uninspectable_binary)
-    try:
-        result = handler(source.content, source.media_type)
-    except (PublicationError, TypeError, ValueError, OSError, MemoryError):
-        return _failure(source.content, source.media_type, "handler", ReasonCode.unsafe_content)
-    except Exception:
-        return _failure(source.content, source.media_type, "handler", ReasonCode.unsafe_content)
-    if (
-        not isinstance(result, MediaInspection)
-        or not result.approved
-        or result.content != source.content
-        or result.media_type != source.media_type
-        or result.sha256 != hashlib.sha256(source.content).hexdigest()
-    ):
-        return _failure(source.content, source.media_type, "handler", ReasonCode.unsafe_content)
-    changed = _verify_path(source)
-    if changed is not None:
-        return _failure(source.content, source.media_type, "handler", changed)
-    return result
+    return _failure(source.content, source.media_type, "binary", ReasonCode.uninspectable_binary)
 
 
 def inspect_publication_media(
@@ -1448,14 +1403,10 @@ __all__ = [
     "SUPPORTED_IMAGE_FORMATS",
     "SUPPORTED_IMAGE_MEDIA_TYPES",
     "SUPPORTED_TEXT_MEDIA_TYPES",
-    "MediaHandler",
     "MediaInspection",
     "MediaInspectionError",
     "MediaInspectionReport",
     "classify_media",
     "inspect_media",
     "inspect_publication_media",
-    "register_media_handler",
-    "registered_media_handlers",
-    "unregister_media_handler",
 ]

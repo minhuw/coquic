@@ -17,6 +17,7 @@ from urllib.request import (
 )
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
@@ -984,6 +985,12 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
         )
     )
     assert created
+    with Session(store.engine) as session:
+        first_row = session.get(SignalItemRow, first.id)
+        assert first_row is not None
+        assert first_row.workflow_run_id == "100"
+        assert first_row.workflow_run_attempt == 1
+        assert json.loads(first_row.payload_json) == {"run_id": "100"}
     store.mark_signal_items_planned(
         [first.id], planner_run_id="planner-1", task_id=task.id
     )
@@ -1014,6 +1021,118 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
     assert same_attempt.id == first.id
     assert next_attempt_created
     assert next_attempt.id == "wi-ci-attempt-2"
+    with Session(store.engine) as session:
+        next_row = session.get(SignalItemRow, next_attempt.id)
+        assert next_row is not None
+        assert next_row.workflow_run_id == "100"
+        assert next_row.workflow_run_attempt == 2
+
+
+@pytest.mark.parametrize(
+    ("provider", "payload"),
+    [
+        ("github-actions:ci", {"run_attempt": 2, "evidence": {"raw": "keep"}}),
+        (
+            "github-actions:ci",
+            {"run_id": None, "run_attempt": 2, "evidence": {"raw": "keep"}},
+        ),
+        (
+            "github-actions:ci",
+            {"run_id": 100, "run_attempt": 2, "evidence": {"raw": "keep"}},
+        ),
+        (
+            "codacy",
+            {"run_id": "100", "run_attempt": 2, "evidence": {"raw": "keep"}},
+        ),
+    ],
+)
+def test_store_keeps_invalid_or_non_workflow_signal_identity_unindexed(
+    config: StewardConfig, provider: str, payload: dict[str, object]
+) -> None:
+    store = TaskStore.create(config.db_path)
+    item, created = store.add_signal_item(
+        SignalItem(
+            id="identity-case",
+            provider=provider,
+            kind="signal.test",
+            fingerprint=f"identity-{provider}",
+            title="Identity case",
+            payload=payload,
+        )
+    )
+
+    assert created
+    with Session(store.engine) as session:
+        row = session.get(SignalItemRow, item.id)
+        assert row is not None
+        assert row.workflow_run_id is None
+        assert row.workflow_run_attempt is None
+        assert json.loads(row.payload_json) == payload
+
+
+def test_store_matches_workflow_signal_identity_with_one_bounded_query(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="bounded-first",
+            provider="github-actions:ci",
+            kind="github-actions.ci-failure",
+            fingerprint="bounded-first-fingerprint",
+            title="CI run 100 failed",
+            payload={"run_id": "100"},
+        )
+    )
+    assert created
+
+    statements: list[str] = []
+
+    def capture_statement(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if "signal_items" in statement.lower():
+            statements.append(statement)
+
+    event.listen(store.engine, "before_cursor_execute", capture_statement)
+    try:
+        duplicate, duplicate_created = store.add_signal_item(
+            SignalItem(
+                id="bounded-second",
+                provider="github-actions:ci",
+                kind="github-actions.ci-failure",
+                fingerprint="bounded-second-fingerprint",
+                title="CI run 100 failed again",
+                payload={"run_id": "100", "run_attempt": 1},
+            )
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture_statement)
+
+    assert not duplicate_created
+    assert duplicate.id == first.id
+    signal_queries = [
+        statement
+        for statement in statements
+        if "select" in statement.lower() and "from signal_items" in statement.lower()
+    ]
+    assert len(signal_queries) == 2
+    identity_queries = [
+        statement
+        for statement in signal_queries
+        if (
+            "signal_items.workflow_run_id = ?" in statement
+            and "signal_items.workflow_run_attempt = ?" in statement
+        )
+    ]
+    assert len(identity_queries) == 1
+    assert "limit" in identity_queries[0].lower()
+    assert not any(
+        "workflow_run_id" not in statement
+        and "fingerprint" not in statement
+        and "where signal_items.provider" in statement.lower()
+        for statement in signal_queries
+    )
 
 
 def test_store_requeues_planned_signal_after_configured_suppression(

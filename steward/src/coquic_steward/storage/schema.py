@@ -246,6 +246,8 @@ class SignalItemRow(Base):
     provider: Mapped[str] = mapped_column(String, nullable=False, index=True)
     kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
     fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    workflow_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    workflow_run_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     severity: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -1380,6 +1382,13 @@ Index(
     SignalItemRow.fingerprint,
     unique=True,
     sqlite_where=SignalItemRow.status == "pending",
+)
+Index(
+    "ix_signal_items_provider_workflow_identity",
+    SignalItemRow.provider,
+    SignalItemRow.workflow_run_id,
+    SignalItemRow.workflow_run_attempt,
+    SignalItemRow.updated_at,
 )
 
 Index("ix_task_pipelines_task_ordinal", TaskPipelineRow.task_id, TaskPipelineRow.ordinal)

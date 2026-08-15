@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,70 @@ def _catalog_digest(connection: sqlite3.Connection) -> str:
     return hashlib.sha256(
         json.dumps(payload, separators=(",", ":"), sort_keys=False).encode("utf-8")
     ).hexdigest()
+
+
+def _create_pre_018_empty_catalog(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        for name in (
+            "ix_signal_items_provider",
+            "ix_signal_items_kind",
+            "ix_signal_items_created_at",
+            "ix_signal_items_updated_at",
+            "ix_signal_items_status",
+            "ix_signal_items_provider_fingerprint_status",
+        ):
+            connection.execute(f'DROP INDEX "{name}"')
+        connection.execute("ALTER TABLE signal_items RENAME TO signal_items_pre_018")
+        connection.execute(
+            """
+            CREATE TABLE signal_items (
+                id VARCHAR NOT NULL,
+                provider VARCHAR NOT NULL,
+                kind VARCHAR NOT NULL,
+                fingerprint VARCHAR NOT NULL,
+                title VARCHAR NOT NULL,
+                summary TEXT NOT NULL,
+                severity VARCHAR,
+                location_json TEXT,
+                links_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status VARCHAR NOT NULL,
+                created_at VARCHAR NOT NULL,
+                updated_at VARCHAR NOT NULL,
+                planned_at VARCHAR,
+                planner_run_id VARCHAR,
+                planned_task_id VARCHAR,
+                source_fetch_id VARCHAR,
+                PRIMARY KEY (id)
+            )
+            """
+        )
+        connection.execute("DROP TABLE signal_items_pre_018")
+        connection.execute(
+            "CREATE INDEX ix_signal_items_provider ON signal_items (provider)"
+        )
+        connection.execute("CREATE INDEX ix_signal_items_kind ON signal_items (kind)")
+        connection.execute(
+            "CREATE INDEX ix_signal_items_created_at ON signal_items (created_at)"
+        )
+        connection.execute(
+            "CREATE INDEX ix_signal_items_updated_at ON signal_items (updated_at)"
+        )
+        connection.execute("CREATE INDEX ix_signal_items_status ON signal_items (status)")
+        connection.execute(
+            "CREATE UNIQUE INDEX ix_signal_items_provider_fingerprint_status "
+            "ON signal_items (provider, fingerprint) WHERE status = 'pending'"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+
+
+def _file_snapshot(root: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and path.name != "steward.sqlite-shm"
+    }
 
 
 def test_current_schema_oracle_is_complete_and_seeded(tmp_path: Path) -> None:
@@ -99,6 +164,51 @@ def test_current_schema_oracle_is_complete_and_seeded(tmp_path: Path) -> None:
             )
         }
         assert "ix_control_loop_overhead_pending" in index_names
+
+        signal_columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(signal_items)")
+        ]
+        assert signal_columns == [
+            "id",
+            "provider",
+            "kind",
+            "fingerprint",
+            "workflow_run_id",
+            "workflow_run_attempt",
+            "title",
+            "summary",
+            "severity",
+            "location_json",
+            "links_json",
+            "payload_json",
+            "status",
+            "created_at",
+            "updated_at",
+            "planned_at",
+            "planner_run_id",
+            "planned_task_id",
+            "source_fetch_id",
+        ]
+        workflow_index = next(
+            row
+            for row in connection.execute("PRAGMA index_list(signal_items)")
+            if row[1] == "ix_signal_items_provider_workflow_identity"
+        )
+        assert workflow_index[2] == 0
+        assert [
+            row[2]
+            for row in sorted(
+                connection.execute(
+                    "PRAGMA index_info(ix_signal_items_provider_workflow_identity)"
+                ),
+                key=lambda row: row[0],
+            )
+        ] == [
+            "provider",
+            "workflow_run_id",
+            "workflow_run_attempt",
+            "updated_at",
+        ]
 
 
 def test_create_and_open_bind_the_immutable_task_epoch_and_callback(tmp_path: Path) -> None:
@@ -314,6 +424,78 @@ def test_create_rebuilds_instead_of_adopting_recognized_database_temporary(
     assert store.control_loop.epoch_id == epoch_id
     assert remnant.exists()
     assert (tmp_path / "steward.sqlite").is_file()
+
+
+def test_open_rejects_pre_018_empty_catalog_without_mutation(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    store.engine.dispose()
+    (tmp_path / "control-loop").mkdir()
+    _create_pre_018_empty_catalog(database)
+
+    before = _file_snapshot(tmp_path)
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.open(database)
+    assert _file_snapshot(tmp_path) == before
+
+    for path in (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    ):
+        path.unlink(missing_ok=True)
+    shutil.rmtree(tmp_path / "tasks")
+    shutil.rmtree(tmp_path / "control-loop")
+
+    recreated = TaskStore.create(database)
+    try:
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone() == (
+                SQLITE_USER_VERSION,
+            )
+    finally:
+        recreated.engine.dispose()
+
+
+def test_create_rejects_sqlite_only_deleted_root_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    store.engine.dispose()
+    for path in (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+    before = _file_snapshot(tmp_path)
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+    assert _file_snapshot(tmp_path) == before
+
+
+def test_create_rejects_populated_control_loop_root_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    store.engine.dispose()
+    control_loop = tmp_path / "control-loop"
+    control_loop.mkdir()
+    (control_loop / "retained-state").write_bytes(b"evidence")
+    for path in (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    ):
+        path.unlink(missing_ok=True)
+
+    before = _file_snapshot(tmp_path)
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+    assert _file_snapshot(tmp_path) == before
 
 
 def test_open_rejects_version_corruption_without_repair(tmp_path: Path) -> None:

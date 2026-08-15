@@ -100,6 +100,7 @@ from .mappers import (
     session_to_row,
     signal_fetch_run_to_row,
     signal_item_to_row,
+    signal_workflow_identity,
     task_to_row,
     update_iteration_row,
     update_plan_run_row,
@@ -247,9 +248,9 @@ _PUBLICATION_HIDE_FENCE_COLUMNS = (
 
 # Exact factories create only this current SQLite shape.  The constructor remains
 # the compatibility path until the ordered caller migration removes it.
-SQLITE_USER_VERSION = 1
+SQLITE_USER_VERSION = 2
 CURRENT_SCHEMA_VERSION = SQLITE_USER_VERSION
-CURRENT_SCHEMA_CATALOG_DIGEST = "113f1c9e9acc8a350d01756de0ac481653b9eb306eac03495834c06890e5e6fd"
+CURRENT_SCHEMA_CATALOG_DIGEST = "8960dbc8bca84606c640e452f1928093e56e11afbfd46265ca64358d79f32165"
 SCHEMA_CATALOG_DIGEST = CURRENT_SCHEMA_CATALOG_DIGEST
 _CONTROL_LOOP_META_SEED_KEYS = frozenset({"epoch_id", "next_sequence", "planning_blocked"})
 
@@ -483,6 +484,18 @@ class SQLiteTaskStore:
         _ensure_database_parent(database.parent)
 
         tasks_root = database.parent / "tasks"
+        sibling_store_exists = _sibling_store_exists(database)
+        control_loop_root = database.parent / "control-loop"
+        if os.path.lexists(control_loop_root):
+            _require_directory(control_loop_root, "control-loop root")
+            if (
+                _directory_entries(control_loop_root, "control-loop root")
+                and not sibling_store_exists
+            ):
+                raise SQLiteStoreLifecycleError(
+                    "control-loop root contains existing state"
+                )
+
         epoch_path = tasks_root / "epoch.json"
         epoch: dict[str, object] | None = None
         epoch_temporaries: list[Path] = []
@@ -537,6 +550,17 @@ class SQLiteTaskStore:
             database_temporaries = _scan_database_temporaries(
                 database, expected_epoch_id
             )
+            if (
+                not any(
+                    os.path.lexists(path)
+                    for path in _database_publication_paths(database)
+                )
+                and not database_temporaries
+                and not sibling_store_exists
+            ):
+                raise SQLiteStoreLifecycleError(
+                    "task archive exists without a Store database"
+                )
 
         assert expected_epoch_id is not None
         # Visible database and sidecar paths are never a retry prefix.  Refuse
@@ -6503,34 +6527,19 @@ def _matching_signal_row(session: Session, item: SignalItem) -> SignalItemRow | 
     )
     if exact is not None:
         return exact
-    if not item.provider.startswith("github-actions:"):
+    identity = signal_workflow_identity(item)
+    if identity is None:
         return None
-    run_id = str(item.payload.get("run_id") or "")
-    if not run_id:
-        return None
-    run_attempt = _workflow_run_attempt(item.payload)
-    rows = session.scalars(
+    return session.scalar(
         select(SignalItemRow)
-        .where(SignalItemRow.provider == item.provider)
+        .where(
+            SignalItemRow.provider == item.provider,
+            SignalItemRow.workflow_run_id == identity.run_id,
+            SignalItemRow.workflow_run_attempt == identity.run_attempt,
+        )
         .order_by(SignalItemRow.updated_at.desc())
-    ).all()
-    for row in rows:
-        try:
-            payload = json.loads(row.payload_json or "{}")
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get("run_id") or "") != run_id:
-            continue
-        if _workflow_run_attempt(payload) == run_attempt:
-            return row
-    return None
-
-
-def _workflow_run_attempt(payload: dict[str, object]) -> int:
-    value = payload.get("run_attempt")
-    return value if isinstance(value, int) and value > 0 else 1
+        .limit(1)
+    )
 
 
 def _signal_duplicate_blocks_requeue(
@@ -7268,6 +7277,24 @@ def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
         database.with_name(database.name + "-wal"),
         database.with_name(database.name + "-shm"),
     )
+
+
+def _sibling_store_exists(database: Path) -> bool:
+    target_names = {path.name for path in _database_publication_paths(database)}
+    try:
+        entries = _directory_entries(database.parent, "database parent")
+    except SQLiteStoreLifecycleError:
+        return False
+    for candidate in entries:
+        if candidate.name in target_names or candidate.suffix != database.suffix:
+            continue
+        try:
+            _require_regular_file(candidate, "sibling Store database")
+            _require_wal_sidecars(candidate)
+        except SQLiteStoreLifecycleError:
+            continue
+        return True
+    return False
 
 
 def _same_regular_file(left: Path, right: Path) -> bool:

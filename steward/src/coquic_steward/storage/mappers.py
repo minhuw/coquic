@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..core.models import (
     CodexSession,
@@ -441,12 +441,36 @@ def row_to_event(row: EventRow, *, path_codec: PathCodec) -> Event:
     )
 
 
+class SignalWorkflowIdentity(NamedTuple):
+    run_id: str
+    run_attempt: int
+
+
+def signal_workflow_identity(item: SignalItem) -> SignalWorkflowIdentity | None:
+    if not item.provider.startswith("github-actions:"):
+        return None
+    run_id = item.payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        return None
+    run_attempt = item.payload.get("run_attempt")
+    if (
+        not isinstance(run_attempt, int)
+        or isinstance(run_attempt, bool)
+        or run_attempt <= 0
+    ):
+        run_attempt = 1
+    return SignalWorkflowIdentity(run_id=run_id, run_attempt=run_attempt)
+
+
 def signal_item_to_row(item: SignalItem, *, path_codec: PathCodec) -> SignalItemRow:
+    identity = signal_workflow_identity(item)
     return SignalItemRow(
         id=item.id,
         provider=item.provider,
         kind=item.kind,
         fingerprint=item.fingerprint,
+        workflow_run_id=identity.run_id if identity is not None else None,
+        workflow_run_attempt=(identity.run_attempt if identity is not None else None),
         title=item.title,
         summary=item.summary,
         severity=item.severity,

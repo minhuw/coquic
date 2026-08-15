@@ -9596,26 +9596,26 @@ def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> 
         validation = session.query(ValidationRow).filter_by(task_id=task.id).one()
         iteration = session.query(TaskIterationRow).filter_by(task_id=task.id).one()
         assert row.worktree_path == f"worktrees/{task.id}"
-        assert row.transcript_path == f"transcripts/{task.id}/worker/codex.jsonl"
-        assert row.last_message_path == f"transcripts/{task.id}/worker/last-message.md"
-        assert row.patch_path == f"patches/{task.id}/iteration-0.patch"
+        assert row.transcript_path == f"steward/transcripts/{task.id}/worker/codex.jsonl"
+        assert row.last_message_path == f"steward/transcripts/{task.id}/worker/last-message.md"
+        assert row.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
         assert json.loads(row.metadata_json) == {
             "note": "patches/looks-like-text",
-            "source_patch_path": f"patches/{task.id}/iteration-0.patch",
+            "source_patch_path": f"steward/patches/{task.id}/iteration-0.patch",
             "source_worktree_path": f"worktrees/{task.id}",
         }
-        assert validation.output_path == f"logs/{task.id}/iteration-0/validation.txt"
+        assert validation.output_path == f"steward/logs/{task.id}/iteration-0/validation.txt"
         assert validation.cwd == str(config.repo_root)
-        assert iteration.worker_prompt_path == f"prompts/{task.id}/worker.md"
-        assert iteration.worker_transcript_path == f"transcripts/{task.id}/worker/codex.jsonl"
-        assert iteration.worker_last_message_path == f"transcripts/{task.id}/worker/last-message.md"
-        assert iteration.patch_path == f"patches/{task.id}/iteration-0.patch"
+        assert iteration.worker_prompt_path == f"steward/prompts/{task.id}/worker.md"
+        assert iteration.worker_transcript_path == f"steward/transcripts/{task.id}/worker/codex.jsonl"
+        assert iteration.worker_last_message_path == f"steward/transcripts/{task.id}/worker/last-message.md"
+        assert iteration.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
         event = session.query(EventRow).filter_by(kind="artifact.ready").one()
-        assert event.message == f"patches/{task.id}/iteration-0.patch"
+        assert event.message == f"steward/patches/{task.id}/iteration-0.patch"
         assert json.loads(event.data_json) == {
-            "failed": [{"output_path": f"logs/{task.id}/iteration-0/validation.txt"}],
+            "failed": [{"output_path": f"steward/logs/{task.id}/iteration-0/validation.txt"}],
             "note": "patches/looks-like-text",
-            "patch_path": f"patches/{task.id}/iteration-0.patch",
+            "patch_path": f"steward/patches/{task.id}/iteration-0.patch",
         }
 
     reopened = TaskStore.open(config.db_path)
@@ -9655,6 +9655,30 @@ def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: P
         assert row is not None
         assert row.worktree_path == str(external)
     assert TaskStore.open(config.db_path).get(task.id).worktree_path == external
+
+
+def test_store_ignores_historic_relative_path_root(config: StewardConfig) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    historic = config.state_dir / "logs" / task.id / "historic.txt"
+    historic.parent.mkdir(parents=True, exist_ok=True)
+    historic.write_text("historic\n", encoding="utf-8")
+    relative = f"logs/{task.id}/historic.txt"
+    current = config.db_path.parent / relative
+
+    with Session(store.engine) as session, session.begin():
+        row = session.get(TaskRow, task.id)
+        assert row is not None
+        row.patch_path = relative
+        row.metadata_json = json.dumps({"source_patch_path": relative})
+
+    reopened = TaskStore.open(config.db_path)
+    saved = reopened.get(task.id)
+    assert saved.patch_path == current
+    assert saved.patch_path != historic
+    assert saved.spec.metadata["source_patch_path"] == str(current)
 
 
 def test_store_open_preserves_existing_absolute_state_paths(config: StewardConfig) -> None:

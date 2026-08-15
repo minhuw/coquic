@@ -14,8 +14,9 @@ control-loop/
 
 The control-loop epoch and `tasks/epoch.json` are allocated together.  Their
 format versions are independent, but both carry the immutable epoch ID and
-`post-steward-2.0` policy.  Steward does not scan, import, sanitize, redact, or
-backfill pre-2.0 state.
+`post-steward-2.0` policy.  Steward uses only the current roots: historic files
+and SQLite rows are not scanned, imported, rewritten, sanitized, redacted, or
+backfilled.
 
 ## Write boundaries
 

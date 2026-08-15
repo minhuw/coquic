@@ -46,25 +46,15 @@ class PathCodec:
             "patches",
             "prompts",
             "schemas",
+            "steward",
             "transcripts",
             "worktrees",
         }
     )
-    _LEGACY_ROOTS = frozenset(
-        {
-            "implementation-plans",
-            "logs",
-            "patches",
-            "prompts",
-            "schemas",
-            "transcripts",
-        }
-    )
     _PATH_KEYS = frozenset({"cwd", "log", "logs", "path", "paths"})
 
-    def __init__(self, base_dir: Path, legacy_dir: Path | None = None):
+    def __init__(self, base_dir: Path):
         self.base_dir = base_dir.resolve()
-        self.legacy_dir = legacy_dir.resolve() if legacy_dir is not None else None
 
     def dump(self, value: Path | None) -> str | None:
         if value is None:
@@ -72,13 +62,6 @@ class PathCodec:
         path = value.expanduser()
         if not path.is_absolute():
             return path.as_posix()
-        if self.legacy_dir is not None:
-            try:
-                relative = path.resolve().relative_to(self.legacy_dir)
-            except ValueError:
-                pass
-            else:
-                return relative.as_posix()
         try:
             return path.resolve().relative_to(self.base_dir).as_posix()
         except ValueError:
@@ -90,14 +73,7 @@ class PathCodec:
         path = Path(value)
         if path.is_absolute():
             return path
-        if self.legacy_dir is not None and self._looks_like_legacy_path(path):
-            return self.legacy_dir / path
         return self.base_dir / path
-
-    def is_portable(self, value: str | None) -> bool:
-        if not value:
-            return True
-        return not Path(value).is_absolute()
 
     def dump_text_path(self, value: str) -> str:
         return self._dump_string(value)
@@ -140,17 +116,11 @@ class PathCodec:
         path = Path(value)
         if path.is_absolute() or not self._looks_like_state_path(path):
             return value
-        if self.legacy_dir is not None and self._looks_like_legacy_path(path):
-            return str(self.legacy_dir / path)
         return str(self.base_dir / path)
 
     def _looks_like_state_path(self, path: Path) -> bool:
         parts = path.parts
         return bool(parts) and parts[0] in self._RELATIVE_ROOTS
-
-    def _looks_like_legacy_path(self, path: Path) -> bool:
-        parts = path.parts
-        return bool(parts) and parts[0] in self._LEGACY_ROOTS
 
     def _is_path_key(self, key: str | None) -> bool:
         if key is None:

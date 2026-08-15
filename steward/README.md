@@ -180,8 +180,11 @@ $COQUIC_HOME/
 ├── control-loop/           raw scheduler archive
 ├── private/                session homes and bounded scratch
 ├── worktrees/              task worktrees
-└── steward/                compatibility logs, prompts, and local diagnostics
+└── steward/                current logs, prompts, and local diagnostics
 ```
+
+Steward uses only this current layout. Historic roots and SQLite rows are never
+scanned, imported, rewritten, or backfilled.
 
 Keep the entire state root private. Cloud publication reads a completed task
 snapshot through the daemon boundary and writes only validated D1 metadata and

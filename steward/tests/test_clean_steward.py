@@ -474,7 +474,7 @@ def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
 
 
 def test_store_dedupes_active_tasks(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     spec = TaskSpec(
         kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P"
     )
@@ -489,7 +489,7 @@ def test_store_dedupes_active_tasks(config: StewardConfig) -> None:
 
 
 def test_store_recovers_stale_active_tasks(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     spec = TaskSpec(
         kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P"
     )
@@ -519,7 +519,7 @@ def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
         nonlocal changes
         changes += 1
 
-    store = TaskStore(config.db_path, on_change=on_change)
+    store = TaskStore.create(config.db_path, on_change=on_change)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -532,7 +532,7 @@ def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
 
 
 def test_daemon_cleans_recovered_stale_task_worktree(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -566,7 +566,7 @@ def test_daemon_preserves_recovered_stale_integration_commit(
     subprocess.run(
         ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -620,7 +620,7 @@ def test_daemon_preserves_recovered_stale_integration_commit(
 def test_daemon_does_not_clean_external_recovered_stale_worktree(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -641,7 +641,7 @@ def test_daemon_does_not_clean_external_recovered_stale_worktree(
 
 
 def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypatch) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -677,7 +677,7 @@ def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypat
 def test_daemon_marks_early_dispatch_exception_failed(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -704,7 +704,7 @@ def test_daemon_marks_early_dispatch_exception_failed(
 def test_store_keeps_integrating_source_with_queued_integration(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -729,7 +729,7 @@ def test_store_keeps_integrating_source_with_queued_integration(
 
 
 def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -746,7 +746,7 @@ def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
 
 
 def test_store_rejects_invalid_task_status_transition(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -760,7 +760,7 @@ def test_store_rejects_invalid_task_status_transition(config: StewardConfig) -> 
 def test_store_allows_integration_conflict_to_return_to_worker(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -775,7 +775,7 @@ def test_store_allows_integration_conflict_to_return_to_worker(
 
 
 def test_store_save_does_not_overwrite_lifecycle_state(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -793,7 +793,7 @@ def test_store_save_does_not_overwrite_lifecycle_state(config: StewardConfig) ->
 
 
 def test_store_dispatches_integration_tasks_first(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     normal, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -819,7 +819,7 @@ def test_store_dispatches_integration_tasks_first(config: StewardConfig) -> None
 
 
 def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item, created = store.add_signal_item(
         SignalItem(
             id="wi-codacy-1",
@@ -852,7 +852,7 @@ def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
 def test_store_records_scheduler_wakeups_for_actionable_changes(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, created = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -887,7 +887,7 @@ def test_store_records_scheduler_wakeups_for_actionable_changes(
 def test_store_suppresses_recent_duplicate_signal_fingerprints(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     first, created = store.add_signal_item(
         SignalItem(
             id="wi-codacy-1",
@@ -920,7 +920,7 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
 def test_store_permanently_suppresses_resolved_planned_signal(
     config: StewardConfig, terminal_status: TaskStatus
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -964,7 +964,7 @@ def test_store_permanently_suppresses_resolved_planned_signal(
 def test_store_matches_legacy_workflow_signal_by_run_attempt(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.ci, worker=WorkerKind.ci_doctor, title="T", prompt="P")
     )
@@ -1014,7 +1014,7 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
 def test_store_requeues_planned_signal_after_configured_suppression(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -1060,7 +1060,7 @@ def test_store_requeues_planned_signal_after_configured_suppression(
 def test_store_requeues_failed_planned_signal_after_retry_window(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -1101,7 +1101,7 @@ def test_store_requeues_failed_planned_signal_after_retry_window(
 def test_store_skips_failed_signal_requeue_with_duplicate_pending(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -1151,7 +1151,7 @@ def test_store_skips_failed_signal_requeue_with_duplicate_pending(
 def test_store_skips_failed_signal_requeue_with_duplicate_planned(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     first_task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T1", prompt="P")
     )
@@ -1207,7 +1207,7 @@ def test_store_skips_failed_signal_requeue_with_duplicate_planned(
 def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     first_task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T1", prompt="P")
     )
@@ -1273,7 +1273,7 @@ def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
 def test_store_does_not_requeue_recent_failed_signal(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -1309,7 +1309,7 @@ def test_store_does_not_requeue_recent_failed_signal(
 def test_store_suppresses_planned_signal_while_task_is_active(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -1350,7 +1350,7 @@ def test_store_suppresses_planned_signal_while_task_is_active(
 
 
 def test_store_marks_signal_items_planned(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     ingest_test_signal(
         store,
         SignalItem(
@@ -1384,7 +1384,7 @@ def test_store_marks_signal_items_planned(config: StewardConfig) -> None:
 def test_store_supersedes_consumed_signal_items_without_tasks(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     ingest_test_signal(
         store,
         SignalItem(
@@ -1416,7 +1416,7 @@ def test_store_supersedes_consumed_signal_items_without_tasks(
 def test_daemon_supersedes_stale_signals_before_planning(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     signal, _ = store.add_signal_item(
         SignalItem(
             id="wi-codeql-42",
@@ -1460,7 +1460,7 @@ def test_daemon_supersedes_stale_signals_before_planning(
 def test_daemon_tick_recovers_stale_task_before_planning(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.code_quality,
@@ -1522,7 +1522,7 @@ def test_daemon_tick_recovers_stale_task_before_planning(
 def test_daemon_replans_expired_failed_signal_without_refetch(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -1605,7 +1605,7 @@ def test_daemon_recovers_stale_reviewing_task_with_review_timeout(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     reviewing, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
     )
@@ -1654,7 +1654,7 @@ def test_daemon_recovers_stale_reviewing_task_with_review_timeout(
 def test_store_treats_unfinished_review_revision_as_worker_active(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
     )
@@ -1681,7 +1681,7 @@ def test_store_treats_unfinished_review_revision_as_worker_active(
 def test_store_marks_task_running_when_revision_iteration_begins(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
     )
@@ -1717,7 +1717,7 @@ def test_store_marks_task_running_when_revision_iteration_begins(
 def test_store_recovers_unfinished_review_revision_with_worker_timeout(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
     )
@@ -1755,7 +1755,7 @@ def test_store_recovers_unfinished_review_revision_with_worker_timeout(
 def test_store_recovers_validation_phase_with_validation_timeout(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="V", prompt="V")
     )
@@ -1873,7 +1873,7 @@ def test_daemon_preflights_push_main_remote(
     config.ensure_dirs()
     logs: list[str] = []
 
-    StewardDaemon(config, TaskStore(config.db_path), logger=logs.append)
+    StewardDaemon(config, TaskStore.create(config.db_path), logger=logs.append)
 
     assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
 
@@ -1905,7 +1905,7 @@ def test_daemon_preflight_rejects_divergent_local_main(
     )
 
     with pytest.raises(StewardPreflightError) as exc_info:
-        StewardDaemon(config, TaskStore(config.db_path))
+        StewardDaemon(config, TaskStore.create(config.db_path))
 
     message = str(exc_info.value)
     assert "local main does not match remote main" in message
@@ -1926,7 +1926,7 @@ def test_daemon_preflight_fails_before_tick_for_push_main(
     config.ensure_dirs()
 
     with pytest.raises(StewardPreflightError) as exc_info:
-        StewardDaemon(config, TaskStore(config.db_path))
+        StewardDaemon(config, TaskStore.create(config.db_path))
 
     assert "remote push preflight failed" in str(exc_info.value)
     assert "fetch remote main" in str(exc_info.value)
@@ -1951,13 +1951,13 @@ def test_daemon_preflight_skips_when_external_writes_disabled(
         "coquic_steward.orchestration.preflight.run_command", fail_run_command
     )
 
-    StewardDaemon(config, TaskStore(config.db_path))
+    StewardDaemon(config, TaskStore.create(config.db_path))
 
 
 def test_daemon_logs_planner_lifecycle_event(
     config: StewardConfig, monkeypatch, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     inbox_item = ingest_test_signal(
         store,
         SignalItem(
@@ -2029,7 +2029,7 @@ def test_daemon_logs_planner_lifecycle_event(
 def test_daemon_streams_debug_lines_to_logger(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     lines: list[str] = []
     store.add_signal_item(
         SignalItem(
@@ -2073,7 +2073,7 @@ def test_daemon_streams_debug_lines_to_logger(
 def test_daemon_replans_after_successful_dispatch(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     queued, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -2150,7 +2150,7 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -2198,7 +2198,7 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
 def test_daemon_dispatch_exception_preserves_terminal_task_status(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -2234,7 +2234,7 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     active_integration, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.integration,
@@ -2280,7 +2280,7 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
 def test_daemon_forever_dispatches_up_to_source_capacity_per_cycle(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
     calls: list[dict[str, object]] = []
 
@@ -2317,7 +2317,7 @@ def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     active, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -2365,7 +2365,7 @@ def test_daemon_local_wakeup_fetches_idle_due_signals_when_idle(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fetched_at = utc_now() - timedelta(minutes=2)
     for provider in config.enabled_signals:
         store.add_signal_fetch_run(
@@ -2413,7 +2413,7 @@ def test_daemon_local_wakeup_fetches_idle_due_signals_when_idle(
 def test_daemon_idle_signal_fetch_waits_for_existing_local_work(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.request_wakeup("task.status", {"task_id": "task-1"})
     store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
@@ -2443,7 +2443,7 @@ def test_daemon_idle_signal_fetch_waits_for_existing_local_work(
 def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.request_wakeup("task.status", {"task_id": "task-1"})
     store.add_signal_item(
         SignalItem(
@@ -2490,7 +2490,7 @@ def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
 def test_daemon_fetches_selected_providers_from_force_wakeup(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.request_wakeup("signal.fetch", {"providers": ["codacy"]})
     fetched: list[list[str]] = []
 
@@ -2511,7 +2511,7 @@ def test_daemon_fetches_selected_providers_from_force_wakeup(
 
 
 def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
 
     initial = scheduler_state(config, store)
 
@@ -2539,7 +2539,7 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
 
 
 def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
 
     trigger = wait_for_scheduler_event(config, store)
 
@@ -2550,7 +2550,7 @@ def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -
 def test_wait_for_scheduler_event_prioritizes_pending_wakeup(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.request_wakeup("task.created")
 
     trigger = wait_for_scheduler_event(config, store)
@@ -2570,7 +2570,7 @@ def test_wait_for_scheduler_event_fetches_signals_when_idle(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fetched_at = utc_now() - timedelta(minutes=31)
     for provider in config.enabled_signals:
         store.add_signal_fetch_run(
@@ -2607,7 +2607,7 @@ def test_wait_for_scheduler_event_uses_configured_idle_poll_interval(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fetched_at = utc_now() - timedelta(minutes=2)
     store.add_signal_fetch_run(
         SignalFetchRun(
@@ -2639,7 +2639,7 @@ def test_wait_for_scheduler_event_coalesces_near_idle_fetches(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     first_due = utc_now() - timedelta(minutes=31)
     second_due_soon = utc_now() - timedelta(minutes=30) + timedelta(seconds=1)
     for provider, fetched_at in [
@@ -2675,7 +2675,7 @@ def test_wait_for_scheduler_event_does_not_idle_fetch_with_queued_work(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.add_signal_fetch_run(
         SignalFetchRun(
             provider="codacy",
@@ -2715,7 +2715,7 @@ def test_daemon_plans_bounded_signal_item_inbox(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     for index in range(5):
         ingest_test_signal(
             store,
@@ -3248,7 +3248,7 @@ def test_codex_planner_prompt_includes_active_tasks(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     active, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.interop,
@@ -3329,7 +3329,7 @@ def test_codex_planner_selects_explicit_runner_boundaries(
 
     supervisor = SessionSupervisor(
         config,
-        TaskStore(config.db_path),
+        TaskStore.create(config.db_path),
         require_boundary=False,
     )
     with pytest.raises(TypeError, match="FreshPlannerSession"):
@@ -3377,7 +3377,7 @@ def test_codex_runner_places_resume_options_before_session(
 def test_executor_reconciles_late_write_after_authoritative_patch(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -3462,7 +3462,7 @@ def test_codex_runner_review_uses_structured_exec(
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     runner = CodexRunner(config)
-    task, _ = TaskStore(config.db_path).add_task(
+    task, _ = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     schema = tmp_path / "review.schema.json"
@@ -3494,7 +3494,7 @@ def test_codex_review_failure_uses_stderr_summary(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    task, _ = TaskStore(config.db_path).add_task(
+    task, _ = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     schema = tmp_path / "review.schema.json"
@@ -3554,7 +3554,7 @@ def test_codex_review_uses_review_timeout(
         }
     )
     config.ensure_dirs()
-    task, _ = TaskStore(config.db_path).add_task(
+    task, _ = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     schema = tmp_path / "review.schema.json"
@@ -4623,7 +4623,7 @@ def test_collect_signal_items_persists_provider_items(config: StewardConfig) -> 
 def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
     config: StewardConfig,
 ) -> None:
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.code_quality,
             worker=WorkerKind.code_quality_janitor,
@@ -4661,7 +4661,7 @@ def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
 def test_worker_prompt_highlights_workflow_signal_guidance(
     config: StewardConfig,
 ) -> None:
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.ci,
             worker=WorkerKind.ci_doctor,
@@ -4725,7 +4725,7 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
         }
     )
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
             workflow=TaskWorkflow.fix,
@@ -4798,7 +4798,7 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
 def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
     config: StewardConfig,
 ) -> None:
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
             worker=WorkerKind.issue_implementer,
@@ -4839,7 +4839,7 @@ def test_review_revision_prompt_keeps_repairs_scoped(
         }
     )
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
             workflow=TaskWorkflow.fix,
@@ -4891,7 +4891,7 @@ def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
         }
     )
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
             workflow=TaskWorkflow.fix,
@@ -4995,7 +4995,7 @@ def test_review_verdict_uses_structured_output() -> None:
 
 
 def test_worktree_create_and_patch(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5059,7 +5059,7 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
             "local_only": False,
         }
     )
-    store = TaskStore(push_config.db_path)
+    store = TaskStore.create(push_config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5080,7 +5080,7 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
 def test_commit_all_skips_hooks_only_for_the_validated_tree(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5111,7 +5111,7 @@ def test_commit_all_skips_hooks_only_for_the_validated_tree(
 
 
 def test_commit_all_rejects_changes_after_validation(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5147,7 +5147,7 @@ def test_commit_all_rejects_changes_after_validation(config: StewardConfig) -> N
 def test_worktree_patch_includes_staged_and_untracked_changes(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P"
@@ -5192,7 +5192,7 @@ def test_worktree_reports_frozen_file_and_directory_changes(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -5263,7 +5263,7 @@ def test_codex_runner_writes_prompt_and_transcript(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
 
@@ -5304,7 +5304,7 @@ def test_codex_runner_retries_transient_failure_and_resumes(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
@@ -5361,7 +5361,7 @@ def test_codex_runner_reports_missing_codex_executable(config: StewardConfig) ->
         **{**config.__dict__, "codex_bin": "/missing/codex-for-steward-test"}
     )
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
 
@@ -5394,7 +5394,7 @@ def test_executor_no_changes_reaches_terminal_status(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5436,7 +5436,7 @@ def test_executor_blocks_worker_patch_that_changes_frozen_path(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -5492,7 +5492,7 @@ def test_executor_blocks_frozen_path_written_by_validation(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -5532,7 +5532,7 @@ def test_executor_heartbeats_active_worker(
     config: StewardConfig, monkeypatch
 ) -> None:
     monkeypatch.setattr("coquic_steward.execution.executor.WORKER_HEARTBEAT_SECONDS", 0.01)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5583,7 +5583,7 @@ def test_executor_patch_happy_path(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5620,7 +5620,7 @@ def test_executor_patch_happy_path(
 def test_executor_does_not_clean_external_finished_worktree(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5661,7 +5661,7 @@ def test_executor_marks_task_validation_running_before_gates(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5740,7 +5740,7 @@ def test_executor_records_validation_results_incrementally(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5992,7 +5992,7 @@ def test_executor_retries_invalid_review_output(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -6060,7 +6060,7 @@ def test_executor_accepts_approved_review_with_validation_gaps(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -6131,7 +6131,7 @@ def test_executor_push_main_queues_integration_task(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -6196,7 +6196,7 @@ def test_integration_manager_local_only_commits_without_push(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     args_path = tmp_path / "commit-message-args.txt"
     fake.write_text(
@@ -6321,7 +6321,7 @@ def test_integration_manager_blocks_frozen_path_before_commit(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     fake.write_text(
         "#!/bin/sh\n"
@@ -6436,7 +6436,7 @@ def test_integration_manager_blocks_frozen_path_before_validation_repair(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     fake.write_text(
         "#!/bin/sh\n"
@@ -6538,7 +6538,7 @@ def test_integration_manager_counts_main_push_budget_per_utc_day(
             ),
         }
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     old_push_time = utc_now().astimezone(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     ) - timedelta(seconds=1)
@@ -6671,7 +6671,7 @@ def test_integration_manager_serializes_push_to_main(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     args_path = tmp_path / "commit-message-args.txt"
     fake.write_text(
@@ -6832,7 +6832,7 @@ def test_integration_manager_preserves_branch_when_push_fails(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     fake.write_text(
         "#!/bin/sh\n"
@@ -6972,7 +6972,7 @@ def test_integration_manager_closes_feature_issue_after_push(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -7086,7 +7086,7 @@ def test_integration_manager_keeps_push_when_feature_issue_close_fails(
             prompt="P",
         )
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     saved_source, _ = store.add_task(source.spec)
     saved_task, _ = store.add_task(task.spec)
     transcript_messages: list[tuple[str, str]] = []
@@ -7147,7 +7147,7 @@ def test_integration_manager_skips_feature_issue_close_for_multiple_issues(
             prompt="P",
         )
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     saved_source, _ = store.add_task(source.spec)
     saved_task, _ = store.add_task(task.spec)
     transcript_messages: list[tuple[str, str]] = []
@@ -7182,7 +7182,7 @@ def test_integration_manager_skips_feature_issue_close_for_multiple_issues(
 def test_integration_manager_skips_terminal_source_task(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -7240,7 +7240,7 @@ def test_integration_manager_fails_on_invalid_commit_message(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.code_quality,
@@ -7329,7 +7329,7 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     calls = tmp_path / "calls.txt"
     fake.write_text(
@@ -7466,7 +7466,7 @@ def test_integration_reset_failure_blocks_without_conflict_repair(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     source, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -7536,7 +7536,7 @@ def test_integration_conflict_no_changes_marks_source_no_changes(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     calls = tmp_path / "calls.txt"
     fake.write_text(
@@ -7645,7 +7645,7 @@ def test_integration_validation_failure_returns_to_worker_then_queues_retry(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     calls = tmp_path / "calls.txt"
     fake.write_text(
@@ -7784,7 +7784,7 @@ def test_integration_manager_records_commit_failure_without_crashing(
         }
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     fake = tmp_path / "codex"
     fake.write_text(
         "#!/bin/sh\n"
@@ -7873,7 +7873,7 @@ def test_executor_routes_blocking_review_back_to_worker_session(
     calls = tmp_path / "calls.txt"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -7958,7 +7958,7 @@ def test_executor_persists_iterations_as_first_class_records(
     fake = tmp_path / "codex"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8060,7 +8060,7 @@ def test_executor_routes_validation_failure_back_to_worker_session(
     calls = tmp_path / "calls.txt"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8154,7 +8154,7 @@ def test_executor_blocks_unchanged_validation_revision(
     calls = tmp_path / "calls.txt"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8222,7 +8222,7 @@ def test_executor_blocks_unchanged_validation_revision(
 def test_validation_failure_state_uses_complete_validation_log(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8260,7 +8260,7 @@ def test_validation_failure_state_uses_complete_validation_log(
 def test_validation_failure_state_includes_untracked_changes(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8291,7 +8291,7 @@ def test_validation_failure_state_includes_untracked_changes(
 def test_validation_failure_state_normalizes_volatile_zig_test_output(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8350,7 +8350,7 @@ def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
     fake = tmp_path / "codex"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8423,7 +8423,7 @@ def test_executor_blocks_repeated_patch_and_validation_failure(
     fake = tmp_path / "codex"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8494,7 +8494,7 @@ def test_executor_uses_shared_revision_counter_for_validation_and_review(
     calls = tmp_path / "calls.txt"
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8580,7 +8580,6 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     config = load_config(allow_legacy_migration=False)
     store = TaskStore.create(config.db_path)
-    store.engine.dispose()
     runner = CliRunner()
 
     result = runner.invoke(app, ["enqueue", "custom", "demo", "--prompt", "hello"])
@@ -8721,7 +8720,7 @@ def test_cli_daemon_refuses_second_instance(
 
 
 def test_store_records_in_progress_iteration_review(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8763,7 +8762,7 @@ def test_store_records_in_progress_iteration_review(config: StewardConfig) -> No
 
 
 def test_store_persists_tasks_in_sqlite(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.ci,
@@ -8775,7 +8774,7 @@ def test_store_persists_tasks_in_sqlite(config: StewardConfig) -> None:
         )
     )
 
-    reopened = TaskStore(config.db_path)
+    reopened = TaskStore.open(config.db_path)
     saved = reopened.get(task.id)
     assert saved.spec.title == "CI"
     assert reopened.count_events("task.created") == 1
@@ -8784,7 +8783,7 @@ def test_store_persists_tasks_in_sqlite(config: StewardConfig) -> None:
 def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> None:
     from coquic_steward.core.models import ValidationResult
 
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8859,7 +8858,7 @@ def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> 
             "patch_path": f"patches/{task.id}/iteration-0.patch",
         }
 
-    reopened = TaskStore(config.db_path)
+    reopened = TaskStore.open(config.db_path)
     saved = reopened.get(task.id)
     iteration = reopened.get_iteration(task.id, 0)
     assert saved.worktree_path == config.worktrees_dir / task.id
@@ -8882,7 +8881,7 @@ def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> 
 
 
 def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: Path) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8895,11 +8894,11 @@ def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: P
         row = session.get(TaskRow, task.id)
         assert row is not None
         assert row.worktree_path == str(external)
-    assert TaskStore(config.db_path).get(task.id).worktree_path == external
+    assert TaskStore.open(config.db_path).get(task.id).worktree_path == external
 
 
 def test_store_migrates_existing_absolute_state_paths(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -8957,7 +8956,7 @@ def test_store_migrates_existing_absolute_state_paths(config: StewardConfig) -> 
             )
         )
 
-    reopened = TaskStore(config.db_path)
+    reopened = TaskStore.open(config.db_path)
 
     with Session(reopened.engine) as session:
         row = session.get(TaskRow, task.id)
@@ -8997,7 +8996,7 @@ def test_runtime_has_raw_archive_peers(config: StewardConfig) -> None:
 
 
 def test_store_initializes_private_control_loop_ledger(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     assert isinstance(store.control_loop_ledger, ControlLoopLedger)
     assert store.control_loop_ledger.epoch_id == config.ensure_epoch()["epochId"]
 

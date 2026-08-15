@@ -141,7 +141,7 @@ def test_successful_retry_replaces_activity_sidecar_and_clears_pending_marker(
     )
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
     monkeypatch.setattr("coquic_steward.agents.runner.time.sleep", lambda _delay: None)
@@ -208,7 +208,7 @@ def test_code_runner_injects_rules_and_records_marker(config, tmp_path: Path) ->
     )
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
     result = CodexRunner(config).run(task, "hello", config.repo_root)

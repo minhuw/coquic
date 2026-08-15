@@ -104,7 +104,7 @@ class Worktrees:
             return False
         from ..storage import TaskStore
 
-        store = TaskStore(self.config.db_path)
+        store = TaskStore.open(self.config.db_path)
         try:
             durable = store.get_checkpoint(str(execution_id))
             execution = store.get_execution(str(execution_id))
@@ -164,7 +164,7 @@ class Worktrees:
     ) -> WorktreeIdentity:
         from ..storage import TaskStore
 
-        execution = TaskStore(self.config.db_path).get_execution(task.id)
+        execution = TaskStore.open(self.config.db_path).get_execution(task.id)
         base_commit = run_command(["git", "rev-parse", "HEAD"], cwd=path, check=True).stdout.strip()
         expected_tree = _worktree_tree(path)
         if expected_tree is None:

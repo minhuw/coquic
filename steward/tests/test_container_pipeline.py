@@ -99,7 +99,7 @@ def _passing_gates(
 
 def test_advance_once_is_idempotent_and_stops_at_ready_to_seal(config, monkeypatch) -> None:
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", _passing_gates)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -128,7 +128,7 @@ def test_advance_once_is_idempotent_and_stops_at_ready_to_seal(config, monkeypat
 
 def test_implementation_validation_patch_tree_full_gate_is_recorded(config, monkeypatch) -> None:
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", _passing_gates)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, workflow=TaskWorkflow.fix, worker=WorkerKind.custom, title="identity", prompt="change")
     )
@@ -179,7 +179,7 @@ def test_every_child_pipeline_can_validate_its_implementation(trigger) -> None:
 
 
 def test_phase_claim_is_atomic_across_executor_instances(config) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -195,7 +195,7 @@ def test_phase_claim_is_atomic_across_executor_instances(config) -> None:
 
     def claim() -> None:
         executor = StewardExecutor(
-            config, TaskStore(config.db_path), runner=FakeRunner(config)
+            config, TaskStore.open(config.db_path), runner=FakeRunner(config)
         )
         barrier.wait()
         try:
@@ -236,7 +236,7 @@ def test_phase_claim_is_atomic_across_executor_instances(config) -> None:
 
 
 def test_repair_prompt_inherits_plan_and_exact_child_packet(config, monkeypatch) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -282,7 +282,7 @@ def _advance_to_integration(config, monkeypatch):
     monkeypatch.setattr(
         "coquic_steward.execution.executor.run_gates", _passing_gates
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -411,7 +411,7 @@ def test_integration_blocks_tree_changed_after_review(config, monkeypatch) -> No
 
 
 def test_validation_uses_container_validation_role(config, monkeypatch) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -533,7 +533,7 @@ def test_validation_no_progress_fingerprint_ignores_attempt_metadata(tmp_path) -
 def test_archive_write_preserves_parent_and_child_pipeline_refs(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -604,7 +604,7 @@ def test_archive_write_preserves_parent_and_child_pipeline_refs(
 
 
 def test_publication_graph_builders_share_bounded_invocation_evidence(config) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -658,7 +658,7 @@ def test_publication_graph_builders_share_bounded_invocation_evidence(config) ->
 
 
 def test_validation_conflict_and_phase_budgets_are_explicit(config) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -698,7 +698,7 @@ def test_push_race_classifier_is_strict(detail, race) -> None:
 
 
 def test_child_pipeline_budget_and_no_progress_fingerprint_are_explicit(config) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, workflow=TaskWorkflow.fix, worker=WorkerKind.custom, title="budget", prompt="change")
     )

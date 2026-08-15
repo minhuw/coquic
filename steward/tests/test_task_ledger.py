@@ -36,6 +36,16 @@ def test_new_layout_and_epoch_are_explicit(repo: Path, coquic_home: Path) -> Non
     assert config.ensure_epoch() == epoch
 
 
+def test_task_store_direct_construction_is_rejected(config: StewardConfig) -> None:
+    Store = TaskStore
+    with pytest.raises(TypeError) as error:
+        Store(config.db_path)
+
+    message = str(error.value)
+    assert "TaskStore.create()" in message
+    assert "TaskStore.open()" in message
+
+
 def test_legacy_database_migration_preserves_source_and_marks_backup(
     repo: Path, coquic_home: Path
 ) -> None:
@@ -162,7 +172,7 @@ def test_normal_startup_migrates_legacy_database(
 ) -> None:
     config = StewardConfig(repo_root=repo)
     config.ensure_dirs()
-    legacy_store = TaskStore(config.legacy_db_path)
+    legacy_store = TaskStore.create(config.legacy_db_path)
     task, _ = legacy_store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -174,7 +184,9 @@ def test_normal_startup_migrates_legacy_database(
     legacy_store.engine.dispose()
 
     startup_config = load_config(repo_root=repo)
-    current_store = TaskStore(startup_config.db_path)
+    current_store = TaskStore._blank_store(
+        startup_config.db_path, on_change=None, wal=False
+    )
 
     assert current_store.get(task.id).id == task.id
     assert not startup_config.legacy_db_path.exists()
@@ -249,7 +261,7 @@ def test_migration_restart_rebuilds_incomplete_read_only_backup(
 
 
 def test_ledger_allocates_ordered_lineage_and_private_fields(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -291,7 +303,7 @@ def _pipeline_claim_data(
 def test_pipeline_action_claim_persists_event_after_commit(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
     )
@@ -330,7 +342,7 @@ def test_pipeline_action_claim_rejects_active_phase_without_notification(
     config: StewardConfig,
 ) -> None:
     notifications: list[str] = []
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
     )
@@ -359,7 +371,7 @@ def test_pipeline_action_claim_rejects_active_phase_without_notification(
 
 
 def test_pipeline_action_claim_allows_interrupted_retry(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
     )
@@ -394,7 +406,7 @@ def test_pipeline_action_claim_allows_interrupted_retry(config: StewardConfig) -
 
 
 def test_pipeline_action_claim_rejects_finished_action(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
     )
@@ -424,7 +436,7 @@ def test_pipeline_action_claim_rejects_finished_action(config: StewardConfig) ->
 
 
 def test_pipeline_action_claim_skips_malformed_history(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
     )
@@ -456,7 +468,7 @@ def test_pipeline_action_claim_rolls_back_without_notification_on_error(
     config: StewardConfig,
 ) -> None:
     notifications: list[str] = []
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="claim", prompt="p")
     )
@@ -484,7 +496,7 @@ def test_pipeline_action_claim_rolls_back_without_notification_on_error(
 
 
 def test_concurrent_pipeline_ordinals_are_unique(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -498,7 +510,7 @@ def test_concurrent_pipeline_ordinals_are_unique(config: StewardConfig) -> None:
 
 
 def test_checkpoint_round_trip(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -521,7 +533,7 @@ def test_checkpoint_round_trip(config: StewardConfig) -> None:
 def test_execution_and_checkpoint_pointers_are_task_scoped(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
 
     def allocate(title: str):
         task, _ = store.add_task(
@@ -594,7 +606,7 @@ def test_execution_and_checkpoint_pointers_are_task_scoped(
 def test_referenced_pipeline_cannot_be_reassigned_to_another_task(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
 
     def allocate(title: str):
         task, _ = store.add_task(
@@ -649,7 +661,7 @@ def test_referenced_pipeline_cannot_be_reassigned_to_another_task(
 def test_task_allocation_rolls_back_execution_pipeline_failure(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     from coquic_steward.storage.sqlite import Session
 
     real_flush = Session.flush
@@ -686,7 +698,7 @@ def test_task_allocation_rolls_back_execution_pipeline_failure(
 
 
 def test_invalid_recovery_lineage_is_rejected(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -700,7 +712,7 @@ def test_invalid_recovery_lineage_is_rejected(config: StewardConfig) -> None:
 def test_run_lineage_and_idempotency_are_task_scoped(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
 
     def create_task(title: str):
         return store.add_task(
@@ -744,7 +756,7 @@ def test_run_lineage_and_idempotency_are_task_scoped(
 def test_session_and_first_run_allocation_rolls_back_together(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -787,7 +799,7 @@ def test_session_and_first_run_allocation_rolls_back_together(
 
 
 def test_interrupted_run_has_only_one_recovery(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -819,7 +831,7 @@ def test_interrupted_run_has_only_one_recovery(config: StewardConfig) -> None:
 
 
 def test_database_rejects_cross_task_run_parent(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
 
     def create_run(title: str):
         task, _ = store.add_task(
@@ -849,7 +861,7 @@ def test_database_rejects_cross_task_run_parent(config: StewardConfig) -> None:
 
 def test_checkpoint_rejects_dirty_worktree(config: StewardConfig) -> None:
     worktrees = Worktrees(config)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -889,7 +901,7 @@ def test_checkpoint_rejects_dirty_worktree(config: StewardConfig) -> None:
 def test_checkpoint_recovery_binds_durable_runtime_identity(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,

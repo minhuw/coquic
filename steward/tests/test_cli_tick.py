@@ -25,7 +25,7 @@ def test_tick_requests_default_scheduler_wakeup(repo, monkeypatch) -> None:
     wakeup_id = fields[1]
     assert fields[2:] == ["plan=true", "dispatch=true", "max_dispatch=-"]
 
-    wakeup = TaskStore(load_config().db_path).pending_wakeups()[0]
+    wakeup = TaskStore.open(load_config().db_path).pending_wakeups()[0]
     assert wakeup.id == wakeup_id
     assert wakeup.reason == "scheduler.manual"
     assert wakeup.data == {"plan": True, "dispatch": True, "max_dispatch": None}
@@ -44,7 +44,7 @@ def test_tick_persists_normalized_options_and_prints_them(repo, monkeypatch) -> 
     assert result.exit_code == 0, result.output
     assert "plan=true dispatch=false max_dispatch=3" in result.output
 
-    wakeup = TaskStore(load_config().db_path).pending_wakeups()[0]
+    wakeup = TaskStore.open(load_config().db_path).pending_wakeups()[0]
     assert wakeup.data == {"plan": True, "dispatch": False, "max_dispatch": 3}
 
 
@@ -54,7 +54,7 @@ def test_tick_rejects_invalid_max_dispatch(repo, monkeypatch, value: str) -> Non
 
     assert result.exit_code == 2
     assert "Invalid value for '--max-dispatch'" in result.output
-    assert TaskStore(load_config().db_path).pending_wakeups() == []
+    assert TaskStore.open(load_config().db_path).pending_wakeups() == []
 
 
 def test_tick_does_not_run_a_cycle_or_acquire_daemon_lock(repo, monkeypatch) -> None:
@@ -70,5 +70,5 @@ def test_tick_does_not_run_a_cycle_or_acquire_daemon_lock(repo, monkeypatch) -> 
     result = _invoke_tick(repo, monkeypatch, "--no-plan", "--no-dispatch")
 
     assert result.exit_code == 0, result.output
-    wakeup = TaskStore(load_config().db_path).pending_wakeups()[0]
+    wakeup = TaskStore.open(load_config().db_path).pending_wakeups()[0]
     assert wakeup.data == {"plan": False, "dispatch": False, "max_dispatch": None}

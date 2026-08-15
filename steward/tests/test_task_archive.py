@@ -962,7 +962,7 @@ def test_manifest_verification_rejects_invalid_identity_and_epoch(
 def test_materializes_typed_ledger_with_real_ids_and_exact_terminal_retries(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,

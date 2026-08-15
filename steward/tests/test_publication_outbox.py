@@ -791,7 +791,7 @@ def test_schema_rejects_broad_or_unverified_cleanup_authority() -> None:
 
 def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     observed: list[PublicationState | None] = []
     store.on_change = lambda: observed.append(
         store.get_publication_generation(_generation().publication_id).state
@@ -838,7 +838,7 @@ def test_store_enqueue_is_idempotent_and_notifies_after_commit(tmp_path) -> None
 
 
 def test_store_queued_hide_requires_explicit_expectation_and_replays(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     assert store.enqueue_publication(generation).status is PublicationOperationStatus.enqueued
 
@@ -889,7 +889,7 @@ def test_store_queued_hide_requires_explicit_expectation_and_replays(tmp_path) -
 
 
 def _blocked_generation_store(path):
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW)
@@ -919,7 +919,7 @@ def _repaired_generation() -> PublicationGeneration:
 def test_store_replace_blocked_publication_is_atomic_and_replays(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
     first_store, old = _blocked_generation_store(path)
-    second_store = TaskStore(path)
+    second_store = TaskStore.open(path)
     repaired = _repaired_generation()
     observed: list[list[str]] = []
     first_store.on_change = lambda: observed.append(
@@ -943,7 +943,7 @@ def test_store_replace_blocked_publication_is_atomic_and_replays(tmp_path) -> No
 def test_store_replace_blocked_publication_concurrent_replay_converges(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
     first_store, old = _blocked_generation_store(path)
-    second_store = TaskStore(path)
+    second_store = TaskStore.open(path)
     repaired = _repaired_generation()
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
@@ -982,7 +982,7 @@ def test_store_replace_blocked_publication_refuses_proof_and_identity_guards(tmp
     elif guard == "receipt":
         # Receipts are recorded only while the generation owns a live lease;
         # block it afterward and ensure the proof still prevents replacement.
-        store2 = TaskStore(tmp_path / "receipt-source.sqlite")
+        store2 = TaskStore.create(tmp_path / "receipt-source.sqlite")
         receipt_old = _generation()
         store2.enqueue_publication(receipt_old)
         store2.claim_publication("worker-1", now=NOW)
@@ -1052,8 +1052,8 @@ def test_store_replace_blocked_publication_refuses_proof_and_identity_guards(tmp
 
 def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
-    first_store = TaskStore(path)
-    second_store = TaskStore(path)
+    first_store = TaskStore.create(path)
+    second_store = TaskStore.open(path)
     generation = _generation()
     first_store.enqueue_publication(generation)
 
@@ -1111,7 +1111,7 @@ def test_store_claim_cas_and_concurrent_callers_have_one_lease(tmp_path) -> None
 
 
 def test_store_claim_skips_later_generation_for_task_with_live_lease(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
 
     def generation(
         task_id: str,
@@ -1161,7 +1161,7 @@ def test_store_claim_skips_later_generation_for_task_with_live_lease(tmp_path) -
 
 
 def test_store_claim_edges_cannot_bypass_attempt_accounting(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
 
@@ -1186,7 +1186,7 @@ def test_store_claim_edges_cannot_bypass_attempt_accounting(tmp_path) -> None:
 
 def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     generation = _generation()
     store.enqueue_publication(generation)
     first = store.claim_publication("worker-1", now=NOW)
@@ -1251,7 +1251,7 @@ def test_store_expiry_retry_and_block_are_restart_safe(tmp_path) -> None:
     assert store.get_publication_generation(generation.publication_id).state is PublicationState.blocked
 
     store.engine.dispose()
-    restarted = TaskStore(path)
+    restarted = TaskStore.open(path)
     assert restarted.get_publication_generation(generation.publication_id).state is PublicationState.blocked
 
 
@@ -1259,7 +1259,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
     path = tmp_path / "steward.sqlite"
     started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     generation = _generation(created_at=started_at, updated_at=started_at)
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     store.enqueue_publication(generation)
     claimed = store.claim_publication(
         "worker-1", now=started_at, lease_seconds=1
@@ -1285,7 +1285,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
     assert recorded.receipt is not None
     store.engine.dispose()
 
-    restarted = TaskStore(path)
+    restarted = TaskStore.open(path)
     recovered = restarted.get_publication_generation(generation.publication_id)
     assert recovered is not None
     assert recovered.state is PublicationState.retry_wait
@@ -1296,7 +1296,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
 
 
 def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
 
@@ -1397,7 +1397,7 @@ def test_store_receipts_require_current_generation_ownership(tmp_path) -> None:
 
 
 def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW, lease_seconds=1)
@@ -1438,7 +1438,7 @@ def test_active_upload_and_staging_leases_expire_without_losing_receipts(tmp_pat
 
 
 def test_receipt_replay_requires_the_current_unexpired_owner(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW)
@@ -1485,7 +1485,7 @@ def test_receipt_replay_requires_the_current_unexpired_owner(tmp_path) -> None:
 
 
 def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW, lease_seconds=1)
@@ -1528,7 +1528,7 @@ def test_matching_receipt_replay_is_allowed_after_a_durable_reclaim(tmp_path) ->
 
 
 def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation(run_id="run-2")
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW)
@@ -1567,7 +1567,7 @@ def test_private_receipts_accept_all_runs_after_their_public_trajectories(tmp_pa
 
 
 def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     owner = "worker-1"
@@ -1637,7 +1637,7 @@ def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
     aged_health = store.get_publication_health(now=NOW + timedelta(seconds=14))
     assert aged_health.oldest_queued_age_seconds == 0
 
-    second_store = TaskStore(store.path)
+    second_store = TaskStore.open(store.path)
     with ThreadPoolExecutor(max_workers=2) as pool:
         verification_results = list(
             pool.map(
@@ -1695,7 +1695,7 @@ def test_store_receipts_cleanup_intents_and_health_converge(tmp_path) -> None:
 
 
 def test_store_cleanup_intents_reject_unsafe_replay_and_remain_in_health(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW)
@@ -1778,7 +1778,7 @@ def test_store_cleanup_intents_reject_unsafe_replay_and_remain_in_health(tmp_pat
 
 def test_store_health_tracks_current_age_and_last_outcome(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     started_at = datetime.now(timezone.utc)
     generation = _generation(created_at=started_at, updated_at=started_at)
     store.enqueue_publication(generation)
@@ -1801,7 +1801,7 @@ def test_store_health_tracks_current_age_and_last_outcome(tmp_path) -> None:
     ).last_category == "scanner_failure"
     store.engine.dispose()
 
-    restarted = TaskStore(path)
+    restarted = TaskStore.open(path)
     assert restarted.get_publication_health().last_category == "scanner_failure"
     requeued = restarted.advance_publication(
         generation.publication_id,
@@ -1816,7 +1816,7 @@ def test_store_health_tracks_current_age_and_last_outcome(tmp_path) -> None:
 
 
 def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW)
@@ -1845,7 +1845,7 @@ def test_store_retry_exhaustion_stays_bounded_from_all_retryable_states(tmp_path
 
 
 def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generation = _generation()
     store.enqueue_publication(generation)
     store.claim_publication("worker-1", now=NOW)
@@ -1889,7 +1889,7 @@ def test_store_hide_retry_at_attempt_ceiling_remains_reconcilable(tmp_path) -> N
 def test_store_begin_publication_hide_fences_pre_exposure_states_and_preserves_evidence(
     tmp_path,
 ) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     pre_exposure = (
         ("queued", {}),
         (
@@ -1974,7 +1974,7 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
     tmp_path,
 ) -> None:
     path = tmp_path / "steward.sqlite"
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     original = _generation()
     store.enqueue_publication(original)
     started = store.begin_publication_hide(
@@ -1983,7 +1983,7 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
     assert started.status is PublicationOperationStatus.enqueued
     store.engine.dispose()
 
-    restarted = TaskStore(path)
+    restarted = TaskStore.open(path)
     pending = restarted.get_publication_hide(original.task_id)
     assert pending is not None
     assert pending.state is PublicationHideState.pending
@@ -2038,7 +2038,7 @@ def test_store_publication_hide_survives_reopen_and_releases_only_distinct_repai
 def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_evidence(
     tmp_path,
 ) -> None:
-    store = TaskStore(tmp_path / "enqueue-repair.sqlite")
+    store = TaskStore.create(tmp_path / "enqueue-repair.sqlite")
     original = _generation()
     store.enqueue_publication(original)
     store.claim_publication("worker-1", now=NOW)
@@ -2091,7 +2091,7 @@ def test_store_confirmed_hide_enqueues_distinct_repair_without_erasing_exposed_e
 def test_store_confirmed_hide_replaces_exposed_generation_without_deleting_evidence(
     tmp_path,
 ) -> None:
-    store = TaskStore(tmp_path / "replace-repair.sqlite")
+    store = TaskStore.create(tmp_path / "replace-repair.sqlite")
     original = _generation()
     store.enqueue_publication(original)
     with store.engine.begin() as connection:

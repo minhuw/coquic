@@ -350,7 +350,7 @@ def test_fresh_planner_interrupt_during_container_startup_prevents_exec(config) 
 
 
 def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _signals().items[0]
     store.ingest_signal_collection(
         SignalFetchRun(
@@ -393,7 +393,7 @@ def test_cli_plan_uses_fresh_planner_boundary(config, monkeypatch) -> None:
 def test_cli_diagnostics_normalizes_task_epoch_and_reports_control_state(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     monkeypatch.setattr("coquic_steward.cli._context", lambda: (store, config))
 
     result = CliRunner().invoke(app, ["diagnostics"])

@@ -56,7 +56,7 @@ def test_prune_consumed_wakeups_respects_strict_cutoff_and_pending_rows(
     config: StewardConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _freeze_clock(monkeypatch)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     old = NOW - timedelta(days=7, microseconds=1)
     exact = NOW - timedelta(days=7)
     recent = NOW - timedelta(days=6)
@@ -102,7 +102,7 @@ def test_prune_consumed_wakeups_uses_one_bulk_delete_without_loading_rows(
     config: StewardConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _freeze_clock(monkeypatch)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     old = NOW - timedelta(days=8)
     for index in range(3):
         _insert_wakeup(
@@ -134,7 +134,7 @@ def test_consumption_activates_retention_once_and_notifies_once(
     config: StewardConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _freeze_clock(monkeypatch)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     old = NOW - timedelta(days=8)
     _insert_wakeup(
         store,
@@ -184,7 +184,7 @@ def test_consumption_commits_before_retention_failure(
     config: StewardConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _freeze_clock(monkeypatch)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     _insert_wakeup(
         store,
         "pending",

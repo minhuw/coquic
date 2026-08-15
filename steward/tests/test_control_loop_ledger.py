@@ -252,7 +252,7 @@ def test_normalized_graph_relations_and_state_checks_are_enforced(tmp_path: Path
 def test_task_and_signal_mutations_roll_back_when_completion_fails(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _item("observation-atomic", "atomic-fingerprint")
     store.ingest_signal_collection(_fetch("fetch-atomic"), [item])
     signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
@@ -305,7 +305,7 @@ def test_task_and_signal_mutations_roll_back_when_completion_fails(
 def test_signal_collection_rolls_back_legacy_and_control_rows_together(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _item("observation-ingest-atomic", "ingest-atomic-fingerprint")
 
     def fail_fetch_row(*_args, **_kwargs):
@@ -330,7 +330,7 @@ def test_signal_collection_rolls_back_legacy_and_control_rows_together(
 def test_signal_collection_exact_replay_is_idempotent_across_both_ledgers(
     config,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _item("observation-ingest-replay", "ingest-replay-fingerprint")
     fetch = _fetch("fetch-ingest-replay")
 

@@ -341,7 +341,7 @@ def test_runner_only_exports_context_for_code_stage(config, tmp_path: Path) -> N
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
     result = CodexRunner(config).run(task, "hello", config.repo_root)
@@ -427,7 +427,7 @@ def test_retry_archive_failure_isolated_from_next_capture(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
     runner = CodexRunner(config)
@@ -495,7 +495,7 @@ def test_non_code_stage_has_no_context_artifacts(config, tmp_path: Path, monkeyp
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
     monkeypatch.setenv("COQUIC_STEWARD_HOOK_CONTEXT", str(tmp_path / "ambient"))

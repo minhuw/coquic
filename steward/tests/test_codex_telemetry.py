@@ -506,7 +506,7 @@ def test_runner_starts_when_telemetry_initial_clock_fails(
     fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )[0]
     monkeypatch.setattr(

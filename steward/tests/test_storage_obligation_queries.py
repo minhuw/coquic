@@ -26,7 +26,7 @@ def _task(store: TaskStore, title: str):
 def test_task_pages_are_complete_and_stable_for_tied_timestamps(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     tasks = [_task(store, f"task-{index}") for index in range(7)]
     tied_timestamp = "2026-01-01T00:00:00+00:00"
     with store.engine.begin() as connection:
@@ -61,7 +61,7 @@ def test_task_pages_are_complete_and_stable_for_tied_timestamps(
 def test_running_runs_are_discovered_without_a_task_window(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest = _task(store, "oldest")
     pipeline = store.list_pipelines(oldest.id)[0]
     session = store.create_session(oldest.id, pipeline.id)
@@ -83,7 +83,7 @@ def test_running_runs_are_discovered_without_a_task_window(
 def test_cleanup_queries_use_all_events_and_latest_completion(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     no_obligation = _task(store, "no-obligation")
     pending_only = _task(store, "pending-only")
     completed = _task(store, "completed")

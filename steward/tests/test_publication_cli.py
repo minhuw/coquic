@@ -88,7 +88,7 @@ def _returning_composer(result: object):
 
 
 def _blocked_store(tmp_path):
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     identity = GenerationIdentity("task-retry-hide", "boundary-retry-hide")
     generation = PublicationGeneration(
         publication_id=identity.publication_id,
@@ -355,7 +355,7 @@ def test_retry_missing_publication_configuration_is_bounded(monkeypatch) -> None
 
 
 def test_retry_without_provider_fences_all_same_task_generations(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generations = []
     for index in range(2):
         identity = GenerationIdentity("task-disabled", f"boundary-disabled-{index}")
@@ -408,7 +408,7 @@ def test_retry_without_provider_fences_all_same_task_generations(tmp_path) -> No
 
 
 def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     old_identity = GenerationIdentity("task-retry", "boundary-old")
     old = PublicationGeneration(
         publication_id=old_identity.publication_id,
@@ -468,7 +468,7 @@ def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
 
 
 def test_hide_real_store_blocks_101_queued_generations_and_replays(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     generations = []
     for index in range(101):
         boundary = f"boundary-hide-{index}"

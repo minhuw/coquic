@@ -940,7 +940,7 @@ def test_transient_hide_failure_replays_before_blocking() -> None:
 
 
 def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     provider = _SQLitePublicationProvider(hide_failures=MAX_ATTEMPTS)
     clock = [NOW]
@@ -984,7 +984,7 @@ def test_sqlite_hide_retry_at_attempt_ceiling_stays_reconcilable(tmp_path) -> No
 
 
 def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     provider = _SQLitePublicationProvider(
         put_failure=R2Error(R2ErrorCategory.precondition),
@@ -1029,7 +1029,7 @@ def test_sqlite_precondition_hide_failure_replays_and_blocks(tmp_path) -> None:
 
 
 def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     provider = _StageBarrierProvider()
     publisher = CloudPublisher(
@@ -1066,7 +1066,7 @@ def test_hide_fence_blocks_stage_release_before_exposure(tmp_path) -> None:
 
 def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
     path = tmp_path / "steward.sqlite"
-    store = TaskStore(path)
+    store = TaskStore.create(path)
     store.enqueue_publication(_sqlite_generation())
     failing = _SQLitePublicationProvider(hide_failures=1)
     first = CloudPublisher(
@@ -1082,7 +1082,7 @@ def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
     assert store.get_publication_hide("task-1").state.value == "pending"
     store.engine.dispose()
 
-    restarted = TaskStore(path)
+    restarted = TaskStore.open(path)
     healthy = _SQLitePublicationProvider()
     second = CloudPublisher(
         restarted,
@@ -1097,7 +1097,7 @@ def test_pending_hide_survives_restart_before_provider_retry(tmp_path) -> None:
 
 
 def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     store.enqueue_publication(_sqlite_generation())
     store.claim_publication("worker-1", now=NOW)
     assert store.advance_publication(

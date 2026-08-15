@@ -304,7 +304,7 @@ def test_commit_message_stage_reaches_wrapper_without_worktree_group(
     config: StewardConfig,
     container_config: TaskContainerConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )

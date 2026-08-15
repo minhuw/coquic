@@ -70,7 +70,7 @@ def test_production_config_loading_and_init_leave_legacy_evidence_untouched(
     repo: Path, monkeypatch
 ) -> None:
     config = load_config(allow_legacy_migration=False)
-    legacy = TaskStore(config.legacy_db_path)
+    legacy = TaskStore.create(config.legacy_db_path)
     try:
         with legacy.engine.begin() as connection:
             connection.exec_driver_sql(

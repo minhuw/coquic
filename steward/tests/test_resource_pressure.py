@@ -143,7 +143,7 @@ def test_production_daemon_wires_label_filtered_owned_usage(
             "usage": OwnedDockerUsage(container_bytes=1, image_bytes=1)
         },
     )
-    daemon = StewardDaemon(config, TaskStore(config.db_path))
+    daemon = StewardDaemon(config, TaskStore.create(config.db_path))
     report = daemon.resource_pressure
     assert report["state"] == "normal"
     assert report["ownedBytes"] == 2
@@ -186,7 +186,7 @@ def test_production_daemon_restores_pressure_hysteresis_after_restart(
             "usage": OwnedDockerUsage(container_bytes=800)
         },
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     store.record_resource_pressure(
         state="resource_pressure",
         home_free_bytes=1000,
@@ -318,7 +318,7 @@ def test_refresh_uses_one_reconciliation_snapshot_and_cleanup_aggregate(
 
 
 def test_cleanup_aggregate_counts_latest_pending_obligation(tmp_path: Path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
 
     def task(title: str):
         return store.add_task(

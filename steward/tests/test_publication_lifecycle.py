@@ -734,7 +734,7 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
     assert isinstance(aware, PublicationGeneration)
     assert free.publication_id != aware.publication_id
 
-    store = TaskStore(tmp_path / "publication.sqlite")
+    store = TaskStore.create(tmp_path / "publication.sqlite")
     store.enqueue_publication(free.to_outbox())
 
     class R2:
@@ -880,7 +880,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
     assert later_free.publication_id != later_aware.publication_id
 
     database = tmp_path / "publication-restart-ordering.sqlite"
-    store = TaskStore(database)
+    store = TaskStore.create(database)
     first_created = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.enqueue_publication(
         replace(older.to_outbox(), created_at=first_created, updated_at=first_created)
@@ -906,7 +906,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
         now=later_created,
     )
 
-    restarted = TaskStore(database)
+    restarted = TaskStore.open(database)
 
     class Publisher:
         def __init__(self) -> None:
@@ -1062,7 +1062,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
     assert later_free.publication_id != later_aware.publication_id
 
     database = tmp_path / "publication-restart-provider.sqlite"
-    store = TaskStore(database)
+    store = TaskStore.create(database)
     first_created = datetime(2026, 1, 1, tzinfo=timezone.utc)
     store.enqueue_publication(
         replace(older.to_outbox(), created_at=first_created, updated_at=first_created)
@@ -1087,7 +1087,7 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
         reason="integrity",
         now=later_created,
     )
-    restarted = TaskStore(database)
+    restarted = TaskStore.open(database)
     older_before = restarted.get_publication_generation(older.publication_id)
     assert older_before is not None
 

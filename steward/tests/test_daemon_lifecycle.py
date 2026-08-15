@@ -622,7 +622,7 @@ def test_sequential_publication_daemons_do_not_chain_stale_callbacks():
 
 def test_shutdown_keeps_stopping_while_publication_worker_is_live(config, tmp_path):
     object.__setattr__(config, "publication", _enabled_publication_config(tmp_path, "stubborn"))
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
     started = threading.Event()
     release = threading.Event()
@@ -1794,7 +1794,7 @@ def test_publication_worker_shutdown_interrupts_inflight_httpx_d1_request(monkey
 def test_planner_retry_defers_unchanged_input_and_success_resets_state(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _planner_signal(store)
     signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
     assert signal_id is not None
@@ -1836,7 +1836,7 @@ def test_planner_retry_defers_unchanged_input_and_success_resets_state(
 def test_planner_context_keeps_all_active_tasks_and_bounds_terminal_history(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest_active, _ = _task(store, "oldest active planner context")
     store.start_worker(oldest_active.id, "running")
     queued_active, _ = _task(store, "queued active planner context")
@@ -1906,7 +1906,7 @@ def test_planner_context_keeps_all_active_tasks_and_bounds_terminal_history(
 
 def test_planner_admission_cap_blocks_new_work_at_boundary(config, monkeypatch) -> None:
     config = replace(config, limits=replace(config.limits, max_active_tasks=32))
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     for index in range(16):
         _task(store, f"admission boundary active {index}")
     item = _planner_signal(store, "admission-boundary")
@@ -1943,7 +1943,7 @@ def test_planner_admission_cap_blocks_new_work_at_boundary(config, monkeypatch) 
 
 def test_planner_admission_resumes_after_active_task_drains(config, monkeypatch) -> None:
     config = replace(config, limits=replace(config.limits, max_active_tasks=32))
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     active = []
     for index in range(16):
         task, _ = _task(store, f"admission drain active {index}")
@@ -1982,7 +1982,7 @@ def test_planner_admission_resumes_after_active_task_drains(config, monkeypatch)
 
 
 def test_startup_reconstructs_terminal_planner_publication(config) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _planner_signal(store, "publication")
     signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
     assert signal_id is not None
@@ -2018,7 +2018,7 @@ def test_startup_reconstructs_terminal_planner_publication(config) -> None:
 def test_startup_finalizes_claimed_planner_as_interrupted_and_publishes(
     config,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _planner_signal(store, "restart-claimed")
     signal_id = store.control_loop.canonical_signal_id(item.provider, item.fingerprint)
     assert signal_id is not None
@@ -2043,7 +2043,7 @@ def test_startup_finalizes_claimed_planner_as_interrupted_and_publishes(
 def test_planner_retry_is_not_committed_before_failed_completion(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _planner_signal(store, "completion-failure")
     daemon = StewardDaemon(config, store)
 
@@ -2077,7 +2077,7 @@ def test_planner_retry_is_not_committed_before_failed_completion(
 def test_signal_shutdown_interrupts_active_planner_and_persists_interruption(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _planner_signal(store, "signal-interrupt")
     started = threading.Event()
     released = threading.Event()
@@ -2130,7 +2130,7 @@ def test_signal_shutdown_interrupts_active_planner_and_persists_interruption(
 def test_shutdown_after_planner_claim_prevents_launch_and_preserves_signal(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     item = _planner_signal(store, "claim-window-interrupt")
 
     class RecordingInvoker(LocalSessionInvoker):
@@ -2190,7 +2190,7 @@ def test_shutdown_after_planner_claim_prevents_launch_and_preserves_signal(
 def test_control_loop_epoch_conflict_blocks_planning_without_aborting_preflight(
     config,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task_epoch = config.ensure_epoch()
     config.control_loop_dir.mkdir(parents=True, exist_ok=True)
     (config.control_loop_dir / "epoch.json").write_text(
@@ -2225,7 +2225,7 @@ def test_control_loop_epoch_conflict_blocks_planning_without_aborting_preflight(
 def test_startup_blocks_planning_when_required_archive_audit_errors(
     config, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
     monkeypatch.setattr(
         daemon,
@@ -2294,7 +2294,7 @@ def test_locked_daemon_routes_scheduler_planning_through_fresh_boundary(
         local_codex_test_harness=False,
         task_image_digest=IMAGE,
     )
-    store = TaskStore(configured.db_path)
+    store = TaskStore.create(configured.db_path)
     item = _planner_signal(store, "isolated-boundary")
     seen: list[object] = []
 
@@ -2503,7 +2503,7 @@ class FakeSupervisor(SessionSupervisor):
 
 
 def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
 
     assert daemon.preflight_report is not None
@@ -2516,7 +2516,7 @@ def test_daemon_rejects_unsupported_collaborators(config):
     with pytest.raises(TypeError, match="SQLiteTaskStore"):
         StewardDaemon(config, object())
 
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     with pytest.raises(TypeError, match="SessionSupervisor"):
         StewardDaemon(config, store, session_supervisor=object())
     with pytest.raises(TypeError, match="FreshPlannerSession"):
@@ -2602,7 +2602,7 @@ def test_preflight_rejects_unlocked_docker(config, monkeypatch):
 
 
 def test_startup_reconcile_orders_task_identity_before_dispatch(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     second, _ = _task(store, "z-second")
     first, _ = _task(store, "a-first")
     daemon = StewardDaemon(config, store)
@@ -2616,7 +2616,7 @@ def test_startup_reconcile_orders_task_identity_before_dispatch(config):
 def test_startup_reconciles_oldest_active_run_after_detached_pages(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest, pipeline = _task(store, "oldest active")
     store.start_worker(oldest.id, "running")
     session = store.create_session(oldest.id, pipeline.id)
@@ -2647,7 +2647,7 @@ def test_startup_reconciles_oldest_active_run_after_detached_pages(
 def test_publication_recovery_enqueues_oldest_run_after_detached_pages(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest, pipeline = _task(store, "oldest publication")
     session = store.create_session(oldest.id, pipeline.id)
     run = store.create_run(oldest.id, pipeline.id, session.id, role="implementation")
@@ -2677,7 +2677,7 @@ def test_publication_recovery_enqueues_oldest_run_after_detached_pages(
 
 
 def test_cleanup_retry_uses_complete_pending_predicate(config, monkeypatch):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest, _ = _task(store, "oldest cleanup")
     store.finish_task(oldest.id, TaskStatus.failed, "terminal")
     store.add_event(oldest.id, "cleanup_pending", "retry")
@@ -2717,7 +2717,7 @@ def test_cleanup_retry_uses_complete_pending_predicate(config, monkeypatch):
 def test_shutdown_interrupts_oldest_running_run_from_direct_query(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest, pipeline = _task(store, "oldest running")
     session = store.create_session(oldest.id, pipeline.id)
     run = store.create_run(oldest.id, pipeline.id, session.id, role="implementation")
@@ -2763,7 +2763,7 @@ def test_shutdown_interrupts_oldest_running_run_from_direct_query(
 
 
 def test_reconcile_adopts_matching_live_wrapper_without_duplicate(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     store.restart_run = lambda *_args, **_kwargs: None
     with store.engine.begin() as connection:
@@ -2785,7 +2785,7 @@ def test_reconcile_adopts_matching_live_wrapper_without_duplicate(config):
 
 
 def test_complete_atomic_result_is_ingested_once(config, monkeypatch):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
@@ -2827,7 +2827,7 @@ def test_complete_atomic_result_is_ingested_once(config, monkeypatch):
 def test_exact_id_resume_is_wired_and_persisted_without_private_identity(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     supervisor = FakeSupervisor(config, store)
     daemon = StewardDaemon(config, store, session_supervisor=supervisor)
@@ -2851,7 +2851,7 @@ def test_exact_id_resume_is_wired_and_persisted_without_private_identity(
 
 
 def test_shutdown_interrupts_blocking_startup_resume(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, predecessor = _interrupted_run(config, store)
 
     class BlockingSupervisor(FakeSupervisor):
@@ -2892,7 +2892,7 @@ def test_shutdown_interrupts_blocking_startup_resume(config):
 
 
 def test_corrupt_resume_falls_back_to_fresh_recovery_packet(config, monkeypatch):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     supervisor = FakeSupervisor(
         config,
@@ -2923,7 +2923,7 @@ def test_corrupt_resume_falls_back_to_fresh_recovery_packet(config, monkeypatch)
 def test_fresh_recovery_lineage_is_durable_before_process_returns(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, predecessor = _interrupted_run(config, store)
     supervisor = SessionSupervisor(
         config,
@@ -2969,7 +2969,7 @@ def test_fresh_recovery_lineage_is_durable_before_process_returns(
 
 
 def test_checkpoint_identity_conflict_blocks_without_resume(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     store.update_session(run.session_id, checkpoint_id="different-checkpoint")
     supervisor = FakeSupervisor(config, store)
@@ -2984,7 +2984,7 @@ def test_checkpoint_identity_conflict_blocks_without_resume(config):
 
 
 def test_resume_rejects_worktree_mutation_after_interruption(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     supervisor = SessionSupervisor(
         config,
@@ -3010,7 +3010,7 @@ def test_resume_rejects_worktree_mutation_after_interruption(config):
 
 
 def test_commit_and_remote_ancestry_identity_conflict_blocks(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "commit identity")
     task.worktree_path = config.repo_root
     store.save(task)
@@ -3032,7 +3032,7 @@ def test_commit_and_remote_ancestry_identity_conflict_blocks(config):
 def test_validation_crash_releases_exact_phase_claim_for_deterministic_rerun(
     config,
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "validation crash")
     action = f"{task.id}:{pipeline.id}:validation"
     store.add_event(
@@ -3065,7 +3065,7 @@ def test_validation_crash_releases_exact_phase_claim_for_deterministic_rerun(
 
 
 def test_commit_crash_adopts_exact_tree_once_before_manifest(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "commit crash")
     task.worktree_path = config.repo_root
     store.save(task)
@@ -3120,7 +3120,7 @@ def test_commit_crash_adopts_exact_tree_once_before_manifest(config):
 
 
 def test_ledger_backed_stale_task_uses_identity_reconciliation(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = _task(store, "stale ledger")
     store.start_worker(task.id, "running")
     with store.engine.begin() as connection:
@@ -3136,7 +3136,7 @@ def test_ledger_backed_stale_task_uses_identity_reconciliation(config):
 
 
 def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     _task(store, "pool one")
     _task(store, "pool two")
     daemon = StewardDaemon(config, store)
@@ -3168,7 +3168,7 @@ def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(confi
 def test_worker_pool_dispatches_old_active_task_beyond_legacy_window(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     oldest_active, _ = _task(store, "oldest active pool task")
     store.start_worker(oldest_active.id, "running")
     for index in range(4):
@@ -3202,7 +3202,7 @@ def test_worker_pool_dispatches_old_active_task_beyond_legacy_window(
 
 def test_shutdown_grace_bounds_blocked_worker_pool(config):
     object.__setattr__(config, "shutdown_grace_seconds", 5.0)
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
     release = threading.Event()
     pool = ThreadPoolExecutor(max_workers=1)
@@ -3221,7 +3221,7 @@ def test_shutdown_grace_bounds_blocked_worker_pool(config):
 
 
 def test_shutdown_interrupted_implementation_preserves_restart_state(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "interrupted implementation")
     task.worktree_path = config.repo_root
     store.save(task)
@@ -3278,7 +3278,7 @@ def test_shutdown_interrupted_implementation_preserves_restart_state(config):
 
 
 def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     first, _ = _task(store, "once progress")
     second, _ = _task(store, "once max dispatch")
     daemon = StewardDaemon(config, store)
@@ -3335,7 +3335,7 @@ def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config):
 
 
 def test_once_dispatch_counts_terminal_and_nonprogress_outcomes(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     terminal, _ = _task(store, "once terminal")
     blocked, _ = _task(store, "once blocked")
     interrupted, _ = _task(store, "once interrupted")
@@ -3374,7 +3374,7 @@ def test_once_dispatch_counts_terminal_and_nonprogress_outcomes(config):
 
 
 def test_once_dispatch_stops_without_counting_shutdown_interruption(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = _task(store, "once shutdown")
     daemon = StewardDaemon(config, store)
     calls: list[str] = []
@@ -3400,7 +3400,7 @@ def test_once_dispatch_stops_without_counting_shutdown_interruption(config):
 
 
 def test_session_runner_preserves_interrupted_run_identity(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "session interruption")
     task.worktree_path = config.repo_root
     store.save(task)
@@ -3459,7 +3459,7 @@ def test_enabled_nested_container_config_drives_runtime_fields(config):
     nested = StewardConfig(repo_root=config.repo_root, container=container)
     nested.ensure_dirs()
 
-    executor = StewardExecutor(nested, TaskStore(nested.db_path))
+    executor = StewardExecutor(nested, TaskStore.create(nested.db_path))
 
     assert nested.task_image == container.image
     assert nested.task_image_digest == container.image_digest
@@ -3474,7 +3474,7 @@ def test_enabled_nested_container_config_drives_runtime_fields(config):
 
 
 def test_sigint_sigterm_second_signal_stops_not_removes_restart_state(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)
     with store.engine.begin() as connection:
         connection.exec_driver_sql(
@@ -3527,7 +3527,7 @@ def test_cli_signal_handler_only_sets_shutdown_intent(monkeypatch):
 
 
 def test_shutdown_request_is_lock_free(config):
-    daemon = StewardDaemon(config, TaskStore(config.db_path))
+    daemon = StewardDaemon(config, TaskStore.create(config.db_path))
 
     with daemon._runtime_lock:
         daemon.request_shutdown()
@@ -3537,7 +3537,7 @@ def test_shutdown_request_is_lock_free(config):
 
 
 def test_shutdown_does_not_claim_failed_container_stop(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = _task(store, "container stop failure")
 
     class StopFailure(FakeSupervisor):
@@ -3557,7 +3557,7 @@ def test_shutdown_does_not_claim_failed_container_stop(config):
 
 
 def test_shutdown_discovers_and_stops_uncached_owned_container(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = _task(store, "uncached owned container")
     task.worktree_path = config.repo_root
     store.save(task)
@@ -3611,7 +3611,7 @@ def test_shutdown_discovers_and_stops_uncached_owned_container(config):
 
 def test_shutdown_treats_queued_task_without_container_as_noop(config):
     configured = replace(config, task_image_digest=IMAGE)
-    store = TaskStore(configured.db_path)
+    store = TaskStore.create(configured.db_path)
     task, _ = _task(store, "queued without container")
     supervisor = SessionSupervisor(
         configured,
@@ -3641,7 +3641,7 @@ def test_shutdown_treats_queued_task_without_container_as_noop(config):
 def test_shutdown_skips_uncached_cleaned_terminal_container(
     config, cleanup_events
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = _task(store, "cleaned terminal container")
     store.finish_task(task.id, TaskStatus.failed, "terminal")
     worktree = config.worktrees_dir / task.id
@@ -3708,7 +3708,7 @@ def test_shutdown_skips_uncached_cleaned_terminal_container(
 
 
 def test_shutdown_discovers_terminal_container_without_cleanup_proof(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = _task(store, "unproven terminal container")
     store.finish_task(task.id, TaskStatus.failed, "terminal")
     worktree = config.worktrees_dir / task.id
@@ -3764,7 +3764,7 @@ def test_shutdown_discovers_terminal_container_without_cleanup_proof(config):
 
 
 def test_recovery_waits_for_live_wrapper_before_adoption(config, monkeypatch):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, predecessor = _interrupted_run(config, store)
 
     class SlowLaunchSupervisor(FakeSupervisor):
@@ -3834,7 +3834,7 @@ def test_recovery_waits_for_live_wrapper_before_adoption(config, monkeypatch):
 
 
 def test_recovery_does_not_adopt_before_wrapper_is_published(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline, predecessor = _interrupted_run(config, store)
 
     class SlowRuntime(TaskContainerRuntime):
@@ -3915,7 +3915,7 @@ def test_recovery_does_not_adopt_before_wrapper_is_published(config):
 
 
 def test_recovered_result_without_durable_phase_advance_stays_blocked(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _, predecessor = _interrupted_run(config, store)
     supervisor = FakeSupervisor(config, store)
     recovered = store.create_run(
@@ -3947,7 +3947,7 @@ def test_recovered_result_without_durable_phase_advance_stays_blocked(config):
 
 
 def test_recovered_result_advances_exact_interrupted_phase_once(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline, predecessor = _interrupted_run(config, store)
     task.worktree_path = config.repo_root
     store.save(task)
@@ -4039,7 +4039,7 @@ def test_recovered_result_advances_exact_interrupted_phase_once(config):
 
 
 def test_terminal_seal_uses_canonical_utc_timestamp(config):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "canonical terminal timestamp")
     _, run = store.create_session_with_run(
         task.id,
@@ -4089,7 +4089,7 @@ def test_terminal_seal_uses_canonical_utc_timestamp(config):
 
 
 def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "unresolved terminal action")
     store.add_event(
         task.id,
@@ -4125,7 +4125,7 @@ def test_terminal_seal_rejects_unresolved_external_action(config, monkeypatch):
 def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
     config, monkeypatch
 ):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, pipeline = _task(store, "terminal cleanup")
     store.add_event(
         task.id,
@@ -4222,7 +4222,7 @@ def test_terminal_manifest_cleanup_container_worktree_home_crash_retry(
 
 
 def test_terminal_container_remove_requires_stopped_identity(config):
-    task, _ = _task(TaskStore(config.db_path), "container remove")
+    task, _ = _task(TaskStore.create(config.db_path), "container remove")
     root = config.repo_root
     runtime_config = TaskContainerConfig(
         task_id=task.id,

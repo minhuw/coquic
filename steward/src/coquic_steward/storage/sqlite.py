@@ -283,42 +283,10 @@ class SQLiteTaskStore:
     """SQLite-backed store hidden behind Steward's TaskStore API."""
 
     def __init__(self, path: Path, on_change: Callable[[], None] | None = None):
-        self.path = path
-        self.on_change = on_change
-        # A legacy store is opened only long enough for the explicit database
-        # migration path.  Do not create post-2.0 epoch/ledger tables in that
-        # source database: copying those tables would make the new root look
-        # like an already-published control loop with the wrong epoch.
-        self._legacy_database = (
-            path.name == "steward.sqlite" and path.parent.name == "steward"
+        raise TypeError(
+            "TaskStore cannot be constructed directly; use TaskStore.create() "
+            "or TaskStore.open()"
         )
-        self.path_codec = PathCodec(path.parent, legacy_dir=path.parent / "steward")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.engine = create_engine(f"sqlite:///{path}", future=True)
-        event.listen(self.engine, "connect", _configure_sqlite)
-        Base.metadata.create_all(self.engine)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        self._migrate_schema()
-        # The control-loop ledger starts at the same immutable epoch as the
-        # task archive.  No pre-2.0 rows are inspected or imported.
-        if self._legacy_database:
-            self.control_loop = None
-        else:
-            self._ensure_archive_epoch()
-            try:
-                epoch_value = json.loads(
-                    self.archive_epoch_path.read_text(encoding="utf-8")
-                )
-                epoch_id = epoch_value.get("epochId")
-            except (OSError, json.JSONDecodeError):
-                epoch_id = None
-            self.control_loop = ControlLoopLedger(self.path, epoch_id=epoch_id)
-        self._ensure_publication_health()
-        self._migrate_portable_paths()
-        self._migrate_legacy_json()
 
     @classmethod
     def create(
@@ -395,7 +363,7 @@ class SQLiteTaskStore:
         *,
         on_change: Callable[[], None] | None = None,
     ) -> "SQLiteTaskStore":
-        """Open an exact current Store without schema or application writes."""
+        """Open an exact current Store and normalize portable state paths."""
 
         database = Path(path).expanduser()
         epoch = _read_task_epoch(database.parent / "tasks")
@@ -412,6 +380,8 @@ class SQLiteTaskStore:
     ) -> "SQLiteTaskStore":
         store = cls._blank_store(database, on_change=on_change, wal=False)
         store.control_loop = _bind_existing_control_loop(database, epoch_id)
+        store._ensure_publication_health()
+        store._migrate_portable_paths()
         return store
 
     @classmethod
@@ -576,7 +546,7 @@ class SQLiteTaskStore:
     @classmethod
     def _validate_current_database(cls, database: Path, epoch_id: str) -> None:
         _require_regular_file(database, "Store database")
-        _require_wal_sidecars(database)
+        _validate_optional_sqlite_sidecars(database)
         try:
             uri = database.resolve().as_uri() + "?mode=ro"
             connection = sqlite3.connect(uri, uri=True, timeout=30)
@@ -4575,9 +4545,34 @@ class SQLiteTaskStore:
         return _publication_exists(connection, publication_id)
 
     def _ensure_publication_health(self) -> None:
-        """Create the singleton health row and reconcile it on restart."""
+        """Create the singleton health row and reconcile expired leases."""
 
         timestamp = _publication_now(None)
+        now_text = _publication_timestamp(timestamp)
+        uri = self.path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as connection:
+            expired = connection.execute(
+                """
+                SELECT 1
+                FROM publication_generations AS generation
+                WHERE generation.state IN ('claimed','building','uploading','d1_staged')
+                  AND generation.lease_expires_at <= ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM publication_hide_fences AS fence
+                      WHERE fence.task_id=generation.task_id
+                        AND fence.state IN ('pending','confirmed')
+                  )
+                LIMIT 1
+                """,
+                (now_text,),
+            ).fetchone()
+            health_exists = connection.execute(
+                "SELECT 1 FROM publication_health WHERE id=1"
+            ).fetchone()
+        if expired is None and health_exists is not None:
+            return
+
         with self.engine.begin() as connection:
             expired = self._expire_publication_leases_in_connection(
                 connection, timestamp
@@ -6138,6 +6133,8 @@ class SQLiteTaskStore:
             _install_ledger_ownership_triggers(connection)
 
     def _migrate_portable_paths(self) -> None:
+        if not self._portable_paths_need_migration():
+            return
         task_columns = (
             "worktree_path",
             "transcript_path",
@@ -6185,6 +6182,73 @@ class SQLiteTaskStore:
                     row.location_json = self._portable_json(row.location_json)
             for row in session.scalars(select(SchedulerWakeupRow)).all():
                 row.data_json = self._portable_json(row.data_json)
+
+    def _portable_paths_need_migration(self) -> bool:
+        uri = self.path.resolve().as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True) as connection:
+            for row in connection.execute(
+                """
+                SELECT worktree_path, transcript_path, last_message_path,
+                       patch_path, metadata_json
+                FROM tasks
+                """
+            ):
+                if any(
+                    self._portable_path(value) != value for value in row[:4]
+                ) or self._portable_json(row[4]) != row[4]:
+                    return True
+            for row in connection.execute(
+                """
+                SELECT worker_prompt_path, worker_transcript_path,
+                       worker_last_message_path, reviewer_prompt_path,
+                       reviewer_transcript_path, reviewer_last_message_path,
+                       patch_path
+                FROM task_iterations
+                """
+            ):
+                if any(self._portable_path(value) != value for value in row):
+                    return True
+            for row in connection.execute(
+                """
+                SELECT prompt_path, transcript_path, last_message_path, plan_path
+                FROM task_plan_runs
+                """
+            ):
+                if any(self._portable_path(value) != value for value in row):
+                    return True
+            for row in connection.execute(
+                "SELECT private_home_path, cwd FROM codex_sessions"
+            ):
+                if any(self._portable_path(value) != value for value in row):
+                    return True
+            for row in connection.execute(
+                "SELECT output_path, cwd FROM validations"
+            ):
+                if any(self._portable_path(value) != value for value in row):
+                    return True
+            for row in connection.execute(
+                "SELECT message, data_json FROM events"
+            ):
+                if (
+                    self._portable_path(row[0]) != row[0]
+                    or self._portable_json(row[1]) != row[1]
+                ):
+                    return True
+            for row in connection.execute(
+                "SELECT payload_json, location_json FROM signal_items"
+            ):
+                if (
+                    self._portable_json(row[0]) != row[0]
+                    or (
+                        row[1] is not None
+                        and self._portable_json(row[1]) != row[1]
+                    )
+                ):
+                    return True
+            for row in connection.execute("SELECT data_json FROM scheduler_wakeups"):
+                if self._portable_json(row[0]) != row[0]:
+                    return True
+        return False
 
     def _portable_path(self, value: str | None) -> str | None:
         if self.path_codec.is_portable(value):
@@ -7149,7 +7213,7 @@ def _configure_sqlite(dbapi_connection, _connection_record) -> None:
 
 
 def _configure_sqlite_read_only(dbapi_connection, _connection_record) -> None:
-    """Configure an already validated WAL database without changing it."""
+    """Configure an already validated WAL database without changing its mode."""
 
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA busy_timeout=5000")
@@ -7502,8 +7566,8 @@ def _bind_existing_control_loop(
     database: Path, epoch_id: str
 ) -> ControlLoopLedger:
     # Constructing ControlLoopLedger normally creates/probes tables and seeds
-    # metadata.  Exact open has already validated those bytes and must not do
-    # any application write, so bind the validated object without __init__.
+    # metadata. Exact validation has already established those bytes, so bind
+    # the validated object without invoking its write-capable initializer.
     ledger = ControlLoopLedger.__new__(ControlLoopLedger)
     ledger.path = database
     ledger._epoch_id = epoch_id

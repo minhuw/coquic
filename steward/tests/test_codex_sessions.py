@@ -118,7 +118,7 @@ class InterruptedInvoker(FakeInvoker):
 
 
 def _interrupted_session(config: StewardConfig, checkpoint_id: str | None):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -147,7 +147,7 @@ def _interrupted_session(config: StewardConfig, checkpoint_id: str | None):
 
 
 def test_fresh_session_has_private_home_uid_and_no_auth(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -232,7 +232,7 @@ def test_jsonl_stream_preserves_invalid_bytes_and_incomplete_suffix() -> None:
 
 
 def test_runtime_factory_is_scoped_per_task(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     first, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="one", prompt="p")
     )
@@ -283,7 +283,7 @@ def test_runtime_factory_is_scoped_per_task(config: StewardConfig) -> None:
 def test_task_session_mount_root_is_traversable_by_allocated_uids(
     config: StewardConfig, monkeypatch
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -305,7 +305,7 @@ def test_task_session_mount_root_is_traversable_by_allocated_uids(
 def test_inspect_and_interrupt_recover_persisted_container_identity(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -473,7 +473,7 @@ def test_interrupt_uses_invoker_process_during_active_publication(
 def test_interrupt_does_not_treat_runtime_probe_failure_as_process_exit(
     config: StewardConfig,
 ) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="x", prompt="p")
     )
@@ -987,7 +987,7 @@ def test_production_construction_rejects_local_codex_fallback(
         local_codex_test_harness=False,
         task_image_digest=None,
     )
-    store = TaskStore(production.db_path)
+    store = TaskStore.create(production.db_path)
     with pytest.raises(ValueError, match="task-container"):
         StewardExecutor(production, store)
     with pytest.raises(ValueError, match="task-container"):

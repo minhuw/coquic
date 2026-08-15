@@ -336,7 +336,7 @@ def _assert_bounded_validation_artifact(
 
 
 def _validation_task_context(config: StewardConfig):
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _created = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -738,7 +738,7 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
         validation_image_digest=digest,
         deployment=deployment,
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _created = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -927,7 +927,7 @@ def test_production_cli_binds_task_and_planner_deployment_labels(
         "coquic_steward.execution.session._provision_group_tree",
         lambda _root, _gid: None,
     )
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     supervisor = cli_module._configured_supervisor(config, store)
     assert supervisor is not None and supervisor.runtime_factory is not None
     task_runtime = supervisor.runtime_factory(
@@ -943,7 +943,7 @@ def test_production_cli_binds_task_and_planner_deployment_labels(
 
 
 def test_release_and_pressure_facts_are_private(tmp_path: Path) -> None:
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     store.record_image_release(
         "release-test",
         daemon_image_id="sha256:" + "a" * 64,
@@ -1091,7 +1091,7 @@ def test_labeled_docker_reconciliation_retains_references_and_reclaims_exact_ima
             return subprocess.CompletedProcess(argv, delete_returncode, b"", b"")
         raise AssertionError(argv)
 
-    store = TaskStore(tmp_path / "steward.sqlite")
+    store = TaskStore.create(tmp_path / "steward.sqlite")
     manager = DockerResourceManager(runner=runner)
     snapshot_calls = 0
     snapshot = manager._snapshot
@@ -1134,7 +1134,7 @@ def test_ambiguous_docker_snapshot_never_reclaims_images(tmp_path: Path) -> None
         raise AssertionError("ambiguous snapshots must not reclaim images")
 
     manager.runner = runner
-    result = manager.reconcile(TaskStore(tmp_path / "steward.sqlite"), deployment)
+    result = manager.reconcile(TaskStore.create(tmp_path / "steward.sqlite"), deployment)
 
     assert result["ambiguous"] is True
     assert result["reclaimed"] == ()
@@ -1319,7 +1319,8 @@ def test_cli_treats_absent_control_loop_ledger_as_idle(
         deployment=replace(config.deployment, home=tmp_path / "steward"),
     )
     config.ensure_dirs()
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
+    store.control_loop = None
     assert store.control_loop_ledger is None
 
     monkeypatch.setattr(cli_module, "_context", lambda: (store, config))

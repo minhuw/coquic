@@ -103,7 +103,7 @@ def test_stage_settings_override_global_defaults(config: StewardConfig) -> None:
 
 
 def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -> None:
-    task = TaskStore(config.db_path).add_task(
+    task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
             worker=WorkerKind.feature_implementer,
@@ -119,7 +119,7 @@ def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -
 
 
 def test_store_migrates_feature_workflow(config: StewardConfig) -> None:
-    store = TaskStore(config.db_path)
+    store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -132,7 +132,10 @@ def test_store_migrates_feature_workflow(config: StewardConfig) -> None:
     with sqlite3.connect(config.db_path) as connection:
         connection.execute("ALTER TABLE tasks DROP COLUMN workflow")
 
-    migrated = TaskStore(config.db_path)
+    migrated = TaskStore._blank_store(
+        config.db_path, on_change=None, wal=True
+    )
+    migrated._migrate_schema()
     assert migrated.get(task.id).spec.workflow == TaskWorkflow.feature
 
 
@@ -159,7 +162,7 @@ def test_feature_plans_then_codes_in_separate_session(
         }
     )
     configured.ensure_dirs()
-    store = TaskStore(configured.db_path)
+    store = TaskStore.create(configured.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -199,7 +202,7 @@ def test_fix_workflow_skips_planning(
     fake = _fake_codex(tmp_path, invalid_plan=False)
     configured = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     configured.ensure_dirs()
-    store = TaskStore(configured.db_path)
+    store = TaskStore.create(configured.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
@@ -226,7 +229,7 @@ def test_invalid_feature_plan_retries_without_coding(
     fake = _fake_codex(tmp_path, invalid_plan=True)
     configured = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     configured.ensure_dirs()
-    store = TaskStore(configured.db_path)
+    store = TaskStore.create(configured.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,

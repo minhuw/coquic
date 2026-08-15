@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -253,9 +254,20 @@ SCHEMA_CATALOG_DIGEST = CURRENT_SCHEMA_CATALOG_DIGEST
 _CONTROL_LOOP_META_SEED_KEYS = frozenset({"epoch_id", "next_sequence", "planning_blocked"})
 
 
-class _StoreOpenRequirements(NamedTuple):
-    needs_publication_health: bool
-    needs_portable_paths: bool
+@dataclass(frozen=True, slots=True)
+class StoreRecoveryResult:
+    """The durable changes made while recovering one exact Store."""
+
+    expired_leases: int = 0
+    health_changed: bool = False
+    changed: bool = False
+
+    def __post_init__(self) -> None:
+        if self.expired_leases < 0:
+            raise ValueError("expired lease count cannot be negative")
+        expected = self.expired_leases > 0 or self.health_changed
+        if self.changed != expected:
+            raise ValueError("Store recovery changed flag does not match its fields")
 
 
 class SQLiteStoreLifecycleError(RuntimeError):
@@ -340,13 +352,11 @@ class SQLiteTaskStore:
                         raise SQLiteStoreLifecycleError(
                             "concurrent Store winner has a mismatched task epoch"
                         )
-                    requirements = cls._validate_current_database(database, epoch_id)
+                    cls._validate_current_database(database, epoch_id)
                     # The adopter must establish durability independently of
                     # the creator that won the link race.
                     _fsync_directory(database.parent)
-                    return cls._open_validated(
-                        database, epoch_id, on_change, requirements
-                    )
+                    return cls._open_validated(database, epoch_id, on_change)
                 _fsync_directory(database.parent)
             except BaseException:
                 if not publication_conflict:
@@ -370,13 +380,13 @@ class SQLiteTaskStore:
         *,
         on_change: Callable[[], None] | None = None,
     ) -> "SQLiteTaskStore":
-        """Open an exact current Store and normalize portable state paths."""
+        """Open an exact current Store without recovery or application writes."""
 
         database = Path(path).expanduser()
         epoch = _read_task_epoch(database.parent / "tasks")
         epoch_id = epoch["epochId"]
-        requirements = cls._validate_current_database(database, epoch_id)
-        return cls._open_validated(database, epoch_id, on_change, requirements)
+        cls._validate_current_database(database, epoch_id)
+        return cls._open_validated(database, epoch_id, on_change)
 
     @classmethod
     def _open_validated(
@@ -384,15 +394,63 @@ class SQLiteTaskStore:
         database: Path,
         epoch_id: str,
         on_change: Callable[[], None] | None,
-        requirements: _StoreOpenRequirements,
     ) -> "SQLiteTaskStore":
         store = cls._blank_store(database, on_change=on_change, wal=False)
         store.control_loop = _bind_existing_control_loop(database, epoch_id)
-        store._ensure_publication_health(
-            required=requirements.needs_publication_health
-        )
-        store._migrate_portable_paths(required=requirements.needs_portable_paths)
         return store
+
+    def recover(self) -> StoreRecoveryResult:
+        """Recover same-version publication leases and derived health once."""
+
+        timestamp = _publication_now(None)
+        connection = self.engine.connect()
+        expired_leases = 0
+        health_changed = False
+        try:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            expired_leases = int(
+                connection.exec_driver_sql(
+                    """
+                    SELECT COUNT(*)
+                    FROM publication_generations AS generation
+                    WHERE generation.state IN ('claimed','building','uploading','d1_staged')
+                      AND generation.lease_expires_at <= :now
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM publication_hide_fences AS fence
+                          WHERE fence.task_id=generation.task_id
+                            AND fence.state IN ('pending','confirmed')
+                      )
+                    """,
+                    {"now": _publication_timestamp(timestamp)},
+                ).scalar_one()
+            )
+            if expired_leases:
+                self._expire_publication_leases_in_connection(connection, timestamp)
+            health_changed = expired_leases > 0 or _publication_health_needs_refresh(
+                connection
+            )
+            if health_changed:
+                self._refresh_publication_health(
+                    connection,
+                    updated_at=timestamp,
+                    reason="lease_expired" if expired_leases else None,
+                    preserve_category=expired_leases == 0,
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        result = StoreRecoveryResult(
+            expired_leases=expired_leases,
+            health_changed=health_changed,
+            changed=expired_leases > 0 or health_changed,
+        )
+        if result.changed:
+            self._notify_change()
+        return result
 
     @classmethod
     def _blank_store(
@@ -556,7 +614,7 @@ class SQLiteTaskStore:
     @classmethod
     def _validate_current_database(
         cls, database: Path, epoch_id: str
-    ) -> _StoreOpenRequirements:
+    ) -> None:
         _require_regular_file(database, "Store database")
         _require_wal_sidecars(database)
         try:
@@ -588,37 +646,6 @@ class SQLiteTaskStore:
             if _catalog_digest(connection) != CURRENT_SCHEMA_CATALOG_DIGEST:
                 raise SQLiteStoreLifecycleError("Store database catalog mismatch")
             _validate_store_seeds(connection, epoch_id)
-            now_text = _publication_timestamp(_publication_now(None))
-            expired_lease = connection.execute(
-                """
-                SELECT 1
-                FROM publication_generations AS generation
-                WHERE generation.state IN ('claimed','building','uploading','d1_staged')
-                  AND generation.lease_expires_at <= ?
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM publication_hide_fences AS fence
-                      WHERE fence.task_id=generation.task_id
-                        AND fence.state IN ('pending','confirmed')
-                  )
-                LIMIT 1
-                """,
-                (now_text,),
-            ).fetchone()
-            health_exists = connection.execute(
-                "SELECT 1 FROM publication_health WHERE id=1"
-            ).fetchone()
-            path_codec = PathCodec(
-                database.parent, legacy_dir=database.parent / "steward"
-            )
-            return _StoreOpenRequirements(
-                needs_publication_health=(
-                    expired_lease is not None or health_exists is None
-                ),
-                needs_portable_paths=_portable_paths_need_migration_in_connection(
-                    connection, path_codec
-                ),
-            )
         except sqlite3.Error as exc:
             raise SQLiteStoreLifecycleError("invalid Store database") from exc
         finally:
@@ -7179,6 +7206,42 @@ def _publication_exists(connection: Connection, publication_id: str) -> bool:
         {"publication_id": publication_id},
     ).first()
     return row is not None
+
+
+def _publication_health_needs_refresh(connection: Connection) -> bool:
+    counts = connection.exec_driver_sql(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM publication_generations
+            WHERE state IN ('queued','retry_wait')) AS queued_count,
+          (SELECT COUNT(*) FROM publication_generations WHERE state='blocked') AS blocked_count,
+          (SELECT COUNT(*) FROM publication_cleanup_intents
+            WHERE state IN ('pending','blocked')) AS cleanup_count,
+          (SELECT COALESCE(SUM(receipt.byte_size),0)
+             FROM publication_cleanup_intents AS intent
+             LEFT JOIN publication_receipts AS receipt
+               ON receipt.publication_id=intent.publication_id
+            WHERE intent.state IN ('pending','blocked')) AS cleanup_bytes
+        """
+    ).mappings().first()
+    assert counts is not None
+    current = connection.exec_driver_sql(
+        """
+        SELECT queued_count,blocked_count,cleanup_pending_count,
+               cleanup_pending_bytes
+        FROM publication_health
+        WHERE id=1
+        """
+    ).mappings().first()
+    if current is None:
+        return True
+    expected = {
+        "queued_count": _bounded_health_count(counts["queued_count"]),
+        "blocked_count": _bounded_health_count(counts["blocked_count"]),
+        "cleanup_pending_count": _bounded_health_count(counts["cleanup_count"]),
+        "cleanup_pending_bytes": _bounded_health_count(counts["cleanup_bytes"]),
+    }
+    return any(current[key] != value for key, value in expected.items())
 
 
 def _expire_publication_leases_in_connection(

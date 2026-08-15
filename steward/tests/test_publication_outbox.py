@@ -1286,6 +1286,7 @@ def test_store_restart_preserves_receipts_at_the_retry_boundary(tmp_path) -> Non
     store.engine.dispose()
 
     restarted = TaskStore.open(path)
+    restarted.recover()
     recovered = restarted.get_publication_generation(generation.publication_id)
     assert recovered is not None
     assert recovered.state is PublicationState.retry_wait

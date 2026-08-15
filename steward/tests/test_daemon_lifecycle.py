@@ -28,6 +28,7 @@ from coquic_steward.agents.runner import CodexRunner
 from coquic_steward.control_loop.models import StewardOverheadUsage
 from coquic_steward.core.models import (
     CodexRunState,
+    DaemonLifecycleState,
     CodexStage,
     PipelineCursorPhase,
     TaskKind,
@@ -2316,6 +2317,7 @@ def test_locked_daemon_routes_scheduler_planning_through_fresh_boundary(
         "coquic_steward.orchestration.daemon.run_planner", fake_run_planner
     )
     daemon = StewardDaemon(configured, store)
+    daemon.startup_reconcile()
     daemon._plan(TickResult(), [item])
 
     assert isinstance(daemon.planner_session, FreshPlannerSession)
@@ -2506,10 +2508,150 @@ def test_config_preflight_launch_has_epoch_and_bounded_no_init_status(config):
     store = TaskStore.create(config.db_path)
     daemon = StewardDaemon(config, store)
 
+    assert daemon.preflight_report is None
+    assert store.get_daemon_state() is None
+    daemon.startup_reconcile()
+
     assert daemon.preflight_report is not None
     assert "epoch" in daemon.preflight_report.checks
     assert "private" not in daemon.preflight_report.summary
+    assert store.get_daemon_state()["lifecycle"] == "running"
     assert config.epoch_path.exists()
+
+
+def test_daemon_construction_does_not_run_startup_effects(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    for name in (
+        "get_resource_pressure",
+        "claim_daemon_instance",
+        "recover",
+    ):
+        monkeypatch.setattr(
+            store,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"{_name} must not run during construction"
+            ),
+        )
+    monkeypatch.setattr(
+        daemon_module,
+        "run_preflight",
+        lambda *_args, **_kwargs: pytest.fail("preflight must not run during construction"),
+    )
+    monkeypatch.setattr(
+        daemon_module,
+        "preflight_remote_push",
+        lambda *_args, **_kwargs: pytest.fail(
+            "remote preflight must not run during construction"
+        ),
+    )
+
+    daemon = StewardDaemon(config, store)
+
+    assert daemon.preflight_report is None
+    assert store.get_daemon_state() is None
+
+
+def test_startup_orders_validation_recovery_reconciliation_claim_and_running(
+    config, monkeypatch
+):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    events: list[str] = []
+    monkeypatch.setattr(
+        daemon_module,
+        "run_preflight",
+        lambda *_args, **_kwargs: events.append("validation")
+        or daemon_module.PreflightReport(),
+    )
+    monkeypatch.setattr(
+        store,
+        "recover",
+        lambda: events.append("store") or SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_startup_reconcile_control_loop",
+        lambda: events.append("archive"),
+    )
+    monkeypatch.setattr(
+        daemon.executor,
+        "retry_validation_cleanup_pending",
+        lambda: None,
+    )
+    monkeypatch.setattr(daemon, "_reconcile_docker_resources", lambda: None)
+    monkeypatch.setattr(
+        store,
+        "iter_tasks",
+        lambda: events.append("tasks") or [],
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_restore_resource_pressure",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        store,
+        "claim_daemon_instance",
+        lambda *_args, **_kwargs: events.append("claim") or {},
+    )
+    monkeypatch.setattr(
+        store,
+        "set_daemon_lifecycle",
+        lambda lifecycle, **_kwargs: events.append(lifecycle) or {},
+    )
+    monkeypatch.setattr(daemon, "_enqueue_materialized_publications", lambda: None)
+    monkeypatch.setattr(daemon, "_start_publication_worker", lambda: None)
+
+    daemon.startup_reconcile()
+
+    assert events == ["validation", "store", "archive", "tasks", "claim", "running"]
+    assert daemon.lifecycle_state is DaemonLifecycleState.running
+
+
+def test_startup_failure_before_claim_never_publishes_running(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(
+        daemon_module, "run_preflight", lambda *_args, **_kwargs: daemon_module.PreflightReport()
+    )
+    monkeypatch.setattr(
+        store,
+        "recover",
+        lambda: (_ for _ in ()).throw(RuntimeError("recovery failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="recovery failed"):
+        daemon.startup_reconcile()
+
+    assert store.get_daemon_state() is None
+    assert daemon.lifecycle_state is not DaemonLifecycleState.running
+
+
+def test_startup_failure_after_claim_clears_running_claim(config, monkeypatch):
+    store = TaskStore.create(config.db_path)
+    daemon = StewardDaemon(config, store)
+    original_set_lifecycle = store.set_daemon_lifecycle
+    monkeypatch.setattr(
+        daemon_module, "run_preflight", lambda *_args, **_kwargs: daemon_module.PreflightReport()
+    )
+    monkeypatch.setattr(store, "recover", lambda: SimpleNamespace())
+    monkeypatch.setattr(daemon, "_restore_resource_pressure", lambda: None)
+    monkeypatch.setattr(daemon, "_startup_reconcile_control_loop", lambda: None)
+    monkeypatch.setattr(daemon.executor, "retry_validation_cleanup_pending", lambda: None)
+    monkeypatch.setattr(daemon, "_reconcile_docker_resources", lambda: None)
+    monkeypatch.setattr(store, "iter_tasks", lambda: [])
+
+    def fail_running(lifecycle, **kwargs):
+        if lifecycle == DaemonLifecycleState.running.value:
+            raise RuntimeError("running publication failed")
+        return original_set_lifecycle(lifecycle, **kwargs)
+
+    monkeypatch.setattr(store, "set_daemon_lifecycle", fail_running)
+    with pytest.raises(RuntimeError, match="running publication"):
+        daemon.startup_reconcile()
+
+    assert store.get_daemon_state()["lifecycle"] != DaemonLifecycleState.running.value
 
 
 def test_daemon_rejects_unsupported_collaborators(config):

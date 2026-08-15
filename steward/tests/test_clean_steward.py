@@ -1873,7 +1873,8 @@ def test_daemon_preflights_push_main_remote(
     config.ensure_dirs()
     logs: list[str] = []
 
-    StewardDaemon(config, TaskStore.create(config.db_path), logger=logs.append)
+    daemon = StewardDaemon(config, TaskStore.create(config.db_path), logger=logs.append)
+    daemon.startup_reconcile()
 
     assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
 
@@ -1904,8 +1905,9 @@ def test_daemon_preflight_rejects_divergent_local_main(
         }
     )
 
+    daemon = StewardDaemon(config, TaskStore.create(config.db_path))
     with pytest.raises(StewardPreflightError) as exc_info:
-        StewardDaemon(config, TaskStore.create(config.db_path))
+        daemon.startup_reconcile()
 
     message = str(exc_info.value)
     assert "local main does not match remote main" in message
@@ -1925,8 +1927,9 @@ def test_daemon_preflight_fails_before_tick_for_push_main(
     )
     config.ensure_dirs()
 
+    daemon = StewardDaemon(config, TaskStore.create(config.db_path))
     with pytest.raises(StewardPreflightError) as exc_info:
-        StewardDaemon(config, TaskStore.create(config.db_path))
+        daemon.startup_reconcile()
 
     assert "remote push preflight failed" in str(exc_info.value)
     assert "fetch remote main" in str(exc_info.value)
@@ -8897,7 +8900,7 @@ def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: P
     assert TaskStore.open(config.db_path).get(task.id).worktree_path == external
 
 
-def test_store_migrates_existing_absolute_state_paths(config: StewardConfig) -> None:
+def test_store_open_preserves_existing_absolute_state_paths(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
@@ -8964,19 +8967,21 @@ def test_store_migrates_existing_absolute_state_paths(config: StewardConfig) -> 
         validation = session.query(ValidationRow).filter_by(task_id=task.id).one()
         event = session.query(EventRow).filter_by(task_id=task.id, kind="artifact.ready").one()
         assert row is not None
-        assert row.patch_path == f"patches/{task.id}/iteration-0.patch"
+        assert row.patch_path == str(absolute_patch)
         assert json.loads(row.metadata_json) == {
-            "source_patch_path": f"patches/{task.id}/iteration-0.patch",
-            "source_worktree_path": f"worktrees/{task.id}",
+            "source_patch_path": str(absolute_patch),
+            "source_worktree_path": str(config.worktrees_dir / task.id),
         }
-        assert iteration.worker_prompt_path == f"prompts/{task.id}/worker.md"
-        assert iteration.patch_path == f"patches/{task.id}/iteration-0.patch"
-        assert validation.cwd == f"worktrees/{task.id}"
-        assert validation.output_path == f"logs/{task.id}/validation.txt"
-        assert event.message == f"patches/{task.id}/iteration-0.patch"
-        assert json.loads(event.data_json) == {
-            "patch_path": f"patches/{task.id}/iteration-0.patch"
-        }
+        assert iteration.worker_prompt_path == str(
+            config.prompts_dir / task.id / "worker.md"
+        )
+        assert iteration.patch_path == str(absolute_patch)
+        assert validation.cwd == str(config.worktrees_dir / task.id)
+        assert validation.output_path == str(
+            config.logs_dir / task.id / "validation.txt"
+        )
+        assert event.message == str(absolute_patch)
+        assert json.loads(event.data_json) == {"patch_path": str(absolute_patch)}
     assert reopened.get(task.id).patch_path == absolute_patch
     assert reopened.get(task.id).spec.metadata["source_patch_path"] == str(absolute_patch)
     assert (

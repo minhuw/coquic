@@ -4,13 +4,19 @@ import hashlib
 import json
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 import coquic_steward.storage.sqlite as sqlite_module
 from coquic_steward.execution.task_archive import TaskArchive
-from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
+from coquic_steward.publication.outbox import (
+    GenerationIdentity,
+    PublicationGeneration,
+    PublicationState,
+)
+from coquic_steward.storage import SQLiteStoreLifecycleError, StoreRecoveryResult, TaskStore
 from coquic_steward.storage.sqlite import (
     CURRENT_SCHEMA_CATALOG_DIGEST,
     SQLITE_USER_VERSION,
@@ -353,5 +359,132 @@ def test_open_accepts_a_sequence_seed_for_a_valid_evolved_ledger(
     try:
         assert event.sequence == 0
         assert reopened.control_loop.list_events()[0].sequence == 0
+    finally:
+        reopened.engine.dispose()
+
+
+def _stale_publication_generation() -> tuple[PublicationGeneration, datetime]:
+    now = datetime.now(timezone.utc) - timedelta(days=2)
+    identity = GenerationIdentity("task-recovery", "boundary-recovery")
+    return (
+        PublicationGeneration(
+            publication_id=identity.publication_id,
+            task_id=identity.task_id,
+            run_id="run-recovery",
+            generation_boundary=identity.stable_boundary,
+            metadata_digest="a" * 64,
+            idempotency_key=identity.idempotency_key,
+            created_at=now,
+            updated_at=now,
+        ),
+        now,
+    )
+
+
+def test_open_defers_stale_lease_recovery_to_explicit_recover(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    generation, now = _stale_publication_generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("recovery-worker", now=now)
+    store.engine.dispose()
+
+    opened = TaskStore.open(database)
+    try:
+        before = opened.get_publication_generation(generation.publication_id)
+        assert before is not None
+        assert before.state is PublicationState.claimed
+        result = opened.recover()
+        assert result == StoreRecoveryResult(
+            expired_leases=1, health_changed=True, changed=True
+        )
+        recovered = opened.get_publication_generation(generation.publication_id)
+        assert recovered is not None
+        assert recovered.state is PublicationState.retry_wait
+        assert recovered.lease_owner is None
+    finally:
+        opened.engine.dispose()
+
+    committed = TaskStore.open(database)
+    try:
+        recovered = committed.get_publication_generation(generation.publication_id)
+        assert recovered is not None
+        assert recovered.state is PublicationState.retry_wait
+        assert committed.get_publication_health().queued_count == 1
+    finally:
+        committed.engine.dispose()
+
+
+def test_recover_current_state_is_write_free(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    TaskStore.create(database).engine.dispose()
+    tracked = [
+        database,
+        database.with_name("steward.sqlite-wal"),
+        database.with_name("steward.sqlite-shm"),
+    ]
+    before = {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in tracked}
+
+    opened = TaskStore.open(database)
+    try:
+        assert opened.recover() == StoreRecoveryResult()
+    finally:
+        opened.engine.dispose()
+
+    after = {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in tracked}
+    assert after == before
+
+
+def test_recover_repairs_derived_health_without_lease_changes(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE publication_health SET queued_count=7 WHERE id=1"
+        )
+        connection.commit()
+    store.engine.dispose()
+
+    opened = TaskStore.open(database)
+    try:
+        result = opened.recover()
+        assert result == StoreRecoveryResult(
+            expired_leases=0, health_changed=True, changed=True
+        )
+        assert opened.get_publication_health().queued_count == 0
+        assert opened.recover() == StoreRecoveryResult()
+    finally:
+        opened.engine.dispose()
+
+
+def test_recover_rolls_back_lease_and_health_changes_on_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    generation, now = _stale_publication_generation()
+    store.enqueue_publication(generation)
+    store.claim_publication("recovery-worker", now=now)
+    before_health = store.get_publication_health()
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("health refresh failed")
+
+    monkeypatch.setattr(store, "_refresh_publication_health", fail_refresh)
+    with pytest.raises(RuntimeError, match="health refresh"):
+        store.recover()
+    store.engine.dispose()
+
+    reopened = TaskStore.open(database)
+    try:
+        unchanged = reopened.get_publication_generation(generation.publication_id)
+        assert unchanged is not None
+        assert unchanged.state is PublicationState.claimed
+        assert unchanged.lease_owner == "recovery-worker"
+        after_health = reopened.get_publication_health()
+        assert after_health.queued_count == before_health.queued_count
+        assert after_health.blocked_count == before_health.blocked_count
+        assert after_health.cleanup_pending_count == before_health.cleanup_pending_count
+        assert after_health.cleanup_pending_bytes == before_health.cleanup_pending_bytes
     finally:
         reopened.engine.dispose()

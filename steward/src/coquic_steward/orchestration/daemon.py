@@ -38,6 +38,7 @@ from ..core.models import (
     DaemonRuntimeState,
     OwnedDockerUsage,
     PipelineCursorPhase,
+    ResourcePressure,
     ResourcePressureState,
     SignalFetchStatus,
     SignalItem,
@@ -567,27 +568,12 @@ class StewardDaemon:
                 assert self._docker_resources is not None
                 return self._docker_resources.owned_usage()
 
-        initial_pressure_state = ResourcePressureState.normal
-        try:
-            persisted_pressure = store.get_resource_pressure()
-            if persisted_pressure is not None:
-                initial_pressure_state = ResourcePressureState(
-                    str(persisted_pressure.get("state"))
-                )
-        except (OSError, TypeError, ValueError):
-            initial_pressure_state = ResourcePressureState.pressure
         self._resource_pressure = ResourcePressureController(
             config,
             usage_provider=usage_provider,
-            initial_state=initial_pressure_state,
+            initial_state=ResourcePressureState.normal,
         )
-        with use_subprocess_owner(self._subprocess_owner):
-            remote_push_ready = preflight_remote_push(config)
-        if remote_push_ready:
-            self._log(
-                "remote push preflight ok "
-                f"remote={config.git_remote} branch={config.main_branch}"
-            )
+        self._resource_pressure_restored = False
         self.session_supervisor = session_supervisor
         if self.session_supervisor is None and config.task_image_digest:
             self.session_supervisor = SessionSupervisor(
@@ -600,15 +586,6 @@ class StewardDaemon:
                 codex_identity=config.codex_identity or config.codex_bin,
             )
         self.planner_session = planner_session
-        if (
-            self.planner_session is None
-            and config.task_image_digest
-            and not config.local_codex_test_harness
-        ):
-            self.planner_session = planner_session_for_config(config)
-            bind_deployment_identity(self.planner_session.invoker.runtime, config)
-        elif self.planner_session is None and config.local_codex_test_harness:
-            self.planner_session = FreshPlannerSession(config)
         self.executor = StewardExecutor(
             config,
             store,
@@ -618,23 +595,6 @@ class StewardDaemon:
             heartbeat_interval_seconds=DAEMON_HEARTBEAT_INTERVAL_SECONDS
         )
         self._runtime_lock = threading.Lock()
-        # This is a local, bounded check. External integrations are checked
-        # only when explicitly enabled; remote push remains the compatibility
-        # preflight above for existing callers.
-        # ``preflight_remote_push`` above is retained for the existing startup
-        # log contract; avoid running the network-facing check a second time.
-        with use_subprocess_owner(self._subprocess_owner):
-            report = run_preflight(config, store, check_remote_push=False)
-        if remote_push_ready:
-            report = PreflightReport(
-                checks=(*report.checks, "remote-push"),
-                warnings=report.warnings,
-            )
-        self._preflight_report = report
-        store.claim_daemon_instance(
-            self.runtime.instance_id,
-            lifecycle=DaemonLifecycleState.starting.value,
-        )
 
     @property
     def lifecycle_state(self) -> DaemonLifecycleState:
@@ -662,7 +622,37 @@ class StewardDaemon:
 
         return bool(self._refresh_resource_pressure().get("admissionAllowed"))
 
+    def _restore_resource_pressure(self) -> None:
+        if getattr(self, "_resource_pressure_restored", True):
+            return
+        initial_state = ResourcePressureState.normal
+        try:
+            persisted_pressure = self.store.get_resource_pressure()
+            if persisted_pressure is not None:
+                initial_state = ResourcePressureState(
+                    str(persisted_pressure.get("state"))
+                )
+        except (AttributeError, OSError, TypeError, ValueError):
+            initial_state = ResourcePressureState.pressure
+        self._resource_pressure.state = initial_state
+        self._resource_pressure.last = ResourcePressure(
+            state=initial_state,
+            admission_allowed=initial_state is ResourcePressureState.normal,
+        )
+        self._resource_pressure_restored = True
+
+    def _prepare_planner_session(self) -> None:
+        if self.planner_session is not None:
+            return
+        if self.config.task_image_digest and not self.config.local_codex_test_harness:
+            self.planner_session = planner_session_for_config(self.config)
+            runtime = self.planner_session.invoker.runtime
+            bind_deployment_identity(runtime, self.config)
+        elif self.config.local_codex_test_harness:
+            self.planner_session = FreshPlannerSession(self.config)
+
     def _refresh_resource_pressure(self) -> dict[str, Any]:
+        self._restore_resource_pressure()
         reconciled_usage = self._reconcile_docker_resources()
         if reconciled_usage is None:
             report = self._resource_pressure.measure()
@@ -762,78 +752,124 @@ class StewardDaemon:
             self.finalize_terminal_task(task.id)
 
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
-        """Reconcile durable ownership before any new dispatch is allowed."""
+        """Validate and recover durable ownership before dispatch is allowed."""
 
         with self._lifecycle_lock:
             if self._startup_complete:
                 return tuple(self._reconciliation)
+            claimed = False
             with self._runtime_lock:
                 self.runtime.lifecycle = DaemonLifecycleState.reconciling
                 self.runtime.state = DaemonRuntimeState.active
-            self.store.set_daemon_lifecycle(
-                DaemonLifecycleState.reconciling.value,
-                instance_id=self.runtime.instance_id,
-            )
-            outcomes: list[ReconciliationOutcome] = []
-            self.executor.retry_validation_cleanup_pending()
-            self._reconcile_docker_resources()
-            self._startup_reconcile_control_loop()
-            tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
-            for task in tasks:
-                outcome = self._reconcile_task(task)
-                outcomes.append(outcome)
-                try:
-                    self.store.add_event(
-                        task.id,
-                        "daemon.reconciled",
-                        outcome.disposition.value,
-                        outcome.as_dict(),
+            try:
+                with use_subprocess_owner(self._subprocess_owner):
+                    remote_push_ready = preflight_remote_push(self.config)
+                    report = run_preflight(
+                        self.config, self.store, check_remote_push=False
                     )
-                except Exception:
-                    # Reconciliation evidence must not hide the identity result.
-                    pass
-                if (
-                    outcome.disposition is ReconciliationDisposition.blocked
-                    and _is_identity_conflict(outcome.detail)
-                    and not TaskStatus(task.status).terminal
-                ):
+                if remote_push_ready:
+                    report = PreflightReport(
+                        checks=(*report.checks, "remote-push"),
+                        warnings=report.warnings,
+                    )
+                    self._log(
+                        "remote push preflight ok "
+                        f"remote={self.config.git_remote} branch={self.config.main_branch}"
+                    )
+                self._preflight_report = report
+                self.store.recover()
+                self._prepare_planner_session()
+                self._restore_resource_pressure()
+
+                outcomes: list[ReconciliationOutcome] = []
+                self.executor.retry_validation_cleanup_pending()
+                self._reconcile_docker_resources()
+                self._startup_reconcile_control_loop()
+                tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
+                for task in tasks:
+                    outcome = self._reconcile_task(task)
+                    outcomes.append(outcome)
                     try:
-                        self.store.finish_task(
+                        self.store.add_event(
                             task.id,
-                            TaskStatus.blocked,
-                            outcome.detail,
+                            "daemon.reconciled",
+                            outcome.disposition.value,
+                            outcome.as_dict(),
                         )
                     except Exception:
-                        # The durable reconciliation event remains evidence even
-                        # when an older task row cannot accept a terminal block.
+                        # Reconciliation evidence must not hide the identity result.
                         pass
+                    if (
+                        outcome.disposition is ReconciliationDisposition.blocked
+                        and _is_identity_conflict(outcome.detail)
+                        and not TaskStatus(task.status).terminal
+                    ):
+                        try:
+                            self.store.finish_task(
+                                task.id,
+                                TaskStatus.blocked,
+                                outcome.detail,
+                            )
+                        except Exception:
+                            # The durable reconciliation event remains evidence even
+                            # when an older task row cannot accept a terminal block.
+                            pass
+                    if self._shutdown_event.is_set():
+                        break
+                self._reconciliation = outcomes
                 if self._shutdown_event.is_set():
-                    break
-            self._reconciliation = outcomes
-            if self._shutdown_event.is_set():
+                    return tuple(outcomes)
+
+                self.store.claim_daemon_instance(
+                    self.runtime.instance_id,
+                    lifecycle=DaemonLifecycleState.starting.value,
+                )
+                claimed = True
+                with self._runtime_lock:
+                    self.runtime.lifecycle = DaemonLifecycleState.running
+                    self.runtime.state = DaemonRuntimeState.idle
+                    self.runtime.reconciliation_complete = True
+                    self.runtime.heartbeat_at = utc_now()
+                self.store.set_daemon_lifecycle(
+                    DaemonLifecycleState.running.value,
+                    instance_id=self.runtime.instance_id,
+                    state={"reconciliation_complete": True},
+                )
+                if self._control_loop_ledger is not None:
+                    try:
+                        self._control_loop_ledger.record_runtime(
+                            "running", {"instanceId": self.runtime.instance_id}
+                        )
+                        self._control_loop_wakeup.set()
+                    except Exception as exc:
+                        self._log(
+                            "control-loop runtime start lag "
+                            f"error={exc.__class__.__name__}"
+                        )
+                self._enqueue_materialized_publications()
+                self._start_publication_worker()
+                self._startup_complete = True
                 return tuple(outcomes)
-            self._startup_complete = True
-            with self._runtime_lock:
-                self.runtime.lifecycle = DaemonLifecycleState.running
-                self.runtime.state = DaemonRuntimeState.idle
-                self.runtime.reconciliation_complete = True
-                self.runtime.heartbeat_at = utc_now()
-            self.store.set_daemon_lifecycle(
-                DaemonLifecycleState.running.value,
-                instance_id=self.runtime.instance_id,
-                state={"reconciliation_complete": True},
-            )
-            if self._control_loop_ledger is not None:
-                try:
-                    self._control_loop_ledger.record_runtime(
-                        "running", {"instanceId": self.runtime.instance_id}
-                    )
-                    self._control_loop_wakeup.set()
-                except Exception as exc:
-                    self._log(f"control-loop runtime start lag error={exc.__class__.__name__}")
-            self._enqueue_materialized_publications()
-            self._start_publication_worker()
-            return tuple(outcomes)
+            except BaseException:
+                self._startup_complete = False
+                if claimed:
+                    try:
+                        self.store.set_daemon_lifecycle(
+                            DaemonLifecycleState.stopped.value,
+                            instance_id=self.runtime.instance_id,
+                            state={"startup_failed": True},
+                        )
+                    except Exception:
+                        pass
+                with self._runtime_lock:
+                    if claimed:
+                        self.runtime.lifecycle = DaemonLifecycleState.stopped
+                        self.runtime.state = DaemonRuntimeState.stopping
+                    else:
+                        self.runtime.lifecycle = DaemonLifecycleState.starting
+                        self.runtime.state = DaemonRuntimeState.starting
+                    self.runtime.reconciliation_complete = False
+                raise
 
     def _startup_reconcile_control_loop(self) -> None:
         """Establish the shared epoch and repair archive lag before dispatch."""
@@ -5015,11 +5051,11 @@ class StewardDaemon:
         return artifacts
 
     def run_forever(self) -> None:
-        self._start_heartbeat_thread()
         try:
             self.startup_reconcile()
             if self._shutdown_event.is_set():
                 return
+            self._start_heartbeat_thread()
             self._start_control_loop_writer()
             with self._worker_pool_lock:
                 if self._worker_pool is None:

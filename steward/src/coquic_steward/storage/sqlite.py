@@ -341,34 +341,54 @@ class SQLiteTaskStore:
         # cannot delete another live attempt; this attempt always gets a new
         # temporary name and builds it from scratch.
         temporary = cls._new_database_temporary(database, epoch_id)
+        keep_temporary = False
+        publication_conflict = False
         try:
             cls._build_current_database(temporary, epoch_id)
             cls._durabilize_database(temporary)
             cls._validate_current_database(temporary, epoch_id)
             try:
-                os.link(temporary, database)
+                # Publish the sidecars first.  The database hard link is the
+                # final visible name, so an interruption before it leaves only
+                # a recognized retryable prefix and never an openable-looking
+                # database without its WAL state.
                 _publish_database_sidecars(temporary, database)
+                try:
+                    os.link(temporary, database)
+                except FileExistsError:
+                    publication_conflict = True
+                    # The target was absent at entry but another creator won
+                    # the no-replace publication race.  Only an exact current
+                    # winner can be adopted; an arbitrary file is never
+                    # inspected as a usable Store.
+                    _validate_optional_sqlite_sidecars(database)
+                    winner_epoch = _read_task_epoch(database.parent / "tasks")
+                    if winner_epoch["epochId"] != epoch_id:
+                        raise SQLiteStoreLifecycleError(
+                            "concurrent Store winner has a mismatched task epoch"
+                        )
+                    cls._validate_current_database(database, epoch_id)
+                    # The adopter must establish durability independently of
+                    # the creator that won the link race.
+                    _fsync_directory(database.parent)
+                    return cls._open_validated(database, epoch_id, on_change)
                 _fsync_directory(database.parent)
-            except FileExistsError:
-                # The target was absent at entry but another creator won the
-                # no-replace publication race.  Only an exact current winner
-                # can be adopted; an arbitrary file is never inspected as a
-                # usable Store.
-                _validate_optional_sqlite_sidecars(database)
-                winner_epoch = _read_task_epoch(database.parent / "tasks")
-                if winner_epoch["epochId"] != epoch_id:
-                    raise SQLiteStoreLifecycleError(
-                        "concurrent Store winner has a mismatched task epoch"
+            except BaseException:
+                if publication_conflict:
+                    _remove_matching_publication_fragments(temporary, database)
+                else:
+                    # Preserve a partially published prefix long enough for
+                    # the next creator to identify and remove only its
+                    # matching final links.  A complete final set needs no
+                    # temporary retained.
+                    keep_temporary = _temporary_publication_is_partial(
+                        temporary, database
                     )
-                cls._validate_current_database(database, epoch_id)
-                return cls._open_validated(database, epoch_id, on_change)
-            finally:
-                _remove_factory_temporary(temporary)
-            _fsync_directory(database.parent)
+                raise
             return cls.open(database, on_change=on_change)
-        except Exception:
-            _remove_factory_temporary(temporary)
-            raise
+        finally:
+            if not keep_temporary:
+                _remove_factory_temporary(temporary)
 
     @classmethod
     def open(
@@ -424,7 +444,6 @@ class SQLiteTaskStore:
     def _prepare_creation_state(
         cls, database: Path
     ) -> tuple[str, list[Path]]:
-        _refuse_existing_database_state(database)
         _ensure_database_parent(database.parent)
 
         tasks_root = database.parent / "tasks"
@@ -452,10 +471,14 @@ class SQLiteTaskStore:
                 )
 
         expected_epoch_id = None if epoch is None else str(epoch["epochId"])
-        database_temporaries = _scan_database_temporaries(
-            database, expected_epoch_id
-        )
         if epoch is None:
+            # Refuse all visible target state before publishing a new epoch.
+            # A hidden database temporary without an epoch is a reverse orphan,
+            # not a creation prefix that may be inferred or adopted.
+            _refuse_existing_database_state(database)
+            database_temporaries = _scan_database_temporaries(
+                database, expected_epoch_id
+            )
             if database_temporaries:
                 raise SQLiteStoreLifecycleError(
                     "database temporary exists without a task epoch"
@@ -474,7 +497,17 @@ class SQLiteTaskStore:
             database_temporaries = _scan_database_temporaries(
                 database, expected_epoch_id
             )
+        else:
+            database_temporaries = _scan_database_temporaries(
+                database, expected_epoch_id
+            )
+
         assert expected_epoch_id is not None
+        _validate_database_namespace(database)
+        _recover_incomplete_database_publication(
+            database, database_temporaries
+        )
+        _refuse_existing_database_state(database)
         return expected_epoch_id, [*epoch_temporaries, *database_temporaries]
 
     @classmethod
@@ -7163,16 +7196,119 @@ def _ensure_database_parent(parent: Path) -> None:
     _require_directory(parent, "database parent")
 
 
+def _validate_database_namespace(database: Path) -> None:
+    parent = database.parent
+    if not os.path.lexists(parent):
+        return
+    _require_directory(parent, "database parent")
+    target_names = {
+        path.name for path in _database_publication_paths(database)
+    }
+    temporary_marker = f".{database.name}.create-"
+    target_prefixes = (
+        database.name + "-",
+        database.name + ".",
+        "." + database.name,
+    )
+    for candidate in _directory_entries(parent, "database parent"):
+        if candidate.name in target_names or candidate.name.startswith(
+            temporary_marker
+        ):
+            continue
+        if candidate.name.startswith(target_prefixes):
+            raise SQLiteStoreLifecycleError(
+                "create() refuses a pre-existing database state"
+            )
+
+
 def _refuse_existing_database_state(database: Path) -> None:
-    for candidate in (
-        database,
-        database.with_name(database.name + "-wal"),
-        database.with_name(database.name + "-shm"),
-    ):
+    _validate_database_namespace(database)
+    for candidate in _database_publication_paths(database):
         if os.path.lexists(candidate):
             raise SQLiteStoreLifecycleError(
                 "create() refuses a pre-existing database state"
             )
+
+
+def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
+    return (
+        database,
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    )
+
+
+def _same_regular_file(left: Path, right: Path) -> bool:
+    try:
+        _require_regular_file(left, "database publication entry")
+        _require_regular_file(right, "database publication temporary")
+        return os.path.samefile(left, right)
+    except (OSError, SQLiteStoreLifecycleError):
+        return False
+
+
+def _publication_matches_temporary(
+    temporary: Path, database: Path
+) -> bool:
+    present = False
+    for target, suffix in zip(
+        _database_publication_paths(database), ("", "-wal", "-shm")
+    ):
+        if not os.path.lexists(target):
+            continue
+        present = True
+        source = temporary if not suffix else temporary.with_name(
+            temporary.name + suffix
+        )
+        if not _same_regular_file(target, source):
+            return False
+    return present
+
+
+def _temporary_publication_is_partial(
+    temporary: Path, database: Path
+) -> bool:
+    paths = _database_publication_paths(database)
+    present = [os.path.lexists(path) for path in paths]
+    if not any(present) or all(present):
+        return False
+    return _publication_matches_temporary(temporary, database)
+
+
+def _remove_matching_publication_fragments(
+    temporary: Path, database: Path
+) -> None:
+    removed = False
+    for target, suffix in zip(
+        _database_publication_paths(database), ("", "-wal", "-shm")
+    ):
+        source = temporary if not suffix else temporary.with_name(
+            temporary.name + suffix
+        )
+        if os.path.lexists(target) and _same_regular_file(target, source):
+            _unlink_regular_remnant(target)
+            removed = True
+    if removed:
+        _fsync_directory(database.parent)
+
+
+def _recover_incomplete_database_publication(
+    database: Path, temporaries: list[Path]
+) -> None:
+    paths = _database_publication_paths(database)
+    present = [os.path.lexists(path) for path in paths]
+    if not any(present) or all(present):
+        return
+    for temporary in temporaries:
+        if not temporary.name.endswith(".tmp"):
+            continue
+        if not _publication_matches_temporary(temporary, database):
+            continue
+        for path in paths:
+            if os.path.lexists(path):
+                _unlink_regular_remnant(path)
+        _fsync_directory(database.parent)
+        return
 
 
 def _read_epoch_document(path: Path) -> dict[str, object]:
@@ -7337,10 +7473,54 @@ def _validate_store_seeds(connection: sqlite3.Connection, epoch_id: str) -> None
     if rows["epoch_id"] != epoch_id:
         raise SQLiteStoreLifecycleError("Store and task epochs do not match")
     try:
-        if int(rows["next_sequence"]) < 0:
+        next_sequence = int(rows["next_sequence"])
+        if next_sequence < 0:
             raise ValueError
     except (TypeError, ValueError) as exc:
         raise SQLiteStoreLifecycleError("Store sequence seed is invalid") from exc
+
+    event_count, minimum_sequence, maximum_sequence = connection.execute(
+        "SELECT COUNT(*), MIN(sequence), MAX(sequence) FROM control_loop_events"
+    ).fetchone()
+    expected_sequence = 0 if event_count == 0 else int(maximum_sequence) + 1
+    if (
+        next_sequence != expected_sequence
+        or (event_count and minimum_sequence != 0)
+        or (event_count and event_count != expected_sequence)
+    ):
+        raise SQLiteStoreLifecycleError("Store sequence seed is inconsistent")
+    if connection.execute(
+        "SELECT 1 FROM control_loop_events WHERE epoch_id<>? LIMIT 1",
+        (epoch_id,),
+    ).fetchone() is not None:
+        raise SQLiteStoreLifecycleError("Store event epoch is inconsistent")
+    outbox_count = connection.execute(
+        "SELECT COUNT(*) FROM control_loop_outbox"
+    ).fetchone()[0]
+    if outbox_count != event_count:
+        raise SQLiteStoreLifecycleError("Store event outbox is inconsistent")
+    if connection.execute(
+        """
+        SELECT 1
+        FROM control_loop_events AS event
+        LEFT JOIN control_loop_outbox AS outbox
+          ON outbox.sequence=event.sequence
+        WHERE outbox.sequence IS NULL OR outbox.event_id<>event.event_id
+        LIMIT 1
+        """
+    ).fetchone() is not None:
+        raise SQLiteStoreLifecycleError("Store event outbox is inconsistent")
+    if connection.execute(
+        """
+        SELECT 1
+        FROM control_loop_outbox AS outbox
+        LEFT JOIN control_loop_events AS event
+          ON event.sequence=outbox.sequence
+        WHERE event.sequence IS NULL
+        LIMIT 1
+        """
+    ).fetchone() is not None:
+        raise SQLiteStoreLifecycleError("Store event outbox is inconsistent")
     if rows["planning_blocked"] not in {"0", "1"}:
         raise SQLiteStoreLifecycleError("Store planning seed is invalid")
 

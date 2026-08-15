@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import coquic_steward.storage.sqlite as sqlite_module
 from coquic_steward.execution.task_archive import TaskArchive
 from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
 from coquic_steward.storage.sqlite import (
@@ -111,6 +112,58 @@ def test_create_and_open_bind_the_immutable_task_epoch_and_callback(tmp_path: Pa
     assert calls == []
 
 
+def test_publication_leaves_an_exact_store_if_database_link_is_interrupted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    original_link = sqlite_module.os.link
+
+    def interrupted_link(source, target, *args, **kwargs):
+        result = original_link(source, target, *args, **kwargs)
+        if Path(target) == database:
+            raise RuntimeError("interrupted after database publication")
+        return result
+
+    monkeypatch.setattr(sqlite_module.os, "link", interrupted_link)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        TaskStore.create(database)
+
+    assert database.is_file()
+    assert database.with_name(database.name + "-wal").is_file()
+    assert database.with_name(database.name + "-shm").is_file()
+    reopened = TaskStore.open(database)
+    reopened.engine.dispose()
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+
+
+def test_create_retries_a_partial_sidecar_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    original_link = sqlite_module.os.link
+    interrupted = False
+
+    def interrupted_link(source, target, *args, **kwargs):
+        nonlocal interrupted
+        result = original_link(source, target, *args, **kwargs)
+        if not interrupted and Path(target) == database.with_name(database.name + "-wal"):
+            interrupted = True
+            raise RuntimeError("interrupted after sidecar publication")
+        return result
+
+    monkeypatch.setattr(sqlite_module.os, "link", interrupted_link)
+    with pytest.raises(RuntimeError, match="sidecar"):
+        TaskStore.create(database)
+
+    assert not database.exists()
+    assert database.with_name(database.name + "-wal").is_file()
+    created = TaskStore.create(database)
+    assert created.control_loop.epoch_id == json.loads(
+        (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
+    )["epochId"]
+
+
 def test_open_validation_does_not_repair_or_write(tmp_path: Path) -> None:
     database = tmp_path / "steward.sqlite"
     TaskStore.create(database).engine.dispose()
@@ -142,6 +195,21 @@ def test_create_rejects_existing_target_and_extra_archive_state(tmp_path: Path) 
     assert not (other_root / "steward.sqlite").exists()
 
 
+def test_create_rejects_a_database_rollback_journal_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    journal = database.with_name(database.name + "-journal")
+    journal.write_bytes(b"journal-remnant")
+
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.create(database)
+
+    assert journal.read_bytes() == b"journal-remnant"
+    assert not database.exists()
+    assert not (tmp_path / "tasks").exists()
+
+
 def test_create_rebuilds_instead_of_adopting_recognized_database_temporary(
     tmp_path: Path,
 ) -> None:
@@ -169,3 +237,37 @@ def test_open_rejects_version_corruption_without_repair(tmp_path: Path) -> None:
         TaskStore.open(database)
 
     assert database.read_bytes() == before
+
+
+def test_open_rejects_a_sequence_seed_inconsistent_with_an_empty_ledger(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    TaskStore.create(database).engine.dispose()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE control_loop_meta SET value='7' WHERE key='next_sequence'"
+        )
+        connection.commit()
+    before = database.read_bytes()
+
+    with pytest.raises(SQLiteStoreLifecycleError):
+        TaskStore.open(database)
+
+    assert database.read_bytes() == before
+
+
+def test_open_accepts_a_sequence_seed_for_a_valid_evolved_ledger(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database)
+    event = store.control_loop.record_runtime("running")
+    store.engine.dispose()
+
+    reopened = TaskStore.open(database)
+    try:
+        assert event.sequence == 0
+        assert reopened.control_loop.list_events()[0].sequence == 0
+    finally:
+        reopened.engine.dispose()

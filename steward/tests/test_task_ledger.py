@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +20,7 @@ from coquic_steward.core.models import (
     WorkerKind,
     WorktreeCheckpoint,
 )
-from coquic_steward.storage import TaskStore
+from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
 from coquic_steward.execution.worktree import Worktrees
 from coquic_steward.orchestration import DaemonAlreadyRunning, acquire_daemon_lock
 
@@ -44,6 +45,37 @@ def test_task_store_direct_construction_is_rejected(config: StewardConfig) -> No
     message = str(error.value)
     assert "TaskStore.create()" in message
     assert "TaskStore.open()" in message
+
+
+def test_open_rejects_a_database_without_its_durable_wal_namespace(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_database = source_root / "steward.sqlite"
+    source_root.mkdir()
+    source = TaskStore.create(source_database)
+    try:
+        source.add_task(
+            TaskSpec(
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title="wal-only",
+                prompt="prompt",
+            )
+        )
+        assert source_database.with_name("steward.sqlite-wal").stat().st_size > 0
+        target_root = tmp_path / "target"
+        target_root.mkdir()
+        shutil.copy2(source_database, target_root / source_database.name)
+        shutil.copytree(source_root / "tasks", target_root / "tasks")
+    finally:
+        source.engine.dispose()
+
+    with pytest.raises(SQLiteStoreLifecycleError, match="WAL sidecar is missing"):
+        TaskStore.open(target_root / source_database.name)
+
+    assert not (target_root / "steward.sqlite-wal").exists()
+    assert not (target_root / "steward.sqlite-shm").exists()
 
 
 def test_legacy_database_migration_preserves_source_and_marks_backup(

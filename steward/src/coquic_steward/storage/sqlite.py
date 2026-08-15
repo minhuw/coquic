@@ -253,6 +253,11 @@ SCHEMA_CATALOG_DIGEST = CURRENT_SCHEMA_CATALOG_DIGEST
 _CONTROL_LOOP_META_SEED_KEYS = frozenset({"epoch_id", "next_sequence", "planning_blocked"})
 
 
+class _StoreOpenRequirements(NamedTuple):
+    needs_publication_health: bool
+    needs_portable_paths: bool
+
+
 class SQLiteStoreLifecycleError(RuntimeError):
     """The exact Store lifecycle precondition or validation failed."""
 
@@ -335,11 +340,13 @@ class SQLiteTaskStore:
                         raise SQLiteStoreLifecycleError(
                             "concurrent Store winner has a mismatched task epoch"
                         )
-                    cls._validate_current_database(database, epoch_id)
+                    requirements = cls._validate_current_database(database, epoch_id)
                     # The adopter must establish durability independently of
                     # the creator that won the link race.
                     _fsync_directory(database.parent)
-                    return cls._open_validated(database, epoch_id, on_change)
+                    return cls._open_validated(
+                        database, epoch_id, on_change, requirements
+                    )
                 _fsync_directory(database.parent)
             except BaseException:
                 if not publication_conflict:
@@ -368,8 +375,8 @@ class SQLiteTaskStore:
         database = Path(path).expanduser()
         epoch = _read_task_epoch(database.parent / "tasks")
         epoch_id = epoch["epochId"]
-        cls._validate_current_database(database, epoch_id)
-        return cls._open_validated(database, epoch_id, on_change)
+        requirements = cls._validate_current_database(database, epoch_id)
+        return cls._open_validated(database, epoch_id, on_change, requirements)
 
     @classmethod
     def _open_validated(
@@ -377,11 +384,14 @@ class SQLiteTaskStore:
         database: Path,
         epoch_id: str,
         on_change: Callable[[], None] | None,
+        requirements: _StoreOpenRequirements,
     ) -> "SQLiteTaskStore":
         store = cls._blank_store(database, on_change=on_change, wal=False)
         store.control_loop = _bind_existing_control_loop(database, epoch_id)
-        store._ensure_publication_health()
-        store._migrate_portable_paths()
+        store._ensure_publication_health(
+            required=requirements.needs_publication_health
+        )
+        store._migrate_portable_paths(required=requirements.needs_portable_paths)
         return store
 
     @classmethod
@@ -544,9 +554,11 @@ class SQLiteTaskStore:
             ) from exc
 
     @classmethod
-    def _validate_current_database(cls, database: Path, epoch_id: str) -> None:
+    def _validate_current_database(
+        cls, database: Path, epoch_id: str
+    ) -> _StoreOpenRequirements:
         _require_regular_file(database, "Store database")
-        _validate_optional_sqlite_sidecars(database)
+        _require_wal_sidecars(database)
         try:
             uri = database.resolve().as_uri() + "?mode=ro"
             connection = sqlite3.connect(uri, uri=True, timeout=30)
@@ -576,6 +588,37 @@ class SQLiteTaskStore:
             if _catalog_digest(connection) != CURRENT_SCHEMA_CATALOG_DIGEST:
                 raise SQLiteStoreLifecycleError("Store database catalog mismatch")
             _validate_store_seeds(connection, epoch_id)
+            now_text = _publication_timestamp(_publication_now(None))
+            expired_lease = connection.execute(
+                """
+                SELECT 1
+                FROM publication_generations AS generation
+                WHERE generation.state IN ('claimed','building','uploading','d1_staged')
+                  AND generation.lease_expires_at <= ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM publication_hide_fences AS fence
+                      WHERE fence.task_id=generation.task_id
+                        AND fence.state IN ('pending','confirmed')
+                  )
+                LIMIT 1
+                """,
+                (now_text,),
+            ).fetchone()
+            health_exists = connection.execute(
+                "SELECT 1 FROM publication_health WHERE id=1"
+            ).fetchone()
+            path_codec = PathCodec(
+                database.parent, legacy_dir=database.parent / "steward"
+            )
+            return _StoreOpenRequirements(
+                needs_publication_health=(
+                    expired_lease is not None or health_exists is None
+                ),
+                needs_portable_paths=_portable_paths_need_migration_in_connection(
+                    connection, path_codec
+                ),
+            )
         except sqlite3.Error as exc:
             raise SQLiteStoreLifecycleError("invalid Store database") from exc
         finally:
@@ -4544,33 +4587,37 @@ class SQLiteTaskStore:
     def _publication_exists(self, connection: Connection, publication_id: str) -> bool:
         return _publication_exists(connection, publication_id)
 
-    def _ensure_publication_health(self) -> None:
+    def _ensure_publication_health(
+        self, *, required: bool | None = None
+    ) -> None:
         """Create the singleton health row and reconcile expired leases."""
 
         timestamp = _publication_now(None)
-        now_text = _publication_timestamp(timestamp)
-        uri = self.path.resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True) as connection:
-            expired = connection.execute(
-                """
-                SELECT 1
-                FROM publication_generations AS generation
-                WHERE generation.state IN ('claimed','building','uploading','d1_staged')
-                  AND generation.lease_expires_at <= ?
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM publication_hide_fences AS fence
-                      WHERE fence.task_id=generation.task_id
-                        AND fence.state IN ('pending','confirmed')
-                  )
-                LIMIT 1
-                """,
-                (now_text,),
-            ).fetchone()
-            health_exists = connection.execute(
-                "SELECT 1 FROM publication_health WHERE id=1"
-            ).fetchone()
-        if expired is None and health_exists is not None:
+        if required is None:
+            now_text = _publication_timestamp(timestamp)
+            uri = self.path.resolve().as_uri() + "?mode=ro"
+            with sqlite3.connect(uri, uri=True) as connection:
+                expired = connection.execute(
+                    """
+                    SELECT 1
+                    FROM publication_generations AS generation
+                    WHERE generation.state IN ('claimed','building','uploading','d1_staged')
+                      AND generation.lease_expires_at <= ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM publication_hide_fences AS fence
+                          WHERE fence.task_id=generation.task_id
+                            AND fence.state IN ('pending','confirmed')
+                      )
+                    LIMIT 1
+                    """,
+                    (now_text,),
+                ).fetchone()
+                health_exists = connection.execute(
+                    "SELECT 1 FROM publication_health WHERE id=1"
+                ).fetchone()
+            required = expired is not None or health_exists is None
+        if not required:
             return
 
         with self.engine.begin() as connection:
@@ -6132,8 +6179,10 @@ class SQLiteTaskStore:
             )
             _install_ledger_ownership_triggers(connection)
 
-    def _migrate_portable_paths(self) -> None:
-        if not self._portable_paths_need_migration():
+    def _migrate_portable_paths(self, *, required: bool | None = None) -> None:
+        if required is None:
+            required = self._portable_paths_need_migration()
+        if not required:
             return
         task_columns = (
             "worktree_path",
@@ -6186,83 +6235,95 @@ class SQLiteTaskStore:
     def _portable_paths_need_migration(self) -> bool:
         uri = self.path.resolve().as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
-            for row in connection.execute(
-                """
-                SELECT worktree_path, transcript_path, last_message_path,
-                       patch_path, metadata_json
-                FROM tasks
-                """
-            ):
-                if any(
-                    self._portable_path(value) != value for value in row[:4]
-                ) or self._portable_json(row[4]) != row[4]:
-                    return True
-            for row in connection.execute(
-                """
-                SELECT worker_prompt_path, worker_transcript_path,
-                       worker_last_message_path, reviewer_prompt_path,
-                       reviewer_transcript_path, reviewer_last_message_path,
-                       patch_path
-                FROM task_iterations
-                """
-            ):
-                if any(self._portable_path(value) != value for value in row):
-                    return True
-            for row in connection.execute(
-                """
-                SELECT prompt_path, transcript_path, last_message_path, plan_path
-                FROM task_plan_runs
-                """
-            ):
-                if any(self._portable_path(value) != value for value in row):
-                    return True
-            for row in connection.execute(
-                "SELECT private_home_path, cwd FROM codex_sessions"
-            ):
-                if any(self._portable_path(value) != value for value in row):
-                    return True
-            for row in connection.execute(
-                "SELECT output_path, cwd FROM validations"
-            ):
-                if any(self._portable_path(value) != value for value in row):
-                    return True
-            for row in connection.execute(
-                "SELECT message, data_json FROM events"
-            ):
-                if (
-                    self._portable_path(row[0]) != row[0]
-                    or self._portable_json(row[1]) != row[1]
-                ):
-                    return True
-            for row in connection.execute(
-                "SELECT payload_json, location_json FROM signal_items"
-            ):
-                if (
-                    self._portable_json(row[0]) != row[0]
-                    or (
-                        row[1] is not None
-                        and self._portable_json(row[1]) != row[1]
-                    )
-                ):
-                    return True
-            for row in connection.execute("SELECT data_json FROM scheduler_wakeups"):
-                if self._portable_json(row[0]) != row[0]:
-                    return True
-        return False
+            return _portable_paths_need_migration_in_connection(
+                connection, self.path_codec
+            )
 
     def _portable_path(self, value: str | None) -> str | None:
-        if self.path_codec.is_portable(value):
-            return value
-        return self.path_codec.dump(Path(value))
+        return _portable_path_value(self.path_codec, value)
 
     def _portable_json(self, value: str) -> str:
-        try:
-            loaded = json.loads(value or "{}")
-        except json.JSONDecodeError:
-            return value
-        if not isinstance(loaded, dict):
-            return value
-        return json.dumps(self.path_codec.dump_json(loaded), sort_keys=True)
+        return _portable_json_value(self.path_codec, value)
+
+
+def _portable_paths_need_migration_in_connection(
+    connection: sqlite3.Connection, path_codec: PathCodec
+) -> bool:
+    for row in connection.execute(
+        """
+        SELECT worktree_path, transcript_path, last_message_path,
+               patch_path, metadata_json
+        FROM tasks
+        """
+    ):
+        if any(
+            _portable_path_value(path_codec, value) != value for value in row[:4]
+        ) or _portable_json_value(path_codec, row[4]) != row[4]:
+            return True
+    for row in connection.execute(
+        """
+        SELECT worker_prompt_path, worker_transcript_path,
+               worker_last_message_path, reviewer_prompt_path,
+               reviewer_transcript_path, reviewer_last_message_path,
+               patch_path
+        FROM task_iterations
+        """
+    ):
+        if any(_portable_path_value(path_codec, value) != value for value in row):
+            return True
+    for row in connection.execute(
+        """
+        SELECT prompt_path, transcript_path, last_message_path, plan_path
+        FROM task_plan_runs
+        """
+    ):
+        if any(_portable_path_value(path_codec, value) != value for value in row):
+            return True
+    for row in connection.execute(
+        "SELECT private_home_path, cwd FROM codex_sessions"
+    ):
+        if any(_portable_path_value(path_codec, value) != value for value in row):
+            return True
+    for row in connection.execute("SELECT output_path, cwd FROM validations"):
+        if any(_portable_path_value(path_codec, value) != value for value in row):
+            return True
+    for row in connection.execute("SELECT message, data_json FROM events"):
+        if (
+            _portable_path_value(path_codec, row[0]) != row[0]
+            or _portable_json_value(path_codec, row[1]) != row[1]
+        ):
+            return True
+    for row in connection.execute(
+        "SELECT payload_json, location_json FROM signal_items"
+    ):
+        if (
+            _portable_json_value(path_codec, row[0]) != row[0]
+            or (
+                row[1] is not None
+                and _portable_json_value(path_codec, row[1]) != row[1]
+            )
+        ):
+            return True
+    for row in connection.execute("SELECT data_json FROM scheduler_wakeups"):
+        if _portable_json_value(path_codec, row[0]) != row[0]:
+            return True
+    return False
+
+
+def _portable_path_value(path_codec: PathCodec, value: str | None) -> str | None:
+    if path_codec.is_portable(value):
+        return value
+    return path_codec.dump(Path(value))
+
+
+def _portable_json_value(path_codec: PathCodec, value: str) -> str:
+    try:
+        loaded = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return value
+    if not isinstance(loaded, dict):
+        return value
+    return json.dumps(path_codec.dump_json(loaded), sort_keys=True)
 
 
 def _install_ledger_ownership_triggers(connection: Connection) -> None:

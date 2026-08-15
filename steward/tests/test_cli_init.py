@@ -35,7 +35,7 @@ def test_init_creates_the_exact_store_and_unblocks_ordinary_cli(
 
     assert result.exit_code == 0, result.output
     assert "initialized" in result.output
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     assert config.db_path.is_file()
     assert config.epoch_path.is_file()
     assert config.db_path.with_name("steward.sqlite-wal").is_file()
@@ -50,7 +50,7 @@ def test_repeated_init_opens_without_rewriting_application_state(
 ) -> None:
     first = _invoke(repo, monkeypatch, "init")
     assert first.exit_code == 0, first.output
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     paths = (
         config.db_path,
         config.db_path.with_name("steward.sqlite-wal"),
@@ -66,43 +66,46 @@ def test_repeated_init_opens_without_rewriting_application_state(
     assert _snapshot(paths) == before
 
 
-def test_production_config_loading_and_init_leave_legacy_evidence_untouched(
+def test_config_loading_and_init_leave_unrelated_database_untouched(
     repo: Path, monkeypatch
 ) -> None:
-    config = load_config(allow_legacy_migration=False)
-    legacy = TaskStore.create(config.legacy_db_path)
+    config = load_config()
+    historic_database = (
+        config.coquic_home / "historic-steward" / "steward.sqlite"
+    )
+    historic = TaskStore.create(historic_database)
     try:
-        with legacy.engine.begin() as connection:
+        with historic.engine.begin() as connection:
             connection.exec_driver_sql(
-                "CREATE TABLE IF NOT EXISTS legacy_canary (value TEXT)"
+                "CREATE TABLE IF NOT EXISTS historic_canary (value TEXT)"
             )
             connection.exec_driver_sql(
-                "INSERT INTO legacy_canary(value) VALUES ('untouched')"
+                "INSERT INTO historic_canary(value) VALUES ('untouched')"
             )
     finally:
-        _dispose(legacy)
-    legacy_paths = (
-        config.legacy_db_path,
-        config.legacy_db_path.with_name("steward.sqlite-wal"),
-        config.legacy_db_path.with_name("steward.sqlite-shm"),
+        _dispose(historic)
+    historic_paths = (
+        historic_database,
+        historic_database.with_name("steward.sqlite-wal"),
+        historic_database.with_name("steward.sqlite-shm"),
     )
-    before = _snapshot(legacy_paths)
+    before = _snapshot(historic_paths)
 
-    loaded = load_config(allow_legacy_migration=False)
-    assert loaded.db_path != loaded.legacy_db_path
+    loaded = load_config()
+    assert loaded.db_path != historic_database
     assert not loaded.db_path.exists()
-    assert _snapshot(legacy_paths) == before
+    assert _snapshot(historic_paths) == before
 
     result = _invoke(repo, monkeypatch, "init")
 
     assert result.exit_code == 0, result.output
-    assert _snapshot(legacy_paths) == before
+    assert _snapshot(historic_paths) == before
 
 
 def test_init_refuses_to_run_while_the_daemon_lock_is_held(
     repo: Path, monkeypatch
 ) -> None:
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     with acquire_daemon_lock(config):
         result = _invoke(repo, monkeypatch, "init")
 
@@ -116,7 +119,7 @@ def test_init_refuses_a_mismatched_store_without_repair(
 ) -> None:
     created = _invoke(repo, monkeypatch, "init")
     assert created.exit_code == 0, created.output
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     with sqlite3.connect(config.db_path) as connection:
         connection.execute("PRAGMA user_version = 999")
         connection.commit()
@@ -140,5 +143,5 @@ def test_ordinary_cli_and_health_refuse_absent_store_without_creating_it(
 
     assert status.exit_code != 0
     assert health.exit_code == 1
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     assert not config.db_path.exists()

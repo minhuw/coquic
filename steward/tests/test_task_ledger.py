@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import os
 import shutil
 import sqlite3
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-import coquic_steward.core.config as config_module
 from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.models import (
     PipelineCursorPhase,
@@ -22,7 +18,6 @@ from coquic_steward.core.models import (
 )
 from coquic_steward.storage import SQLiteStoreLifecycleError, TaskStore
 from coquic_steward.execution.worktree import Worktrees
-from coquic_steward.orchestration import DaemonAlreadyRunning, acquire_daemon_lock
 
 
 def test_new_layout_and_epoch_are_explicit(repo: Path, coquic_home: Path) -> None:
@@ -122,220 +117,6 @@ def test_open_rejects_a_database_without_its_durable_wal_namespace(
 
     assert not (target_root / "steward.sqlite-wal").exists()
     assert not (target_root / "steward.sqlite-shm").exists()
-
-
-def test_legacy_database_migration_preserves_source_and_marks_backup(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    with sqlite3.connect(config.legacy_db_path) as connection:
-        connection.execute("CREATE TABLE fixture (value TEXT)")
-        connection.execute("INSERT INTO fixture VALUES ('kept')")
-    config.migrate_legacy_database()
-    assert config.db_path.exists()
-    assert config.legacy_backup_path.exists()
-    assert config.migration_marker_path.exists()
-    with sqlite3.connect(config.db_path) as connection:
-        assert connection.execute("SELECT value FROM fixture").fetchone() == ("kept",)
-
-
-def test_legacy_database_migration_accepts_released_persistent_lock(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    with sqlite3.connect(config.legacy_db_path) as connection:
-        connection.execute("CREATE TABLE fixture (value TEXT)")
-        connection.execute("INSERT INTO fixture VALUES ('stale')")
-    lock_path = config.state_dir / "daemon.lock"
-    lock_path.write_text("pid=stale\n", encoding="utf-8")
-
-    config.migrate_legacy_database()
-
-    assert config.db_path.exists()
-    assert lock_path.exists()
-    assert lock_path.read_text(encoding="utf-8") == "pid=stale\n"
-
-
-def test_completed_legacy_migration_does_not_require_daemon_lock(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    with sqlite3.connect(config.legacy_db_path) as connection:
-        connection.execute("CREATE TABLE fixture (value TEXT)")
-        connection.execute("INSERT INTO fixture VALUES ('complete')")
-    config.migrate_legacy_database()
-
-    with acquire_daemon_lock(config):
-        assert config.migrate_legacy_database() == config.db_path
-
-
-def test_legacy_database_migration_rejects_live_lock_before_state_changes(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    with sqlite3.connect(config.legacy_db_path) as connection:
-        connection.execute("CREATE TABLE fixture (value TEXT)")
-        connection.execute("INSERT INTO fixture VALUES ('live')")
-    source_bytes = config.legacy_db_path.read_bytes()
-
-    with acquire_daemon_lock(config):
-        with pytest.raises(
-            RuntimeError, match="cannot migrate Steward state while daemon is running"
-        ):
-            config.migrate_legacy_database()
-
-    assert config.legacy_db_path.read_bytes() == source_bytes
-    assert not config.db_path.exists()
-    assert not config.legacy_backup_path.exists()
-    assert not config.migration_marker_path.exists()
-
-
-def test_legacy_database_migration_holds_lock_through_backup_finalization(
-    repo: Path, coquic_home: Path, monkeypatch
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    with sqlite3.connect(config.legacy_db_path) as connection:
-        connection.execute("CREATE TABLE fixture (value TEXT)")
-        connection.execute("INSERT INTO fixture VALUES ('held')")
-
-    entered_finalization = threading.Event()
-    release_finalization = threading.Event()
-    errors: list[BaseException] = []
-    real_finish = config_module._finish_legacy_backup
-
-    def pause_before_finalization(
-        migration_config: StewardConfig, destination: Path, backup: Path
-    ) -> None:
-        entered_finalization.set()
-        if not release_finalization.wait(timeout=5):
-            raise AssertionError("migration finalization did not resume")
-        real_finish(migration_config, destination, backup)
-
-    monkeypatch.setattr(
-        config_module, "_finish_legacy_backup", pause_before_finalization
-    )
-
-    def migrate() -> None:
-        try:
-            config.migrate_legacy_database()
-        except BaseException as exc:  # pragma: no cover - surfaced below
-            errors.append(exc)
-
-    worker = threading.Thread(target=migrate)
-    worker.start()
-    try:
-        assert entered_finalization.wait(timeout=5)
-        with pytest.raises(DaemonAlreadyRunning):
-            with acquire_daemon_lock(config):
-                pass
-    finally:
-        release_finalization.set()
-    worker.join(timeout=5)
-
-    assert not worker.is_alive()
-    assert not errors
-    assert config.db_path.exists()
-    assert config.legacy_backup_path.exists()
-    with acquire_daemon_lock(config):
-        pass
-
-
-def test_normal_startup_migrates_legacy_database(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    legacy_store = TaskStore.create(config.legacy_db_path)
-    task, _ = legacy_store.add_task(
-        TaskSpec(
-            kind=TaskKind.custom,
-            worker=WorkerKind.custom,
-            title="legacy",
-            prompt="prompt",
-        )
-    )
-    legacy_store.engine.dispose()
-
-    startup_config = load_config(repo_root=repo)
-    current_store = TaskStore._blank_store(
-        startup_config.db_path, on_change=None, wal=False
-    )
-
-    assert current_store.get(task.id).id == task.id
-    assert not startup_config.legacy_db_path.exists()
-    assert startup_config.legacy_backup_path.exists()
-
-
-def test_migration_restart_reconciles_stranded_wal(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    connection = sqlite3.connect(config.legacy_db_path)
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA wal_autocheckpoint=0")
-    connection.execute("CREATE TABLE fixture (value TEXT)")
-    connection.commit()
-    connection.execute("INSERT INTO fixture VALUES ('wal-only')")
-    connection.commit()
-    real_replace = os.replace
-
-    def crash_after_database_rename(source: Path, destination: Path) -> None:
-        real_replace(source, destination)
-        if Path(source) == config.legacy_db_path:
-            raise RuntimeError("simulated migration interruption")
-
-    with patch(
-        "coquic_steward.core.config.os.replace",
-        side_effect=crash_after_database_rename,
-    ), pytest.raises(RuntimeError, match="interruption"):
-        config.migrate_legacy_database()
-    connection.close()
-
-    config.migrate_legacy_database()
-
-    with sqlite3.connect(config.legacy_backup_path) as backup:
-        assert backup.execute("SELECT value FROM fixture").fetchall() == [
-            ("wal-only",)
-        ]
-    assert config.migration_marker_path.exists()
-
-
-def test_migration_restart_rebuilds_incomplete_read_only_backup(
-    repo: Path, coquic_home: Path
-) -> None:
-    config = StewardConfig(repo_root=repo)
-    config.ensure_dirs()
-    with sqlite3.connect(config.legacy_db_path) as source:
-        source.execute("CREATE TABLE fixture (value TEXT)")
-        source.execute("INSERT INTO fixture VALUES ('committed')")
-        source.commit()
-        with sqlite3.connect(config.db_path) as destination:
-            source.backup(destination)
-    config.legacy_db_path.unlink()
-    for suffix in ("-wal", "-shm"):
-        config.legacy_db_path.with_name(
-            config.legacy_db_path.name + suffix
-        ).unlink(missing_ok=True)
-    with sqlite3.connect(config.legacy_backup_path):
-        pass
-    os.chmod(config.legacy_backup_path, 0o440)
-    config.migration_marker_path.write_text("{}\n", encoding="utf-8")
-
-    config = load_config(repo_root=repo)
-
-    with sqlite3.connect(config.legacy_backup_path) as backup:
-        assert backup.execute("SELECT value FROM fixture").fetchall() == [
-            ("committed",)
-        ]
-    assert config.legacy_backup_path.with_name(
-        config.legacy_backup_path.name + ".interrupted"
-    ).exists()
 
 
 def test_ledger_allocates_ordered_lineage_and_private_fields(config: StewardConfig) -> None:

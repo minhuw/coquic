@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
 import re
 import secrets
 import shutil
-import sqlite3
 import stat
 import tomllib
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urlsplit
 
 from .models import CodexStage, IntegrationMode
@@ -770,8 +767,6 @@ class StewardConfig:
 
     @property
     def coquic_home(self) -> Path:
-        # Keep the lexical path so migration can detect a symlinked root before
-        # resolving it into an apparently safe directory.
         configured = self.deployment.home
         if configured is not None:
             return configured
@@ -830,14 +825,7 @@ class StewardConfig:
         return self.coquic_home / "steward"
 
     @property
-    def legacy_steward_home(self) -> Path:
-        """The pre-2.0 private root, retained for compatibility reads."""
-        return self.coquic_home / "steward"
-
-    @property
     def state_dir(self) -> Path:
-        # Existing workers still use this root for private compatibility files.
-        # New operational state is exposed through the explicit properties below.
         return self.steward_home
 
     @property
@@ -875,36 +863,8 @@ class StewardConfig:
         return self.coquic_home / "steward.sqlite"
 
     @property
-    def legacy_db_path(self) -> Path:
-        return self.legacy_steward_home / "steward.sqlite"
-
-    @property
-    def legacy_worktrees_dir(self) -> Path:
-        return self.legacy_steward_home / "worktrees"
-
-    @property
-    def legacy_transcripts_dir(self) -> Path:
-        return self.legacy_steward_home / "transcripts"
-
-    @property
-    def migration_marker_path(self) -> Path:
-        return self.coquic_home / ".steward-2.0-migration.json"
-
-    @property
-    def legacy_migration_marker_path(self) -> Path:
-        return self.legacy_steward_home / "steward.sqlite.pre-2.0.json"
-
-    @property
-    def legacy_backup_path(self) -> Path:
-        return self.legacy_db_path.with_name("steward.sqlite.pre-2.0.bak")
-
-    @property
     def epoch_path(self) -> Path:
         return self.tasks_dir / "epoch.json"
-
-    @property
-    def legacy_json_path(self) -> Path:
-        return self.state_dir / "steward.json"
 
     @property
     def logs_dir(self) -> Path:
@@ -934,10 +894,6 @@ class StewardConfig:
         )
 
     def ensure_dirs(self) -> None:
-        # Keep old private directories available to existing readers while all
-        # 2.0 roots are created directly below COQUIC_HOME.  This method is
-        # intentionally migration-free; callers must request migration
-        # explicitly after stopping the daemon.
         roots = (
             self.coquic_home,
             self.worktrees_dir,
@@ -953,14 +909,7 @@ class StewardConfig:
             self.implementation_plans_dir,
         )
         if self.deployment.enabled:
-            roots = tuple(
-                path
-                for path in roots
-                if path not in {
-                    self.legacy_steward_home,
-                    self.legacy_transcripts_dir,
-                }
-            ) + (self.credentials_dir, self.deployment_dir)
+            roots = roots + (self.credentials_dir, self.deployment_dir)
         _ensure_controlled_roots(roots)
 
     def ensure_epoch(self) -> dict[str, Any]:
@@ -1004,106 +953,10 @@ class StewardConfig:
             raise RuntimeError("archive epoch does not match post-steward-2.0")
         return result
 
-    def migrate_legacy_database(
-        self, *, daemon_running: bool = False, require_epoch: bool = False
-    ) -> Path:
-        """Copy the legacy SQLite database to the 2.0 root without data loss.
-
-        Migration is deliberately explicit.  The source remains intact until
-        the destination passes SQLite integrity checks, then it is moved to a
-        read-only, provenance-marked backup.
-        """
-        _reject_symlink_roots(self.coquic_home, self.legacy_steward_home)
-        self.coquic_home.mkdir(parents=True, exist_ok=True)
-        source = self.legacy_db_path
-        destination = self.db_path
-        marker = self.migration_marker_path
-        legacy_marker = self.legacy_migration_marker_path
-        backup = self.legacy_backup_path
-        if source.is_symlink() or destination.is_symlink():
-            raise RuntimeError("Steward database paths must not be symlinks")
-        _validate_private_mode(self.legacy_steward_home)
-        migration_marked = marker.exists() or legacy_marker.exists()
-        if (
-            not require_epoch
-            and not source.exists()
-            and destination.exists()
-            and backup.exists()
-            and migration_marked
-            and _legacy_backup_is_complete(self, destination, backup)
-        ):
-            return destination
-        if daemon_running:
-            raise RuntimeError("cannot migrate Steward state while daemon is running")
-        with _migration_lock(self.state_dir / "daemon.lock"):
-            if require_epoch:
-                self.ensure_epoch()
-            if source.is_symlink() or destination.is_symlink():
-                raise RuntimeError("Steward database paths must not be symlinks")
-            _validate_private_mode(self.legacy_steward_home)
-            migration_marked = marker.exists() or legacy_marker.exists()
-            if (
-                not source.exists()
-                and destination.exists()
-                and backup.exists()
-                and migration_marked
-                and _legacy_backup_is_complete(self, destination, backup)
-            ):
-                return destination
-            if destination.exists() and source.exists():
-                if not _same_sqlite_content(source, destination):
-                    raise RuntimeError("ambiguous differing active Steward databases")
-                # Identical copies are safe to make authoritative; still preserve
-                # the source below as a marked backup when migration is incomplete.
-            if not source.exists():
-                if destination.exists():
-                    _validate_sqlite(destination)
-                    if backup.exists():
-                        _finish_legacy_backup(self, destination, backup)
-                    elif marker.exists() or legacy_marker.exists():
-                        raise RuntimeError(
-                            "Steward migration provenance has no legacy backup"
-                        )
-                    return destination
-                return destination
-            _validate_private_mode(self.coquic_home)
-            temporary = destination.with_name(
-                f".{destination.name}.copy-{secrets.token_hex(8)}"
-            )
-            temporary.unlink(missing_ok=True)
-            try:
-                _sqlite_backup(source, temporary)
-                _validate_sqlite(temporary)
-                os.replace(temporary, destination)
-                os.chmod(destination, 0o600)
-                _fsync_directory(destination.parent)
-            finally:
-                temporary.unlink(missing_ok=True)
-            _checkpoint_sqlite(source)
-            if not _same_sqlite_content(source, destination):
-                raise RuntimeError(
-                    "verified Steward destination differs from legacy source"
-                )
-            if source.exists() and source != backup:
-                if backup.exists():
-                    if not _same_sqlite_content(source, backup):
-                        raise RuntimeError("legacy database backup conflicts with source")
-                    source.unlink()
-                else:
-                    os.replace(source, backup)
-            _finish_legacy_backup(self, destination, backup)
-            return destination
-
-    # Compatibility spellings used by migration callers and tests.
-    migrate_legacy_state = migrate_legacy_database
-    migrate_database = migrate_legacy_database
-
 
 def load_config(
     repo_root: Path | None = None,
     config_path: Path | None = None,
-    *,
-    allow_legacy_migration: bool = True,
 ) -> StewardConfig:
     if config_path is None:
         configured_path = os.getenv("COQUIC_STEWARD_CONFIG_PATH") or os.getenv("STEWARD_CONFIG_PATH")
@@ -1239,13 +1092,6 @@ def load_config(
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
         resume_attempt_limit=int(steward.get("resume_attempt_limit", 2)),
     )
-    # Configuration loading keeps its historical migration behavior by
-    # default. Production process-start callers explicitly disable this side
-    # effect and must use the stopped-only migration command instead.
-    if allow_legacy_migration and (
-        config.legacy_db_path.exists() or config.legacy_backup_path.exists()
-    ):
-        config.migrate_legacy_database()
     config.ensure_dirs()
     return config
 
@@ -1659,43 +1505,6 @@ def _valid_utc_timestamp(value: object) -> bool:
     return parsed.utcoffset() is not None
 
 
-def _reject_symlink_roots(*paths: Path) -> None:
-    for path in paths:
-        if path.is_symlink():
-            raise RuntimeError(f"Steward root must not be a symlink: {path}")
-
-
-@contextmanager
-def _migration_lock(path: Path) -> Iterator[None]:
-    """Hold the daemon lock while an offline migration changes Steward state."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+", encoding="utf-8")
-    acquired = False
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError(
-                "cannot migrate Steward state while daemon is running"
-            ) from exc
-        acquired = True
-        yield
-    finally:
-        try:
-            if acquired:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
-
-
-def _validate_private_mode(path: Path) -> None:
-    if not path.exists():
-        return
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_IRWXO):
-        raise PermissionError(f"unsafe permissions on Steward root: {path}")
-
-
 def _ensure_controlled_roots(paths: tuple[Path, ...]) -> None:
     for path in paths:
         if path.is_symlink():
@@ -1723,187 +1532,6 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
-
-def _validate_sqlite(path: Path) -> None:
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-            result = connection.execute("PRAGMA integrity_check").fetchone()
-            if not result or result[0] != "ok":
-                raise RuntimeError(f"SQLite integrity check failed for {path}")
-            connection.execute("PRAGMA schema_version").fetchone()
-    except sqlite3.Error as exc:
-        raise RuntimeError(f"invalid SQLite database: {path}") from exc
-
-
-def _sqlite_backup(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    source_connection = sqlite3.connect(source)
-    destination_connection = sqlite3.connect(destination)
-    try:
-        source_connection.backup(destination_connection)
-        destination_connection.commit()
-    finally:
-        destination_connection.close()
-        source_connection.close()
-
-
-def _checkpoint_sqlite(path: Path) -> None:
-    """Fold committed WAL bytes into the legacy database after copy validation."""
-    try:
-        with sqlite3.connect(path) as connection:
-            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-    except sqlite3.Error as exc:
-        raise RuntimeError(f"could not checkpoint legacy SQLite database: {path}") from exc
-    if result is not None and result[0] != 0:
-        raise RuntimeError(f"legacy SQLite database is busy: {path}")
-
-
-def _finish_legacy_backup(
-    config: StewardConfig, destination: Path, backup: Path
-) -> None:
-    """Finish the restartable database/sidecar rename before marking migration."""
-    source = config.legacy_db_path
-    interrupted = backup.with_name(f"{backup.name}.interrupted")
-    if not backup.exists():
-        if not interrupted.exists():
-            raise RuntimeError("legacy Steward database backup is missing")
-        if not stat.S_ISREG(interrupted.lstat().st_mode):
-            raise RuntimeError("interrupted legacy backup is not a regular file")
-        _rebuild_legacy_backup(destination, backup)
-    if backup.is_symlink() or interrupted.is_symlink():
-        raise RuntimeError("legacy Steward database backup is unsafe")
-    for suffix in ("-wal", "-shm"):
-        sidecar = source.with_name(source.name + suffix)
-        sidecar_backup = backup.with_name(backup.name + suffix)
-        if sidecar.is_symlink() or sidecar_backup.is_symlink():
-            raise RuntimeError("legacy SQLite sidecars must not be symlinks")
-        if sidecar.exists():
-            if sidecar_backup.exists():
-                if sidecar.read_bytes() != sidecar_backup.read_bytes():
-                    raise RuntimeError("legacy SQLite sidecar backup conflicts")
-                sidecar.unlink()
-            else:
-                os.replace(sidecar, sidecar_backup)
-        if sidecar_backup.exists():
-            os.chmod(sidecar_backup, stat.S_IRUSR | stat.S_IRGRP)
-    if not _same_sqlite_content(backup, destination):
-        if interrupted.exists():
-            raise RuntimeError("multiple interrupted legacy backups conflict")
-        for suffix in ("-wal", "-shm"):
-            sidecar_backup = backup.with_name(backup.name + suffix)
-            if sidecar_backup.exists():
-                interrupted_sidecar = interrupted.with_name(interrupted.name + suffix)
-                if interrupted_sidecar.is_symlink():
-                    raise RuntimeError("interrupted legacy sidecar is unsafe")
-                if interrupted_sidecar.exists():
-                    if sidecar_backup.read_bytes() != interrupted_sidecar.read_bytes():
-                        raise RuntimeError("interrupted legacy sidecar conflicts")
-                    sidecar_backup.unlink()
-                else:
-                    os.replace(sidecar_backup, interrupted_sidecar)
-                os.chmod(interrupted_sidecar, stat.S_IRUSR | stat.S_IRGRP)
-        os.replace(backup, interrupted)
-        os.chmod(interrupted, stat.S_IRUSR | stat.S_IRGRP)
-        _rebuild_legacy_backup(destination, backup)
-    if not _same_sqlite_content(backup, destination):
-        raise RuntimeError("legacy Steward backup differs from verified destination")
-    os.chmod(backup, stat.S_IRUSR | stat.S_IRGRP)
-    _fsync_directory(backup.parent)
-    _write_migration_provenance(config, destination, backup)
-
-
-def _legacy_backup_is_complete(
-    config: StewardConfig, destination: Path, backup: Path
-) -> bool:
-    if backup.is_symlink():
-        return False
-    for suffix in ("-wal", "-shm"):
-        source_sidecar = config.legacy_db_path.with_name(
-            config.legacy_db_path.name + suffix
-        )
-        backup_sidecar = backup.with_name(backup.name + suffix)
-        if source_sidecar.exists() or source_sidecar.is_symlink() or backup_sidecar.is_symlink():
-            return False
-    return _same_sqlite_content(backup, destination)
-
-
-def _rebuild_legacy_backup(destination: Path, backup: Path) -> None:
-    temporary = backup.with_name(f".{backup.name}.copy-{secrets.token_hex(8)}")
-    try:
-        _sqlite_backup(destination, temporary)
-        _validate_sqlite(temporary)
-        os.replace(temporary, backup)
-        _fsync_directory(backup.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _same_sqlite_content(left: Path, right: Path) -> bool:
-    try:
-        _validate_sqlite(left)
-        _validate_sqlite(right)
-    except RuntimeError:
-        return False
-    left_connection = sqlite3.connect(f"file:{left}?mode=ro", uri=True)
-    right_connection = sqlite3.connect(f"file:{right}?mode=ro", uri=True)
-    try:
-        left_tables = left_connection.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-        right_tables = right_connection.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-        if left_tables != right_tables:
-            return False
-        for table, _ in left_tables:
-            if table.startswith("sqlite_"):
-                continue
-            left_rows = left_connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
-            right_rows = right_connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
-            if left_rows != right_rows:
-                return False
-        return True
-    except sqlite3.Error:
-        return False
-    finally:
-        left_connection.close()
-        right_connection.close()
-
-
-def _write_migration_provenance(
-    config: StewardConfig, destination: Path, backup: Path
-) -> None:
-    provenance = {
-        "formatVersion": ARCHIVE_FORMAT_VERSION,
-        "source": str(backup.relative_to(config.coquic_home)),
-        "destination": str(destination.relative_to(config.coquic_home)),
-        "migratedAt": _utc_timestamp(),
-    }
-    markers = (config.migration_marker_path, config.legacy_migration_marker_path)
-    for marker in markers:
-        temporary_marker = marker.with_name(
-            f".{marker.name}.tmp-{secrets.token_hex(8)}"
-        )
-        try:
-            temporary_marker.write_text(
-                json.dumps(provenance, sort_keys=True, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            _fsync_file(temporary_marker)
-            os.replace(temporary_marker, marker)
-            _fsync_directory(marker.parent)
-        finally:
-            temporary_marker.unlink(missing_ok=True)
-
-
-def migrate_legacy_database(
-    config: StewardConfig, *, daemon_running: bool = False, require_epoch: bool = False
-) -> Path:
-    """Module-level compatibility wrapper for explicit state migration."""
-    return config.migrate_legacy_database(
-        daemon_running=daemon_running, require_epoch=require_epoch
-    )
 
 
 def default_signal_provider_config(name: str) -> SignalProviderConfig:

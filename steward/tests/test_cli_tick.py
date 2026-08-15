@@ -10,7 +10,7 @@ from coquic_steward.storage import TaskStore
 
 def _invoke_tick(repo, monkeypatch, *args: str):
     monkeypatch.chdir(repo)
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store = TaskStore.create(config.db_path)
     store.engine.dispose()
     return CliRunner().invoke(app, ["tick", *args])

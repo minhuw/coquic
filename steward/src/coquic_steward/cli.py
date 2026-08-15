@@ -103,7 +103,7 @@ _PUBLICATION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _context() -> tuple[TaskStore, StewardConfig]:
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     # A repository with no explicit container section is the historical local
     # CLI fixture. Production launches opt into the strict container boundary.
     if not config.container.enabled and not config.local_codex_test_harness:
@@ -446,7 +446,7 @@ def publication_hide(
 def init() -> None:
     """Create or verify the exact current SQLite store while stopped."""
 
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store: TaskStore | None = None
     try:
         with acquire_daemon_lock(config):
@@ -776,7 +776,7 @@ def diagnostics() -> None:
 def health() -> None:
     """Return bounded local health facts for Compose and operators."""
 
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     active_tasks = 0
     cleanup_pending = 0
     publication_health = None

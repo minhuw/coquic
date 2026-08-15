@@ -159,7 +159,6 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.state_dir == coquic_home / "steward"
     assert config.db_path == coquic_home / "steward.sqlite"
     assert config.db_path.name == "steward.sqlite"
-    assert config.legacy_json_path == config.state_dir / "steward.json"
     assert config.worktrees_dir == coquic_home / "worktrees"
     assert config.tasks_dir == coquic_home / "tasks"
     assert config.private_root == coquic_home / "private"
@@ -9339,7 +9338,7 @@ def test_executor_uses_shared_revision_counter_for_validation_and_review(
 
 def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store = TaskStore.create(config.db_path)
     runner = CliRunner()
 
@@ -9356,7 +9355,7 @@ def test_cli_plan_supersedes_stale_signals_before_planning(
     repo: Path, monkeypatch
 ) -> None:
     monkeypatch.chdir(repo)
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store = TaskStore.create(config.db_path)
     signal, _ = store.add_signal_item(
         SignalItem(
@@ -9390,7 +9389,7 @@ def test_cli_plan_supersedes_stale_signals_before_planning(
 
 def test_cli_daemon_forever_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store = TaskStore.create(config.db_path)
     store.engine.dispose()
     started = []
@@ -9427,7 +9426,7 @@ def test_cli_rejects_removed_web_command() -> None:
 
 def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store = TaskStore.create(config.db_path)
     store.engine.dispose()
 
@@ -9452,7 +9451,7 @@ github_repository = "minhuw/coquic"
 """,
         encoding="utf-8",
     )
-    config = load_config(allow_legacy_migration=False)
+    config = load_config()
     store = TaskStore.create(config.db_path)
     store.engine.dispose()
 

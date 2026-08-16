@@ -77,13 +77,109 @@ _KNOWN_STEWARD_SECTIONS = frozenset(
         "path_policy",
         "codex",
         "container",
-        "containers",
-        "task_container",
         "publication",
         "deployment",
-        "container_operations",
     }
 )
+_ROOT_ALLOWED_KEYS = frozenset(
+    {
+        "codex_bin",
+        "codex_model",
+        "codex_reasoning_effort",
+        "codex_profile",
+        "codex_sandbox",
+        "daemon_image",
+        "daemon_image_digest",
+        "validation_image",
+        "validation_image_digest",
+        "validation_runtime",
+        "runtime_protocol",
+        "local_codex_test_harness",
+        "integration_mode",
+        "local_only",
+        "git_remote",
+        "main_branch",
+        "github_repository",
+        "scheduler_wait_interval_sec",
+        "shutdown_grace_seconds",
+        "resume_attempt_limit",
+        "limits",
+        "signals",
+        "telemetry",
+        "path_policy",
+        "codex",
+        "container",
+        "publication",
+        "deployment",
+    }
+)
+_CONTAINER_ALLOWED_KEYS = frozenset(
+    {
+        "enabled",
+        "image",
+        "image_digest",
+        "repository_host_path",
+        "state_host_path",
+        "codex_api_key_path",
+        "docker_bin",
+        "network",
+        "runtime_protocol",
+    }
+)
+_DEPLOYMENT_ALLOWED_KEYS = frozenset(
+    {
+        "enabled",
+        "home",
+        "repository",
+        "docker_socket",
+        "host_uid",
+        "host_gid",
+        "docker_gid",
+        "expected_remote",
+        "expected_branch",
+        "compose_project",
+        "codex_credential_path",
+        "github_credential_path",
+        "release_id",
+        "daemon_image",
+        "daemon_image_id",
+        "task_image",
+        "task_image_id",
+        "validation_image",
+        "validation_image_id",
+        "validation_runtime",
+        "stop_grace_seconds",
+        "max_pids",
+        "max_memory_bytes",
+        "max_log_bytes",
+        "max_scratch_bytes",
+        "min_free_bytes",
+        "max_owned_docker_bytes",
+        "recovery_free_bytes",
+        "recovery_owned_docker_bytes",
+    }
+)
+_LIMITS_ALLOWED_KEYS = frozenset(
+    {
+        "max_active_tasks",
+        "max_main_pushes_per_day",
+        "plan_timeout_minutes",
+        "worker_timeout_minutes",
+        "review_timeout_minutes",
+        "validation_timeout_minutes",
+    }
+)
+
+
+def _require_allowed_keys(
+    section: str, data: object, allowed: frozenset[str]
+) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError(f"{section} must be a table")
+    unknown = sorted(str(key) for key in data if key not in allowed)
+    if unknown:
+        raise ValueError(f"{section} has unsupported keys: {', '.join(unknown)}")
+    return data
 
 
 def _bounded_token(value: object, label: str, *, allow_empty: bool = False) -> str:
@@ -431,8 +527,7 @@ class StewardPublicationConfig:
 
 
 
-# Descriptive aliases used by callers that refer to the host-side boundary.
-DaemonContainerConfig = StewardContainerConfig
+# Descriptive alias used by callers that refer to the cloud publication boundary.
 PublicationSettings = StewardPublicationConfig
 
 
@@ -468,7 +563,6 @@ class StewardDeploymentConfig:
     validation_image_id: str | None = None
     validation_runtime: str = "validation-container-v1"
     stop_grace_seconds: int = 45
-    max_active_tasks: int = 4
     max_pids: int = 512
     max_memory_bytes: int = 4 * 1024 * 1024 * 1024
     max_log_bytes: int = 64 * 1024 * 1024
@@ -500,7 +594,7 @@ class StewardDeploymentConfig:
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535):
                 raise ValueError(f"deployment.{name} must be a numeric UID/GID")
-        for name in ("stop_grace_seconds", "max_active_tasks", "max_pids", "max_memory_bytes", "max_log_bytes", "max_scratch_bytes"):
+        for name in ("stop_grace_seconds", "max_pids", "max_memory_bytes", "max_log_bytes", "max_scratch_bytes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"deployment.{name} must be a positive bounded integer")
@@ -547,9 +641,6 @@ class StewardDeploymentConfig:
     @property
     def previous_release_path(self) -> Path | None:
         return self.deployment_dir / "previous" if self.deployment_dir is not None else None
-
-
-ContainerOperationsConfig = StewardDeploymentConfig
 
 
 def _valid_sha256_digest(value: str) -> bool:
@@ -726,18 +817,6 @@ class StewardConfig:
         object.__setattr__(self, "signal_providers", providers)
 
     @property
-    def task_container(self) -> StewardContainerConfig:
-        return self.container
-
-    @property
-    def containers(self) -> StewardContainerConfig:
-        return self.container
-
-    @property
-    def grace_period_seconds(self) -> float:
-        return float(self.shutdown_grace_seconds)
-
-    @property
     def codex_api_key_path(self) -> Path | None:
         """Daemon-only path for the configured Codex credential."""
 
@@ -762,8 +841,6 @@ class StewardConfig:
             raise ValueError("configured Codex API key file is empty")
         return value
 
-    configured_codex_api_key = read_codex_api_key_bytes
-
     @property
     def coquic_home(self) -> Path:
         configured = self.deployment.home
@@ -780,10 +857,6 @@ class StewardConfig:
     @property
     def docker_socket(self) -> Path:
         return self.deployment.docker_socket
-
-    @property
-    def docker_socket_path(self) -> Path:
-        return self.docker_socket
 
     @property
     def repository_host_path(self) -> Path:
@@ -970,20 +1043,27 @@ def load_config(
     steward = data.get("steward", data)
     if not isinstance(steward, dict):
         raise ValueError("steward configuration must be a table")
-    _reject_embedded_secrets(steward)
     if "cloud_publication" in steward:
         raise ValueError("unknown configuration section: steward.cloud_publication")
     for section_name, section_value in steward.items():
         if isinstance(section_value, dict) and section_name not in _KNOWN_STEWARD_SECTIONS:
             raise ValueError(f"unknown configuration section: steward.{section_name}")
-    limits_data = steward.get("limits", {})
+    _require_allowed_keys("steward", steward, _ROOT_ALLOWED_KEYS)
+    limits_data = _require_allowed_keys(
+        "steward.limits", steward.get("limits", {}), _LIMITS_ALLOWED_KEYS
+    )
     signals_data = steward.get("signals", {})
     telemetry_data = steward.get("telemetry", {})
     path_policy_data = steward.get("path_policy", {})
     codex_data = steward.get("codex", {})
-    container_data = _section_alias(steward, "container", "containers", "task_container")
-    publication_data = _section_alias(steward, "publication")
-    deployment_data = _section_alias(steward, "deployment", "container_operations")
+    container_data = _require_allowed_keys(
+        "steward.container", steward.get("container", {}), _CONTAINER_ALLOWED_KEYS
+    )
+    publication_data = steward.get("publication", {})
+    deployment_data = _require_allowed_keys(
+        "steward.deployment", steward.get("deployment", {}), _DEPLOYMENT_ALLOWED_KEYS
+    )
+    _reject_embedded_secrets(steward)
     deployment_config = _deployment_config(deployment_data, root)
     selected_task_image = (
         deployment_config.task_image_id if deployment_config.enabled else None
@@ -998,10 +1078,9 @@ def load_config(
     if selected_task_image is not None:
         runtime_container_data["image"] = selected_task_image
         runtime_container_data["image_digest"] = selected_task_image
+    container_config = _container_config(runtime_container_data, root)
     enabled_signals = _string_tuple(
-        signals_data.get(
-            "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
-        )
+        signals_data.get("enabled", DEFAULT_ENABLED_SIGNALS)
     )
     config = StewardConfig(
         repo_root=root,
@@ -1022,14 +1101,8 @@ def load_config(
             if isinstance(codex_data, dict) and codex_data.get("identity") is not None
             else None
         ),
-        task_image=selected_task_image
-        or str(steward.get("task_image", "coquic-steward-task")),
-        task_image_digest=(
-            selected_task_image or str(steward.get("task_image_digest"))
-            if selected_task_image is not None
-            or steward.get("task_image_digest") is not None
-            else None
-        ),
+        task_image=container_config.image,
+        task_image_digest=container_config.image_digest,
         daemon_image=selected_daemon_image
         or str(steward.get("daemon_image", "coquic-steward-daemon")),
         daemon_image_digest=(
@@ -1075,12 +1148,7 @@ def load_config(
         ),
         telemetry=_telemetry_config(telemetry_data),
         path_policy=_path_policy_config(path_policy_data),
-        container=_container_config(
-            runtime_container_data,
-            root,
-            fallback_image=steward.get("task_image"),
-            fallback_digest=steward.get("task_image_digest"),
-        ),
+        container=container_config,
         publication=_publication_config(publication_data),
         deployment=deployment_config,
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
@@ -1088,20 +1156,6 @@ def load_config(
     )
     config.ensure_dirs()
     return config
-
-
-def _section_alias(data: dict[str, Any], *names: str) -> dict[str, Any]:
-    selected: dict[str, Any] = {}
-    for name in names:
-        value = data.get(name)
-        if value is None:
-            continue
-        if not isinstance(value, dict):
-            raise ValueError(f"steward.{name} must be a table")
-        if selected and value != selected:
-            raise ValueError(f"conflicting steward configuration sections: {names!r}")
-        selected = value
-    return selected
 
 
 _SECRET_KEY_PARTS = (
@@ -1132,50 +1186,21 @@ def _reject_embedded_secrets(value: object, path: str = "steward") -> None:
             _reject_embedded_secrets(child, f"{path}[{index}]")
 
 
-def _container_config(
-    raw: object,
-    root: Path,
-    *,
-    fallback_image: object | None = None,
-    fallback_digest: object | None = None,
-) -> StewardContainerConfig:
-    data = raw if isinstance(raw, dict) else {}
+def _container_config(raw: object, root: Path) -> StewardContainerConfig:
+    data = _require_allowed_keys("steward.container", raw, _CONTAINER_ALLOWED_KEYS)
     enabled = bool(data.get("enabled", False))
-    repository = data.get("repository_host_path", data.get("repository_path"))
-    state = data.get("state_host_path", data.get("state_path"))
+    repository = data.get("repository_host_path")
+    state = data.get("state_host_path")
     if repository is None and enabled:
         repository = str(root)
     if state is None and enabled:
         state = str(Path(os.getenv("COQUIC_HOME", DEFAULT_COQUIC_HOME)).expanduser())
-    key = data.get("codex_api_key_path", data.get("api_key_path"))
+    key = data.get("codex_api_key_path")
+    image_digest = data.get("image_digest")
     return StewardContainerConfig(
         enabled=enabled,
-        image=str(
-            data.get(
-                "image",
-                data.get(
-                    "task_image",
-                    fallback_image if fallback_image is not None else "coquic-steward-task",
-                ),
-            )
-        ),
-        image_digest=(
-            str(
-                data.get(
-                    "image_digest",
-                    data.get(
-                        "task_image_digest",
-                        fallback_digest,
-                    ),
-                )
-            )
-            if data.get(
-                "image_digest",
-                data.get("task_image_digest", fallback_digest),
-            )
-            is not None
-            else None
-        ),
+        image=str(data.get("image", "coquic-steward-task")),
+        image_digest=str(image_digest) if image_digest is not None else None,
         repository_host_path=Path(repository).expanduser() if repository is not None else None,
         state_host_path=Path(state).expanduser() if state is not None else None,
         codex_api_key_path=Path(key).expanduser() if key is not None else None,
@@ -1186,31 +1211,36 @@ def _container_config(
 
 
 def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
-    data = raw if isinstance(raw, dict) else {}
+    data = _require_allowed_keys("steward.deployment", raw, _DEPLOYMENT_ALLOWED_KEYS)
     enabled = bool(data.get("enabled", False))
-    home_value = data.get("home", data.get("coquic_home"))
+    home_value = data.get("home")
     if home_value is None and enabled:
         home_value = os.getenv("COQUIC_HOME")
     home = Path(home_value).expanduser() if home_value is not None else None
-    repository_value = data.get("repository", data.get("repository_path"))
+    repository_value = data.get("repository")
     if repository_value is None and home is not None:
         repository_value = home / "repository"
-    def _path(*names: str) -> Path | None:
-        value = next((data[name] for name in names if name in data), None)
-        return Path(value).expanduser() if value is not None else None
     return StewardDeploymentConfig(
         enabled=enabled,
         home=home,
         repository=Path(repository_value).expanduser() if repository_value is not None else None,
-        docker_socket=Path(data.get("docker_socket", data.get("socket", "/var/run/docker.sock"))).expanduser(),
+        docker_socket=Path(data.get("docker_socket", "/var/run/docker.sock")).expanduser(),
         host_uid=int(data["host_uid"]) if "host_uid" in data else None,
         host_gid=int(data["host_gid"]) if "host_gid" in data else None,
         docker_gid=int(data["docker_gid"]) if "docker_gid" in data else None,
-        expected_remote=str(data.get("expected_remote", data.get("git_remote", "origin"))),
-        expected_branch=str(data.get("expected_branch", data.get("main_branch", "main"))),
+        expected_remote=str(data.get("expected_remote", "origin")),
+        expected_branch=str(data.get("expected_branch", "main")),
         compose_project=str(data.get("compose_project", "coquic-steward")),
-        codex_credential_path=_path("codex_credential_path", "codex_api_key_path"),
-        github_credential_path=_path("github_credential_path", "github_identity_path"),
+        codex_credential_path=(
+            Path(data["codex_credential_path"]).expanduser()
+            if data.get("codex_credential_path") is not None
+            else None
+        ),
+        github_credential_path=(
+            Path(data["github_credential_path"]).expanduser()
+            if data.get("github_credential_path") is not None
+            else None
+        ),
         release_id=(
             os.getenv("STEWARD_RELEASE_ID")
             if enabled and os.getenv("STEWARD_RELEASE_ID")
@@ -1244,7 +1274,6 @@ def _deployment_config(raw: object, root: Path) -> StewardDeploymentConfig:
         ),
         validation_runtime=str(data.get("validation_runtime", "validation-container-v1")),
         stop_grace_seconds=int(data.get("stop_grace_seconds", 45)),
-        max_active_tasks=int(data.get("max_active_tasks", data.get("task_concurrency", 4))),
         max_pids=int(data.get("max_pids", 512)),
         max_memory_bytes=int(data.get("max_memory_bytes", 4 * 1024 * 1024 * 1024)),
         max_log_bytes=int(data.get("max_log_bytes", 64 * 1024 * 1024)),

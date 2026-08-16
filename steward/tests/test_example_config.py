@@ -240,6 +240,96 @@ def test_publication_rejects_removed_sections(
         load_config(repo_root=repo, config_path=config_path)
 
 
+@pytest.mark.parametrize(
+    "removed_root_entry",
+    (
+        "containers = {}",
+        "task_container = {}",
+        "container_operations = {}",
+        "task_image = \"unsupported-task\"",
+        "task_image_digest = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        "enabled_signals = [\"codacy\"]",
+        "unknown_root_key = true",
+    ),
+)
+def test_config_rejects_removed_root_keys(
+    repo: Path, tmp_path: Path, removed_root_entry: str
+) -> None:
+    config_path = tmp_path / "removed-root.toml"
+    config_path.write_text(
+        f"[steward]\n{removed_root_entry}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+@pytest.mark.parametrize(
+    "removed_container_key",
+    (
+        "repository_path",
+        "state_path",
+        "api_key_path",
+        "task_image",
+        "task_image_digest",
+        "unknown_container_key",
+    ),
+)
+def test_config_rejects_removed_container_keys(
+    repo: Path, tmp_path: Path, removed_container_key: str
+) -> None:
+    config_path = tmp_path / "removed-container.toml"
+    value = "true" if removed_container_key == "unknown_container_key" else "\"unsupported\""
+    config_path.write_text(
+        f"[steward.container]\n{removed_container_key} = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=rf"unsupported keys: {removed_container_key}"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+@pytest.mark.parametrize(
+    "removed_deployment_key",
+    (
+        "coquic_home",
+        "repository_path",
+        "socket",
+        "git_remote",
+        "main_branch",
+        "codex_api_key_path",
+        "github_identity_path",
+        "task_concurrency",
+        "max_active_tasks",
+        "unknown_deployment_key",
+    ),
+)
+def test_config_rejects_removed_deployment_keys(
+    repo: Path, tmp_path: Path, removed_deployment_key: str
+) -> None:
+    config_path = tmp_path / "removed-deployment.toml"
+    value = "true" if removed_deployment_key == "unknown_deployment_key" else "\"unsupported\""
+    config_path.write_text(
+        f"[steward.deployment]\n{removed_deployment_key} = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=rf"unsupported keys: {removed_deployment_key}"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+def test_config_rejects_unknown_limits_keys(repo: Path, tmp_path: Path) -> None:
+    config_path = tmp_path / "unknown-limits.toml"
+    config_path.write_text(
+        "[steward.limits]\nunknown_limits_key = true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported keys: unknown_limits_key"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
 def test_explicit_runtime_repository_loads_config_outside_a_checkout(
     repo: Path, tmp_path: Path, monkeypatch
 ) -> None:

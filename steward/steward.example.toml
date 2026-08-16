@@ -6,10 +6,6 @@ codex_bin = "codex"
 # codex_model = "gpt-5.6-terra"
 # codex_reasoning_effort = "medium"
 codex_sandbox = "workspace-write"
-# The daemon resolves and locks these digests before constructing a task
-# container. Never put credentials or a mutable tag in runtime state.
-task_image = "coquic-steward-task"
-# task_image_digest = "sha256:<64 lowercase hex characters>"
 daemon_image = "coquic-steward-daemon"
 # daemon_image_digest = "sha256:<64 lowercase hex characters>"
 validation_image = "coquic-steward-validation"
@@ -58,33 +54,6 @@ lease_duration_seconds = 300
 max_retries = 3
 retry_backoff_seconds = 5
 
-# Production Compose values are explicit and private. These fake examples are
-# intentionally disabled; no machine-independent resource threshold is used.
-# [steward.deployment]
-# enabled = false
-# home = "/tmp/fake-coquic-home"
-# repository = "/tmp/fake-coquic-home/repository"
-# docker_socket = "/tmp/fake-docker.sock"
-# host_uid = 10000
-# host_gid = 10000
-# docker_gid = 10001
-# expected_remote = "origin"
-# expected_branch = "main"
-# compose_project = "coquic-steward-fake"
-# codex_credential_path = "/tmp/fake-coquic-home/private/credentials/codex-api"
-# github_credential_path = "/tmp/fake-coquic-home/private/credentials/github"
-# daemon_image = "coquic-steward-daemon"
-# daemon_image_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-# task_image = "coquic-steward-task"
-# task_image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-# validation_image = "coquic-steward-validation"
-# validation_image_id = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-# stop_grace_seconds = 45
-# min_free_bytes = 1048576
-# max_owned_docker_bytes = 4194304
-# recovery_free_bytes = 2097152
-# recovery_owned_docker_bytes = 2097152
-
 # Docker Compose deployment is opt-in. Production must uncomment every path,
 # numeric identity, credential file, image ID, and resource threshold; these
 # values are deliberately fake examples and never contain secret values.
@@ -105,7 +74,6 @@ compose_project = "coquic-steward"
 # daemon_image_id = "sha256:<64 lowercase hex characters>"
 # task_image_id = "sha256:<64 lowercase hex characters>"
 stop_grace_seconds = 45
-max_active_tasks = 4
 max_pids = 512
 max_memory_bytes = 4294967296
 max_log_bytes = 67108864

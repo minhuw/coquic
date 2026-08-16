@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto';
+
 import os from 'node:os';
-import path from 'node:path';
 
 import { defineConfig, devices } from '@playwright/test';
 
@@ -9,7 +8,6 @@ const defaultPort = 3101;
 type PlaywrightEnvironment = {
   [name: string]: string | undefined;
   CI?: string;
-  COQUIC_PLAYWRIGHT_FIXTURE_ROOT?: string;
   COQUIC_PLAYWRIGHT_PORT?: string;
   COQUIC_PLAYWRIGHT_REUSE_SERVER?: string;
 };
@@ -22,21 +20,11 @@ function parsePort(value: string) {
   return parsed;
 }
 
-function defaultFixtureRoot(checkoutRoot: string) {
-  const checkoutId = createHash('sha256').update(checkoutRoot).digest('hex').slice(0, 12);
-  return path.join(os.tmpdir(), `coquic-steward-playwright-${checkoutId}`);
-}
-
 export function createPlaywrightConfig(
   environment: PlaywrightEnvironment = process.env,
-  checkoutRoot = process.cwd(),
 ) {
   const configuredPort = environment.COQUIC_PLAYWRIGHT_PORT?.trim() || String(defaultPort);
   const port = parsePort(configuredPort);
-  const configuredFixtureRoot = environment.COQUIC_PLAYWRIGHT_FIXTURE_ROOT;
-  const fixtureRoot = configuredFixtureRoot === undefined
-    ? defaultFixtureRoot(checkoutRoot)
-    : configuredFixtureRoot.trim();
   const baseURL = `http://127.0.0.1:${port}`;
   const reuseExistingServer = ['1', 'true'].includes(
     environment.COQUIC_PLAYWRIGHT_REUSE_SERVER?.trim().toLowerCase() ?? '',
@@ -74,11 +62,7 @@ export function createPlaywrightConfig(
       },
     ],
     webServer: {
-      command: `node scripts/prepare-steward-test-fixture.mjs && next dev --hostname 127.0.0.1 --port ${port}`,
-      env: {
-        COQUIC_PLAYWRIGHT_FIXTURE_ROOT: fixtureRoot,
-        COQUIC_STEWARD_PUBLIC_ROOT: fixtureRoot,
-      },
+      command: `next dev --hostname 127.0.0.1 --port ${port}`,
       reuseExistingServer,
       timeout: 120_000,
       url: baseURL,

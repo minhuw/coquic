@@ -3,7 +3,6 @@ import { expect, test } from '@playwright/test';
 import { docItems } from '../../src/lib/doc-items';
 import {
   designViewports,
-  expectLocalScrollRegion,
   expectNoGlobalOverflow,
   expectNoSeriousAxeViolations,
 } from './helpers/design-system';
@@ -55,13 +54,6 @@ const routeInventory: RouteContract[] = [
   { path: '/interop-results', title: 'CoQUIC Interop Results', heading: 'CoQUIC Interop Matrix' },
   { path: '/coverage', title: 'CoQUIC Coverage Results', heading: 'CoQUIC Coverage Report' },
   { path: '/coverage-results', title: 'CoQUIC Coverage Results', heading: 'CoQUIC Coverage Report' },
-  { path: '/steward', title: 'CoQUIC Steward', heading: 'CoQUIC Steward' },
-  { path: '/steward/planner', title: 'Planner history | CoQUIC Steward', heading: 'Planner history' },
-  {
-    path: '/steward/tasks/task-20260713115945-a1b2c3d4',
-    title: 'task-20260713115945-a1b2c3d4 | CoQUIC Steward',
-    heading: 'Implement dashboard contract',
-  },
 ];
 
 const sharedHeaderRoutes = new Map<string, string>([
@@ -77,8 +69,6 @@ const sharedHeaderRoutes = new Map<string, string>([
   ['/interop-results', 'evidence'],
   ['/coverage', 'evidence'],
   ['/coverage-results', 'evidence'],
-  ['/steward', 'operations'],
-  ['/steward/planner', 'operations'],
 ]);
 
 test.describe('route identity', () => {
@@ -164,18 +154,12 @@ test('home shell fits the configured project viewport', async ({ page }, testInf
   await expectNoSeriousAxeViolations(page, 'main');
 });
 
-test('retained Steward task exposes its pipeline for the active breakpoint', async ({ page, isMobile }) => {
-  await page.goto('/steward/tasks/task-20260713115945-a1b2c3d4');
-  await expect(page.getByRole('heading', { name: 'Implement dashboard contract' })).toBeVisible();
-  if (isMobile) {
-    await expect(page.locator('.pipeline-graph')).toBeHidden();
-    await expect(page.getByRole('list', { name: 'Task pipeline stages and feedback loops' })).toBeVisible();
-    return;
-  }
-  await expectLocalScrollRegion(page, '.pipeline-graph');
-});
 
-test.fixme('Steward task has no nested main landmark after plan 018', async ({ page }) => {
-  await page.goto('/steward/tasks/task-20260713115945-a1b2c3d4');
-  await expect(page.locator('main main')).toHaveCount(0);
+
+
+test('retired Steward paths remain ordinary framework 404s', async ({ page }) => {
+  for (const path of ['/steward', '/steward/status', '/steward/planner', '/steward/tasks/task-20260713115945-a1b2c3d4']) {
+    const response = await page.goto(path);
+    expect(response?.status(), `${path} should be retired`).toBe(404);
+  }
 });

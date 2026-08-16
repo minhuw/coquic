@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { ArrowUpRight, ShieldCheck } from 'lucide-react';
+import { ArrowUpRight } from 'lucide-react';
 
 import { CoquicLogoIcon } from '@/components/icons';
 import { HomeArtwork, type HomeArtworkVariant } from '@/components/home-artwork';
@@ -28,10 +28,10 @@ export default function Home() {
       <section className="border-b border-[var(--border)] bg-[var(--surface)]" data-home-section="hero" aria-labelledby="home-title">
         <div
           className={cn(
-            'container-wide grid min-h-[min(520px,calc(100svh-128px))] grid-cols-[minmax(0,1fr)_minmax(360px,480px)] items-center gap-[var(--space-8)] py-[var(--space-8)]',
-            'max-[899px]:grid-cols-[minmax(0,1fr)] max-[899px]:gap-[var(--space-6)]',
+            'container-wide grid min-h-[min(520px,calc(100svh-128px))] grid-cols-[minmax(0,1fr)] items-center gap-[var(--space-8)] py-[var(--space-8)]',
+            'max-[899px]:gap-[var(--space-6)]',
             'max-[600px]:min-h-0 max-[600px]:pt-[var(--space-6)] max-[600px]:pb-[var(--space-7)]',
-            '[@media(min-width:700px)_and_(max-height:500px)]:min-h-0 [@media(min-width:700px)_and_(max-height:500px)]:grid-cols-[minmax(0,1fr)_minmax(300px,0.8fr)] [@media(min-width:700px)_and_(max-height:500px)]:gap-[var(--space-6)] [@media(min-width:700px)_and_(max-height:500px)]:py-[var(--space-5)]',
+            '[@media(min-width:700px)_and_(max-height:500px)]:min-h-0 [@media(min-width:700px)_and_(max-height:500px)]:py-[var(--space-5)]',
           )}
           data-home-slot="hero-inner"
         >
@@ -75,36 +75,6 @@ export default function Home() {
             </p>
           </div>
 
-          <Link
-            className={cn(
-              'grid min-h-[240px] min-w-0 content-center border-l border-[var(--border)] py-[var(--space-7)] pr-0 pl-[var(--space-7)] text-[var(--text)] no-underline [transition:background-color_var(--motion-fast)_var(--ease-standard)] hover:bg-[var(--surface-subtle)] motion-reduce:transition-none',
-              'max-[899px]:min-h-0 max-[899px]:w-[min(100%,680px)] max-[899px]:border-t max-[899px]:border-l-0 max-[899px]:pt-[var(--space-6)] max-[899px]:pr-0 max-[899px]:pb-0 max-[899px]:pl-0',
-              'max-[600px]:pt-[var(--space-5)]',
-              '[@media(min-width:700px)_and_(max-height:500px)]:w-auto [@media(min-width:700px)_and_(max-height:500px)]:border-t-0 [@media(min-width:700px)_and_(max-height:500px)]:border-l [@media(min-width:700px)_and_(max-height:500px)]:py-[var(--space-3)] [@media(min-width:700px)_and_(max-height:500px)]:pr-0 [@media(min-width:700px)_and_(max-height:500px)]:pl-[var(--space-6)]',
-            )}
-            data-home-destination="steward"
-            href="/steward"
-            aria-label="Open Steward"
-          >
-            <span className="inline-flex items-center gap-[var(--space-2)] font-sans text-sm leading-[1.4] font-medium text-[var(--accent-ink)]">
-              <ShieldCheck aria-hidden="true" size={20} />
-              Steward
-            </span>
-            <strong className="mt-[var(--space-5)] max-w-[360px] font-sans text-[28px] leading-[1.3] font-medium text-[var(--text-strong)] max-[600px]:mt-[var(--space-3)] max-[600px]:text-[22px] [@media(min-width:700px)_and_(max-height:500px)]:mt-[var(--space-3)] [@media(min-width:700px)_and_(max-height:500px)]:text-[22px]">
-              Repository tasks and automation
-            </strong>
-            <span
-              className={cn(
-                'mt-[var(--space-7)] flex min-w-0 items-center justify-between gap-[var(--space-4)] border-t border-[var(--border)] pt-[var(--space-4)] font-sans text-sm leading-[1.4] font-medium text-[var(--accent-ink)]',
-                'max-[899px]:mt-[var(--space-5)]',
-                'max-[600px]:mt-[var(--space-4)] max-[600px]:min-h-[var(--control-coarse)] max-[600px]:pt-[var(--space-3)]',
-                '[@media(min-width:700px)_and_(max-height:500px)]:mt-[var(--space-3)] [@media(min-width:700px)_and_(max-height:500px)]:pt-[var(--space-2)]',
-              )}
-            >
-              Open Steward
-              <ArrowUpRight aria-hidden="true" size={18} />
-            </span>
-          </Link>
         </div>
       </section>
 

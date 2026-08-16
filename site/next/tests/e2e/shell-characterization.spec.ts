@@ -32,7 +32,7 @@ test.describe('desktop shell behavior', () => {
     })).toBe(true);
     await page.getByRole('button', { name: 'Benchmark' }).click();
     await page.getByRole('button', { name: 'Development' }).click();
-    await expect(navigation.locator('[data-slot="nav-menu-content"]').last().getByRole('link')).toHaveText(['Interop', 'Coverage', 'Duvet', 'Steward']);
+    await expect(navigation.locator('[data-slot="nav-menu-content"]').last().getByRole('link')).toHaveText(['Interop', 'Coverage', 'Duvet']);
   });
 
   test('theme choice persists across navigation and reload', async ({ page }) => {
@@ -155,7 +155,7 @@ test('plan 003 provides complete mobile menu access', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await page.goto('/');
   await page.getByRole('button', { name: 'Open menu' }).click();
-  await expect(page.getByRole('dialog', { name: 'CoQUIC navigation' }).getByRole('link')).toHaveCount(12);
+  await expect(page.getByRole('dialog', { name: 'CoQUIC navigation' }).getByRole('link')).toHaveCount(11);
 });
 
 test('mobile menu preserves destination order and external links', async ({ page }) => {
@@ -164,7 +164,7 @@ test('mobile menu preserves destination order and external links', async ({ page
   await page.getByRole('button', { name: 'Open menu' }).click();
 
   const links = page.getByRole('dialog', { name: 'CoQUIC navigation' }).getByRole('link');
-  await expect(links).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench', 'LAN', 'Interop', 'Coverage', 'Duvet', 'Steward', 'GitHub', 'Contact']);
+  await expect(links).toHaveText(['Ask', 'Docs', 'Blog', 'Dataset', 'Workbench', 'LAN', 'Interop', 'Coverage', 'Duvet', 'GitHub', 'Contact']);
   const destinations = await links.evaluateAll((elements) => elements.map((element) => {
     const link = element as HTMLAnchorElement;
     const url = new URL(link.href);
@@ -180,7 +180,6 @@ test('mobile menu preserves destination order and external links', async ({ page
     '/interop',
     '/coverage',
     '/duvet',
-    '/steward',
     'https://github.com/minhuw/coquic',
     'https://www.minhuw.dev/',
   ]);
@@ -218,7 +217,7 @@ test('short pages keep the footer at the document bottom', async ({ page }) => {
 
 test('long routes keep the footer after main content in mobile landscape', async ({ page }) => {
   await page.setViewportSize({ width: 844, height: 390 });
-  await page.goto('/steward');
+  await page.goto('/docs/api/c-ffi-reference');
 
   const geometry = await page.locator('[data-slot="project-footer"]').evaluate((footer) => {
     const main = document.querySelector<HTMLElement>('[data-slot="shell-main"]');

@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pytest
 
 from coquic_steward.agents.telemetry import PriceCatalog, PriceEntry
+
+ROOT = Path(__file__).resolve().parents[2]
+CLOUD_VALIDATOR = ROOT / "scripts" / "validate_steward_cloud_contracts.py"
+CLOUD_FIXTURE_DIR = ROOT / "contracts" / "steward-cloud" / "fixtures"
+CLOUD_PUBLICATION_SCHEMA = ROOT / "contracts" / "steward-cloud" / "publication.schema.json"
+
 from coquic_steward.publication import (
     AtifDocument,
     TaskUsageProjection,
@@ -310,3 +319,29 @@ def test_projection_marks_priced_and_unpriced_children_partial() -> None:
     assert projection.runs[0].cost.output_micro_usd == 14
     assert projection.runs[0].cost.total_micro_usd == 24
     assert projection.summary.cost.status == "Partial"
+
+def test_clean_usage_contract_gate() -> None:
+    subprocess.run([sys.executable, str(CLOUD_VALIDATOR), "--publication-only"], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(CLOUD_VALIDATOR), "--d1-only"], cwd=ROOT, check=True)
+
+
+def test_clean_usage_rows_carry_closed_totals_and_provenance() -> None:
+    schema = json.loads(CLOUD_PUBLICATION_SCHEMA.read_text(encoding="utf-8"))
+    assert schema["properties"]["schemaVersion"]["const"] == "2.0"
+    usage = schema["$defs"]["usage"]["properties"]
+    assert set(usage) >= {"generation", "summaries", "invocations", "turns", "prices", "globals"}
+    fixture_paths = sorted(CLOUD_FIXTURE_DIR.glob("*-publication.json")) + [CLOUD_FIXTURE_DIR / "active-after-planning.json"]
+    for fixture_path in fixture_paths:
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        publication = fixture["publication"]
+        usage_rows = publication["usage"]
+        assert publication["schemaVersion"] == "2.0"
+        assert usage_rows["generation"]["schemaVersion"] == "1.0"
+        assert usage_rows["summaries"]
+        for row in usage_rows["summaries"] + usage_rows["globals"]:
+            assert {"promptTokens", "cachedTokens", "uncachedTokens", "completionTokens", "reasoningTokens", "totalTokens"} <= row.keys()
+            assert {"uncachedInputCostMicroUsd", "cachedInputCostMicroUsd", "outputCostMicroUsd", "totalCostMicroUsd"} <= row.keys()
+        for row in usage_rows["invocations"]:
+            assert row["ownershipClass"] == "task-owned"
+            assert row["taskId"] == publication["taskId"]
+        assert all(row["aggregateOnly"] for row in usage_rows["globals"] if row["ownershipClass"] == "steward-overhead")

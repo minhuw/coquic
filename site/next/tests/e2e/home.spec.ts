@@ -8,14 +8,13 @@ import {
   tabUntilFocused,
 } from './helpers/design-system';
 
-test('home presents CoQUIC with Steward as its primary destination', async ({ page }) => {
+test('home presents the CoQUIC project identity', async ({ page }) => {
   await page.goto('/');
 
   const home = page.locator('main[data-home-route="home"]');
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
   await expect(page.getByRole('heading', { name: 'CoQUIC', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByText('From Prompt to Packet.', { exact: true })).toBeVisible();
-  await expect(home.getByRole('link', { name: 'Open Steward', exact: true })).toHaveAttribute('href', '/steward');
 
   await expect(page.locator('meta[name="coquic-demo-marker"][content="coquic-wasm-demo-v1"]')).toHaveCount(1);
   await expect(page.locator('meta[name="coquic-home-marker"][content="coquic-demo-home-v1"]')).toHaveCount(1);
@@ -41,19 +40,16 @@ test('home uses a consistent wide composition on large screens', async ({ page }
       return element.getBoundingClientRect().width;
     });
     const copy = document.querySelector<HTMLElement>('[data-home-slot="hero-copy"]')?.getBoundingClientRect();
-    const steward = document.querySelector<HTMLElement>('[data-home-destination="steward"]')?.getBoundingClientRect();
-    if (!copy || !steward) throw new Error('Missing homepage hero column');
+    if (!copy) throw new Error('Missing homepage hero copy');
 
     return {
       bandWidths,
       copyRight: copy.right,
-      stewardLeft: steward.left,
     };
   });
 
   expect(Math.min(...layout.bandWidths)).toBeGreaterThan(1500);
   expect(Math.max(...layout.bandWidths) - Math.min(...layout.bandWidths)).toBeLessThanOrEqual(1);
-  expect(layout.stewardLeft).toBeGreaterThan(layout.copyRight);
   await expectNoGlobalOverflow(page);
 });
 
@@ -149,7 +145,6 @@ for (const [theme, expectedCanvas] of [
 
 test('home destinations activate with keyboard-only focus and Enter', async ({ page }) => {
   for (const [name, href] of [
-    ['Open Steward', '/steward'],
     ['Performance', '/performance'],
     ['Workbench', '/workbench'],
   ] as const) {
@@ -169,7 +164,6 @@ test('home remains usable at 200 percent page scale', async ({ page }) => {
 
   await expect.poll(() => page.evaluate(() => window.visualViewport?.scale)).toBe(2);
   await expect(page.getByRole('heading', { name: 'CoQUIC', exact: true, level: 1 })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Open Steward', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Tools', exact: true })).toBeVisible();
   await expectNoGlobalOverflow(page);
   await expectNoSeriousAxeViolations(page, 'main');

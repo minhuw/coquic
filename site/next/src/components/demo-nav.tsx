@@ -12,7 +12,7 @@ import { ThemeToggle } from './theme-toggle';
 import { Button } from './ui/button';
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from './ui/dialog';
 
-export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'dataset' | 'interop' | 'coverage' | 'duvet' | 'steward' | 'qa';
+export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'dataset' | 'interop' | 'coverage' | 'duvet' | 'qa';
 
 export const views: { href: string; label: string; route: DemoRoute }[] = [
   { href: '/qa', label: 'Ask', route: 'qa' },
@@ -24,12 +24,11 @@ export const views: { href: string; label: string; route: DemoRoute }[] = [
   { href: '/interop', label: 'Interop', route: 'interop' },
   { href: '/coverage', label: 'Coverage', route: 'coverage' },
   { href: '/duvet', label: 'Duvet', route: 'duvet' },
-  { href: '/steward', label: 'Steward', route: 'steward' },
 ];
 
 const primaryViews = views.filter((view) => ['qa', 'docs', 'blog', 'dataset', 'workbench'].includes(view.route));
 const benchmarkViews = views.filter((view) => view.route === 'performance');
-const developmentViews = views.filter((view) => ['interop', 'coverage', 'duvet', 'steward'].includes(view.route));
+const developmentViews = views.filter((view) => ['interop', 'coverage', 'duvet'].includes(view.route));
 type NavMenuId = 'benchmark' | 'development';
 
 function routeForPath(pathname: string): DemoRoute {
@@ -39,7 +38,6 @@ function routeForPath(pathname: string): DemoRoute {
   if (pathname.startsWith('/qa')) return 'qa';
   if (pathname.startsWith('/transcript')) return 'dataset';
   if (pathname.startsWith('/blog')) return 'blog';
-  if (pathname.startsWith('/steward')) return 'steward';
   if (pathname === '/performance' || pathname === '/perf-comparison') return 'performance';
   if (pathname === '/interop' || pathname === '/interop-results') return 'interop';
   if (pathname === '/coverage' || pathname === '/coverage-results') return 'coverage';

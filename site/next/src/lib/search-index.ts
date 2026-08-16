@@ -61,15 +61,6 @@ const routeItems: SiteSearchItem[] = [
     keywords: ['dataset', 'transcript', 'conversation', 'training'],
   },
   {
-    id: 'route-steward',
-    title: 'Steward',
-    href: '/steward',
-    section: 'Project',
-    description: 'Inspect public repository stewardship tasks and planner history.',
-    kind: 'dashboard',
-    keywords: ['steward', 'tasks', 'planner', 'repository'],
-  },
-  {
     id: 'route-workbench',
     title: 'Protocol Workbench',
     href: '/workbench',

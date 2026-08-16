@@ -8,28 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  steward-schema:
-    name: Steward Schema
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
-        with:
-          summarize: false
-
-      - name: Check generated Steward contract
-        run: nix develop -c uv run --project steward python steward/schema/generate_types.py --check
-
-      - name: Test Steward contract compatibility
-        run: nix develop -c uv run --project steward python -m pytest steward/tests/test_public_schema.py
-
-      - name: Test on-demand cloud checker fixtures
-        run: nix develop -c uv run --project steward python -m pytest steward/tests/test_deployed_synthetic_monitor.py
-
   steward-tests:
     name: Steward Tests
     runs-on: ubuntu-latest
@@ -48,6 +26,9 @@ jobs:
 
       - name: Test Steward suite
         run: nix develop -c uv run --locked --project steward python -m pytest steward/tests -q
+
+      - name: Test on-demand cloud checker fixtures
+        run: nix develop -c uv run --project steward python -m pytest steward/tests/test_deployed_synthetic_monitor.py
 
       - name: Smoke Steward package import
         run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'import coquic_steward'

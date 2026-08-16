@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CodexTranscriptThread, transcriptDisplayCount } from '@/components/codex-transcript-thread';
 import { EvidenceDisclosure } from '@/components/evidence/disclosure';
 import { CodeBlock, getEvidenceTokenizationCount } from '@/components/evidence/code-block';
-import { TranscriptView } from '@/components/steward-transcript';
 import {
   conversationKind,
   groupConversationRecords,
@@ -155,37 +154,6 @@ describe('evidence fixtures before consolidation', () => {
     expect(screen.getByAltText('capture')).toHaveAttribute('src', 'capture.png');
   });
 
-  it('retains truncation safeguards and planner prompt/decision display contracts', () => {
-    const [truncated] = parseCodexTranscriptText(
-      JSON.stringify({ item: { type: 'agent_message', id: 'large-1', text: '1234567890' } }),
-      { maxRecordTextLength: 5 },
-    );
-    expect(truncated).toMatchObject({ textTruncated: true });
-    expect(truncated.text).toContain('Preview truncated');
-
-    render(
-      <TranscriptView
-        prompt={[
-          "CoQUIC Steward's planning brain",
-          'Decide which maintenance tasks should exist.',
-          'Review active_tasks before proposing anything.',
-          'Return only JSON matching the requested schema.',
-          'Planning input JSON:',
-          JSON.stringify({ active_tasks: [], signal_items: [], repository: 'minhuw/coquic' }),
-        ].join('\n')}
-        taskId="task-fixture"
-        text={JSON.stringify({
-          consumed_item_ids: ['signal-1'],
-          tasks: [{ title: 'Review packet path', kind: 'maintenance', evidence: ['signal-1'] }],
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Planner instructions')).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Planner input context' })).toBeInTheDocument();
-    expect(screen.getByText('Scheduling decision')).toBeInTheDocument();
-    expect(screen.getByText('Review packet path')).toBeInTheDocument();
-  });
 });
 
 describe('shared evidence primitives', () => {

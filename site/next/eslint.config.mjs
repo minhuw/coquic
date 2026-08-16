@@ -35,9 +35,6 @@ const config = [
       'app/transcript/transcript-dataset.tsx',
       'src/components/duvet-report-frame.tsx',
       'src/components/site-search-dialog.tsx',
-      'src/components/steward/dashboard.tsx',
-      'src/components/steward/data.ts',
-      'src/components/steward/task-detail.tsx',
       'src/components/theme-toggle.tsx',
     ],
     rules: {
@@ -59,17 +56,6 @@ const config = [
     rules: {
       // This value is intentionally derived from parsed content.
       'react-hooks/immutability': 'off',
-    },
-  },
-  {
-    name: 'coquic/render-clock-values',
-    files: [
-      'src/components/steward/dashboard.tsx',
-      'src/components/steward/shared.tsx',
-    ],
-    rules: {
-      // These values are intentionally derived from an external clock.
-      'react-hooks/purity': 'off',
     },
   },
   {

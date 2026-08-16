@@ -64,7 +64,6 @@ jobs:
       - name: Visual smoke
         env:
           COQUIC_PLAYWRIGHT_PORT: 3204
-          COQUIC_PLAYWRIGHT_FIXTURE_ROOT: /tmp/coquic-steward-playwright-ci
         run: nix develop -c npm --prefix site/next run test:e2e -- tests/e2e/visual-foundation.spec.ts --project=desktop
 
       - name: Upload Playwright failure artifacts

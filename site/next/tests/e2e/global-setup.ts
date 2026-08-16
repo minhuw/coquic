@@ -18,9 +18,6 @@ const applicationRoutes = [
   '/interop-results',
   '/coverage',
   '/coverage-results',
-  '/steward',
-  '/steward/planner',
-  '/steward/tasks/task-20260713115945-a1b2c3d4',
 ];
 
 export default async function globalSetup(config: FullConfig) {

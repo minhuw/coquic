@@ -1,9 +1,8 @@
 import { expect, test } from '@playwright/test';
 
-import { expectNoGlobalOverflow, expectNoSeriousAxeViolations, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
+import { expectNoGlobalOverflow, setStoredTheme, waitForVisualAssets } from './helpers/design-system';
 
 const themes = ['light', 'dark'] as const;
-const taskRoute = '/steward/tasks/task-20260713115945-a1b2c3d4';
 
 test.use({ launchOptions: { args: ['--disable-gpu'] } });
 
@@ -41,35 +40,5 @@ test.describe('content primitive compositions', () => {
       expect(thirdPartyFontRequests).toEqual([]);
     });
 
-    test(`evidence transcript and diff stay bounded in ${theme}`, async ({ page }) => {
-      const thirdPartyFontRequests = trackThirdPartyFontRequests(page);
-      await page.addInitScript(() => {
-        const fixedNow = Date.parse('2026-07-17T12:00:00.000Z');
-        Date.now = () => fixedNow;
-      });
-      await setStoredTheme(page, theme);
-      await page.goto(taskRoute);
-
-      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-      const transcriptTab = page.getByRole('tab', { name: 'Transcript' }).first();
-      await expect(transcriptTab).toBeVisible();
-      await transcriptTab.click();
-      await expect(page.locator('[data-transcript-view="true"], [data-transcript-thread="true"]')).not.toHaveCount(0);
-      await expect(page.locator('[data-evidence-message="true"], [data-evidence-disclosure="true"]')).not.toHaveCount(0);
-      await expectNoGlobalOverflow(page);
-      await expectNoSeriousAxeViolations(page, 'main');
-      await prepareVisualCapture(page);
-      await expect(page).toHaveScreenshot(`evidence-transcript-${theme}.png`, { fullPage: false });
-
-      const patchTab = page.getByRole('tab', { name: 'Patch' }).first();
-      await patchTab.click();
-      await expect(page.locator('[data-evidence-code-block="true"]')).not.toHaveCount(0);
-      await expect(page.locator('.diff-split, .diff-unified')).not.toHaveCount(0);
-      await expectNoGlobalOverflow(page);
-      await expectNoSeriousAxeViolations(page, 'main');
-      await prepareVisualCapture(page);
-      await expect(page).toHaveScreenshot(`evidence-diff-${theme}.png`, { fullPage: false });
-      expect(thirdPartyFontRequests).toEqual([]);
-    });
   }
 });

@@ -10,7 +10,7 @@ import styles from './site-search.module.css';
 import { Button } from './ui/button';
 import { DialogClose, DialogContent, DialogTitle } from './ui/dialog';
 
-const emptyQueryIds = ['route-docs', 'route-workbench', 'route-qa', 'route-dataset', 'route-steward'];
+const emptyQueryIds = ['route-docs', 'route-workbench', 'route-qa', 'route-dataset'];
 const maxResults = 12;
 
 export function SiteSearchDialog() {

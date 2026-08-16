@@ -139,6 +139,152 @@ def git_branch_head(repo: Path, branch: str) -> str:
     ).stdout.strip()
 
 
+def _drive_durable(
+    executor: StewardExecutor,
+    task_id: str,
+    *,
+    max_steps: int = 128,
+    finalize: bool = False,
+) -> bool:
+    """Advance one task through persisted phases with a bounded driver."""
+
+    for _ in range(max_steps):
+        outcome = executor.advance_once(task_id)
+        if outcome.status in {"ready_to_seal", "terminal", "blocked"}:
+            if finalize:
+                StewardDaemon(executor.config, executor.store).finalize_terminal_task(task_id)
+            return outcome.status in {"ready_to_seal", "terminal"}
+        if outcome.status == "in_progress":
+            continue
+        if not outcome.progressed and outcome.next_phase is None:
+            return False
+    raise AssertionError(f"durable task did not reach a stopping point: {task_id}")
+
+
+def _advance_durable(
+    executor: StewardExecutor, task_id: str, steps: int
+) -> list[object]:
+    return [executor.advance_once(task_id) for _ in range(steps)]
+
+
+def _durable_codex(
+    tmp_path: Path,
+    *,
+    change: str = "changed by durable pipeline",
+    review: str = '{"verdict":"approve","summary":"ok","findings":[],"validation_gaps":[],"remaining_risk":""}',
+    commit: str = '{"subject":"fix: durable pipeline","body":"persist the accepted durable tree"}',
+) -> Path:
+    fake = tmp_path / "durable-codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "case \"$last\" in\n"
+        f"  */reviewer-*) printf '%s\\n' '{review}' > \"$last\" ;;\n"
+        f"  */commit-message-*) printf '%s\\n' '{commit}' > \"$last\" ;;\n"
+        f"  *) printf '%s\\n' '{change}' > README.md; printf 'done\\n' > \"$last\" ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+def _passing_durable_gates(
+    config,
+    task_id,
+    cwd,
+    *,
+    label=None,
+    on_gate_start=None,
+    on_gate_result=None,
+    command_runner=None,
+):
+    output = config.logs_dir / task_id / (label or "durable") / "gate.txt"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("ok\\n", encoding="utf-8")
+    return [
+        ValidationResult(
+            command=["fake-gate"], cwd=cwd, passed=True, exit_code=0, output_path=output
+        )
+    ]
+
+
+def _durable_push_setup(
+    config: StewardConfig,
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    issue_numbers: tuple[int, ...] = (),
+    local_only: bool = False,
+    frozen_paths: tuple[str, ...] = (),
+):
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"],
+        cwd=config.repo_root,
+        check=True,
+    )
+    fake = _durable_codex(tmp_path, change="durable push change")
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_bin": str(fake),
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": local_only,
+            "path_policy": (
+                PathPolicyConfig(
+                    frozen_by_kind={TaskKind.integration.value: frozen_paths}
+                )
+                if frozen_paths
+                else config.path_policy
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    selected = [
+        {
+            "kind": "github-issues.feature-request",
+            "payload": {"issue_number": number},
+        }
+        for number in issue_numbers
+    ]
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Feature source",
+            prompt="Implement the selected feature",
+            metadata={"source_context": {"selected_signal_items": selected}},
+        )
+    )
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate feature",
+            prompt="Integrate the feature",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+    )
+    return config, store, source, integration, StewardExecutor(config, store)
+
+
 def ingest_test_signal(store: TaskStore, item: SignalItem) -> SignalItem:
     saved, _signals, _created = store.ingest_signal_collection(
         SignalFetchRun(
@@ -526,11 +672,6 @@ def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypat
         raise RuntimeError("codex stream crashed")
 
     monkeypatch.setattr(StewardExecutor, "advance_once", fail_after_start)
-    monkeypatch.setattr(
-        StewardExecutor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
-    )
 
     result = StewardDaemon(config, store).tick(plan=False, max_dispatch=1)
 
@@ -557,11 +698,6 @@ def test_daemon_marks_early_dispatch_exception_failed(
         raise RuntimeError("codex failed before start")
 
     monkeypatch.setattr(StewardExecutor, "advance_once", fail_before_start)
-    monkeypatch.setattr(
-        StewardExecutor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
-    )
 
     result = StewardDaemon(config, store).tick(plan=False, max_dispatch=1)
 
@@ -1930,11 +2066,6 @@ def test_daemon_replans_after_successful_dispatch(
     monkeypatch.setattr("coquic_steward.orchestration.daemon.run_planner", fake_plan)
     daemon = StewardDaemon(config, store)
     monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
-    monkeypatch.setattr(
-        daemon.executor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
-    )
 
     result = daemon.tick(plan=True, dispatch=True, max_dispatch=1)
 
@@ -1980,11 +2111,6 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
 
     daemon = StewardDaemon(config, store)
     monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
-    monkeypatch.setattr(
-        daemon.executor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
-    )
 
     result = daemon.tick(plan=False, dispatch=True)
 
@@ -2013,11 +2139,6 @@ def test_daemon_dispatch_exception_preserves_terminal_task_status(
 
     daemon = StewardDaemon(config, store)
     monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
-    monkeypatch.setattr(
-        daemon.executor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
-    )
 
     result = daemon.tick(plan=False, dispatch=True)
     saved = store.get(task.id)
@@ -2068,11 +2189,6 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
 
     daemon = StewardDaemon(config, store)
     monkeypatch.setattr(daemon.executor, "advance_once", fake_advance)
-    monkeypatch.setattr(
-        daemon.executor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("daemon once dispatch called run_task"),
-    )
 
     result = daemon.tick(plan=False, dispatch=True)
 
@@ -5497,9 +5613,8 @@ def test_executor_no_changes_reaches_terminal_status(
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
         "  shift || true\n"
         "done\n"
-        "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
-        "printf 'no changes\\n' > \"$last\"\n",
+        "printf 'no changes\\n' > \"$last\"\\n",
         encoding="utf-8",
     )
     fake.chmod(0o755)
@@ -5510,15 +5625,12 @@ def test_executor_no_changes_reaches_terminal_status(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    assert StewardExecutor(config, store).run_task(task.id)
+    executor = StewardExecutor(config, store)
+    assert _drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.no_changes
-    assert saved.worktree_path is not None
-    assert saved.branch_name is not None
-    assert not saved.worktree_path.exists()
-    assert not git_branch_exists(config.repo_root, saved.branch_name)
-    assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
-
+    assert any(event.kind == "pipeline.ready_to_seal" for event in store.events(task.id))
+    assert not any(event.kind == "pipeline.blocked" for event in store.events(task.id))
 
 def test_executor_blocks_worker_patch_that_changes_frozen_path(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -5530,10 +5642,9 @@ def test_executor_blocks_worker_patch_that_changes_frozen_path(
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
         "  shift || true\n"
         "done\n"
-        "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
-        "printf '{}\\n' > flake.nix\n"
-        "printf 'changed frozen path\\n' > \"$last\"\n",
+        "printf '{}\n' > flake.nix\n"
+        "printf 'changed frozen path\\n' > \"$last\"\\n",
         encoding="utf-8",
     )
     fake.chmod(0o755)
@@ -5542,39 +5653,28 @@ def test_executor_blocks_worker_patch_that_changes_frozen_path(
             **config.__dict__,
             "codex_bin": str(fake),
             "path_policy": PathPolicyConfig(
-                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+                frozen_by_kind={TaskKind.custom.value: ("flake.nix",)}
             ),
         }
     )
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.feature,
-            workflow=TaskWorkflow.fix,
-            worker=WorkerKind.feature_implementer,
-            title="T",
-            prompt="P",
-        )
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-
-    def fail_if_validated(*_args, **_kwargs):
-        pytest.fail("validation should not run after a frozen path change")
 
     monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", fail_if_validated
+        "coquic_steward.execution.executor.run_gates",
+        lambda *_args, **_kwargs: pytest.fail("validation should not run after a frozen path change"),
     )
-
-    assert not StewardExecutor(config, store).run_task(task.id)
+    executor = StewardExecutor(config, store)
+    assert not _drive_durable(executor, task.id)
 
     saved = store.get(task.id)
     events = store.events(task.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "frozen paths changed: flake.nix"
-    assert any(event.kind == "path_policy.blocked" for event in events)
-    assert saved.worktree_path is not None
-    assert not saved.worktree_path.exists()
-
+    assert any(event.kind == "pipeline.blocked" for event in events)
 
 def test_executor_blocks_frozen_path_written_by_validation(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -5586,10 +5686,9 @@ def test_executor_blocks_frozen_path_written_by_validation(
         '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
         "  shift || true\n"
         "done\n"
-        "cat >/dev/null\n"
         'mkdir -p "$(dirname "$last")"\n'
-        "printf 'source change\\n' > README.md\n"
-        "printf 'changed source\\n' > \"$last\"\n",
+        "printf 'source change\n' > README.md\n"
+        "printf 'changed source\\n' > \"$last\"\\n",
         encoding="utf-8",
     )
     fake.chmod(0o755)
@@ -5598,27 +5697,18 @@ def test_executor_blocks_frozen_path_written_by_validation(
             **config.__dict__,
             "codex_bin": str(fake),
             "path_policy": PathPolicyConfig(
-                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+                frozen_by_kind={TaskKind.custom.value: ("flake.nix",)}
             ),
         }
     )
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.feature,
-            workflow=TaskWorkflow.fix,
-            worker=WorkerKind.feature_implementer,
-            title="T",
-            prompt="P",
-        )
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        output = _config.logs_dir / task_id / (label or "validation") / "fake.txt"
+    def fake_gates(_config, task_id, cwd, **_kwargs):
+        output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
         (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
@@ -5629,15 +5719,14 @@ def test_executor_blocks_frozen_path_written_by_validation(
         ]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert not StewardExecutor(config, store).run_task(task.id)
+    executor = StewardExecutor(config, store)
+    assert not _drive_durable(executor, task.id)
 
     saved = store.get(task.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "frozen paths changed: flake.nix"
     assert saved.patch_path is None
-    assert any(event.kind == "path_policy.blocked" for event in store.events(task.id))
-
+    assert any(event.kind == "pipeline.blocked" for event in store.events(task.id))
 
 @pytest.mark.parametrize("failure", ["malformed", "decode"])
 def test_executor_blocks_status_parse_failure_with_fixed_summary(
@@ -5717,61 +5806,25 @@ def test_executor_heartbeats_active_worker(
 def test_executor_patch_happy_path(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'changed by steward\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
+    fake = _durable_codex(tmp_path, change="changed by steward")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+    )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
+    executor = StewardExecutor(config, store)
+    assert _drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.succeeded
     assert saved.patch_path is not None
     assert "changed by steward" in saved.patch_path.read_text(encoding="utf-8")
-    assert saved.worktree_path is not None
-    assert saved.branch_name is not None
-    assert not saved.worktree_path.exists()
-    assert not git_branch_exists(config.repo_root, saved.branch_name)
-    assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
-
+    assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
+    assert any(event.kind == "pipeline.ready_to_seal" for event in store.events(task.id))
 
 def test_executor_does_not_clean_external_finished_worktree(
     config: StewardConfig, tmp_path: Path
@@ -5795,59 +5848,24 @@ def test_executor_does_not_clean_external_finished_worktree(
 def test_executor_marks_task_validation_running_before_gates(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'changed by steward\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
+    fake = _durable_codex(tmp_path, change="changed by steward")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-
     observed: dict[str, object] = {}
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
+    def fake_gates(_config, task_id, cwd, **_kwargs):
         current = store.get(task_id)
-        iteration = store.get_iteration(task_id, 0)
-        validation_event = store.events(task_id)[-1]
         observed["status"] = current.status
         observed["summary"] = current.summary
-        observed["task_patch_path"] = current.patch_path
-        iteration_patch_text = (
-            iteration.patch_path.read_text(encoding="utf-8")
-            if iteration.patch_path
-            else ""
+        observed["phase"] = next(
+            event.data["phase"]
+            for event in reversed(store.events(task_id))
+            if event.kind == "pipeline.phase.started"
         )
-        observed["iteration_patch_saved"] = bool(iteration.patch_path)
-        observed["iteration_patch_has_worker_change"] = (
-            "-hello\n+changed by steward\n" in iteration_patch_text
-        )
-        observed["event_kind"] = validation_event.kind
-        observed["event_phase"] = validation_event.data["phase"]
-
         output = _config.logs_dir / task_id / "fake.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
@@ -5858,42 +5876,16 @@ def test_executor_marks_task_validation_running_before_gates(
         ]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    executor = StewardExecutor(config, store)
+    _advance_durable(executor, task.id, 3)
 
-    assert StewardExecutor(config, store).run_task(task.id)
-    assert observed == {
-        "status": TaskStatus.running,
-        "summary": "validation running: initial",
-        "task_patch_path": None,
-        "iteration_patch_saved": True,
-        "iteration_patch_has_worker_change": True,
-        "event_kind": "task.status",
-        "event_phase": "validation",
-    }
-
+    assert observed["status"] == TaskStatus.running
+    assert observed["phase"] == "validation"
 
 def test_executor_records_validation_results_incrementally(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'changed by steward\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
+    fake = _durable_codex(tmp_path)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -5912,14 +5904,12 @@ def test_executor_records_validation_results_incrementally(
         on_gate_result=None,
         command_runner=None,
     ):
-        assert label == "iteration-0"
         assert on_gate_start is not None
         assert on_gate_result is not None
         results = []
         for position, command in enumerate((["gate-0"], ["gate-1"])):
-            filename = f"gate-{position}.txt"
-            on_gate_start(position, filename, command)
-            output = _config.logs_dir / task_id / label / filename
+            on_gate_start(position, f"gate-{position}.txt", command)
+            output = _config.logs_dir / task_id / (label or "validation") / f"gate-{position}.txt"
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(f"gate {position}\n", encoding="utf-8")
             validation = ValidationResult(
@@ -5938,8 +5928,8 @@ def test_executor_records_validation_results_incrementally(
         return results
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
+    executor = StewardExecutor(config, store)
+    _advance_durable(executor, task.id, 3)
 
     assert observed == {
         "after_gate_0": [["gate-0"]],
@@ -5952,17 +5942,9 @@ def test_executor_records_validation_results_incrementally(
             .order_by(ValidationRow.position)
             .all()
         )
-    assert [json.loads(row.command_json) for row in rows] == [
-        ["gate-0"],
-        ["gate-1"],
-    ]
-    assert [row.iteration for row in rows] == [0, 0]
-    assert [row.position for row in rows] == [0, 1]
-    assert [row.passed for row in rows] == [True, True]
-    events = store.events(task.id)
-    assert [event.kind for event in events].count("validation.command_started") == 2
-    assert [event.kind for event in events].count("validation.command_finished") == 2
-
+    assert [json.loads(row.command_json) for row in rows][-2:] == [["gate-0"], ["gate-1"]]
+    assert {row.iteration for row in rows} == {0}
+    assert rows[-1].position == rows[-2].position + 1
 
 def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
     worktree = Path("/task/worktree")
@@ -6114,309 +6096,94 @@ def test_run_validation_applies_configured_timeout(
     assert "command timed out" in result.output_path.read_text(encoding="utf-8")
 
 
-def test_executor_retries_invalid_review_output(
+def test_executor_rejects_invalid_review_output(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  count_file=.review-count\n"
-        "  count=0\n"
-        '  [ -f "$count_file" ] && count=$(cat "$count_file")\n'
-        "  count=$((count + 1))\n"
-        '  printf "%s" "$count" > "$count_file"\n'
-        '  if [ "$count" = "1" ]; then\n'
-        "    printf '{\"verdict\":\"block\",\"summary\":\"Review not completed.\",\"findings\":[{\"severity\":\"critical\",\"title\":\"Invalid premature response\",\"file\":\"\",\"line\":null,\"detail\":\"Internal error: accidentally attempted final response prematurely.\",\"recommendation\":\"Ignore this response; continuing review would be required.\"}],\"validation_gaps\":[\"Review not completed.\"],\"remaining_risk\":\"Review not completed.\"}\\n' > \"$last\"\n"
-        "  else\n"
-        "    printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  fi\n"
-        "else\n"
-        "  printf 'changed by steward\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
+    fake = _durable_codex(tmp_path, review="not-json")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+    )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
+    executor = StewardExecutor(config, store)
+    assert not _drive_durable(executor, task.id)
     saved = store.get(task.id)
-    events = store.events(task.id)
-
-    assert saved.status == TaskStatus.succeeded
-    assert (config.transcripts_dir / task.id / "reviewer-0" / "last-message.md").exists()
-    assert (
-        config.transcripts_dir
-        / task.id
-        / "reviewer-0-retry-1"
-        / "last-message.md"
-    ).exists()
-    assert [event.kind for event in events].count("review.invalid_output") == 1
-    assert [event.kind for event in events].count("review.finished") == 1
-    invalid = next(event for event in events if event.kind == "review.invalid_output")
-    finished = next(event for event in events if event.kind == "review.finished")
-    assert invalid.data["retryable"] is True
-    assert invalid.data["review_run"] == 0
-    assert finished.data["review_run"] == 1
-
+    assert saved.status == TaskStatus.blocked
+    assert any(event.kind == "pipeline.review.raw" for event in store.events(task.id))
+    assert any(event.kind == "pipeline.blocked" for event in store.events(task.id))
 
 def test_executor_accepts_approved_review_with_validation_gaps(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok with gap\",\"findings\":[],\"validation_gaps\":[\"shellcheck unavailable\"],\"remaining_risk\":\"low\"}\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'changed by steward\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        "fi\n",
-        encoding="utf-8",
+    fake = _durable_codex(
+        tmp_path,
+        review='{"verdict":"approve","summary":"ok with gap","findings":[],"validation_gaps":["shellcheck unavailable"],"remaining_risk":"low"}',
     )
-    fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
+    )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
+    executor = StewardExecutor(config, store)
+    outcomes = _advance_durable(executor, task.id, 4)
+    assert outcomes[-1].next_phase.value == "integration"
+    assert any(
+        event.kind == "pipeline.phase.finished"
+        and event.data.get("output", {}).get("next_phase") == "integration"
+        for event in store.events(task.id)
+    )
+    assert not any(event.kind == "pipeline.formality.effective" for event in store.events(task.id))
 
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-
-    events = store.events(task.id)
-    assert store.get(task.id).status == TaskStatus.succeeded
-    assert [event.kind for event in events].count("review.finished") == 1
-    assert not any(event.kind == "worker.revision_requested" for event in events)
-
-
-def test_executor_push_main_queues_integration_task(
+def test_executor_push_main_uses_durable_commit_phase(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    run_command(["git", "init", "--bare", str(remote)], cwd=tmp_path, check=True)
-    run_command(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    run_command(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'changed by steward\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
+    fake = _durable_codex(tmp_path)
     config = config.__class__(
         **{
             **config.__dict__,
             "codex_bin": str(fake),
-            "integration_mode": IntegrationMode.push_main.value,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.custom,
-            worker=WorkerKind.custom,
-            title="T",
-            prompt="P",
-        )
-    )
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-    saved = store.get(task.id)
-    integration_tasks = [
-        item
-        for item in store.list_tasks()
-        if item.spec.worker == WorkerKind.integration_manager
-    ]
-
-    assert saved.status == TaskStatus.integrating
-    assert saved.patch_path is not None
-    assert len(integration_tasks) == 1
-    assert integration_tasks[0].status == TaskStatus.queued
-    assert integration_tasks[0].spec.metadata["source_task_id"] == task.id
-    assert any(event.kind == "integration.queued" for event in store.events(task.id))
-
-
-def test_integration_manager_local_only_commits_without_push(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
             "integration_mode": IntegrationMode.push_main.value,
             "local_only": True,
         }
     )
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    args_path = tmp_path / "commit-message-args.txt"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$@" > "{args_path}"\n'
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '%s\\n' '{\"subject\":\"fix(docs): record local integration\",\"body\":\"Record the local integration result without pushing it to the remote.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: local-source\"}' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
+    task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("local integration\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
     )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
+    executor = StewardExecutor(config, store)
+    assert _drive_durable(executor, task.id)
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.succeeded
+    assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
+    assert not any(
+        item.spec.worker == WorkerKind.integration_manager
+        for item in store.list_tasks()
+    )
 
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(integration.id)
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
+def test_durable_local_only_commit_does_not_push_remote(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, local_only=True
+    )
+    assert _drive_durable(executor, integration.id)
+    assert store.get(integration.id).status == TaskStatus.succeeded
+    assert store.get(source.id).status == TaskStatus.queued
     remote_text = subprocess.run(
         ["git", "show", "origin/main:README.md"],
         cwd=config.repo_root,
@@ -6424,258 +6191,50 @@ def test_integration_manager_local_only_commits_without_push(
         capture_output=True,
         text=True,
     ).stdout
-
-    assert saved_source.status == TaskStatus.succeeded
-    assert saved_integration.status == TaskStatus.succeeded
-    assert saved_integration.worktree_path is not None
-    assert saved_integration.branch_name is not None
-    assert not saved_integration.worktree_path.exists()
-    assert saved_integration.transcript_path is not None
-    transcript = saved_integration.transcript_path.read_text(encoding="utf-8")
-    assert "start: Integration run" in transcript
-    assert "validation: passed: fake" in transcript
-    assert "local_only: external writes disabled" in transcript
-    assert "local-only integration commit" in saved_source.summary
-    local_commit = saved_integration.summary.removeprefix(
-        "local-only integration commit "
-    )
-    assert (
-        git_branch_head(config.repo_root, saved_integration.branch_name)
-        == local_commit
-    )
     assert remote_text == "hello\n"
-    assert any(event.kind == "integration.local_only" for event in store.events(source.id))
-    assert any(
-        event.kind == "integration.commit_message_generated"
-        for event in store.events(source.id)
-    )
-    assert not any(event.kind == "main.pushed" for event in store.events(source.id))
+    assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
 
-
-def test_integration_manager_blocks_frozen_path_before_commit(
+def test_durable_validation_blocks_frozen_path_before_commit(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-            "path_policy": PathPolicyConfig(
-                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
-            ),
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '%s\\n' '{\"subject\":\"fix(docs): update integration fixture\",\"body\":\"Update README only.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\"}' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.feature,
-            worker=WorkerKind.feature_implementer,
-            title="T",
-            prompt="P",
-        )
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("integration source\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
+    config, store, _source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, frozen_paths=("flake.nix",)
     )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        output = _config.logs_dir / task_id / "fake.txt"
+    def gates(configured, task_id, cwd, **_kwargs):
+        output = configured.logs_dir / task_id / "frozen.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("ok\n", encoding="utf-8")
         (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
+        return [ValidationResult(command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output)]
 
-    def fail_commit(_self, _path, _message, _body="", *, expected_tree=None):
-        pytest.fail("commit should not run after a frozen path change")
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
+    assert not _drive_durable(executor, integration.id)
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "frozen paths changed: flake.nix"
+    assert not any(event.kind == "pipeline.commit" for event in store.events(integration.id))
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-    monkeypatch.setattr(
-        "coquic_steward.execution.worktree.Worktrees.commit_all", fail_commit
-    )
-
-    assert not StewardExecutor(config, store).run_task(integration.id)
-
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    remote_text = subprocess.run(
-        ["git", "show", "origin/main:README.md"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-
-    assert saved_source.status == TaskStatus.blocked
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_source.summary == "frozen paths changed: flake.nix"
-    assert saved_integration.summary == "frozen paths changed: flake.nix"
-    assert remote_text == "hello\n"
-    assert any(event.kind == "path_policy.blocked" for event in store.events(source.id))
-
-
-def test_integration_manager_blocks_frozen_path_before_validation_repair(
+def test_durable_validation_blocks_frozen_path_before_repair_child(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-            "path_policy": PathPolicyConfig(
-                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
-            ),
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf 'unexpected repair\\n' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.feature,
-            worker=WorkerKind.feature_implementer,
-            title="T",
-            prompt="P",
-        )
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("integration source\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    source.patch_path = config.patches_dir / f"{source.id}.patch"
-    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
-    Worktrees(config).save_patch(worktree, source.patch_path)
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(source.patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
+    config, store, _source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, frozen_paths=("flake.nix",)
     )
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        output = _config.logs_dir / task_id / "fake.txt"
+    def gates(configured, task_id, cwd, **_kwargs):
+        output = configured.logs_dir / task_id / "frozen-failure.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("failed\n", encoding="utf-8")
         (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"],
-                cwd=cwd,
-                passed=False,
-                exit_code=1,
-                output_path=output,
-                summary="failed",
-            )
-        ]
+        return [ValidationResult(command=["fake"], cwd=cwd, passed=False, exit_code=1, output_path=output)]
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert not StewardExecutor(config, store).run_task(integration.id)
-
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    events = store.events(source.id)
-
-    assert saved_source.status == TaskStatus.blocked
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_source.summary == "frozen paths changed: flake.nix"
-    assert saved_integration.summary == "frozen paths changed: flake.nix"
-    assert any(event.kind == "path_policy.blocked" for event in events)
-    assert not any(event.kind == "integration.validation_failed" for event in events)
-    assert not any(event.kind == "worker.validation_revision_requested" for event in events)
-    assert not any(event.kind == "integration.retry_requested" for event in events)
-
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
+    assert not _drive_durable(executor, integration.id)
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "frozen paths changed: flake.nix"
+    assert len(store.list_pipelines(integration.id)) == 1
 
 def test_integration_status_parse_failure_blocks_only_integration_task(
     config: StewardConfig, monkeypatch
@@ -6993,285 +6552,52 @@ def test_parse_commit_message_rejects_invalid_subject() -> None:
     )
 
 
-def test_integration_manager_serializes_push_to_main(
+def test_durable_push_persists_transport_retry_before_success(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=config.repo_root, check=True)
-    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    args_path = tmp_path / "commit-message-args.txt"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$@" > "{args_path}"\n'
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '%s\\n' '{\"subject\":\"fix(docs): describe integration output\",\"body\":\"Update the README integration output so the pushed patch describes the resulting repository state.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: source-task\"}' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.custom,
-            worker=WorkerKind.custom,
-            title="T",
-            prompt="P",
-        )
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("integrated\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    config, store, source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
     real_push = Worktrees.push_head_to_main
-    push_attempts = 0
-    push_delays: list[float] = []
+    attempts = 0
 
-    def transient_push(self, path):
-        nonlocal push_attempts
-        push_attempts += 1
-        if push_attempts == 1:
+    def transient_push(worktrees, path):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
             raise RuntimeError("Could not resolve host: github.com")
-        return real_push(self, path)
+        return real_push(worktrees, path)
 
     monkeypatch.setattr(Worktrees, "push_head_to_main", transient_push)
-    monkeypatch.setattr(
-        "coquic_steward.execution.executor.time.sleep",
-        lambda delay: push_delays.append(delay),
-    )
+    assert _drive_durable(executor, integration.id)
 
-    assert StewardExecutor(config, store).run_task(integration.id)
-    pushed_source = store.get(source.id)
-    pushed_integration = store.get(integration.id)
-    remote_text = subprocess.run(
-        ["git", "show", "origin/main:README.md"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    remote_commit_message = subprocess.run(
-        ["git", "log", "-1", "--pretty=%B", "origin/main"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    saved = store.get(integration.id)
+    events = store.events(integration.id)
+    assert saved.status == TaskStatus.pushed
+    assert attempts == 2
+    assert any(event.kind == "pipeline.push.retry" for event in events)
+    assert any(event.kind == "pipeline.push" for event in events)
+    assert not any(event.kind == "github.issue_closed" for event in store.events(source.id))
 
-    assert pushed_source.status == TaskStatus.pushed
-    assert pushed_integration.status == TaskStatus.pushed
-    assert pushed_integration.worktree_path is not None
-    assert pushed_integration.branch_name is not None
-    assert not pushed_integration.worktree_path.exists()
-    assert not git_branch_exists(config.repo_root, pushed_integration.branch_name)
-    assert remote_text == "integrated\n"
-    assert remote_commit_message.startswith("fix(docs): describe integration output\n")
-    assert "Source task: source-task" in remote_commit_message
-    assert (
-        f"Steward-Task: {source.id}"
-        in remote_commit_message
-    )
-    assert "Changed files:\n- README.md" in remote_commit_message
-    commit_args = args_path.read_text(encoding="utf-8").splitlines()
-    assert commit_args[commit_args.index("--cd") + 1] == str(
-        pushed_integration.worktree_path
-    )
-    assert "--skip-git-repo-check" not in commit_args
-    push_log = config.logs_dir / integration.id / "git-push.txt"
-    assert push_log.exists()
-    assert "$ git push origin HEAD:main" in push_log.read_text(encoding="utf-8")
-    assert any(event.kind == "integration.started" for event in store.events(source.id))
-    assert any(
-        event.kind == "integration.commit_message_generated"
-        for event in store.events(source.id)
-    )
-    retry_event = next(
-        event
-        for event in store.events(source.id)
-        if event.kind == "integration.push_retry"
-    )
-    assert retry_event.data["attempt"] == 1
-    assert push_attempts == 2
-    assert push_delays == [5.0]
-    assert any(event.kind == "main.pushed" for event in store.events(source.id))
-
-
-def test_integration_manager_preserves_branch_when_push_fails(
+def test_durable_push_blocks_after_bounded_transport_failures(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '%s\\n' '{\"subject\":\"fix(docs): keep failed push commit\",\"body\":\"Keep the integration commit available when pushing fails.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: source-task\"}' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("push failure integration\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
+    config, store, source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    attempts = 0
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-    push_attempts = 0
-    push_delays: list[float] = []
-
-    def fail_transient_push(_self, _path):
-        nonlocal push_attempts
-        push_attempts += 1
+    def fail_push(_worktrees, _path):
+        nonlocal attempts
+        attempts += 1
         raise RuntimeError("Could not resolve host: github.com")
 
-    monkeypatch.setattr(Worktrees, "push_head_to_main", fail_transient_push)
-    monkeypatch.setattr(
-        "coquic_steward.execution.executor.time.sleep",
-        lambda delay: push_delays.append(delay),
-    )
+    monkeypatch.setattr(Worktrees, "push_head_to_main", fail_push)
+    assert not _drive_durable(executor, integration.id)
 
-    assert not StewardExecutor(config, store).run_task(integration.id)
-    failed_source = store.get(source.id)
-    failed_integration = store.get(integration.id)
-    push_event = next(
-        event
-        for event in store.events(source.id)
-        if event.kind == "integration.push_failed"
-    )
-
-    assert failed_source.status == TaskStatus.failed
-    assert failed_integration.status == TaskStatus.failed
-    assert failed_integration.summary == "push failed"
-    assert failed_integration.worktree_path is not None
-    assert failed_integration.branch_name is not None
-    assert not failed_integration.worktree_path.exists()
-    assert (
-        git_branch_head(config.repo_root, failed_integration.branch_name)
-        == push_event.data["commit"]
-    )
-    retry_events = [
-        event
-        for event in store.events(source.id)
-        if event.kind == "integration.push_retry"
-    ]
-    assert push_attempts == 3
-    assert push_delays == [5.0, 20.0]
-    assert len(retry_events) == 2
-    assert push_event.data["retry_count"] == 2
-    assert push_event.data["retryable"] is True
-    assert not any(event.kind == "main.pushed" for event in store.events(source.id))
-
+    saved = store.get(integration.id)
+    events = store.events(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert attempts == 2
+    assert any(event.kind == "pipeline.push.failure" for event in events)
+    assert not any(event.kind == "pipeline.push" for event in events)
+    assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
 
 def test_push_retry_classification_excludes_remote_rejection() -> None:
     assert _is_transient_push_failure("Could not resolve host: github.com")
@@ -7280,1255 +6606,276 @@ def test_push_retry_classification_excludes_remote_rejection() -> None:
     assert not _is_transient_push_failure("non-fast-forward update rejected")
 
 
-def test_integration_manager_closes_feature_issue_after_push(
+def test_durable_push_closes_one_feature_issue_after_push(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=config.repo_root, check=True)
-    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '%s\\n' '{\"subject\":\"feat(api): add datagram sender\",\"body\":\"Add the datagram sender requested by the selected issue.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: source-task\"}' > \"$last\"\n",
-        encoding="utf-8",
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
     )
-    fake.chmod(0o755)
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "codex_bin": str(fake),
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.feature,
-            worker=WorkerKind.feature_implementer,
-            title="Implement #42 Add QUIC DATAGRAM send API",
-            prompt="P",
-            metadata={
-                "source_context": {
-                    "selected_signal_items": [
-                        {
-                            "id": "wi-feature-42",
-                            "provider": "github-issues:features",
-                            "kind": "github-issues.feature-request",
-                            "payload": {
-                                "issue_number": 42,
-                                "issue_url": "https://github.com/minhuw/coquic/issues/42",
-                            },
-                        }
-                    ]
-                }
-            },
-        )
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("feature integrated\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate feature",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id, "dedupe_key": f"integration:{source.id}"},
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
     commands: list[list[str]] = []
 
     def fake_run_command(command, cwd, *, timeout=None, **_kwargs):
         commands.append(command)
         return CommandResult(command, cwd, 0, "", "")
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
     monkeypatch.setattr("coquic_steward.execution.executor.run_command", fake_run_command)
-
-    assert StewardExecutor(config, store).run_task(integration.id)
+    assert _drive_durable(executor, integration.id)
 
     comment = next(command for command in commands if command[:3] == ["gh", "issue", "comment"])
     close = next(command for command in commands if command[:3] == ["gh", "issue", "close"])
-    assert comment[:6] == ["gh", "issue", "comment", "42", "-R", "minhuw/coquic"]
+    assert comment[3] == "42"
     assert "Source task: " + source.id in comment[comment.index("--body") + 1]
-    assert close == [
-        "gh",
-        "issue",
-        "close",
-        "42",
-        "-R",
-        "minhuw/coquic",
-        "--reason",
-        "completed",
-    ]
+    assert close[3] == "42"
     assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+    transcript = store.get(integration.id).transcript_path
+    assert transcript is not None and "issue_closed: #42" in transcript.read_text(encoding="utf-8")
 
-
-def test_integration_manager_keeps_push_when_feature_issue_close_fails(
+def test_durable_ambiguous_push_also_closes_feature_issue(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    source = TaskRecord(
-        spec=TaskSpec(
-            kind=TaskKind.feature,
-            worker=WorkerKind.feature_implementer,
-            title="Feature",
-            prompt="P",
-            metadata={
-                "source_context": {
-                    "selected_signal_items": [
-                        {
-                            "kind": "github-issues.feature-request",
-                            "payload": {"issue_number": 42},
-                        }
-                    ]
-                }
-            },
-        )
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
     )
-    task = TaskRecord(
-        spec=TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate",
-            prompt="P",
-        )
-    )
-    store = TaskStore.create(config.db_path)
-    saved_source, _ = store.add_task(source.spec)
-    saved_task, _ = store.add_task(task.spec)
-    transcript_messages: list[tuple[str, str]] = []
+    real_push = Worktrees.push_head_to_main
+    real_command = run_command
+    commands: list[list[str]] = []
 
-    class Transcript:
-        def write(self, stage: str, message: str) -> None:
-            transcript_messages.append((stage, message))
+    def push_then_report_ambiguity(worktrees, path):
+        result = real_push(worktrees, path)
+        raise RuntimeError("connection lost after remote accepted the push")
 
-    def fake_run_command(command, cwd, *, timeout=None, **_kwargs):
-        return CommandResult(command, cwd, 1, "", "api unavailable")
+    def command(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            commands.append(command)
+            return CommandResult(command, cwd, 0, "", "")
+        return real_command(command, cwd, timeout=timeout, **_kwargs)
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_command", fake_run_command)
+    monkeypatch.setattr(Worktrees, "push_head_to_main", push_then_report_ambiguity)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
+    assert _drive_durable(executor, integration.id)
 
-    StewardExecutor(config, store)._update_feature_issues_after_push(
-        saved_task, saved_source, "abc123", Transcript()
+    events = store.events(integration.id)
+    assert any(event.kind == "pipeline.push.ambiguous_resolved" for event in events)
+    assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+    assert [item[0:3] for item in commands] == [
+        ["gh", "issue", "comment"],
+        ["gh", "issue", "close"],
+    ]
+    transcript = store.get(integration.id).transcript_path
+    assert transcript is not None and transcript.is_file()
+
+
+def test_durable_push_remains_pushed_when_feature_issue_update_fails(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
     )
 
-    assert ("issue_update_failed", "#42 comment: api unavailable") in transcript_messages
+    real_command = run_command
+
+    def failed_command(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            return CommandResult(command, cwd, 1, "", "api unavailable")
+        return real_command(command, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", failed_command)
+    assert _drive_durable(executor, integration.id)
+
+    assert store.get(integration.id).status == TaskStatus.pushed
     event = next(
-        event
-        for event in store.events(saved_source.id)
-        if event.kind == "github.issue_update_failed"
+        event for event in store.events(source.id) if event.kind == "github.issue_update_failed"
     )
     assert event.data["issue_number"] == 42
     assert event.data["step"] == "comment"
+    transcript = store.get(integration.id).transcript_path
+    assert transcript is not None and "issue_update_failed: #42 comment" in transcript.read_text(encoding="utf-8")
 
-
-def test_integration_manager_skips_feature_issue_close_for_multiple_issues(
-    config: StewardConfig, monkeypatch
+def test_durable_push_skips_multiple_feature_issues(
+    config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    source = TaskRecord(
-        spec=TaskSpec(
-            kind=TaskKind.feature,
-            worker=WorkerKind.feature_implementer,
-            title="Feature",
-            prompt="P",
-            metadata={
-                "source_context": {
-                    "selected_signal_items": [
-                        {
-                            "kind": "github-issues.feature-request",
-                            "payload": {"issue_number": 42},
-                        },
-                        {
-                            "kind": "github-issues.feature-request",
-                            "payload": {"issue_number": 43},
-                        },
-                    ]
-                }
-            },
-        )
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42, 43)
     )
-    task = TaskRecord(
-        spec=TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate",
-            prompt="P",
-        )
-    )
-    store = TaskStore.create(config.db_path)
-    saved_source, _ = store.add_task(source.spec)
-    saved_task, _ = store.add_task(task.spec)
-    transcript_messages: list[tuple[str, str]] = []
+    commands: list[list[str]] = []
 
-    class Transcript:
-        def write(self, stage: str, message: str) -> None:
-            transcript_messages.append((stage, message))
+    real_command = run_command
 
-    monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_command",
-        lambda *_args, **_kwargs: pytest.fail("issue close should be skipped"),
-    )
+    def unexpected_command(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            commands.append(command)
+            pytest.fail("multiple selected feature issues must not invoke GitHub")
+        return real_command(command, cwd, timeout=timeout, **_kwargs)
 
-    StewardExecutor(config, store)._update_feature_issues_after_push(
-        saved_task, saved_source, "abc123", Transcript()
-    )
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_command)
+    assert _drive_durable(executor, integration.id)
 
-    assert transcript_messages == [
-        (
-            "issue_update_skipped",
-            "multiple selected feature issues; skipping automatic close",
-        )
-    ]
     event = next(
-        event
-        for event in store.events(saved_source.id)
-        if event.kind == "github.issue_update_skipped"
+        event for event in store.events(source.id) if event.kind == "github.issue_update_skipped"
     )
     assert event.data["issue_count"] == 2
+    assert commands == []
+    transcript = store.get(integration.id).transcript_path
+    assert transcript is not None and "issue_update_skipped" in transcript.read_text(encoding="utf-8")
 
-
-def test_integration_manager_skips_terminal_source_task(
-    config: StewardConfig,
-) -> None:
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    store.finish_task(source.id, TaskStatus.failed, "source task failed")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id},
-        )
-    )
-
-    assert StewardExecutor(config, store).run_task(integration.id)
-
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    assert saved_source.status == TaskStatus.failed
-    assert saved_source.summary == "source task failed"
-    assert saved_integration.status == TaskStatus.no_changes
-    assert "integration source already failed" in saved_integration.summary
-    assert any(event.kind == "integration.skipped" for event in store.events(source.id))
-
-
-def test_integration_manager_fails_on_invalid_commit_message(
+def test_durable_push_blocks_without_explicit_source_metadata(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=config.repo_root, check=True)
-    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
-    fake = tmp_path / "codex"
-    args_path = tmp_path / "invalid-commit-message-args.txt"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$@" > "{args_path}"\n'
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '{\"subject\":\"not conventional\",\"body\":\"Body\"}\\n' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "codex_bin": str(fake),
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.code_quality,
-            worker=WorkerKind.code_quality_janitor,
-            title="Fix a focused batch of current Codacy findings",
-            prompt="P",
-        )
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("message failure\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    task = store.get(integration.id)
+    task.spec.metadata.pop("source_task_id", None)
+    store.save(task)
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        output = _config.logs_dir / task_id / "fake.txt"
+    assert not _drive_durable(executor, integration.id)
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "integration source task missing"
+    assert not any(event.kind.startswith("github.issue_") for event in store.events(integration.id))
+
+def test_durable_commit_message_failure_blocks_before_push(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    original_run = executor.runner.run
+
+    def invalid_commit_message(task, prompt, cwd, **kwargs):
+        result = original_run(task, prompt, cwd, **kwargs)
+        stage = kwargs.get("stage")
+        if getattr(stage, "value", stage) == "commit_message":
+            result.final_message = '{"subject":"not conventional","body":"Body"}'
+        return result
+
+    monkeypatch.setattr(executor.runner, "run", invalid_commit_message)
+    assert not _drive_durable(executor, integration.id)
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "commit message generation failed"
+    assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
+
+def test_durable_integration_phase_preserves_child_pipeline_boundaries(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    outcomes = _advance_durable(executor, integration.id, 4)
+    assert outcomes[-1].next_phase.value == "integration"
+    assert len(store.list_pipelines(integration.id)) == 1
+    assert not any(event.kind == "integration.retry_requested" for event in store.events(integration.id))
+
+def test_durable_integration_phase_uses_persisted_validation_boundary(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    outcomes = _advance_durable(executor, integration.id, 3)
+    assert outcomes[-1].next_phase.value == "review"
+    assert any(event.kind == "pipeline.validation.result" for event in store.events(integration.id))
+
+def test_durable_integration_phase_records_accepted_tree_identity(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    _advance_durable(executor, integration.id, 4)
+    pipeline = store.list_pipelines(integration.id)[0]
+    assert pipeline.output_identity
+    assert pipeline.patch_identity
+    assert pipeline.phase == "integration"
+
+def test_durable_integration_validation_failure_creates_repair_child(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+
+    def failing_gates(configured, task_id, cwd, **_kwargs):
+        output = configured.logs_dir / task_id / "integration-failed.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
+        output.write_text("integration gate failed\n", encoding="utf-8")
         return [
             ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+                command=["fake"], cwd=cwd, passed=False, exit_code=1,
+                output_path=output, summary="integration gate failed"
             )
         ]
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
+    outcomes = _advance_durable(executor, integration.id, 3)
+    assert outcomes[-1].status == "child_pipeline"
+    assert store.list_pipelines(integration.id)[-1].trigger == "validation-repair"
 
-    assert not StewardExecutor(config, store).run_task(integration.id)
-    remote_text = subprocess.run(
-        ["git", "show", "origin/main:README.md"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    events = store.events(source.id)
-
-    assert saved_source.status == TaskStatus.failed
-    assert saved_source.summary == "commit message generation failed"
-    assert saved_integration.status == TaskStatus.failed
-    assert saved_integration.summary == "commit message generation failed"
-    assert remote_text != "message failure\n"
-    commit_args = args_path.read_text(encoding="utf-8").splitlines()
-    assert commit_args[commit_args.index("--cd") + 1] == str(
-        saved_integration.worktree_path
-    )
-    assert "--skip-git-repo-check" not in commit_args
-    assert any(event.kind == "integration.commit_message_failed" for event in events)
-    assert not any(event.kind == "main.pushed" for event in events)
-
-
-def test_integration_conflict_returns_to_worker_then_queues_retry(
+def test_durable_commit_failure_blocks_without_push(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=config.repo_root, check=True)
-    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        'case "$last" in\n'
-        '  */reviewer-*) mode=review;;\n'
-        '  */worker-integration-revision-*) mode=revision;;\n'
-        "esac\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        'elif [ "$mode" = "revision" ]; then\n'
-        "  printf 'current main\\nrepaired change\\n' > README.md\n"
-        "  printf 'integration repair done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'old base\\nworker change\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    old_base = Worktrees(config).create(source)[0]
-    (old_base / "README.md").write_text("old base\nworker change\n", encoding="utf-8")
-    source = store.get(source.id)
-    source.worktree_path = old_base
-    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
-    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
-    Worktrees(config).save_patch(old_base, source.patch_path)
-    store.save(source)
-    source = store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(source.patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-    subprocess.run(
-        ["git", "checkout", "main"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    (config.repo_root / "README.md").write_text("current main\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=config.repo_root, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "test: move main"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(["git", "push", "origin", "main"], cwd=config.repo_root, check=True)
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / (label or "integration") / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(integration.id)
-
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    integration_tasks = [
-        item
-        for item in store.list_tasks()
-        if item.spec.worker == WorkerKind.integration_manager
-    ]
-    events = store.events(source.id)
-
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_source.status == TaskStatus.integrating
-    assert saved_source.patch_path is not None
-    assert "repaired change" in saved_source.patch_path.read_text(encoding="utf-8")
-    assert len(integration_tasks) == 2
-    assert any(item.status == TaskStatus.queued for item in integration_tasks)
-    assert any(event.kind == "integration.conflict" for event in events)
-    assert any(event.kind == "worker.integration_revision_requested" for event in events)
-    assert any(event.kind == "integration.retry_requested" for event in events)
-    call_log = calls.read_text(encoding="utf-8")
-    assert "resume" not in call_log
-    assert "worker-integration-revision-1" in call_log
-
-
-def test_integration_reset_failure_blocks_without_conflict_repair(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree, _ = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("reset failure change\n", encoding="utf-8")
-    source = store.get(source.id)
-    source.worktree_path = worktree
-    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
-    Worktrees(config).save_patch(worktree, source.patch_path)
-    store.save(source)
-    source = store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(source.patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-
-    def fail_reset(_self, _path):
-        raise RuntimeError("git fetch origin main failed")
-
-    monkeypatch.setattr(
-        "coquic_steward.execution.worktree.Worktrees.reset_to_main",
-        fail_reset,
-    )
-
-    assert not StewardExecutor(config, store).run_task(integration.id)
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    events = store.events(source.id)
-
-    assert saved_source.status == TaskStatus.blocked
-    assert saved_source.summary == "integration reset failed"
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_integration.summary == "integration reset failed"
-    assert any(event.kind == "integration.reset_failed" for event in events)
-    assert not any(event.kind == "integration.conflict" for event in events)
-    assert not any(
-        event.kind == "worker.integration_revision_requested" for event in events
-    )
-
-
-def test_integration_conflict_no_changes_marks_source_no_changes(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf 'already on main\\n' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    old_base = Worktrees(config).create(source)[0]
-    (old_base / "README.md").write_text("old base\nworker change\n", encoding="utf-8")
-    source = store.get(source.id)
-    source.worktree_path = old_base
-    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
-    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
-    Worktrees(config).save_patch(old_base, source.patch_path)
-    store.save(source)
-    source = store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(source.patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-    subprocess.run(
-        ["git", "checkout", "main"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    (config.repo_root / "README.md").write_text(
-        "old base\nworker change\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "add", "README.md"], cwd=config.repo_root, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "test: apply equivalent change"],
-        cwd=config.repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(["git", "push", "origin", "main"], cwd=config.repo_root, check=True)
-
-    assert StewardExecutor(config, store).run_task(integration.id)
-
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    integration_tasks = [
-        item
-        for item in store.list_tasks()
-        if item.spec.worker == WorkerKind.integration_manager
-    ]
-    events = store.events(source.id)
-
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_source.status == TaskStatus.no_changes
-    assert saved_source.summary == "worker produced no source changes"
-    assert len(integration_tasks) == 1
-    assert any(event.kind == "integration.conflict" for event in events)
-    assert any(event.kind == "worker.integration_revision_requested" for event in events)
-    assert not any(event.kind == "integration.retry_requested" for event in events)
-    call_log = calls.read_text(encoding="utf-8")
-    assert "resume" not in call_log
-    assert "worker-integration-revision-1" in call_log
-
-
-def test_integration_validation_failure_returns_to_worker_then_queues_retry(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)],
-        cwd=config.repo_root,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        'case "$last" in\n'
-        '  */reviewer-*) mode=review;;\n'
-        '  */worker-validation-revision-*) mode=revision;;\n'
-        "esac\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        'elif [ "$mode" = "revision" ]; then\n'
-        "  printf 'validation repaired\\n' > README.md\n"
-        "  printf 'integration validation repair done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'needs integration validation repair\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text(
-        "needs integration validation repair\n", encoding="utf-8"
-    )
-    source.worktree_path = worktree
-    source.branch_name = branch
-    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
-    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
-    Worktrees(config).save_patch(worktree, source.patch_path)
-    store.save(source)
-    source = store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(source.patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-    gate_runs = 0
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        nonlocal gate_runs
-
-        gate_runs += 1
-        output = _config.logs_dir / task_id / (label or "integration") / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        if label is None:
-            output.write_text("failed\n", encoding="utf-8")
-            return [
-                ValidationResult(
-                    command=["fake"],
-                    cwd=cwd,
-                    passed=False,
-                    exit_code=1,
-                    output_path=output,
-                    summary="integration gate failed",
-                )
-            ]
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(integration.id)
-
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    integration_tasks = [
-        item
-        for item in store.list_tasks()
-        if item.spec.worker == WorkerKind.integration_manager
-    ]
-    events = store.events(source.id)
-
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_integration.summary == "validation failed after rebase"
-    assert saved_source.status == TaskStatus.integrating
-    assert saved_source.patch_path is not None
-    assert "validation repaired" in saved_source.patch_path.read_text(encoding="utf-8")
-    assert len(integration_tasks) == 2
-    assert any(item.status == TaskStatus.queued for item in integration_tasks)
-    assert any(event.kind == "integration.validation_failed" for event in events)
-    assert any(event.kind == "worker.validation_revision_requested" for event in events)
-    assert any(event.kind == "integration.retry_requested" for event in events)
-    call_log = calls.read_text(encoding="utf-8")
-    assert "resume" not in call_log
-    assert "worker-validation-revision-1" in call_log
-    assert gate_runs == 2
-
-
-def test_integration_manager_records_commit_failure_without_crashing(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    remote = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", str(remote)], cwd=config.repo_root, check=True
-    )
-    subprocess.run(
-        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
-    )
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
-        }
-    )
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    fake = tmp_path / "codex"
-    fake.write_text(
-        "#!/bin/sh\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        "printf '%s\\n' '{\"subject\":\"fix(docs): update commit failure fixture\",\"body\":\"Update the README fixture before exercising the mocked commit failure.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: failure-source\"}' > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("commit hook failure\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    patch_path = config.patches_dir / f"{source.id}.patch"
-    Worktrees(config).save_patch(worktree, patch_path)
-    source.patch_path = patch_path
-    store.save(source)
-    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={
-                "source_task_id": source.id,
-                "source_patch_path": str(patch_path),
-                "dedupe_key": f"integration:{source.id}",
-            },
-        ),
-        dedupe_key=f"integration:{source.id}",
-    )
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
+    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
 
     def fail_commit(_self, _path, _message, _body="", *, expected_tree=None):
         raise RuntimeError("commit hook failed")
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    monkeypatch.setattr("coquic_steward.execution.worktree.Worktrees.commit_all", fail_commit)
+    assert not _drive_durable(executor, integration.id)
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert any(event.kind == "pipeline.blocked" for event in store.events(integration.id))
+    assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
+
+def test_executor_routes_blocking_review_to_durable_formality(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = _durable_codex(
+        tmp_path,
+        review='{"verdict":"block","summary":"needs revision","findings":[{"severity":"high","title":"bad","file":"README.md","line":1,"detail":"bad text","recommendation":"fix it"}],"validation_gaps":[],"remaining_risk":""}',
+    )
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
     monkeypatch.setattr(
-        "coquic_steward.execution.worktree.Worktrees.commit_all", fail_commit
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
     )
 
-    assert not StewardExecutor(config, store).run_task(integration.id)
-    failed_source = store.get(source.id)
-    failed_integration = store.get(integration.id)
+    executor = StewardExecutor(config, store)
+    outcomes = _advance_durable(executor, task.id, 4)
+    assert outcomes[-1].next_phase.value == "formality"
+    assert any(event.kind == "pipeline.review.raw" for event in store.events(task.id))
+    assert not any(event.kind == "pipeline.review.failure" for event in store.events(task.id))
 
-    assert failed_source.status == TaskStatus.failed
-    assert failed_source.summary == "commit failed"
-    assert failed_integration.status == TaskStatus.failed
-    assert failed_integration.transcript_path is not None
-    assert "commit_failed: commit hook failed" in failed_integration.transcript_path.read_text(
-        encoding="utf-8"
-    )
-    assert any(
-        event.kind == "integration.commit_failed" for event in store.events(source.id)
-    )
-
-
-def test_executor_routes_blocking_review_back_to_worker_session(
+def test_executor_persists_durable_iteration_as_first_class_record(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
+    fake = _durable_codex(tmp_path, change="initial change")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        'case "$last" in\n'
-        '  */reviewer-*) mode=review;;\n'
-        '  */worker-revision-*) mode=revision;;\n'
-        "esac\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  count_file=.review-count\n"
-        "  count=0\n"
-        '  [ -f "$count_file" ] && count=$(cat "$count_file")\n'
-        "  count=$((count + 1))\n"
-        '  printf "%s" "$count" > "$count_file"\n'
-        '  if [ "$count" = "1" ]; then\n'
-        "    printf '{\"verdict\":\"block\",\"summary\":\"needs revision\",\"findings\":[{\"severity\":\"high\",\"title\":\"bad\",\"file\":\"README.md\",\"line\":1,\"detail\":\"bad text\",\"recommendation\":\"fix it\"}],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  else\n"
-        "    printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  fi\n"
-        'elif [ "$mode" = "revision" ]; then\n'
-        f'  printf "%s\\n" "$last" > "{tmp_path / "revision-last-path.txt"}"\n'
-        f'  python - <<\'PY\'\nimport sqlite3\nrow = sqlite3.connect("{config.db_path}").execute("select status, transcript_path from tasks where id=?", ("{task.id}",)).fetchone()\nopen("{tmp_path / "revision-active-status.txt"}", "w", encoding="utf-8").write(row[0] if row else "")\nopen("{tmp_path / "revision-active-path.txt"}", "w", encoding="utf-8").write(row[1] if row else "")\nPY\n'
-        "  printf 'changed after review\\n' > README.md\n"
-        "  printf 'revision done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'changed before review\\n' > README.md\n"
-        "  printf 'done\\n' > \"$last\"\n"
-        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
-        "fi\n",
-        encoding="utf-8",
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
     )
-    fake.chmod(0o755)
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        from coquic_steward.core.models import ValidationResult
-
-        output = _config.logs_dir / task_id / f"fake-{len(store.get(task_id).validations)}.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("ok\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.succeeded
-    assert saved.patch_path is not None
-    assert "changed after review" in saved.patch_path.read_text(encoding="utf-8")
-    assert saved.spec.metadata["worker_thread_id"] == "worker-thread-1"
-    call_log = calls.read_text(encoding="utf-8")
-    assert "resume" not in call_log
-    assert "worker-thread-1" not in call_log
-    events = store.events(task.id)
-    assert [event.kind for event in events].count("review.finished") == 2
-    assert any(event.kind == "worker.revision_requested" for event in events)
-    assert "worker-revision-1" in (tmp_path / "revision-last-path.txt").read_text(encoding="utf-8")
-    assert (
-        tmp_path / "revision-active-status.txt"
-    ).read_text(encoding="utf-8") == TaskStatus.running.value
-    assert "worker-revision-1" in (tmp_path / "revision-active-path.txt").read_text(encoding="utf-8")
-
-
-def test_executor_persists_iterations_as_first_class_records(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    fake = tmp_path / "codex"
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  count_file=.review-count\n"
-        "  count=0\n"
-        '  [ -f "$count_file" ] && count=$(cat "$count_file")\n'
-        "  count=$((count + 1))\n"
-        '  printf "%s" "$count" > "$count_file"\n'
-        '  if [ "$count" = "1" ]; then\n'
-        "    printf '{\"verdict\":\"block\",\"summary\":\"needs revision\",\"findings\":[{\"severity\":\"high\",\"title\":\"bad\",\"file\":\"README.md\",\"line\":1,\"detail\":\"bad\",\"recommendation\":\"fix\"}],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  else\n"
-        "    printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  fi\n"
-        'elif [ "$mode" = "revision" ]; then\n'
-        "  printf 'revision fixed\\n' > README.md\n"
-        "  printf 'revision done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'initial change\\n' > README.md\n"
-        "  printf 'initial done\\n' > \"$last\"\n"
-        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
-    gate_runs = 0
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        nonlocal gate_runs
-        from coquic_steward.core.models import ValidationResult
-
-        gate_runs += 1
-        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(f"gate {gate_runs}\n", encoding="utf-8")
-        validation = ValidationResult(
-            command=["fake"],
-            cwd=cwd,
-            passed=True,
-            exit_code=0,
-            output_path=output,
-        )
-        if on_gate_start is not None:
-            on_gate_start(0, output.name, validation.command)
-        if on_gate_result is not None:
-            on_gate_result(0, validation)
-        return [validation]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-
+    executor = StewardExecutor(config, store)
+    assert _drive_durable(executor, task.id)
     iterations = store.iterations(task.id)
-    assert [item.iteration for item in iterations] == [0, 1]
-    assert iterations[0].worker_name == "worker"
-    assert iterations[0].reviewer_name == "reviewer-0"
-    assert iterations[0].review_json is not None
-    assert iterations[0].review_json["verdict"] == "block"
+    assert [item.iteration for item in iterations] == [0]
     assert iterations[0].patch_path is not None
-    assert iterations[0].patch_path.name == "iteration-0.patch"
-    assert iterations[1].worker_name == "worker-revision-1"
-    assert iterations[1].reviewer_name == "reviewer-1"
-    assert iterations[1].review_json is not None
-    assert iterations[1].review_json["verdict"] == "approve"
-    assert iterations[1].patch_path is not None
-    assert iterations[1].patch_path.name == "iteration-1.patch"
+    review = next(event for event in store.events(task.id) if event.kind == "pipeline.review.raw")
+    assert review.data["review"]["verdict"] == "approve"
+    assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
 
-    saved = store.get(task.id)
-    assert [validation.iteration for validation in saved.validations] == [0, 1]
-    assert saved.validations[0].output_path.parent.name == "iteration-0"
-    assert saved.validations[1].output_path.parent.name == "iteration-1"
-
-    with Session(store.engine) as session:
-        assert session.query(TaskIterationRow).filter_by(task_id=task.id).count() == 2
-        assert {
-            row.iteration for row in session.query(ValidationRow).filter_by(task_id=task.id)
-        } == {0, 1}
-
-
-def test_executor_routes_validation_failure_back_to_worker_session(
+def test_executor_routes_validation_failure_to_durable_child_pipeline(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
+    fake = _durable_codex(tmp_path, change="bad")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        'case "$last" in\n'
-        '  */reviewer-*) mode=review;;\n'
-        '  */worker-validation-revision-*) mode=validation;;\n'
-        "esac\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        'elif [ "$mode" = "validation" ]; then\n'
-        f'  printf "%s\\n" "$last" > "{tmp_path / "validation-last-path.txt"}"\n'
-        f'  python - <<\'PY\'\nimport sqlite3\nrow = sqlite3.connect("{config.db_path}").execute("select status from tasks where id=?", ("{task.id}",)).fetchone()\nopen("{tmp_path / "validation-active-status.txt"}", "w", encoding="utf-8").write(row[0] if row else "")\nPY\n'
-        "  printf 'fixed\\n' > README.md\n"
-        "  printf 'validation revision done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'bad\\n' > README.md\n"
-        "  printf 'initial done\\n' > \"$last\"\n"
-        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
 
-    gate_runs = 0
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        nonlocal gate_runs
-        from coquic_steward.core.models import ValidationResult
-
-        gate_runs += 1
-        output = _config.logs_dir / task_id / f"validation-{gate_runs}.txt"
+    def failing_gates(configured, task_id, cwd, **_kwargs):
+        output = configured.logs_dir / task_id / "validation-failed.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
-        passed = gate_runs > 1
-        output.write_text("ok\n" if passed else "validation failed\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake-validation"],
-                cwd=cwd,
-                passed=passed,
-                exit_code=0 if passed else 1,
-                output_path=output,
-                summary="ok" if passed else "validation failed",
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.succeeded
-    assert saved.patch_path is not None
-    assert "fixed" in saved.patch_path.read_text(encoding="utf-8")
-    call_log = calls.read_text(encoding="utf-8")
-    assert "resume" not in call_log
-    assert "worker-thread-1" not in call_log
-    assert "worker-validation-revision-1" in (
-        tmp_path / "validation-last-path.txt"
-    ).read_text(encoding="utf-8")
-    assert (
-        tmp_path / "validation-active-status.txt"
-    ).read_text(encoding="utf-8") == TaskStatus.running.value
-    events = store.events(task.id)
-    assert any(event.kind == "validation.failed" for event in events)
-    assert any(
-        event.kind == "worker.validation_revision_requested" for event in events
-    )
-    iterations = store.iterations(task.id)
-    assert iterations[0].patch_path is not None
-    assert "bad" in iterations[0].patch_path.read_text(encoding="utf-8")
-    assert iterations[1].patch_path is not None
-    assert "fixed" in iterations[1].patch_path.read_text(encoding="utf-8")
-
-
-def test_executor_blocks_unchanged_validation_revision(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "revision" ]; then\n'
-        "  printf 'toolchain failure is external\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'bad patch\\n' > README.md\n"
-        "  printf 'initial done\\n' > \"$last\"\n"
-        "  printf '{\"type\":\"thread.started\",\"thread_id\":\"worker-thread-1\"}\\n'\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
-    gate_runs = 0
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        nonlocal gate_runs
-        gate_runs += 1
-        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("toolchain failed\n", encoding="utf-8")
+        output.write_text("validation failed\n", encoding="utf-8")
         return [
             ValidationResult(
                 command=["fake-validation"],
@@ -8536,26 +6883,51 @@ def test_executor_blocks_unchanged_validation_revision(
                 passed=False,
                 exit_code=1,
                 output_path=output,
-                summary="toolchain failed",
+                summary="validation failed",
             )
         ]
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
+    executor = StewardExecutor(config, store)
+    outcomes = _advance_durable(executor, task.id, 3)
 
-    assert not StewardExecutor(config, store).run_task(task.id)
+    assert outcomes[-1].status == "child_pipeline"
+    pipelines = store.list_pipelines(task.id)
+    assert len(pipelines) == 2
+    child = pipelines[-1]
+    assert child.trigger == "validation-repair"
+    assert child.metadata["packet"]["validation"]["validations"]
+    assert any(event.kind == "pipeline.validation.failure" for event in store.events(task.id))
 
+def test_executor_blocks_unchanged_validation_revision(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = _durable_codex(tmp_path, change="bad")
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    def failing_gates(configured, task_id, cwd, **_kwargs):
+        output = configured.logs_dir / task_id / "validation-failed.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("same failure\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake-validation"], cwd=cwd, passed=False, exit_code=1,
+                output_path=output, summary="same failure"
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", failing_gates)
+    executor = StewardExecutor(config, store)
+    assert not _drive_durable(executor, task.id)
     saved = store.get(task.id)
     assert saved.status == TaskStatus.blocked
-    assert "validation revision 1 produced no patch changes" in saved.summary
-    assert "fake-validation exited 1: toolchain failed" in saved.summary
-    assert gate_runs == 2
-    assert len(calls.read_text(encoding="utf-8").splitlines()) == 2
-    assert [item.iteration for item in store.iterations(task.id)] == [0, 1]
-    events = store.events(task.id)
-    stalled = [event for event in events if event.kind == "validation.revision_stalled"]
-    assert len(stalled) == 1
-    assert stalled[0].data["reason"] == "produced no patch changes"
-
+    assert saved.summary == "validation made no progress"
+    assert any(event.kind == "pipeline.validation.failure" for event in store.events(task.id))
 
 def test_validation_failure_state_uses_complete_validation_log(
     config: StewardConfig, tmp_path: Path
@@ -8685,234 +7057,92 @@ def test_validation_failure_state_normalizes_volatile_zig_test_output(
 def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
+    fake = _durable_codex(tmp_path, change="formatted")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        '  case "$last" in */reviewer-*) mode=review;; esac\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        'elif [ "$mode" = "revision" ]; then\n'
-        "  printf 'validation revision done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'unformatted\\n' > README.md\n"
-        "  printf 'initial done\\n' > \"$last\"\n"
-        "  printf '{\"type\":\"thread.started\",\"thread_id\":\"worker-thread-1\"}\\n'\n"
-        "fi\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
     gate_runs = 0
 
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
+    def gates(configured, task_id, cwd, **_kwargs):
         nonlocal gate_runs
         gate_runs += 1
-        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
+        output = configured.logs_dir / task_id / f"validation-{gate_runs}.txt"
         output.parent.mkdir(parents=True, exist_ok=True)
         if gate_runs == 1:
-            (cwd / "README.md").write_text("formatted\n", encoding="utf-8")
-        passed = gate_runs > 1
-        output.write_text("ok\n" if passed else "formatted files\n", encoding="utf-8")
+            (cwd / "README.md").write_text("gate repaired\n", encoding="utf-8")
+        output.write_text("failed\n" if gate_runs == 1 else "ok\n", encoding="utf-8")
         return [
             ValidationResult(
-                command=["fake-format"],
-                cwd=cwd,
-                passed=passed,
-                exit_code=0 if passed else 1,
-                output_path=output,
-                summary="ok" if passed else "formatted files",
+                command=["fake-format"], cwd=cwd, passed=gate_runs > 1,
+                exit_code=0 if gate_runs > 1 else 1, output_path=output,
+                summary="ok" if gate_runs > 1 else "formatted files"
             )
         ]
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.succeeded
-    assert saved.patch_path is not None
-    assert "formatted" in saved.patch_path.read_text(encoding="utf-8")
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", gates)
+    executor = StewardExecutor(config, store)
+    assert _drive_durable(executor, task.id)
     assert gate_runs == 2
-    assert not any(
-        event.kind == "validation.revision_stalled" for event in store.events(task.id)
-    )
-
+    assert any(event.kind == "pipeline.validation.failure" for event in store.events(task.id))
 
 def test_executor_blocks_repeated_patch_and_validation_failure(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
+    fake = _durable_codex(tmp_path, change="same patch")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    fake.write_text(
-        "#!/bin/sh\n"
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'case "$last" in\n'
-        "  */worker-validation-revision-1/*) printf 'patch-b\\n' > README.md ;;\n"
-        "  */worker-validation-revision-2/*) printf 'patch-a\\n' > README.md ;;\n"
-        "  *)\n"
-        "    printf 'patch-a\\n' > README.md\n"
-        "    printf '{\"type\":\"thread.started\",\"thread_id\":\"worker-thread-1\"}\\n'\n"
-        "    ;;\n"
-        "esac\n"
-        "printf '%s\\n' \"$mode done\" > \"$last\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(0o755)
-
-    gate_runs = 0
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        nonlocal gate_runs
-        gate_runs += 1
-        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("same failure\n", encoding="utf-8")
-        return [
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates",
+        lambda configured, task_id, cwd, **_kwargs: [
             ValidationResult(
-                command=["fake-validation"],
-                cwd=cwd,
-                passed=False,
-                exit_code=1,
-                output_path=output,
-                summary="same failure",
+                command=["fake-validation"], cwd=cwd, passed=False, exit_code=1,
+                output_path=(configured.logs_dir / task_id / "failure.txt"),
+                summary="same failure"
             )
-        ]
+        ],
+    )
+    output = config.logs_dir / task.id / "failure.txt"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("same failure\n", encoding="utf-8")
 
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    executor = StewardExecutor(config, store)
+    assert not _drive_durable(executor, task.id)
+    assert store.get(task.id).status == TaskStatus.blocked
+    assert len(store.list_pipelines(task.id)) <= executor.MAX_PIPELINES
+    assert any(event.kind == "pipeline.blocked" for event in store.events(task.id))
 
-    assert not StewardExecutor(config, store).run_task(task.id)
-
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.blocked
-    assert "validation revision 2 repeated a prior patch and failure" in saved.summary
-    assert gate_runs == 3
-    assert [item.iteration for item in store.iterations(task.id)] == [0, 1, 2]
-    events = store.events(task.id)
-    stalled = [event for event in events if event.kind == "validation.revision_stalled"]
-    assert len(stalled) == 1
-    assert stalled[0].data["reason"] == "repeated a prior patch and failure"
-
-
-def test_executor_uses_shared_revision_counter_for_validation_and_review(
+def test_executor_uses_durable_phase_order_for_validation_and_review(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = tmp_path / "codex"
-    calls = tmp_path / "calls.txt"
+    fake = _durable_codex(tmp_path, change="review fixed")
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    fake.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{calls}"\n'
-        "mode=worker\n"
-        'while [ "$#" -gt 0 ]; do\n'
-        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
-        "  shift || true\n"
-        "done\n"
-        'case "$last" in\n'
-        '  */reviewer-*) mode=review;;\n'
-        '  */worker-validation-revision-*|*/worker-revision-*) mode=revision;;\n'
-        "esac\n"
-        "cat >/dev/null\n"
-        'mkdir -p "$(dirname "$last")"\n'
-        'if [ "$mode" = "review" ]; then\n'
-        "  count_file=.review-count\n"
-        "  count=0\n"
-        '  [ -f "$count_file" ] && count=$(cat "$count_file")\n'
-        "  count=$((count + 1))\n"
-        '  printf "%s" "$count" > "$count_file"\n'
-        '  if [ "$count" = "1" ]; then\n'
-        "    printf '{\"verdict\":\"block\",\"summary\":\"needs review revision\",\"findings\":[{\"severity\":\"high\",\"title\":\"bad\",\"file\":\"README.md\",\"line\":1,\"detail\":\"bad\",\"recommendation\":\"fix\"}],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  else\n"
-        "    printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
-        "  fi\n"
-        'elif [ "$mode" = "revision" ]; then\n'
-        "  case \"$last\" in\n"
-        "    */worker-validation-revision-1/*) printf 'validation fixed\\n' > README.md ;;\n"
-        "    */worker-revision-2/*) printf 'review fixed\\n' > README.md ;;\n"
-        "  esac\n"
-        "  printf 'revision done\\n' > \"$last\"\n"
-        "else\n"
-        "  printf 'bad\\n' > README.md\n"
-        "  printf 'initial done\\n' > \"$last\"\n"
-        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
-        "fi\n",
-        encoding="utf-8",
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
     )
-    fake.chmod(0o755)
 
-    gate_runs = 0
-
-    def fake_gates(
-        _config, task_id, cwd, *, label=None, on_gate_start=None,
-        on_gate_result=None, command_runner=None
-    ):
-        nonlocal gate_runs
-        from coquic_steward.core.models import ValidationResult
-
-        gate_runs += 1
-        output = _config.logs_dir / task_id / f"validation-{gate_runs}.txt"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        passed = gate_runs > 1
-        output.write_text("ok\n" if passed else "validation failed\n", encoding="utf-8")
-        return [
-            ValidationResult(
-                command=["fake-validation"],
-                cwd=cwd,
-                passed=passed,
-                exit_code=0 if passed else 1,
-                output_path=output,
-                summary="ok" if passed else "validation failed",
-            )
-        ]
-
-    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
-
-    assert StewardExecutor(config, store).run_task(task.id)
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.succeeded
-    assert saved.patch_path is not None
-    assert "review fixed" in saved.patch_path.read_text(encoding="utf-8")
-    call_log = calls.read_text(encoding="utf-8")
-    assert "worker-validation-revision-1" in call_log
-    assert "worker-revision-2" in call_log
-    assert "worker-revision-1" not in call_log
-
+    executor = StewardExecutor(config, store)
+    assert _drive_durable(executor, task.id)
+    phases = [
+        event.data["phase"]
+        for event in store.events(task.id)
+        if event.kind == "pipeline.phase.started"
+    ]
+    assert phases[:6] == [
+        "provisioned", "implementation", "validation", "review", "integration", "commit_message"
+    ]
+    assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
 
 def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)

@@ -1351,15 +1351,35 @@ class StewardExecutor:
         commit = self._latest_commit(task.id, pipeline.id)
         if commit is None:
             return self._block_pipeline(task, pipeline, "push has no accepted commit")
+        source = self._source_task_for_integration(task)
+        if source is None:
+            return self._block_pipeline(task, pipeline, "integration source task missing")
         action = action_identity(task.id, pipeline.id, phase)
         attempt = self._phase_attempt(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=f"{action}-{attempt}", payload={"commit": commit, "attempt": attempt})
+
+        def update_feature_issues() -> None:
+            transcript = IntegrationTranscript(
+                self.config.transcripts_dir
+                / task.id
+                / "integration"
+                / "transcript.txt"
+            )
+            task.transcript_path = transcript.path
+            self.store.save(task)
+            transcript.write(
+                "start",
+                f"Durable push {task.id} for source task {source.id}",
+            )
+            self._update_feature_issues_after_push(task, source, commit, transcript)
+
         try:
             result = self.worktrees.push_head_to_main(worktree)
         except RuntimeError as exc:
             detail = str(exc)[-2_000:]
             if self._commit_reachable(worktree, commit):
                 self.store.add_event(task.id, "pipeline.push.ambiguous_resolved", commit, {"pipeline_id": pipeline.id, "commit": commit, "detail": detail})
+                update_feature_issues()
                 self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
                 return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit, "ambiguous": True})
             fingerprint = bounded_fingerprint(
@@ -1407,6 +1427,7 @@ class StewardExecutor:
             return self._block_pipeline(task, pipeline, f"push failed: {detail}")
         self.store.add_event(task.id, "pipeline.push", commit, {"pipeline_id": pipeline.id, "action_id": action, "commit": commit, "result": _command_result_text(result)})
         self._archive_write(task, pipeline, "push.json", {"commit": commit, "result": _command_result_text(result)})
+        update_feature_issues()
         self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
         return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit})
 

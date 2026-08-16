@@ -115,11 +115,6 @@ def test_run_preserves_success_output_and_releases_lock(repo, monkeypatch) -> No
             pytest.fail("run must not invoke general daemon dispatch")
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
-    monkeypatch.setattr(
-        StewardExecutor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("legacy run_task must not be called"),
-    )
     result = _invoke_run(repo, monkeypatch, task.id)
 
     assert result.exit_code == 0, result.output
@@ -299,11 +294,6 @@ def test_run_advances_only_selected_task_without_planning_or_dispatch(
             return ShutdownResult()
 
     monkeypatch.setattr("coquic_steward.cli.StewardDaemon", FakeDaemon)
-    monkeypatch.setattr(
-        StewardExecutor,
-        "run_task",
-        lambda *_args, **_kwargs: pytest.fail("legacy run_task must not be called"),
-    )
     result = _invoke_run(repo, monkeypatch, selected.id)
 
     assert result.exit_code == 0, result.output

@@ -19,9 +19,25 @@ from coquic_steward.core.models import (
 )
 from coquic_steward.execution import StewardExecutor
 from coquic_steward.execution.executor import _publication_preflight_fingerprint
+from coquic_steward.orchestration import StewardDaemon
 from coquic_steward.publication.models import FailClosed, ReasonCode
 from coquic_steward.execution.implementation_plan import parse_implementation_plan
 from coquic_steward.storage import TaskStore
+
+
+def _drive_durable(
+    executor: StewardExecutor, task_id: str, *, max_steps: int = 128
+) -> bool:
+    for _ in range(max_steps):
+        outcome = executor.advance_once(task_id)
+        if outcome.status in {"ready_to_seal", "terminal", "blocked"}:
+            StewardDaemon(executor.config, executor.store).finalize_terminal_task(task_id)
+            return outcome.status in {"ready_to_seal", "terminal"}
+        if outcome.status == "in_progress":
+            continue
+        if not outcome.progressed and outcome.next_phase is None:
+            return False
+    raise AssertionError(f"durable task did not reach a stopping point: {task_id}")
 
 
 VALID_PLAN = {
@@ -175,25 +191,33 @@ def test_feature_plans_then_codes_in_separate_session(
         "coquic_steward.execution.executor.run_gates", _passing_gates
     )
 
-    assert StewardExecutor(configured, store).run_task(task.id)
+    executor = StewardExecutor(configured, store)
+    assert _drive_durable(executor, task.id)
     saved = store.get(task.id)
     plan_runs = store.plan_runs(task.id)
     iterations = store.iterations(task.id)
     events = store.events(task.id)
 
     assert saved.status == TaskStatus.succeeded
-    assert saved.spec.metadata["worker_thread_id"] == "worker-thread"
+    assert any(
+        event.kind == "pipeline.phase.finished"
+        and event.data.get("output", {}).get("next_phase") == "implementation"
+        for event in events
+    )
     assert len(plan_runs) == 1
     assert plan_runs[0].plan_json == VALID_PLAN
     assert plan_runs[0].model == "plan-model"
     assert iterations[0].worker_model == "code-model"
-    assert iterations[0].reviewer_model == "review-model"
+    assert any(event.kind == "pipeline.review.raw" for event in events)
     worker_prompt = iterations[0].worker_prompt_path
     assert worker_prompt is not None
     assert json.dumps(VALID_PLAN, indent=2, sort_keys=True) in worker_prompt.read_text(
         encoding="utf-8"
     )
-    assert any(event.kind == "implementation_plan.finished" for event in events)
+    assert any(
+        event.kind == "pipeline.plan.result" and event.message == "accepted"
+        for event in events
+    )
 
 
 def test_fix_workflow_skips_planning(
@@ -216,7 +240,8 @@ def test_fix_workflow_skips_planning(
         "coquic_steward.execution.executor.run_gates", _passing_gates
     )
 
-    assert StewardExecutor(configured, store).run_task(task.id)
+    executor = StewardExecutor(configured, store)
+    assert _drive_durable(executor, task.id)
     assert store.plan_runs(task.id) == []
     assert not any(
         event.kind.startswith("implementation_plan.") for event in store.events(task.id)
@@ -239,8 +264,9 @@ def test_invalid_feature_plan_retries_without_coding(
         )
     )
 
-    assert not StewardExecutor(configured, store).run_task(task.id)
-    assert store.get(task.id).status == TaskStatus.failed
+    executor = StewardExecutor(configured, store)
+    assert not _drive_durable(executor, task.id)
+    assert store.get(task.id).status == TaskStatus.blocked
     assert len(store.plan_runs(task.id)) == 2
     assert store.iterations(task.id) == []
 
@@ -260,6 +286,7 @@ def _fake_codex(tmp_path: Path, *, invalid_plan: bool) -> Path:
         'case "$last" in\n'
         f'  */implementation-plan-*) printf \'%s\\n\' \'{plan_json}\' > "$last"; printf \'{{"type":"thread.started","thread_id":"plan-thread"}}\\n\';;\n'
         '  */reviewer-*) printf \'%s\\n\' \'{"verdict":"approve","summary":"ok","findings":[],"validation_gaps":[],"remaining_risk":""}\' > "$last"; printf \'{"type":"thread.started","thread_id":"review-thread"}\\n\';;\n'
+        '  */commit-message-*) printf \'%s\\n\' \'{"subject":"fix: durable workflow","body":"persist the durable workflow result"}\' > "$last"; printf \'{"type":"thread.started","thread_id":"commit-message-thread"}\\n\';;\n'
         '  *) printf \'changed\\n\' > README.md; printf \'done\\n\' > "$last"; printf \'{"type":"thread.started","thread_id":"worker-thread"}\\n\';;\n'
         "esac\n",
         encoding="utf-8",

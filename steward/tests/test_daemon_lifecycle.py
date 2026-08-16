@@ -3772,9 +3772,6 @@ def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config, monkeypa
     daemon.finalize_terminal_task = lambda task_id: finalized.append(task_id) or True
     daemon._plan_until_idle = planned.append
     daemon._task_phase_requires_serialization = lambda _task_id: True
-    daemon.executor.run_task = lambda *_args, **_kwargs: pytest.fail(
-        "daemon once dispatch called run_task"
-    )
 
     result = TickResult()
     daemon._dispatch_queued(result, plan=True, max_dispatch=1)
@@ -3817,9 +3814,6 @@ def test_once_dispatch_counts_terminal_and_nonprogress_outcomes(config):
 
     daemon.executor = SimpleNamespace(advance_once=advance)
     daemon.finalize_terminal_task = lambda task_id: finalized.append(task_id) or True
-    daemon.executor.run_task = lambda *_args, **_kwargs: pytest.fail(
-        "daemon once dispatch called run_task"
-    )
 
     result = TickResult()
     daemon._dispatch_queued(result, plan=False, max_dispatch=None)
@@ -3842,9 +3836,6 @@ def test_once_dispatch_stops_without_counting_shutdown_interruption(config):
         return SimpleNamespace(status="interrupted", progressed=False, next_phase=None)
 
     daemon.executor = SimpleNamespace(advance_once=advance)
-    daemon.executor.run_task = lambda *_args, **_kwargs: pytest.fail(
-        "daemon once dispatch called run_task"
-    )
 
     result = TickResult()
     daemon._dispatch_queued(result, plan=False, max_dispatch=1)

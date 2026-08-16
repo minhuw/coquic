@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
@@ -43,7 +44,21 @@ _OS_MODULE = "os-module"
 _BUILTINS_MODULE = "builtins-module"
 _BUILTIN_CALLABLE = "builtin-callable"
 _BUILTIN_GETATTR = "builtin-getattr"
+_BUILTIN_HASATTR = "builtin-hasattr"
+_BUILTIN_TYPE_ERROR = "builtin-type-error"
+_BUILTIN_EXCEPTION = "builtin-exception"
+_BUILTIN_BASE_EXCEPTION = "builtin-base-exception"
 _OTHER = "other"
+
+
+_BUILTIN_REFERENCE_MARKERS = {
+    "callable": _BUILTIN_CALLABLE,
+    "getattr": _BUILTIN_GETATTR,
+    "hasattr": _BUILTIN_HASATTR,
+    "TypeError": _BUILTIN_TYPE_ERROR,
+    "Exception": _BUILTIN_EXCEPTION,
+    "BaseException": _BUILTIN_BASE_EXCEPTION,
+}
 
 
 def _is_named_call(node: ast.Call, name: str) -> bool:
@@ -59,8 +74,10 @@ def _argument_shape(node: ast.Call) -> tuple[object, ...]:
         "starred" if isinstance(argument, ast.Starred) else "positional"
         for argument in node.args
     )
+    # Keyword order has no bearing on a Python call's signature.  Normalize it
+    # so a reordering alone is not mistaken for a fallback signature.
     keywords = tuple(
-        "**" if keyword.arg is None else keyword.arg for keyword in node.keywords
+        sorted("**" if keyword.arg is None else keyword.arg for keyword in node.keywords)
     )
     return (positional, keywords)
 
@@ -115,45 +132,93 @@ def _argument_descriptors(
     return positional + keywords
 
 
+def _argument_kinds_are_compatible(left: str, right: str) -> bool:
+    if left in {"starred", "double-starred"} or right in {
+        "starred",
+        "double-starred",
+    }:
+        return left == right
+    # Explicit positional and keyword arguments may represent the same
+    # retained value when a fallback changes the call convention.
+    return True
+
+
+def _match_argument_descriptors(
+    shorter: tuple[tuple[str, str | None, str], ...],
+    longer: tuple[tuple[str, str | None, str], ...],
+) -> bool:
+    if len(shorter) > len(longer):
+        return False
+    used: set[int] = set()
+    for short_kind, short_name, short_value in shorter:
+        candidates: list[tuple[int, int]] = []
+        for index, (long_kind, long_name, long_value) in enumerate(longer):
+            if index in used or short_value != long_value:
+                continue
+            if not _argument_kinds_are_compatible(short_kind, long_kind):
+                continue
+            if (
+                short_kind == long_kind == "keyword"
+                and short_name != long_name
+            ):
+                continue
+            score = 2
+            if short_kind == long_kind:
+                score = 1
+                if short_kind == "keyword" and short_name == long_name:
+                    score = 0
+            candidates.append((score, index))
+        if not candidates:
+            return False
+        _, index = min(candidates)
+        used.add(index)
+    # An omitted expansion may contribute arbitrary arguments (or no
+    # arguments), so it is not a provable subset of the fallback call.
+    return all(
+        kind not in {"starred", "double-starred"}
+        for index, (kind, _name, _value) in enumerate(longer)
+        if index not in used
+    )
+
+
 def _arguments_have_same_values(left: ast.Call, right: ast.Call) -> bool:
     left_arguments = _argument_descriptors(left)
     right_arguments = _argument_descriptors(right)
-    if len(left_arguments) != len(right_arguments):
-        return False
-    for (
-        (left_kind, left_name, left_value),
-        (right_kind, right_name, right_value),
-    ) in zip(left_arguments, right_arguments):
-        if left_value != right_value:
-            return False
-        if {left_kind, right_kind} & {"starred", "double-starred"}:
-            if left_kind != right_kind:
-                return False
-        elif left_kind == right_kind == "keyword" and left_name != right_name:
-            return False
-    return True
+    return _match_argument_descriptors(left_arguments, right_arguments) and _match_argument_descriptors(
+        right_arguments, left_arguments
+    )
 
 
 def _is_strict_argument_subset(
     left: tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]],
     right: tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]],
 ) -> bool:
-    """Match a fallback that removes arguments without changing retained ones."""
+    """Match a fallback that removes arguments without changing retained values."""
 
-    left_positional, left_keywords = left
-    right_positional, right_keywords = right
-    if len(left_positional) > len(right_positional):
-        return False
-    if left_positional != right_positional[: len(left_positional)]:
-        return False
-
-    right_keyword_values = dict(right_keywords)
-    for name, value in left_keywords:
-        if right_keyword_values.get(name) != value:
-            return False
-    return (
-        len(left_positional) < len(right_positional)
-        or len(left_keywords) < len(right_keywords)
+    left_items = tuple(
+        ("starred" if kind == "starred" else "positional", None, value)
+        for kind, value in left[0]
+    ) + tuple(
+        (
+            "double-starred" if name == "**" else "keyword",
+            None if name == "**" else name,
+            value,
+        )
+        for name, value in left[1]
+    )
+    right_items = tuple(
+        ("starred" if kind == "starred" else "positional", None, value)
+        for kind, value in right[0]
+    ) + tuple(
+        (
+            "double-starred" if name == "**" else "keyword",
+            None if name == "**" else name,
+            value,
+        )
+        for name, value in right[1]
+    )
+    return len(left_items) < len(right_items) and _match_argument_descriptors(
+        left_items, right_items
     )
 
 
@@ -161,42 +226,131 @@ def _arguments_are_compatible(
     left: ast.Call,
     right: ast.Call,
 ) -> bool:
-    if _arguments_have_same_values(left, right):
+    left_arguments = _argument_descriptors(left)
+    right_arguments = _argument_descriptors(right)
+    if len(left_arguments) == len(right_arguments):
+        return _arguments_have_same_values(left, right)
+    if len(left_arguments) < len(right_arguments):
+        return _match_argument_descriptors(left_arguments, right_arguments)
+    return _match_argument_descriptors(right_arguments, left_arguments)
+
+
+def _catches_type_error(
+    node: ast.AST | None,
+    is_exception_reference: Callable[[ast.AST], bool] | None = None,
+) -> bool:
+    """Recognize handlers that can consume a TypeError.
+
+    A bare handler and the builtin ``Exception``/``BaseException`` classes
+    subsume TypeError.  The optional resolver lets the syntax visitor account
+    for qualified names, imports, and lexical shadowing without importing or
+    executing the scanned module.
+    """
+
+    if node is None:
         return True
-    return _is_strict_argument_subset(
-        _argument_fingerprint(left), _argument_fingerprint(right)
-    ) or _is_strict_argument_subset(
-        _argument_fingerprint(right), _argument_fingerprint(left)
-    )
-
-
-def _catches_type_error(node: ast.AST | None) -> bool:
-    """Recognize handlers that include TypeError among their exceptions."""
-
-    if isinstance(node, ast.Name):
-        return node.id == "TypeError"
     if isinstance(node, (ast.Tuple, ast.List)):
-        return any(_catches_type_error(item) for item in node.elts)
+        return any(
+            _catches_type_error(item, is_exception_reference) for item in node.elts
+        )
+    if is_exception_reference is not None:
+        return is_exception_reference(node)
+    if isinstance(node, ast.Name):
+        return node.id in {"TypeError", "Exception", "BaseException"}
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "builtins"
+    ):
+        return node.attr in {"TypeError", "Exception", "BaseException"}
     return False
 
 
+def _contains_direct_type_error(
+    node: ast.AST | None,
+    is_type_error_reference: Callable[[ast.AST], bool] | None = None,
+) -> bool:
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(
+            _contains_direct_type_error(item, is_type_error_reference)
+            for item in node.elts
+        )
+    if is_type_error_reference is not None:
+        return bool(node is not None and is_type_error_reference(node))
+    return isinstance(node, ast.Name) and node.id == "TypeError"
+
+
+def _contains_broad_exception(
+    node: ast.AST | None,
+    is_broad_exception_reference: Callable[[ast.AST], bool] | None = None,
+) -> bool:
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(
+            _contains_broad_exception(item, is_broad_exception_reference)
+            for item in node.elts
+        )
+    if is_broad_exception_reference is not None:
+        return bool(node is not None and is_broad_exception_reference(node))
+    if isinstance(node, ast.Name):
+        return node.id in {"Exception", "BaseException"}
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "builtins"
+        and node.attr in {"Exception", "BaseException"}
+    )
+
+
 class _TypeErrorReraiseCollector(ast.NodeVisitor):
-    def __init__(self, handler_name: str | None) -> None:
+    def __init__(
+        self,
+        handler_name: str | None,
+        is_type_error_reference: Callable[[ast.AST], bool] | None = None,
+        catches_type_error: Callable[[ast.AST | None], bool] | None = None,
+    ) -> None:
         self.handler_name = handler_name
+        self.is_type_error_reference = is_type_error_reference
+        self._catches_type_error = catches_type_error or _catches_type_error
+        self._non_type_error_handler_depth = 0
         self.found = False
+
+    def _is_type_error_expression(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Call):
+            node = node.func
+        if self.is_type_error_reference is not None:
+            return self.is_type_error_reference(node)
+        return isinstance(node, ast.Name) and node.id == "TypeError"
 
     def visit_Raise(self, node: ast.Raise) -> None:
         if node.exc is None:
-            self.found = True
+            if self._non_type_error_handler_depth == 0:
+                self.found = True
         elif isinstance(node.exc, ast.Name) and node.exc.id == self.handler_name:
             self.found = True
-        elif (
-            isinstance(node.exc, ast.Call)
-            and isinstance(node.exc.func, ast.Name)
-            and node.exc.func.id == "TypeError"
-        ):
+        elif self._is_type_error_expression(node.exc):
             self.found = True
         self.generic_visit(node)
+
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        for statement in node.body:
+            self.visit(statement)
+        for handler in node.handlers:
+            if not self._catches_type_error(handler.type):
+                self._non_type_error_handler_depth += 1
+            for statement in handler.body:
+                self.visit(statement)
+            if not self._catches_type_error(handler.type):
+                self._non_type_error_handler_depth -= 1
+        for statement in node.orelse:
+            self.visit(statement)
+        for statement in node.finalbody:
+            self.visit(statement)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
 
     def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
         return
@@ -211,8 +365,16 @@ class _TypeErrorReraiseCollector(ast.NodeVisitor):
         return
 
 
-def _handler_rethrows_type_error(handler: ast.ExceptHandler) -> bool:
-    collector = _TypeErrorReraiseCollector(handler.name)
+def _handler_rethrows_type_error(
+    handler: ast.ExceptHandler,
+    is_type_error_reference: Callable[[ast.AST], bool] | None = None,
+    catches_type_error: Callable[[ast.AST | None], bool] | None = None,
+) -> bool:
+    collector = _TypeErrorReraiseCollector(
+        handler.name,
+        is_type_error_reference,
+        catches_type_error,
+    )
     for statement in handler.body:
         collector.visit(statement)
     return collector.found
@@ -226,13 +388,11 @@ class _CallCollector(ast.NodeVisitor):
         self.calls.append(node)
         self.generic_visit(node)
 
-    def visit_Try(self, _node: ast.Try) -> None:
-        # A nested handler may consume TypeError before it can reach the
-        # handler belonging to the try whose calls are being collected.
-        return
+    def visit_Try(self, node: ast.Try) -> None:
+        self.generic_visit(node)
 
-    def visit_TryStar(self, _node: ast.TryStar) -> None:
-        return
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
         return
@@ -248,20 +408,62 @@ class _CallCollector(ast.NodeVisitor):
 
 
 class _TypeErrorEscapeCallCollector(_CallCollector):
+    def __init__(
+        self,
+        catches_type_error: Callable[[ast.AST | None], bool] | None = None,
+        is_type_error_reference: Callable[[ast.AST], bool] | None = None,
+        is_broad_exception_reference: Callable[[ast.AST], bool] | None = None,
+    ) -> None:
+        super().__init__()
+        self._catches_type_error = catches_type_error or _catches_type_error
+        self._is_type_error_reference = is_type_error_reference
+        self._is_broad_exception_reference = is_broad_exception_reference
+
     def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
-        catches_type_error = any(
-            _catches_type_error(handler.type) for handler in node.handlers
+        matching_handler = next(
+            (
+                handler
+                for handler in node.handlers
+                if self._catches_type_error(handler.type)
+            ),
+            None,
         )
-        rethrows_type_error = any(
-            _catches_type_error(handler.type)
-            and _handler_rethrows_type_error(handler)
-            for handler in node.handlers
-        )
-        if not catches_type_error or rethrows_type_error:
+        if matching_handler is None or _handler_rethrows_type_error(
+            matching_handler,
+            self._is_type_error_reference,
+            self._catches_type_error,
+        ):
             for statement in node.body:
                 self.visit(statement)
+
         for handler in node.handlers:
-            if not _catches_type_error(handler.type):
+            catches_type_error = self._catches_type_error(handler.type)
+            if catches_type_error and handler is not matching_handler:
+                # A prior matching clause has already claimed every TypeError
+                # path; later clauses cannot receive the same exception.
+                continue
+            direct_type_error = _contains_direct_type_error(
+                handler.type,
+                self._is_type_error_reference,
+            )
+            broad_exception = _contains_broad_exception(
+                handler.type,
+                self._is_broad_exception_reference,
+            )
+            rethrows_type_error = catches_type_error and _handler_rethrows_type_error(
+                handler,
+                self._is_type_error_reference,
+                self._catches_type_error,
+            )
+            # An exact TypeError handler is a signature-fallback boundary: a
+            # call made while handling it can raise a new TypeError that reaches
+            # the outer handler.  A broad consumer such as Exception, however,
+            # consumes the original attempt and is not itself a fallback.
+            if (
+                not catches_type_error
+                or (direct_type_error and not broad_exception)
+                or rethrows_type_error
+            ):
                 for statement in handler.body:
                     self.visit(statement)
         for statement in node.orelse:
@@ -288,8 +490,15 @@ def _calls_in(nodes: ast.AST | list[ast.stmt]) -> list[ast.Call]:
 
 def _calls_reaching_type_error_handler(
     nodes: ast.AST | list[ast.stmt],
+    catches_type_error: Callable[[ast.AST | None], bool] | None = None,
+    is_type_error_reference: Callable[[ast.AST], bool] | None = None,
+    is_broad_exception_reference: Callable[[ast.AST], bool] | None = None,
 ) -> list[ast.Call]:
-    collector = _TypeErrorEscapeCallCollector()
+    collector = _TypeErrorEscapeCallCollector(
+        catches_type_error,
+        is_type_error_reference,
+        is_broad_exception_reference,
+    )
     if isinstance(nodes, list):
         for node in nodes:
             collector.visit(node)
@@ -299,8 +508,14 @@ def _calls_reaching_type_error_handler(
 
 
 class _HasattrGuardCollector(ast.NodeVisitor):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        is_builtin_hasattr: Callable[[ast.Call], bool] | None = None,
+    ) -> None:
         self.guards: list[_HasattrGuard] = []
+        self._is_builtin_hasattr = is_builtin_hasattr or (
+            lambda node: _is_named_call(node, "hasattr")
+        )
         self._negated = False
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
@@ -312,14 +527,17 @@ class _HasattrGuardCollector(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        if _is_named_call(node, "hasattr") and len(node.args) >= 2:
+        if self._is_builtin_hasattr(node) and len(node.args) >= 2:
             name = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
             self.guards.append(_HasattrGuard(node.args[0], name, self._negated))
         self.generic_visit(node)
 
 
-def _hasattr_guards(node: ast.AST) -> list[_HasattrGuard]:
-    collector = _HasattrGuardCollector()
+def _hasattr_guards(
+    node: ast.AST,
+    is_builtin_hasattr: Callable[[ast.Call], bool] | None = None,
+) -> list[_HasattrGuard]:
+    collector = _HasattrGuardCollector(is_builtin_hasattr)
     collector.visit(node)
     return collector.guards
 
@@ -387,6 +605,90 @@ class _LocalBindingCollector(ast.NodeVisitor):
         for alias in node.names:
             if alias.name != "*":
                 self.names.add(alias.asname or alias.name)
+
+    def _collect_target(self, target: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            self.names.add(target.id)
+        elif isinstance(target, ast.Starred):
+            self._collect_target(target.value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self._collect_target(item)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._collect_target(target)
+        self.visit(node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._collect_target(node.target)
+        if node.annotation is not None:
+            self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._collect_target(node.target)
+        self.visit(node.value)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._collect_target(node.target)
+        self.visit(node.value)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._collect_target(node.target)
+        self.visit(node.iter)
+        for statement in node.body:
+            self.visit(statement)
+        for statement in node.orelse:
+            self.visit(statement)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.visit_For(node)  # type: ignore[arg-type]
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._collect_target(item.optional_vars)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self.visit_With(node)  # type: ignore[arg-type]
+
+    def _collect_pattern(self, pattern: ast.pattern) -> None:
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.name is not None:
+                self.names.add(pattern.name)
+            if pattern.pattern is not None:
+                self._collect_pattern(pattern.pattern)
+        elif isinstance(pattern, ast.MatchStar):
+            if pattern.name is not None:
+                self.names.add(pattern.name)
+        elif isinstance(pattern, ast.MatchMapping):
+            if pattern.rest is not None:
+                self.names.add(pattern.rest)
+            for item in pattern.patterns:
+                self._collect_pattern(item)
+        elif isinstance(pattern, ast.MatchClass):
+            for item in (*pattern.patterns, *pattern.kwd_patterns):
+                self._collect_pattern(item)
+        elif isinstance(pattern, ast.MatchSequence):
+            for item in pattern.patterns:
+                self._collect_pattern(item)
+        elif isinstance(pattern, ast.MatchOr):
+            for item in pattern.patterns:
+                self._collect_pattern(item)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        for case in node.cases:
+            self._collect_pattern(case.pattern)
+            if case.guard is not None:
+                self.visit(case.guard)
+            for statement in case.body:
+                self.visit(statement)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name is not None:
@@ -479,25 +781,27 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
             self.visit(statement)
             self._block_stack.pop()
 
-    def _is_builtin_function(self, node: ast.AST, name: str) -> bool:
+    def _builtin_reference_state(self, node: ast.AST) -> frozenset[str]:
         if isinstance(node, ast.Name):
             state = self._lookup(node.id)
-            if node.id != name:
-                return False
             if state is None:
-                return True
-            expected = {
-                "callable": _BUILTIN_CALLABLE,
-                "getattr": _BUILTIN_GETATTR,
-                "hasattr": "builtin-hasattr",
-            }[name]
-            return expected in state
-        if not isinstance(node, ast.Attribute) or node.attr != name:
-            return False
-        if not isinstance(node.value, ast.Name):
-            return False
-        state = self._lookup(node.value.id)
-        return state is not None and _BUILTINS_MODULE in state
+                marker = _BUILTIN_REFERENCE_MARKERS.get(node.id)
+                return frozenset({marker}) if marker is not None else frozenset()
+            markers = frozenset(_BUILTIN_REFERENCE_MARKERS.values()) | {
+                _BUILTINS_MODULE
+            }
+            return frozenset(state.intersection(markers))
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            module_state = self._lookup(node.value.id)
+            if _BUILTINS_MODULE not in (module_state or ()):
+                return frozenset()
+            marker = _BUILTIN_REFERENCE_MARKERS.get(node.attr)
+            return frozenset({marker}) if marker is not None else frozenset()
+        return frozenset()
+
+    def _is_builtin_function(self, node: ast.AST, name: str) -> bool:
+        expected = _BUILTIN_REFERENCE_MARKERS[name]
+        return expected in self._builtin_reference_state(node)
 
     def _is_getattr_expression(self, node: ast.AST) -> bool:
         return isinstance(node, ast.Call) and self._is_builtin_function(node.func, "getattr")
@@ -505,6 +809,9 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
     def _binding_for_value(self, value: ast.AST) -> frozenset[str]:
         if self._is_getattr_expression(value):
             return frozenset({_GETATTR})
+        builtin_state = self._builtin_reference_state(value)
+        if builtin_state:
+            return builtin_state
         if isinstance(value, ast.Name):
             state = self._lookup(value.id)
             if state is not None and _GETATTR in state:
@@ -517,6 +824,16 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
                 kinds.update(self._binding_for_value(item))
             return frozenset(kinds or {_OTHER})
         return frozenset({_OTHER})
+
+    def _is_builtin_type_error_reference(self, node: ast.AST) -> bool:
+        return _BUILTIN_TYPE_ERROR in self._builtin_reference_state(node)
+
+    def _is_broad_exception_reference(self, node: ast.AST) -> bool:
+        state = self._builtin_reference_state(node)
+        return bool(state & {_BUILTIN_EXCEPTION, _BUILTIN_BASE_EXCEPTION})
+
+    def _is_exception_reference(self, node: ast.AST) -> bool:
+        return self._is_builtin_type_error_reference(node) or self._is_broad_exception_reference(node)
 
     def _assign_target(self, target: ast.AST, state: frozenset[str]) -> None:
         if isinstance(target, ast.Name):
@@ -586,7 +903,13 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If) -> None:
         self.visit(node.test)
-        self._check_hasattr_guards(node, _hasattr_guards(node.test))
+        self._check_hasattr_guards(
+            node,
+            _hasattr_guards(
+                node.test,
+                lambda call: self._is_builtin_function(call.func, "hasattr"),
+            ),
+        )
         baseline = self._snapshot()
 
         self._visit_block(node.body)
@@ -642,19 +965,42 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
                 self._assign_target(item.optional_vars, frozenset({_OTHER}))
         self._visit_block(node.body)
 
+    def _handler_catches_type_error(self, node: ast.AST | None) -> bool:
+        return _catches_type_error(node, self._is_exception_reference)
+
+    def _handler_is_signature_type_error(self, node: ast.AST | None) -> bool:
+        return (
+            _contains_direct_type_error(node, self._is_builtin_type_error_reference)
+            and not _contains_broad_exception(
+                node,
+                self._is_broad_exception_reference,
+            )
+        )
+
     def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
-        attempted = _calls_reaching_type_error_handler(node.body)
+        attempted = _calls_reaching_type_error_handler(
+            node.body,
+            self._handler_catches_type_error,
+            self._is_builtin_type_error_reference,
+            self._is_broad_exception_reference,
+        )
         for handler in node.handlers:
-            if not _catches_type_error(handler.type):
+            if not self._handler_catches_type_error(handler.type):
                 continue
-            for retry in _calls_in(handler.body):
-                for original in attempted:
-                    if (
-                        _expression_key(retry.func) == _expression_key(original.func)
-                        and _argument_shape(retry) != _argument_shape(original)
-                        and _arguments_are_compatible(retry, original)
-                    ):
-                        self._add(retry, "typeerror-signature-retry")
+            if self._handler_is_signature_type_error(handler.type):
+                for retry in _calls_in(handler.body):
+                    for original in attempted:
+                        if (
+                            _expression_key(retry.func)
+                            == _expression_key(original.func)
+                            and _argument_shape(retry) != _argument_shape(original)
+                            and _arguments_are_compatible(retry, original)
+                        ):
+                            self._add(retry, "typeerror-signature-retry")
+            # Only the first matching handler can receive a TypeError.  Later
+            # handlers are unreachable for this analysis, even when they name
+            # TypeError explicitly after a broad Exception handler.
+            break
 
         baseline = self._snapshot()
         self._visit_block(node.body)
@@ -680,12 +1026,37 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
     def visit_TryStar(self, node: ast.TryStar) -> None:
         self._visit_try(node)
 
+    def _bind_pattern(self, pattern: ast.pattern) -> None:
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.name is not None:
+                self._bind(pattern.name, _OTHER)
+            if pattern.pattern is not None:
+                self._bind_pattern(pattern.pattern)
+        elif isinstance(pattern, ast.MatchStar):
+            if pattern.name is not None:
+                self._bind(pattern.name, _OTHER)
+        elif isinstance(pattern, ast.MatchMapping):
+            if pattern.rest is not None:
+                self._bind(pattern.rest, _OTHER)
+            for item in pattern.patterns:
+                self._bind_pattern(item)
+        elif isinstance(pattern, ast.MatchClass):
+            for item in (*pattern.patterns, *pattern.kwd_patterns):
+                self._bind_pattern(item)
+        elif isinstance(pattern, ast.MatchSequence):
+            for item in pattern.patterns:
+                self._bind_pattern(item)
+        elif isinstance(pattern, ast.MatchOr):
+            for item in pattern.patterns:
+                self._bind_pattern(item)
+
     def visit_Match(self, node: ast.Match) -> None:
         self.visit(node.subject)
         baseline = self._snapshot()
         states: list[list[tuple[_ScopeFrame, dict[str, frozenset[str]]]]] = []
         for case in node.cases:
             self._restore(baseline)
+            self._bind_pattern(case.pattern)
             if case.guard is not None:
                 self.visit(case.guard)
             self._visit_block(case.body)
@@ -818,10 +1189,9 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
             if alias.name == "*":
                 continue
             name = alias.asname or alias.name
-            if node.module == "builtins" and alias.name == "callable":
-                self._bind(name, _BUILTIN_CALLABLE)
-            elif node.module == "builtins" and alias.name == "getattr":
-                self._bind(name, _BUILTIN_GETATTR)
+            if node.module == "builtins":
+                marker = _BUILTIN_REFERENCE_MARKERS.get(alias.name)
+                self._bind(name, marker or _OTHER)
             else:
                 self._bind(name, _OTHER)
 
@@ -911,6 +1281,66 @@ def test_rejects_prohibited_dispatch_forms(source: str, kind: str) -> None:
     assert all(item.startswith("snippet.py:") for item in violations)
 
 
+@pytest.mark.parametrize(
+    ("source", "kind"),
+    [
+        (
+            "from builtins import getattr as resolve\n"
+            "resolve(store, 'publish')()",
+            "direct-getattr-call",
+        ),
+        (
+            "import builtins\n"
+            "builtins.getattr(store, 'publish')()",
+            "direct-getattr-call",
+        ),
+        (
+            "from builtins import callable as probe\n"
+            "if probe(callback):\n"
+            "    callback()",
+            "callable-probe",
+        ),
+        (
+            "import builtins\n"
+            "if builtins.callable(callback):\n"
+            "    callback()",
+            "callable-probe",
+        ),
+        (
+            "from builtins import hasattr as present\n"
+            "if present(store, 'publish'):\n"
+            "    store.publish()",
+            "hasattr-guarded-call",
+        ),
+        (
+            "import builtins\n"
+            "if builtins.hasattr(store, 'publish'):\n"
+            "    store.publish()",
+            "hasattr-guarded-call",
+        ),
+        (
+            "from builtins import TypeError as SignatureError\n"
+            "try:\n"
+            "    publisher.publish(generation)\n"
+            "except SignatureError:\n"
+            "    publisher.publish()",
+            "typeerror-signature-retry",
+        ),
+        (
+            "import builtins\n"
+            "try:\n"
+            "    publisher.publish(generation)\n"
+            "except builtins.TypeError:\n"
+            "    publisher.publish()",
+            "typeerror-signature-retry",
+        ),
+    ],
+)
+def test_rejects_qualified_and_aliased_builtins(source: str, kind: str) -> None:
+    violations = _scan_source(source)
+    assert any(item.endswith(f" {kind}") for item in violations), violations
+
+
 def test_merges_aliases_and_respects_lexical_parameter_shadowing() -> None:
     dynamic = """
         callback = getattr(store, "publish")
@@ -941,6 +1371,49 @@ def test_collects_typeerror_attempts_inside_control_flow() -> None:
     assert any(
         item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
     )
+
+
+def test_collects_calls_from_nested_typeerror_handlers_that_can_escape() -> None:
+    source = """
+        try:
+            try:
+                publisher.publish(generation)
+            except TypeError:
+                publisher.publish(generation)
+        except TypeError:
+            publisher.publish()
+    """
+    assert any(
+        item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
+    )
+
+
+def test_nested_broad_handler_consumes_the_original_typeerror() -> None:
+    source = """
+        try:
+            try:
+                publisher.publish(generation)
+            except Exception:
+                other()
+        except TypeError:
+            publisher.publish()
+    """
+    assert _scan_source(source) == ()
+
+
+def test_first_broad_handler_subsumes_later_typeerror_handler() -> None:
+    source = """
+        try:
+            try:
+                publisher.publish(generation)
+            except Exception:
+                other()
+            except TypeError:
+                publisher.publish(generation)
+        except TypeError:
+            publisher.publish()
+    """
+    assert _scan_source(source) == ()
 
 
 def test_detects_typeerror_in_mixed_exception_handler() -> None:
@@ -990,6 +1463,45 @@ def test_detects_positional_to_keyword_signature_retry() -> None:
     assert _scan_source(unrelated) == ()
 
 
+def test_matches_argument_conversion_and_removal_together() -> None:
+    source = """
+        try:
+            publisher.publish(generation, metadata)
+        except TypeError:
+            publisher.publish(generation=generation)
+    """
+    assert any(
+        item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
+    )
+
+
+def test_keyword_order_alone_is_not_a_signature_retry() -> None:
+    source = """
+        try:
+            publisher.publish(generation=generation, metadata=metadata)
+        except TypeError:
+            publisher.publish(metadata=metadata, generation=generation)
+    """
+    assert _scan_source(source) == ()
+
+
+def test_argument_matching_rejects_unrelated_values_and_opaque_expansions() -> None:
+    unrelated = """
+        try:
+            publisher.publish(generation, metadata)
+        except TypeError:
+            publisher.publish(generation=generation, metadata=other)
+    """
+    opaque = """
+        try:
+            publisher.publish(**kwargs)
+        except TypeError:
+            publisher.publish()
+    """
+    assert _scan_source(unrelated) == ()
+    assert _scan_source(opaque) == ()
+
+
 def test_does_not_cross_nested_exception_boundaries() -> None:
     source = """
         try:
@@ -1035,6 +1547,23 @@ def test_resolves_platform_and_builtin_bindings_lexically() -> None:
     assert any(
         item.endswith(" callable-probe") for item in _scan_source(qualified_builtin)
     )
+
+
+def test_builtin_aliases_respect_local_shadowing() -> None:
+    source = """
+        from builtins import getattr as resolve
+        from builtins import hasattr as present
+
+        def invoke(resolve, present):
+            resolve(store, "publish")()
+            if present(store, "publish"):
+                store.publish()
+
+        def assigned_later():
+            resolve(store, "publish")()
+            resolve = typed
+    """
+    assert _scan_source(source) == ()
 
 
 def test_accepts_typed_calls_data_reflection_os_fallback_and_unrelated_exceptions() -> None:

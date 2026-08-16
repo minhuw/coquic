@@ -5,42 +5,17 @@ SQLite task queue, collects configured signals, runs Codex in task-scoped
 boundaries, validates work, and optionally integrates approved changes into
 `main`.
 
-## Docker Compose operation
+## Container operations
 
-The trusted daemon is deployed as one Docker Compose service. It runs as the
-configured numeric host UID/GID plus the Docker socket group and creates task
-and scheduler-planner siblings through the standard local Unix Docker socket.
-The daemon-owned clone is always `$COQUIC_HOME/repository/`; an interactive
-checkout is rejected. Codex, GitHub, and cloud-publication credentials are
-individual read-only files exposed only to the trusted service as
-`/run/secrets/` targets. No task container receives the socket, whole home,
-credentials, or daemon configuration. See
-[CONTAINER_OPERATIONS.md](CONTAINER_OPERATIONS.md) for the durable contract.
-
-Use the checked-in wrapper for bootstrap and lifecycle; it never calls
-`docker compose down` or a global Docker prune. Production launch is
-`bootstrap → init → start`:
-
-```bash
-bash steward/containers/manage.sh bootstrap
-bash steward/containers/manage.sh init
-bash steward/containers/manage.sh start
-bash steward/containers/manage.sh status
-```
-
-Bootstrap builds the pinned Nix `steward-daemon-image`, `steward-task-image`,
-and no-Codex `steward-validation-image`, records exact local image IDs, validates the private
-layout and credentials, and clones only an absent canonical repository. It
-does not create credentials, initialize SQLite/epochs, or start work. `init` runs
-`coquic-steward init` in the selected daemon image with production mounts and
-secrets, refuses a running daemon, and verifies exact repeats without repairing
-mismatches. Start validates the exact Store before launch. Upgrades require
-proven quiescence unless the operator explicitly uses `--force`; ordinary stop
-preserves recoverable state.
+Production container operations, lifecycle, recovery, cleanup, Site handoff,
+and local proof belong to the canonical [container operations runbook](CONTAINER_OPERATIONS.md).
+This README is a product overview and navigation entry point; it does not
+repeat the operational contract.
 
 ## Quick start
 
-Steward reads `$COQUIC_HOME/steward.toml` (`~/.coquic` by default).
+Steward reads `$COQUIC_HOME/steward.toml` (`~/.coquic` by default). For local
+(non-container) development and inspection:
 
 ```bash
 export COQUIC_HOME="${COQUIC_HOME:-$HOME/.coquic}"
@@ -135,27 +110,12 @@ evidence.
 
 ## Task execution
 
-Production task execution requires a locked task image digest and the
-daemon-owned container boundary. A task container receives only its worktree,
-task archive, Git metadata, bounded scratch, and one private session home.
-Implementation is the only write-capable role. Validation uses scratch; planner,
-reviewer, formality, and commit-message roles are read-only.
+Production task execution uses the locked task image and daemon-owned container
+boundary described in the [container operations runbook](CONTAINER_OPERATIONS.md).
+Task roles are isolated by worktree and credential boundaries; implementation
+is the only write-capable role, while validation and planner roles remain
+restricted.
 
-`CODEX_API_KEY` is delivered to the trusted wrapper as a length-prefixed stdin
-value immediately before `execve`; it is not written to argv, labels, SQLite,
-configuration, or archive records. The task image has no Docker socket,
-GitHub/SSH credential, or daemon home.
-
-Build and inspect the locked images with:
-
-```bash
-nix build --no-link .#steward-daemon-image .#steward-task-image .#steward-validation-image
-bash steward/containers/smoke-test.sh --images
-bash steward/containers/smoke-test.sh --isolation
-```
-
-See [containers/README.md](containers/README.md) for mount, identity, and
-shutdown details.
 
 ## Signals and tasks
 

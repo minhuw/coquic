@@ -37,9 +37,20 @@ Task, planner, and validation containers receive only their declared worktree,
 archive/history, session, scratch, Git, or output mounts. They receive no
 socket, repository clone, SQLite, deployment state, daemon home, or secret.
 Task roles get a read-only worktree view by default; only the implementation
-role gets one scoped writable worktree and scratch mount. Validation always
-gets a read-only worktree plus bounded output and store mounts. The planner has
-only sealed history, one private session, and output staging.
+role gets one scoped writable worktree and scratch mount. Validation always gets
+a read-only worktree plus bounded output and store mounts. The planner has only
+sealed history, one private session, and output staging.
+
+The daemon runs as the configured numeric host UID/GID and receives the local
+Docker socket group. Its container uses a read-only root with bounded `/tmp`
+and `/run` tmpfs. Validation runs with `--network none` and excludes raw
+subprocess output. The raw subprocess output is never exposed to validation.
+The task wrapper delivers `CODEX_API_KEY` as a
+length-prefixed value on stdin immediately before `execve`; it is not persisted
+in `auth.json`, TOML, labels, argv, SQLite, transcripts, or public artifacts.
+The same-session process inspection risk remains a known residual risk and
+cannot be fully eliminated. The credential is dedicated and revocable for this
+run.
 
 ## Releases and state
 
@@ -293,6 +304,24 @@ current-release rollback restores the Site pair and points Steward at the same
 persistent D1 and cloud configuration. Provider changes remain a separate
 operator action.
 
+For the Cloudflare rollout, the following exact set is the sole cleanup
+authority for delayed Site cleanup after cutover proof and the rollback window:
+
+```text
+/opt/coquic-demo/steward/tasks
+/opt/coquic-demo/steward/control-loop
+/opt/coquic-demo/steward/cache
+```
+
+These are Site-host replica roots. Treat each directory as one exact target and
+remove at most one manually after the rollback window. No other Site path or
+document is cleanup authority for this rollout; do not add or reclassify a
+target from another document. Ordinary deploy, repair, and rollback remove
+none. Do not delete Steward's private `$COQUIC_HOME/tasks`,
+`$COQUIC_HOME/control-loop`, or source archives, and never replace the exact
+paths above with a recursive glob. This cleanup set does not authorize
+publication or a production lifecycle action.
+
 ## Local proof
 
 The deterministic management tests use fake credentials, a local bare remote,
@@ -312,6 +341,15 @@ nix develop -c bash steward/containers/smoke-test.sh --production-compose
 nix develop -c bash steward/containers/smoke-test.sh --planner
 ```
 
-Image and Docker isolation checks are separate operator actions and require the
-corresponding local tools. No local proof command performs a live Cloudflare,
-Site SSH, or production lifecycle action.
+Image and Docker isolation checks are separate operator actions. They require
+the pinned Nix outputs, and isolation requires a local Docker daemon:
+
+```sh
+nix develop -c bash steward/containers/smoke-test.sh --images
+nix develop -c bash steward/containers/smoke-test.sh --isolation
+nix develop -c bash steward/containers/smoke-test.sh --shutdown
+```
+
+These checks use fake inputs where possible and do not publish anything or
+contact Cloudflare. No local proof command performs a live Cloudflare, Site
+SSH, or production lifecycle action.

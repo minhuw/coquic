@@ -102,6 +102,13 @@ def test_current_config_object_uses_canonical_fields_without_credentials() -> No
     assert fake.calls[0][1]["Bucket"] == "config-public-bucket"
     assert fake.calls[0][1]["Key"] == PUBLIC_KEY
 
+    fake.head = _head(klass="private")
+    private_result = client.put_object(PRIVATE_KEY, BODY, R2ObjectClass.private)
+
+    assert private_result.status is R2PutStatus.uploaded
+    assert fake.calls[2][1]["Bucket"] == "config-private-bucket"
+    assert fake.calls[2][1]["Key"] == PRIVATE_KEY
+
 
 def test_new_object_is_single_part_conditional_and_head_verified() -> None:
     fake = FakeS3(head=_head())

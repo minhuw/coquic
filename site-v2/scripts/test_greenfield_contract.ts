@@ -16,8 +16,6 @@ type AtifViewModelModule = typeof import("../lib/steward-archive/atif-view-model
 
 const rawCase = process.argv[2] ?? "";
 const MAX_CASE_LENGTH = 256;
-const MAX_CHILD_STDOUT_BYTES = 4 * 1024;
-const MAX_CHILD_STDERR_BYTES = 64 * 1024;
 const GREENFIELD_TASK_ID = "task-greenfield";
 const FAILURE_CASES = new Set(["dangling-head", "digest-mismatch", "private-field"]);
 const REPLAY_CASES = new Set(["replay", "reopen/replay"]);
@@ -51,21 +49,6 @@ const { CloudflareD1Client } = runtime.cloudflare;
 const { validateCloudStatusResponse, validateCloudTaskPageResponse, validateCloudTaskDetailResponse, validateCloudCompleteTrajectoryResponse, validateCloudProblemResponse, validateCloudTaskDetailData } = runtime.schema;
 const { loadVerifiedAtif } = runtime.atifLoader;
 const { buildAtifViewModel } = runtime.atifViewModel;
-
-function writeChildStream(stream: NodeJS.WriteStream, payload: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      stream.off("error", onError);
-      reject(error);
-    };
-    stream.once("error", onError);
-    stream.write(payload, (error?: Error | null) => {
-      stream.off("error", onError);
-      if (error) reject(error);
-      else resolve();
-    });
-  });
-}
 
 function assertLoopbackBase(value: unknown): URL {
   assert.equal(typeof value, "string", "provider URL is required");
@@ -372,24 +355,6 @@ async function run(): Promise<void> {
   assert.equal(process.argv.length, 3, "exactly one case argument is required");
   assert(rawCase.length > 0 && rawCase.length <= MAX_CASE_LENGTH, "case is required");
   assert(SUPPORTED_CASES.has(rawCase), "unsupported greenfield case");
-  const childMode = process.env.COQUIC_GREENFIELD_CHILD_MODE;
-  if (childMode === "malformed") {
-    process.stdout.write(`${JSON.stringify({ case: rawCase, ok: true, extra: true })}\n`);
-    return;
-  }
-  if (childMode === "oversized-stdout") {
-    await writeChildStream(process.stdout, "x".repeat(MAX_CHILD_STDOUT_BYTES * 2));
-    return;
-  }
-  if (childMode === "oversized-stderr") {
-    await writeChildStream(process.stderr, "x".repeat(MAX_CHILD_STDERR_BYTES * 2));
-    await writeChildStream(process.stdout, `${JSON.stringify({ case: rawCase, ok: true })}\n`);
-    return;
-  }
-  if (childMode === "timeout") {
-    await new Promise<void>(() => { setInterval(() => undefined, 1000); });
-    return;
-  }
   const provider = assertLoopbackBase(process.env.COQUIC_GREENFIELD_PROVIDER_BASE_URL);
   const config = configFor(provider);
   const restoreFetch = installProviderFetch(provider);
@@ -446,7 +411,6 @@ async function run(): Promise<void> {
 
 void run().then(
   () => {
-    if (process.env.COQUIC_GREENFIELD_CHILD_MODE) return;
     process.stdout.write(`${JSON.stringify({ case: rawCase, ok: true })}\n`);
   },
   (error: unknown) => {

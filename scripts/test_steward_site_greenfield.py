@@ -470,68 +470,104 @@ MAX_CHILD_STDERR_BYTES = 64 * 1024
 def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: bool = True, timeout: int = 60) -> None:
     environment = os.environ.copy()
     environment["COQUIC_GREENFIELD_PROVIDER_BASE_URL"] = base_url
-    if mode is not None: environment["COQUIC_GREENFIELD_CHILD_MODE"] = mode
+    environment.pop("COQUIC_GREENFIELD_CHILD_MODE", None)
     site_root = ROOT / "site-v2"
-    tsx = site_root / "node_modules" / ".bin" / "tsx"
-    command = [str(tsx), str(site_root / "scripts" / "test_greenfield_contract.ts"), case] if tsx.exists() else ["npm", "exec", "--prefix", str(site_root), "--", "tsx", "scripts/test_greenfield_contract.ts", case]
+    if mode is None:
+        tsx = site_root / "node_modules" / ".bin" / "tsx"
+        command = [str(tsx), str(site_root / "scripts" / "test_greenfield_contract.ts"), case] if tsx.exists() else ["npm", "exec", "--prefix", str(site_root), "--", "tsx", "scripts/test_greenfield_contract.ts", case]
+    else:
+        command = ["node", str(site_root / "scripts" / "test_greenfield_child.mjs"), mode]
     process = subprocess.Popen(command, cwd=site_root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     stdout: list[bytes] = []
     stderr: list[bytes] = []
+    observed = {"stdout": 0, "stderr": 0}
     oversized = {"stdout": False, "stderr": False}
+
     def drain(stream: Any, target: list[bytes], limit: int, name: str) -> None:
-        total = 0
         while True:
             chunk = stream.read(8192)
-            if not chunk: break
-            if total + len(chunk) > limit:
+            if not chunk:
+                break
+            observed[name] += len(chunk)
+            if observed[name] > limit:
                 oversized[name] = True
-                remaining = max(0, limit - total)
-                if remaining: target.append(chunk[:remaining])
-                total = limit
-            elif total < limit:
-                target.append(chunk)
-                total += len(chunk)
+            retained = sum(len(item) for item in target)
+            remaining = max(0, limit - retained)
+            if remaining:
+                target.append(chunk[:remaining])
+
     threads = [Thread(target=drain, args=(process.stdout, stdout, MAX_CHILD_STDOUT_BYTES, "stdout")), Thread(target=drain, args=(process.stderr, stderr, MAX_CHILD_STDERR_BYTES, "stderr"))]
-    for item in threads: item.start()
+    for item in threads:
+        item.start()
     timed_out = False
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try: os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError: pass
-        try: process.wait(timeout=2)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            try: os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
-        if expect_ok or mode != "timeout": raise RuntimeError(f"Site contract case {case} timed out")
+        if expect_ok or mode != "timeout":
+            raise RuntimeError(f"Site contract case {case} timed out")
     finally:
         if process.poll() is None:
-            try: os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
-        for item in threads: item.join(timeout=2)
+        for item in threads:
+            item.join(timeout=2)
         if any(item.is_alive() for item in threads):
             raise RuntimeError(f"Site contract case {case} did not finish draining child output")
     output = b"".join(stdout)
+
+    def stderr_excerpt() -> str:
+        text = b"".join(stderr).decode("utf-8", errors="replace")
+        sanitized = "".join(character if character in "\t " or 0x20 <= ord(character) < 0x7F else " " for character in text)
+        return " ".join(sanitized.split())[:512] or "<empty>"
+
     if not expect_ok:
         if mode == "timeout":
-            if not timed_out: raise RuntimeError("timeout child exited before the bound")
+            if not timed_out:
+                raise RuntimeError("timeout child exited before the bound")
             return
         if mode == "malformed":
-            try: payload = json.loads(output.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError): return
-            if set(payload) != {"case", "ok"} or payload.get("case") != case or payload.get("ok") is not True: return
+            if process.returncode != 0 or not output:
+                raise RuntimeError(f"Site contract child boundary malformed mode failed: returncode={process.returncode}; stdout_bytes={observed['stdout']}; stderr_bytes={observed['stderr']}; stderr_excerpt={stderr_excerpt()!r}")
+            try:
+                payload = json.loads(output.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return
+            if set(payload) != {"case", "ok"} or payload.get("case") != case or payload.get("ok") is not True:
+                return
             raise RuntimeError(f"Site contract child boundary accepted {mode}")
         if mode in {"oversized-stdout", "oversized-stderr"}:
-            if oversized[mode.removeprefix("oversized-")]: return
-            raise RuntimeError(f"Site contract child boundary did not exceed {mode}")
+            stream = mode.removeprefix("oversized-")
+            if oversized[stream]:
+                return
+            raise RuntimeError(
+                f"Site contract child boundary missing overflow: mode={mode}; returncode={process.returncode}; "
+                f"stdout_bytes={observed['stdout']}; stderr_bytes={observed['stderr']}; "
+                f"stdout_overflow={oversized['stdout']}; stderr_overflow={oversized['stderr']}; "
+                f"stderr_excerpt={stderr_excerpt()!r}"
+            )
         raise RuntimeError(f"unknown child boundary mode {mode}")
     if oversized["stdout"] or oversized["stderr"] or process.returncode != 0 or len(output) > MAX_CHILD_STDOUT_BYTES or not output.endswith(b"\n") or output.count(b"\n") != 1:
         raise RuntimeError(f"Site contract case {case} failed")
-    try: payload = json.loads(output.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error: raise RuntimeError(f"Site contract case {case} emitted invalid JSON") from error
+    try:
+        payload = json.loads(output.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Site contract case {case} emitted invalid JSON") from error
     if set(payload) != {"case", "ok"} or payload.get("case") != case or payload.get("ok") is not True:
         raise RuntimeError(f"Site contract case {case} emitted an invalid summary")
 

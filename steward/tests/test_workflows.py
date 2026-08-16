@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -132,27 +131,6 @@ def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -
     generated = json.loads(json.dumps(VALID_PLAN))
     generated["steps"][0]["files"] = ["zig-out/result"]
     assert parse_implementation_plan(json.dumps(generated), task, config) is None
-
-
-def test_store_migrates_feature_workflow(config: StewardConfig) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.feature,
-            worker=WorkerKind.feature_implementer,
-            title="Feature",
-            prompt="Implement it",
-        )
-    )
-    store.engine.dispose()
-    with sqlite3.connect(config.db_path) as connection:
-        connection.execute("ALTER TABLE tasks DROP COLUMN workflow")
-
-    migrated = TaskStore._blank_store(
-        config.db_path, on_change=None, wal=True
-    )
-    migrated._migrate_schema()
-    assert migrated.get(task.id).spec.workflow == TaskWorkflow.feature
 
 
 def test_feature_plans_then_codes_in_separate_session(

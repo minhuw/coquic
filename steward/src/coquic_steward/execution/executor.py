@@ -1351,27 +1351,19 @@ class StewardExecutor:
         commit = self._latest_commit(task.id, pipeline.id)
         if commit is None:
             return self._block_pipeline(task, pipeline, "push has no accepted commit")
-        source = self._source_task_for_integration(task)
-        if source is None:
+        integration = _is_integration_task(task)
+        source = self._source_task_for_integration(task) if integration else task
+        if integration and source is None:
             return self._block_pipeline(task, pipeline, "integration source task missing")
+        if integration and source is not None and TaskStatus(source.status).terminal:
+            return self._block_pipeline(
+                task,
+                pipeline,
+                f"integration source already terminal: {source.status}",
+            )
         action = action_identity(task.id, pipeline.id, phase)
         attempt = self._phase_attempt(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=f"{action}-{attempt}", payload={"commit": commit, "attempt": attempt})
-
-        def update_feature_issues() -> None:
-            transcript = IntegrationTranscript(
-                self.config.transcripts_dir
-                / task.id
-                / "integration"
-                / "transcript.txt"
-            )
-            task.transcript_path = transcript.path
-            self.store.save(task)
-            transcript.write(
-                "start",
-                f"Durable push {task.id} for source task {source.id}",
-            )
-            self._update_feature_issues_after_push(task, source, commit, transcript)
 
         try:
             result = self.worktrees.push_head_to_main(worktree)
@@ -1379,7 +1371,7 @@ class StewardExecutor:
             detail = str(exc)[-2_000:]
             if self._commit_reachable(worktree, commit):
                 self.store.add_event(task.id, "pipeline.push.ambiguous_resolved", commit, {"pipeline_id": pipeline.id, "commit": commit, "detail": detail})
-                update_feature_issues()
+                self._complete_confirmed_push(task, commit)
                 self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
                 return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit, "ambiguous": True})
             fingerprint = bounded_fingerprint(
@@ -1427,7 +1419,7 @@ class StewardExecutor:
             return self._block_pipeline(task, pipeline, f"push failed: {detail}")
         self.store.add_event(task.id, "pipeline.push", commit, {"pipeline_id": pipeline.id, "action_id": action, "commit": commit, "result": _command_result_text(result)})
         self._archive_write(task, pipeline, "push.json", {"commit": commit, "result": _command_result_text(result)})
-        update_feature_issues()
+        self._complete_confirmed_push(task, commit)
         self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
         return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit})
 
@@ -1542,6 +1534,15 @@ class StewardExecutor:
             require_pipeline_transition(phase, next_phase, trigger=pipeline.trigger)
         action = self._latest_started_action(task.id, pipeline.id, phase)
         selected_action = action or action_identity(task.id, pipeline.id, phase)
+        if (
+            phase == PipelineCursorPhase.push
+            and next_phase == PipelineCursorPhase.ready_to_seal
+            and evidence is not None
+            and evidence.get("reconciled") is True
+        ):
+            commit = evidence.get("commit")
+            if isinstance(commit, str) and commit:
+                self._complete_confirmed_push(task, commit)
         output = PhaseOutput(
             selected_action,
             phase,
@@ -3698,6 +3699,51 @@ class StewardExecutor:
             return self.store.get(source_task_id)
         except KeyError:
             return None
+
+    def _complete_confirmed_push(self, task: TaskRecord, commit: str) -> None:
+        """Record post-push issue evidence without undoing a confirmed push."""
+
+        try:
+            current = self.store.get(task.id)
+            source = current
+            if _is_integration_task(current):
+                source = self._source_task_for_integration(current)
+                if source is None or TaskStatus(source.status).terminal:
+                    return
+            transcript = IntegrationTranscript(
+                self.config.transcripts_dir
+                / current.id
+                / "integration"
+                / "transcript.txt"
+            )
+            current.transcript_path = transcript.path
+            self.store.save(current)
+            transcript.write(
+                "start",
+                f"Durable push {current.id} for source task {source.id}",
+            )
+            self._update_feature_issues_after_push(
+                current, source, commit, transcript
+            )
+        except Exception as exc:
+            detail = str(exc).strip()[-2_000:] or exc.__class__.__name__
+            try:
+                if "transcript" in locals():
+                    transcript.write("issue_update_failed", detail)
+            except Exception:
+                pass
+            try:
+                self.store.add_event(
+                    task.id,
+                    "github.issue_update_failed",
+                    detail,
+                    {
+                        "integration_task_id": task.id,
+                        "step": "bookkeeping",
+                    },
+                )
+            except Exception:
+                pass
 
     def _integrate_source_task(
         self,

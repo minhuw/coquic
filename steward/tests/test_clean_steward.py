@@ -6194,6 +6194,41 @@ def test_durable_local_only_commit_does_not_push_remote(
     assert remote_text == "hello\n"
     assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
 
+def test_durable_ordinary_push_uses_task_as_issue_source(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, _integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
+    source.spec.kind = TaskKind.custom
+    source.spec.workflow = TaskWorkflow.fix
+    source.spec.worker = WorkerKind.custom
+    store.save(source)
+    commands: list[list[str]] = []
+    real_command = run_command
+
+    def command(argv, cwd, *, timeout=None, **_kwargs):
+        if argv and argv[0] == "gh":
+            commands.append(argv)
+            return CommandResult(argv, cwd, 0, "", "")
+        return real_command(argv, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
+    assert _drive_durable(executor, source.id), (
+        f"status={store.get(source.id).status} "
+        f"summary={store.get(source.id).summary} "
+        f"events={[event.kind for event in store.events(source.id)]}"
+    )
+
+    assert store.get(source.id).status == TaskStatus.pushed
+    assert any(event.kind == "pipeline.push" for event in store.events(source.id))
+    assert [item[:3] for item in commands] == [
+        ["gh", "issue", "comment"],
+        ["gh", "issue", "close"],
+    ]
+    assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+
+
 def test_durable_validation_blocks_frozen_path_before_commit(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -6555,18 +6590,30 @@ def test_parse_commit_message_rejects_invalid_subject() -> None:
 def test_durable_push_persists_transport_retry_before_success(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    config, store, source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
     real_push = Worktrees.push_head_to_main
+    real_command = run_command
     attempts = 0
+    trace: list[str] = []
 
     def transient_push(worktrees, path):
         nonlocal attempts
         attempts += 1
+        trace.append("push")
         if attempts == 1:
             raise RuntimeError("Could not resolve host: github.com")
         return real_push(worktrees, path)
 
+    def command(argv, cwd, *, timeout=None, **_kwargs):
+        if argv and argv[0] == "gh":
+            trace.append(argv[2])
+            return CommandResult(argv, cwd, 0, "", "")
+        return real_command(argv, cwd, timeout=timeout, **_kwargs)
+
     monkeypatch.setattr(Worktrees, "push_head_to_main", transient_push)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
     assert _drive_durable(executor, integration.id)
 
     saved = store.get(integration.id)
@@ -6575,12 +6622,15 @@ def test_durable_push_persists_transport_retry_before_success(
     assert attempts == 2
     assert any(event.kind == "pipeline.push.retry" for event in events)
     assert any(event.kind == "pipeline.push" for event in events)
-    assert not any(event.kind == "github.issue_closed" for event in store.events(source.id))
+    assert trace == ["push", "push", "comment", "close"]
+    assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
 
 def test_durable_push_blocks_after_bounded_transport_failures(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    config, store, source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
     attempts = 0
 
     def fail_push(_worktrees, _path):
@@ -6588,14 +6638,22 @@ def test_durable_push_blocks_after_bounded_transport_failures(
         attempts += 1
         raise RuntimeError("Could not resolve host: github.com")
 
+    def unexpected_github(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            pytest.fail("unsuccessful durable push must not invoke GitHub")
+        return run_command(command, cwd, timeout=timeout, **_kwargs)
+
     monkeypatch.setattr(Worktrees, "push_head_to_main", fail_push)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
     assert not _drive_durable(executor, integration.id)
 
     saved = store.get(integration.id)
     events = store.events(integration.id)
     assert saved.status == TaskStatus.blocked
+    assert saved.summary == "push made no progress"
     assert attempts == 2
     assert any(event.kind == "pipeline.push.failure" for event in events)
+    assert any(event.kind == "pipeline.push.retry" for event in events)
     assert not any(event.kind == "pipeline.push" for event in events)
     assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
 
@@ -6604,6 +6662,61 @@ def test_push_retry_classification_excludes_remote_rejection() -> None:
     assert _is_transient_push_failure("unexpected status 503 Service Unavailable")
     assert not _is_transient_push_failure("remote rejected: permission denied")
     assert not _is_transient_push_failure("non-fast-forward update rejected")
+
+
+def test_durable_push_rejection_does_not_update_feature_issue(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
+
+    def rejected_push(_worktrees, _path):
+        raise RuntimeError("remote rejected: permission denied")
+
+    def unexpected_github(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            pytest.fail("rejected durable push must not invoke GitHub")
+        return run_command(command, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", rejected_push)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
+    assert not _drive_durable(executor, integration.id)
+
+    saved = store.get(integration.id)
+    events = store.events(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "push failed: remote rejected: permission denied"
+    assert any(event.kind == "pipeline.push.failure" for event in events)
+    assert not any(event.kind == "pipeline.push.retry" for event in events)
+    assert not any(event.kind == "pipeline.push" for event in events)
+    assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
+
+
+def test_durable_integration_rebase_does_not_update_feature_issue(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
+    _advance_durable(executor, integration.id, 4)
+    (config.repo_root / "REMOTE.md").write_text("remote change\n", encoding="utf-8")
+    run_command(["git", "add", "REMOTE.md"], cwd=config.repo_root, check=True)
+    run_command(["git", "commit", "-m", "remote change"], cwd=config.repo_root, check=True)
+    run_command(["git", "push", "origin", "main"], cwd=config.repo_root, check=True)
+
+    def unexpected_github(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            pytest.fail("integration rebase must not update GitHub")
+        return run_command(command, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
+    outcome = executor.advance_once(integration.id)
+
+    assert outcome.status == "child_pipeline"
+    child = store.list_pipelines(integration.id)[-1]
+    assert child.trigger == "integration-rebase"
+    assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
 
 
 def test_durable_push_closes_one_feature_issue_after_push(
@@ -6665,6 +6778,58 @@ def test_durable_ambiguous_push_also_closes_feature_issue(
     assert transcript is not None and transcript.is_file()
 
 
+def test_reconciled_push_updates_feature_issue_before_sealing(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
+    _advance_durable(executor, integration.id, 7)
+    real_push = Worktrees.push_head_to_main
+
+    def push_then_crash(worktrees, path):
+        result = real_push(worktrees, path)
+        raise KeyboardInterrupt("daemon stopped after remote acceptance")
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", push_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        executor.advance_once(integration.id)
+
+    commands: list[list[str]] = []
+    real_command = run_command
+
+    def command(argv, cwd, *, timeout=None, **_kwargs):
+        if argv and argv[0] == "gh":
+            commands.append(argv)
+            return CommandResult(argv, cwd, 0, "", "")
+        return real_command(argv, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", command)
+    daemon = StewardDaemon(config, store)
+    task = store.get(integration.id)
+    pipeline = store.list_pipelines(integration.id)[0]
+    active = next(
+        event
+        for event in store.events(integration.id)
+        if event.kind == "pipeline.phase.started"
+        and event.data.get("phase") == "push"
+    )
+    outcome = daemon._reconcile_interrupted_push(
+        task, pipeline, str(active.data["action_id"])
+    )
+
+    assert outcome.disposition.value == "ingested"
+    assert store.get(integration.id).status == TaskStatus.pushed
+    assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+    assert [item[:3] for item in commands] == [
+        ["gh", "issue", "comment"],
+        ["gh", "issue", "close"],
+    ]
+    transcript = store.get(integration.id).transcript_path
+    assert transcript is not None and "issue_closed: #42" in transcript.read_text(encoding="utf-8")
+    assert executor.advance_once(integration.id).status == "ready_to_seal"
+
+
 def test_durable_push_remains_pushed_when_feature_issue_update_fails(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -6721,16 +6886,61 @@ def test_durable_push_skips_multiple_feature_issues(
 def test_durable_push_blocks_without_explicit_source_metadata(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    config, store, _source, integration, executor = _durable_push_setup(config, tmp_path, monkeypatch)
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
     task = store.get(integration.id)
     task.spec.metadata.pop("source_task_id", None)
     store.save(task)
+    pushes: list[object] = []
 
+    def unexpected_push(_worktrees, _path):
+        pushes.append(True)
+        pytest.fail("missing integration source must not push")
+
+    def unexpected_github(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            pytest.fail("missing integration source must not update GitHub")
+        return run_command(command, cwd, timeout=timeout, **_kwargs)
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", unexpected_push)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_github)
     assert not _drive_durable(executor, integration.id)
     saved = store.get(integration.id)
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "integration source task missing"
-    assert not any(event.kind.startswith("github.issue_") for event in store.events(integration.id))
+    assert pushes == []
+    assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
+
+def test_durable_push_skips_terminal_integration_source(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, source, integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, issue_numbers=(42,)
+    )
+    store.finish_task(source.id, TaskStatus.failed, "source failed before integration")
+    commands: list[list[str]] = []
+
+    def unexpected_command(command, cwd, *, timeout=None, **_kwargs):
+        if command and command[0] == "gh":
+            commands.append(command)
+            pytest.fail("terminal integration source must not be mutated")
+        return run_command(command, cwd, timeout=timeout, **_kwargs)
+
+    def unexpected_push(_worktrees, _path):
+        pytest.fail("terminal integration source must not be published")
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", unexpected_command)
+    monkeypatch.setattr(Worktrees, "push_head_to_main", unexpected_push)
+    assert not _drive_durable(executor, integration.id)
+
+    assert store.get(source.id).status == TaskStatus.failed
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "integration source already terminal: failed"
+    assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
+    assert commands == []
+
 
 def test_durable_commit_message_failure_blocks_before_push(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -6815,13 +7025,29 @@ def test_durable_commit_failure_blocks_without_push(
     assert any(event.kind == "pipeline.blocked" for event in store.events(integration.id))
     assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
 
-def test_executor_routes_blocking_review_to_durable_formality(
+def test_executor_drives_blocking_review_through_durable_repair(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
-    fake = _durable_codex(
-        tmp_path,
-        review='{"verdict":"block","summary":"needs revision","findings":[{"severity":"high","title":"bad","file":"README.md","line":1,"detail":"bad text","recommendation":"fix it"}],"validation_gaps":[],"remaining_risk":""}',
+    fake = tmp_path / "durable-review-repair-codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'case "$last" in\n'
+        '  */reviewer-1/last-message.md) printf \'%s\\n\' \'{"verdict":"block","summary":"needs revision","findings":[{"severity":"high","title":"bad","file":"README.md","line":1,"detail":"bad text","recommendation":"fix it"}],"validation_gaps":[],"remaining_risk":""}\' > "$last" ;;\n'
+        '  */formality-1/last-message.md) printf \'%s\\n\' \'{"dispositions":[{"sourceIndex":0,"disposition":"required","rationale":"bounded repair","followUp":null}]}\' > "$last" ;;\n'
+        '  */reviewer-2/last-message.md) printf \'%s\\n\' \'{"verdict":"approve","summary":"repaired","findings":[],"validation_gaps":[],"remaining_risk":""}\' > "$last" ;;\n'
+        '  */pipeline-2-implementation-1/last-message.md) printf \'repaired change\\n\' > README.md; printf \'done\\n\' > "$last" ;;\n'
+        '  */commit-message-2/last-message.md) printf \'%s\\n\' \'{"subject":"fix: durable review repair","body":"persist the repaired tree"}\' > "$last" ;;\n'
+        '  *) printf \'initial change\\n\' > README.md; printf \'done\\n\' > "$last" ;;\n'
+        "esac\n",
+        encoding="utf-8",
     )
+    fake.chmod(0o755)
     config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
@@ -6833,10 +7059,21 @@ def test_executor_routes_blocking_review_to_durable_formality(
     )
 
     executor = StewardExecutor(config, store)
-    outcomes = _advance_durable(executor, task.id, 4)
-    assert outcomes[-1].next_phase.value == "formality"
-    assert any(event.kind == "pipeline.review.raw" for event in store.events(task.id))
-    assert not any(event.kind == "pipeline.review.failure" for event in store.events(task.id))
+    assert _drive_durable(executor, task.id, finalize=True)
+
+    iterations = store.iterations(task.id)
+    assert [item.iteration for item in iterations] == [0, 1]
+    assert all(item.patch_path is not None for item in iterations)
+    assert store.get(task.id).status == TaskStatus.succeeded
+    assert len(store.list_pipelines(task.id)) == 2
+    assert any(event.kind == "pipeline.formality.effective" for event in store.events(task.id))
+    assert any(event.kind == "pipeline.review.failure" for event in store.events(task.id))
+    assert any(
+        event.kind == "pipeline.child.created"
+        and event.data.get("trigger") == "review-repair"
+        for event in store.events(task.id)
+    )
+    assert sum(event.kind == "pipeline.review.raw" for event in store.events(task.id)) == 2
 
 def test_executor_persists_durable_iteration_as_first_class_record(
     config: StewardConfig, tmp_path: Path, monkeypatch

@@ -463,6 +463,10 @@ def graph() -> dict[str, Any]:
     }
 
 
+MAX_CHILD_STDOUT_BYTES = 4 * 1024
+MAX_CHILD_STDERR_BYTES = 64 * 1024
+
+
 def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: bool = True, timeout: int = 60) -> None:
     environment = os.environ.copy()
     environment["COQUIC_GREENFIELD_PROVIDER_BASE_URL"] = base_url
@@ -487,7 +491,7 @@ def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: 
             elif total < limit:
                 target.append(chunk)
                 total += len(chunk)
-    threads = [Thread(target=drain, args=(process.stdout, stdout, 4096, "stdout")), Thread(target=drain, args=(process.stderr, stderr, 65536, "stderr"))]
+    threads = [Thread(target=drain, args=(process.stdout, stdout, MAX_CHILD_STDOUT_BYTES, "stdout")), Thread(target=drain, args=(process.stderr, stderr, MAX_CHILD_STDERR_BYTES, "stderr"))]
     for item in threads: item.start()
     timed_out = False
     try:
@@ -503,11 +507,13 @@ def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: 
             process.wait()
         if expect_ok or mode != "timeout": raise RuntimeError(f"Site contract case {case} timed out")
     finally:
-        for item in threads: item.join(timeout=2)
         if process.poll() is None:
             try: os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError: pass
             process.wait()
+        for item in threads: item.join(timeout=2)
+        if any(item.is_alive() for item in threads):
+            raise RuntimeError(f"Site contract case {case} did not finish draining child output")
     output = b"".join(stdout)
     if not expect_ok:
         if mode == "timeout":
@@ -522,7 +528,7 @@ def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: 
             if oversized[mode.removeprefix("oversized-")]: return
             raise RuntimeError(f"Site contract child boundary did not exceed {mode}")
         raise RuntimeError(f"unknown child boundary mode {mode}")
-    if oversized["stdout"] or oversized["stderr"] or process.returncode != 0 or len(output) > 4096 or not output.endswith(b"\n") or output.count(b"\n") != 1:
+    if oversized["stdout"] or oversized["stderr"] or process.returncode != 0 or len(output) > MAX_CHILD_STDOUT_BYTES or not output.endswith(b"\n") or output.count(b"\n") != 1:
         raise RuntimeError(f"Site contract case {case} failed")
     try: payload = json.loads(output.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error: raise RuntimeError(f"Site contract case {case} emitted invalid JSON") from error

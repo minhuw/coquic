@@ -21,7 +21,38 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     assert config.publication.account_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     assert config.publication.d1_database_id == "12345678-1234-4abc-8def-1234567890ab"
     assert config.telemetry.billing_mode == "unknown"
-    assert config.telemetry.price_catalog_path is None
+
+
+def test_telemetry_billing_mode_is_normalized(repo: Path, tmp_path: Path) -> None:
+    config_path = tmp_path / "telemetry.toml"
+    config_path.write_text(
+        '[steward.telemetry]\nbilling_mode = "API"\n',
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.telemetry.billing_mode == "api"
+
+
+@pytest.mark.parametrize(
+    ("key", "toml_value"),
+    (
+        ("price_" + "catalog_path", '"ignored.json"'),
+        ("unknown_sentinel", "true"),
+    ),
+)
+def test_telemetry_rejects_unknown_keys(
+    repo: Path, tmp_path: Path, key: str, toml_value: str
+) -> None:
+    config_path = tmp_path / f"telemetry-{key}.toml"
+    config_path.write_text(
+        f"[steward.telemetry]\n{key} = {toml_value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=rf"telemetry has unsupported keys: {key}"):
+        load_config(repo_root=repo, config_path=config_path)
 
 
 def test_enabled_publication_runs_preflight_without_deployment_credentials(

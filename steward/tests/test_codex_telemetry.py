@@ -365,20 +365,16 @@ def test_estimate_cost_uses_invocation_start_and_rejects_fuzzy_models() -> None:
     assert rejected.reason == "price_entry_unmatched"
 
 
-def test_runner_ignores_legacy_catalog_override(config, tmp_path: Path) -> None:
+def test_runner_uses_operational_catalog(config, tmp_path: Path) -> None:
     operational = config.repo_root / "steward"
     operational.mkdir()
     (operational / "model-prices.json").write_text(
         '{"schema_version": 1, "entries": []}\n', encoding="utf-8"
     )
-    override = tmp_path / "override.json"
-    override.write_text('{"schema_version": 1, "entries": []}\n', encoding="utf-8")
     configured = config.__class__(
         **{
             **config.__dict__,
-            "telemetry": TelemetryConfig(
-                billing_mode="api", price_catalog_path=override
-            ),
+            "telemetry": TelemetryConfig(billing_mode="api"),
         }
     )
     recorder = _new_telemetry_recorder(
@@ -393,7 +389,7 @@ def test_runner_ignores_legacy_catalog_override(config, tmp_path: Path) -> None:
     )
     assert recorder.catalog is not None
     assert recorder.catalog.entries == ()
-    assert recorder.issues["price_catalog_override_ignored"] == 1
+    assert not recorder.issues
 
 
 def test_api_cost_without_completed_turns_is_unavailable() -> None:

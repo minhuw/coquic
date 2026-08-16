@@ -1175,7 +1175,6 @@ def _new_telemetry_recorder(
 ) -> TelemetryRecorder:
     catalog: PriceCatalog | None = None
     catalog_error = False
-    catalog_override = config.telemetry.price_catalog_path is not None
     catalog_path = config.repo_root / _OPERATIONAL_PRICE_CATALOG
     try:
         catalog = PriceCatalog.from_path(catalog_path)
@@ -1212,8 +1211,6 @@ def _new_telemetry_recorder(
     )
     if catalog_error:
         recorder.add_issue("price_catalog_unavailable")
-    if catalog_override:
-        recorder.add_issue("price_catalog_override_ignored")
     if clock_error:
         recorder.add_issue("telemetry_clock_unavailable")
     return recorder

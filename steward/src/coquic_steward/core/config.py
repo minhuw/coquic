@@ -169,6 +169,7 @@ _LIMITS_ALLOWED_KEYS = frozenset(
         "validation_timeout_minutes",
     }
 )
+_TELEMETRY_ALLOWED_KEYS = frozenset({"billing_mode"})
 
 
 def _require_allowed_keys(
@@ -694,15 +695,9 @@ class CodexRunSettings:
 
 @dataclass(frozen=True)
 class TelemetryConfig:
-    """Telemetry settings.
-
-    ``price_catalog_path`` is retained solely so older configuration files
-    remain readable.  Runtime pricing always uses the repository's committed
-    catalog; the path cannot select a different authority.
-    """
+    """Telemetry settings."""
 
     billing_mode: str = "unknown"
-    price_catalog_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.billing_mode not in VALID_TELEMETRY_BILLING_MODES:
@@ -1480,17 +1475,10 @@ def _signal_provider_configs(
 
 
 def _telemetry_config(raw: object) -> TelemetryConfig:
-    data = raw if isinstance(raw, dict) else {}
+    data = _require_allowed_keys("telemetry", raw, _TELEMETRY_ALLOWED_KEYS)
     return TelemetryConfig(
         billing_mode=str(data.get("billing_mode", "unknown")).strip().lower(),
-        price_catalog_path=_optional_path(data.get("price_catalog_path")),
     )
-
-
-def _optional_path(value: object) -> Path | None:
-    if value in (None, ""):
-        return None
-    return Path(str(value)).expanduser()
 
 
 def _utc_timestamp() -> str:

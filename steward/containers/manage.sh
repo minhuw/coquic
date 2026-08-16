@@ -86,10 +86,6 @@ validate_compose_static() {
   ! grep -Eq '/var/lib/docker|/root/\.docker|auth\.json' "$compose_file" || die 'forbidden Docker state or credential mount'
 }
 
-compose_argv() {
-  printf '%s\n' docker compose --project-name "$project" --file "$compose_file"
-}
-
 release_field() {
   local release="$1" field="$2" record="$deployment/releases/$release.json"
   [[ -f "$record" && ! -L "$record" ]] || die 'selected release record is unavailable'

@@ -5,6 +5,9 @@ on:
     paths:
       - 'site/next/**'
       - 'site-v2/**'
+      - 'steward/**'
+      - 'contracts/steward-cloud/**'
+      - 'scripts/test_steward_site_greenfield.py'
       - 'flake.nix'
       - 'DESIGN.md'
       - '.github/workflows/frontend.yml'
@@ -12,6 +15,9 @@ on:
     paths:
       - 'site/next/**'
       - 'site-v2/**'
+      - 'steward/**'
+      - 'contracts/steward-cloud/**'
+      - 'scripts/test_steward_site_greenfield.py'
       - 'flake.nix'
       - 'DESIGN.md'
       - '.github/workflows/frontend.yml'
@@ -83,6 +89,8 @@ jobs:
           summarize: false
       - name: Install Site V2 dependencies
         run: nix develop -c npm --prefix site-v2 ci
+      - name: Steward-to-Site greenfield contract
+        run: nix develop -c uv run --project steward python scripts/test_steward_site_greenfield.py
       - name: Install Site V2 Playwright Chromium
         run: nix develop -c npm --prefix site-v2 exec -- playwright install --with-deps chromium
       - name: Contract validation

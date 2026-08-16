@@ -54,16 +54,35 @@ def _item(item_id: str, fingerprint: str) -> SignalItem:
 
 
 def _ledger(tmp_path: Path) -> ControlLoopLedger:
-    ledger = ControlLoopLedger(
-        tmp_path / "steward.sqlite", epoch_id="epoch-ledger-test"
-    )
-    with sqlite3.connect(ledger.path) as connection:
-        connection.execute("CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY)")
-        connection.executemany(
-            "INSERT OR IGNORE INTO tasks(id) VALUES(?)",
-            [("task-active-1",), ("task-created-1",)],
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+    for task_id in ("task-active-1", "task-created-1"):
+        store.add_task(
+            TaskSpec(
+                id=task_id,
+                kind=TaskKind.custom,
+                worker=WorkerKind.custom,
+                title=f"Fixture task {task_id}",
+                prompt="Fixture task for control-loop relations.",
+            )
         )
-    return ledger
+    return store.control_loop
+
+
+def test_blank_direct_ledger_rejects_without_schema_side_effect(tmp_path: Path) -> None:
+    database = tmp_path / "blank.sqlite"
+    with sqlite3.connect(database):
+        pass
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerConflictError, match="schema"):
+        ControlLoopLedger(database, epoch_id="epoch-blank-test")
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        objects = connection.execute(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'control_loop_%'"
+        ).fetchall()
+    assert objects == []
 
 
 def test_fetch_retains_repeated_observations_and_deduplicates_signal(tmp_path: Path) -> None:

@@ -85,236 +85,98 @@ class ControlLoopLedger:
     def __init__(self, database: Path | str | Any, *, epoch_id: str | None = None):
         path = getattr(database, "path", database)
         self.path = Path(path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._epoch_id = validate_id(epoch_id) if epoch_id else None
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        uri = self.path.resolve().as_uri() + "?mode=rw"
+        connection = sqlite3.connect(uri, uri=True, timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
+    @staticmethod
+    def _validate_schema(db: sqlite3.Connection) -> None:
+        # The current Store metadata is the schema authority.  Read its table
+        # and index declarations rather than repeating a second catalog here.
+        from ..storage.schema import Base
+
+        required_tables = {
+            table.name: tuple(column.name for column in table.columns)
+            for table in Base.metadata.tables.values()
+        }
+        table_names = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        missing_tables = sorted(set(required_tables) - table_names)
+        if missing_tables:
+            raise LedgerConflictError(
+                "current Store schema is incomplete: " + ", ".join(missing_tables)
+            )
+
+        for table, columns in required_tables.items():
+            projection = ", ".join(f'"{column}"' for column in columns)
+            try:
+                db.execute(f'SELECT {projection} FROM "{table}" LIMIT 0')
+            except sqlite3.Error as exc:
+                raise LedgerConflictError(
+                    f"current Store table {table} has an incomplete shape"
+                ) from exc
+
+        required_indexes = {
+            index.name
+            for table in Base.metadata.tables.values()
+            for index in table.indexes
+            if index.name is not None
+        }
+        index_names = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        missing_indexes = sorted(required_indexes - index_names)
+        if missing_indexes:
+            raise LedgerConflictError(
+                "current Store schema indexes are incomplete: "
+                + ", ".join(missing_indexes)
+            )
+
     def _initialize(self) -> None:
-        with self._connect() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS control_loop_meta (
-                  key TEXT PRIMARY KEY,
-                  value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_fetches (
-                  fetch_id TEXT PRIMARY KEY,
-                  epoch_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  status TEXT NOT NULL CHECK(status IN ('ok','error')),
-                  started_at TEXT NOT NULL,
-                  completed_at TEXT NOT NULL,
-                  item_count INTEGER NOT NULL CHECK(item_count >= 0),
-                  new_item_count INTEGER NOT NULL CHECK(new_item_count >= 0),
-                  has_more INTEGER NOT NULL CHECK(has_more IN (0, 1)),
-                  error TEXT,
-                  summary TEXT NOT NULL,
-                  normalized_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_signals (
-                  signal_id TEXT PRIMARY KEY,
-                  epoch_id TEXT NOT NULL,
-                  provider TEXT NOT NULL,
-                  fingerprint TEXT NOT NULL,
-                  status TEXT NOT NULL CHECK(status IN ('pending','planned','superseded','errored')),
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  normalized_json TEXT NOT NULL,
-                  UNIQUE(epoch_id, provider, fingerprint)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_observations (
-                  observation_id TEXT PRIMARY KEY,
-                  fetch_id TEXT NOT NULL REFERENCES control_loop_fetches(fetch_id),
-                  signal_id TEXT NOT NULL REFERENCES control_loop_signals(signal_id),
-                  provider TEXT NOT NULL,
-                  fingerprint TEXT NOT NULL,
-                  dedupe_result TEXT NOT NULL CHECK(dedupe_result IN ('new','existing')),
-                  observed_at TEXT NOT NULL,
-                  normalized_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_wakeups (
-                  wakeup_id TEXT PRIMARY KEY,
-                  epoch_id TEXT NOT NULL,
-                  reason TEXT NOT NULL,
-                  status TEXT NOT NULL CHECK(status IN ('pending','consumed')),
-                  created_at TEXT NOT NULL,
-                  consumed_at TEXT,
-                  input_signal_ids_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_cycles (
-                  cycle_id TEXT PRIMARY KEY,
-                  epoch_id TEXT NOT NULL,
-                  reason TEXT NOT NULL,
-                  started_at TEXT NOT NULL,
-                  completed_at TEXT,
-                  runtime_state TEXT NOT NULL,
-                  input_signal_ids_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_planner_runs (
-                  planner_run_id TEXT PRIMARY KEY,
-                  epoch_id TEXT NOT NULL,
-                  state TEXT NOT NULL CHECK(state IN ('claimed','running','succeeded','failed','interrupted','cancelled')),
-                  started_at TEXT NOT NULL,
-                  completed_at TEXT,
-                  input_signal_ids_json TEXT NOT NULL,
-                  active_task_ids_json TEXT NOT NULL,
-                  prompt_json TEXT,
-                  result_json TEXT,
-                  diagnostics_json TEXT NOT NULL,
-                  retry_eligible_at TEXT,
-                  attempt INTEGER NOT NULL CHECK(attempt >= 1),
-                  UNIQUE(epoch_id, planner_run_id)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_proposals (
-                  proposal_id TEXT PRIMARY KEY,
-                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id),
-                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
-                  outcome TEXT NOT NULL CHECK(outcome IN ('accepted','invalid','policy_rejected','duplicate','capacity_skipped')),
-                  reason_code TEXT NOT NULL,
-                  signal_ids_json TEXT NOT NULL,
-                  dedupe_key TEXT,
-                  task_id TEXT,
-                  proposal_json TEXT NOT NULL,
-                  UNIQUE(planner_run_id, ordinal)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_planner_signals (
-                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
-                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
-                  signal_id TEXT NOT NULL REFERENCES control_loop_signals(signal_id),
-                  PRIMARY KEY(planner_run_id, signal_id),
-                  UNIQUE(planner_run_id, ordinal)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_planner_tasks (
-                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
-                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
-                  task_id TEXT NOT NULL REFERENCES tasks(id),
-                  PRIMARY KEY(planner_run_id, task_id),
-                  UNIQUE(planner_run_id, ordinal)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_proposal_signals (
-                  proposal_id TEXT NOT NULL REFERENCES control_loop_proposals(proposal_id) ON DELETE CASCADE,
-                  ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
-                  signal_id TEXT NOT NULL REFERENCES control_loop_signals(signal_id),
-                  PRIMARY KEY(proposal_id, signal_id),
-                  UNIQUE(proposal_id, ordinal)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_proposal_tasks (
-                  proposal_id TEXT PRIMARY KEY REFERENCES control_loop_proposals(proposal_id) ON DELETE CASCADE,
-                  task_id TEXT NOT NULL REFERENCES tasks(id)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_planner_artifacts (
-                  planner_run_id TEXT NOT NULL REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
-                  name TEXT NOT NULL,
-                  source_path TEXT NOT NULL,
-                  required INTEGER NOT NULL CHECK(required IN (0,1)),
-                  PRIMARY KEY(planner_run_id, name)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_edges (
-                  edge_id TEXT PRIMARY KEY,
-                  epoch_id TEXT NOT NULL,
-                  edge_type TEXT NOT NULL,
-                  source_id TEXT NOT NULL,
-                  target_id TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  UNIQUE(edge_type, source_id, target_id)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_events (
-                  sequence INTEGER PRIMARY KEY,
-                  event_id TEXT NOT NULL UNIQUE,
-                  epoch_id TEXT NOT NULL,
-                  occurred_at TEXT NOT NULL,
-                  kind TEXT NOT NULL,
-                  payload_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_outbox (
-                  sequence INTEGER PRIMARY KEY REFERENCES control_loop_events(sequence),
-                  event_id TEXT NOT NULL UNIQUE,
-                  payload_json TEXT NOT NULL,
-                  materialized_at TEXT
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_retry (
-                  key TEXT PRIMARY KEY,
-                  attempt INTEGER NOT NULL CHECK(attempt >= 0),
-                  eligible_at TEXT,
-                  updated_at TEXT NOT NULL,
-                  CHECK((attempt = 0 AND eligible_at IS NULL) OR (attempt > 0 AND eligible_at IS NOT NULL))
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_overhead_usage (
-                  usage_date TEXT NOT NULL,
-                  model TEXT NOT NULL,
-                  owner_class TEXT NOT NULL,
-                  tokens_json TEXT NOT NULL,
-                  costs_json TEXT NOT NULL,
-                  coverage_json TEXT NOT NULL,
-                  PRIMARY KEY(usage_date, model, owner_class)
-                );
-                CREATE TABLE IF NOT EXISTS control_loop_overhead_usage_runs (
-                  planner_run_id TEXT PRIMARY KEY REFERENCES control_loop_planner_runs(planner_run_id) ON DELETE CASCADE,
-                  archive_digest TEXT NOT NULL,
-                  processed_at TEXT NOT NULL,
-                  rows_json TEXT NOT NULL DEFAULT '[]',
-                  cost_pending INTEGER NOT NULL DEFAULT 1 CHECK(cost_pending IN (0,1))
-                );
-                CREATE INDEX IF NOT EXISTS ix_control_loop_observations_signal
-                  ON control_loop_observations(signal_id, observed_at);
-                CREATE INDEX IF NOT EXISTS ix_control_loop_events_epoch_sequence
-                  ON control_loop_events(epoch_id, sequence);
-                CREATE INDEX IF NOT EXISTS ix_control_loop_outbox_pending
-                  ON control_loop_outbox(materialized_at, sequence);
-                CREATE INDEX IF NOT EXISTS ix_control_loop_planner_terminal_order
-                  ON control_loop_planner_runs(epoch_id, state, completed_at, planner_run_id);
-                """
-            )
-            # Plan 030 originally shipped the marker table without private
-            # contribution state.  Keep existing local ledgers readable while
-            # ensuring every new marker can be rebuilt exactly on catalog fill.
-            columns = {
-                row[1]
-                for row in db.execute(
-                    "PRAGMA table_info(control_loop_overhead_usage_runs)"
-                ).fetchall()
-            }
-            if "rows_json" not in columns:
+        if not self.path.is_file():
+            raise LedgerConflictError("control-loop schema is unavailable")
+        try:
+            with self._connect() as db:
+                self._validate_schema(db)
+                existing = db.execute(
+                    "SELECT value FROM control_loop_meta WHERE key='epoch_id'"
+                ).fetchone()
+                if existing is None:
+                    selected = self._epoch_id or new_id("epoch")
+                    db.execute(
+                        "INSERT INTO control_loop_meta(key,value) VALUES('epoch_id',?)",
+                        (selected,),
+                    )
+                else:
+                    selected = existing[0]
+                    if self._epoch_id is not None and selected != self._epoch_id:
+                        raise LedgerConflictError("control-loop epoch id mismatch")
+                self._epoch_id = selected
                 db.execute(
-                    "ALTER TABLE control_loop_overhead_usage_runs "
-                    "ADD COLUMN rows_json TEXT NOT NULL DEFAULT '[]'"
+                    "INSERT OR IGNORE INTO control_loop_meta(key,value) VALUES('next_sequence','0')"
                 )
-            if "cost_pending" not in columns:
                 db.execute(
-                    "ALTER TABLE control_loop_overhead_usage_runs "
-                    "ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 1"
+                    "INSERT OR IGNORE INTO control_loop_meta(key,value) VALUES('planning_blocked','0')"
                 )
-            db.execute(
-                "CREATE INDEX IF NOT EXISTS ix_control_loop_overhead_pending "
-                "ON control_loop_overhead_usage_runs(cost_pending, processed_at, planner_run_id)"
-            )
-            existing = db.execute(
-                "SELECT value FROM control_loop_meta WHERE key='epoch_id'"
-            ).fetchone()
-            if existing is None:
-                selected = self._epoch_id or new_id("epoch")
-                db.execute(
-                    "INSERT INTO control_loop_meta(key,value) VALUES('epoch_id',?)",
-                    (selected,),
-                )
-            else:
-                selected = existing[0]
-                if self._epoch_id is not None and selected != self._epoch_id:
-                    raise LedgerConflictError("control-loop epoch id mismatch")
-            self._epoch_id = selected
-            db.execute(
-                "INSERT OR IGNORE INTO control_loop_meta(key,value) VALUES('next_sequence','0')"
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO control_loop_meta(key,value) VALUES('planning_blocked','0')"
-            )
+        except LedgerConflictError:
+            raise
+        except sqlite3.Error as exc:
+            raise LedgerConflictError("control-loop schema is invalid") from exc
 
     @property
     def epoch_id(self) -> str:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from coquic_steward.agents.telemetry import PriceCatalog, PriceEntry
 from coquic_steward.control_loop import ControlLoopArchive, ControlLoopLedger
 from coquic_steward.control_loop.models import PlannerRun
+from coquic_steward.storage import TaskStore
 from coquic_steward.control_loop.usage import (
     STEWARD_OVERHEAD_OWNER,
     StewardOverheadReducer,
@@ -42,23 +44,62 @@ def _catalog(*models: str) -> PriceCatalog:
 
 
 def _archive(tmp_path: Path) -> tuple[ControlLoopArchive, ControlLoopLedger]:
-    tasks = tmp_path / "tasks"
-    tasks.mkdir()
-    (tasks / "epoch.json").write_text(
-        json.dumps(
-            {
-                "epochId": "epoch-usage-test",
-                "formatVersion": "1.0",
-                "policy": "post-steward-2.0",
-                "startedAt": "2026-07-24T00:00:00Z",
-            }
-        ),
-        encoding="utf-8",
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+    task_epoch = json.loads(
+        (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
     )
-    archive = ControlLoopArchive(tmp_path / "control-loop", task_root=tasks)
-    archive.ensure_epoch()
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-usage-test")
-    return archive, ledger
+    archive = ControlLoopArchive(
+        tmp_path / "control-loop", task_root=tmp_path / "tasks"
+    )
+    archive.ensure_epoch(
+        authoritative={
+            "epochId": task_epoch["epochId"],
+            "formatVersion": "1.0",
+            "taskFormatVersion": task_epoch["formatVersion"],
+            "policy": task_epoch["policy"],
+            "startedAt": "2026-07-24T00:00:00Z",
+        }
+    )
+    return archive, store.control_loop
+
+
+def test_current_store_preserves_overhead_usage_schema(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "steward.sqlite"
+    observed: dict[str, set[str]] = {}
+    original_init = ControlLoopLedger.__init__
+
+    def inspect_before_ledger_open(
+        ledger: ControlLoopLedger,
+        path: Path | str,
+        *,
+        epoch_id: str | None = None,
+    ) -> None:
+        with sqlite3.connect(path) as connection:
+            observed["tables"] = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            observed["columns"] = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(control_loop_overhead_usage_runs)"
+                )
+            }
+        original_init(ledger, path, epoch_id=epoch_id)
+
+    monkeypatch.setattr(ControlLoopLedger, "__init__", inspect_before_ledger_open)
+    store = TaskStore.create(database)
+
+    assert {
+        "control_loop_overhead_usage",
+        "control_loop_overhead_usage_runs",
+    } <= observed["tables"]
+    assert {"rows_json", "cost_pending"} <= observed["columns"]
+    assert store.control_loop.epoch_id
 
 
 def _sidecar(

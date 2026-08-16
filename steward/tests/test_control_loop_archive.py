@@ -11,10 +11,12 @@ from coquic_steward.control_loop import (
     ArchiveConflictError,
     ArchiveValidationError,
     ControlLoopArchive,
+    ControlLoopLedger,
     CurrentState,
     Event,
     PlannerRun,
 )
+from coquic_steward.storage import TaskStore
 
 
 UTC = timezone.utc
@@ -22,23 +24,31 @@ NOW = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
 
 
 def _archive(tmp_path: Path) -> ControlLoopArchive:
-    tasks = tmp_path / "tasks"
-    tasks.mkdir()
-    (tasks / "epoch.json").write_text(
-        json.dumps(
-            {
-                "epochId": "epoch-archive-test",
-                "formatVersion": "1.0",
-                "policy": "post-steward-2.0",
-                "startedAt": "2026-07-24T12:00:00Z",
-                "endedAt": None,
-            }
-        ),
-        encoding="utf-8",
+    TaskStore.create(tmp_path / "steward.sqlite")
+    task_epoch = json.loads(
+        (tmp_path / "tasks" / "epoch.json").read_text(encoding="utf-8")
     )
-    archive = ControlLoopArchive(tmp_path / "control-loop", task_root=tasks)
-    archive.ensure_epoch()
+    archive = ControlLoopArchive(
+        tmp_path / "control-loop", task_root=tmp_path / "tasks"
+    )
+    archive.ensure_epoch(
+        authoritative={
+            "epochId": task_epoch["epochId"],
+            "formatVersion": "1.0",
+            "taskFormatVersion": task_epoch["formatVersion"],
+            "policy": task_epoch["policy"],
+            "startedAt": "2026-07-24T12:00:00Z",
+        }
+    )
     return archive
+
+
+def _ledger(tmp_path: Path) -> ControlLoopLedger:
+    return TaskStore.open(tmp_path / "steward.sqlite").control_loop
+
+
+def _epoch_id(archive: ControlLoopArchive) -> str:
+    return archive._require_epoch().epoch_id
 
 
 def _event(archive: ControlLoopArchive, sequence: int, event_id: str) -> Event:
@@ -70,21 +80,21 @@ def test_epoch_current_and_daily_events_are_atomic_and_idempotent(tmp_path: Path
 
     current = archive.write_current(
         CurrentState(
-            epochId="epoch-archive-test",
+            epochId=_epoch_id(archive),
             counts={"pendingSignals": 1},
             pendingSignalIds=["signal-current"],
             archive={"lag": 0},
         )
     )
     assert current == archive.current_path
-    assert json.loads(current.read_text(encoding="utf-8"))["epochId"] == "epoch-archive-test"
+    assert json.loads(current.read_text(encoding="utf-8"))["epochId"] == _epoch_id(archive)
 
 
 def test_sealed_planner_run_manifest_preserves_raw_bytes_and_rejects_conflicts(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
     run = PlannerRun(
         plannerRunId="planner-run-sealed",
-        epochId="epoch-archive-test",
+        epochId=_epoch_id(archive),
         state="failed",
         startedAt=NOW,
         completedAt=NOW,
@@ -112,7 +122,7 @@ def test_archive_rejects_epoch_and_path_conflicts(tmp_path: Path) -> None:
         archive.publish_planner_run(
             PlannerRun(
                 plannerRunId="planner-run-path",
-                epochId="epoch-archive-test",
+                epochId=_epoch_id(archive),
                 state="succeeded",
                 startedAt=NOW,
                 completedAt=NOW,
@@ -123,9 +133,7 @@ def test_archive_rejects_epoch_and_path_conflicts(tmp_path: Path) -> None:
 
 def test_reconcile_stops_at_temporary_outbox_gap(tmp_path: Path, monkeypatch) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
         ledger._event(connection, "synthetic.event", {"ordinal": 1}, occurred_at=NOW)
@@ -156,13 +164,12 @@ def test_reconcile_does_not_drain_outbox_after_archive_validation_failure(
     tmp_path: Path,
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
 
     malformed = archive.events_root / "2026" / "07" / "23.jsonl"
     malformed.parent.mkdir(parents=True)
     malformed.write_bytes(b'{"sequence":"not-an-event"}\n')
 
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
 
@@ -179,11 +186,7 @@ def test_reconcile_blocks_planning_when_hidden_planner_stage_survives(
     tmp_path: Path,
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(
-        tmp_path / "steward.sqlite", epoch_id="epoch-archive-test"
-    )
+    ledger = _ledger(tmp_path)
     stage = archive.planner_runs_root / ".planner-run-hidden.stage-interrupted"
     stage.mkdir()
     (stage / "prompt.md").write_text("unsealed evidence\n", encoding="utf-8")
@@ -200,9 +203,7 @@ def test_confirmed_event_file_uses_one_bulk_lookup_and_returns_verified_facts(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         event = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
     path = archive.events_root / "2026" / "07" / "24.jsonl"
@@ -239,9 +240,7 @@ def test_reconcile_reuses_verified_file_for_outbox_prefixes(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         events = [
             ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
@@ -281,10 +280,9 @@ def test_reconcile_parses_an_accepted_file_once_for_pending_rows(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
     import coquic_steward.control_loop.archive as archive_module
 
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         events = [
             ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
@@ -316,9 +314,7 @@ def test_reconcile_invalidates_verified_file_when_accepted_bytes_change(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         events = [
             ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
@@ -353,9 +349,7 @@ def test_unchanged_reconcile_is_byte_idle_and_append_uses_cached_high_watermark(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         first = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
         second = ledger._event(
@@ -403,9 +397,7 @@ def test_reconcile_carries_materialized_watermark_into_snapshot_and_append(
     tmp_path: Path,
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         first = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
 
@@ -428,9 +420,7 @@ def test_reconcile_carries_materialized_watermark_into_snapshot_and_append(
 
 def test_verified_duplicate_requires_exact_canonical_bytes(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         event = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
 
@@ -452,7 +442,7 @@ def test_fresh_archive_process_fails_closed_without_verified_watermark(tmp_path:
     archive.append_event(retained)
 
     fresh = ControlLoopArchive(archive.root, task_root=archive.task_root)
-    fresh.ensure_epoch()
+    fresh.ensure_epoch(archive._require_epoch())
     candidate = _event(fresh, 1, "event-unverified").model_copy(
         update={"occurred_at": NOW.replace(day=25)}
     )
@@ -484,7 +474,7 @@ def test_fresh_archive_accepts_exact_duplicate_before_watermark_check(tmp_path: 
     original = retained_path.read_bytes()
 
     fresh = ControlLoopArchive(archive.root, task_root=archive.task_root)
-    fresh.ensure_epoch()
+    fresh.ensure_epoch(archive._require_epoch())
 
     assert fresh.append_event(retained) == len(original)
 
@@ -510,9 +500,7 @@ def test_verified_append_does_not_walk_unrelated_event_files(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     with ledger.transaction() as connection:
         first = ledger._event(connection, "synthetic.event", {"ordinal": 0}, occurred_at=NOW)
         second = ledger._event(
@@ -537,12 +525,10 @@ def test_disappearing_verified_planner_run_blocks_and_discards_trust(
     tmp_path: Path,
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     run = PlannerRun(
         plannerRunId="planner-run-disappearing",
-        epochId="epoch-archive-test",
+        epochId=_epoch_id(archive),
         state="failed",
         startedAt=NOW,
         completedAt=NOW,
@@ -564,12 +550,10 @@ def test_planner_audit_oserror_is_incomplete_and_blocks_planning(
     tmp_path: Path, monkeypatch
 ) -> None:
     archive = _archive(tmp_path)
-    from coquic_steward.control_loop import ControlLoopLedger
-
-    ledger = ControlLoopLedger(tmp_path / "steward.sqlite", epoch_id="epoch-archive-test")
+    ledger = _ledger(tmp_path)
     run = PlannerRun(
         plannerRunId="planner-run-audit-error",
-        epochId="epoch-archive-test",
+        epochId=_epoch_id(archive),
         state="failed",
         startedAt=NOW,
         completedAt=NOW,

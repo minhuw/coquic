@@ -1043,24 +1043,6 @@ class PublicationOperationResult:
     def with_status(self, status: PublicationOperationStatus | str) -> "PublicationOperationResult":
         return replace(self, status=status)
 
-    def __getattr__(self, name: str) -> object:
-        # Successful claim/transition callers often need the immutable value
-        # directly.  Delegation keeps the result typed while preserving that
-        # ergonomic access without duplicating the generation fields.
-        generation = object.__getattribute__(self, "generation")
-        if generation is not None and hasattr(generation, name):
-            return getattr(generation, name)
-        receipt = object.__getattribute__(self, "receipt")
-        if receipt is not None and hasattr(receipt, name):
-            return getattr(receipt, name)
-        cleanup = object.__getattribute__(self, "cleanup")
-        if cleanup is not None and hasattr(cleanup, name):
-            return getattr(cleanup, name)
-        fence = object.__getattribute__(self, "fence")
-        if fence is not None and hasattr(fence, name):
-            return getattr(fence, name)
-        raise AttributeError(name)
-
     @property
     def hide(self) -> PublicationHideFence | None:
         return self.fence

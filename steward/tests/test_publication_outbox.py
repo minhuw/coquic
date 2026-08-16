@@ -17,6 +17,7 @@ from coquic_steward.publication.outbox import (
     MAX_LEASE_SECONDS,
     OutboxValidationError,
     PublicationGeneration,
+    PublicationOperationResult,
     PublicationHideState,
     PublicationOperationStatus,
     PublicationReceipt,
@@ -288,6 +289,33 @@ def _insert_generation_row(connection: object, **overrides: object) -> None:
         ),
         values,
     )
+
+
+def test_publication_operation_result_exposes_only_declared_nested_contract() -> None:
+    generation = _generation()
+    result = PublicationOperationResult(
+        PublicationOperationStatus.enqueued,
+        generation=generation,
+    )
+
+    assert result.generation is generation
+    assert result.generation.publication_id == generation.publication_id
+    assert result.status is PublicationOperationStatus.enqueued
+    assert bool(result) is True
+    assert result.as_dict() == {
+        "status": "enqueued",
+        "reason": None,
+        "generation": generation.as_dict(),
+    }
+    blocked = result.with_status(PublicationOperationStatus.conflict)
+    assert blocked.status is PublicationOperationStatus.conflict
+    assert blocked.generation is generation
+    assert bool(blocked) is False
+
+    with pytest.raises(AttributeError):
+        result.publication_id
+    with pytest.raises(AttributeError):
+        result.idempotency_key
 
 
 def test_identity_is_deterministic_from_task_and_boundary() -> None:

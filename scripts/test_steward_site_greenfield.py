@@ -15,6 +15,8 @@ import hmac
 import json
 import math
 import os
+import signal
+import socket
 from collections.abc import Mapping
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -201,6 +203,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if parsed_host.hostname != "127.0.0.1" or port not in {None, self.server.server_port} or parsed_host.username or parsed_host.password or parsed_host.path not in {"", "/"} or parsed_host.query or parsed_host.fragment:
             self._send(421); return False
         parsed = urlsplit(self.path)
+        origin_values = self.headers.get_all("Origin", [])
+        if len(origin_values) > 1 or (origin_values and origin_values[0] != f"http://127.0.0.1:{self.server.server_port}"):
+            self._send(403); return False
         if parsed.query or parsed.fragment or method not in {"POST", "PUT", "GET", "HEAD", "DELETE"}:
             self._send(400 if parsed.query or parsed.fragment else 405); return False
         if self.headers.get_all("Transfer-Encoding", []):
@@ -243,6 +248,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
         result = self._r2_path(urlsplit(self.path).path)
         if result is None: self._send(404)
         return result
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._guard("PATCH")
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._guard("POST"):
@@ -455,13 +463,14 @@ def graph() -> dict[str, Any]:
     }
 
 
-def run_site_case(base_url: str, case: str) -> None:
+def run_site_case(base_url: str, case: str, mode: str | None = None, expect_ok: bool = True, timeout: int = 60) -> None:
     environment = os.environ.copy()
     environment["COQUIC_GREENFIELD_PROVIDER_BASE_URL"] = base_url
+    if mode is not None: environment["COQUIC_GREENFIELD_CHILD_MODE"] = mode
     site_root = ROOT / "site-v2"
     tsx = site_root / "node_modules" / ".bin" / "tsx"
     command = [str(tsx), str(site_root / "scripts" / "test_greenfield_contract.ts"), case] if tsx.exists() else ["npm", "exec", "--prefix", str(site_root), "--", "tsx", "scripts/test_greenfield_contract.ts", case]
-    process = subprocess.Popen(command, cwd=site_root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(command, cwd=site_root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     stdout: list[bytes] = []
     stderr: list[bytes] = []
     oversized = {"stdout": False, "stderr": False}
@@ -480,19 +489,39 @@ def run_site_case(base_url: str, case: str) -> None:
                 total += len(chunk)
     threads = [Thread(target=drain, args=(process.stdout, stdout, 4096, "stdout")), Thread(target=drain, args=(process.stderr, stderr, 65536, "stderr"))]
     for item in threads: item.start()
+    timed_out = False
     try:
-        process.wait(timeout=60)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.terminate()
+        timed_out = True
+        try: os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError: pass
         try: process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            process.kill(); process.wait()
-        raise RuntimeError(f"Site contract case {case} timed out")
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait()
+        if expect_ok or mode != "timeout": raise RuntimeError(f"Site contract case {case} timed out")
     finally:
         for item in threads: item.join(timeout=2)
         if process.poll() is None:
-            process.kill(); process.wait()
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait()
     output = b"".join(stdout)
+    if not expect_ok:
+        if mode == "timeout":
+            if not timed_out: raise RuntimeError("timeout child exited before the bound")
+            return
+        if mode == "malformed":
+            try: payload = json.loads(output.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError): return
+            if set(payload) != {"case", "ok"} or payload.get("case") != case or payload.get("ok") is not True: return
+            raise RuntimeError(f"Site contract child boundary accepted {mode}")
+        if mode in {"oversized-stdout", "oversized-stderr"}:
+            if oversized[mode.removeprefix("oversized-")]: return
+            raise RuntimeError(f"Site contract child boundary did not exceed {mode}")
+        raise RuntimeError(f"unknown child boundary mode {mode}")
     if oversized["stdout"] or oversized["stderr"] or process.returncode != 0 or len(output) > 4096 or not output.endswith(b"\n") or output.count(b"\n") != 1:
         raise RuntimeError(f"Site contract case {case} failed")
     try: payload = json.loads(output.decode("utf-8"))
@@ -500,6 +529,47 @@ def run_site_case(base_url: str, case: str) -> None:
     if set(payload) != {"case", "ok"} or payload.get("case") != case or payload.get("ok") is not True:
         raise RuntimeError(f"Site contract case {case} emitted an invalid summary")
 
+
+def raw_http_status(base_url: str, request: bytes) -> int:
+    parsed = urlsplit(base_url)
+    if parsed.hostname != "127.0.0.1" or parsed.port is None: raise RuntimeError("raw request target was not loopback")
+    with socket.create_connection((parsed.hostname, parsed.port), timeout=5) as connection:
+        connection.sendall(request)
+        response = bytearray()
+        while True:
+            chunk = connection.recv(8192)
+            if not chunk: break
+            response.extend(chunk)
+    line = bytes(response).split(b"\r\n", 1)[0].split()
+    if len(line) < 2: raise RuntimeError("provider emitted an invalid HTTP response")
+    return int(line[1])
+
+
+def assert_protocol_negatives(base_url: str, provider: LoopbackProvider) -> None:
+    before = provider.snapshot()
+    host = f"127.0.0.1:{urlsplit(base_url).port}"
+    with httpx.Client() as client:
+        if client.post(f"{base_url}/d1/query", headers={"Host": "evil.invalid"}, json={"sql": "SELECT 1", "params": []}).status_code != 421: raise RuntimeError("invalid Host was accepted")
+        if client.post(f"{base_url}/d1/query?query=1", json={"sql": "SELECT 1", "params": []}).status_code != 400: raise RuntimeError("query path was accepted")
+        if client.patch(f"{base_url}/d1/query", json={"sql": "SELECT 1", "params": []}).status_code != 405: raise RuntimeError("unsupported method was accepted")
+        if client.post(f"{base_url}/d1/query", headers={"Origin": "http://evil.invalid"}, json={"sql": "SELECT 1", "params": []}).status_code != 403: raise RuntimeError("non-loopback Origin was accepted")
+        if client.get(f"{base_url}/not-allowlisted").status_code != 404: raise RuntimeError("non-allowlisted path was accepted")
+        large_response = client.post(f"{base_url}/d1/query", headers={"Authorization": f"Bearer {READ_TOKEN}"}, json={"sql": "SELECT hex(zeroblob(1048577)) AS payload", "params": []})
+        if large_response.status_code != 500: raise RuntimeError("oversized response was not rejected")
+    prefix = f"POST /d1/query HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {READ_TOKEN}\r\nConnection: close\r\n"
+    if raw_http_status(base_url, (prefix + "Content-Length: abc\r\n\r\n{}").encode()) != 400: raise RuntimeError("invalid Content-Length was accepted")
+    if raw_http_status(base_url, (prefix + "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n").encode()) != 400: raise RuntimeError("chunked request was accepted")
+    if raw_http_status(base_url, (prefix + "\r\n{}").encode()) != 400: raise RuntimeError("missing Content-Length was accepted")
+    if raw_http_status(base_url, (prefix + "Content-Length: 0\r\nContent-Length: 0\r\n\r\n").encode()) != 400: raise RuntimeError("duplicate Content-Length was accepted")
+    if raw_http_status(base_url, (prefix + f"Content-Length: {MAX_REQUEST_BODY + 1}\r\n\r\n").encode()) != 413: raise RuntimeError("oversized request was accepted")
+    if provider.snapshot() != before: raise RuntimeError("rejected protocol request changed provider state")
+
+
+def assert_child_boundaries(base_url: str) -> None:
+    run_site_case(base_url, "child-boundary", mode="malformed", expect_ok=False)
+    run_site_case(base_url, "child-boundary", mode="oversized-stdout", expect_ok=False)
+    run_site_case(base_url, "child-boundary", mode="oversized-stderr", expect_ok=False)
+    run_site_case(base_url, "child-boundary", mode="timeout", expect_ok=False, timeout=1)
 
 def assert_d1_authentication(base_url: str, client: httpx.Client) -> None:
     body = {"sql": "SELECT 1", "params": []}
@@ -541,11 +611,10 @@ def close_store(store: SQLiteTaskStore) -> None:
 
 
 CASE_ALIASES = {
-    "empty", "published", "replay", "reopen", "reopen/replay", "reopen-replay",
-    "hidden", "unavailable", "hidden/unavailable", "failure", "failures",
-    "dangling-head", "dangling_head", "digest-mismatch", "digest_mismatch", "private-field", "private_field",
+    "empty", "published", "replay", "reopen/replay", "hidden", "unavailable", "hidden/unavailable",
+    "dangling-head", "digest-mismatch", "private-field", "protocol-negative", "child-boundary",
 }
-DEFAULT_CASES = ("empty", "published", "replay", "unavailable", "dangling-head", "digest-mismatch", "private-field", "hidden")
+DEFAULT_CASES = ("empty", "published", "replay", "unavailable", "dangling-head", "digest-mismatch", "private-field", "hidden", "hidden/unavailable", "protocol-negative", "child-boundary")
 
 
 def parse_cases() -> list[str]:
@@ -570,6 +639,7 @@ def assert_r2_http_operations(base_url: str) -> None:
         if head.status_code != 200 or head.headers.get("content-length") != "11": raise RuntimeError("R2 HEAD failed")
         if client.get(url).content != b"r2-boundary": raise RuntimeError("R2 GET failed")
         if client.delete(url).status_code != 204 or client.delete(url).status_code != 204: raise RuntimeError("R2 DELETE failed")
+        if client.get(url).status_code != 404: raise RuntimeError("R2 GET exposed a deleted object")
 
 
 def emit_child(base_url: str, case: str, summaries: list[dict[str, object]]) -> None:
@@ -604,10 +674,16 @@ def main() -> int:
             r2_transport = HttpR2Transport(base_url)
             r2 = R2Client("https://r2.local", public_bucket=PUBLIC_BUCKET, private_bucket=PRIVATE_BUCKET, client=r2_transport)
             assert_d1_authentication(base_url, d1_transport.client)
+            assert_protocol_negatives(base_url, provider)
             assert_r2_http_operations(base_url)
             assert_r2_boundary(r2, provider)
+            if "child-boundary" in cases:
+                assert_child_boundaries(base_url)
+                emit_child(base_url, "child-boundary", summaries)
+            if "protocol-negative" in cases:
+                emit_child(base_url, "protocol-negative", summaries)
             if "empty" in cases: emit_child(base_url, "empty", summaries)
-            needs_publication = any(case != "empty" for case in cases)
+            needs_publication = any(case not in {"empty", "protocol-negative", "child-boundary"} for case in cases)
             if needs_publication:
                 store_path = temporary_root / "tasks.sqlite"
                 store = SQLiteTaskStore.create(store_path)
@@ -654,6 +730,7 @@ def main() -> int:
                     d1.hide_task(TASK_ID, "operator_blocked")
                     if "hidden" in cases: emit_child(base_url, "hidden", summaries)
                     if "hidden/unavailable" in cases:
+                        run_site_case(base_url, "hidden")
                         provider.unavailable = True
                         try: emit_child(base_url, "hidden/unavailable", summaries)
                         finally: provider.unavailable = False

@@ -17,8 +17,9 @@ type AtifViewModelModule = typeof import("../lib/steward-archive/atif-view-model
 const rawCase = process.argv[2] ?? "";
 const MAX_CASE_LENGTH = 256;
 const GREENFIELD_TASK_ID = "task-greenfield";
-const FAILURE_CASES = new Set(["failure", "failures", "corrupt-dangling", "corrupt_dangling", "dangling-head", "dangling_head", "corrupt-digest", "corrupt_digest", "digest-mismatch", "digest_mismatch", "corrupt-private", "corrupt_private", "private-field", "private_field"]);
-const REPLAY_CASES = new Set(["replay", "reopen", "reopen/replay", "reopen-replay"]);
+const FAILURE_CASES = new Set(["dangling-head", "digest-mismatch", "private-field"]);
+const REPLAY_CASES = new Set(["replay", "reopen/replay"]);
+const SUPPORTED_CASES = new Set(["empty", "published", "replay", "reopen/replay", "hidden", "unavailable", "hidden/unavailable", "dangling-head", "digest-mismatch", "private-field", "protocol-negative", "child-boundary"]);
 const requireForScript = createRequire(import.meta.url);
 const runtimeModule = Module as unknown as { _resolveFilename: (request: string, parent?: unknown, isMain?: boolean, options?: unknown) => string };
 
@@ -45,7 +46,7 @@ function loadRuntimeModules(): { readonly repository: RepositoryModule; readonly
 const runtime = loadRuntimeModules();
 const { getCloudRepository, resetCloudRepository } = runtime.repository;
 const { CloudflareD1Client } = runtime.cloudflare;
-const { validateCloudStatusResponse, validateCloudTaskPageResponse, validateCloudTaskDetailResponse, validateCloudCompleteTrajectoryResponse, validateCloudTaskDetailData } = runtime.schema;
+const { validateCloudStatusResponse, validateCloudTaskPageResponse, validateCloudTaskDetailResponse, validateCloudCompleteTrajectoryResponse, validateCloudProblemResponse, validateCloudTaskDetailData } = runtime.schema;
 const { loadVerifiedAtif } = runtime.atifLoader;
 const { buildAtifViewModel } = runtime.atifViewModel;
 
@@ -182,7 +183,7 @@ async function loadDisplayModel(provider: URL, repository: ReturnType<typeof get
   return model;
 }
 
-async function readRealRoutes(provider: URL, repository: ReturnType<typeof getCloudRepository>, taskId: string, logicalPath: string, runId: string): Promise<void> {
+async function readRealRoutes(provider: URL, repository: ReturnType<typeof getCloudRepository>, taskId: string, logicalPath: string, runId: string): Promise<unknown> {
   const [statusRoute, tasksRoute, detailRoute, artifactRoute, transcriptRoute] = await Promise.all([
     import("../app/api/steward/status/route"),
     import("../app/api/steward/tasks/route"),
@@ -221,6 +222,34 @@ async function readRealRoutes(provider: URL, repository: ReturnType<typeof getCl
   const validatedTranscript = validateCloudCompleteTrajectoryResponse(transcriptBody);
   assert.equal(validatedTranscript.schemaVersion, "4.0");
   assert(validatedTranscript.data !== undefined, "transcript route omitted data");
+  return {
+    status: { status: status.status, headers: selectedHeaders(status.headers), body: normalizeJson(statusBody) },
+    tasks: { status: tasks.status, headers: selectedHeaders(tasks.headers), body: normalizeJson(tasksBody) },
+    detail: { status: detail.status, headers: selectedHeaders(detail.headers), body: normalizeJson(detailBody) },
+    artifact: { status: artifact.status, headers: selectedHeaders(artifact.headers), location: normalizeLocation(artifact.headers.get("location"), provider) },
+    transcript: { status: transcript.status, headers: selectedHeaders(transcript.headers), body: normalizeJson(transcriptBody) },
+  };
+}
+
+function normalizeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeJson);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, key === "generatedAt" ? "<generated>" : normalizeJson(item)]));
+  }
+  return value;
+}
+
+function selectedHeaders(headers: Headers): Record<string, string> {
+  const entries: Array<[string, string]> = [];
+  headers.forEach((value, name) => entries.push([name, value]));
+  return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function normalizeLocation(value: string | null, provider: URL): string | null {
+  if (value === null) return null;
+  const location = new URL(value);
+  assert.equal(location.hostname, provider.hostname, "route redirect escaped provider");
+  return `${location.pathname}${location.search}${location.hash}`;
 }
 
 async function readPublished(provider: URL, repository: ReturnType<typeof getCloudRepository>): Promise<string> {
@@ -261,6 +290,7 @@ async function readPublished(provider: URL, repository: ReturnType<typeof getClo
     const objectSnapshot = await checkArtifact(provider, artifact);
     if (objectSnapshot !== null) objectSnapshots.push(objectSnapshot);
   }
+  let routeSnapshot: unknown = null;
   if (detail.trajectory) {
     assert.equal(detail.trajectory.taskId, task.taskId);
     assert.equal(detail.trajectory.availability, "available");
@@ -270,9 +300,9 @@ async function readPublished(provider: URL, repository: ReturnType<typeof getClo
     await loadDisplayModel(provider, repository, task.taskId, detail.trajectory.runId, detail.artifacts.filter((artifact) => artifact.runId === detail.trajectory!.runId));
     const artifact = detail.artifacts.find((candidate) => candidate.availability === "available");
     assert(artifact, "published task has no available artifact");
-    await readRealRoutes(provider, repository, task.taskId, artifact.logicalPath, detail.trajectory.runId);
+    routeSnapshot = await readRealRoutes(provider, repository, task.taskId, artifact.logicalPath, detail.trajectory.runId);
   }
-  return JSON.stringify({ status, active, history, detail, objectSnapshots });
+  return JSON.stringify(normalizeJson({ status, active, history, detail, objectSnapshots, routeSnapshot }));
 }
 
 async function readHidden(provider: URL, repository: ReturnType<typeof getCloudRepository>): Promise<void> {
@@ -287,27 +317,28 @@ async function readHidden(provider: URL, repository: ReturnType<typeof getCloudR
   assert.equal(response.status, 404, "hidden task remained available through the route");
 }
 
-async function readUnavailable(provider: URL, repository: ReturnType<typeof getCloudRepository>): Promise<void> {
-  let status;
-  try {
-    status = await repository.getStatus();
-  } catch {
-    return;
-  }
-  if (status.state === "empty") {
-    assert.equal(status.taskCount, 0);
-    return;
-  }
-  const pages = [await repository.listTasks("active", { limit: 50 }), await repository.listTasks("history", { limit: 50 })];
-  const task = pages.flatMap((page) => page.tasks)[0];
-  assert(task, "unavailable case has no visible task");
-  const detail = await repository.getTaskDetail(task.taskId);
-  assert(detail, "unavailable task detail is missing");
-  validateCloudTaskDetailData(detail);
-  const unavailable = detail.artifacts.filter((artifact) => artifact.availability === "unavailable");
-  assert(unavailable.length > 0, "unavailable case did not expose an unavailable artifact");
-  assert.equal(detail.trajectory, null, "unavailable trajectory was exposed");
-  for (const artifact of unavailable) await checkArtifact(provider, artifact);
+async function assertUnavailableRoute(responsePromise: Promise<Response>, name: string): Promise<void> {
+  const response = await responsePromise;
+  assert.equal(response.status, 503, `${name} did not fail closed during outage`);
+  const body = validateCloudProblemResponse(await response.json());
+  assert.equal(body.schemaVersion, "4.0");
+  assert.equal(body.problem.status, 503);
+  assert.equal(body.problem.code, "UNAVAILABLE", `${name} returned an unexpected outage code`);
+}
+
+async function readUnavailable(provider: URL, _repository: ReturnType<typeof getCloudRepository>): Promise<void> {
+  const [statusRoute, tasksRoute, detailRoute, artifactRoute, transcriptRoute] = await Promise.all([
+    import("../app/api/steward/status/route"),
+    import("../app/api/steward/tasks/route"),
+    import("../app/api/steward/tasks/[taskId]/route"),
+    import("../app/api/steward/tasks/[taskId]/artifact/route"),
+    import("../app/api/steward/tasks/[taskId]/transcript/route"),
+  ]);
+  await assertUnavailableRoute(statusRoute.GET(), "status route");
+  await assertUnavailableRoute(tasksRoute.GET(new Request(`${provider.origin}/api/steward/tasks?scope=history&limit=50`)), "tasks route");
+  await assertUnavailableRoute(detailRoute.GET(new Request(`${provider.origin}/api/steward/tasks/${GREENFIELD_TASK_ID}`), { params: Promise.resolve({ taskId: GREENFIELD_TASK_ID }) }), "detail route");
+  await assertUnavailableRoute(artifactRoute.GET(new Request(`${provider.origin}/api/steward/tasks/${GREENFIELD_TASK_ID}/artifact?path=run.json`), { params: Promise.resolve({ taskId: GREENFIELD_TASK_ID }) }), "artifact route");
+  await assertUnavailableRoute(transcriptRoute.GET(new Request(`${provider.origin}/api/steward/tasks/${GREENFIELD_TASK_ID}/transcript?run=run-greenfield`), { params: Promise.resolve({ taskId: GREENFIELD_TASK_ID }) }), "transcript route");
 }
 
 async function readFailure(provider: URL, repository: ReturnType<typeof getCloudRepository>, expectedCase: string): Promise<void> {
@@ -323,6 +354,25 @@ async function readFailure(provider: URL, repository: ReturnType<typeof getCloud
 async function run(): Promise<void> {
   assert.equal(process.argv.length, 3, "exactly one case argument is required");
   assert(rawCase.length > 0 && rawCase.length <= MAX_CASE_LENGTH, "case is required");
+  assert(SUPPORTED_CASES.has(rawCase), "unsupported greenfield case");
+  const childMode = process.env.COQUIC_GREENFIELD_CHILD_MODE;
+  if (childMode === "malformed") {
+    process.stdout.write(`${JSON.stringify({ case: rawCase, ok: true, extra: true })}\n`);
+    return;
+  }
+  if (childMode === "oversized-stdout") {
+    process.stdout.write("x".repeat(4097));
+    return;
+  }
+  if (childMode === "oversized-stderr") {
+    process.stderr.write("x".repeat(65537));
+    process.stdout.write(`${JSON.stringify({ case: rawCase, ok: true })}\n`);
+    return;
+  }
+  if (childMode === "timeout") {
+    await new Promise<void>(() => { setInterval(() => undefined, 1000); });
+    return;
+  }
   const provider = assertLoopbackBase(process.env.COQUIC_GREENFIELD_PROVIDER_BASE_URL);
   const config = configFor(provider);
   const restoreFetch = installProviderFetch(provider);
@@ -350,12 +400,16 @@ async function run(): Promise<void> {
       assert.equal(second, first, "replay changed the visible Site response");
     } else if (rawCase === "hidden") {
       await readHidden(provider, repository);
-    } else if (rawCase === "unavailable") {
+    } else if (rawCase === "unavailable" || rawCase === "hidden/unavailable") {
       await readUnavailable(provider, repository);
     } else if (FAILURE_CASES.has(rawCase)) {
       await readFailure(provider, repository, rawCase);
-    } else if (rawCase === "published" || rawCase === "one") {
+    } else if (rawCase === "published") {
       await readPublished(provider, repository);
+    } else if (rawCase === "protocol-negative") {
+      // Protocol negatives are exercised by the Python parent process.
+    } else if (rawCase === "child-boundary") {
+      // Child protocol bounds are exercised by the Python parent process.
     } else {
       throw new Error("unsupported greenfield case");
     }
@@ -374,7 +428,10 @@ async function run(): Promise<void> {
 }
 
 void run().then(
-  () => process.stdout.write(`${JSON.stringify({ case: rawCase, ok: true })}\n`),
+  () => {
+    if (process.env.COQUIC_GREENFIELD_CHILD_MODE) return;
+    process.stdout.write(`${JSON.stringify({ case: rawCase, ok: true })}\n`);
+  },
   (error: unknown) => {
     process.exitCode = 1;
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);

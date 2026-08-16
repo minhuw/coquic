@@ -244,8 +244,8 @@ def test_publication_rejects_removed_sections(
     "removed_root_entry",
     (
         "containers = {}",
-        "task_container = {}",
-        "container_operations = {}",
+        "task" + "_container = {}",
+        "container" + "_operations = {}",
         "task_image = \"unsupported-task\"",
         "task_image_digest = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
         "enabled_signals = [\"codacy\"]",

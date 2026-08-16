@@ -87,6 +87,53 @@ def _argument_fingerprint(
     return positional, keywords
 
 
+def _argument_descriptors(
+    node: ast.Call,
+) -> tuple[tuple[str, str | None, str], ...]:
+    """Describe argument values while allowing positional/keyword conversion."""
+
+    positional = tuple(
+        (
+            "starred",
+            None,
+            _expression_key(argument.value),
+        )
+        if isinstance(argument, ast.Starred)
+        else ("positional", None, _expression_key(argument))
+        for argument in node.args
+    )
+    keywords = tuple(
+        (
+            "double-starred",
+            None,
+            _expression_key(keyword.value),
+        )
+        if keyword.arg is None
+        else ("keyword", keyword.arg, _expression_key(keyword.value))
+        for keyword in node.keywords
+    )
+    return positional + keywords
+
+
+def _arguments_have_same_values(left: ast.Call, right: ast.Call) -> bool:
+    left_arguments = _argument_descriptors(left)
+    right_arguments = _argument_descriptors(right)
+    if len(left_arguments) != len(right_arguments):
+        return False
+    for (
+        (left_kind, left_name, left_value),
+        (right_kind, right_name, right_value),
+    ) in zip(left_arguments, right_arguments):
+        if left_value != right_value:
+            return False
+        if {left_kind, right_kind} & {"starred", "double-starred"}:
+            if left_kind != right_kind:
+                return False
+        elif left_kind == right_kind == "keyword" and left_name != right_name:
+            return False
+    return True
+
+
 def _is_strict_argument_subset(
     left: tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]],
     right: tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]],
@@ -110,6 +157,19 @@ def _is_strict_argument_subset(
     )
 
 
+def _arguments_are_compatible(
+    left: ast.Call,
+    right: ast.Call,
+) -> bool:
+    if _arguments_have_same_values(left, right):
+        return True
+    return _is_strict_argument_subset(
+        _argument_fingerprint(left), _argument_fingerprint(right)
+    ) or _is_strict_argument_subset(
+        _argument_fingerprint(right), _argument_fingerprint(left)
+    )
+
+
 def _catches_type_error(node: ast.AST | None) -> bool:
     """Recognize handlers that include TypeError among their exceptions."""
 
@@ -118,6 +178,44 @@ def _catches_type_error(node: ast.AST | None) -> bool:
     if isinstance(node, (ast.Tuple, ast.List)):
         return any(_catches_type_error(item) for item in node.elts)
     return False
+
+
+class _TypeErrorReraiseCollector(ast.NodeVisitor):
+    def __init__(self, handler_name: str | None) -> None:
+        self.handler_name = handler_name
+        self.found = False
+
+    def visit_Raise(self, node: ast.Raise) -> None:
+        if node.exc is None:
+            self.found = True
+        elif isinstance(node.exc, ast.Name) and node.exc.id == self.handler_name:
+            self.found = True
+        elif (
+            isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+            and node.exc.func.id == "TypeError"
+        ):
+            self.found = True
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, _node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_Lambda(self, _node: ast.Lambda) -> None:
+        return
+
+    def visit_ClassDef(self, _node: ast.ClassDef) -> None:
+        return
+
+
+def _handler_rethrows_type_error(handler: ast.ExceptHandler) -> bool:
+    collector = _TypeErrorReraiseCollector(handler.name)
+    for statement in handler.body:
+        collector.visit(statement)
+    return collector.found
 
 
 class _CallCollector(ast.NodeVisitor):
@@ -149,8 +247,49 @@ class _CallCollector(ast.NodeVisitor):
         return
 
 
+class _TypeErrorEscapeCallCollector(_CallCollector):
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
+        catches_type_error = any(
+            _catches_type_error(handler.type) for handler in node.handlers
+        )
+        rethrows_type_error = any(
+            _catches_type_error(handler.type)
+            and _handler_rethrows_type_error(handler)
+            for handler in node.handlers
+        )
+        if not catches_type_error or rethrows_type_error:
+            for statement in node.body:
+                self.visit(statement)
+        for handler in node.handlers:
+            if not _catches_type_error(handler.type):
+                for statement in handler.body:
+                    self.visit(statement)
+        for statement in node.orelse:
+            self.visit(statement)
+        for statement in node.finalbody:
+            self.visit(statement)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_try(node)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self._visit_try(node)
+
+
 def _calls_in(nodes: ast.AST | list[ast.stmt]) -> list[ast.Call]:
     collector = _CallCollector()
+    if isinstance(nodes, list):
+        for node in nodes:
+            collector.visit(node)
+    else:
+        collector.visit(nodes)
+    return collector.calls
+
+
+def _calls_reaching_type_error_handler(
+    nodes: ast.AST | list[ast.stmt],
+) -> list[ast.Call]:
+    collector = _TypeErrorEscapeCallCollector()
     if isinstance(nodes, list):
         for node in nodes:
             collector.visit(node)
@@ -504,7 +643,7 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
         self._visit_block(node.body)
 
     def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
-        attempted = _calls_in(node.body)
+        attempted = _calls_reaching_type_error_handler(node.body)
         for handler in node.handlers:
             if not _catches_type_error(handler.type):
                 continue
@@ -513,16 +652,7 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
                     if (
                         _expression_key(retry.func) == _expression_key(original.func)
                         and _argument_shape(retry) != _argument_shape(original)
-                        and (
-                            _is_strict_argument_subset(
-                                _argument_fingerprint(retry),
-                                _argument_fingerprint(original),
-                            )
-                            or _is_strict_argument_subset(
-                                _argument_fingerprint(original),
-                                _argument_fingerprint(retry),
-                            )
-                        )
+                        and _arguments_are_compatible(retry, original)
                     ):
                         self._add(retry, "typeerror-signature-retry")
 
@@ -823,6 +953,41 @@ def test_detects_typeerror_in_mixed_exception_handler() -> None:
     assert any(
         item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
     )
+
+
+def test_collects_typeerror_attempts_through_nested_nonmatching_handler() -> None:
+    source = """
+        try:
+            try:
+                publisher.publish(generation)
+            except ValueError:
+                other()
+        except TypeError:
+            publisher.publish()
+    """
+    assert any(
+        item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
+    )
+
+
+def test_detects_positional_to_keyword_signature_retry() -> None:
+    source = """
+        try:
+            publisher.publish(generation)
+        except TypeError:
+            publisher.publish(generation=generation)
+    """
+    assert any(
+        item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
+    )
+
+    unrelated = """
+        try:
+            publisher.publish(generation)
+        except TypeError:
+            publisher.publish(generation=other)
+    """
+    assert _scan_source(unrelated) == ()
 
 
 def test_does_not_cross_nested_exception_boundaries() -> None:

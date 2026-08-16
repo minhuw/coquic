@@ -383,29 +383,15 @@ class R2Client:
     ) -> None:
         source = config if config is not None else endpoint
         if source is not None and not isinstance(source, str):
-            endpoint = getattr(source, "r2_endpoint", None) or getattr(
-                source, "r2_endpoint_url", None
+            endpoint = getattr(source, "r2_endpoint", None)
+            access_key_id_path = access_key_id_path or getattr(
+                source, "r2_access_key_id_path", None
             )
-            access_key_id_path = (
-                access_key_id_path
-                or getattr(source, "r2_access_key_id_path", None)
-                or getattr(source, "r2_access_key_path", None)
+            secret_access_key_path = secret_access_key_path or getattr(
+                source, "r2_secret_access_key_path", None
             )
-            secret_access_key_path = (
-                secret_access_key_path
-                or getattr(source, "r2_secret_access_key_path", None)
-                or getattr(source, "r2_secret_key_path", None)
-            )
-            public_bucket = (
-                public_bucket
-                or getattr(source, "public_bucket", None)
-                or getattr(source, "public_r2_bucket", None)
-            )
-            private_bucket = (
-                private_bucket
-                or getattr(source, "private_bucket", None)
-                or getattr(source, "private_r2_bucket", None)
-            )
+            public_bucket = public_bucket or getattr(source, "public_bucket", None)
+            private_bucket = private_bucket or getattr(source, "private_bucket", None)
         if client is not None and s3_client is not None:
             _validation()
         self._endpoint = _endpoint(endpoint)
@@ -605,15 +591,6 @@ class R2Client:
             byte_size,
             digest,
         )
-
-    def put_or_verify(self, *args: Any, **kwargs: Any) -> R2PutResult:
-        return self.put_object(*args, **kwargs)
-
-    def put_immutable(self, *args: Any, **kwargs: Any) -> R2PutResult:
-        return self.put_object(*args, **kwargs)
-
-    def upload(self, *args: Any, **kwargs: Any) -> R2PutResult:
-        return self.put_object(*args, **kwargs)
 
     def verify_object(
         self,

@@ -84,6 +84,25 @@ def _r2(fake: FakeS3) -> R2Client:
     )
 
 
+def test_current_config_object_uses_canonical_fields_without_credentials() -> None:
+    class Config:
+        r2_endpoint = "https://config-r2.example.test"
+        r2_access_key_id_path = Path("/missing/access-key")
+        r2_secret_access_key_path = Path("/missing/secret-key")
+        public_bucket = "config-public-bucket"
+        private_bucket = "config-private-bucket"
+
+    fake = FakeS3(head=_head())
+    client = R2Client(config=Config(), client=fake)
+
+    result = client.put_object(PUBLIC_KEY, BODY)
+
+    assert result.status is R2PutStatus.uploaded
+    assert client._endpoint == "https://config-r2.example.test"
+    assert fake.calls[0][1]["Bucket"] == "config-public-bucket"
+    assert fake.calls[0][1]["Key"] == PUBLIC_KEY
+
+
 def test_new_object_is_single_part_conditional_and_head_verified() -> None:
     fake = FakeS3(head=_head())
     result = _r2(fake).put_object(PUBLIC_KEY, BODY)
@@ -107,7 +126,7 @@ def test_new_object_is_single_part_conditional_and_head_verified() -> None:
 
 def test_matching_precondition_replay_is_success_and_private_uses_private_bucket() -> None:
     fake = FakeS3(put_error=_client_error("PreconditionFailed", 412), head=_head())
-    result = _r2(fake).put_or_verify(PUBLIC_KEY, BODY)
+    result = _r2(fake).put_object(PUBLIC_KEY, BODY)
     assert result.status is R2PutStatus.existing
     assert fake.calls[1][1]["Bucket"] == "public-bucket"
 

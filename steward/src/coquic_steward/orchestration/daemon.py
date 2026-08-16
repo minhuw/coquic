@@ -1238,21 +1238,16 @@ class StewardDaemon:
         with self._publication_lock:
             if self._publication_callback is not None:
                 return
-            previous = getattr(self.store, "on_change", None)
+            previous = self.store.on_change
 
             def on_change() -> None:
                 try:
-                    if callable(previous):
+                    if previous is not None:
                         previous()
                 finally:
                     self._publication_wakeup.set()
 
-            try:
-                self.store.on_change = on_change
-            except (AttributeError, TypeError):
-                # A narrow fake store may expose no callback slot.  The worker
-                # still makes progress through its bounded periodic retry.
-                return
+            self.store.on_change = on_change
             self._publication_previous_callback = previous
             self._publication_callback = on_change
 
@@ -1271,14 +1266,9 @@ class StewardDaemon:
                 self._publication_previous_callback = None
                 return True
 
-            current = getattr(self.store, "on_change", None)
+            current = self.store.on_change
             if current is callback:
-                try:
-                    self.store.on_change = self._publication_previous_callback
-                except (AttributeError, TypeError):
-                    # Keep ownership recorded when the callback cannot be
-                    # restored; shutdown must not claim a complete teardown.
-                    return False
+                self.store.on_change = self._publication_previous_callback
 
             # Whether the callback was restored or superseded externally, the
             # daemon must drop its retained callback and previous-callback refs.

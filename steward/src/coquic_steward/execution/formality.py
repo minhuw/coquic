@@ -153,11 +153,6 @@ def parse_formality(
     return result
 
 
-parse_formality_output = parse_formality
-parse_formality_json = parse_formality
-validate_formality = parse_formality
-
-
 def build_effective_review(
     raw_review: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     dispositions: Sequence[FormalityDispositionRecord | Mapping[str, Any]],
@@ -203,10 +198,6 @@ def build_effective_review(
         blocking=blocking,
         escalated=escalated,
     )
-
-
-effective_review = build_effective_review
-effective_review_from_formality = build_effective_review
 
 
 def _findings(raw_review: Mapping[str, Any] | Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:

@@ -65,20 +65,58 @@ def _argument_shape(node: ast.Call) -> tuple[object, ...]:
     return (positional, keywords)
 
 
-def _catches_only_type_error(node: ast.AST | None) -> bool:
-    """Recognize a handler dedicated to signature adaptation.
+def _argument_fingerprint(
+    node: ast.Call,
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
+    positional = tuple(
+        (
+            "starred",
+            _expression_key(argument.value),
+        )
+        if isinstance(argument, ast.Starred)
+        else ("positional", _expression_key(argument))
+        for argument in node.args
+    )
+    keywords = tuple(
+        (
+            "**" if keyword.arg is None else keyword.arg,
+            _expression_key(keyword.value),
+        )
+        for keyword in node.keywords
+    )
+    return positional, keywords
 
-    A handler that combines TypeError with unrelated validation or I/O errors
-    is an ordinary error-normalization branch, not evidence of a call being
-    retried with another signature.  Keeping that distinction prevents the
-    archive's broad exception handlers from being mistaken for dispatch
-    fallbacks while still accepting a redundant ``(TypeError,)`` spelling.
-    """
+
+def _is_strict_argument_subset(
+    left: tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]],
+    right: tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]],
+) -> bool:
+    """Match a fallback that removes arguments without changing retained ones."""
+
+    left_positional, left_keywords = left
+    right_positional, right_keywords = right
+    if len(left_positional) > len(right_positional):
+        return False
+    if left_positional != right_positional[: len(left_positional)]:
+        return False
+
+    right_keyword_values = dict(right_keywords)
+    for name, value in left_keywords:
+        if right_keyword_values.get(name) != value:
+            return False
+    return (
+        len(left_positional) < len(right_positional)
+        or len(left_keywords) < len(right_keywords)
+    )
+
+
+def _catches_type_error(node: ast.AST | None) -> bool:
+    """Recognize handlers that include TypeError among their exceptions."""
 
     if isinstance(node, ast.Name):
         return node.id == "TypeError"
     if isinstance(node, (ast.Tuple, ast.List)):
-        return bool(node.elts) and all(_catches_only_type_error(item) for item in node.elts)
+        return any(_catches_type_error(item) for item in node.elts)
     return False
 
 
@@ -89,6 +127,14 @@ class _CallCollector(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         self.calls.append(node)
         self.generic_visit(node)
+
+    def visit_Try(self, _node: ast.Try) -> None:
+        # A nested handler may consume TypeError before it can reach the
+        # handler belonging to the try whose calls are being collected.
+        return
+
+    def visit_TryStar(self, _node: ast.TryStar) -> None:
+        return
 
     def visit_FunctionDef(self, _node: ast.FunctionDef) -> None:
         return
@@ -460,13 +506,23 @@ class _StaticDispatchVisitor(ast.NodeVisitor):
     def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
         attempted = _calls_in(node.body)
         for handler in node.handlers:
-            if not _catches_only_type_error(handler.type):
+            if not _catches_type_error(handler.type):
                 continue
             for retry in _calls_in(handler.body):
                 for original in attempted:
                     if (
                         _expression_key(retry.func) == _expression_key(original.func)
                         and _argument_shape(retry) != _argument_shape(original)
+                        and (
+                            _is_strict_argument_subset(
+                                _argument_fingerprint(retry),
+                                _argument_fingerprint(original),
+                            )
+                            or _is_strict_argument_subset(
+                                _argument_fingerprint(original),
+                                _argument_fingerprint(retry),
+                            )
+                        )
                     ):
                         self._add(retry, "typeerror-signature-retry")
 
@@ -755,6 +811,31 @@ def test_collects_typeerror_attempts_inside_control_flow() -> None:
     assert any(
         item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
     )
+
+
+def test_detects_typeerror_in_mixed_exception_handler() -> None:
+    source = """
+        try:
+            publisher.publish(generation)
+        except (TypeError, ValueError):
+            publisher.publish()
+    """
+    assert any(
+        item.endswith(" typeerror-signature-retry") for item in _scan_source(source)
+    )
+
+
+def test_does_not_cross_nested_exception_boundaries() -> None:
+    source = """
+        try:
+            try:
+                publisher.publish(generation)
+            except TypeError:
+                other()
+        except TypeError:
+            publisher.publish()
+    """
+    assert _scan_source(source) == ()
 
 
 def test_follows_a_successful_negative_hasattr_guard_after_early_exit() -> None:

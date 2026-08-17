@@ -26,6 +26,7 @@ from coquic_steward.publication.generation import (
     GenerationObject,
     GenerationOriginal,
     PublicationComposer,
+    PublicationGeneration as ComposedGeneration,
     compose_publication_generation,
 )
 from coquic_steward.publication.outbox import (
@@ -57,7 +58,7 @@ from coquic_steward.storage import TaskStore
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
 POLICY = PublicationRetryPolicy()
-IDENTITY = GenerationIdentity("task-1", "boundary-1")
+IDENTITY = GenerationIdentity("task-1", "3f0b90c7ade7e39f4eeaa5153d417bb8500c93fc65301205de26b3057fea2e03")
 
 
 def _composed(
@@ -99,19 +100,18 @@ def _composed(
             "idempotencyKey": IDENTITY.idempotency_key,
             "metadataDigest": metadata_digest,
             "expectedCounts": counts,
+            "createdAt": NOW.isoformat(),
+        },
+        "headIntent": {
+            "publicationId": IDENTITY.publication_id,
+            "taskId": "task-1",
+            "updatedAt": NOW.isoformat(),
         },
         "runs": [{"runId": "run-1"}],
         "events": [{"sequence": 1}],
         "artifacts": [{"artifactId": "artifact-1"}],
     }
-    return SimpleNamespace(
-        publication_id=IDENTITY.publication_id,
-        task_id="task-1",
-        run_id="run-1",
-        generation_boundary="boundary-1",
-        metadata_digest=metadata_digest,
-        idempotency_key=IDENTITY.idempotency_key,
-        generation=payload["generation"],
+    return ComposedGeneration(
         payload=payload,
         objects=(public,),
         private_originals=originals,
@@ -128,7 +128,7 @@ class _FakeStore:
             publication_id=IDENTITY.publication_id,
             task_id="task-1",
             run_id="run-1",
-            generation_boundary="boundary-1",
+            generation_boundary=IDENTITY.generation_boundary,
             metadata_digest="a" * 64,
             idempotency_key=IDENTITY.idempotency_key,
             state=PublicationState.queued,
@@ -625,7 +625,7 @@ def _sqlite_generation() -> PublicationGeneration:
         publication_id=IDENTITY.publication_id,
         task_id="task-1",
         run_id="run-1",
-        generation_boundary="boundary-1",
+        generation_boundary=IDENTITY.generation_boundary,
         metadata_digest="a" * 64,
         idempotency_key=IDENTITY.idempotency_key,
         created_at=NOW,
@@ -743,8 +743,11 @@ def test_reused_public_object_key_is_uploaded_once() -> None:
         idempotency_key: str | None = None,
     ) -> object:
         generated = _composed()
-        generated.objects = (generated.objects[0], generated.objects[0])
-        return generated
+        return ComposedGeneration(
+            payload=generated.payload,
+            objects=(generated.objects[0], generated.objects[0]),
+            private_originals=generated.private_originals,
+        )
 
     result = _publisher(store, provider, compose=compose).publish(
         IDENTITY.publication_id, source={"stable": True}
@@ -1162,6 +1165,34 @@ def test_sqlite_lease_expiry_reclaims_and_composes_without_hiding(tmp_path) -> N
     assert current is not None
     assert current.state is PublicationState.exposed
 
+
+def test_composer_lookalike_is_rejected_before_provider_request() -> None:
+    store = _FakeStore()
+    provider = _FakeProvider(store)
+    generated = _composed()
+    lookalike = SimpleNamespace(
+        **{
+            name: getattr(generated, name)
+            for name in (
+                "publication_id",
+                "task_id",
+                "run_id",
+                "generation_boundary",
+                "metadata_digest",
+                "idempotency_key",
+                "generation",
+                "payload",
+                "objects",
+                "private_originals",
+            )
+        }
+    )
+    result = _publisher(store, provider, compose=_returning_composer(lookalike)).publish(
+        IDENTITY.publication_id, source={"stable": True}
+    )
+    assert result.status is PublicationStatus.blocked
+    assert result.reason == "invalid_metadata"
+    assert provider.calls == []
 
 def test_prebuilt_transport_generation_is_not_a_composition_bypass() -> None:
     store = _FakeStore()

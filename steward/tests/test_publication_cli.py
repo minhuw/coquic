@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,7 @@ from coquic_steward.core.config import StewardConfig
 from coquic_steward.cli import app
 from coquic_steward.publication.d1 import HideReceipt
 from coquic_steward.publication.models import FailClosed, ReasonCode
-from coquic_steward.publication.generation import PublicationComposer
+from coquic_steward.publication.generation import PublicationComposer, PublicationGeneration as ComposedGeneration
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
     PublicationGeneration,
@@ -61,6 +62,52 @@ def _generation(*, state: str = "blocked") -> PublicationGeneration:
         created_at=NOW - timedelta(minutes=3),
         updated_at=NOW - timedelta(minutes=2),
     )
+
+
+def _composed_generation(
+    *, task_id: str, boundary_label: str, metadata_digest: str, run_id: str | None = None
+) -> ComposedGeneration:
+    task = {"taskId": task_id}
+    pipelines = [{"pipelineId": f"pipeline-{boundary_label}"}]
+    runs = [{"runId": run_id or f"run-{boundary_label}"}]
+    events = [{"sequence": 1}]
+    artifacts = [{"artifactId": f"artifact-{boundary_label}"}]
+    seed = {
+        "taskId": task_id,
+        "task": task,
+        "pipelines": pipelines,
+        "runs": runs,
+        "events": events,
+        "artifacts": artifacts,
+    }
+    boundary = hashlib.sha256(
+        (json.dumps(seed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    identity = GenerationIdentity(task_id, boundary)
+    payload = {
+        "taskId": task_id,
+        "publicationId": identity.publication_id,
+        "task": task,
+        "pipelines": pipelines,
+        "runs": runs,
+        "events": events,
+        "artifacts": artifacts,
+        "generation": {
+            "runId": runs[0]["runId"],
+            "publicationId": identity.publication_id,
+            "taskId": task_id,
+            "idempotencyKey": identity.idempotency_key,
+            "metadataDigest": metadata_digest,
+            "expectedCounts": {"tasks": 1, "pipelines": 1, "runs": 1, "events": 1, "artifacts": 1},
+            "createdAt": NOW.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        },
+        "headIntent": {
+            "publicationId": identity.publication_id,
+            "taskId": task_id,
+            "updatedAt": NOW.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        },
+    }
+    return ComposedGeneration(payload=payload)
 
 
 def _returning_composer(result: object):
@@ -189,18 +236,16 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
             replaced.append((publication_id, value))
             return SimpleNamespace(status="enqueued")
 
-    changed = SimpleNamespace(
-        publication_id="pub-repaired",
+    unchanged = _composed_generation(
+        task_id="task-current",
+        boundary_label="repaired",
+        metadata_digest="a" * 64,
+    )
+    current = replace(unchanged.to_outbox(), state=PublicationState.blocked, reason="unsafe_content")
+    changed = _composed_generation(
         task_id=current.task_id,
+        boundary_label="new",
         metadata_digest="b" * 64,
-        outbox_record=SimpleNamespace(publication_id="pub-repaired"),
-        generation={},
-        payload={},
-        objects=(),
-        private_originals=(),
-        run_id="run-current",
-        generation_boundary="boundary-repaired",
-        idempotency_key="gen-repaired",
     )
     publisher = CloudPublisher(
         Store(),
@@ -213,7 +258,12 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
     assert result.status is PublicationStatus.queued
     assert replaced == [(current.publication_id, changed.outbox_record)]
 
-    unchanged = SimpleNamespace(**{**changed.__dict__, "publication_id": current.publication_id, "metadata_digest": "a" * 64})
+    unchanged = _composed_generation(
+        task_id=current.task_id,
+        boundary_label="repaired",
+        metadata_digest="a" * 64,
+    )
+
     publisher = CloudPublisher(
         Store(),
         object(),
@@ -471,29 +521,11 @@ def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
         now=NOW + timedelta(seconds=1),
     ).status is PublicationOperationStatus.blocked
 
-    new_identity = GenerationIdentity("task-retry", "boundary-new")
-    repaired = PublicationGeneration(
-        publication_id=new_identity.publication_id,
+    composed = _composed_generation(
         task_id="task-retry",
-        run_id="run-retry",
-        generation_boundary="boundary-new",
+        boundary_label="run-retry",
         metadata_digest="b" * 64,
-        idempotency_key=new_identity.idempotency_key,
-        created_at=NOW + timedelta(seconds=2),
-        updated_at=NOW + timedelta(seconds=2),
-    )
-    composed = SimpleNamespace(
-        publication_id=repaired.publication_id,
-        task_id=repaired.task_id,
-        run_id=repaired.run_id,
-        generation_boundary=repaired.generation_boundary,
-        metadata_digest=repaired.metadata_digest,
-        idempotency_key=repaired.idempotency_key,
-        generation={},
-        payload={},
-        objects=(),
-        private_originals=(),
-        outbox_record=repaired,
+        run_id="run-retry",
     )
     publisher = CloudPublisher(
         store,
@@ -504,9 +536,9 @@ def test_retry_real_store_replaces_changed_same_run_evidence(tmp_path) -> None:
     )
     result = publisher.retry_publication(old.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.queued
-    assert result.publication_id == repaired.publication_id
+    assert result.publication_id == composed.publication_id
     assert store.get_publication_generation(old.publication_id) is None
-    assert store.get_publication_generation(repaired.publication_id).state is PublicationState.queued
+    assert store.get_publication_generation(composed.publication_id).state is PublicationState.queued
 
 
 def test_hide_real_store_blocks_101_queued_generations_and_replays(tmp_path) -> None:

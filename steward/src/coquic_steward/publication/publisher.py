@@ -189,28 +189,6 @@ def _publication_id_from(value: object) -> object | None:
     return None
 
 
-def _is_composed_generation(value: object) -> bool:
-    """Accept the immutable envelope and bounded test doubles alike."""
-
-    if isinstance(value, PublicationGeneration):
-        return True
-    return all(
-        hasattr(value, name)
-        for name in (
-            "publication_id",
-            "task_id",
-            "run_id",
-            "generation_boundary",
-            "metadata_digest",
-            "idempotency_key",
-            "generation",
-            "payload",
-            "objects",
-            "private_originals",
-        )
-    )
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1040,7 +1018,7 @@ class CloudPublisher:
                 phase="retry",
                 hide_result=hide_result,
             )
-        if not _is_composed_generation(composed_value):
+        if not isinstance(composed_value, PublicationGeneration):
             return _result(
                 PublicationStatus.blocked,
                 publication_id,
@@ -1065,10 +1043,11 @@ class CloudPublisher:
                     hide_result=hide_result,
                 )
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        record = getattr(composed, "outbox_record", None)
-        if record is None:
-            record = getattr(composed, "outbox", None)
-        if record is None or _view_identifier(_publication_id_from(record)) != composed.publication_id:
+        try:
+            record = composed.to_outbox()
+        except Exception:
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        if record.publication_id != composed.publication_id:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         try:
             operation = self.store.replace_blocked_publication(publication_id, record)
@@ -1605,7 +1584,7 @@ class CloudPublisher:
                 )
             except Exception:
                 return self._block(durable, "invalid_metadata", hide=False, phase="compose")
-            generation = composed_value if _is_composed_generation(composed_value) else None
+            generation = composed_value if isinstance(composed_value, PublicationGeneration) else None
             if isinstance(composed_value, RepairRequired):
                 return _result(
                     PublicationStatus.repair_required,

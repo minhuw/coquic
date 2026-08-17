@@ -728,9 +728,6 @@ class ControlLoopLedger:
             ).fetchone()
         return str(row[0]) if row is not None else None
 
-    # Plan-019 terminology used by archive/reducer callers.
-    usage_watermark = overhead_usage_watermark
-
     def overhead_usage_processed_at(self) -> str | None:
         with self._connect() as db:
             row = db.execute(
@@ -931,11 +928,6 @@ class ControlLoopLedger:
                 ),
             )
 
-    # Reducer-facing aliases use the terminology from the plan while keeping
-    # one transactional implementation.
-    apply_overhead_usage = record_overhead_usage
-    record_usage_rows = record_overhead_usage
-
     def list_overhead_usage(self) -> list[StewardOverheadUsage]:
         with self._connect() as db:
             rows = db.execute(
@@ -953,9 +945,6 @@ class ControlLoopLedger:
             )
             for row in rows
         ]
-
-    overhead_usage_rows = list_overhead_usage
-    usage_rows = list_overhead_usage
 
     def list_events(self, *, after_sequence: int = -1, limit: int | None = None) -> list[Event]:
         sql = "SELECT * FROM control_loop_events WHERE sequence>? ORDER BY sequence"

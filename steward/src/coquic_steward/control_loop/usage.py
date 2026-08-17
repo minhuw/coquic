@@ -423,10 +423,6 @@ class StewardOverheadReducer:
             archive_digest=manifest_digest,
         )
 
-    # Short aliases make the reducer convenient for focused archive tests.
-    reduce = reduce_run
-    derive = reduce_run
-
     def reconcile(
         self,
         ledger: ControlLoopLedger | None = None,

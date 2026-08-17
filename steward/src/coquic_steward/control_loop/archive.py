@@ -740,11 +740,6 @@ class ControlLoopArchive:
             self._verified_snapshot.setdefault("plannerRuns", {})[run_id] = facts
         return manifest, artifacts, digest
 
-    # Explicit aliases keep the authentication boundary discoverable to
-    # reducers and future private consumers without exposing archive internals.
-    verified_planner_artifacts = read_verified_planner_run
-    read_verified_planner_artifacts = read_verified_planner_run
-
     def planner_run_is_verified(self, planner_run_id: str) -> bool:
         """Check cached planner-run trust using stat identities only."""
 

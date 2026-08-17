@@ -526,11 +526,6 @@ class StewardPublicationConfig:
         object.__setattr__(self, "retry_backoff_seconds", retry_backoff)
 
 
-
-# Descriptive alias used by callers that refer to the cloud publication boundary.
-PublicationSettings = StewardPublicationConfig
-
-
 @dataclass(frozen=True)
 class StewardDeploymentConfig:
     """The host-side Docker Compose contract for the trusted daemon.

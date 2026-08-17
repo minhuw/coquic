@@ -750,10 +750,69 @@ def test_publication_graph_builders_share_bounded_invocation_evidence(config) ->
     integration_graph = StewardExecutor(
         config, store, runner=FakeRunner(config)
     )._integration_publication_graph(store.get(task.id))
+    assert session_graph == integration_graph
     session_source = session_graph["runs"][0]["source"]
     integration_source = integration_graph["runs"][0]["source"]
     assert session_source.run["invocations"] == integration_source.run["invocations"]
     assert session_source.run["invocations"][0]["availability"] == "partial"
+
+
+@pytest.mark.parametrize(
+    ("status", "lifecycle"),
+    [
+        ("queued", "active"),
+        ("running", "active"),
+        ("reviewing", "active"),
+        ("integrating", "active"),
+        ("succeeded", "completed"),
+        ("pushed", "completed"),
+        ("no_changes", "completed"),
+        ("blocked", "failed"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+    ],
+)
+def test_publication_graph_builders_map_all_legal_lifecycles(
+    config, status: str, lifecycle: str
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="lifecycle",
+            prompt="map status",
+        )
+    )
+    task = task.model_copy(update={"status": status})
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+
+    session_graph = publication_graph_for_task(config, store, task)
+    integration_graph = executor._integration_publication_graph(task)
+
+    assert session_graph == integration_graph
+    assert session_graph["task"]["lifecycleState"] == lifecycle
+
+
+def test_publication_graph_builders_reject_invalid_status(config) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="invalid status",
+            prompt="fail closed",
+        )
+    )
+    invalid = task.model_copy(update={"status": "corrupt"})
+    executor = StewardExecutor(config, store, runner=FakeRunner(config))
+
+    with pytest.raises(ValueError):
+        publication_graph_for_task(config, store, invalid)
+    with pytest.raises(ValueError):
+        executor._integration_publication_graph(invalid)
 
 
 def test_validation_conflict_and_phase_budgets_are_explicit(config) -> None:

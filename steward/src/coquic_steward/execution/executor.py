@@ -82,7 +82,7 @@ from .session import (
     worktree_checkpoint,
 )
 from .container_config import TaskRole
-from ..publication.atif import AtifSource
+from .publication_graph import assemble_publication_graph
 from ..publication.generation import PublicationGeneration, compose_publication_generation
 from ..publication.models import MAX_FINDINGS, FailClosed, ReasonCode, RepairRequired
 from ..publication.redaction import discover_secrets
@@ -4096,103 +4096,9 @@ class StewardExecutor:
 
         from .task_archive import TaskArchive
 
-        def timestamp(value: Any) -> str:
-            return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
-                "+00:00", "Z"
-            )
-
-        def run_mapping(
-            run: Any, invocations: Sequence[object]
-        ) -> dict[str, object]:
-            started = run.started_at
-            completed = run.completed_at
-            duration = (
-                max(0, int((completed - started).total_seconds() * 1000))
-                if completed is not None
-                else 0
-            )
-            return {
-                "taskId": run.task_id,
-                "pipelineId": run.pipeline_id,
-                "runId": run.id,
-                "role": str(run.role),
-                "state": str(run.state),
-                "startedAt": timestamp(started),
-                "completedAt": timestamp(completed) if completed is not None else None,
-                "durationMs": duration,
-                "model": run.model,
-                "reasoning": run.reasoning,
-                "parentRunId": run.parent_run_id,
-                "retryOfRunId": run.retry_of_run_id,
-                "resumeOfRunId": run.resume_of_run_id,
-                "invocations": [
-                    item.to_dict(include_telemetry=True)
-                    for item in invocations
-                ],
-            }
-
-        archive = TaskArchive(self.config)
-        pipelines: list[dict[str, object]] = []
-        runs: list[dict[str, object]] = []
-        for pipeline in self.store.list_pipelines(source.id):
-            pipeline_value = {
-                "pipelineId": pipeline.id,
-                "taskId": pipeline.task_id,
-                "name": f"pipeline-{pipeline.ordinal}",
-                "createdAt": timestamp(pipeline.started_at),
-            }
-            pipelines.append(pipeline_value)
-            for run in self.store.list_runs(source.id, pipeline_id=pipeline.id):
-                if run.completed_at is None or str(run.state) == "running":
-                    continue
-                documents, invocations = archive.collect_run_publication_evidence(
-                    source.id,
-                    pipeline.id,
-                    run,
-                )
-                runs.append(
-                    {
-                        "source": AtifSource(
-                            run=run_mapping(run, invocations),
-                            documents=documents,
-                        ),
-                        "pipeline": pipeline_value,
-                    }
-                )
-
-        status = TaskStatus(source.status)
-        lifecycle = (
-            "active"
-            if status in {TaskStatus.queued, TaskStatus.running, TaskStatus.reviewing, TaskStatus.integrating}
-            else "cancelled"
-            if status is TaskStatus.cancelled
-            else "failed"
-            if status in {TaskStatus.failed, TaskStatus.blocked}
-            else "completed"
+        return assemble_publication_graph(
+            self.store, source, TaskArchive(self.config)
         )
-        task_value = {
-            "taskId": source.id,
-            "title": source.spec.title,
-            "lifecycleState": lifecycle,
-            "createdAt": timestamp(source.created_at),
-            "completedAt": None if lifecycle == "active" else timestamp(source.updated_at),
-        }
-        events = [
-            {
-                "taskId": source.id,
-                "sequence": index,
-                "eventType": event.kind,
-                "occurredAt": timestamp(event.created_at),
-                "summary": event.message,
-            }
-            for index, event in enumerate(self.store.events(source.id), start=1)
-        ]
-        return {
-            "task": task_value,
-            "pipelines": pipelines,
-            "runs": runs,
-            "events": events,
-        }
 
     def _scan_integration_source(
         self,

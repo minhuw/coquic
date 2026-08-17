@@ -117,12 +117,6 @@ class ControlLoopArchive:
 
         return dict(self._verification_counters)
 
-    @property
-    def verification_stats(self) -> dict[str, int]:
-        """Compatibility alias for callers inspecting verification work."""
-
-        return self.verification_counters
-
     def reset_verification_counters(self) -> None:
         for key in self._verification_counters:
             self._verification_counters[key] = 0

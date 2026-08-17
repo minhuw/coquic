@@ -373,6 +373,31 @@ def test_estimate_cost_rejects_malformed_turn_evidence() -> None:
         estimate_cost(turns=[], **kwargs)
 
 
+def test_estimate_cost_reports_missing_model_and_catalog() -> None:
+    turns = [TelemetryTurn.from_usage(_usage())]
+    started_at = datetime(2026, 2, 1, tzinfo=UTC)
+
+    missing_model = estimate_cost(
+        turns,
+        billing_mode=BillingMode.api,
+        configured_model=None,
+        started_at=started_at,
+        catalog=PriceCatalog.empty(),
+    )
+    assert missing_model.status is CostStatus.unavailable
+    assert missing_model.reason == "configured_model_missing"
+
+    missing_catalog = estimate_cost(
+        turns,
+        billing_mode=BillingMode.api,
+        configured_model="m",
+        started_at=started_at,
+        catalog=None,
+    )
+    assert missing_catalog.status is CostStatus.unavailable
+    assert missing_catalog.reason == "price_catalog_unavailable"
+
+
 def test_runner_uses_operational_catalog(config, tmp_path: Path) -> None:
     operational = config.repo_root / "steward"
     operational.mkdir()

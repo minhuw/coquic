@@ -784,10 +784,6 @@ class PublicationGeneration:
         object.__setattr__(self, "private_originals", originals)
 
     @property
-    def envelope(self) -> Mapping[str, Any]:
-        return self.payload
-
-    @property
     def generation(self) -> Mapping[str, Any]:
         value = self.payload.get("generation")
         return value if isinstance(value, Mapping) else MappingProxyType({})
@@ -821,32 +817,6 @@ class PublicationGeneration:
     @property
     def identity(self) -> GenerationIdentity:
         return GenerationIdentity(self.task_id, self.generation_boundary)
-
-    @property
-    def publication(self) -> Mapping[str, Any]:
-        return self.payload
-
-    @property
-    def snapshot(self) -> Mapping[str, Any]:
-        """Compatibility spelling for consumers that call the envelope a snapshot."""
-
-        return self.payload
-
-    @property
-    def components(self) -> tuple[GenerationObject, ...]:
-        return self.objects
-
-    @property
-    def object_descriptors(self) -> tuple[GenerationObject, ...]:
-        return self.objects
-
-    @property
-    def originals(self) -> tuple[GenerationOriginal, ...]:
-        return self.private_originals
-
-    @property
-    def private_original(self) -> GenerationOriginal | None:
-        return self.private_originals[0] if len(self.private_originals) == 1 else None
 
     @property
     def outbox_record(self) -> outbox.PublicationGeneration:
@@ -885,22 +855,11 @@ class PublicationGeneration:
             updated_at=_timestamp_value(head_intent.get("updatedAt")),
         )
 
-    @property
-    def outbox_generation(self) -> outbox.PublicationGeneration:
-        return self.outbox_record
-
-    @property
-    def outbox(self) -> outbox.PublicationGeneration:
-        return self.outbox_record
-
     def to_outbox(self) -> outbox.PublicationGeneration:
         return self.outbox_record
 
     def as_dict(self) -> dict[str, Any]:
         return _thaw(self.payload)
-
-    def to_dict(self) -> dict[str, Any]:
-        return self.as_dict()
 
 
 GenerationOutcome: TypeAlias = PublicationGeneration | RepairRequired | FailClosed

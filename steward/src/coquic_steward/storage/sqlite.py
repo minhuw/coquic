@@ -2298,9 +2298,7 @@ class SQLiteTaskStore:
     ):
         """Persist one normalized provider collection atomically.
 
-        This is the scheduler-facing replacement for per-item insertion.  The
-        legacy methods remain available for task-archive compatibility, while
-        every new observation goes through the control-loop graph ledger.
+        Every observation goes through the control-loop graph ledger.
         """
 
         with Session(self.engine) as session:
@@ -2654,65 +2652,6 @@ class SQLiteTaskStore:
                 .limit(1)
             )
             return row_to_signal_fetch_run(row) if row is not None else None
-
-    def add_signal_item(
-        self, item: SignalItem, *, suppression_hours: int = 24
-    ) -> tuple[SignalItem, bool]:
-        now = utc_now()
-        item = item.model_copy(
-            update={"created_at": item.created_at, "updated_at": now}
-        )
-        saved_item: SignalItem | None = None
-        was_created = False
-        with Session(self.engine) as session, session.begin():
-            workflow_identity = signal_workflow_identity(item)
-            existing = _matching_signal_row(
-                session, item, workflow_identity=workflow_identity
-            )
-            if existing is not None:
-                if _signal_row_suppressed(
-                    session,
-                    existing,
-                    suppression_hours=suppression_hours,
-                ):
-                    existing.updated_at = now.isoformat()
-                    if item.source_fetch_id:
-                        existing.source_fetch_id = item.source_fetch_id
-                    saved_item = row_to_signal_item(existing, path_codec=self.path_codec)
-                else:
-                    item = item.model_copy(update={"id": new_signal_item_id()})
-            if saved_item is None:
-                session.add(
-                    signal_item_to_row(
-                        item,
-                        path_codec=self.path_codec,
-                        workflow_identity=workflow_identity,
-                    )
-                )
-                was_created = True
-        if was_created:
-            self.request_wakeup(
-                "signal.pending",
-                {"signal_item_id": item.id, "provider": item.provider},
-            )
-            return item, True
-        self._notify_change()
-        assert saved_item is not None
-        return saved_item, False
-
-    def add_signal_items(
-        self, items: list[SignalItem], *, suppression_hours: int = 24
-    ) -> tuple[list[SignalItem], int]:
-        saved: list[SignalItem] = []
-        created = 0
-        for item in items:
-            saved_item, was_created = self.add_signal_item(
-                item, suppression_hours=suppression_hours
-            )
-            saved.append(saved_item)
-            if was_created:
-                created += 1
-        return saved, created
 
     def list_signal_items(
         self,

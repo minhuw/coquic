@@ -285,16 +285,22 @@ def _durable_push_setup(
     return config, store, source, integration, StewardExecutor(config, store)
 
 
-def ingest_test_signal(store: TaskStore, item: SignalItem) -> SignalItem:
-    saved, _signals, _created = store.ingest_signal_collection(
+def ingest_test_signal(
+    store: TaskStore,
+    item: SignalItem,
+    *,
+    suppression_hours: int = 24,
+) -> tuple[SignalItem, bool]:
+    saved, _signals, created = store.ingest_signal_collection(
         SignalFetchRun(
             id=new_signal_fetch_id(),
             provider=item.provider,
             status=SignalFetchStatus.ok,
         ),
         [item],
+        suppression_hours=suppression_hours,
     )
-    return saved[0]
+    return saved[0], bool(created)
 
 
 def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
@@ -885,7 +891,8 @@ def test_store_dispatch_snapshot_is_bounded_and_deterministic(
 
 def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
-    item, created = store.add_signal_item(
+    item, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -898,9 +905,10 @@ def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
             },
         )
     )
-    duplicate, duplicate_created = store.add_signal_item(
+    duplicate, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
-            id="wi-codacy-1",
+            id="wi-codacy-duplicate",
             provider="codacy",
             kind="codacy.issue",
             fingerprint="wi-codacy-1",
@@ -917,7 +925,8 @@ def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
 def test_store_preserves_repository_relative_signal_paths(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     expected_path = "steward/src/coquic_steward/public_mirror.py"
-    store.add_signal_item(
+    ingest_test_signal(
+        store,
         SignalItem(
             provider="codacy",
             kind="codacy.issue",
@@ -941,7 +950,8 @@ def test_store_records_scheduler_wakeups_for_actionable_changes(
     task, created = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    item, item_created = store.add_signal_item(
+    item, item_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -973,7 +983,8 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
     config: StewardConfig,
 ) -> None:
     store = TaskStore.create(config.db_path)
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -982,7 +993,8 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
             title="Open Codacy finding",
         )
     )
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1009,7 +1021,8 @@ def test_store_permanently_suppresses_resolved_planned_signal(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1030,7 +1043,8 @@ def test_store_permanently_suppresses_resolved_planned_signal(
         row.planned_at = old.isoformat()
         row.updated_at = old.isoformat()
 
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1053,7 +1067,8 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.ci, worker=WorkerKind.ci_doctor, title="T", prompt="P")
     )
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-ci-legacy",
             provider="github-actions:ci",
@@ -1075,7 +1090,8 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
     )
     store.finish_task(task.id, TaskStatus.no_changes, "no changes")
 
-    same_attempt, duplicate_created = store.add_signal_item(
+    same_attempt, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-ci-stable",
             provider="github-actions:ci",
@@ -1085,7 +1101,8 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
             payload={"run_id": "100", "run_attempt": 1},
         )
     )
-    next_attempt, next_attempt_created = store.add_signal_item(
+    next_attempt, next_attempt_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-ci-attempt-2",
             provider="github-actions:ci",
@@ -1129,7 +1146,8 @@ def test_store_keeps_invalid_or_non_workflow_signal_identity_unindexed(
     config: StewardConfig, provider: str, payload: dict[str, object]
 ) -> None:
     store = TaskStore.create(config.db_path)
-    item, created = store.add_signal_item(
+    item, created = ingest_test_signal(
+        store,
         SignalItem(
             id="identity-case",
             provider=provider,
@@ -1153,7 +1171,8 @@ def test_store_matches_workflow_signal_identity_with_one_bounded_query(
     config: StewardConfig,
 ) -> None:
     store = TaskStore.create(config.db_path)
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="bounded-first",
             provider="github-actions:ci",
@@ -1175,7 +1194,8 @@ def test_store_matches_workflow_signal_identity_with_one_bounded_query(
 
     event.listen(store.engine, "before_cursor_execute", capture_statement)
     try:
-        duplicate, duplicate_created = store.add_signal_item(
+        duplicate, duplicate_created = ingest_test_signal(
+            store,
             SignalItem(
                 id="bounded-second",
                 provider="github-actions:ci",
@@ -1222,7 +1242,8 @@ def test_store_requeues_planned_signal_after_configured_suppression(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
     store.finish_task(task.id, TaskStatus.failed, "failed")
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1242,7 +1263,8 @@ def test_store_requeues_planned_signal_after_configured_suppression(
         row.planned_at = old.isoformat()
         row.updated_at = old.isoformat()
 
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1267,7 +1289,8 @@ def test_store_requeues_failed_planned_signal_after_retry_window(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    signal, created = store.add_signal_item(
+    signal, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1308,7 +1331,8 @@ def test_store_skips_failed_signal_requeue_with_duplicate_pending(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1331,7 +1355,8 @@ def test_store_skips_failed_signal_requeue_with_duplicate_pending(
         signal_row.planned_at = old.isoformat()
         signal_row.updated_at = old.isoformat()
         task_row.updated_at = old.isoformat()
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1358,7 +1383,8 @@ def test_store_skips_failed_signal_requeue_with_duplicate_planned(
     first_task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T1", prompt="P")
     )
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1381,7 +1407,8 @@ def test_store_skips_failed_signal_requeue_with_duplicate_planned(
         signal_row.planned_at = old.isoformat()
         signal_row.updated_at = old.isoformat()
         task_row.updated_at = old.isoformat()
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1414,7 +1441,8 @@ def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
     first_task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T1", prompt="P")
     )
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1437,7 +1465,8 @@ def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
         signal_row.planned_at = old.isoformat()
         signal_row.updated_at = old.isoformat()
         task_row.updated_at = old.isoformat()
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1480,7 +1509,8 @@ def test_store_does_not_requeue_recent_failed_signal(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    signal, created = store.add_signal_item(
+    signal, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1516,7 +1546,8 @@ def test_store_suppresses_planned_signal_while_task_is_active(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    first, created = store.add_signal_item(
+    first, created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -1536,7 +1567,8 @@ def test_store_suppresses_planned_signal_while_task_is_active(
         row.planned_at = old.isoformat()
         row.updated_at = old.isoformat()
 
-    second, duplicate_created = store.add_signal_item(
+    second, duplicate_created = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-2",
             provider="codacy",
@@ -1620,7 +1652,8 @@ def test_daemon_supersedes_stale_signals_before_planning(
     config: StewardConfig, monkeypatch
 ) -> None:
     store = TaskStore.create(config.db_path)
-    signal, _ = store.add_signal_item(
+    signal, _ = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codeql-42",
             provider="code-scanning",
@@ -1667,7 +1700,7 @@ def test_daemon_replans_expired_failed_signal_without_refetch(
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
-    signal = ingest_test_signal(
+    signal, _ = ingest_test_signal(
         store,
         SignalItem(
             id="wi-codeql-1",
@@ -1898,7 +1931,7 @@ def test_daemon_logs_planner_lifecycle_event(
     config: StewardConfig, monkeypatch, tmp_path: Path
 ) -> None:
     store = TaskStore.create(config.db_path)
-    inbox_item = ingest_test_signal(
+    inbox_item, _ = ingest_test_signal(
         store,
         SignalItem(
             id="wi-codeql-1",
@@ -1971,7 +2004,8 @@ def test_daemon_streams_debug_lines_to_logger(
 ) -> None:
     store = TaskStore.create(config.db_path)
     lines: list[str] = []
-    store.add_signal_item(
+    ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -2365,7 +2399,8 @@ def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
 ) -> None:
     store = TaskStore.create(config.db_path)
     store.request_wakeup("task.status", {"task_id": "task-1"})
-    store.add_signal_item(
+    ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codacy-1",
             provider="codacy",
@@ -2545,7 +2580,8 @@ def test_scheduler_idle_excludes_signal_error_rows(
     )
     config.ensure_dirs()
     store = TaskStore.create(config.db_path)
-    store.add_signal_item(
+    ingest_test_signal(
+        store,
         SignalItem(
             provider="codacy",
             kind="signal-error",
@@ -2556,7 +2592,8 @@ def test_scheduler_idle_excludes_signal_error_rows(
 
     assert scheduler_state(config, store).idle is True
 
-    store.add_signal_item(
+    ingest_test_signal(
+        store,
         SignalItem(
             provider="codacy",
             kind="codacy.issue",
@@ -7402,7 +7439,8 @@ def test_cli_plan_supersedes_stale_signals_before_planning(
     monkeypatch.chdir(repo)
     config = load_config()
     store = TaskStore.create(config.db_path)
-    signal, _ = store.add_signal_item(
+    signal, _ = ingest_test_signal(
+        store,
         SignalItem(
             id="wi-codeql-42",
             provider="code-scanning",

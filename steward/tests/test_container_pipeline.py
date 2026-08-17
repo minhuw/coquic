@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
@@ -34,6 +35,7 @@ from coquic_steward.execution.worktree import (
 from coquic_steward.execution.session import SessionSupervisor, publication_graph_for_task
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
+from coquic_steward.storage import sqlite as sqlite_module
 from coquic_steward.storage.sqlite import TaskLedgerOwnershipError
 
 
@@ -702,59 +704,248 @@ def test_archive_write_preserves_parent_and_child_pipeline_refs(
     archive._validate_task_graph(task.id, "blocked")
 
 
-def test_publication_graph_builders_share_bounded_invocation_evidence(config) -> None:
+def _equivalent_publication_fixture(config, monkeypatch, home, status):
+    """Build one complete archive independently from its comparison peer."""
+
+    clock_value = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    fixture_config = replace(
+        config,
+        deployment=replace(config.deployment, home=home),
+    )
+    fixture_config.ensure_dirs()
+    monkeypatch.setattr(sqlite_module, "new_execution_id", lambda: "execution-fixed")
+    monkeypatch.setattr(sqlite_module, "new_pipeline_id", lambda: "pipeline-initial")
+    store = TaskStore.create(fixture_config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            id="task-publication-equivalence",
+            kind=TaskKind.custom,
+            workflow=TaskWorkflow.fix,
+            worker=WorkerKind.custom,
+            title="complete graph fixture",
+            prompt="preserve every graph dimension",
+        )
+    )
+    parent = store.list_pipelines(task.id)[0]
+
+    parent_session = store.create_session(
+        task.id, parent.id, session_id="session-parent"
+    )
+    parent_run = store.create_run(
+        task.id,
+        parent.id,
+        parent_session.id,
+        run_id="run-parent",
+        role="planner",
+        role_ordinal=1,
+    )
+    store.transition_run(parent_run.id, "succeeded", expected_state="running")
+
+    child = store.create_pipeline(
+        task.id,
+        execution_id=parent.execution_id,
+        pipeline_id="pipeline-child",
+        trigger=PipelineTrigger.validation_repair.value,
+        parent_pipeline_id=parent.id,
+    )
+
+    child_session = store.create_session(task.id, child.id, session_id="session-child")
+    interrupted = store.create_run(
+        task.id,
+        child.id,
+        child_session.id,
+        run_id="run-interrupted",
+        role="implementation",
+        role_ordinal=1,
+    )
+    store.transition_run(interrupted.id, "interrupted", expected_state="running")
+    retry = store.create_run(
+        task.id,
+        child.id,
+        child_session.id,
+        run_id="run-retry",
+        role="implementation",
+        role_ordinal=2,
+        retry_of_run_id=interrupted.id,
+    )
+    store.transition_run(retry.id, "succeeded", expected_state="running")
+    recovery = store.create_run(
+        task.id,
+        child.id,
+        child_session.id,
+        run_id="run-recovery",
+        role="implementation",
+        role_ordinal=3,
+        resume_of_run_id=interrupted.id,
+        parent_run_id=retry.id,
+    )
+    store.transition_run(recovery.id, "succeeded", expected_state="running")
+    incomplete = store.create_run(
+        task.id,
+        child.id,
+        child_session.id,
+        run_id="run-incomplete",
+        role="implementation",
+        role_ordinal=4,
+    )
+
+    store.add_event(task.id, "publication.fixture", "lineage and evidence")
+    fixed = clock_value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    with store.engine.begin() as connection:
+        for table, columns in (
+            ("tasks", ("created_at", "updated_at")),
+            ("task_executions", ("created_at", "updated_at")),
+            ("task_pipelines", ("started_at", "updated_at", "completed_at")),
+            ("codex_sessions", ("started_at", "updated_at")),
+            ("task_runs", ("started_at", "updated_at", "completed_at")),
+            ("events", ("created_at",)),
+        ):
+            assignments = ", ".join(
+                (
+                    f"{column} = CASE WHEN {column} IS NULL THEN NULL ELSE ? END"
+                    if column == "completed_at"
+                    else f"{column} = ?"
+                )
+                for column in columns
+            )
+            connection.exec_driver_sql(
+                f"UPDATE {table} SET {assignments}",
+                tuple(fixed for _ in columns),
+            )
+    task = store.get(task.id)
+    parent, child = store.list_pipelines(task.id)
+    parent_run = store.get_run(parent_run.id)
+    interrupted = store.get_run(interrupted.id)
+    retry = store.get_run(retry.id)
+    recovery = store.get_run(recovery.id)
+    incomplete = store.get_run(incomplete.id)
+
+    archive = TaskArchiveWriter(fixture_config)
+    archive.ensure_epoch()
+    archive.create_task_from_record(task, pipeline=parent)
+    for pipeline, runs in (
+        (parent, [parent_run]),
+        (child, [interrupted, retry, recovery, incomplete]),
+    ):
+        archive.materialize_pipeline(task.id, pipeline, runs=runs)
+    archive.write_run_file(
+        task.id,
+        child.id,
+        retry.id,
+        "telemetry.json",
+        {"availability": "unavailable", "reason": "interrupted"},
+    )
+    archive.write_run_file(
+        task.id,
+        child.id,
+        retry.id,
+        "telemetry.retry-1.json",
+        {"availability": "unavailable", "reason": "interrupted"},
+    )
+    archive.append_run_jsonl(
+        task.id, child.id, retry.id, "codex.jsonl", {"event": "retry"}
+    )
+    archive.append_run_jsonl(
+        task.id, child.id, retry.id, "activities.jsonl", {"activity": "retry"}
+    )
+    for pipeline, runs in (
+        (parent, [parent_run]),
+        (child, [interrupted, retry, recovery, incomplete]),
+    ):
+        for run in runs:
+            archive.materialize_run(task.id, pipeline.id, run)
+    return fixture_config, store, task.model_copy(update={"status": status})
+
+
+@pytest.mark.parametrize(
+    ("status", "lifecycle"),
+    [
+        ("queued", "active"),
+        ("running", "active"),
+        ("reviewing", "active"),
+        ("integrating", "active"),
+        ("succeeded", "completed"),
+        ("pushed", "completed"),
+        ("no_changes", "completed"),
+        ("blocked", "failed"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+    ],
+)
+def test_publication_graph_builders_match_complete_independent_fixtures(
+    config, monkeypatch, tmp_path, status, lifecycle
+) -> None:
+    session_config, session_store, session_task = _equivalent_publication_fixture(
+        config, monkeypatch, tmp_path / "session", status
+    )
+    integration_config, integration_store, integration_task = (
+        _equivalent_publication_fixture(config, monkeypatch, tmp_path / "integration", status)
+    )
+
+    session_graph = publication_graph_for_task(
+        session_config, session_store, session_task
+    )
+    integration_graph = StewardExecutor(
+        integration_config,
+        integration_store,
+        runner=FakeRunner(integration_config),
+    )._integration_publication_graph(integration_task)
+
+    assert session_graph == integration_graph
+    assert session_graph["task"]["lifecycleState"] == lifecycle
+    assert [item["pipeline"]["pipelineId"] for item in session_graph["runs"]] == [
+        "pipeline-initial",
+        "pipeline-child",
+        "pipeline-child",
+        "pipeline-child",
+    ]
+    assert [item["source"].run["runId"] for item in session_graph["runs"]] == [
+        "run-parent",
+        "run-interrupted",
+        "run-recovery",
+        "run-retry",
+    ]
+    by_run = {
+        item["source"].run["runId"]: item["source"] for item in session_graph["runs"]
+    }
+    assert by_run["run-recovery"].run["parentRunId"] == "run-retry"
+    assert by_run["run-retry"].run["retryOfRunId"] == "run-interrupted"
+    assert set(by_run["run-retry"].documents) == {
+        "activities.jsonl",
+        "codex.jsonl",
+        "run.json",
+        "telemetry.json",
+    }
+    assert by_run["run-retry"].run["invocations"][0][
+        "availability"
+    ] == "partial"
+
+
+def test_publication_graph_ownership_is_session_only(config, monkeypatch) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.custom,
             workflow=TaskWorkflow.fix,
             worker=WorkerKind.custom,
-            title="graph evidence",
-            prompt="preserve retries",
+            title="ownership boundary",
+            prompt="preserve wrapper policy",
         )
     )
-    pipeline = store.list_pipelines(task.id)[0]
-    session = store.create_session(task.id, pipeline.id)
-    run = store.create_run(
-        task.id,
-        pipeline.id,
-        session.id,
-        role="implementation",
-        role_ordinal=1,
-    )
-    archive = TaskArchiveWriter(config)
-    archive.ensure_epoch()
-    archive.create_task_from_record(task, pipeline=pipeline)
-    archive.materialize_pipeline(task.id, pipeline, runs=[run])
-    archive.materialize_run(task.id, pipeline.id, run)
-    unavailable = {"availability": "unavailable", "reason": "interrupted"}
-    archive.write_run_file(
-        task.id,
-        pipeline.id,
-        run.id,
-        "telemetry.retry-1.json",
-        unavailable,
-    )
-    archive.write_run_file(task.id, pipeline.id, run.id, "telemetry.json", unavailable)
-    store.transition_run(
-        run.id,
-        "interrupted",
-        expected_state="running",
-        exit_code=130,
-        exit_reason="interrupted",
-    )
-    terminal_run = store.get_run(run.id)
-    archive.materialize_run(task.id, pipeline.id, terminal_run)
+    execution = store.get_execution(task.id)
+    with store.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE task_executions SET owning_pipeline_id = NULL WHERE id = ?",
+            (execution.id,),
+        )
 
-    session_graph = publication_graph_for_task(config, store, store.get(task.id))
+    with pytest.raises(TaskLedgerOwnershipError, match="owning pipeline"):
+        publication_graph_for_task(config, store, task)
     integration_graph = StewardExecutor(
         config, store, runner=FakeRunner(config)
-    )._integration_publication_graph(store.get(task.id))
-    assert session_graph == integration_graph
-    session_source = session_graph["runs"][0]["source"]
-    integration_source = integration_graph["runs"][0]["source"]
-    assert session_source.run["invocations"] == integration_source.run["invocations"]
-    assert session_source.run["invocations"][0]["availability"] == "partial"
+    )._integration_publication_graph(task)
+    assert integration_graph["task"]["taskId"] == task.id
+
 
 
 @pytest.mark.parametrize(

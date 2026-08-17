@@ -41,6 +41,7 @@ from ..core.models import (
     WorkerResult,
     utc_now,
 )
+from ..core.output_schema import write_output_schema_file
 from ..core.subprocesses import CommandResult, run_command
 from ..storage import TaskStore
 from ..storage.sqlite import TaskLedgerOwnershipError
@@ -4732,10 +4733,9 @@ def render_integration_revision_prompt(
 
 
 def commit_message_schema_path(config: StewardConfig) -> Path:
-    path = config.state_dir / "schemas" / "commit-message.schema.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(COMMIT_MESSAGE_OUTPUT_SCHEMA, indent=2), encoding="utf-8")
-    return path
+    return write_output_schema_file(
+        config, "commit-message.schema.json", COMMIT_MESSAGE_OUTPUT_SCHEMA
+    )
 
 
 def render_commit_message_prompt(

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..core.config import StewardConfig
+from ..core.output_schema import write_output_schema_file
 from ..core.models import FormalityDisposition, TaskRecord
 
 MAX_FORMALITY_BYTES = 64 * 1024
@@ -67,10 +68,12 @@ class FormalityResult:
 
 
 def formality_schema_path(config: StewardConfig) -> Path:
-    path = config.state_dir / "schemas" / "formality.schema.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(FORMALITY_OUTPUT_SCHEMA, indent=2) + "\n", encoding="utf-8")
-    return path
+    return write_output_schema_file(
+        config,
+        "formality.schema.json",
+        FORMALITY_OUTPUT_SCHEMA,
+        trailing_newline=True,
+    )
 
 
 def render_formality_prompt(

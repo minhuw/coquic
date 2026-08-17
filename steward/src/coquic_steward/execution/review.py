@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import StewardConfig
+from ..core.output_schema import write_output_schema_file
 from ..core.models import TaskRecord
 
 REVISION_SCOPE_CONTROL = """\
@@ -103,10 +104,7 @@ def review_context(
 
 
 def review_schema_path(config: StewardConfig) -> Path:
-    path = config.state_dir / "schemas" / "review.schema.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(REVIEW_OUTPUT_SCHEMA, indent=2), encoding="utf-8")
-    return path
+    return write_output_schema_file(config, "review.schema.json", REVIEW_OUTPUT_SCHEMA)
 
 
 def parse_review(message: str) -> dict[str, Any] | None:

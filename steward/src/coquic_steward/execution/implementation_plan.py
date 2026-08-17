@@ -7,6 +7,7 @@ from typing import Any
 
 from ..core.config import StewardConfig
 from ..core.models import TaskRecord
+from ..core.output_schema import write_output_schema_file
 from .worktree import FORBIDDEN_PATH_PARTS
 
 MAX_PLAN_RUN_ATTEMPTS = 2
@@ -45,10 +46,9 @@ def deterministic_plan_skip_reason(task: TaskRecord) -> str:
 
 
 def implementation_plan_schema_path(config: StewardConfig) -> Path:
-    path = config.state_dir / "schemas" / "implementation-plan.schema.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(IMPLEMENTATION_PLAN_SCHEMA, indent=2), encoding="utf-8")
-    return path
+    return write_output_schema_file(
+        config, "implementation-plan.schema.json", IMPLEMENTATION_PLAN_SCHEMA
+    )
 
 
 def parse_implementation_plan(

@@ -23,7 +23,6 @@ ACTIVITY_SCHEMA_VERSION = 1
 ACTIVITY_STAGE = "worker"
 ACTIVITY_SOURCE = "agent_declared"
 ACTIVITY_MARKER = "STEWARD_ACTIVITY "
-ACTIVITY_MARKER_PREFIX = ACTIVITY_MARKER
 ACTIVITY_VALUES = (
     "orient",
     "investigate",
@@ -36,15 +35,8 @@ ACTIVITIES = frozenset(ACTIVITY_VALUES)
 ACTIVITY_MAX_SUMMARY_BYTES = 240
 ACTIVITY_MAX_CAPTURE = 256
 ACTIVITY_PUBLIC_MAX_EVENTS = 64
-# Descriptive aliases used by callers that treat these as record limits.
-ACTIVITY_MAX_RECORDS = ACTIVITY_MAX_CAPTURE
-ACTIVITY_PUBLIC_LIMIT = ACTIVITY_PUBLIC_MAX_EVENTS
 ACTIVITY_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 ACTIVITY_RECORD_TYPES = frozenset({"header", "event", "summary"})
-# Short aliases mirror the naming used by other private Steward recorders.
-SCHEMA_VERSION = ACTIVITY_SCHEMA_VERSION
-MAX_COMPLETED_RECORDS = ACTIVITY_MAX_CAPTURE
-MAX_SUMMARY_BYTES = ACTIVITY_MAX_SUMMARY_BYTES
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
 
@@ -428,11 +420,8 @@ def activity_diagnostics_unavailable() -> dict[str, object]:
 __all__ = [
     "ACTIVITIES",
     "ACTIVITY_MARKER",
-    "ACTIVITY_MARKER_PREFIX",
     "ACTIVITY_MAX_CAPTURE",
-    "ACTIVITY_MAX_RECORDS",
     "ACTIVITY_MAX_SUMMARY_BYTES",
-    "ACTIVITY_PUBLIC_LIMIT",
     "ACTIVITY_PUBLIC_MAX_EVENTS",
     "ACTIVITY_REPORTING_RULES",
     "ACTIVITY_RECORD_TYPES",
@@ -441,9 +430,6 @@ __all__ = [
     "ACTIVITY_SOURCE",
     "ACTIVITY_STAGE",
     "ACTIVITY_VALUES",
-    "MAX_COMPLETED_RECORDS",
-    "MAX_SUMMARY_BYTES",
-    "SCHEMA_VERSION",
     "ActivityDeclaration",
     "ActivityRecorder",
     "activity_diagnostics_unavailable",

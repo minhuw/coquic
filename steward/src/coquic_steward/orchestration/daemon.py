@@ -138,6 +138,7 @@ from .preflight import PreflightReport, preflight_remote_push, run_preflight
 
 DAEMON_EVENT_TASK_ID = "daemon"
 DAEMON_HEARTBEAT_INTERVAL_SECONDS = 30
+SESSION_RESUME_MAX_ATTEMPTS = 2
 PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
 PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
 PLANNER_TERMINAL_CONTEXT_LIMIT = 200
@@ -2705,7 +2706,7 @@ class StewardDaemon:
                     lambda: self.session_supervisor.resume_with_retries(
                         predecessor.id,
                         prompt=prompt,
-                        max_attempts=self.config.resume_attempt_limit,
+                        max_attempts=SESSION_RESUME_MAX_ATTEMPTS,
                         cwd=session.cwd,
                         checkpoint_id=predecessor.checkpoint_id,
                     ),

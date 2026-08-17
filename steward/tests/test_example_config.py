@@ -280,6 +280,7 @@ def test_publication_rejects_removed_sections(
         "task_image = \"unsupported-task\"",
         "task_image_digest = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
         "enabled_signals = [\"codacy\"]",
+        "resume_attempt_limit = 2",
         "unknown_root_key = true",
     ),
 )

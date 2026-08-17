@@ -102,7 +102,6 @@ _ROOT_ALLOWED_KEYS = frozenset(
         "github_repository",
         "scheduler_wait_interval_sec",
         "shutdown_grace_seconds",
-        "resume_attempt_limit",
         "limits",
         "signals",
         "telemetry",
@@ -742,7 +741,6 @@ class StewardConfig:
     publication: StewardPublicationConfig = field(default_factory=StewardPublicationConfig)
     deployment: StewardDeploymentConfig = field(default_factory=StewardDeploymentConfig)
     shutdown_grace_seconds: float = 30.0
-    resume_attempt_limit: int = 2
 
     def __post_init__(self) -> None:
         if self.deployment.enabled and self.deployment.stop_grace_seconds <= self.shutdown_grace_seconds:
@@ -783,8 +781,6 @@ class StewardConfig:
             self.shutdown_grace_seconds, (int, float)
         ) or not 5 <= float(self.shutdown_grace_seconds) <= 300:
             raise ValueError("shutdown_grace_seconds must be between 5 and 300")
-        if self.resume_attempt_limit != 2:
-            raise ValueError("resume_attempt_limit is fixed at two attempts")
         if not self.task_image or "\n" in self.task_image:
             raise ValueError("task_image must be non-empty and single-line")
         if self.task_image_digest is not None and not _valid_sha256_digest(self.task_image_digest):
@@ -1147,7 +1143,6 @@ def load_config(
         publication=_publication_config(publication_data),
         deployment=deployment_config,
         shutdown_grace_seconds=float(steward.get("shutdown_grace_seconds", 30.0)),
-        resume_attempt_limit=int(steward.get("resume_attempt_limit", 2)),
     )
     config.ensure_dirs()
     return config

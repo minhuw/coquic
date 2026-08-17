@@ -16,7 +16,6 @@ local_only = false
 shutdown_grace_seconds = 30
 # Resume launch attempts are deliberately fixed at two; ordinary role changes
 # always allocate a fresh session.
-resume_attempt_limit = 2
 git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"

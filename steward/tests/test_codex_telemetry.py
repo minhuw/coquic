@@ -120,15 +120,7 @@ def test_catalog_intervals_and_integer_cost() -> None:
         }
     )
     estimate = estimate_cost(
-        TelemetryAggregate(
-            completed_turns=1,
-            input_tokens=8,
-            cached_input_tokens=3,
-            uncached_input_tokens=5,
-            output_tokens=5,
-            reasoning_output_tokens=2,
-            total_tokens=13,
-        ),
+        [TelemetryTurn.from_usage(_usage())],
         billing_mode=BillingMode.api,
         configured_model="m",
         started_at=datetime(2026, 2, 1, tzinfo=UTC),
@@ -365,6 +357,22 @@ def test_estimate_cost_uses_invocation_start_and_rejects_fuzzy_models() -> None:
     assert rejected.reason == "price_entry_unmatched"
 
 
+def test_estimate_cost_rejects_malformed_turn_evidence() -> None:
+    kwargs = {
+        "billing_mode": BillingMode.api,
+        "configured_model": "m",
+        "started_at": datetime(2026, 2, 1, tzinfo=UTC),
+        "catalog": PriceCatalog.empty(),
+    }
+    for malformed in (None, object(), [object()]):
+        estimate = estimate_cost(malformed, **kwargs)
+        assert estimate.status is CostStatus.unavailable
+        assert estimate.reason == "usage_unavailable"
+
+    with pytest.raises(TypeError):
+        estimate_cost(turns=[], **kwargs)
+
+
 def test_runner_uses_operational_catalog(config, tmp_path: Path) -> None:
     operational = config.repo_root / "steward"
     operational.mkdir()
@@ -414,7 +422,7 @@ def test_api_cost_without_completed_turns_is_unavailable() -> None:
     )
 
     estimate = estimate_cost(
-        TelemetryAggregate(),
+        [],
         billing_mode=BillingMode.api,
         configured_model="m",
         started_at=datetime(2026, 2, 1, tzinfo=UTC),
@@ -427,13 +435,12 @@ def test_api_cost_without_completed_turns_is_unavailable() -> None:
 
 
 def test_chatgpt_and_unknown_cost_are_explicitly_unavailable() -> None:
-    aggregate = TelemetryAggregate()
     for mode, reason in (
         (BillingMode.chatgpt, "chatgpt_cost_unavailable"),
         (BillingMode.unknown, "billing_mode_unknown"),
     ):
         estimate = estimate_cost(
-            aggregate,
+            [],
             billing_mode=mode,
             configured_model="m",
             started_at=datetime.now(UTC),

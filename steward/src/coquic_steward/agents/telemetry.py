@@ -430,42 +430,22 @@ class TelemetryInvocation:
 
 
 def estimate_cost(
-    aggregate: TelemetryAggregate | Iterable[TelemetryTurn] | None = None,
+    turns: Iterable[TelemetryTurn],
+    /,
     *,
     billing_mode: str | BillingMode,
     configured_model: str | None,
     started_at: datetime,
     catalog: PriceCatalog | None,
-    turns: Iterable[TelemetryTurn] | None = None,
 ) -> CostEstimate:
-    """Estimate API cost using independently rounded turn components.
+    """Estimate API cost using independently rounded turn components."""
 
-    ``TelemetryAggregate`` remains accepted for compatibility with callers
-    that only have invocation totals.  The recorder passes its validated turn
-    sequence so each turn is rounded before components are summed.
-    """
-
-    selected_turns: list[TelemetryTurn] | None = None
-    aggregate_value: TelemetryAggregate
-    if turns is not None:
+    try:
         selected_turns = list(turns)
-        aggregate_value = TelemetryAggregate.from_turns(selected_turns)
-    elif isinstance(aggregate, TelemetryAggregate):
-        aggregate_value = aggregate
-        try:
-            TelemetryAggregate.from_dict(aggregate.to_dict())
-        except ValueError:
-            return CostEstimate(CostStatus.unavailable, "usage_unavailable")
-    elif aggregate is None:
+    except TypeError:
         return CostEstimate(CostStatus.unavailable, "usage_unavailable")
-    else:
-        try:
-            selected_turns = list(aggregate)
-        except TypeError:
-            return CostEstimate(CostStatus.unavailable, "usage_unavailable")
-        if any(not isinstance(turn, TelemetryTurn) for turn in selected_turns):
-            return CostEstimate(CostStatus.unavailable, "usage_unavailable")
-        aggregate_value = TelemetryAggregate.from_turns(selected_turns)
+    if any(not isinstance(turn, TelemetryTurn) for turn in selected_turns):
+        return CostEstimate(CostStatus.unavailable, "usage_unavailable")
 
     try:
         mode = BillingMode(billing_mode)
@@ -475,7 +455,7 @@ def estimate_cost(
         return CostEstimate(CostStatus.unavailable, "chatgpt_cost_unavailable")
     if mode == BillingMode.unknown:
         return CostEstimate(CostStatus.unavailable, "billing_mode_unknown")
-    if aggregate_value.completed_turns == 0:
+    if not selected_turns:
         return CostEstimate(CostStatus.unavailable, "usage_unavailable")
     if not isinstance(configured_model, str) or not configured_model:
         return CostEstimate(CostStatus.unavailable, "configured_model_missing")
@@ -487,18 +467,6 @@ def estimate_cost(
         return CostEstimate(CostStatus.unavailable, "price_catalog_unavailable")
     if entry is None:
         return CostEstimate(CostStatus.unavailable, "price_entry_unmatched")
-    if selected_turns is None:
-        selected_turns = [
-            TelemetryTurn(
-                ordinal=1,
-                input_tokens=aggregate_value.input_tokens,
-                cached_input_tokens=aggregate_value.cached_input_tokens,
-                uncached_input_tokens=aggregate_value.uncached_input_tokens,
-                output_tokens=aggregate_value.output_tokens,
-                reasoning_output_tokens=aggregate_value.reasoning_output_tokens,
-                total_tokens=aggregate_value.total_tokens,
-            )
-        ]
     uncached_input_micro_usd = sum(
         _round_micro_usd(turn.uncached_input_tokens, entry.input_micro_usd_per_million)
         for turn in selected_turns

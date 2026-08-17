@@ -253,22 +253,6 @@ class StewardContainerConfig:
         object.__setattr__(self, "docker_bin", _bounded_token(self.docker_bin, "container.docker_bin"))
         object.__setattr__(self, "network", _bounded_token(self.network, "container.network"))
 
-    @property
-    def repository_path(self) -> Path | None:
-        return self.repository_host_path
-
-    @property
-    def state_path(self) -> Path | None:
-        return self.state_host_path
-
-    @property
-    def api_key_path(self) -> Path | None:
-        return self.codex_api_key_path
-
-    @property
-    def image_digest_locked(self) -> bool:
-        return self.image_digest is not None
-
 
 def _publication_optional_path(value: object, label: str) -> Path | None:
     if value in (None, ""):

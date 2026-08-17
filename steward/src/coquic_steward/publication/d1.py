@@ -1781,20 +1781,20 @@ class D1PublicationClient:
             return account_id, database_id, token
         if isinstance(config, Mapping):
             values = config
-            credential = values.get("d1_token", values.get("token"))
+            credential = values.get("d1_token")
             if credential is None and values.get("d1_token_path") is not None:
                 try:
                     credential = Path(values["d1_token_path"]).read_text(encoding="utf-8").strip()
                 except (OSError, UnicodeError):
                     _invalid()
             return (
-                values.get("account_id", values.get("cloudflare_account_id")),
-                values.get("d1_database_id", values.get("database_id", values.get("cloudflare_database_id"))),
+                values.get("account_id"),
+                values.get("d1_database_id"),
                 credential,
             )
-        account = getattr(config, "account_id", getattr(config, "cloudflare_account_id", None))
-        database = getattr(config, "d1_database_id", getattr(config, "database_id", getattr(config, "cloudflare_database_id", None)))
-        credential = getattr(config, "d1_token", getattr(config, "token", None))
+        account = getattr(config, "account_id", None)
+        database = getattr(config, "d1_database_id", None)
+        credential = getattr(config, "d1_token", None)
         path = getattr(config, "d1_token_path", None)
         if credential is None and path is not None:
             try:

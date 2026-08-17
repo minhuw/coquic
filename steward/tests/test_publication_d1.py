@@ -6,6 +6,7 @@ import json
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -147,6 +148,79 @@ def client(server: ScriptedD1) -> D1PublicationClient:
         token=TOKEN,
         http_client=httpx.Client(transport=httpx.MockTransport(server)),
     )
+
+
+def test_canonical_mapping_configuration_constructs_client() -> None:
+    with D1PublicationClient(
+        config={"account_id": ACCOUNT, "d1_database_id": DATABASE, "d1_token": TOKEN},
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+    ) as d1:
+        assert d1.account_id == ACCOUNT
+        assert d1.database_id == DATABASE
+        assert d1._token == TOKEN
+
+
+def test_canonical_object_configuration_constructs_client() -> None:
+    config = SimpleNamespace(account_id=ACCOUNT, d1_database_id=DATABASE, d1_token=TOKEN)
+    with D1PublicationClient(
+        config=config,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+    ) as d1:
+        assert d1.account_id == ACCOUNT
+        assert d1.database_id == DATABASE
+        assert d1._token == TOKEN
+
+
+def test_canonical_mapping_token_path_constructs_client(tmp_path: Path) -> None:
+    token_path = tmp_path / "d1-token"
+    token_path.write_text(TOKEN + "\n", encoding="utf-8")
+    with D1PublicationClient(
+        config={"account_id": ACCOUNT, "d1_database_id": DATABASE, "d1_token_path": token_path},
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+    ) as d1:
+        assert d1._token == TOKEN
+
+
+def test_canonical_object_token_path_constructs_client(tmp_path: Path) -> None:
+    token_path = tmp_path / "d1-token"
+    token_path.write_text(TOKEN + "\n", encoding="utf-8")
+    config = SimpleNamespace(account_id=ACCOUNT, d1_database_id=DATABASE, d1_token_path=token_path)
+    with D1PublicationClient(
+        config=config,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+    ) as d1:
+        assert d1._token == TOKEN
+
+
+@pytest.mark.parametrize("config_type", ["mapping", "object"])
+@pytest.mark.parametrize(
+    ("retired_name", "retired_value"),
+    [
+        ("cloudflare_account_id", ACCOUNT),
+        ("cloudflare_database_id", DATABASE),
+        ("database_id", DATABASE),
+        ("token", TOKEN),
+    ],
+)
+def test_retired_configuration_names_are_not_discovered(
+    config_type: str,
+    retired_name: str,
+    retired_value: str,
+) -> None:
+    values: dict[str, object] = {"account_id": ACCOUNT, "d1_database_id": DATABASE, "d1_token": TOKEN}
+    if retired_name == "cloudflare_account_id":
+        values.pop("account_id")
+    elif retired_name in {"cloudflare_database_id", "database_id"}:
+        values.pop("d1_database_id")
+    else:
+        values.pop("d1_token")
+    values[retired_name] = retired_value
+    config: object = values if config_type == "mapping" else SimpleNamespace(**values)
+
+    with pytest.raises(D1Error) as error:
+        D1PublicationClient(config=config)
+
+    assert error.value.code == D1ErrorCode.invalid_request
 
 
 class CompleteHttpAdapter:

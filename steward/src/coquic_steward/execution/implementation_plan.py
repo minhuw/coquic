@@ -44,11 +44,6 @@ def deterministic_plan_skip_reason(task: TaskRecord) -> str:
     return "task intent is already executable and workflow is narrowly scoped"
 
 
-# Compatibility aliases used by callers that describe the decision as a gate.
-plan_required = implementation_plan_required
-plan_skip_reason = deterministic_plan_skip_reason
-
-
 def implementation_plan_schema_path(config: StewardConfig) -> Path:
     path = config.state_dir / "schemas" / "implementation-plan.schema.json"
     path.parent.mkdir(parents=True, exist_ok=True)

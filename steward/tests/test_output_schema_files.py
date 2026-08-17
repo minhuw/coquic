@@ -51,10 +51,10 @@ def test_schema_wrappers_preserve_path_and_bytes(
     path = writer(config)
 
     assert path == config.state_dir / "schemas" / filename
-    expected = json.dumps(schema, indent=2)
+    expected = json.dumps(schema, indent=2).encode("utf-8")
     if trailing_newline:
-        expected += "\n"
-    assert path.read_text(encoding="utf-8") == expected
+        expected += b"\n"
+    assert path.read_bytes() == expected
 
 
 def test_writer_creates_parent_and_overwrites_existing_file(config: StewardConfig) -> None:
@@ -62,8 +62,8 @@ def test_writer_creates_parent_and_overwrites_existing_file(config: StewardConfi
 
     returned = write_output_schema_file(config, "custom.json", {"version": 1})
     assert returned == schema_path
-    assert schema_path.read_text(encoding="utf-8") == json.dumps({"version": 1}, indent=2)
+    assert schema_path.read_bytes() == json.dumps({"version": 1}, indent=2).encode("utf-8")
 
     write_output_schema_file(config, "custom.json", {"version": 2})
 
-    assert schema_path.read_text(encoding="utf-8") == json.dumps({"version": 2}, indent=2)
+    assert schema_path.read_bytes() == json.dumps({"version": 2}, indent=2).encode("utf-8")

@@ -33,6 +33,7 @@ from coquic_steward.execution.worktree import (
     _PathPolicyStatusParseError,
 )
 from coquic_steward.execution.session import SessionSupervisor, publication_graph_for_task
+from coquic_steward.publication.atif import AtifSource
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.storage import TaskStore
 from coquic_steward.storage import sqlite as sqlite_module
@@ -857,6 +858,109 @@ def _equivalent_publication_fixture(config, monkeypatch, home, status):
     return fixture_config, store, task.model_copy(update={"status": status})
 
 
+def _reference_publication_graph(config, store, task):
+    """Build the complete expected graph without calling either production wrapper."""
+
+    archive = TaskArchiveWriter(config)
+    pipelines = []
+    runs = []
+
+    def timestamp(value):
+        return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        )
+
+    for pipeline in store.list_pipelines(task.id):
+        pipeline_value = {
+            "pipelineId": pipeline.id,
+            "taskId": pipeline.task_id,
+            "name": f"pipeline-{pipeline.ordinal}",
+            "createdAt": timestamp(pipeline.started_at),
+        }
+        pipelines.append(pipeline_value)
+        for run in store.list_runs(task.id, pipeline_id=pipeline.id):
+            if run.completed_at is None or str(run.state) == "running":
+                continue
+            documents, invocations = archive.collect_run_publication_evidence(
+                task.id, pipeline.id, run
+            )
+            completed = run.completed_at
+            duration = (
+                max(0, int((completed - run.started_at).total_seconds() * 1000))
+                if completed is not None
+                else 0
+            )
+            runs.append(
+                {
+                    "source": AtifSource(
+                        run={
+                            "taskId": run.task_id,
+                            "pipelineId": run.pipeline_id,
+                            "runId": run.id,
+                            "role": str(run.role),
+                            "state": str(run.state),
+                            "startedAt": timestamp(run.started_at),
+                            "completedAt": (
+                                timestamp(completed) if completed is not None else None
+                            ),
+                            "durationMs": duration,
+                            "model": run.model,
+                            "reasoning": run.reasoning,
+                            "parentRunId": run.parent_run_id,
+                            "retryOfRunId": run.retry_of_run_id,
+                            "resumeOfRunId": run.resume_of_run_id,
+                            "invocations": [
+                                item.to_dict(include_telemetry=True)
+                                for item in invocations
+                            ],
+                        },
+                        documents=documents,
+                    ),
+                    "pipeline": pipeline_value,
+                }
+            )
+
+    status = TaskStatus(task.status)
+    lifecycle = (
+        "active"
+        if status
+        in {
+            TaskStatus.queued,
+            TaskStatus.running,
+            TaskStatus.reviewing,
+            TaskStatus.integrating,
+        }
+        else "cancelled"
+        if status is TaskStatus.cancelled
+        else "failed"
+        if status in {TaskStatus.failed, TaskStatus.blocked}
+        else "completed"
+    )
+    task_value = {
+        "taskId": task.id,
+        "title": task.spec.title,
+        "lifecycleState": lifecycle,
+        "createdAt": timestamp(task.created_at),
+        "completedAt": None if lifecycle == "active" else timestamp(task.updated_at),
+    }
+    events = [
+        {
+            "taskId": task.id,
+            "sequence": index,
+            "eventType": event.kind,
+            "occurredAt": timestamp(event.created_at),
+            "summary": event.message,
+        }
+        for index, event in enumerate(store.events(task.id), start=1)
+    ]
+    return {
+        "task": task_value,
+        "pipelines": pipelines,
+        "runs": runs,
+        "events": events,
+    }
+
+
 @pytest.mark.parametrize(
     ("status", "lifecycle"),
     [
@@ -890,8 +994,90 @@ def test_publication_graph_builders_match_complete_independent_fixtures(
         integration_store,
         runner=FakeRunner(integration_config),
     )._integration_publication_graph(integration_task)
+    session_expected = _reference_publication_graph(
+        session_config, session_store, session_task
+    )
+    integration_expected = _reference_publication_graph(
+        integration_config, integration_store, integration_task
+    )
 
+    assert session_expected == integration_expected
+    assert session_graph == session_expected
+    assert integration_graph == integration_expected
     assert session_graph == integration_graph
+    assert session_expected["task"] == {
+        "taskId": "task-publication-equivalence",
+        "title": "complete graph fixture",
+        "lifecycleState": lifecycle,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "completedAt": (
+            None if lifecycle == "active" else "2026-01-01T00:00:00.000Z"
+        ),
+    }
+    assert session_expected["pipelines"] == [
+        {
+            "pipelineId": "pipeline-initial",
+            "taskId": "task-publication-equivalence",
+            "name": "pipeline-1",
+            "createdAt": "2026-01-01T00:00:00.000Z",
+        },
+        {
+            "pipelineId": "pipeline-child",
+            "taskId": "task-publication-equivalence",
+            "name": "pipeline-2",
+            "createdAt": "2026-01-01T00:00:00.000Z",
+        },
+    ]
+    assert session_expected["events"] == [
+        {
+            "taskId": "task-publication-equivalence",
+            "sequence": 1,
+            "eventType": "task.created",
+            "occurredAt": "2026-01-01T00:00:00.000Z",
+            "summary": "complete graph fixture",
+        },
+        {
+            "taskId": "task-publication-equivalence",
+            "sequence": 2,
+            "eventType": "publication.fixture",
+            "occurredAt": "2026-01-01T00:00:00.000Z",
+            "summary": "lineage and evidence",
+        },
+    ]
+    expected_runs = {
+        "run-parent": ("succeeded", None, None, None),
+        "run-interrupted": ("interrupted", None, None, None),
+        "run-recovery": ("succeeded", "run-retry", None, "run-interrupted"),
+        "run-retry": ("succeeded", None, "run-interrupted", None),
+    }
+    assert len(session_expected["runs"]) == len(expected_runs)
+    for item in session_expected["runs"]:
+        run = item["source"].run
+        run_id = run["runId"]
+        assert set(run) == {
+            "taskId",
+            "pipelineId",
+            "runId",
+            "role",
+            "state",
+            "startedAt",
+            "completedAt",
+            "durationMs",
+            "model",
+            "reasoning",
+            "parentRunId",
+            "retryOfRunId",
+            "resumeOfRunId",
+            "invocations",
+        }
+        assert run["taskId"] == "task-publication-equivalence"
+        assert run["startedAt"] == "2026-01-01T00:00:00.000Z"
+        assert run["completedAt"] == "2026-01-01T00:00:00.000Z"
+        assert run["durationMs"] == 0
+        assert (run["state"], run["parentRunId"], run["retryOfRunId"], run["resumeOfRunId"]) == expected_runs[run_id]
+        assert set(item["source"].documents) == {
+            "run.json",
+        } | ({"activities.jsonl", "codex.jsonl", "telemetry.json"} if run_id == "run-retry" else set())
     assert session_graph["task"]["lifecycleState"] == lifecycle
     assert [item["pipeline"]["pipelineId"] for item in session_graph["runs"]] == [
         "pipeline-initial",

@@ -115,15 +115,6 @@ def _object_without_duplicates(pairs: list[tuple[str, object]]) -> dict[str, obj
     return value
 
 
-def decode_activity_marker(text: object) -> dict[str, str] | None:
-    """Dictionary-shaped compatibility helper for protocol consumers."""
-
-    declaration = parse_activity_marker(text)
-    if declaration is None:
-        return None
-    return {"activity": declaration.activity, "summary": declaration.summary}
-
-
 def validate_activity_event(event: object) -> tuple[str, ActivityDeclaration] | None:
     """Return a safe source ID and declaration for a completed agent event."""
 
@@ -139,11 +130,6 @@ def validate_activity_event(event: object) -> tuple[str, ActivityDeclaration] | 
     if declaration is None:
         return None
     return source_event_id, declaration
-
-
-def parse_activity_event(event: object) -> ActivityDeclaration | None:
-    decoded = validate_activity_event(event)
-    return decoded[1] if decoded is not None else None
 
 
 def activity_sidecar_path(transcript_path: Path) -> Path:
@@ -436,11 +422,9 @@ __all__ = [
     "activity_retry_pending_path",
     "activity_sidecar_path",
     "activity_transcript_sha256",
-    "decode_activity_marker",
     "is_safe_activity_id",
     "is_safe_source_event_id",
     "parse_activity_marker",
-    "parse_activity_event",
     "utc_timestamp",
     "validate_activity_event",
     "validate_activity_summary",

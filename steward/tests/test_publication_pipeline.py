@@ -69,8 +69,8 @@ def _clean_scanner(argv: list[str], **kwargs: object) -> subprocess.CompletedPro
 
 
 def test_clean_build_is_deterministic_and_every_component_is_inspected(tmp_path) -> None:
-    first = build_publication_bundle(_source(), staging_root=tmp_path, run_scanner=False, scanner_runner=_clean_scanner)
-    second = build_publication_bundle(_source(), staging_root=tmp_path, run_scanner=False, scanner_runner=_clean_scanner)
+    first = build_publication_bundle(_source(), staging_root=tmp_path, scanner_runner=_clean_scanner)
+    second = build_publication_bundle(_source(), staging_root=tmp_path, scanner_runner=_clean_scanner)
 
     assert isinstance(first, Publishable)
     assert isinstance(second, Publishable)
@@ -89,7 +89,6 @@ def test_atif_redaction_retains_only_the_original_codex_jsonl() -> None:
     result = build_publication_bundle(
         _source(f"remove {secret}"),
         known_secrets=(secret,),
-        run_scanner=False,
         scanner_runner=_clean_scanner,
     )
 
@@ -135,7 +134,6 @@ def test_artifact_redaction_does_not_create_a_transcript_original(monkeypatch) -
     )
     result = module.build_publication_bundle(
         known_secrets=(artifact_secret,),
-        run_scanner=False,
         scanner_runner=_clean_scanner,
     )
 
@@ -148,7 +146,7 @@ def test_artifact_redaction_does_not_create_a_transcript_original(monkeypatch) -
 def test_partial_input_returns_bounded_failure_without_public_bytes() -> None:
     source = _source()
     partial = AtifSource(run=source.run, documents={"codex.jsonl": source.documents["codex.jsonl"]})
-    result = build_publication_bundle(partial, run_scanner=False, scanner_runner=_clean_scanner)
+    result = build_publication_bundle(partial, scanner_runner=_clean_scanner)
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.partial,)
@@ -164,7 +162,7 @@ def test_source_repair_is_not_publishable(monkeypatch) -> None:
         "sanitize_publication",
         lambda *args, **kwargs: module.SanitizationResult.repair(ReasonCode.source_finding, count=2),
     )
-    result = build_publication_bundle(_source(), run_scanner=False, scanner_runner=_clean_scanner)
+    result = build_publication_bundle(_source(), scanner_runner=_clean_scanner)
 
     assert isinstance(result, RepairRequired)
     assert result.reason_codes == (ReasonCode.source_finding,)
@@ -185,7 +183,7 @@ def test_media_failure_fails_closed_without_receipts(monkeypatch) -> None:
             reason=ReasonCode.scanner_failure,
         ),
     )
-    result = build_publication_bundle(_source(), run_scanner=False, scanner_runner=_clean_scanner)
+    result = build_publication_bundle(_source(), scanner_runner=_clean_scanner)
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.scanner_failure,)
@@ -194,7 +192,7 @@ def test_media_failure_fails_closed_without_receipts(monkeypatch) -> None:
 def test_untrusted_staging_root_fails_closed(tmp_path) -> None:
     unsafe = tmp_path / "unsafe"
     unsafe.mkdir(mode=0o755)
-    result = build_publication_bundle(_source(), staging_root=unsafe, run_scanner=False, scanner_runner=_clean_scanner)
+    result = build_publication_bundle(_source(), staging_root=unsafe, scanner_runner=_clean_scanner)
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.staging_unsafe,)
@@ -224,7 +222,6 @@ def test_builder_routes_configured_root_to_redaction_and_media(monkeypatch, tmp_
     result = module.build_publication_bundle(
         _source(),
         staging_root=tmp_path,
-        run_scanner=False,
         scanner_runner=_clean_scanner,
     )
 
@@ -240,7 +237,6 @@ def test_nonwritable_staging_root_fails_before_materialization(tmp_path) -> None
     result = build_publication_bundle(
         _source(),
         staging_root=unsafe,
-        run_scanner=False,
         scanner_runner=_clean_scanner,
     )
 
@@ -248,7 +244,7 @@ def test_nonwritable_staging_root_fails_before_materialization(tmp_path) -> None
     assert result.reason_codes == (ReasonCode.staging_unsafe,)
 
 
-def test_scanner_cannot_be_disabled_by_public_builder() -> None:
+def test_public_builder_always_scans_and_redacts() -> None:
     raw = "heuristic-pipeline-secret"
     calls = 0
 
@@ -265,7 +261,7 @@ def test_scanner_cannot_be_disabled_by_public_builder() -> None:
             return subprocess.CompletedProcess(argv, 0, output, b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
-    result = build_publication_bundle(_source(f"found {raw}"), run_scanner=False, scanner_runner=runner)
+    result = build_publication_bundle(_source(f"found {raw}"), scanner_runner=runner)
 
     assert isinstance(result, Publishable)
     assert calls == 2
@@ -285,7 +281,7 @@ def test_descriptor_without_public_bytes_fails_closed() -> None:
     )
     incomplete = AtifSource(run=source.run, documents=source.documents, artifacts=(descriptor,))
 
-    result = build_publication_bundle(incomplete, run_scanner=False, scanner_runner=_clean_scanner)
+    result = build_publication_bundle(incomplete, scanner_runner=_clean_scanner)
 
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.partial,)

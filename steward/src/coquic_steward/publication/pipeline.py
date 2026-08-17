@@ -357,7 +357,6 @@ def build_publication_bundle(
     credential_paths: object = None,
     credentials: object = None,
     known_secrets: Sequence[str] | str | None = None,
-    run_scanner: bool = True,
     scanner_runner: Any = None,
     scanner_timeout: float = MAX_SCANNER_TIMEOUT_SECONDS,
     max_repair_passes: int = MAX_REPAIR_PASSES,
@@ -409,10 +408,6 @@ def build_publication_bundle(
         original_codex = None if original_codex_value is _MISSING else _content(original_codex_value)
 
         converted = convert_completed_run(source, **converter_kwargs)
-        # ``run_scanner`` is retained as an inert compatibility keyword.  The
-        # final builder always performs the network-disabled scanner pass;
-        # tests and trusted callers may inject only the runner implementation.
-        _ = run_scanner
         sanitization = sanitize_publication(
             converted,
             selected_credentials,

@@ -80,7 +80,6 @@ def _returning_composer(result: object):
         max_repair_passes: int = 2,
         ocr_runner: object = None,
         ocr_timeout: float = 30.0,
-        run_scanner: bool = True,
         price_catalog: object = None,
         generation_boundary: str | None = None,
         publication_id: str | None = None,

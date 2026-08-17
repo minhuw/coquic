@@ -465,7 +465,6 @@ def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
         max_repair_passes: int,
         ocr_runner: object,
         ocr_timeout: float,
-        run_scanner: bool,
     ):
         outcome = build_publication_bundle(
             source,
@@ -477,7 +476,6 @@ def test_graph_mutation_after_builder_is_fail_closed(section: str) -> None:
             max_repair_passes=max_repair_passes,
             ocr_runner=ocr_runner,
             ocr_timeout=ocr_timeout,
-            run_scanner=run_scanner,
         )
         mutate()
         return outcome
@@ -600,7 +598,6 @@ def test_builder_type_error_is_reduced_after_one_invocation() -> None:
         max_repair_passes: int,
         ocr_runner: object,
         ocr_timeout: float,
-        run_scanner: bool,
     ):
         nonlocal calls
         calls += 1
@@ -631,7 +628,6 @@ def test_repair_and_fail_closed_outcomes_never_emit_generation(monkeypatch) -> N
         max_repair_passes: int,
         ocr_runner: object,
         ocr_timeout: float,
-        run_scanner: bool,
     ):
         return RepairRequired((ReasonCode.source_finding,), ())
 
@@ -650,7 +646,6 @@ def test_repair_and_fail_closed_outcomes_never_emit_generation(monkeypatch) -> N
         max_repair_passes: int,
         ocr_runner: object,
         ocr_timeout: float,
-        run_scanner: bool,
     ):
         return FailClosed((ReasonCode.unsafe_content,), ())
 

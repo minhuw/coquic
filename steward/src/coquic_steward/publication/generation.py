@@ -555,7 +555,6 @@ def _builder_kwargs(
     max_repair_passes: int,
     ocr_runner: Any,
     ocr_timeout: float,
-    run_scanner: bool,
 ) -> dict[str, Any]:
     return {
         "credential_sources": credential_sources,
@@ -566,7 +565,6 @@ def _builder_kwargs(
         "max_repair_passes": max_repair_passes,
         "ocr_runner": ocr_runner,
         "ocr_timeout": ocr_timeout,
-        "run_scanner": run_scanner,
     }
 
 
@@ -925,7 +923,6 @@ class PublicationBuilder:
         max_repair_passes: int,
         ocr_runner: Any,
         ocr_timeout: float,
-        run_scanner: bool,
         staging_root: Path | None = None,
     ) -> PublicationOutcome:
         kwargs: dict[str, Any] = {
@@ -937,7 +934,6 @@ class PublicationBuilder:
             "max_repair_passes": max_repair_passes,
             "ocr_runner": ocr_runner,
             "ocr_timeout": ocr_timeout,
-            "run_scanner": run_scanner,
         }
         return self.callback(source, **kwargs)
 
@@ -965,7 +961,6 @@ class PublicationComposer:
         max_repair_passes: int = 2,
         ocr_runner: Any = None,
         ocr_timeout: float = 30.0,
-        run_scanner: bool = True,
         price_catalog: Any = None,
         generation_boundary: str | None = None,
         publication_id: str | None = None,
@@ -984,7 +979,6 @@ class PublicationComposer:
             "max_repair_passes": max_repair_passes,
             "ocr_runner": ocr_runner,
             "ocr_timeout": ocr_timeout,
-            "run_scanner": run_scanner,
             "price_catalog": price_catalog,
             "generation_boundary": generation_boundary,
             "publication_id": publication_id,
@@ -2030,7 +2024,6 @@ def compose_publication_generation(
     max_repair_passes: int = 2,
     ocr_runner: Any = None,
     ocr_timeout: float = 30.0,
-    run_scanner: bool = True,
     price_catalog: Any = None,
     generation_boundary: str | None = None,
     publication_id: str | None = None,
@@ -2105,7 +2098,6 @@ def compose_publication_generation(
         max_repair_passes=max_repair_passes,
         ocr_runner=ocr_runner,
         ocr_timeout=ocr_timeout,
-        run_scanner=run_scanner,
     )
     try:
         return _build_generation(

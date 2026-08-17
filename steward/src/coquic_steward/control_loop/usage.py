@@ -492,13 +492,6 @@ class StewardOverheadReducer:
         }
 
 
-# Names used by callers in the control-loop package and future reducers.
-StewardOverheadUsageReducer = StewardOverheadReducer
-OverheadUsageReducer = StewardOverheadReducer
-StewardOverheadUsageRow = StewardOverheadUsage
-OverheadUsageRow = StewardOverheadUsage
-
-
 def reduce_steward_overhead(
     archive: ControlLoopArchive,
     run: PlannerRun | Mapping[str, Any],
@@ -509,15 +502,11 @@ def reduce_steward_overhead(
 
 
 __all__ = [
-    "OverheadUsageReducer",
-    "OverheadUsageRow",
     "STEWARD_OVERHEAD_OWNER",
     "STEWARD_PLANNER_RUN_NAME",
     "STEWARD_PLANNER_STAGE",
     "STEWARD_PLANNER_TASK_ID",
     "StewardOverheadReducer",
-    "StewardOverheadUsageReducer",
-    "StewardOverheadUsageRow",
     "TERMINAL_PLANNER_STATES",
     "UsageReduction",
     "UsageReductionError",

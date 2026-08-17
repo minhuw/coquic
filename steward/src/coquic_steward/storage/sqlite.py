@@ -5901,25 +5901,16 @@ class SQLiteTaskStore:
     def dispatch_snapshot(
         self,
         *,
-        source_limit: int | None = None,
-        integration_limit: int | None = 1,
-        queued_limit: int | None = None,
-        resumable_limit: int | None = None,
+        source_limit: int,
+        integration_limit: int,
+        resumable_limit: int,
     ) -> DispatchSnapshot:
         """Read one bounded dispatch snapshot in one SQLite transaction.
 
         Queued lanes are selected independently so a saturated integration lane
-        cannot consume the source candidate bound.  ``queued_limit`` is kept as
-        a descriptive alias for callers that use one queued bound; the daemon
-        passes the source and integration bounds explicitly.
+        cannot consume the source candidate bound.
         """
 
-        if source_limit is None:
-            source_limit = queued_limit if queued_limit is not None else 0
-        if resumable_limit is None:
-            resumable_limit = queued_limit if queued_limit is not None else source_limit
-        if integration_limit is None:
-            integration_limit = 1
         source_limit = _validate_dispatch_limit(source_limit, "source")
         integration_limit = _validate_dispatch_limit(integration_limit, "integration")
         resumable_limit = _validate_dispatch_limit(resumable_limit, "resumable")

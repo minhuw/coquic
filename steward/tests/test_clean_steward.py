@@ -878,15 +878,15 @@ def test_store_dispatch_snapshot_is_bounded_and_deterministic(
         resumable_limit=1,
     )
 
-    assert [task.id for task in snapshot.queued] == [
+    assert [task.id for task in snapshot.queued_tasks] == [
         integration_a.id,
         integration_b.id,
         source_a.id,
     ]
-    assert [task.id for task in snapshot.resumable] == [active_source.id]
-    assert snapshot.source_active == 1
-    assert snapshot.integration_active == 0
-    assert source_b.id not in {task.id for task in snapshot.queued}
+    assert [task.id for task in snapshot.resumable_tasks] == [active_source.id]
+    assert snapshot.source_active_count == 1
+    assert snapshot.integration_active_count == 0
+    assert source_b.id not in {task.id for task in snapshot.queued_tasks}
 
 
 def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:

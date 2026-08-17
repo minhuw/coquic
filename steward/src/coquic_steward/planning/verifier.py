@@ -86,6 +86,24 @@ class VerifiedPlan(BaseModel):
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
+def selected_signal_item_ids(
+    metadata: dict[str, Any], consumed_item_ids: list[str]
+) -> list[str]:
+    selected = metadata.get("selected_signal_item_ids")
+    candidates = selected if isinstance(selected, list) else consumed_item_ids
+    allowed = set(consumed_item_ids)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        if not isinstance(value, str) or value in seen:
+            continue
+        if allowed and value not in allowed:
+            continue
+        result.append(value)
+        seen.add(value)
+    return result
+
+
 class PlanVerifier:
     def __init__(self, *, max_tasks: int = 8):
         self.max_tasks = max_tasks

@@ -120,7 +120,7 @@ from ..control_loop.models import StewardOverheadUsage
 from ..control_loop.usage import StewardOverheadReducer
 from ..planning import PlannerRun as PlanningPlannerRun, run_planner
 from ..planning.planner import render_planner_prompt
-from ..planning.verifier import summarize_active_tasks
+from ..planning.verifier import selected_signal_item_ids, summarize_active_tasks
 from ..storage import (
     SQLiteTaskStore,
     TaskStore,
@@ -4908,8 +4908,8 @@ class StewardDaemon:
                     is not None
                 }
                 selected_item_ids_by_dedupe = {
-                    dedupe_key: _selected_item_ids(
-                        spec, planner_run.consumed_item_ids
+                    dedupe_key: selected_signal_item_ids(
+                        spec.metadata or {}, planner_run.consumed_item_ids
                     )
                     for spec, dedupe_key in planner_run.planned
                 }
@@ -5331,23 +5331,6 @@ def _is_identity_conflict(summary: str) -> bool:
             "ancestry",
         )
     )
-
-
-def _selected_item_ids(spec, consumed_item_ids: list[str]) -> list[str]:
-    metadata = spec.metadata or {}
-    selected = metadata.get("selected_signal_item_ids")
-    candidates = selected if isinstance(selected, list) else consumed_item_ids
-    ids: list[str] = []
-    seen: set[str] = set()
-    allowed = set(consumed_item_ids)
-    for value in candidates:
-        if not isinstance(value, str) or value in seen:
-            continue
-        if allowed and value not in allowed:
-            continue
-        ids.append(value)
-        seen.add(value)
-    return ids
 
 
 def _failed_planner_result(error: Exception | None) -> PlanningPlannerRun:

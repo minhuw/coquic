@@ -39,6 +39,7 @@ from .core.models import (
     default_workflow_for_kind,
 )
 from .planning import run_planner
+from .planning.verifier import selected_signal_item_ids
 from .control_loop import ControlLoopArchive
 from .signals import (
     collect_signal_items,
@@ -608,7 +609,7 @@ def plan(enqueue: bool = False) -> None:
         if enqueue:
             record, created = store.add_task(spec, dedupe_key=dedupe_key)
             if created:
-                selected_item_ids = _selected_item_ids(
+                selected_item_ids = selected_signal_item_ids(
                     spec.metadata, planner_run.consumed_item_ids
                 )
                 store.mark_signal_items_planned(
@@ -986,24 +987,6 @@ def _selected_providers(values: list[str] | None, enabled: tuple[str, ...]) -> l
         if value not in selected:
             selected.append(value)
     return selected
-
-
-def _selected_item_ids(
-    metadata: dict[str, object], consumed_item_ids: list[str]
-) -> list[str]:
-    selected = metadata.get("selected_signal_item_ids")
-    candidates = selected if isinstance(selected, list) else consumed_item_ids
-    allowed = set(consumed_item_ids)
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in candidates:
-        if not isinstance(value, str) or value in seen:
-            continue
-        if allowed and value not in allowed:
-            continue
-        result.append(value)
-        seen.add(value)
-    return result
 
 
 if __name__ == "__main__":

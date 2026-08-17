@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 import threading
 
+import pytest
 from typer.testing import CliRunner
 
 from coquic_steward.agents.catalog import AGENTS, REMOTE_WRITE_AUTHORITY
@@ -32,6 +33,7 @@ from coquic_steward.planning.verifier import (
     PLANNABLE_WORKERS,
     ActiveTaskSummary,
     PlanVerifier,
+    selected_signal_item_ids,
 )
 from coquic_steward.storage import TaskStore
 
@@ -70,6 +72,45 @@ def _proposal(
         "evidence": evidence or ["signal-item-1"],
         "metadata": {"selected_signal_item_ids": ["signal-item-1"]},
     }
+
+
+
+
+@pytest.mark.parametrize(
+    ("metadata", "consumed_item_ids", "expected"),
+    [
+        (
+            {"selected_signal_item_ids": ["item-2", "item-1"]},
+            ["item-1", "item-2", "item-3"],
+            ["item-2", "item-1"],
+        ),
+        (
+            {"selected_signal_item_ids": "not-a-list"},
+            ["item-2", "item-1"],
+            ["item-2", "item-1"],
+        ),
+        ({"other": True}, ["item-2", "item-1"], ["item-2", "item-1"]),
+        (
+            {"selected_signal_item_ids": ["item-2", 42, "item-1", "item-2", None]},
+            [],
+            ["item-2", "item-1"],
+        ),
+        (
+            {"selected_signal_item_ids": ["item-3", "item-1", "item-2"]},
+            ["item-1", "item-2"],
+            ["item-1", "item-2"],
+        ),
+        (
+            {"selected_signal_item_ids": ["item-2", "item-1"]},
+            [],
+            ["item-2", "item-1"],
+        ),
+    ],
+)
+def test_selected_signal_item_ids_normalizes_metadata(
+    metadata: dict[str, object], consumed_item_ids: list[str], expected: list[str]
+) -> None:
+    assert selected_signal_item_ids(metadata, consumed_item_ids) == expected
 
 
 def test_zero_entry_remote_authority_rejects_remote_workers() -> None:

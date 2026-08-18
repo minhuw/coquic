@@ -27,9 +27,6 @@ jobs:
       - name: Test Steward suite
         run: nix develop -c uv run --locked --project steward python -m pytest steward/tests -q
 
-      - name: Smoke Steward package import
-        run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'import coquic_steward'
-
       - name: Smoke Steward CLI load
         run: nix develop -c env -u VIRTUAL_ENV PYTHONNOUSERSITE=1 PYTHONPATH=steward/src python -c 'from coquic_steward.cli import app; assert app is not None'
 

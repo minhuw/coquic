@@ -1376,16 +1376,6 @@ class StewardExecutor:
                 with _integration_lock(self.config.state_dir):
                     self.store.add_event(
                         task.id,
-                        "main.pushed",
-                        commit,
-                        {
-                            "pipeline_id": pipeline.id,
-                            "commit": commit,
-                            "ambiguous": True,
-                        },
-                    )
-                    self.store.add_event(
-                        task.id,
                         "pipeline.push.ambiguous_resolved",
                         commit,
                         {

@@ -6272,6 +6272,66 @@ def test_durable_ambiguous_push_also_closes_feature_issue(
     transcript = store.get(integration.id).transcript_path
     assert transcript is not None and transcript.is_file()
 
+def test_ambiguous_push_consumes_one_daily_budget_unit(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, first_integration, executor = _durable_push_setup(
+        config, tmp_path, monkeypatch, max_main_pushes_per_day=2
+    )
+    real_push = Worktrees.push_head_to_main
+    push_calls = 0
+
+    def push_first_then_report_ambiguity(worktrees, path):
+        nonlocal push_calls
+        push_calls += 1
+        result = real_push(worktrees, path)
+        if push_calls == 1:
+            raise RuntimeError("connection lost after remote accepted the push")
+        return result
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", push_first_then_report_ambiguity)
+    assert _drive_durable(executor, first_integration.id)
+
+    first_events = store.events(first_integration.id)
+    assert sum(event.kind == "pipeline.push.ambiguous_resolved" for event in first_events) == 1
+    assert not any(event.kind == "main.pushed" for event in first_events)
+
+    run_command(
+        ["git", "fetch", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    fake_codex = Path(config.codex_bin)
+    fake_codex.write_text(
+        fake_codex.read_text(encoding="utf-8").replace(
+            "durable push change", "second durable push change"
+        ),
+        encoding="utf-8",
+    )
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Second feature source",
+            prompt="Implement the second selected feature",
+        )
+    )
+    second_integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate second feature",
+            prompt="Integrate the second feature",
+            metadata={"source_task_id": source.id},
+        )
+    )
+
+    assert _drive_durable(executor, second_integration.id)
+    assert store.get(second_integration.id).status == TaskStatus.pushed
+    assert not any(
+        event.kind == "pipeline.push.blocked"
+        for event in store.events(second_integration.id)
+    )
+
+
 def test_reconciled_push_updates_feature_issue_before_sealing(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:

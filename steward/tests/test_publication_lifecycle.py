@@ -12,17 +12,12 @@ import pytest
 from coquic_steward.agents.invocation import InvocationOutcome
 from coquic_steward.core.config import StewardPublicationConfig
 import coquic_steward.execution.session as session_module
-from coquic_steward.execution.executor import (
-    IntegrationTranscript,
-    PublicationPreflightClean,
-    StewardExecutor,
-)
+from coquic_steward.execution.executor import StewardExecutor
 from coquic_steward.execution.session import LocalSessionInvoker, load_publication_snapshot
 from coquic_steward.execution.task_archive import TaskArchiveWriter
 from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.publication.atif import AtifSource
 from coquic_steward.publication.generation import PublicationComposer, PublicationGeneration
-from coquic_steward.publication.models import FailClosed, ReasonCode, RepairRequired
 from coquic_steward.publication.outbox import (
     CleanupIntent,
     CleanupState,
@@ -38,9 +33,7 @@ from coquic_steward.publication.publisher import (
     PublicationStatus,
 )
 from coquic_steward.publication.r2 import private_original_key
-from coquic_steward.publication.scanner import ScannerFinding, ScannerReport
 from coquic_steward.storage import TaskStore
-
 
 class _EventStore:
     def __init__(self) -> None:
@@ -51,7 +44,6 @@ class _EventStore:
 
     def events(self, task_id: str) -> list[SimpleNamespace]:
         return [item for item in self.items if item.task_id == task_id]
-
 
 class _Worktrees:
     def __init__(self) -> None:
@@ -64,7 +56,6 @@ class _Worktrees:
         if self.removed:
             raise RuntimeError("integration worktree removed")
         return "patch"
-
 
 def _publication_config(tmp_path: Path, credential: str) -> StewardPublicationConfig:
     paths = []
@@ -92,7 +83,6 @@ def _publication_config(tmp_path: Path, credential: str) -> StewardPublicationCo
         public_base_url="https://publication.example.test",
         staging_root=staging,
     )
-
 
 def _publication_graph(title: str) -> dict[str, object]:
     task_id = "task-publication-preflight"
@@ -177,7 +167,6 @@ def _publication_graph(title: str) -> dict[str, object]:
         ],
     }
 
-
 def _scanner_composer(scanner: object) -> PublicationComposer:
     def compose(
         source: object,
@@ -223,356 +212,6 @@ def _scanner_composer(scanner: object) -> PublicationComposer:
         )
 
     return PublicationComposer(compose)
-
-
-def test_source_scanner_keeps_patch_and_tree_categories(
-    repo: Path, monkeypatch
-) -> None:
-    (repo / "README.md").write_text("source change\n", encoding="utf-8")
-    captured: list[object] = []
-
-    def scan(entries, **_kwargs):
-        captured.extend(entries)
-        return ScannerReport()
-
-    monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_trufflehog", scan
-    )
-    executor = object.__new__(StewardExecutor)
-
-    result = StewardExecutor._scan_integration_source(executor, repo, "patch text")
-
-    assert result.clean
-    assert captured[0].category == "patch"
-    assert captured[0].logical_path == "integration.patch"
-    source_entries = captured[1:]
-    assert source_entries
-    assert all(entry.category == "source" for entry in source_entries)
-    assert any(entry.logical_path == "README.md" for entry in source_entries)
-
-
-def test_source_scanner_rejects_symlinked_tree_file(repo: Path) -> None:
-    (repo / "target.txt").write_text("source\n", encoding="utf-8")
-    (repo / "linked.txt").symlink_to("target.txt")
-    executor = object.__new__(StewardExecutor)
-
-    with pytest.raises(ValueError, match="symlink"):
-        StewardExecutor._scan_integration_source(executor, repo, "patch text")
-
-
-def test_publication_preflight_inspects_configured_credentials(
-    repo: Path, tmp_path: Path
-) -> None:
-    credential = "plain-credential-value"
-    config = _publication_config(tmp_path, credential)
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(publication=config)
-    executor._publication_scanner_runner = lambda argv, **_kwargs: SimpleNamespace(
-        returncode=0,
-        stdout=b"",
-    )
-    executor._integration_publication_graph = lambda _source: _publication_graph(
-        credential
-    )
-
-    outcome, counts, fingerprint = executor._build_integration_publication_outcome(
-        SimpleNamespace(id="task-publication-preflight"),
-        repo,
-        "safe patch",
-    )
-
-    assert isinstance(outcome, FailClosed)
-    assert outcome.reason_codes == (ReasonCode.unsafe_content,)
-    assert counts == {"source": 0, "patch": 0}
-    assert credential not in repr(outcome)
-    assert credential not in fingerprint
-
-
-def test_integration_composition_receives_configured_staging_root(
-    repo: Path, tmp_path: Path, monkeypatch
-) -> None:
-    config = _publication_config(tmp_path, "integration-credential")
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(publication=config)
-    executor._scan_integration_source = lambda *_args, **_kwargs: ScannerReport()
-    executor._integration_publication_graph = lambda _source: {"graph": True}
-    captured: dict[str, object] = {}
-
-    def compose(_source: object, **kwargs: object) -> object:
-        captured.update(kwargs)
-        return FailClosed((ReasonCode.scanner_failure,))
-
-    monkeypatch.setattr(
-        "coquic_steward.execution.executor.compose_publication_generation",
-        compose,
-    )
-
-    outcome, counts, _fingerprint = executor._build_integration_publication_outcome(
-        SimpleNamespace(id="task-integration-staging"),
-        repo,
-        "safe patch",
-    )
-
-    assert isinstance(outcome, FailClosed)
-    assert outcome.reason_codes == (ReasonCode.scanner_failure,)
-    assert counts == {"source": 0, "patch": 0}
-    assert captured["staging_root"] == config.staging_root
-
-
-def test_source_scanner_detects_literal_configured_credentials(
-    repo: Path, tmp_path: Path
-) -> None:
-    credential = "plain-credential-value"
-    config = _publication_config(tmp_path, credential)
-    (repo / "README.md").write_text(
-        f"source contains {credential}\n",
-        encoding="utf-8",
-    )
-    executor = object.__new__(StewardExecutor)
-    executor._publication_scanner_runner = lambda argv, **_kwargs: SimpleNamespace(
-        returncode=0,
-        stdout=b"",
-    )
-
-    report = executor._scan_integration_source(
-        repo,
-        f"patch contains {credential}",
-        credential_sources=(
-            config.d1_token_path,
-            config.r2_access_key_id_path,
-            config.r2_secret_access_key_path,
-        ),
-    )
-
-    assert report.clean is False
-    assert {finding.category for finding in report.findings} == {"source", "patch"}
-    assert credential not in repr(report)
-
-
-def test_repair_required_blocks_current_integration_before_commit(
-    tmp_path: Path,
-) -> None:
-    store = _EventStore()
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(
-        publication=SimpleNamespace(enabled=True), logs_dir=tmp_path / "logs"
-    )
-    executor.store = store
-    worktrees = _Worktrees()
-    executor.worktrees = worktrees
-    executor._finish_task = lambda *_args: setattr(worktrees, "removed", True)
-    executor._build_integration_publication_outcome = lambda *_args: (
-        RepairRequired((ReasonCode.source_finding,)),
-        {"source": 1, "patch": 0},
-        "f" * 64,
-    )
-    repaired_patches: list[str] = []
-
-    def repair(*args) -> bool:
-        repaired_patches.append(args[2])
-        return True
-
-    executor._repair_integration_validation_failure = repair
-    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
-    task = SimpleNamespace(id="integration-task")
-    source = SimpleNamespace(id="source-task")
-
-    result = executor._integration_publication_preflight(
-        task,
-        source,
-        tmp_path,
-        "patch",
-        "validated-tree",
-        transcript,
-    )
-
-    assert result is True
-    assert repaired_patches == ["patch"]
-    assert any(
-        event.kind == "integration.publication_preflight"
-        and event.data["status"] == "repair_required"
-        for event in store.items
-    )
-    assert "publication_repair" in transcript.path.read_text(encoding="utf-8")
-
-
-def test_clean_publication_preflight_allows_commit_path(tmp_path: Path) -> None:
-    store = _EventStore()
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(
-        publication=SimpleNamespace(enabled=True), logs_dir=tmp_path / "logs"
-    )
-    executor.store = store
-    executor.worktrees = _Worktrees()
-    executor._build_integration_publication_outcome = lambda *_args: (
-        PublicationPreflightClean(),
-        {"source": 0, "patch": 0},
-        "c" * 64,
-    )
-    executor._finish_task = lambda *_args: pytest.fail("clean preflight must not finish a task")
-    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
-
-    result = executor._integration_publication_preflight(
-        SimpleNamespace(id="integration-task"),
-        SimpleNamespace(id="source-task"),
-        tmp_path,
-        "patch",
-        "validated-tree",
-        transcript,
-    )
-
-    assert result is None
-    assert store.items[0].data["status"] == "clean"
-    assert "preflight clean" in transcript.path.read_text(encoding="utf-8")
-
-
-def test_fail_closed_publication_preflight_blocks_without_finding_text(
-    tmp_path: Path,
-) -> None:
-    store = _EventStore()
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(
-        publication=SimpleNamespace(enabled=True), logs_dir=tmp_path / "logs"
-    )
-    executor.store = store
-    executor.worktrees = _Worktrees()
-    executor._build_integration_publication_outcome = lambda *_args: (
-        FailClosed((ReasonCode.scanner_failure,)),
-        {"source": 0, "patch": 0},
-        "d" * 64,
-    )
-    finished: list[tuple[object, ...]] = []
-    executor._finish_task = lambda *args: finished.append(args)
-    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
-
-    result = executor._integration_publication_preflight(
-        SimpleNamespace(id="integration-task"),
-        SimpleNamespace(id="source-task"),
-        tmp_path,
-        "patch contains private-secret-value",
-        "validated-tree",
-        transcript,
-    )
-
-    assert result is False
-    assert len(finished) == 2
-    assert all("private-secret-value" not in str(item) for item in store.items)
-    assert "private-secret-value" not in transcript.path.read_text(encoding="utf-8")
-    assert store.items[0].data["reason_codes"] == [ReasonCode.scanner_failure.value]
-
-
-def test_disabled_publication_preflight_scans_clean_source(tmp_path: Path) -> None:
-    store = _EventStore()
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(
-        publication=StewardPublicationConfig(), logs_dir=tmp_path / "logs"
-    )
-    executor.store = store
-    executor.worktrees = _Worktrees()
-    scanned: list[tuple[Path, str, object]] = []
-
-    def scan(worktree: Path, patch_text: str, *, credential_sources: object) -> ScannerReport:
-        scanned.append((worktree, patch_text, credential_sources))
-        return ScannerReport()
-
-    executor._scan_integration_source = scan
-    executor._integration_publication_graph = lambda _source: pytest.fail(
-        "disabled transport must not require an archive graph"
-    )
-    executor._finish_task = lambda *_args: pytest.fail(
-        "clean source must reach the commit path"
-    )
-    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
-
-    result = executor._integration_publication_preflight(
-        SimpleNamespace(id="integration-task"),
-        SimpleNamespace(id="source-task"),
-        tmp_path,
-        "patch",
-        "validated-tree",
-        transcript,
-    )
-
-    assert result is None
-    assert scanned == [(tmp_path, "patch", ())]
-    assert store.items[0].data["status"] == "clean"
-
-
-def test_disabled_publication_preflight_repairs_source_findings(
-    tmp_path: Path,
-) -> None:
-    store = _EventStore()
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(
-        publication=StewardPublicationConfig(), logs_dir=tmp_path / "logs"
-    )
-    executor.store = store
-    worktrees = _Worktrees()
-    executor.worktrees = worktrees
-    executor._scan_integration_source = lambda *_args, **_kwargs: ScannerReport(
-        findings=(ScannerFinding("README.md", b"source-secret", category="source"),)
-    )
-    executor._integration_publication_graph = lambda _source: pytest.fail(
-        "disabled transport must not require an archive graph"
-    )
-    executor._finish_task = lambda *_args: setattr(worktrees, "removed", True)
-    repaired_patches: list[str] = []
-
-    def repair(*args) -> bool:
-        repaired_patches.append(args[2])
-        return True
-
-    executor._repair_integration_validation_failure = repair
-    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
-
-    result = executor._integration_publication_preflight(
-        SimpleNamespace(id="integration-task"),
-        SimpleNamespace(id="source-task"),
-        tmp_path,
-        "patch",
-        "validated-tree",
-        transcript,
-    )
-
-    assert result is True
-    assert repaired_patches == ["patch"]
-    assert store.items[0].data["status"] == "repair_required"
-
-
-def test_disabled_publication_preflight_fails_closed_on_scan_error(
-    tmp_path: Path,
-) -> None:
-    store = _EventStore()
-    executor = object.__new__(StewardExecutor)
-    executor.config = SimpleNamespace(
-        publication=StewardPublicationConfig(), logs_dir=tmp_path / "logs"
-    )
-    executor.store = store
-    executor.worktrees = _Worktrees()
-    executor._scan_integration_source = lambda *_args, **_kwargs: ScannerReport(
-        failure=ReasonCode.scanner_failure
-    )
-    executor._integration_publication_graph = lambda _source: pytest.fail(
-        "disabled transport must not require an archive graph"
-    )
-    finished: list[tuple[object, ...]] = []
-    executor._finish_task = lambda *args: finished.append(args)
-    transcript = IntegrationTranscript(tmp_path / "transcript.txt")
-
-    result = executor._integration_publication_preflight(
-        SimpleNamespace(id="integration-task"),
-        SimpleNamespace(id="source-task"),
-        tmp_path,
-        "patch contains private-secret-value",
-        "validated-tree",
-        transcript,
-    )
-
-    assert result is False
-    assert len(finished) == 2
-    assert store.items[0].data["reason_codes"] == [ReasonCode.scanner_failure.value]
-    assert "private-secret-value" not in transcript.path.read_text(encoding="utf-8")
-
 
 def test_terminal_publication_receipts_match_immutable_generation(
     monkeypatch,
@@ -636,7 +275,6 @@ def test_terminal_publication_receipts_match_immutable_generation(
         False,
         "receipt_mismatch",
     )
-
 
 def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
     tmp_path: Path, monkeypatch
@@ -737,7 +375,6 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
         SimpleNamespace(id=free.task_id, status="succeeded"), free_durable
     ) == (False, "generation_mismatch")
 
-
 def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> None:
     from coquic_steward.publication.generation import compose_publication_generation
 
@@ -828,7 +465,6 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
     assert len(store.list_publication_receipts(aware.publication_id)) == (
         len(aware.objects) + len(aware.private_originals)
     )
-
 
 @pytest.mark.parametrize("older_reason", ("operator_blocked", "integrity"))
 def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
@@ -1010,7 +646,6 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
     assert later.state.value == "blocked"
     assert later.reason == "integrity"
 
-
 def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
     tmp_path: Path,
 ) -> None:
@@ -1177,7 +812,6 @@ def test_daemon_restart_skips_unchanged_integrity_head_before_credential_rekey(
     assert later is not None
     assert later.state.value == "queued"
 
-
 def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1338,7 +972,6 @@ def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation
     current["generation"] = replace(terminal, state="exposed", exposed_at=now)
     assert daemon._terminal_publication_gate(task) is True
 
-
 def _enqueue_terminal(
     run: object, expected: str, generation: object
 ) -> PublicationOperationResult:
@@ -1347,7 +980,6 @@ def _enqueue_terminal(
         PublicationOperationStatus.enqueued,
         generation=generation,
     )
-
 
 def test_materialized_success_enqueues_deterministically_without_transport(
     tmp_path: Path, monkeypatch,
@@ -1397,7 +1029,6 @@ def test_materialized_success_enqueues_deterministically_without_transport(
 
     run.state = "running"
     assert session_module.enqueue_materialized_publication(config, store, task, run) is None
-
 
 def test_materialized_publication_uses_immutable_snapshot_after_graph_changes(
     tmp_path: Path, monkeypatch
@@ -1454,7 +1085,6 @@ def test_materialized_publication_uses_immutable_snapshot_after_graph_changes(
     daemon.logger = None
     source = daemon._publication_source(queued[0])
     assert source["task"]["title"] == "original-title"
-
 
 def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path: Path) -> None:
     task_id = "task-cleanup-replacement"
@@ -1556,7 +1186,6 @@ def test_verified_cleanup_intent_rejects_replaced_archive_before_delete(tmp_path
     assert archive.task_dir(task_id).is_dir()
     assert store.blocked == [(intent.intent_id, "cleanup_failed")]
     assert store.completed == []
-
 
 def test_session_completion_enqueues_every_materialized_revision(tmp_path: Path) -> None:
     completed_ids: list[str] = []

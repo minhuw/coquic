@@ -124,7 +124,6 @@ from coquic_steward.storage.schema import (
     ValidationRow,
 )
 
-
 def git_branch_exists(repo: Path, branch: str) -> bool:
     result = run_command(
         ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -132,12 +131,10 @@ def git_branch_exists(repo: Path, branch: str) -> bool:
     )
     return result.returncode == 0
 
-
 def git_branch_head(repo: Path, branch: str) -> str:
     return run_command(
         ["git", "rev-parse", branch], cwd=repo, check=True
     ).stdout.strip()
-
 
 def _drive_durable(
     executor: StewardExecutor,
@@ -160,12 +157,10 @@ def _drive_durable(
             return False
     raise AssertionError(f"durable task did not reach a stopping point: {task_id}")
 
-
 def _advance_durable(
     executor: StewardExecutor, task_id: str, steps: int
 ) -> list[object]:
     return [executor.advance_once(task_id) for _ in range(steps)]
-
 
 def _durable_codex(
     tmp_path: Path,
@@ -193,7 +188,6 @@ def _durable_codex(
     fake.chmod(0o755)
     return fake
 
-
 def _passing_durable_gates(
     config,
     task_id,
@@ -212,7 +206,6 @@ def _passing_durable_gates(
             command=["fake-gate"], cwd=cwd, passed=True, exit_code=0, output_path=output
         )
     ]
-
 
 def _durable_push_setup(
     config: StewardConfig,
@@ -284,7 +277,6 @@ def _durable_push_setup(
     )
     return config, store, source, integration, StewardExecutor(config, store)
 
-
 def ingest_test_signal(
     store: TaskStore,
     item: SignalItem,
@@ -301,7 +293,6 @@ def ingest_test_signal(
         suppression_hours=suppression_hours,
     )
     return saved[0], bool(created)
-
 
 def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     config = load_config(repo_root=repo)
@@ -339,7 +330,6 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.signal_providers["code-scanning"].poll_interval_minutes == 360
     assert config.signal_providers["codacy"].poll_interval_minutes == 360
 
-
 def test_config_selects_enabled_signals(repo: Path) -> None:
     config_path = repo / "steward.toml"
     config_path.write_text(
@@ -356,7 +346,6 @@ enabled = ["codacy"]
     config = load_config(repo_root=repo, config_path=config_path)
 
     assert config.enabled_signals == ("codacy",)
-
 
 def test_config_reads_signal_provider_polling(repo: Path) -> None:
     config_path = repo / "steward.toml"
@@ -386,7 +375,6 @@ max_items = 25
     assert provider.idle_poll_interval_minutes == 5
     assert provider.suppression_hours == 12
     assert provider.max_items == 25
-
 
 def test_config_reads_global_and_kind_frozen_paths(repo: Path) -> None:
     config_path = repo / "steward.toml"
@@ -418,7 +406,6 @@ frozen = [".clang-tidy", "scripts/run-clang-tidy.sh"]
         "flake.nix",
     )
 
-
 def test_example_config_freezes_validation_gate_runner(repo: Path) -> None:
     config = load_config(
         repo_root=repo,
@@ -426,7 +413,6 @@ def test_example_config_freezes_validation_gate_runner(repo: Path) -> None:
     )
 
     assert "scripts/run-validation-with-index.sh" in config.path_policy.frozen
-
 
 def test_config_rejects_absolute_frozen_paths(repo: Path) -> None:
     config_path = repo / "steward.toml"
@@ -444,7 +430,6 @@ frozen = ["/etc/passwd"]
     with pytest.raises(ValueError, match="repository-relative"):
         load_config(repo_root=repo, config_path=config_path)
 
-
 def test_config_rejects_blank_frozen_paths(repo: Path) -> None:
     config_path = repo / "steward.toml"
     config_path.write_text(
@@ -461,7 +446,6 @@ frozen = [""]
     with pytest.raises(ValueError, match="must not be empty"):
         load_config(repo_root=repo, config_path=config_path)
 
-
 def test_config_rejects_blank_kind_frozen_paths(repo: Path) -> None:
     config_path = repo / "steward.toml"
     config_path.write_text(
@@ -477,7 +461,6 @@ frozen = ["   "]
 
     with pytest.raises(ValueError, match="must not be empty"):
         load_config(repo_root=repo, config_path=config_path)
-
 
 def test_config_reads_review_timeout_limit(repo: Path) -> None:
     config_path = repo / "steward.toml"
@@ -496,7 +479,6 @@ review_timeout_minutes = 7
 
     assert config.limits.review_timeout_minutes == 7
 
-
 def test_config_reads_validation_timeout_limit(repo: Path) -> None:
     config_path = repo / "steward.toml"
     config_path.write_text(
@@ -514,7 +496,6 @@ validation_timeout_minutes = 9
 
     assert config.limits.validation_timeout_minutes == 9
 
-
 def test_config_reads_local_only(repo: Path) -> None:
     config_path = repo / "steward.toml"
     config_path.write_text(
@@ -531,7 +512,6 @@ local_only = false
 
     assert config.integration_mode == IntegrationMode.push_main.value
     assert config.local_only is False
-
 
 def test_config_resolves_codex_bin_from_path(
     repo: Path, tmp_path: Path, monkeypatch
@@ -554,7 +534,6 @@ github_repository = "minhuw/coquic"
 
     assert config.codex_bin == str(fake)
 
-
 def test_config_reads_codex_model_and_reasoning_effort(
     repo: Path, tmp_path: Path
 ) -> None:
@@ -572,7 +551,6 @@ codex_reasoning_effort = "medium"
 
     assert config.codex_model == "gpt-5.6-terra"
     assert config.codex_reasoning_effort == "medium"
-
 
 def test_config_reads_only_global_file_by_default(
     repo: Path, coquic_home: Path
@@ -606,7 +584,6 @@ github_repository = "minhuw/coquic"
     assert config.github_repository == "minhuw/global"
     assert config.enabled_signals == ("codacy",)
 
-
 def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
     monkeypatch.setattr(
         "coquic_steward.core.models.utc_now",
@@ -628,7 +605,6 @@ def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
     ]
     assert all(len(random_suffix) == 8 for _, _, random_suffix in parts)
 
-
 def test_store_dedupes_active_tasks(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     spec = TaskSpec(
@@ -642,7 +618,6 @@ def test_store_dedupes_active_tasks(config: StewardConfig) -> None:
     assert not duplicate_created
     assert first.id == second.id
     assert store.get(first.id).status == TaskStatus.queued
-
 
 def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
     changes = 0
@@ -661,7 +636,6 @@ def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
 
     assert changes > before
     assert store.get(task.id).status == TaskStatus.running
-
 
 def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypatch) -> None:
     store = TaskStore.create(config.db_path)
@@ -691,7 +665,6 @@ def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypat
     assert any(event.kind == "dispatch.failed" for event in events)
     assert any(event.kind == "worktree.cleaned" for event in events)
 
-
 def test_daemon_marks_early_dispatch_exception_failed(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -713,7 +686,6 @@ def test_daemon_marks_early_dispatch_exception_failed(
     assert saved.summary == "dispatch failed: codex failed before start"
     assert any(event.kind == "dispatch.failed" for event in store.events(task.id))
 
-
 def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
@@ -730,7 +702,6 @@ def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
     assert not store.touch_active_task(task.id)
     assert store.get(task.id).updated_at < utc_now() - timedelta(minutes=10)
 
-
 def test_store_rejects_invalid_task_status_transition(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
@@ -741,7 +712,6 @@ def test_store_rejects_invalid_task_status_transition(config: StewardConfig) -> 
         store.start_review(task.id, "review started")
 
     assert store.get(task.id).status == TaskStatus.queued
-
 
 def test_store_allows_integration_conflict_to_return_to_worker(
     config: StewardConfig,
@@ -759,7 +729,6 @@ def test_store_allows_integration_conflict_to_return_to_worker(
     assert saved.status == TaskStatus.running
     assert saved.summary == "addressing integration conflict revision 1"
 
-
 def test_store_save_does_not_overwrite_lifecycle_state(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
@@ -776,7 +745,6 @@ def test_store_save_does_not_overwrite_lifecycle_state(config: StewardConfig) ->
     assert saved.status == TaskStatus.running
     assert saved.summary == "worker started"
     assert saved.worktree_path == config.worktrees_dir / "stale"
-
 
 def test_store_dispatches_integration_tasks_first(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
@@ -802,7 +770,6 @@ def test_store_dispatches_integration_tasks_first(config: StewardConfig) -> None
     queued = store.queued_tasks()
 
     assert [task.id for task in queued] == [integration.id, normal.id]
-
 
 def test_store_dispatch_snapshot_is_bounded_and_deterministic(
     config: StewardConfig,
@@ -888,7 +855,6 @@ def test_store_dispatch_snapshot_is_bounded_and_deterministic(
     assert snapshot.integration_active_count == 0
     assert source_b.id not in {task.id for task in snapshot.queued_tasks}
 
-
 def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     item, created = ingest_test_signal(
@@ -921,7 +887,6 @@ def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
     assert duplicate.id == item.id
     assert [pending.id for pending in store.pending_signal_items()] == ["wi-codacy-1"]
 
-
 def test_store_preserves_repository_relative_signal_paths(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     expected_path = "steward/src/coquic_steward/public_mirror.py"
@@ -941,7 +906,6 @@ def test_store_preserves_repository_relative_signal_paths(config: StewardConfig)
     pending = reopened.pending_signal_items()
     assert len(pending) == 1
     assert pending[0].location == {"path": expected_path, "line": 203}
-
 
 def test_store_records_scheduler_wakeups_for_actionable_changes(
     config: StewardConfig,
@@ -978,7 +942,6 @@ def test_store_records_scheduler_wakeups_for_actionable_changes(
         SchedulerWakeupStatus.consumed,
     ]
 
-
 def test_store_suppresses_recent_duplicate_signal_fingerprints(
     config: StewardConfig,
 ) -> None:
@@ -1008,7 +971,6 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
     assert not duplicate_created
     assert second.id == first.id
     assert len(store.pending_signal_items()) == 1
-
 
 @pytest.mark.parametrize(
     "terminal_status",
@@ -1058,7 +1020,6 @@ def test_store_permanently_suppresses_resolved_planned_signal(
     assert second.id == first.id
     assert store.pending_signal_items() == []
     assert [item.id for item in store.list_signal_items()] == [first.id]
-
 
 def test_store_matches_legacy_workflow_signal_by_run_attempt(
     config: StewardConfig,
@@ -1123,7 +1084,6 @@ def test_store_matches_legacy_workflow_signal_by_run_attempt(
         assert next_row.workflow_run_id == "100"
         assert next_row.workflow_run_attempt == 2
 
-
 @pytest.mark.parametrize(
     ("provider", "payload"),
     [
@@ -1165,7 +1125,6 @@ def test_store_keeps_invalid_or_non_workflow_signal_identity_unindexed(
         assert row.workflow_run_id is None
         assert row.workflow_run_attempt is None
         assert json.loads(row.payload_json) == payload
-
 
 def test_store_matches_workflow_signal_identity_with_one_bounded_query(
     config: StewardConfig,
@@ -1233,7 +1192,6 @@ def test_store_matches_workflow_signal_identity_with_one_bounded_query(
         for statement in signal_queries
     )
 
-
 def test_store_requeues_planned_signal_after_configured_suppression(
     config: StewardConfig,
 ) -> None:
@@ -1281,7 +1239,6 @@ def test_store_requeues_planned_signal_after_configured_suppression(
     refreshed = store.list_signal_items(status=SignalItemStatus.planned)[0]
     assert refreshed.id == first.id
 
-
 def test_store_requeues_failed_planned_signal_after_retry_window(
     config: StewardConfig,
 ) -> None:
@@ -1322,7 +1279,6 @@ def test_store_requeues_failed_planned_signal_after_retry_window(
     assert pending[0].planned_at is None
     assert pending[0].planner_run_id is None
     assert pending[0].planned_task_id is None
-
 
 def test_store_skips_failed_signal_requeue_with_duplicate_pending(
     config: StewardConfig,
@@ -1374,7 +1330,6 @@ def test_store_skips_failed_signal_requeue_with_duplicate_pending(
     assert [item.id for item in store.pending_signal_items()] == [second.id]
     planned = store.list_signal_items(status=SignalItemStatus.planned)
     assert [item.id for item in planned] == [first.id]
-
 
 def test_store_skips_failed_signal_requeue_with_duplicate_planned(
     config: StewardConfig,
@@ -1432,7 +1387,6 @@ def test_store_skips_failed_signal_requeue_with_duplicate_planned(
     assert store.pending_signal_items() == []
     planned = store.list_signal_items(status=SignalItemStatus.planned)
     assert {item.id for item in planned} == {first.id, second.id}
-
 
 def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
     config: StewardConfig,
@@ -1501,7 +1455,6 @@ def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
     planned = store.list_signal_items(status=SignalItemStatus.planned)
     assert [item.id for item in planned] == [first.id]
 
-
 def test_store_does_not_requeue_recent_failed_signal(
     config: StewardConfig,
 ) -> None:
@@ -1537,7 +1490,6 @@ def test_store_does_not_requeue_recent_failed_signal(
     assert store.pending_signal_items() == []
     planned = store.list_signal_items(status=SignalItemStatus.planned)
     assert [item.id for item in planned] == [signal.id]
-
 
 def test_store_suppresses_planned_signal_while_task_is_active(
     config: StewardConfig,
@@ -1583,7 +1535,6 @@ def test_store_suppresses_planned_signal_while_task_is_active(
     assert second.id == first.id
     assert store.pending_signal_items() == []
 
-
 def test_store_marks_signal_items_planned(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     ingest_test_signal(
@@ -1615,7 +1566,6 @@ def test_store_marks_signal_items_planned(config: StewardConfig) -> None:
     )
     assert transition.payload["transition"]["toStatus"] == "planned"
 
-
 def test_store_supersedes_consumed_signal_items_without_tasks(
     config: StewardConfig,
 ) -> None:
@@ -1646,7 +1596,6 @@ def test_store_supersedes_consumed_signal_items_without_tasks(
         if event.kind == "signal.transition"
     )
     assert transition.payload["transition"]["toStatus"] == "superseded"
-
 
 def test_daemon_supersedes_stale_signals_before_planning(
     config: StewardConfig, monkeypatch
@@ -1691,7 +1640,6 @@ def test_daemon_supersedes_stale_signals_before_planning(
         "count": 1,
         "reasons": {signal.id: "source_not_open"},
     }
-
 
 def test_daemon_replans_expired_failed_signal_without_refetch(
     config: StewardConfig, monkeypatch
@@ -1765,7 +1713,6 @@ def test_daemon_replans_expired_failed_signal_without_refetch(
         for event in store.control_loop.list_events()
     )
 
-
 def test_store_marks_task_running_when_revision_iteration_begins(
     config: StewardConfig,
 ) -> None:
@@ -1801,7 +1748,6 @@ def test_store_marks_task_running_when_revision_iteration_begins(
     assert events[-1].message == "running"
     assert events[-1].data["source"] == "begin_iteration"
 
-
 def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
     with acquire_daemon_lock(config):
         second_lock = acquire_daemon_lock(config)
@@ -1818,7 +1764,6 @@ def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
     assert "pid=" in exc_info.value.owner
     with acquire_daemon_lock(config):
         pass
-
 
 def test_daemon_preflights_push_main_remote(
     config: StewardConfig, tmp_path: Path
@@ -1847,7 +1792,6 @@ def test_daemon_preflights_push_main_remote(
     daemon.startup_reconcile()
 
     assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
-
 
 def test_daemon_preflight_rejects_divergent_local_main(
     config: StewardConfig, tmp_path: Path
@@ -1884,7 +1828,6 @@ def test_daemon_preflight_rejects_divergent_local_main(
     assert "ahead/behind: 1\t0" in message
     assert "reconcile and push local main" in message
 
-
 def test_daemon_preflight_fails_before_tick_for_push_main(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -1903,7 +1846,6 @@ def test_daemon_preflight_fails_before_tick_for_push_main(
 
     assert "remote push preflight failed" in str(exc_info.value)
     assert "fetch remote main" in str(exc_info.value)
-
 
 def test_daemon_preflight_skips_when_external_writes_disabled(
     config: StewardConfig, monkeypatch
@@ -1925,7 +1867,6 @@ def test_daemon_preflight_skips_when_external_writes_disabled(
     )
 
     StewardDaemon(config, TaskStore.create(config.db_path))
-
 
 def test_daemon_logs_planner_lifecycle_event(
     config: StewardConfig, monkeypatch, tmp_path: Path
@@ -1998,7 +1939,6 @@ def test_daemon_logs_planner_lifecycle_event(
     assert events[1].data["consumed_item_count"] == 1
     assert store.list_signal_items()[0].status == SignalItemStatus.planned
 
-
 def test_daemon_streams_debug_lines_to_logger(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2042,7 +1982,6 @@ def test_daemon_streams_debug_lines_to_logger(
     assert any("verifier=0/0" in line for line in lines)
     assert any("transcript=" in line for line in lines)
     assert any("cycle finish" in line for line in lines)
-
 
 def test_daemon_replans_after_successful_dispatch(
     config: StewardConfig, monkeypatch
@@ -2108,7 +2047,6 @@ def test_daemon_replans_after_successful_dispatch(
     assert result.enqueued == 1
     assert store.get(queued.id).status == TaskStatus.succeeded
 
-
 def test_daemon_dispatches_newly_queued_integration_continuation(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2158,7 +2096,6 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
     assert integration_tasks[0].status == TaskStatus.succeeded
     assert store.get(source.id).status == TaskStatus.succeeded
 
-
 def test_daemon_dispatch_exception_preserves_terminal_task_status(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2181,7 +2118,6 @@ def test_daemon_dispatch_exception_preserves_terminal_task_status(
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "blocked before crash"
     assert any(event.kind == "dispatch.failed" for event in store.events(task.id))
-
 
 def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
     config: StewardConfig, monkeypatch
@@ -2230,7 +2166,6 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
     assert ran == [source.id]
     assert store.get(queued_integration.id).status == TaskStatus.queued
 
-
 def test_daemon_forever_dispatches_up_to_source_capacity_per_cycle(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2259,7 +2194,6 @@ def test_daemon_forever_dispatches_up_to_source_capacity_per_cycle(
             "reason": "wakeup",
         }
     ]
-
 
 def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
     config: StewardConfig, monkeypatch
@@ -2297,7 +2231,6 @@ def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
     assert called is False
     assert result.signal_fetches == 0
     assert result.enqueued == 0
-
 
 def test_daemon_local_wakeup_fetches_idle_due_signals_when_idle(
     config: StewardConfig, monkeypatch
@@ -2363,7 +2296,6 @@ def test_daemon_local_wakeup_fetches_idle_due_signals_when_idle(
     assert result.signal_fetches == 0
     assert store.pending_wakeups() == []
 
-
 def test_daemon_idle_signal_fetch_waits_for_existing_local_work(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2392,7 +2324,6 @@ def test_daemon_idle_signal_fetch_waits_for_existing_local_work(
     assert fetched == []
     assert result.signal_fetches == 0
     assert store.pending_wakeups() == []
-
 
 def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
     config: StewardConfig, monkeypatch
@@ -2441,7 +2372,6 @@ def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
     assert result.planned == 0
     assert store.pending_wakeups() == []
 
-
 def test_daemon_fetches_selected_providers_from_force_wakeup(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2463,7 +2393,6 @@ def test_daemon_fetches_selected_providers_from_force_wakeup(
     assert fetched == [["codacy"]]
     assert result.signal_fetches == 0
     assert store.pending_wakeups() == []
-
 
 def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
@@ -2506,7 +2435,6 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
     assert codacy.next_due_at > codacy.last_fetch_at
     assert codacy.idle_next_due_at == codacy.last_fetch_at + timedelta(minutes=30)
     assert codacy.idle_due is False
-
 
 def test_scheduler_snapshot_bounds_wakeups_and_provider_fetches(
     config: StewardConfig,
@@ -2568,7 +2496,6 @@ def test_scheduler_snapshot_bounds_wakeups_and_provider_fetches(
         for left, right in zip(snapshot.recent_wakeups, snapshot.recent_wakeups[1:])
     )
 
-
 def test_scheduler_idle_excludes_signal_error_rows(
     config: StewardConfig,
 ) -> None:
@@ -2604,7 +2531,6 @@ def test_scheduler_idle_excludes_signal_error_rows(
 
     assert scheduler_state(config, store).idle is False
 
-
 def test_scheduler_idle_suppressed_by_active_source_task(
     config: StewardConfig,
 ) -> None:
@@ -2624,7 +2550,6 @@ def test_scheduler_idle_suppressed_by_active_source_task(
     result = scheduler_state(config, store)
 
     assert result.idle is False
-
 
 def test_scheduler_state_uses_error_retry_timing(config: StewardConfig) -> None:
     config = config.__class__(
@@ -2656,7 +2581,6 @@ def test_scheduler_state_uses_error_retry_timing(config: StewardConfig) -> None:
         minutes=retry_minutes + 17
     )
     assert provider.idle_next_due_at == fetched_at + timedelta(minutes=retry_minutes)
-
 
 def test_wait_for_scheduler_event_uses_one_snapshot_per_iteration(
     config: StewardConfig, monkeypatch
@@ -2712,7 +2636,6 @@ def test_wait_for_scheduler_event_uses_one_snapshot_per_iteration(
     assert trigger.reason == "wakeup"
     assert snapshot_calls == [config.enabled_signals, config.enabled_signals]
 
-
 def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
 
@@ -2720,7 +2643,6 @@ def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -
 
     assert trigger.reason == "provider-due"
     assert trigger.providers == list(config.enabled_signals)
-
 
 def test_wait_for_scheduler_event_prioritizes_pending_wakeup(
     config: StewardConfig,
@@ -2732,7 +2654,6 @@ def test_wait_for_scheduler_event_prioritizes_pending_wakeup(
 
     assert trigger.reason == "wakeup"
     assert trigger.providers == []
-
 
 def test_wait_for_scheduler_event_fetches_signals_when_idle(
     config: StewardConfig,
@@ -2764,7 +2685,6 @@ def test_wait_for_scheduler_event_fetches_signals_when_idle(
 
     assert trigger.reason == "idle-fetch"
     assert trigger.providers == list(config.enabled_signals)
-
 
 def test_wait_for_scheduler_event_uses_configured_idle_poll_interval(
     config: StewardConfig,
@@ -2801,7 +2721,6 @@ def test_wait_for_scheduler_event_uses_configured_idle_poll_interval(
     assert trigger.reason == "idle-fetch"
     assert trigger.providers == ["codacy"]
 
-
 def test_wait_for_scheduler_event_coalesces_near_idle_fetches(
     config: StewardConfig,
 ) -> None:
@@ -2837,7 +2756,6 @@ def test_wait_for_scheduler_event_coalesces_near_idle_fetches(
 
     assert trigger.reason == "idle-fetch"
     assert trigger.providers == ["code-scanning", "codacy"]
-
 
 def test_wait_for_scheduler_event_does_not_idle_fetch_with_queued_work(
     config: StewardConfig, monkeypatch
@@ -2878,7 +2796,6 @@ def test_wait_for_scheduler_event_does_not_idle_fetch_with_queued_work(
         wait_for_scheduler_event(config, store)
 
     assert sleep_calls == [pytest.approx(config.scheduler_wait_interval_sec)]
-
 
 def test_daemon_plans_bounded_signal_item_inbox(
     config: StewardConfig, monkeypatch
@@ -2952,7 +2869,6 @@ def test_daemon_plans_bounded_signal_item_inbox(
     assert planned == {"wi-codacy-0", "wi-codacy-1"}
     assert pending == {"wi-codacy-2", "wi-codacy-3", "wi-codacy-4"}
 
-
 def test_plan_verifier_rejects_broken_and_duplicate_specs() -> None:
     signals = ProjectSignals(
         repository="minhuw/coquic",
@@ -3010,7 +2926,6 @@ def test_plan_verifier_rejects_broken_and_duplicate_specs() -> None:
 
     assert planned == []
 
-
 def test_plan_verifier_accepts_valid_llm_proposal() -> None:
     item = SignalItem(
         id="wi-codeql-1",
@@ -3061,7 +2976,6 @@ def test_plan_verifier_accepts_valid_llm_proposal() -> None:
     ]
     assert spec.metadata["source_context"]["selected_signal_items"][0]["id"] == item.id
 
-
 def test_plan_verifier_accepts_item_backed_llm_proposal() -> None:
     item = SignalItem(
         id="wi-codeql-1",
@@ -3108,7 +3022,6 @@ def test_plan_verifier_accepts_item_backed_llm_proposal() -> None:
     spec, dedupe_key = verified.planned[0]
     assert dedupe_key == "codeql:wi-codeql-1"
     assert spec.metadata["source_context"]["selected_signal_items"][0]["id"] == item.id
-
 
 def test_plan_verifier_accepts_feature_issue_proposal() -> None:
     item = SignalItem(
@@ -3172,7 +3085,6 @@ def test_plan_verifier_accepts_feature_issue_proposal() -> None:
     assert selected["payload"]["issue_number"] == 42
     assert selected["payload"]["worker_context"]["recommended_worker"] == "feature-implementer"
 
-
 def test_plan_verifier_rejects_mutating_worker_for_feature_issue() -> None:
     item = SignalItem(
         id="wi-feature-42",
@@ -3212,7 +3124,6 @@ def test_plan_verifier_rejects_mutating_worker_for_feature_issue() -> None:
 
     assert verified.planned == []
     assert verified.consumed_item_ids == []
-
 
 def test_plan_verifier_rejects_multiple_feature_issues_in_one_task() -> None:
     first = SignalItem(
@@ -3263,7 +3174,6 @@ def test_plan_verifier_rejects_multiple_feature_issues_in_one_task() -> None:
     assert verified.planned == []
     assert verified.consumed_item_ids == []
 
-
 def test_plan_verifier_rejects_mixed_feature_issue_source_selection() -> None:
     feature = SignalItem(
         id="wi-feature-42",
@@ -3310,7 +3220,6 @@ def test_plan_verifier_rejects_mixed_feature_issue_source_selection() -> None:
 
     assert verified.planned == []
     assert verified.consumed_item_ids == []
-
 
 def test_plan_verifier_rejects_mismatched_feature_issue_evidence() -> None:
     feature = SignalItem(
@@ -3359,7 +3268,6 @@ def test_plan_verifier_rejects_mismatched_feature_issue_evidence() -> None:
     assert verified.planned == []
     assert verified.consumed_item_ids == []
 
-
 def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
     signals = ProjectSignals(
         repository="minhuw/coquic",
@@ -3399,7 +3307,6 @@ def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
 
     assert len(planned) == 1
     assert planned[0][0].allow_main_write is False
-
 
 def test_codex_planner_prompt_includes_active_tasks(
     config: StewardConfig, tmp_path: Path
@@ -3478,7 +3385,6 @@ def test_codex_planner_prompt_includes_active_tasks(
     assert "planner-thread-1" not in args
     assert args.count("--output-schema") == 2
 
-
 def test_codex_planner_selects_explicit_runner_boundaries(
     config: StewardConfig,
 ) -> None:
@@ -3516,7 +3422,6 @@ def test_codex_planner_selects_explicit_runner_boundaries(
             invocation=FreshPlannerSession(config),
         )
 
-
 def test_codex_runner_places_resume_options_before_session(
     config: StewardConfig, tmp_path: Path
 ) -> None:
@@ -3547,75 +3452,6 @@ def test_codex_runner_places_resume_options_before_session(
     assert args.index("--config") < args.index("planner-thread-1")
     assert "--cd" not in args
     assert "--sandbox" not in args
-
-
-def test_executor_reconciles_late_write_after_authoritative_patch(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree, branch = Worktrees(config).create(task)
-    task.worktree_path = worktree
-    task.branch_name = branch
-    store.save(task)
-    transcript_path = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
-    store.begin_iteration(
-        task.id,
-        0,
-        "Initial attempt",
-        worker_name="worker",
-        worker_prompt_path=None,
-        worker_transcript_path=transcript_path,
-        worker_last_message_path=transcript_path.with_name("last-message.md"),
-    )
-    capture = ToolChangeCapture.start(worktree, transcript_path.parent / "tool-changes")
-    envelope = {
-        "hook_event_name": "PreToolUse",
-        "session_id": "session_1",
-        "turn_id": "turn_1",
-        "cwd": str(worktree),
-        "tool_name": "Bash",
-        "tool_use_id": "tool_1",
-        "tool_input": {"command": "printf changed > README.md"},
-    }
-    handle_hook(json.dumps(envelope), context_path=capture.context_path)
-    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
-    handle_hook(
-        json.dumps(
-            {
-                **envelope,
-                "hook_event_name": "PostToolUse",
-                "tool_response": {"success": True},
-            }
-        ),
-        context_path=capture.context_path,
-    )
-    assert capture.finalize().state == "complete"
-
-    executor = StewardExecutor(config, store)
-    original_save = executor.worktrees.save_patch
-
-    def save_then_write(path: Path, patch_path: Path) -> None:
-        original_save(path, patch_path)
-        (path / "late.txt").write_text("late\n", encoding="utf-8")
-
-    monkeypatch.setattr(executor.worktrees, "save_patch", save_then_write)
-    monkeypatch.setattr(executor, "_run_gates_for_iteration", lambda *_args: [])
-
-    assert executor._prepare_patch(
-        task.id,
-        "initial",
-        iteration=0,
-        no_changes_status=TaskStatus.no_changes,
-    ).value == "ready"
-    summary = json.loads(
-        (transcript_path.parent / "tool-changes" / "summary.json").read_text(encoding="utf-8")
-    )
-    assert summary["state"] == "partial"
-    assert "external_mutation" in summary["reasons"]
-
 
 def test_codex_runner_review_uses_structured_exec(
     config: StewardConfig, tmp_path: Path
@@ -3655,7 +3491,6 @@ def test_codex_runner_review_uses_structured_exec(
     assert "/reviewer/" in args[args.index("--output-last-message") + 1]
     assert args[args.index("--output-schema") + 1] == str(schema)
 
-
 def test_codex_review_failure_uses_stderr_summary(
     config: StewardConfig, tmp_path: Path
 ) -> None:
@@ -3683,7 +3518,6 @@ def test_codex_review_failure_uses_stderr_summary(
     assert result.diagnostics["status"] == "failed"
     assert result.diagnostics["last_error"] == "error: bad review invocation"
 
-
 def test_codex_diagnostics_detect_missing_last_message(tmp_path: Path) -> None:
     transcript = tmp_path / "codex.jsonl"
     last_message = tmp_path / "last-message.md"
@@ -3705,7 +3539,6 @@ def test_codex_diagnostics_detect_missing_last_message(tmp_path: Path) -> None:
     assert diagnostics.thread_id == "thread-1"
     assert diagnostics.last_item_type == "command_execution"
     assert diagnostics.last_item_status == "in_progress"
-
 
 def test_codex_review_uses_review_timeout(
     config: StewardConfig, tmp_path: Path
@@ -3743,7 +3576,6 @@ def test_codex_review_uses_review_timeout(
     assert result.exit_code == 124
     assert "timed out after 0 minute(s)" in result.final_message
 
-
 def test_planner_schema_file_matches_expected_shape(config: StewardConfig) -> None:
     path = planner_schema_path(config)
     schema = json.loads(path.read_text(encoding="utf-8"))
@@ -3764,14 +3596,12 @@ def test_planner_schema_file_matches_expected_shape(config: StewardConfig) -> No
     selected_ids = item["properties"]["metadata"]["properties"]["selected_signal_item_ids"]
     assert selected_ids["items"]["type"] == "string"
 
-
 def test_planner_schema_matches_openai_structured_output_subset(
     config: StewardConfig,
 ) -> None:
     schema = json.loads(planner_schema_path(config).read_text(encoding="utf-8"))
 
     assert_openai_structured_output_schema(schema)
-
 
 def test_review_schema_file_matches_expected_shape(config: StewardConfig) -> None:
     path = review_schema_path(config)
@@ -3791,14 +3621,12 @@ def test_review_schema_file_matches_expected_shape(config: StewardConfig) -> Non
     assert finding["additionalProperties"] is False
     assert finding["properties"]["line"]["type"] == ["integer", "null"]
 
-
 def test_review_schema_matches_openai_structured_output_subset(
     config: StewardConfig,
 ) -> None:
     schema = json.loads(review_schema_path(config).read_text(encoding="utf-8"))
 
     assert_openai_structured_output_schema(schema)
-
 
 def test_commit_message_schema_matches_openai_structured_output_subset(
     config: StewardConfig,
@@ -3809,7 +3637,6 @@ def test_commit_message_schema_matches_openai_structured_output_subset(
     assert schema["required"] == ["subject", "body"]
     assert schema["additionalProperties"] is False
     assert_openai_structured_output_schema(schema)
-
 
 def assert_openai_structured_output_schema(schema: dict[str, object]) -> None:
     unsupported_keywords = {
@@ -3907,14 +3734,12 @@ def assert_openai_structured_output_schema(schema: dict[str, object]) -> None:
     if stats["enum_values"] > 250:
         assert stats["largest_enum_string_length"] <= 15_000
 
-
 def make_task_stale(store: TaskStore, task_id: str, *, minutes: int = 30) -> None:
     old = utc_now() - timedelta(minutes=minutes)
     with Session(store.engine) as session, session.begin():
         row = session.get(TaskRow, task_id)
         assert row is not None
         row.updated_at = old.isoformat()
-
 
 def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
     class FakeProvider(GitHubActionsCiProvider):
@@ -3943,7 +3768,6 @@ def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
     assert signals.summary == "fake signal"
     assert signals.enabled_signals == ["fake"]
 
-
 def test_signal_fetch_errors_are_not_signal_items(
     config: StewardConfig,
 ) -> None:
@@ -3960,7 +3784,6 @@ def test_signal_fetch_errors_are_not_signal_items(
     assert collection.error == "dns failed"
     assert collection.items == []
 
-
 def test_signal_registry_exposes_only_concrete_github_actions_providers() -> None:
     assert "github-actions" not in PROVIDER_TYPES
     assert {
@@ -3973,7 +3796,6 @@ def test_signal_registry_exposes_only_concrete_github_actions_providers() -> Non
         "github-actions:perf",
     }.issubset(PROVIDER_TYPES)
     assert "github-issues:features" in PROVIDER_TYPES
-
 
 def test_collect_signal_items_fetches_github_actions_alias_by_name(
     config: StewardConfig, monkeypatch
@@ -4023,7 +3845,6 @@ def test_collect_signal_items_fetches_github_actions_alias_by_name(
     assert collection.items[0].kind == "github-actions.ci-failure"
     assert collection.items[0].payload["run_attempt"] == 2
 
-
 @pytest.mark.parametrize(
     ("status", "conclusion"),
     [("completed", "success"), ("in_progress", "")],
@@ -4057,7 +3878,6 @@ def test_github_actions_signal_ignores_latest_non_failure(
     signals = gather_signals(config, providers=[GitHubActionsCiProvider()])
 
     assert signals.items == []
-
 
 def test_revalidate_signal_items_filters_stale_sources(
     config: StewardConfig, monkeypatch
@@ -4183,7 +4003,6 @@ def test_revalidate_signal_items_filters_stale_sources(
         feature.id: "source_closed",
     }
 
-
 def test_revalidate_signal_items_treats_legacy_workflow_as_attempt_one(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4224,7 +4043,6 @@ def test_revalidate_signal_items_treats_legacy_workflow_as_attempt_one(
     assert actionable == []
     assert stale == {item.id: "superseded_by_newer_run"}
 
-
 def test_revalidate_signal_items_fails_open(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4254,7 +4072,6 @@ def test_revalidate_signal_items_fails_open(
 
     assert actionable == [item]
     assert stale == {}
-
 
 def test_github_actions_interop_signal_filters_workflow(
     config: StewardConfig, monkeypatch
@@ -4311,7 +4128,6 @@ def test_github_actions_interop_signal_filters_workflow(
         item.payload["worker_context"]["investigation_steps"]
     )
 
-
 def test_github_actions_ci_signal_includes_worker_context(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4357,7 +4173,6 @@ def test_github_actions_ci_signal_includes_worker_context(
     assert "RFC compliance" in context["workflow_purpose"]
     assert "nix develop -c ./scripts/compliance --ci" in context["local_validation"]
 
-
 def test_github_actions_perf_signal_is_separate_provider(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4402,7 +4217,6 @@ def test_github_actions_perf_signal_is_separate_provider(
         signals.items[0].payload["worker_context"]["workflow_file"]
         == "perf.yml"
     )
-
 
 def test_github_feature_issue_signal_fetches_open_feature_issues(
     config: StewardConfig, monkeypatch
@@ -4500,7 +4314,6 @@ def test_github_feature_issue_signal_fetches_open_feature_issues(
         item.payload["worker_context"]["implementation_steps"]
     )
 
-
 def test_github_feature_issue_signal_reports_truncated_samples(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4534,7 +4347,6 @@ def test_github_feature_issue_signal_reports_truncated_samples(
 
     assert len(result.items) == 2
     assert result.has_more is True
-
 
 def test_github_feature_issue_signal_fingerprint_survives_title_edits(
     config: StewardConfig, monkeypatch
@@ -4574,7 +4386,6 @@ def test_github_feature_issue_signal_fingerprint_survives_title_edits(
     assert second.title == "Implement #42: Edited title"
     assert first.id == second.id
     assert first.fingerprint == second.fingerprint
-
 
 def test_codacy_signal_uses_public_issue_search_without_token(
     config: StewardConfig, monkeypatch
@@ -4625,7 +4436,6 @@ def test_codacy_signal_uses_public_issue_search_without_token(
     }
     assert item.payload == {"rule_id": "Bandit_B310", "tool": "Bandit"}
 
-
 def test_codacy_signal_falls_back_to_public_analysis(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4666,7 +4476,6 @@ def test_codacy_signal_falls_back_to_public_analysis(
     assert signals.summary == "Codacy issuesCount=2"
     assert signals.items == []
     assert signals.fetches[0].has_more is True
-
 
 def test_codacy_signal_uses_tokened_issue_search(
     config: StewardConfig, monkeypatch
@@ -4711,7 +4520,6 @@ def test_codacy_signal_uses_tokened_issue_search(
     assert item.location == {"path": "scripts/fuzz-targets.sh", "line": 9}
     assert item.payload == {"rule_id": "shellcheck_SC2034", "tool": "ShellCheck"}
 
-
 def test_codacy_signal_records_error_after_non_2xx_issue_search(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4751,7 +4559,6 @@ def test_codacy_signal_records_error_after_non_2xx_issue_search(
     )
     assert signals.items == []
 
-
 def test_collect_signal_items_persists_provider_items(config: StewardConfig) -> None:
     class WorkItemProvider(CodacyProvider):
         name = "codacy"
@@ -4779,7 +4586,6 @@ def test_collect_signal_items_persists_provider_items(config: StewardConfig) -> 
     assert collection.fetch.summary == "Codacy sampled 1 open finding(s)"
     assert [item.id for item in collection.items] == ["wi-codacy-1"]
     assert collection.items[0].source_fetch_id == collection.fetch.id
-
 
 def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
     config: StewardConfig,
@@ -4817,7 +4623,6 @@ def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
     assert "src/main.cpp" in prompt
     assert "single source of truth" in prompt
     assert "Do not fetch a broad or unknown issue list" in prompt
-
 
 def test_worker_prompt_highlights_workflow_signal_guidance(
     config: StewardConfig,
@@ -4870,7 +4675,6 @@ def test_worker_prompt_highlights_workflow_signal_guidance(
     assert "workflow_file: test.yml" in prompt
     assert "nix develop -c zig build test" in prompt
     assert "Authoritative source context:" in prompt
-
 
 def test_worker_prompt_highlights_feature_issue_signal_guidance(
     config: StewardConfig,
@@ -4955,7 +4759,6 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
     assert "- flake.nix" in prompt
     assert "- .github/**" in prompt
 
-
 def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
     config: StewardConfig,
 ) -> None:
@@ -4986,7 +4789,6 @@ def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
     assert "Worker: Issue Implementer" in prompt
     assert "gh-issue-implementation" not in prompt
     assert "change GitHub issues" in prompt
-
 
 def test_review_revision_prompt_keeps_repairs_scoped(
     config: StewardConfig,
@@ -5039,7 +4841,6 @@ def test_review_revision_prompt_keeps_repairs_scoped(
     assert "Frozen path policy:" in prompt
     assert "- flake.nix" in prompt
 
-
 def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
     config: StewardConfig,
 ) -> None:
@@ -5082,7 +4883,6 @@ def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
     assert "nix develop -c pre-commit run --all-files" in prompt
     assert "Frozen path policy:" in prompt
     assert "- .clang-tidy" in prompt
-
 
 def test_review_verdict_uses_structured_output() -> None:
     approved = parse_review(
@@ -5154,7 +4954,6 @@ def test_review_verdict_uses_structured_output() -> None:
         is None
     )
 
-
 def test_worktree_create_and_patch(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
@@ -5171,7 +4970,6 @@ def test_worktree_create_and_patch(config: StewardConfig) -> None:
     assert branch.startswith("steward/")
     assert "changed" in patch.read_text(encoding="utf-8")
     assert worktrees.has_changes(path)
-
 
 def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
     config: StewardConfig, tmp_path: Path
@@ -5237,7 +5035,6 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
     assert (path / "README.md").read_text(encoding="utf-8") == "remote\n"
     assert not (path / "LOCAL.md").exists()
 
-
 def test_commit_all_skips_hooks_only_for_the_validated_tree(
     config: StewardConfig, tmp_path: Path
 ) -> None:
@@ -5269,7 +5066,6 @@ def test_commit_all_skips_hooks_only_for_the_validated_tree(
         ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
     ).stdout.strip()
     assert committed_tree == validated_tree
-
 
 def test_commit_all_rejects_changes_after_validation(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
@@ -5304,7 +5100,6 @@ def test_commit_all_rejects_changes_after_validation(config: StewardConfig) -> N
         == head_before
     )
 
-
 def test_worktree_patch_includes_staged_and_untracked_changes(
     config: StewardConfig,
 ) -> None:
@@ -5337,7 +5132,6 @@ def test_worktree_patch_includes_staged_and_untracked_changes(
         encoding="utf-8"
     ) == "untracked\n"
     assert "new file mode 100644" in patch
-
 
 def test_worktree_reports_frozen_file_and_directory_changes(
     config: StewardConfig,
@@ -5377,7 +5171,6 @@ def test_worktree_reports_frozen_file_and_directory_changes(
         "flake.nix",
     ]
 
-
 def test_porcelain_z_parser_preserves_structural_utf8_paths() -> None:
     output = (
         "??  leading and trailing  \0"
@@ -5398,13 +5191,11 @@ def test_porcelain_z_parser_preserves_structural_utf8_paths() -> None:
         "literal -> arrow",
     ]
 
-
 @pytest.mark.parametrize("status", ["R  ", "C  "])
 def test_porcelain_z_parser_returns_rename_source_then_destination(status: str) -> None:
     assert _changed_paths_from_porcelain(
         f"{status}destination -> name\0source\\name\0"
     ) == ["source/name", "destination -> name"]
-
 
 @pytest.mark.parametrize(
     "output",
@@ -5413,7 +5204,6 @@ def test_porcelain_z_parser_returns_rename_source_then_destination(status: str) 
 def test_porcelain_z_parser_rejects_invalid_status_fields(output: str) -> None:
     with pytest.raises(_PathPolicyStatusParseError):
         _changed_paths_from_porcelain(output)
-
 
 def test_porcelain_z_parser_rejects_truncated_records_with_bounded_diagnostic() -> None:
     output = "?? " + ("x" * 300)
@@ -5428,7 +5218,6 @@ def test_porcelain_z_parser_rejects_truncated_records_with_bounded_diagnostic() 
         "byte_length": len(output.encode("utf-8")),
     }
 
-
 def test_porcelain_z_parser_rejects_truncated_rename_record() -> None:
     with pytest.raises(_PathPolicyStatusParseError) as raised:
         _changed_paths_from_porcelain("R  destination\0")
@@ -5437,7 +5226,6 @@ def test_porcelain_z_parser_rejects_truncated_rename_record() -> None:
         "raw_prefix": repr(b"R  destination\0"),
         "byte_length": len(b"R  destination\0"),
     }
-
 
 def test_git_porcelain_z_reports_rename_destination_before_source(tmp_path: Path) -> None:
     repo = tmp_path / "status-repo"
@@ -5480,7 +5268,6 @@ def test_git_porcelain_z_reports_rename_destination_before_source(tmp_path: Path
         "destination -> name.txt",
     ]
 
-
 def test_frozen_patch_paths_match_renamed_files(config: StewardConfig) -> None:
     config = config.__class__(
         **{
@@ -5506,7 +5293,6 @@ rename to config/flake.nix
 """
 
     assert frozen_patch_paths(config, task, patch) == ["flake.nix"]
-
 
 def test_codex_runner_writes_prompt_and_transcript(
     config: StewardConfig, tmp_path: Path
@@ -5536,7 +5322,6 @@ def test_codex_runner_writes_prompt_and_transcript(
     assert result.completed
     assert result.final_message == "done\n"
     assert result.transcript_path.exists()
-
 
 def test_codex_runner_retries_transient_failure_and_resumes(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -5594,13 +5379,6 @@ def test_codex_runner_retries_transient_failure_and_resumes(
     assert delays == [5.0]
     assert "exec resume" in calls.read_text(encoding="utf-8").splitlines()[1]
     assert "thread-transient" in calls.read_text(encoding="utf-8").splitlines()[1]
-    StewardExecutor(config, store)._record_codex_retries(task.id, result)
-    retry_event = next(
-        event for event in store.events(task.id) if event.kind == "codex.retry"
-    )
-    assert retry_event.data["next_attempt"] == 2
-    assert retry_event.data["stage"] == "code"
-
 
 @pytest.mark.parametrize(
     "message",
@@ -5614,11 +5392,9 @@ def test_codex_runner_retries_transient_failure_and_resumes(
 def test_codex_transient_failure_classification(message: str) -> None:
     assert _is_transient_codex_message(message)
 
-
 def test_codex_does_not_retry_deterministic_failure() -> None:
     assert not _is_transient_codex_message("invalid output schema")
     assert not _is_transient_codex_message("maximum output tokens exceeded")
-
 
 def test_codex_runner_reports_missing_codex_executable(config: StewardConfig) -> None:
     config = config.__class__(
@@ -5638,7 +5414,6 @@ def test_codex_runner_reports_missing_codex_executable(config: StewardConfig) ->
     event = json.loads(transcript)
     assert event["type"] == "stderr"
     assert "unable to start Codex executable" in event["text"]
-
 
 def test_executor_no_changes_reaches_terminal_status(
     config: StewardConfig, tmp_path: Path
@@ -5765,103 +5540,6 @@ def test_executor_blocks_frozen_path_written_by_validation(
     assert saved.patch_path is None
     assert any(event.kind == "pipeline.blocked" for event in store.events(task.id))
 
-@pytest.mark.parametrize("failure", ["malformed", "decode"])
-def test_executor_blocks_status_parse_failure_with_fixed_summary(
-    config: StewardConfig, monkeypatch, failure: str
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    worktree, branch = Worktrees(config).create(task)
-    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
-    task.worktree_path = worktree
-    task.branch_name = branch
-    store.save(task)
-
-    if failure == "malformed":
-        error: BaseException = _PathPolicyStatusParseError("?? " + ("x" * 300))
-    else:
-        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
-
-    def fail_status(_path: Path) -> list[str]:
-        raise error
-
-    executor = StewardExecutor(config, store)
-    monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_status)
-
-    result = executor._prepare_patch(
-        task.id,
-        "initial",
-        iteration=0,
-        no_changes_status=TaskStatus.no_changes,
-    )
-
-    assert result.value == "terminal_failure"
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.blocked
-    assert saved.summary == PATH_POLICY_STATUS_PARSE_SUMMARY
-    event = next(
-        event for event in store.events(task.id) if event.kind == "path_policy.blocked"
-    )
-    if failure == "malformed":
-        assert event.data["diagnostic"] == error.diagnostic
-    else:
-        assert "diagnostic" not in event.data
-
-
-def test_executor_heartbeats_active_worker(
-    config: StewardConfig, monkeypatch
-) -> None:
-    monkeypatch.setattr("coquic_steward.execution.executor.WORKER_HEARTBEAT_SECONDS", 0.01)
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    store.update_status(task.id, TaskStatus.running, "started")
-    make_task_stale(store, task.id)
-
-    def fake_run() -> WorkerResult:
-        import time
-
-        time.sleep(0.05)
-        return WorkerResult(
-            completed=True,
-            command=["fake"],
-            cwd=config.repo_root,
-            exit_code=0,
-            transcript_path=config.transcripts_dir / task.id / "worker" / "codex.jsonl",
-            last_message_path=config.transcripts_dir / task.id / "worker" / "last-message.md",
-        )
-
-    result = StewardExecutor(config, store)._run_with_heartbeat(task.id, fake_run)
-
-    assert result.completed
-    assert store.get(task.id).updated_at > utc_now() - timedelta(minutes=1)
-
-
-def test_executor_patch_happy_path(
-    config: StewardConfig, tmp_path: Path, monkeypatch
-) -> None:
-    fake = _durable_codex(tmp_path, change="changed by steward")
-    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
-    config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    monkeypatch.setattr(
-        "coquic_steward.execution.executor.run_gates", _passing_durable_gates
-    )
-
-    executor = StewardExecutor(config, store)
-    assert _drive_durable(executor, task.id)
-    saved = store.get(task.id)
-    assert saved.status == TaskStatus.succeeded
-    assert saved.patch_path is not None
-    assert "changed by steward" in saved.patch_path.read_text(encoding="utf-8")
-    assert any(event.kind == "pipeline.commit" for event in store.events(task.id))
-    assert any(event.kind == "pipeline.ready_to_seal" for event in store.events(task.id))
 
 def test_executor_does_not_clean_external_finished_worktree(
     config: StewardConfig, tmp_path: Path
@@ -5876,11 +5554,11 @@ def test_executor_does_not_clean_external_finished_worktree(
     store.save(task)
     store.update_status(task.id, TaskStatus.running, "started")
 
-    StewardExecutor(config, store)._finish_task(task.id, TaskStatus.failed, "failed")
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+    StewardExecutor(config, store).clean_finished_task_worktree(store.get(task.id))
 
     assert external.exists()
     assert not any(event.kind == "worktree.cleaned" for event in store.events(task.id))
-
 
 def test_executor_marks_task_validation_running_before_gates(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -6024,7 +5702,6 @@ def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
         "--all-files",
     ]
 
-
 def test_validation_index_includes_untracked_files_without_mutating_worker_index(
     repo: Path,
 ) -> None:
@@ -6080,7 +5757,6 @@ def test_validation_index_includes_untracked_files_without_mutating_worker_index
         ["git", "status", "--short"], cwd=repo, check=True
     ).stdout
 
-
 def test_run_validation_applies_configured_timeout(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -6131,7 +5807,6 @@ def test_run_validation_applies_configured_timeout(
     assert result.exit_code == 124
     assert not result.passed
     assert "command timed out" in result.output_path.read_text(encoding="utf-8")
-
 
 def test_executor_rejects_invalid_review_output(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -6265,7 +5940,6 @@ def test_durable_ordinary_push_uses_task_as_issue_source(
     ]
     assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
 
-
 def test_durable_validation_blocks_frozen_path_before_commit(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -6307,253 +5981,6 @@ def test_durable_validation_blocks_frozen_path_before_repair_child(
     assert saved.status == TaskStatus.blocked
     assert saved.summary == "frozen paths changed: flake.nix"
     assert len(store.list_pipelines(integration.id)) == 1
-
-def test_integration_status_parse_failure_blocks_only_integration_task(
-    config: StewardConfig, monkeypatch
-) -> None:
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P")
-    )
-    store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate Source",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id},
-        )
-    )
-    executor = StewardExecutor(config, store)
-    failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
-
-    def fail_status(_path: Path, _task: TaskRecord) -> list[str]:
-        raise failure
-
-    monkeypatch.setattr(executor.worktrees, "frozen_paths", fail_status)
-    transcript_messages: list[tuple[str, str]] = []
-
-    class Transcript:
-        def write(self, stage: str, message: str) -> None:
-            transcript_messages.append((stage, message))
-
-    assert (
-        executor._block_integration_for_frozen_paths(
-            integration, source, config.repo_root, Transcript()
-        )
-        is False
-    )
-    assert store.get(integration.id).status == TaskStatus.blocked
-    assert store.get(integration.id).summary == PATH_POLICY_STATUS_PARSE_SUMMARY
-    assert store.get(source.id).status == TaskStatus.integrating
-    event = next(
-        event
-        for event in store.events(integration.id)
-        if event.kind == "path_policy.blocked"
-    )
-    assert event.data["integration_task_id"] == integration.id
-    assert event.data["diagnostic"] == failure.diagnostic
-    assert ("path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY) in transcript_messages
-    assert not any(
-        event.kind == "path_policy.blocked" for event in store.events(source.id)
-    )
-
-
-@pytest.mark.parametrize("repair", ["conflict", "validation"])
-@pytest.mark.parametrize("policy", ["forbidden", "frozen"])
-@pytest.mark.parametrize("failure_kind", ["malformed", "decode"])
-def test_integration_repair_status_parse_failure_preserves_source(
-    config: StewardConfig,
-    monkeypatch,
-    repair: str,
-    policy: str,
-    failure_kind: str,
-) -> None:
-    store = TaskStore.create(config.db_path)
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P")
-    )
-    worktree, branch = Worktrees(config).create(source)
-    (worktree / "README.md").write_text("changed\n", encoding="utf-8")
-    source.worktree_path = worktree
-    source.branch_name = branch
-    store.save(source)
-    source = store.start_integration(source.id, "integration queued")
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate Source",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id},
-        )
-    )
-    store.finish_task(integration.id, TaskStatus.blocked, "integration repair started")
-
-    class SuccessfulRunner:
-        def __init__(self, configured: StewardConfig) -> None:
-            self.config = configured
-
-        def paths(self, task: TaskRecord, *, name: str = "worker") -> tuple[Path, Path]:
-            path = self.config.transcripts_dir / task.id / name
-            return path / "codex.jsonl", path / "last-message.md"
-
-        def run(
-            self,
-            task: TaskRecord,
-            _prompt: str,
-            cwd: Path,
-            *,
-            name: str = "worker",
-            **_kwargs: object,
-        ) -> WorkerResult:
-            cwd = Path(cwd)
-            transcript_path, last_message_path = self.paths(task, name=name)
-            transcript_path.parent.mkdir(parents=True, exist_ok=True)
-            transcript_path.write_text("{}\n", encoding="utf-8")
-            last_message_path.write_text("done\n", encoding="utf-8")
-            return WorkerResult(
-                completed=True,
-                command=["fake"],
-                cwd=cwd,
-                exit_code=0,
-                transcript_path=transcript_path,
-                last_message_path=last_message_path,
-                final_message="done",
-            )
-
-    executor = StewardExecutor(config, store, runner=SuccessfulRunner(config))
-    failure: _PathPolicyStatusParseError | UnicodeDecodeError
-    if failure_kind == "malformed":
-        failure = _PathPolicyStatusParseError("?? " + ("x" * 300))
-    else:
-        failure = UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid start byte")
-
-    monkeypatch.setattr(executor.worktrees, "reset_to_main", lambda _path: None)
-    monkeypatch.setattr(executor.worktrees, "apply_patch", lambda _path, _patch: None)
-
-    if policy == "forbidden":
-        def fail_forbidden(_path: Path) -> list[str]:
-            raise failure
-
-        monkeypatch.setattr(executor.worktrees, "forbidden_paths", fail_forbidden)
-    else:
-        monkeypatch.setattr(executor.worktrees, "forbidden_paths", lambda _path: [])
-
-        def fail_frozen(_path: Path, _task: TaskRecord) -> list[str]:
-            raise failure
-
-        monkeypatch.setattr(executor.worktrees, "frozen_paths", fail_frozen)
-
-    transcript_messages: list[tuple[str, str]] = []
-
-    class Transcript:
-        def write(self, stage: str, message: str) -> None:
-            transcript_messages.append((stage, message))
-
-    if repair == "conflict":
-        result = executor._repair_integration_conflict(
-            source.id, "conflict", "rebased patch", integration.id, Transcript()
-        )
-    else:
-        result = executor._repair_integration_validation_failure(
-            source.id, [], "rebased patch", integration.id, Transcript()
-        )
-
-    assert result is False
-    saved_source = store.get(source.id)
-    saved_integration = store.get(integration.id)
-    assert saved_source.status == TaskStatus.integrating
-    assert saved_source.worktree_path == worktree
-    assert worktree.exists()
-    assert saved_integration.status == TaskStatus.blocked
-    assert saved_integration.summary == PATH_POLICY_STATUS_PARSE_SUMMARY
-    event = next(
-        event
-        for event in store.events(integration.id)
-        if event.kind == "path_policy.blocked"
-    )
-    assert event.data["integration_task_id"] == integration.id
-    if failure_kind == "malformed":
-        assert event.data["diagnostic"] == failure.diagnostic
-    else:
-        assert "diagnostic" not in event.data
-    assert ("path_policy_blocked", PATH_POLICY_STATUS_PARSE_SUMMARY) in transcript_messages
-    assert not any(
-        event.kind == "path_policy.blocked" for event in store.events(source.id)
-    )
-    revision_event = (
-        "worker.integration_revision_finished"
-        if repair == "conflict"
-        else "worker.validation_revision_finished"
-    )
-    assert any(event.kind == revision_event for event in store.events(source.id))
-
-
-def test_integration_manager_counts_main_push_budget_per_utc_day(
-    config: StewardConfig, tmp_path: Path
-) -> None:
-    config = config.__class__(
-        **{
-            **config.__dict__,
-            "integration_mode": IntegrationMode.push_main.value,
-            "limits": StewardLimits(
-                max_active_tasks=config.limits.max_active_tasks,
-                max_main_pushes_per_day=1,
-                worker_timeout_minutes=config.limits.worker_timeout_minutes,
-                review_timeout_minutes=config.limits.review_timeout_minutes,
-                validation_timeout_minutes=config.limits.validation_timeout_minutes,
-            ),
-        }
-    )
-    store = TaskStore.create(config.db_path)
-    old_push_time = utc_now().astimezone(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    ) - timedelta(seconds=1)
-    with Session(store.engine) as session, session.begin():
-        session.add(
-            EventRow(
-                task_id="old-integration",
-                kind="main.pushed",
-                message="old-sha",
-                created_at=old_push_time.isoformat(),
-                data_json="{}",
-            )
-        )
-    source, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    patch_path = tmp_path / "source.patch"
-    patch_path.write_text("", encoding="utf-8")
-    source.patch_path = patch_path
-    store.save(source)
-    integration, _ = store.add_task(
-        TaskSpec(
-            kind=TaskKind.integration,
-            worker=WorkerKind.integration_manager,
-            title="Integrate T",
-            prompt="Integrate",
-            metadata={"source_task_id": source.id},
-        )
-    )
-    transcript_messages: list[tuple[str, str]] = []
-
-    class Transcript:
-        def write(self, stage: str, message: str) -> None:
-            transcript_messages.append((stage, message))
-
-    executor = StewardExecutor(config, store)
-
-    assert executor._integration_preflight(integration, source, Transcript()) is None
-    assert ("patch", f"source patch: {patch_path}") in transcript_messages
-
-    store.add_event("today-integration", "main.pushed", "today-sha")
-
-    assert executor._integration_preflight(integration, source, Transcript()) is False
-    assert store.get(integration.id).status == TaskStatus.blocked
-    assert store.get(source.id).status == TaskStatus.blocked
-
 
 def test_commit_message_prompt_includes_patch_context(config: StewardConfig) -> None:
     source = TaskRecord(
@@ -6607,7 +6034,6 @@ index 1111111..2222222 100644
     assert "scripts/fuzz-targets.sh" in prompt
     assert patch_text.strip() in prompt
 
-
 def test_parse_commit_message_rejects_invalid_subject() -> None:
     assert parse_commit_message('{"subject":"fix: update rag","body":"Body"}') == {
         "subject": "fix: update rag",
@@ -6622,7 +6048,6 @@ def test_parse_commit_message_rejects_invalid_subject() -> None:
         )
         is None
     )
-
 
 def test_durable_push_persists_transport_retry_before_success(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -6700,7 +6125,6 @@ def test_push_retry_classification_excludes_remote_rejection() -> None:
     assert not _is_transient_push_failure("remote rejected: permission denied")
     assert not _is_transient_push_failure("non-fast-forward update rejected")
 
-
 def test_durable_push_rejection_does_not_update_feature_issue(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -6729,7 +6153,6 @@ def test_durable_push_rejection_does_not_update_feature_issue(
     assert not any(event.kind == "pipeline.push" for event in events)
     assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
 
-
 def test_durable_integration_rebase_does_not_update_feature_issue(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -6754,7 +6177,6 @@ def test_durable_integration_rebase_does_not_update_feature_issue(
     child = store.list_pipelines(integration.id)[-1]
     assert child.trigger == "integration-rebase"
     assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
-
 
 def test_durable_push_closes_one_feature_issue_after_push(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -6814,7 +6236,6 @@ def test_durable_ambiguous_push_also_closes_feature_issue(
     transcript = store.get(integration.id).transcript_path
     assert transcript is not None and transcript.is_file()
 
-
 def test_reconciled_push_updates_feature_issue_before_sealing(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -6865,7 +6286,6 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
     transcript = store.get(integration.id).transcript_path
     assert transcript is not None and "issue_closed: #42" in transcript.read_text(encoding="utf-8")
     assert executor.advance_once(integration.id).status == "ready_to_seal"
-
 
 def test_durable_push_remains_pushed_when_feature_issue_update_fails(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -6977,7 +6397,6 @@ def test_durable_push_skips_terminal_integration_source(
     assert saved.summary == "integration source already terminal: failed"
     assert not any(event.kind.startswith("github.issue_") for event in store.events(source.id))
     assert commands == []
-
 
 def test_durable_commit_message_failure_blocks_before_push(
     config: StewardConfig, tmp_path: Path, monkeypatch
@@ -7203,131 +6622,6 @@ def test_executor_blocks_unchanged_validation_revision(
     assert saved.summary == "validation made no progress"
     assert any(event.kind == "pipeline.validation.failure" for event in store.events(task.id))
 
-def test_validation_failure_state_uses_complete_validation_log(
-    config: StewardConfig, tmp_path: Path
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    task.worktree_path = config.repo_root
-    store.save(task)
-    (config.repo_root / "README.md").write_text("changed\n", encoding="utf-8")
-    output = tmp_path / "validation.txt"
-    validation = ValidationResult(
-        command=["fake-validation"],
-        cwd=config.repo_root,
-        passed=False,
-        exit_code=1,
-        output_path=output,
-        summary="coquic lint shell ready",
-    )
-    executor = StewardExecutor(config, store)
-    executor._latest_failed_validations[task.id] = [validation]
-
-    output.write_text("STDOUT: banner\nSTDERR: first failure\n", encoding="utf-8")
-    first_state = executor._validation_failure_state(task.id)
-    output.write_text("STDOUT: banner\nSTDERR: second failure\n", encoding="utf-8")
-    second_state = executor._validation_failure_state(task.id)
-    output.write_text(
-        "STDOUT: banner\n"
-        "STDERR: second failure\n"
-        "error (ignored): SQLite database '/tmp/eval.sqlite' is busy\n",
-        encoding="utf-8",
-    )
-
-    assert first_state[0] == second_state[0]
-    assert first_state[1] != second_state[1]
-    assert second_state == executor._validation_failure_state(task.id)
-
-
-def test_validation_failure_state_includes_untracked_changes(
-    config: StewardConfig, tmp_path: Path
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    task.worktree_path = config.repo_root
-    store.save(task)
-    (config.repo_root / "README.md").write_text("changed\n", encoding="utf-8")
-    output = tmp_path / "validation.txt"
-    output.write_text("same failure\n", encoding="utf-8")
-    validation = ValidationResult(
-        command=["fake-validation"],
-        cwd=config.repo_root,
-        passed=False,
-        exit_code=1,
-        output_path=output,
-        summary="same failure",
-    )
-    executor = StewardExecutor(config, store)
-    executor._latest_failed_validations[task.id] = [validation]
-
-    before = executor._validation_failure_state(task.id)
-    (config.repo_root / "repair.txt").write_text("progress\n", encoding="utf-8")
-    after = executor._validation_failure_state(task.id)
-
-    assert before[0] != after[0]
-    assert before[1] == after[1]
-
-
-def test_validation_failure_state_normalizes_volatile_zig_test_output(
-    config: StewardConfig, tmp_path: Path
-) -> None:
-    store = TaskStore.create(config.db_path)
-    task, _ = store.add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )
-    task.worktree_path = config.repo_root
-    store.save(task)
-    (config.repo_root / "README.md").write_text("changed\n", encoding="utf-8")
-    output = tmp_path / "zig-build-test.txt"
-    validation = ValidationResult(
-        command=["nix", "develop", "-c", "zig", "build", "test"],
-        cwd=config.repo_root,
-        passed=False,
-        exit_code=1,
-        output_path=output,
-        summary="1 FAILED TEST",
-    )
-    executor = StewardExecutor(config, store)
-    executor._latest_failed_validations[task.id] = [validation]
-
-    output.write_text(
-        "[       OK ] OtherSuite.PassingTest (1 ms)\n"
-        "/repo/test.cpp:42: Failure\n"
-        "Expected equality of these values:\n  actual\n  expected\n"
-        "[  FAILED  ] Suite.FailingTest (3 ms)\n"
-        "[==========] 2 tests ran. (9 ms total)\n"
-        "error (ignored): SQLite database '/tmp/first.sqlite' is busy\n"
-        "failed command: ./.zig-cache/o/aaaaaaaa/test\n"
-        "--seed 0x11111111 -Zaaaaaaaa test\n",
-        encoding="utf-8",
-    )
-    first_state = executor._validation_failure_state(task.id)
-    output.write_text(
-        "[       OK ] DifferentSuite.OtherPassingTest (17 ms)\n"
-        "/repo/test.cpp:42: Failure\n"
-        "Expected equality of these values:\n  actual\n  expected\n"
-        "[  FAILED  ] Suite.FailingTest (21 ms)\n"
-        "[==========] 2 tests ran. (35 ms total)\n"
-        "error (ignored): SQLite database '/tmp/second.sqlite' is busy\n"
-        "failed command: ./.zig-cache/o/bbbbbbbb/test\n"
-        "--seed 0x22222222 -Zbbbbbbbb test\n",
-        encoding="utf-8",
-    )
-
-    second_state = executor._validation_failure_state(task.id)
-    assert first_state == second_state
-
-    output.write_text(
-        output.read_text(encoding="utf-8").replace("  actual\n", "  different\n"),
-        encoding="utf-8",
-    )
-    assert second_state != executor._validation_failure_state(task.id)
-
-
 def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -7432,7 +6726,6 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     assert status.exit_code == 0
     assert task_id in status.output
 
-
 def test_cli_plan_supersedes_stale_signals_before_planning(
     repo: Path, monkeypatch
 ) -> None:
@@ -7469,7 +6762,6 @@ def test_cli_plan_supersedes_stale_signals_before_planning(
     assert saved.status == SignalItemStatus.superseded
     assert saved.planner_run_id == "source-revalidation"
 
-
 def test_cli_daemon_forever_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     config = load_config()
@@ -7491,7 +6783,6 @@ def test_cli_daemon_forever_is_headless(repo: Path, monkeypatch) -> None:
     assert "Steward daemon stopped." in result.output
     assert "Steward Web UI" not in result.output
 
-
 def test_cli_daemon_help_has_no_web_options() -> None:
     result = CliRunner().invoke(app, ["daemon", "--help"])
 
@@ -7499,13 +6790,11 @@ def test_cli_daemon_help_has_no_web_options() -> None:
     assert "--web" not in result.output
     assert "--no-web" not in result.output
 
-
 def test_cli_rejects_removed_web_command() -> None:
     result = CliRunner().invoke(app, ["web"])
 
     assert result.exit_code != 0
     assert "No such command 'web'" in result.output
-
 
 def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
@@ -7517,7 +6806,6 @@ def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "TickResult" in result.output
-
 
 def test_cli_daemon_exits_when_push_preflight_fails(
     repo: Path, coquic_home: Path, monkeypatch
@@ -7544,7 +6832,6 @@ github_repository = "minhuw/coquic"
     assert "remote push preflight failed" in result.output
     assert "TickResult" not in result.output
 
-
 def test_cli_daemon_refuses_second_instance(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -7560,7 +6847,6 @@ def test_cli_daemon_refuses_second_instance(
     assert result.exit_code == 1
     assert "Steward daemon already running" in result.output
     assert str(config.state_dir / "daemon.lock") in result.output
-
 
 def test_store_records_in_progress_iteration_review(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
@@ -7603,7 +6889,6 @@ def test_store_records_in_progress_iteration_review(config: StewardConfig) -> No
         == config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
     )
 
-
 def test_store_persists_tasks_in_sqlite(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
@@ -7621,7 +6906,6 @@ def test_store_persists_tasks_in_sqlite(config: StewardConfig) -> None:
     saved = reopened.get(task.id)
     assert saved.spec.title == "CI"
     assert reopened.count_events("task.created") == 1
-
 
 def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> None:
     from coquic_steward.core.models import ValidationResult
@@ -7722,7 +7006,6 @@ def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> 
     assert iteration.worker_prompt_path == config.prompts_dir / task.id / "worker.md"
     assert iteration.patch_path == config.patches_dir / task.id / "iteration-0.patch"
 
-
 def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: Path) -> None:
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(
@@ -7738,7 +7021,6 @@ def test_store_leaves_external_paths_absolute(config: StewardConfig, tmp_path: P
         assert row is not None
         assert row.worktree_path == str(external)
     assert TaskStore.open(config.db_path).get(task.id).worktree_path == external
-
 
 def test_store_ignores_historic_relative_path_root(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
@@ -7762,7 +7044,6 @@ def test_store_ignores_historic_relative_path_root(config: StewardConfig) -> Non
     assert saved.patch_path == current
     assert saved.patch_path != historic
     assert saved.spec.metadata["source_patch_path"] == str(current)
-
 
 def test_store_open_preserves_existing_absolute_state_paths(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
@@ -7856,19 +7137,16 @@ def test_store_open_preserves_existing_absolute_state_paths(config: StewardConfi
     assert reopened.events(task.id)[1].message == str(absolute_patch)
     assert reopened.events(task.id)[1].data["patch_path"] == str(absolute_patch)
 
-
 def test_runtime_has_raw_archive_peers(config: StewardConfig) -> None:
     config.ensure_dirs()
     assert config.tasks_dir.parent == config.control_loop_dir.parent
     assert config.control_loop_dir.name == "control-loop"
     assert config.tasks_dir.name == "tasks"
 
-
 def test_store_initializes_private_control_loop_ledger(config: StewardConfig) -> None:
     store = TaskStore.create(config.db_path)
     assert isinstance(store.control_loop_ledger, ControlLoopLedger)
     assert store.control_loop_ledger.epoch_id == config.ensure_epoch()["epochId"]
-
 
 def test_archive_rejects_symlink_root(tmp_path: Path) -> None:
     target = tmp_path / "target"

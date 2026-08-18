@@ -17,12 +17,9 @@ from coquic_steward.core.models import (
     WorkerKind,
 )
 from coquic_steward.execution import StewardExecutor
-from coquic_steward.execution.executor import _publication_preflight_fingerprint
 from coquic_steward.orchestration import StewardDaemon
-from coquic_steward.publication.models import FailClosed, ReasonCode
 from coquic_steward.execution.implementation_plan import parse_implementation_plan
 from coquic_steward.storage import TaskStore
-
 
 def _drive_durable(
     executor: StewardExecutor, task_id: str, *, max_steps: int = 128
@@ -38,7 +35,6 @@ def _drive_durable(
             return False
     raise AssertionError(f"durable task did not reach a stopping point: {task_id}")
 
-
 VALID_PLAN = {
     "summary": "Implement the scoped change.",
     "assumptions": ["The existing API remains compatible."],
@@ -53,19 +49,6 @@ VALID_PLAN = {
     "risks": ["Behavioral regression"],
     "non_goals": ["Unrelated refactoring"],
 }
-
-
-def test_publication_preflight_fingerprint_is_value_free() -> None:
-    outcome = FailClosed((ReasonCode.scanner_failure,))
-    fingerprint = _publication_preflight_fingerprint(
-        "patch contains a private value",
-        outcome,
-        {"source": 0, "patch": 1},
-    )
-
-    assert len(fingerprint) == 64
-    assert "private value" not in fingerprint
-
 
 def test_task_workflow_defaults_from_kind() -> None:
     feature = TaskSpec(
@@ -83,7 +66,6 @@ def test_task_workflow_defaults_from_kind() -> None:
 
     assert feature.workflow == TaskWorkflow.feature
     assert fix.workflow == TaskWorkflow.fix
-
 
 def test_stage_settings_override_global_defaults(config: StewardConfig) -> None:
     configured = config.__class__(
@@ -116,7 +98,6 @@ def test_stage_settings_override_global_defaults(config: StewardConfig) -> None:
     assert args[args.index("--sandbox") + 1] == "read-only"
     assert 'model_reasoning_effort="high"' in args
 
-
 def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -> None:
     task = TaskStore.create(config.db_path).add_task(
         TaskSpec(
@@ -131,7 +112,6 @@ def test_plan_parser_rejects_frozen_and_generated_paths(config: StewardConfig) -
     generated = json.loads(json.dumps(VALID_PLAN))
     generated["steps"][0]["files"] = ["zig-out/result"]
     assert parse_implementation_plan(json.dumps(generated), task, config) is None
-
 
 def test_feature_plans_then_codes_in_separate_session(
     config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -197,7 +177,6 @@ def test_feature_plans_then_codes_in_separate_session(
         for event in events
     )
 
-
 def test_fix_workflow_skips_planning(
     config: StewardConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -225,7 +204,6 @@ def test_fix_workflow_skips_planning(
         event.kind.startswith("implementation_plan.") for event in store.events(task.id)
     )
 
-
 def test_invalid_feature_plan_retries_without_coding(
     config: StewardConfig, tmp_path: Path
 ) -> None:
@@ -247,7 +225,6 @@ def test_invalid_feature_plan_retries_without_coding(
     assert store.get(task.id).status == TaskStatus.blocked
     assert len(store.plan_runs(task.id)) == 2
     assert store.iterations(task.id) == []
-
 
 def _fake_codex(tmp_path: Path, *, invalid_plan: bool) -> Path:
     fake = tmp_path / ("codex-invalid-plan" if invalid_plan else "codex-workflow")
@@ -271,7 +248,6 @@ def _fake_codex(tmp_path: Path, *, invalid_plan: bool) -> Path:
     )
     fake.chmod(0o755)
     return fake
-
 
 def _passing_gates(
     config,

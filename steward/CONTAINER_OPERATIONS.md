@@ -333,11 +333,15 @@ nix develop -c bash steward/containers/test-manage.sh --init
 nix develop -c bash steward/containers/test-manage.sh --lifecycle
 ```
 
-The production-shaped smoke entry point runs those checks plus planner-boundary
-checks without launching a real service:
+The production-shaped smoke entry point includes the focused Planner smoke internally, along with those checks, without launching a real service:
 
 ```sh
 nix develop -c bash steward/containers/smoke-test.sh --production-compose
+```
+
+For focused Planner boundary verification, the standalone mode is optional:
+
+```sh
 nix develop -c bash steward/containers/smoke-test.sh --planner
 ```
 

@@ -1336,7 +1336,13 @@ class StewardExecutor:
             today = utc_now().astimezone(timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
-            push_count = self.store.count_events_since("main.pushed", today)
+            push_count = (
+                self.store.count_events_since("main.pushed", today)
+                + self.store.count_events_since(
+                    "pipeline.push.ambiguous_resolved", today
+                )
+            )
+
             if push_count >= self.config.limits.max_main_pushes_per_day:
                 summary = "main push budget reached"
                 self.store.add_event(
@@ -1378,7 +1384,16 @@ class StewardExecutor:
                             "ambiguous": True,
                         },
                     )
-                self.store.add_event(task.id, "pipeline.push.ambiguous_resolved", commit, {"pipeline_id": pipeline.id, "commit": commit, "detail": detail})
+                    self.store.add_event(
+                        task.id,
+                        "pipeline.push.ambiguous_resolved",
+                        commit,
+                        {
+                            "pipeline_id": pipeline.id,
+                            "commit": commit,
+                            "ambiguous": True,
+                        },
+                    )
                 self._complete_confirmed_push(task, commit)
                 self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
                 return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"commit": commit, "ambiguous": True})

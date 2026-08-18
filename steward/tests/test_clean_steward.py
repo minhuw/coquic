@@ -6276,7 +6276,11 @@ def test_reconciled_push_updates_feature_issue_before_sealing(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
     config, store, source, integration, executor = _durable_push_setup(
-        config, tmp_path, monkeypatch, issue_numbers=(42,)
+        config,
+        tmp_path,
+        monkeypatch,
+        issue_numbers=(42,),
+        max_main_pushes_per_day=1,
     )
     _advance_durable(executor, integration.id, 7)
     real_push = Worktrees.push_head_to_main

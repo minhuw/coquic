@@ -10,6 +10,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from datetime import timezone
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -86,8 +87,6 @@ from ..core.lifecycle import (
     coarse_phase,
     require_pipeline_transition,
 )
-
-PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 
 
 def _path_policy_status_event_data(
@@ -1332,11 +1331,53 @@ class StewardExecutor:
         attempt = self._phase_attempt(task.id, pipeline.id, phase)
         self._phase_start(task, pipeline, phase, action_id=f"{action}-{attempt}", payload={"commit": commit, "attempt": attempt})
 
-        try:
-            result = self.worktrees.push_head_to_main(worktree)
-        except RuntimeError as exc:
+        push_error: RuntimeError | None = None
+        with _integration_lock(self.config.state_dir):
+            today = utc_now().astimezone(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            push_count = self.store.count_events_since("main.pushed", today)
+            if push_count >= self.config.limits.max_main_pushes_per_day:
+                summary = "main push budget reached"
+                self.store.add_event(
+                    task.id,
+                    "pipeline.push.blocked",
+                    summary,
+                    {
+                        "pipeline_id": pipeline.id,
+                        "attempt": attempt,
+                        "count": push_count,
+                        "limit": self.config.limits.max_main_pushes_per_day,
+                        "day": today.date().isoformat(),
+                    },
+                )
+                return self._block_pipeline(task, pipeline, summary)
+            try:
+                result = self.worktrees.push_head_to_main(worktree)
+                self.store.add_event(
+                    task.id,
+                    "main.pushed",
+                    commit,
+                    {"pipeline_id": pipeline.id, "commit": commit},
+                )
+            except RuntimeError as exc:
+                push_error = exc
+
+        if push_error is not None:
+            exc = push_error
             detail = str(exc)[-2_000:]
             if self._commit_reachable(worktree, commit):
+                with _integration_lock(self.config.state_dir):
+                    self.store.add_event(
+                        task.id,
+                        "main.pushed",
+                        commit,
+                        {
+                            "pipeline_id": pipeline.id,
+                            "commit": commit,
+                            "ambiguous": True,
+                        },
+                    )
                 self.store.add_event(task.id, "pipeline.push.ambiguous_resolved", commit, {"pipeline_id": pipeline.id, "commit": commit, "detail": detail})
                 self._complete_confirmed_push(task, commit)
                 self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {commit}")
@@ -2759,12 +2800,6 @@ class StewardExecutor:
 
 
 
-class CommitMessageGenerationError(RuntimeError):
-    def __init__(self, reason: str, data: dict[str, object]):
-        super().__init__(reason)
-        self.data = data
-
-
 def default_worker_for_kind(kind: str) -> WorkerKind:
     mapping = {
         "code-quality": WorkerKind.code_quality_janitor,
@@ -2904,18 +2939,6 @@ def parse_commit_message(message: str) -> dict[str, str] | None:
     if not re.match(r"^[a-z]+(?:\([A-Za-z0-9._/-]+\))?: .+", subject):
         return None
     return {"subject": subject, "body": body}
-
-
-def _append_steward_task_trailer(
-    config: StewardConfig, body: str, source_task_id: str
-) -> str:
-    trailer = f"Steward-Task: {source_task_id}"
-    body = body.strip()
-    if trailer in body.splitlines():
-        return body
-    if not body:
-        return trailer
-    return f"{body}\n\n{trailer}"
 
 
 COMMIT_MESSAGE_OUTPUT_SCHEMA = {
@@ -3152,15 +3175,6 @@ def _stable_push_failure(message: str) -> str:
     return " ".join(_ANSI_ESCAPE_RE.sub("", message).lower().split())[-2_000:]
 
 
-def _write_integration_command_log(
-    config: StewardConfig, task_id: str, filename: str, text: str
-) -> Path:
-    path = config.logs_dir / task_id / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
 def _command_result_text(result) -> str:
     return "\n".join(
         [
@@ -3217,13 +3231,6 @@ def _path_matches_policy(path: str, pattern: str) -> bool:
         normalized_path == normalized_pattern
         or normalized_path.startswith(normalized_pattern + "/")
     )
-
-
-def _limit_commit_subject(subject: str) -> str:
-    subject = _normalize_commit_subject(subject)
-    if len(subject) <= 72:
-        return subject
-    return subject[:69].rstrip(" .") + "..."
 
 
 def _normalize_commit_subject(subject: str) -> str:

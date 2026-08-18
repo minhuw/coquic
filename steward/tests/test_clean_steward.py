@@ -215,6 +215,7 @@ def _durable_push_setup(
     issue_numbers: tuple[int, ...] = (),
     local_only: bool = False,
     frozen_paths: tuple[str, ...] = (),
+    max_main_pushes_per_day: int | None = None,
 ):
     remote = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True)
@@ -236,6 +237,16 @@ def _durable_push_setup(
             "git_remote": "origin",
             "integration_mode": IntegrationMode.push_main.value,
             "local_only": local_only,
+            "limits": (
+                StewardLimits(
+                    **{
+                        **config.limits.__dict__,
+                        "max_main_pushes_per_day": max_main_pushes_per_day,
+                    }
+                )
+                if max_main_pushes_per_day is not None
+                else config.limits
+            ),
             "path_policy": (
                 PathPolicyConfig(
                     frozen_by_kind={TaskKind.integration.value: frozen_paths}
@@ -5905,6 +5916,31 @@ def test_durable_local_only_commit_does_not_push_remote(
     ).stdout
     assert remote_text == "hello\n"
     assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
+
+def test_durable_push_blocks_when_main_push_budget_is_reached(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    config, store, _source, integration, executor = _durable_push_setup(
+        config,
+        tmp_path,
+        monkeypatch,
+        max_main_pushes_per_day=1,
+    )
+    store.add_event("prior-push", "main.pushed", "already-pushed")
+
+    def unexpected_push(_worktree):
+        raise AssertionError("push must be blocked by the daily budget")
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", unexpected_push)
+    assert not _drive_durable(executor, integration.id)
+    saved = store.get(integration.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "main push budget reached"
+    assert any(
+        event.kind == "pipeline.push.blocked" for event in store.events(integration.id)
+    )
+    assert not any(event.kind == "pipeline.push" for event in store.events(integration.id))
+
 
 def test_durable_ordinary_push_uses_task_as_issue_source(
     config: StewardConfig, tmp_path: Path, monkeypatch

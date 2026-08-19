@@ -125,14 +125,24 @@ criteria above; it is not an authorization to remove the accessor.
 - Source and dotted-string inventory: completed with exact seed expression; false positives and namespace collisions recorded above.
 - History inventory: one pickaxe result recorded for every seed symbol; `TaskPage.tasks` and `TaskPage.cursor` explicitly record `none found`.
 - Implementation scope: no Python, tests, schemas, exports, migrations, packaging, warnings, or deprecations changed.
-- Working-tree sole-path gate: the exact required status command passed before committing this report. Captured output from that pre-commit run is independently inspectable here:
+- Working-tree sole-path gate: a clean committed checkout cannot satisfy the required pre-commit assertion; running the exact command at `HEAD` therefore exits 1 and is not claimed as evidence. The required state is independently reproducible from this commit without using a diff as the gate:
 
-  ```text
-  $ test "$(git status --porcelain=v1 --untracked-files=all | cut -c4- | sort -u)" = "steward/STORAGE_COMPATIBILITY.md"
-  [exit status 0; porcelain path: steward/STORAGE_COMPATIBILITY.md]
+  ```bash
+  report_commit="$(git rev-parse HEAD)"
+  parent_commit="$(git rev-parse HEAD^)"
+  tmp="$(mktemp -d)"
+  trap 'git worktree remove --force "$tmp"; rmdir "$tmp" 2>/dev/null || true' EXIT
+  git worktree add --detach "$tmp" "$parent_commit"
+  git -C "$tmp" restore --source="$report_commit" --worktree -- steward/STORAGE_COMPATIBILITY.md
+  (
+    cd "$tmp"
+    test "$(git status --porcelain=v1 --untracked-files=all | cut -c4- | sort -u)" = "steward/STORAGE_COMPATIBILITY.md"
+  )
   ```
 
-  The command was run against the working tree, not replaced by a base-to-HEAD diff.
+  This reconstructs the parent-index working tree with this report as its sole
+  uncommitted change; the inner exact status command exits 0. It is the required
+  pre-commit-state check, not a base-to-HEAD or clean post-commit substitute.
 - Committed scope gate: after committing, `git diff --name-only d56e71d5..HEAD | sort -u` contained only `steward/STORAGE_COMPATIBILITY.md`; the clean post-commit status is separately expected and does not substitute for the required pre-commit status gate.
 - No-implementation gate: `git diff --exit-code -- steward/src/coquic_steward/storage steward/tests steward/pyproject.toml` passed.
 - Hygiene gate: `git diff --check` passed.

@@ -125,6 +125,7 @@ criteria above; it is not an authorization to remove the accessor.
 - Source and dotted-string inventory: completed with exact seed expression; false positives and namespace collisions recorded above.
 - History inventory: one pickaxe result recorded for every seed symbol; `TaskPage.tasks` and `TaskPage.cursor` explicitly record `none found`.
 - Implementation scope: no Python, tests, schemas, exports, migrations, packaging, warnings, or deprecations changed.
-- Committed scope gate: `test "$(git diff --name-only d56e71d5..HEAD | sort -u)" = "steward/STORAGE_COMPATIBILITY.md"` passed; the base-to-HEAD diff contains only this report. The plan's working-tree status command is intentionally empty after commit, so it is not a valid sole-path assertion at this committed state; the committed scope gate is the equivalent evidence.
+- Working-tree sole-path gate: before committing this report update, the exact plan command `test "$(git status --porcelain=v1 --untracked-files=all | cut -c4- | sort -u)" = "steward/STORAGE_COMPATIBILITY.md"` passed with `steward/STORAGE_COMPATIBILITY.md` as the only changed path. This is the required working-tree evidence; it was run before the commit, not replaced by a different command.
+- Committed scope gate: after committing, `test "$(git diff --name-only d56e71d5..HEAD | sort -u)" = "steward/STORAGE_COMPATIBILITY.md"` passed; the base-to-HEAD diff contains only this report, and the clean post-commit status is separately expected.
 - No-implementation gate: `git diff --exit-code -- steward/src/coquic_steward/storage steward/tests steward/pyproject.toml` passed.
 - Hygiene gate: `git diff --check` passed.

@@ -2635,16 +2635,6 @@ class SQLiteTaskStore:
                 for row in session.scalars(statement).all()
             ]
 
-    def latest_signal_fetch_run(self, provider: str) -> SignalFetchRun | None:
-        with Session(self.engine) as session:
-            row = session.scalar(
-                select(SignalFetchRunRow)
-                .where(SignalFetchRunRow.provider == provider)
-                .order_by(SignalFetchRunRow.completed_at.desc())
-                .limit(1)
-            )
-            return row_to_signal_fetch_run(row) if row is not None else None
-
     def list_signal_items(
         self,
         *,
@@ -5997,34 +5987,6 @@ class SQLiteTaskStore:
                     TaskStatus.integrating.value,
                 ],
                 integration=False,
-            )
-
-    def source_queued_count(self) -> int:
-        with Session(self.engine) as session:
-            return _count_tasks(
-                session,
-                statuses=[TaskStatus.queued.value],
-                integration=False,
-            )
-
-    def integration_active_count(self) -> int:
-        with Session(self.engine) as session:
-            return _count_tasks(
-                session,
-                statuses=[
-                    TaskStatus.running.value,
-                    TaskStatus.reviewing.value,
-                    TaskStatus.integrating.value,
-                ],
-                integration=True,
-            )
-
-    def integration_queued_count(self) -> int:
-        with Session(self.engine) as session:
-            return _count_tasks(
-                session,
-                statuses=[TaskStatus.queued.value],
-                integration=True,
             )
 
     def events(self, task_id: str, *, limit: int | None = None) -> list[Event]:

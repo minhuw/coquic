@@ -2627,13 +2627,9 @@ def test_wait_for_scheduler_event_uses_one_snapshot_per_iteration(
 
     for method in (
         "source_active_count",
-        "source_queued_count",
-        "integration_active_count",
-        "integration_queued_count",
         "pending_wakeups",
         "recent_wakeups",
         "pending_signal_items",
-        "latest_signal_fetch_run",
     ):
         monkeypatch.setattr(store, method, fail_legacy_query)
 

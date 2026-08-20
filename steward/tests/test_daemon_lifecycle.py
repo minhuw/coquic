@@ -3508,11 +3508,6 @@ def test_worker_pool_capacity_max_dispatch_and_heartbeat_remain_responsive(
         "source_active_count",
         lambda: pytest.fail("pool dispatch used a legacy source count"),
     )
-    monkeypatch.setattr(
-        store,
-        "integration_active_count",
-        lambda: pytest.fail("pool dispatch used a legacy integration count"),
-    )
     daemon = StewardDaemon(config, store)
     release = threading.Event()
     started = threading.Event()
@@ -3731,11 +3726,6 @@ def test_once_dispatch_drives_durable_progress_and_bounds_tasks(config, monkeypa
         store,
         "source_active_count",
         lambda: pytest.fail("serial dispatch used a legacy source count"),
-    )
-    monkeypatch.setattr(
-        store,
-        "integration_active_count",
-        lambda: pytest.fail("serial dispatch used a legacy integration count"),
     )
     daemon = StewardDaemon(config, store)
     outcomes = {

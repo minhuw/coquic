@@ -2363,22 +2363,6 @@ class SQLiteTaskStore:
             saved.append(saved_item)
         return saved, created
 
-    def claim_control_loop_planner_run(self, planner_run_id: str, signal_ids: list[str], active_task_ids: list[str] = (), *, prompt: dict[str, object] | None = None, attempt: int = 1):
-        result = self.control_loop.claim_planner_run(
-            planner_run_id,
-            signal_ids,
-            active_task_ids,
-            prompt=prompt,
-            attempt=attempt,
-        )
-        self._notify_change()
-        return result
-
-    def complete_control_loop_planner_run(self, planner_run_id: str, dispositions: list[object], **kwargs: object):
-        result = self.control_loop.complete_planner_run(planner_run_id, dispositions, **kwargs)
-        self._notify_change()
-        return result
-
     def commit_planner_decision(
         self,
         planner_run_id: str,

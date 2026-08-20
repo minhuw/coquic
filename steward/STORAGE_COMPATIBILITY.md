@@ -72,6 +72,16 @@ separated from the schema aliases by module path.
 | Detached page accessor returning `next_cursor` — `TaskPage.cursor` | `TaskPage.next_cursor` | SQLite-local property on `TaskPage` at `sqlite.py:291-304`; `TaskPage` itself is not package-exported | `git grep` finds property definition and cursor use; no separate history pickaxe result and no dotted-path dynamic lookup were found | none found | `explicit-compatibility` | Preserve as an additive accessor while page consumers remain externally unobservable; reassess only with direct import and API evidence. |
 | Public storage facade alias — `TaskStore` | `SQLiteTaskStore` | Package export and `__all__` entry at `storage/__init__.py:51,200`; extensive source and test callers | `git grep` finds broad `TaskStore.create` and `TaskStore.open` use; facade owns task, execution, publication, cleanup, and lifecycle persistence | `6d3f26b7 refactor(steward): remove legacy executor lifecycle`; also `8246344e`, `87aca008`, `9416eacf` | `canonical-public-facade` | Preserve as the stable public facade; any future API narrowing requires a separately selected plan and direct downstream-compatibility evidence. |
 
+### Approved planner Store narrowing
+
+The operator approved direct deletion of `claim_control_loop_planner_run` and
+`complete_control_loop_planner_run`. Repository-wide source, test, documentation,
+dotted-string, plugin-registration, and dynamic-lookup searches found no caller
+or supported promise for either method. The `TaskStore` facade and all other
+Store methods remain supported; direct ledger claims and atomic
+`commit_planner_decision` remain unchanged. No alias, warning, fallback, or
+compatibility shim is provided.
+
 Classification counts: canonical-public-facade=1 internal-cleanup-candidate=1 explicit-compatibility=27 external-ownership-unresolved=1
 
 ## Scan false positives and namespace notes

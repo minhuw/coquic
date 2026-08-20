@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import codecs
 import json
+import locale
 import os
 import queue
 import re
-import selectors
 import shlex
-import signal
 # subprocess is required to stream Codex stdio; launches use explicit argv and shell=False.
 import subprocess  # nosec B404
 import sys
@@ -28,6 +28,12 @@ from .activity import (
     activity_sidecar_path,
 )
 from .diagnostics import diagnostics_for_result
+from .process_stream import (
+    GroupTerminationStrategy,
+    PostEofWait,
+    drain_process,
+    reap_process,
+)
 from .telemetry import (
     PriceCatalog,
     TelemetryRecorder,
@@ -493,8 +499,7 @@ class CodexRunner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                bufsize=0,
                 start_new_session=True,
             )
         except OSError:
@@ -964,8 +969,44 @@ def _write_transcript(path: Path, stdout: str, stderr: str) -> None:
                 handle.write(json.dumps({"type": "stderr", "text": line}) + "\n")
 
 
+class _RunnerTextDecoder:
+    """Decode raw runner bytes with strict locale policy and retain lines."""
+
+    def __init__(self, encoding: str, on_line: Callable[[str], object]) -> None:
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+        self._buffer = ""
+        self._on_line = on_line
+
+    def feed(self, data: bytes) -> None:
+        self._buffer += self._decoder.decode(data, final=False)
+        self._drain_lines()
+
+    def finish(self) -> None:
+        self._buffer += self._decoder.decode(b"", final=True)
+        if self._buffer:
+            line = self._buffer
+            self._buffer = ""
+            self._on_line(line)
+
+    def _drain_lines(self) -> None:
+        while True:
+            newline = self._buffer.find("\n")
+            if newline < 0:
+                return
+            line = self._buffer[: newline + 1]
+            self._buffer = self._buffer[newline + 1 :]
+            self._on_line(line)
+
+
+def _runner_encoding() -> str:
+    try:
+        return locale.getencoding()
+    except AttributeError:
+        return locale.getpreferredencoding(False)
+
+
 def _communicate_streaming(
-    proc: subprocess.Popen[str],
+    proc: subprocess.Popen[bytes],
     input_text: str,
     transcript_path: Path,
     *,
@@ -979,68 +1020,81 @@ def _communicate_streaming(
 ) -> str:
     if proc.stdin is None or proc.stdout is None or proc.stderr is None:
         raise RuntimeError("codex process pipes were not initialized")
-    proc.stdin.write(input_text)
-    proc.stdin.close()
 
-    deadline = time.monotonic() + timeout_seconds
-    stdout_parts: list[str] = []
-    selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+    encoding = _runner_encoding()
+    termination = GroupTerminationStrategy()
+    try:
+        input_bytes = input_text.encode(encoding, errors="strict")
+    except Exception:
+        reap_process(proc, termination)
+        raise
+
     transcript_path.write_text("", encoding="utf-8")
     observer = event_observer or metadata_observer or on_event
     dispatcher = _MetadataDispatcher(observer) if observer is not None else None
+    stdout_parts: list[str] = []
     timed_out = False
+    reader_error: Exception | None = None
     try:
         with transcript_path.open("a", encoding="utf-8") as transcript:
-            while selector.get_map():
-                if time.monotonic() > deadline:
-                    timed_out = True
-                    _terminate_process_tree(proc)
-                    timeout_message = (
-                        f"codex process timed out after {timeout_seconds // 60} minute(s)"
-                    )
-                    _write_transcript_chunk(
-                        transcript,
-                        json.dumps({"type": "stderr", "text": timeout_message}) + "\n",
-                        transcript_digest_update,
-                    )
-                    proc.wait()
-                    proc.returncode = 124
-                    break
-                for key, _ in selector.select(timeout=0.2):
-                    line = key.fileobj.readline()
-                    if line == "":
-                        selector.unregister(key.fileobj)
-                        continue
-                    if key.data == "stdout":
-                        stdout_parts.append(line)
-                        _write_transcript_chunk(
-                            transcript, line, transcript_digest_update
-                        )
-                        transcript.flush()
-                        if dispatcher is not None:
-                            try:
-                                decoded = json.loads(line)
-                            except (json.JSONDecodeError, ValueError):
-                                decoded = None
-                                if malformed_observer is not None:
-                                    try:
-                                        malformed_observer()
-                                    except Exception:
-                                        pass
-                            if isinstance(decoded, dict):
-                                dispatcher.submit(decoded)
-                    else:
-                        _write_transcript_chunk(
-                            transcript,
-                            json.dumps({"type": "stderr", "text": line.rstrip("\n")})
-                            + "\n",
-                            transcript_digest_update,
-                        )
-                    transcript.flush()
-            if proc.returncode is None:
-                proc.wait()
+            def write_stdout(line: str) -> None:
+                stdout_parts.append(line)
+                _write_transcript_chunk(transcript, line, transcript_digest_update)
+                transcript.flush()
+                if dispatcher is None:
+                    return
+                try:
+                    decoded = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    decoded = None
+                    if malformed_observer is not None:
+                        try:
+                            malformed_observer()
+                        except Exception:
+                            pass
+                if isinstance(decoded, dict):
+                    dispatcher.submit(decoded)
+
+            def write_stderr(line: str) -> None:
+                _write_transcript_chunk(
+                    transcript,
+                    json.dumps({"type": "stderr", "text": line.rstrip("\n")})
+                    + "\n",
+                    transcript_digest_update,
+                )
+                transcript.flush()
+
+            stdout_decoder = _RunnerTextDecoder(encoding, write_stdout)
+            stderr_decoder = _RunnerTextDecoder(encoding, write_stderr)
+            outcome = drain_process(
+                proc,
+                input_bytes,
+                stdout_decoder.feed,
+                stderr_decoder.feed,
+                timeout_seconds,
+                termination,
+                PostEofWait.unbounded(),
+            )
+            reader_error = outcome.reader_error
+            timed_out = outcome.timed_out
+            if reader_error is None:
+                try:
+                    stdout_decoder.finish()
+                    stderr_decoder.finish()
+                except Exception as error:
+                    reader_error = error
+            if timed_out:
+                timeout_message = (
+                    f"codex process timed out after {timeout_seconds // 60} minute(s)"
+                )
+                _write_transcript_chunk(
+                    transcript,
+                    json.dumps({"type": "stderr", "text": timeout_message}) + "\n",
+                    transcript_digest_update,
+                )
+                proc.returncode = 124
+            if reader_error is not None:
+                raise reader_error
     finally:
         if dispatcher is not None and not dispatcher.finish(
             timeout=0.0 if timed_out else _METADATA_DRAIN_GRACE_SECONDS
@@ -1315,26 +1369,6 @@ def _last_agent_message(stdout: str) -> str:
         if isinstance(candidate, str) and candidate.strip():
             message = candidate
     return message
-
-
-def _terminate_process_tree(proc: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except OSError:
-        proc.kill()
 
 
 def _stderr_summary(transcript_path: Path) -> str:

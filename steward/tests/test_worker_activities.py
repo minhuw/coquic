@@ -5,7 +5,10 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from coquic_steward.agents.activity import (
     ACTIVITY_REPORTING_RULES,
@@ -243,8 +246,6 @@ def test_slow_metadata_observer_does_not_extend_process_timeout(tmp_path: Path) 
         observer_started.set()
         release_observer.wait(timeout=2)
 
-    import time
-
     started = time.monotonic()
     try:
         stdout = _communicate_streaming(
@@ -262,6 +263,110 @@ def test_slow_metadata_observer_does_not_extend_process_timeout(tmp_path: Path) 
     assert proc.returncode == 124
     assert stdout == raw_line
     assert (tmp_path / "codex.jsonl").read_text(encoding="utf-8").startswith(raw_line)
+
+
+def test_runner_streaming_preserves_text_partial_eof_and_stderr(tmp_path: Path) -> None:
+    transcript = tmp_path / "codex.jsonl"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; "
+            "payload = sys.stdin.buffer.read(); "
+            "os.write(1, payload + b'\\npartial'); "
+            "os.write(2, b'warning\\n')",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+    stdout = _communicate_streaming(
+        proc,
+        "prompt",
+        transcript,
+        timeout_seconds=1,
+    )
+
+    assert stdout == "prompt\npartial"
+    assert proc.returncode == 0
+    contents = transcript.read_text(encoding="utf-8")
+    assert "prompt\n" in contents
+    assert "partial" in contents
+    assert '{"type": "stderr", "text": "warning"}\n' in contents
+
+
+def test_runner_streaming_malformed_bytes_preserves_failure(tmp_path: Path) -> None:
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, time; os.write(1, b'\\xff\\n'); time.sleep(5)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+    with pytest.raises(UnicodeDecodeError):
+        _communicate_streaming(
+            proc,
+            "",
+            tmp_path / "codex.jsonl",
+            timeout_seconds=1,
+        )
+    assert proc.wait(timeout=1) is not None
+
+
+def test_runner_timeout_and_post_eof_wait_are_characterized(tmp_path: Path) -> None:
+    eof_proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, time; "
+            "os.write(1, b'done\\n'); os.close(1); os.close(2); time.sleep(0.1)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    started = time.monotonic()
+    assert _communicate_streaming(
+        eof_proc,
+        "",
+        tmp_path / "post-eof.jsonl",
+        timeout_seconds=1,
+    ) == "done\n"
+    assert time.monotonic() - started >= 0.08
+    assert eof_proc.returncode == 0
+
+    timeout_proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(5)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    timeout_transcript = tmp_path / "timeout.jsonl"
+    started = time.monotonic()
+    assert _communicate_streaming(
+        timeout_proc,
+        "",
+        timeout_transcript,
+        timeout_seconds=0.05,
+    ) == ""
+    assert time.monotonic() - started < 1
+    assert timeout_proc.returncode == 124
+    assert "codex process timed out after 0.0 minute(s)" in timeout_transcript.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_non_code_prompts_do_not_receive_activity_rules() -> None:

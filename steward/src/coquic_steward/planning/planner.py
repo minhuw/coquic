@@ -86,12 +86,6 @@ commentary, code fences, or prose outside the JSON object.
 
 
 @dataclass(frozen=True)
-class PlannedTask:
-    task: TaskSpec
-    dedupe_key: str
-
-
-@dataclass(frozen=True)
 class PlannerRun:
     planned: list[tuple[TaskSpec, str]]
     accepted_count: int
@@ -141,11 +135,6 @@ class CodexPlanner:
         )
         self.invocation = invocation
         self.verifier = verifier or PlanVerifier()
-
-    def plan(
-        self, signals: ProjectSignals, active_tasks: list[TaskRecord]
-    ) -> list[tuple[TaskSpec, str]]:
-        return self.run(signals, active_tasks).planned
 
     def run(
         self,
@@ -241,12 +230,6 @@ class CodexPlanner:
             dispositions=verified.dispositions,
             invalid_output=verified.invalid_output,
         )
-
-
-def plan_tasks(
-    config: StewardConfig, signals: ProjectSignals, active_tasks: list[TaskRecord]
-) -> list[tuple[TaskSpec, str]]:
-    return CodexPlanner(config).plan(signals, active_tasks)
 
 
 def run_planner(

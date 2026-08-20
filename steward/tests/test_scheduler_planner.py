@@ -28,7 +28,7 @@ from coquic_steward.execution.session import (
     LocalSessionInvoker,
     _InvocationLaunchGate,
 )
-from coquic_steward.planning import PlannerRun
+from coquic_steward.planning import PlannerRun, VerifiedPlan
 from coquic_steward.planning.verifier import (
     PLANNABLE_WORKERS,
     ActiveTaskSummary,
@@ -151,6 +151,7 @@ def test_verifier_preserves_invalid_duplicate_and_capacity_dispositions() -> Non
         [],
         capacity=1,
     )
+    assert isinstance(result, VerifiedPlan)
     assert [item.outcome for item in result.dispositions] == [
         "accepted",
         "duplicate",

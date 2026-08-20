@@ -2900,7 +2900,7 @@ def test_plan_verifier_rejects_broken_and_duplicate_specs() -> None:
         )
     ]
 
-    planned = PlanVerifier().verify(
+    verified = PlanVerifier().verify_plan(
         """
         {
           "tasks": [
@@ -2931,7 +2931,7 @@ def test_plan_verifier_rejects_broken_and_duplicate_specs() -> None:
         active,
     )
 
-    assert planned == []
+    assert verified.planned == []
 
 def test_plan_verifier_accepts_valid_llm_proposal() -> None:
     item = SignalItem(
@@ -2949,7 +2949,7 @@ def test_plan_verifier_accepts_valid_llm_proposal() -> None:
         items=[item],
     )
 
-    planned = PlanVerifier().verify(
+    verified = PlanVerifier().verify_plan(
         """
         {
           "tasks": [
@@ -2973,8 +2973,8 @@ def test_plan_verifier_accepts_valid_llm_proposal() -> None:
         [],
     )
 
-    assert len(planned) == 1
-    spec, dedupe_key = planned[0]
+    assert len(verified.planned) == 1
+    spec, dedupe_key = verified.planned[0]
     assert spec.kind == TaskKind.code_quality
     assert dedupe_key == "codeql:open"
     assert spec.metadata["evidence"] == ["wi-codeql-1"]
@@ -3289,7 +3289,7 @@ def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
         ],
     )
 
-    planned = PlanVerifier().verify(
+    verified = PlanVerifier().verify_plan(
         """
         {
           "tasks": [
@@ -3312,8 +3312,8 @@ def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
         [],
     )
 
-    assert len(planned) == 1
-    assert planned[0][0].allow_main_write is False
+    assert len(verified.planned) == 1
+    assert verified.planned[0][0].allow_main_write is False
 
 def test_codex_planner_prompt_includes_active_tasks(
     config: StewardConfig, tmp_path: Path
@@ -3348,7 +3348,7 @@ def test_codex_planner_prompt_includes_active_tasks(
         dedupe_key="interop:100",
     )
 
-    planned = CodexPlanner(config).plan(
+    result = CodexPlanner(config).run(
         ProjectSignals(
             repository="minhuw/coquic",
             items=[
@@ -3369,7 +3369,7 @@ def test_codex_planner_prompt_includes_active_tasks(
         [active],
     )
 
-    assert planned == []
+    assert result.planned == []
     prompt = captured_prompt.read_text(encoding="utf-8")
     assert PLANNER_SYSTEM_PROMPT.strip() in prompt
     assert "active_tasks" in prompt
@@ -3381,12 +3381,12 @@ def test_codex_planner_prompt_includes_active_tasks(
     assert str(planner_schema_path(config)) in args
     assert not (config.state_dir / "planner-thread.txt").exists()
 
-    planned = CodexPlanner(config).plan(
+    result = CodexPlanner(config).run(
         ProjectSignals(repository="minhuw/coquic"),
         [],
     )
 
-    assert planned == []
+    assert result.planned == []
     args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
     assert "resume" not in args
     assert "planner-thread-1" not in args

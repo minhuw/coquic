@@ -108,14 +108,6 @@ class PlanVerifier:
     def __init__(self, *, max_tasks: int = 8):
         self.max_tasks = max_tasks
 
-    def verify(
-        self,
-        raw_json: str,
-        signals: ProjectSignals,
-        active_tasks: list[ActiveTaskSummary],
-    ) -> list[tuple[TaskSpec, str]]:
-        return self.verify_plan(raw_json, signals, active_tasks).planned
-
     def verify_plan(
         self,
         raw_json: str,

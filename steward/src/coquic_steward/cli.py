@@ -48,6 +48,7 @@ from .signals import (
 )
 from .storage import TaskStore
 from .publication.d1 import D1PublicationClient
+from .publication.generation import _publication_compose_kwargs
 from .publication.models import ReasonCode
 from .publication.outbox import PublicationGeneration, PublicationRetryPolicy
 from .publication.publisher import (
@@ -140,25 +141,6 @@ def _configured_planner_session(config: StewardConfig) -> FreshPlannerSession:
         bind_deployment_identity(session.invoker.runtime, config)
         return session
     return FreshPlannerSession(config)
-
-
-def _publication_compose_kwargs(
-    config: StewardConfig,
-) -> dict[str, object]:
-    publication = config.publication
-    sources = tuple(
-        path
-        for path in (
-            publication.d1_token_path,
-            publication.r2_access_key_id_path,
-            publication.r2_secret_access_key_path,
-        )
-        if path is not None
-    )
-    return {
-        "credential_sources": sources,
-        "staging_root": publication.staging_root,
-    }
 
 
 def _current_publication_source(
@@ -360,7 +342,7 @@ def publication_retry(publication_id: str) -> None:
         result = publisher.retry_publication(
             publication_id,
             source,
-            compose_kwargs=_publication_compose_kwargs(config),
+            compose_kwargs=_publication_compose_kwargs(config.publication),
         )
     except Exception:
         _emit_publication(

@@ -62,6 +62,7 @@ from ..publication.atif import AtifSource
 from ..publication.models import RunIdentity, RunLineage, RunMetadata, UsageSummary
 from ..publication.generation import (
     PublicationGeneration as ComposedPublicationGeneration,
+    _publication_compose_kwargs,
     compose_publication_generation,
 )
 from ..publication.outbox import (
@@ -1012,25 +1013,6 @@ class StewardDaemon:
             value = PUBLICATION_RETRY_INTERVAL_SECONDS
         return max(0.05, min(PUBLICATION_RETRY_INTERVAL_SECONDS, value))
 
-    def _publication_compose_kwargs(self) -> dict[str, object]:
-        """Return daemon-only inputs for the canonical publication composer."""
-
-        publication = getattr(getattr(self, "config", None), "publication", None)
-        if publication is None:
-            return {"credential_sources": ()}
-        return {
-            "credential_sources": tuple(
-                path
-                for path in (
-                    getattr(publication, "d1_token_path", None),
-                    getattr(publication, "r2_access_key_id_path", None),
-                    getattr(publication, "r2_secret_access_key_path", None),
-                )
-                if path is not None
-            ),
-            "staging_root": getattr(publication, "staging_root", None),
-        }
-
     def _repair_staged_generation(
         self,
         publisher: CloudPublisher,
@@ -1338,7 +1320,9 @@ class StewardDaemon:
                 return False
         if not generations:
             return False
-        compose_kwargs = self._publication_compose_kwargs()
+        compose_kwargs = _publication_compose_kwargs(
+            getattr(getattr(self, "config", None), "publication", None)
+        )
         generation: PublicationGeneration = generations[0]
         if generation.state is PublicationState.blocked:
             for generation in generations:
@@ -2963,7 +2947,9 @@ class StewardDaemon:
             composed = compose_publication_generation(
                 source,
                 task_id=task.id,
-                **self._publication_compose_kwargs(),
+                **_publication_compose_kwargs(
+                    getattr(getattr(self, "config", None), "publication", None)
+                ),
             )
         except Exception:
             return False, "composition_failed"

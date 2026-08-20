@@ -6,6 +6,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -582,6 +583,45 @@ def test_detached_capture_must_match_source_bookends(section: str) -> None:
     assert isinstance(result, FailClosed)
     assert result.reason_codes == (ReasonCode.changing,)
     assert not hasattr(result, "payload")
+
+
+def test_publication_compose_kwargs_preserves_paths_and_staging_root() -> None:
+    d1_token = Path("/tmp/d1-token")
+    access_key = Path("/tmp/access-key")
+    secret_key = Path("/tmp/secret-key")
+    staging_root = Path("/tmp/publication-staging")
+
+    full = generation_module._publication_compose_kwargs(
+        SimpleNamespace(
+            d1_token_path=d1_token,
+            r2_access_key_id_path=access_key,
+            r2_secret_access_key_path=secret_key,
+            staging_root=staging_root,
+        )
+    )
+    assert set(full) == {"credential_sources", "staging_root"}
+    assert full["credential_sources"] == (d1_token, access_key, secret_key)
+    assert full["credential_sources"][0] is d1_token
+    assert full["credential_sources"][1] is access_key
+    assert full["credential_sources"][2] is secret_key
+    assert full["staging_root"] is staging_root
+
+    partial = generation_module._publication_compose_kwargs(
+        SimpleNamespace(
+            d1_token_path=None,
+            r2_access_key_id_path=access_key,
+            r2_secret_access_key_path=None,
+            staging_root=None,
+        )
+    )
+    assert set(partial) == {"credential_sources", "staging_root"}
+    assert partial["credential_sources"] == (access_key,)
+    assert partial["credential_sources"][0] is access_key
+    assert partial["staging_root"] is None
+
+    assert generation_module._publication_compose_kwargs(None) == {
+        "credential_sources": (),
+    }
 
 
 def test_builder_type_error_is_reduced_after_one_invocation() -> None:

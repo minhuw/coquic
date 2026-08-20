@@ -83,6 +83,25 @@ _TIMESTAMP_RE: Final[re.Pattern[str]] = re.compile(
 _MISSING: Final = object()
 
 
+def _publication_compose_kwargs(publication: object | None) -> dict[str, object]:
+    """Return credential-aware inputs for the canonical publication composer."""
+
+    if publication is None:
+        return {"credential_sources": ()}
+    return {
+        "credential_sources": tuple(
+            path
+            for path in (
+                getattr(publication, "d1_token_path", None),
+                getattr(publication, "r2_access_key_id_path", None),
+                getattr(publication, "r2_secret_access_key_path", None),
+            )
+            if path is not None
+        ),
+        "staging_root": getattr(publication, "staging_root", None),
+    }
+
+
 def _known_public_mapping(value: object) -> Mapping[str, Any] | None:
     """Serialize only named current publication values.
 

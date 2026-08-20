@@ -31,6 +31,16 @@ _CONTAINER_ROOTS = {
     "/nix/store/.links",
 }
 _PLANNER_ROOTS = {"/planner/history", "/planner/session", "/planner/output"}
+_VALIDATION_IMAGE_ENVIRONMENT_KEYS = frozenset(
+    {
+        "NIX_REGISTRATION",
+        "NIX_MATERIALIZED_STORE_PATHS",
+        "NIX_STORE_PATHS",
+        "PYTHONPATH",
+        "ZIG_GLOBAL_CACHE_DIR",
+        "ZIG_LOCAL_CACHE_DIR",
+    }
+)
 
 
 class TaskRole(StrEnum):
@@ -437,6 +447,90 @@ class ValidationContainerConfig:
     @property
     def container_name(self) -> str:
         return f"coquic-steward-validation-{self.run_id}"
+
+    @property
+    def environment(self) -> tuple[tuple[str, str], ...]:
+        values = [("VALIDATION_SOURCE_WORKTREE", self.worktree.as_posix())]
+        if self.git_common_dir is not None:
+            values.extend(
+                (
+                    ("VALIDATION_GIT_OBJECTS_DIR", str(self.git_common_dir / "objects")),
+                    (
+                        "VALIDATION_GIT_ALTERNATE_OBJECTS",
+                        "/validation/git-common-ro/objects",
+                    ),
+                )
+            )
+        return tuple(values)
+
+    @property
+    def image_environment_keys(self) -> frozenset[str]:
+        return _VALIDATION_IMAGE_ENVIRONMENT_KEYS
+
+    @property
+    def network(self) -> str:
+        return "none"
+
+    @property
+    def read_only(self) -> bool:
+        return True
+
+    @property
+    def security_options(self) -> tuple[str, ...]:
+        return ("no-new-privileges:true",)
+
+    @property
+    def cap_drop(self) -> tuple[str, ...]:
+        return ("ALL",)
+
+    @property
+    def tmpfs(self) -> tuple[tuple[str, str], ...]:
+        values: list[tuple[str, str]] = []
+        if self.git_common_dir is not None:
+            values.append(
+                (
+                    str(self.git_common_dir / "objects"),
+                    "rw,nosuid,nodev,size=256m,mode=0755,"
+                    f"uid={self.uid},gid={self.gid}",
+                )
+            )
+        values.extend(
+            (
+                (
+                    "/tmp",
+                    f"rw,noexec,nosuid,nodev,size={self.limits.scratch_bytes},mode=1777",
+                ),
+                (
+                    "/validation/worktree/.zig-cache",
+                    "rw,exec,nosuid,nodev,"
+                    f"size={self.limits.scratch_bytes},mode=0755,"
+                    f"uid={self.uid},gid={self.gid}",
+                ),
+                (
+                    "/validation/worktree/site/next",
+                    "rw,noexec,nosuid,nodev,size=1g,mode=0755,"
+                    f"uid={self.uid},gid={self.gid}",
+                ),
+                (
+                    "/validation/worktree/.duvet",
+                    "rw,noexec,nosuid,nodev,size=1g,mode=0755,"
+                    f"uid={self.uid},gid={self.gid}",
+                ),
+                ("/run", "rw,noexec,nosuid,nodev,size=16m"),
+                (
+                    "/nix/store",
+                    "rw,nosuid,nodev,"
+                    f"size={self.limits.scratch_bytes},mode=0755,"
+                    f"uid={self.uid},gid={self.gid}",
+                ),
+                (
+                    "/nix/var/log/nix",
+                    "rw,noexec,nosuid,nodev,size=64m,mode=0755,"
+                    f"uid={self.uid},gid={self.gid}",
+                ),
+            )
+        )
+        return tuple(values)
 
     @property
     def mounts(self) -> tuple[ContainerMount, ...]:

@@ -10,7 +10,8 @@ from pathlib import Path
 from ..core.config import StewardConfig
 from ..core.models import TaskRecord, ValidationResult, utc_now
 from ..core.subprocesses import CommandResult, run_command
-from .container import SubprocessDockerClient
+from .container import SubprocessDockerClient, ValidationContainerRuntime
+from .container_config import ContainerLimits, ValidationContainerConfig
 
 VALIDATION_SCOPE_CONTROL = """\
 Validation repair scope control:
@@ -135,76 +136,58 @@ def _docker_validation_runner(
     output_root.mkdir(parents=True, exist_ok=True)
     store_root = config.private_dir / "validation-store" / task_id
     store_root.mkdir(parents=True, exist_ok=True)
-    git_common_dir = _validation_git_common_dir(cwd)
+    worktree = cwd.resolve()
+    git_common_dir = _validation_git_common_dir(worktree)
     deployment = config.deployment
     validation_uid = 10000 if deployment.host_uid is None else int(deployment.host_uid)
     validation_gid = 10000 if deployment.host_gid is None else int(deployment.host_gid)
-    scratch_bytes = deployment.max_scratch_bytes
+    validation_config = ValidationContainerConfig(
+        run_id="direct-validation",
+        image=getattr(config, "validation_image", "coquic-steward-validation"),
+        image_digest=digest,
+        worktree=worktree,
+        output=output_root,
+        store=store_root,
+        git_common_dir=git_common_dir,
+        limits=ContainerLimits(
+            memory_bytes=deployment.max_memory_bytes,
+            pids=deployment.max_pids,
+            scratch_bytes=deployment.max_scratch_bytes,
+            log_max_bytes=deployment.max_log_bytes,
+        ),
+        uid=validation_uid,
+        gid=validation_gid,
+    )
     docker_client = SubprocessDockerClient(docker_bin)
+    runtime = ValidationContainerRuntime(validation_config, client=docker_client)
 
     def execute(command: list[str], workdir: Path, timeout: float) -> CommandResult:
+        resolved_worktree = workdir.resolve()
         mapped = [
-            item.replace(str(workdir.resolve()), "/validation/worktree")
-            .replace(workdir.resolve().as_uri(), "file:///validation/worktree")
+            item.replace(str(resolved_worktree), "/validation/worktree")
+            .replace(resolved_worktree.as_uri(), "file:///validation/worktree")
             for item in command
         ]
-        docker_argv = [
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--pids-limit",
-            str(deployment.max_pids),
-            "--memory",
-            str(deployment.max_memory_bytes),
-            "--user",
-            f"{validation_uid}:{validation_gid}",
-            "--mount",
-            f"type=bind,src={workdir.resolve()},dst=/validation/worktree,readonly",
-            "--mount",
-            f"type=bind,src={workdir.resolve()},dst={workdir.resolve()},readonly",
-            "--mount",
-            f"type=bind,src={output_root},dst=/validation/output",
-            "--mount",
-            f"type=bind,src={store_root},dst=/nix/var/nix",
-            "--mount",
-            f"type=bind,src={git_common_dir},dst={git_common_dir},readonly",
-            "--mount",
-            f"type=bind,src={git_common_dir},dst=/validation/git-common-ro,readonly",
-            "--env",
-            f"VALIDATION_SOURCE_WORKTREE={workdir.resolve()}",
-            "--env",
-            f"VALIDATION_GIT_OBJECTS_DIR={git_common_dir / 'objects'}",
-            "--env",
-            "VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects",
-            "--tmpfs",
-            f"{git_common_dir / 'objects'}:rw,nosuid,nodev,size=256m,mode=0755,uid={validation_uid},gid={validation_gid}",
-            "--tmpfs",
-            f"/tmp:rw,noexec,nosuid,nodev,size={scratch_bytes},mode=1777",
-            "--tmpfs",
-            f"/validation/worktree/.zig-cache:rw,exec,nosuid,nodev,size={scratch_bytes},mode=0755,uid={validation_uid},gid={validation_gid}",
-            "--tmpfs",
-            f"/validation/worktree/site/next:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid={validation_uid},gid={validation_gid}",
-            "--tmpfs",
-            f"/validation/worktree/.duvet:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid={validation_uid},gid={validation_gid}",
-            "--tmpfs",
-            f"/nix/store:rw,nosuid,nodev,size={scratch_bytes},mode=0755,uid={validation_uid},gid={validation_gid}",
-            "--tmpfs",
-            f"/nix/var/log/nix:rw,noexec,nosuid,nodev,size=64m,mode=0755,uid={validation_uid},gid={validation_gid}",
-            "--tmpfs",
-            "/run:rw,noexec,nosuid,nodev,size=16m",
-            digest,
-            "--exec",
-            *mapped,
-        ]
+        run_runtime = runtime
+        if resolved_worktree != validation_config.worktree:
+            run_config = ValidationContainerConfig(
+                run_id=validation_config.run_id,
+                image=validation_config.image,
+                image_digest=validation_config.image_digest,
+                worktree=resolved_worktree,
+                output=validation_config.output,
+                store=validation_config.store,
+                git_common_dir=validation_config.git_common_dir,
+                limits=validation_config.limits,
+                uid=validation_config.uid,
+                gid=validation_config.gid,
+            )
+            run_runtime = ValidationContainerRuntime(
+                run_config, client=docker_client
+            )
         try:
             captured = docker_client.run(
-                docker_argv,
+                run_runtime.run_argv(mapped),
                 timeout=timeout,
                 max_output_bytes=MAX_VALIDATION_OUTPUT_BYTES,
             )

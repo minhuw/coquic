@@ -62,7 +62,11 @@ from .implementation_plan import (
     implementation_plan_required,
 )
 from . import validation as validation_module
-from .validation import render_validation_revision_prompt, run_gates
+from .validation import (
+    _validation_git_common_dir,
+    render_validation_revision_prompt,
+    run_gates,
+)
 from .worktree import (
     PATH_POLICY_STATUS_PARSE_SUMMARY,
     Worktrees,
@@ -76,7 +80,7 @@ from .session import (
     session_supervisor_for_config,
     worktree_checkpoint,
 )
-from .container_config import TaskRole
+from .container_config import ContainerLimits, TaskRole, ValidationContainerConfig
 from .publication_graph import assemble_publication_graph
 from ..core.lifecycle import (
     AdvanceResult,
@@ -2134,12 +2138,42 @@ class StewardExecutor:
 
         return _ValidationCommandRunner(execute)
 
+    def _validation_container_config(
+        self,
+        *,
+        run_id: str,
+        image_digest: str,
+        worktree: Path,
+        root: Path,
+        git_common_dir: Path | None,
+        labels: dict[str, str],
+    ) -> ValidationContainerConfig:
+        deployment = self.config.deployment
+        return ValidationContainerConfig(
+            run_id=run_id,
+            image=self.config.validation_image,
+            image_digest=image_digest,
+            worktree=worktree,
+            output=root / "output",
+            store=root / "store",
+            git_common_dir=git_common_dir,
+            scratch=root / "scratch",
+            limits=ContainerLimits(
+                memory_bytes=deployment.max_memory_bytes,
+                pids=deployment.max_pids,
+                scratch_bytes=deployment.max_scratch_bytes,
+                log_max_bytes=deployment.max_log_bytes,
+            ),
+            labels=labels,
+            uid=10000 if deployment.host_uid is None else int(deployment.host_uid),
+            gid=10000 if deployment.host_gid is None else int(deployment.host_gid),
+        )
+
     def _isolated_validation_runner(
         self, task: TaskRecord, pipeline: Any, image_digest: str
     ) -> _ValidationCommandRunner:
         """Create one disposable validation sibling and route every gate through it."""
         from .container import ValidationContainerRuntime
-        from .container_config import ContainerLimits, ValidationContainerConfig
 
         run_id = f"validation-{sha256(f'{task.id}:{pipeline.id}'.encode()).hexdigest()[:16]}"
         root = self.config.private_dir / "validation" / task.id / pipeline.id
@@ -2152,12 +2186,8 @@ class StewardExecutor:
         epoch_id = str(self.config.ensure_epoch()["epochId"])
         deployment_id = getattr(deployment, "compose_project", "local")
         release_id = getattr(deployment, "release_id", None)
-        host_uid = getattr(deployment, "host_uid", None)
-        host_gid = getattr(deployment, "host_gid", None)
-        validation_uid = 10000 if host_uid is None else int(host_uid)
-        validation_gid = 10000 if host_gid is None else int(host_gid)
         worktree = Path(task.worktree_path or self.config.repo_root).resolve()
-        git_common_dir = self._validation_git_common_dir(worktree)
+        git_common_dir = _validation_git_common_dir(worktree)
         labels = {
             "coquic.steward.task": task.id,
             "coquic.steward.pipeline": pipeline.id,
@@ -2166,24 +2196,13 @@ class StewardExecutor:
         }
         if release_id:
             labels["coquic.steward.release"] = str(release_id)
-        config = ValidationContainerConfig(
+        config = self._validation_container_config(
             run_id=run_id,
-            image=getattr(self.config, "validation_image", "coquic-steward-validation"),
             image_digest=image_digest,
             worktree=worktree,
-            output=output,
-            store=store,
+            root=root,
             git_common_dir=git_common_dir,
-            scratch=scratch,
-            limits=ContainerLimits(
-                memory_bytes=getattr(deployment, "max_memory_bytes", 4 * 1024 * 1024 * 1024),
-                pids=getattr(deployment, "max_pids", 512),
-                scratch_bytes=getattr(deployment, "max_scratch_bytes", 8 * 1024 * 1024 * 1024),
-                log_max_bytes=getattr(deployment, "max_log_bytes", 64 * 1024 * 1024),
-            ),
             labels=labels,
-            uid=validation_uid,
-            gid=validation_gid,
         )
         cleanup_record: dict[str, object] = {
             "run_id": run_id,
@@ -2279,7 +2298,6 @@ class StewardExecutor:
 
     def _validation_runtime_for_cleanup(self, record: dict[str, object]) -> Any:
         from .container import ValidationContainerRuntime
-        from .container_config import ContainerLimits, ValidationContainerConfig
 
         task_id = str(record["task_id"])
         pipeline_id = str(record["pipeline_id"])
@@ -2297,35 +2315,15 @@ class StewardExecutor:
         git_common_dir = (
             Path(str(persisted_git_common_dir))
             if persisted_git_common_dir
-            else self._validation_git_common_dir(self.config.repo_root)
+            else _validation_git_common_dir(self.config.repo_root)
         )
-        deployment = self.config.deployment
-        config = ValidationContainerConfig(
+        config = self._validation_container_config(
             run_id=str(record["run_id"]),
-            image=self.config.validation_image,
             image_digest=str(record["image_id"]),
             worktree=worktree,
-            output=root / "output",
-            store=root / "store",
+            root=root,
             git_common_dir=git_common_dir,
-            scratch=root / "scratch",
-            limits=ContainerLimits(
-                memory_bytes=deployment.max_memory_bytes,
-                pids=deployment.max_pids,
-                scratch_bytes=deployment.max_scratch_bytes,
-                log_max_bytes=deployment.max_log_bytes,
-            ),
             labels=labels,
-            uid=(
-                10000
-                if deployment.host_uid is None
-                else int(deployment.host_uid)
-            ),
-            gid=(
-                10000
-                if deployment.host_gid is None
-                else int(deployment.host_gid)
-            ),
         )
         if config.container_name != record["container_name"]:
             raise ValueError("validation cleanup container identity is mismatched")
@@ -2335,27 +2333,6 @@ class StewardExecutor:
                 getattr(self.config, "container", None), "docker_bin", "docker"
             ),
         )
-
-    @staticmethod
-    def _validation_git_common_dir(worktree: Path) -> Path:
-        common = run_command(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=worktree,
-        )
-        git_dir = run_command(
-            ["git", "rev-parse", "--absolute-git-dir"], cwd=worktree
-        )
-        if not common.ok or not git_dir.ok:
-            raise ValueError("validation worktree Git metadata is unavailable")
-        common_path = Path(common.stdout.strip()).resolve()
-        git_dir_path = Path(git_dir.stdout.strip()).resolve()
-        if (
-            not common_path.is_dir()
-            or common_path.is_symlink()
-            or not git_dir_path.is_relative_to(common_path)
-        ):
-            raise ValueError("validation worktree Git metadata is ambiguous")
-        return common_path
 
     def retry_validation_cleanup_pending(self) -> int:
         """Retry ready or previous-daemon validation cleanup records."""

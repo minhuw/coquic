@@ -738,6 +738,38 @@ class ValidationContainerRuntime:
             value += ",readonly"
         return ["--mount", value]
 
+    def _isolation_argv(self) -> list[str]:
+        """Render the policy shared by one-shot and durable validation."""
+
+        config = self.config
+        argv = [
+            "--network",
+            config.network,
+        ]
+        if config.read_only:
+            argv.append("--read-only")
+        for option in config.security_options:
+            argv.extend(["--security-opt", option])
+        for capability in config.cap_drop:
+            argv.extend(["--cap-drop", capability])
+        argv.extend(
+            [
+                "--pids-limit",
+                str(config.limits.pids),
+                "--memory",
+                str(config.limits.memory_bytes),
+                "--user",
+                f"{config.uid}:{config.gid}",
+            ]
+        )
+        for mount in config.mounts:
+            argv.extend(self._mount_argv(mount))
+        for key, value in config.environment:
+            argv.extend(["--env", f"{key}={value}"])
+        for target, options in config.tmpfs:
+            argv.extend(["--tmpfs", f"{target}:{options}"])
+        return argv
+
     def create_argv(self) -> list[str]:
         config = self.config
         argv = [
@@ -745,19 +777,9 @@ class ValidationContainerRuntime:
             "--name",
             config.container_name,
             "--init",
-            "--network",
-            "none",
+            *self._isolation_argv(),
             "--restart",
             "no",
-            "--read-only",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--cap-drop",
-            "ALL",
-            "--pids-limit",
-            str(config.limits.pids),
-            "--memory",
-            str(config.limits.memory_bytes),
             "--stop-timeout",
             str(config.limits.stop_timeout_seconds),
             "--log-driver",
@@ -766,64 +788,11 @@ class ValidationContainerRuntime:
             f"max-size={config.limits.log_max_bytes}b",
             "--log-opt",
             f"max-file={config.limits.log_max_files}",
-            "--user",
-            f"{config.uid}:{config.gid}",
         ]
         for key in sorted(config.labels):
             argv.extend(["--label", f"{key}={config.labels[key]}"])
-        for mount in config.mounts:
-            argv.extend(self._mount_argv(mount))
-        argv.extend(
-            ["--env", f"VALIDATION_SOURCE_WORKTREE={config.worktree.as_posix()}"]
-        )
-        if config.git_common_dir is not None:
-            argv.extend(
-                [
-                    "--env",
-                    f"VALIDATION_GIT_OBJECTS_DIR={config.git_common_dir / 'objects'}",
-                    "--env",
-                    "VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects",
-                    "--tmpfs",
-                    f"{config.git_common_dir / 'objects'}:rw,nosuid,nodev,size=256m,mode=0755,uid={config.uid},gid={config.gid}",
-                ]
-            )
         argv.extend(
             [
-                "--tmpfs",
-                "/tmp:rw,noexec,nosuid,nodev,size="
-                + str(config.limits.scratch_bytes)
-                + ",mode=1777",
-                "--tmpfs",
-                "/validation/worktree/.zig-cache:rw,exec,nosuid,nodev,size="
-                + str(config.limits.scratch_bytes)
-                + ",mode=0755,uid="
-                + str(config.uid)
-                + ",gid="
-                + str(config.gid),
-                "--tmpfs",
-                "/validation/worktree/site/next:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
-                + str(config.uid)
-                + ",gid="
-                + str(config.gid),
-                "--tmpfs",
-                "/validation/worktree/.duvet:rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
-                + str(config.uid)
-                + ",gid="
-                + str(config.gid),
-                "--tmpfs",
-                "/run:rw,noexec,nosuid,nodev,size=16m",
-                "--tmpfs",
-                "/nix/store:rw,nosuid,nodev,size="
-                + str(config.limits.scratch_bytes)
-                + ",mode=0755,uid="
-                + str(config.uid)
-                + ",gid="
-                + str(config.gid),
-                "--tmpfs",
-                "/nix/var/log/nix:rw,noexec,nosuid,nodev,size=64m,mode=0755,uid="
-                + str(config.uid)
-                + ",gid="
-                + str(config.gid),
                 "--entrypoint",
                 "/bootstrap/sh",
                 config.image_digest,
@@ -832,6 +801,20 @@ class ValidationContainerRuntime:
             ]
         )
         return argv
+
+    def run_argv(self, command: list[str]) -> list[str]:
+        if not command or any("\x00" in value for value in command):
+            raise ContainerBoundaryError(
+                ContainerErrorCategory.invalid, "validation command is empty or invalid"
+            )
+        return [
+            "run",
+            "--rm",
+            *self._isolation_argv(),
+            self.config.image_digest,
+            "--exec",
+            *command,
+        ]
 
     def create(self) -> str:
         result = self._run(self.create_argv())
@@ -970,26 +953,10 @@ class ValidationContainerRuntime:
         }
         security = [str(value) for value in host_config.get("SecurityOpt") or []]
         restart = str((host_config.get("RestartPolicy") or {}).get("Name") or "no")
-        expected_environment = {
-            "VALIDATION_SOURCE_WORKTREE": config.worktree.as_posix(),
-        }
-        if config.git_common_dir is not None:
-            expected_environment.update(
-                {
-                    "VALIDATION_GIT_OBJECTS_DIR": str(
-                        config.git_common_dir / "objects"
-                    ),
-                    "VALIDATION_GIT_ALTERNATE_OBJECTS": "/validation/git-common-ro/objects",
-                }
-            )
+        expected_environment = dict(config.environment)
         actual_environment: dict[str, str] = {}
         allowed_environment = {
-            "NIX_REGISTRATION",
-            "NIX_MATERIALIZED_STORE_PATHS",
-            "NIX_STORE_PATHS",
-            "PYTHONPATH",
-            "ZIG_GLOBAL_CACHE_DIR",
-            "ZIG_LOCAL_CACHE_DIR",
+            *config.image_environment_keys,
             *expected_environment,
         }
         for item in container_config.get("Env") or []:
@@ -1000,43 +967,7 @@ class ValidationContainerRuntime:
                     "validation container environment is malformed",
                 )
             actual_environment[key] = value
-        expected_tmpfs = {
-            "/tmp": "rw,noexec,nosuid,nodev,size="
-            + str(config.limits.scratch_bytes)
-            + ",mode=1777",
-            "/run": "rw,noexec,nosuid,nodev,size=16m",
-            "/validation/worktree/.zig-cache": "rw,exec,nosuid,nodev,size="
-            + str(config.limits.scratch_bytes)
-            + ",mode=0755,uid="
-            + str(config.uid)
-            + ",gid="
-            + str(config.gid),
-            "/validation/worktree/site/next": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
-            + str(config.uid)
-            + ",gid="
-            + str(config.gid),
-            "/validation/worktree/.duvet": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid="
-            + str(config.uid)
-            + ",gid="
-            + str(config.gid),
-            "/nix/store": "rw,nosuid,nodev,size="
-            + str(config.limits.scratch_bytes)
-            + ",mode=0755,uid="
-            + str(config.uid)
-            + ",gid="
-            + str(config.gid),
-            "/nix/var/log/nix": "rw,noexec,nosuid,nodev,size=64m,mode=0755,uid="
-            + str(config.uid)
-            + ",gid="
-            + str(config.gid),
-        }
-        if config.git_common_dir is not None:
-            expected_tmpfs[str(config.git_common_dir / "objects")] = (
-                "rw,nosuid,nodev,size=256m,mode=0755,uid="
-                + str(config.uid)
-                + ",gid="
-                + str(config.gid)
-            )
+        expected_tmpfs = dict(config.tmpfs)
         if (
             actual_mounts != expected_mounts
             or dict(host_config.get("Tmpfs") or {}) != expected_tmpfs
@@ -1049,9 +980,9 @@ class ValidationContainerRuntime:
             or container_config.get("Cmd")
             != ["/bootstrap/validation-entrypoint.sh", "--idle"]
             or container_config.get("WorkingDir") != "/validation/worktree"
-            or host_config.get("NetworkMode") != "none"
+            or host_config.get("NetworkMode") != config.network
             or bool(host_config.get("Privileged"))
-            or host_config.get("ReadonlyRootfs") is not True
+            or host_config.get("ReadonlyRootfs") is not config.read_only
             or host_config.get("Init") is not True
             or int(host_config.get("Memory") or 0) != config.limits.memory_bytes
             or int(host_config.get("PidsLimit") or 0) != config.limits.pids
@@ -1062,9 +993,15 @@ class ValidationContainerRuntime:
                 "max-size": f"{config.limits.log_max_bytes}b",
             }
             or restart != "no"
-            or "ALL"
-            not in [str(value).upper() for value in host_config.get("CapDrop") or []]
-            or not any(value.startswith("no-new-privileges") for value in security)
+            or not any(
+                capability.upper()
+                in [str(value).upper() for value in host_config.get("CapDrop") or []]
+                for capability in config.cap_drop
+            )
+            or not any(
+                any(value.startswith(option) for value in security)
+                for option in config.security_options
+            )
         ):
             raise ContainerBoundaryError(
                 ContainerErrorCategory.identity_mismatch,

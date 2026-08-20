@@ -16,6 +16,7 @@ from coquic_steward.core.subprocesses import CommandResult
 from coquic_steward.execution.container import (
     ContainerBoundaryError,
     ContainerErrorCategory,
+    ContainerInspection,
     ExecIdentity,
     ExecResult,
     SubprocessDockerClient,
@@ -112,15 +113,7 @@ def _validation_inspection(config: ValidationContainerConfig) -> dict[str, objec
                 "PYTHONPATH=/nix/store/source/opt/coquic/steward/src",
                 "ZIG_GLOBAL_CACHE_DIR=/tmp/zig-global-cache",
                 "ZIG_LOCAL_CACHE_DIR=/tmp/zig-local-cache",
-                f"VALIDATION_SOURCE_WORKTREE={config.worktree}",
-                *(
-                    [
-                        f"VALIDATION_GIT_OBJECTS_DIR={config.git_common_dir / 'objects'}",
-                        "VALIDATION_GIT_ALTERNATE_OBJECTS=/validation/git-common-ro/objects",
-                    ]
-                    if config.git_common_dir is not None
-                    else []
-                ),
+                *(f"{key}={value}" for key, value in config.environment),
             ],
         },
         "HostConfig": {
@@ -140,15 +133,7 @@ def _validation_inspection(config: ValidationContainerConfig) -> dict[str, objec
                     "max-size": f"{config.limits.log_max_bytes}b",
                 },
             },
-            "Tmpfs": {
-                "/tmp": "rw,noexec,nosuid,nodev,size=8589934592,mode=1777",
-                "/run": "rw,noexec,nosuid,nodev,size=16m",
-                "/validation/worktree/.zig-cache": "rw,exec,nosuid,nodev,size=8589934592,mode=0755,uid=10000,gid=10000",
-                "/validation/worktree/site/next": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid=10000,gid=10000",
-                "/validation/worktree/.duvet": "rw,noexec,nosuid,nodev,size=1g,mode=0755,uid=10000,gid=10000",
-                "/nix/store": "rw,nosuid,nodev,size=8589934592,mode=0755,uid=10000,gid=10000",
-                "/nix/var/log/nix": "rw,noexec,nosuid,nodev,size=64m,mode=0755,uid=10000,gid=10000",
-            },
+            "Tmpfs": dict(config.tmpfs),
         },
         "Mounts": [
             {
@@ -160,6 +145,84 @@ def _validation_inspection(config: ValidationContainerConfig) -> dict[str, objec
             for mount in config.mounts
         ],
     }
+
+
+def test_validation_policy_is_shared(tmp_path: Path) -> None:
+    worktree, output, store, git_common = (
+        tmp_path / name for name in ("worktree", "output", "store", "git-common")
+    )
+    for path in (worktree, output, store, git_common):
+        path.mkdir()
+    config = ValidationContainerConfig(
+        run_id="shared-policy",
+        image="coquic-steward-validation",
+        image_digest="sha256:" + "d" * 64,
+        worktree=worktree,
+        output=output,
+        store=store,
+        git_common_dir=git_common,
+        limits=ContainerLimits(
+            memory_bytes=3 * 1024**3,
+            pids=321,
+            scratch_bytes=5 * 1024**3,
+            log_max_bytes=7 * 1024**2,
+            log_max_files=4,
+        ),
+        uid=12000,
+        gid=12001,
+    )
+    runtime = ValidationContainerRuntime(config)
+    create_argv = runtime.create_argv()
+    run_argv = runtime.run_argv(["git", "status"])
+
+    for option in ("--mount", "--env", "--tmpfs"):
+        create_values = {
+            create_argv[index + 1]
+            for index, value in enumerate(create_argv[:-1])
+            if value == option
+        }
+        run_values = {
+            run_argv[index + 1]
+            for index, value in enumerate(run_argv[:-1])
+            if value == option
+        }
+        assert create_values == run_values
+    for option, expected in (
+        ("--network", "none"),
+        ("--user", "12000:12001"),
+        ("--pids-limit", "321"),
+        ("--memory", str(3 * 1024**3)),
+    ):
+        assert create_argv[create_argv.index(option) + 1] == expected
+        assert run_argv[run_argv.index(option) + 1] == expected
+    assert run_argv[-3:] == ["--exec", "git", "status"]
+
+    payload = _validation_inspection(config)
+    runtime._validate_inspection(
+        ContainerInspection(
+            container_id="d" * 64,
+            name=config.container_name,
+            state="running",
+            running=True,
+            labels=config.labels,
+            image=config.image_digest,
+            raw=payload,
+        )
+    )
+    payload["Config"]["Env"].append("UNEXPECTED=1")
+    with pytest.raises(ContainerBoundaryError) as error:
+        runtime._validate_inspection(
+            ContainerInspection(
+                container_id="d" * 64,
+                name=config.container_name,
+                state="running",
+                running=True,
+                labels=config.labels,
+                image=config.image_digest,
+                raw=payload,
+            )
+        )
+    assert error.value.category is ContainerErrorCategory.identity_mismatch
 
 
 def test_validation_container_refuses_same_name_foreign_image(tmp_path: Path) -> None:
@@ -702,8 +765,7 @@ def test_isolated_validation_runner_propagates_cap_and_statuses(
     )
     executor = StewardExecutor(config, store)
     monkeypatch.setattr(
-        executor,
-        "_validation_git_common_dir",
+        "coquic_steward.execution.executor._validation_git_common_dir",
         lambda _worktree: config.repo_root / ".git",
     )
     runner = executor._isolated_validation_runner(task, pipeline, digest)
@@ -761,6 +823,7 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     observed_pending: list[dict[str, object]] = []
     cleaned: list[str] = []
     runtime_configs: list[ValidationContainerConfig] = []
+    reject_mismatched = False
 
     class RecordingValidationRuntime(ValidationContainerRuntime):
         def __init__(self, runtime_config, *, docker_bin="docker") -> None:
@@ -772,6 +835,12 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
             return "d" * 64
 
         def cleanup_owned(self, *, timeout: float = 5) -> None:
+            if reject_mismatched and (
+                self.config.limits != runtime_configs[0].limits
+                or self.config.uid != runtime_configs[0].uid
+                or self.config.gid != runtime_configs[0].gid
+            ):
+                raise RuntimeError("validation policy changed during recovery")
             cleaned.append(self.config.container_name)
 
     monkeypatch.setattr(
@@ -780,8 +849,7 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     )
     executor = StewardExecutor(config, store)
     monkeypatch.setattr(
-        executor,
-        "_validation_git_common_dir",
+        "coquic_steward.execution.executor._validation_git_common_dir",
         lambda _worktree: git_common_dir,
     )
     executor._isolated_validation_runner(task, pipeline, digest)
@@ -792,10 +860,37 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     root = Path(str(observed_pending[0]["root_path"]))
     assert root.is_dir()
 
+    legacy_record = dict(observed_pending[0])
+    legacy_record["git_common_dir_path"] = None
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor._validation_git_common_dir",
+        lambda _worktree: config.repo_root / ".git",
+    )
+    executor._validation_runtime_for_cleanup(legacy_record)
+    assert runtime_configs[-1].git_common_dir == config.repo_root / ".git"
+
+    reject_mismatched = True
+    executor.config = replace(
+        config,
+        deployment=replace(
+            deployment,
+            host_uid=1001,
+            host_gid=1002,
+            max_memory_bytes=deployment.max_memory_bytes + 1,
+            max_pids=deployment.max_pids + 1,
+        ),
+    )
+    store.claim_daemon_instance("daemon-policy-mismatch")
+    assert executor.retry_validation_cleanup_pending() == 0
+    assert store.list_validation_cleanup_pending()
+    assert root.is_dir()
+    assert digest in store.referenced_image_ids()
+    executor.config = config
+    reject_mismatched = False
+
     validation_worktree.rmdir()
     monkeypatch.setattr(
-        executor,
-        "_validation_git_common_dir",
+        "coquic_steward.execution.executor._validation_git_common_dir",
         lambda _worktree: pytest.fail(
             "cleanup reconstructed Git identity from the removed worktree"
         ),
@@ -806,10 +901,12 @@ def test_validation_cleanup_is_durable_before_start_and_retried_after_crash(
     assert digest not in store.referenced_image_ids()
     assert not root.exists()
     assert cleaned == [str(observed_pending[0]["container_name"])]
-    assert len(runtime_configs) == 2
-    assert runtime_configs[0].limits == runtime_configs[1].limits
-    assert runtime_configs[1].git_common_dir == git_common_dir
-    assert runtime_configs[1].limits == ContainerLimits(
+    assert len(runtime_configs) == 4
+    assert runtime_configs[0].limits == runtime_configs[3].limits
+    assert runtime_configs[1].git_common_dir == config.repo_root / ".git"
+    assert runtime_configs[2].limits != runtime_configs[0].limits
+    assert runtime_configs[3].git_common_dir == git_common_dir
+    assert runtime_configs[3].limits == ContainerLimits(
         memory_bytes=deployment.max_memory_bytes,
         pids=deployment.max_pids,
         scratch_bytes=deployment.max_scratch_bytes,

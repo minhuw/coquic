@@ -240,7 +240,6 @@ _PUBLICATION_HIDE_FENCE_COLUMNS = (
 # Exact factories create only this current SQLite shape.  The constructor remains
 # the compatibility path until the ordered caller migration removes it.
 SQLITE_USER_VERSION = 2
-CURRENT_SCHEMA_VERSION = SQLITE_USER_VERSION
 CURRENT_SCHEMA_CATALOG_DIGEST = "8960dbc8bca84606c640e452f1928093e56e11afbfd46265ca64358d79f32165"
 SCHEMA_CATALOG_DIGEST = CURRENT_SCHEMA_CATALOG_DIGEST
 _CONTROL_LOOP_META_SEED_KEYS = frozenset({"epoch_id", "next_sequence", "planning_blocked"})
@@ -279,13 +278,6 @@ class SQLiteStoreLifecycleError(RuntimeError):
 
 class TaskLedgerOwnershipError(ValueError):
     """A task execution cannot be used without its persisted pipeline owner."""
-
-
-# Public aliases make the failure boundary explicit without adding another
-# exception hierarchy for the additive factories.
-StoreCreationError = SQLiteStoreLifecycleError
-StoreOpenError = SQLiteStoreLifecycleError
-StoreValidationError = SQLiteStoreLifecycleError
 
 
 class TaskPage(NamedTuple):

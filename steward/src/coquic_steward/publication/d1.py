@@ -2037,30 +2037,8 @@ class D1PublicationClient:
             _invalid(D1ErrorCode.generation_state)
         return actual[6]
 
-    def _usage_stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
-        """Build only the bounded rows belonging to a detached usage generation."""
-
-        publication_id = payload["publicationId"]
-        task_id = payload["taskId"]
-        usage = payload["usage"]
-        usage_generation = usage["generation"]
-        counts = usage_generation["expectedCounts"]
-        statements: list[Statement] = [
-            _statement(
-                _USAGE_GENERATION_INSERT,
-                usage_generation["usageGenerationId"],
-                publication_id,
-                task_id,
-                usage_generation["schemaVersion"],
-                usage_generation["metadataDigest"],
-                counts["summaries"],
-                counts["invocations"],
-                counts["turns"],
-                counts["prices"],
-                counts["globals"],
-                usage_generation["createdAt"],
-            )
-        ]
+    def _usage_row_statements(self, usage: Mapping[str, Any]) -> list[Statement]:
+        statements: list[Statement] = []
         for item in usage["prices"]:
             statements.append(
                 _statement(
@@ -2156,6 +2134,33 @@ class D1PublicationClient:
                     int(item["aggregateOnly"]),
                 )
             )
+        return statements
+
+    def _usage_stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
+        """Build only the bounded rows belonging to a detached usage generation."""
+
+        publication_id = payload["publicationId"]
+        task_id = payload["taskId"]
+        usage = payload["usage"]
+        usage_generation = usage["generation"]
+        counts = usage_generation["expectedCounts"]
+        statements: list[Statement] = [
+            _statement(
+                _USAGE_GENERATION_INSERT,
+                usage_generation["usageGenerationId"],
+                publication_id,
+                task_id,
+                usage_generation["schemaVersion"],
+                usage_generation["metadataDigest"],
+                counts["summaries"],
+                counts["invocations"],
+                counts["turns"],
+                counts["prices"],
+                counts["globals"],
+                usage_generation["createdAt"],
+            )
+        ]
+        statements.extend(self._usage_row_statements(usage))
         return tuple(statements)
 
     def _stage_statements(self, payload: Mapping[str, Any]) -> tuple[Statement, ...]:
@@ -2208,101 +2213,7 @@ class D1PublicationClient:
         for item in payload["artifacts"]:
             disclosure = item["disclosure"]
             statements.append(_statement(_ARTIFACT_INSERT, publication_id, item["artifactId"], item["taskId"], item["runId"], item["logicalPath"], item["publicKey"], item["mediaType"], item["byteSize"], item["sha256"], item["availability"], int(disclosure["redactionApplied"]), int(disclosure["originalRetained"])))
-        for item in usage["prices"]:
-            statements.append(
-                _statement(
-                    _USAGE_PRICE_INSERT,
-                    item["priceEntryDigest"],
-                    item["usageGenerationId"],
-                    item["catalogDigest"],
-                    item["model"],
-                    item["effectiveAt"],
-                    item["effectiveUntil"],
-                )
-            )
-        for item in usage["summaries"]:
-            statements.append(
-                _statement(
-                    _USAGE_SUMMARY_INSERT,
-                    item["summaryId"],
-                    item["usageGenerationId"],
-                    item["publicationId"],
-                    item["taskId"],
-                    item["runId"],
-                    item["scope"],
-                    item["coverage"],
-                    item["coveredInvocations"],
-                    item["expectedInvocations"],
-                    item["knownTokenSubtotal"],
-                    item["knownCostSubtotalMicroUsd"],
-                    *(item[field] for field in _TOKEN_FIELDS),
-                    *(item[field] for field in _COST_FIELDS),
-                    item["priceProvenanceDigest"],
-                )
-            )
-        for item in usage["invocations"]:
-            statements.append(
-                _statement(
-                    _USAGE_INVOCATION_INSERT,
-                    item["invocationId"],
-                    item["usageGenerationId"],
-                    item["publicationId"],
-                    item["taskId"],
-                    item["pipelineId"],
-                    item["runId"],
-                    item["ownershipClass"],
-                    item["retryOrdinal"],
-                    item["startedAt"],
-                    item["completedAt"],
-                    item["model"],
-                    item["billingMode"],
-                    item["processOutcome"],
-                    item["coverage"],
-                    item["issueCount"],
-                    item["coveredTurns"],
-                    item["expectedTurns"],
-                    *(item[field] for field in _TOKEN_FIELDS),
-                    *(item[field] for field in _COST_FIELDS),
-                    item["priceEntryDigest"],
-                )
-            )
-        for item in usage["turns"]:
-            statements.append(
-                _statement(
-                    _USAGE_TURN_INSERT,
-                    item["turnId"],
-                    item["usageGenerationId"],
-                    item["invocationId"],
-                    item["publicationId"],
-                    item["taskId"],
-                    item["runId"],
-                    item["ordinal"],
-                    *(item[field] for field in _TOKEN_FIELDS),
-                    *(item[field] for field in _COST_FIELDS),
-                    item["priceEntryDigest"],
-                )
-            )
-        for item in usage["globals"]:
-            statements.append(
-                _statement(
-                    _USAGE_GLOBAL_INSERT,
-                    item["globalId"],
-                    item["usageGenerationId"],
-                    item["periodKind"],
-                    item["periodKey"],
-                    item["model"],
-                    item["ownershipClass"],
-                    item["coverage"],
-                    item["coveredInvocations"],
-                    item["expectedInvocations"],
-                    item["knownTokenSubtotal"],
-                    item["knownCostSubtotalMicroUsd"],
-                    *(item[field] for field in _TOKEN_FIELDS),
-                    *(item[field] for field in _COST_FIELDS),
-                    item["priceProvenanceDigest"],
-                    int(item["aggregateOnly"]),
-                )
-            )
+        statements.extend(self._usage_row_statements(usage))
         return tuple(statements)
 
     def _verify_rows(self, payload: Mapping[str, Any]) -> None:

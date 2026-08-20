@@ -100,12 +100,12 @@ def _composed(
             "idempotencyKey": IDENTITY.idempotency_key,
             "metadataDigest": metadata_digest,
             "expectedCounts": counts,
-            "createdAt": NOW.isoformat(),
+            "createdAt": NOW.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         },
         "headIntent": {
             "publicationId": IDENTITY.publication_id,
             "taskId": "task-1",
-            "updatedAt": NOW.isoformat(),
+            "updatedAt": NOW.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         },
         "runs": [{"runId": "run-1"}],
         "events": [{"sequence": 1}],
@@ -496,6 +496,17 @@ def _publisher(store: _FakeStore, provider: _FakeProvider, *, compose=None) -> C
     )
 
 
+def _blocked_store(identity: GenerationIdentity) -> _FakeStore:
+    store = _FakeStore()
+    store.generation.publication_id = identity.publication_id
+    store.generation.task_id = identity.task_id
+    store.generation.generation_boundary = identity.generation_boundary
+    store.generation.idempotency_key = identity.idempotency_key
+    store.generation.state = PublicationState.blocked
+    store.generation.reason = "integrity"
+    return store
+
+
 def test_usage_delegates_use_canonical_d1_operations() -> None:
     overhead = OverheadReceipt("2026-07-28", "model", "digest")
     backfill = UsageBackfillReceipt(
@@ -692,6 +703,78 @@ def test_identity_mismatch_is_blocked_without_provider_request() -> None:
     assert result.reason == "integrity"
     assert provider.calls == []
     assert "d1:hide" not in store.events
+
+
+def test_precomposed_repair_enqueues_without_provider_access() -> None:
+    old_identity = GenerationIdentity("task-1", "boundary-old")
+    store = _blocked_store(old_identity)
+    replacements: list[tuple[str, object]] = []
+
+    def replace_blocked_publication(old_publication_id: str, generation: object):
+        replacements.append((old_publication_id, generation))
+        return SimpleNamespace(status=PublicationOperationStatus.enqueued)
+
+    store.replace_blocked_publication = replace_blocked_publication
+    provider = _FakeProvider(store)
+    candidate = _composed()
+
+    result = _publisher(store, provider)._enqueue_precomposed_repair(
+        old_identity.publication_id,
+        candidate,
+    )
+
+    assert result.status is PublicationStatus.queued
+    assert result.publication_id == candidate.publication_id
+    assert replacements == [(old_identity.publication_id, candidate.to_outbox())]
+    assert provider.calls == []
+    assert store.events == []
+
+
+def test_precomposed_repair_rejects_invalid_candidates() -> None:
+    candidate = _composed()
+    lookalike = SimpleNamespace(
+        **{
+            name: getattr(candidate, name)
+            for name in (
+                "publication_id",
+                "task_id",
+                "run_id",
+                "generation_boundary",
+                "metadata_digest",
+                "idempotency_key",
+                "generation",
+                "payload",
+                "objects",
+                "private_originals",
+            )
+        }
+    )
+    cases = (
+        (GenerationIdentity("task-1", "boundary-old"), lookalike, "invalid_metadata"),
+        (GenerationIdentity("task-2", "boundary-old"), candidate, "integrity"),
+        (GenerationIdentity("task-1", IDENTITY.generation_boundary), candidate, "unchanged"),
+    )
+
+    for identity, value, reason in cases:
+        store = _blocked_store(identity)
+        replacements: list[tuple[str, object]] = []
+
+        def replace_blocked_publication(old_publication_id: str, generation: object):
+            replacements.append((old_publication_id, generation))
+            return SimpleNamespace(status=PublicationOperationStatus.enqueued)
+
+        store.replace_blocked_publication = replace_blocked_publication
+        provider = _FakeProvider(store)
+        result = _publisher(store, provider)._enqueue_precomposed_repair(
+            identity.publication_id,
+            value,
+        )
+
+        assert result.status is PublicationStatus.blocked
+        assert result.reason == reason
+        assert replacements == []
+        assert provider.calls == []
+        assert store.events == []
 
 
 def test_receipt_logical_path_mismatch_blocks_before_provider_request() -> None:

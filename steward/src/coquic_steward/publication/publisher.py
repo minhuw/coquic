@@ -930,6 +930,72 @@ class CloudPublisher:
             return self._retry(generation, category, phase=phase)
         return self._block(generation, category, hide=True, phase=phase)
 
+    def _enqueue_precomposed_repair(
+        self,
+        publication_id: str,
+        generation: PublicationGeneration,
+    ) -> PublicationResult:
+        """Atomically enqueue one already-composed changed generation."""
+
+        publication_view_id = _view_identifier(publication_id)
+        if publication_view_id is None or type(generation) is not PublicationGeneration:
+            return _result(
+                PublicationStatus.blocked,
+                publication_view_id,
+                reason="invalid_metadata",
+                reason_codes=(ReasonCode.invalid_metadata,),
+                phase="retry",
+            )
+        try:
+            current = self._get(publication_id)
+        except Exception:
+            return _result(
+                PublicationStatus.blocked,
+                publication_id,
+                reason="integrity",
+                phase="retry",
+            )
+        if current is None:
+            return _result(PublicationStatus.blocked, publication_id, reason="missing", phase="retry")
+        if getattr(current, "publication_id", None) != publication_id:
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        if _status(getattr(current, "state", "")) != PublicationState.blocked.value:
+            return _result(
+                PublicationStatus.blocked,
+                publication_id,
+                reason="precondition",
+                phase="retry",
+            )
+        if generation.task_id != getattr(current, "task_id", None):
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        if generation.publication_id == publication_id:
+            if generation.metadata_digest == getattr(current, "metadata_digest", None):
+                return _result(PublicationStatus.blocked, publication_id, reason="unchanged", phase="retry")
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        try:
+            record = generation.to_outbox()
+            if getattr(record, "publication_id", None) != generation.publication_id:
+                return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        except Exception:
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        try:
+            operation = self.store.replace_blocked_publication(publication_id, record)
+        except Exception:
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        operation_status = _status(getattr(operation, "status", operation))
+        if operation_status not in {
+            PublicationOperationStatus.enqueued.value,
+            PublicationOperationStatus.existing.value,
+        }:
+            reason = _reason(getattr(operation, "reason", None), "integrity")
+            if operation_status == PublicationOperationStatus.missing.value:
+                reason = "missing"
+            return _result(PublicationStatus.blocked, publication_id, reason=reason, phase="retry")
+        queued_id = _view_identifier(generation.publication_id)
+        if queued_id is None:
+            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        return _result(PublicationStatus.queued, queued_id, phase="retry")
+
     def retry_publication(
         self,
         publication_id: str,
@@ -1018,7 +1084,7 @@ class CloudPublisher:
                 phase="retry",
                 hide_result=hide_result,
             )
-        if not isinstance(composed_value, PublicationGeneration):
+        if type(composed_value) is not PublicationGeneration:
             return _result(
                 PublicationStatus.blocked,
                 publication_id,
@@ -1043,29 +1109,7 @@ class CloudPublisher:
                     hide_result=hide_result,
                 )
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        try:
-            record = composed.to_outbox()
-        except Exception:
-            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        if record.publication_id != composed.publication_id:
-            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        try:
-            operation = self.store.replace_blocked_publication(publication_id, record)
-        except Exception:
-            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        operation_status = _status(getattr(operation, "status", operation))
-        if operation_status not in {
-            PublicationOperationStatus.enqueued.value,
-            PublicationOperationStatus.existing.value,
-        }:
-            reason = _reason(getattr(operation, "reason", None), "integrity")
-            if operation_status == PublicationOperationStatus.missing.value:
-                reason = "missing"
-            return _result(PublicationStatus.blocked, publication_id, reason=reason, phase="retry")
-        queued_id = _view_identifier(getattr(composed, "publication_id", None))
-        if queued_id is None:
-            return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
-        return _result(PublicationStatus.queued, queued_id, phase="retry")
+        return self._enqueue_precomposed_repair(publication_id, composed)
 
     def _retry_hide_head(self, generation: object, reason: str) -> PublicationHideResult:
         task_id = getattr(generation, "task_id", None)

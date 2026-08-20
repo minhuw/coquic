@@ -435,14 +435,30 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
             )
 
     d1 = D1()
+    compose_calls: list[object] = []
+    scanner_composer = _scanner_composer(scanner)
+
+    def counted_compose(source: object, **kwargs: object) -> object:
+        result = scanner_composer(source, **kwargs)
+        compose_calls.append(result)
+        return result
+
     publisher = CloudPublisher(
         store,
         R2(),
         d1,
         worker_id="publication-test",
-        compose=_scanner_composer(scanner),
+        compose=PublicationComposer(counted_compose),
         retry_policy=PublicationRetryPolicy(config.max_retries),
     )
+    enqueued_candidates: list[object] = []
+    enqueue_precomposed = publisher._enqueue_precomposed_repair
+
+    def capture_enqueue(publication_id: str, generation: object) -> PublicationResult:
+        enqueued_candidates.append(generation)
+        return enqueue_precomposed(publication_id, generation)
+
+    publisher._enqueue_precomposed_repair = capture_enqueue
     daemon = object.__new__(StewardDaemon)
     daemon.config = SimpleNamespace(publication=config)
     daemon.store = store
@@ -450,12 +466,16 @@ def test_daemon_worker_rekeys_staging_before_remote_exposure(tmp_path: Path) -> 
     daemon._publication_source = lambda _generation: graph
 
     assert daemon._publish_next_generation(publisher) is True
+    assert len(compose_calls) == 2
+    assert len(enqueued_candidates) == 1
+    assert enqueued_candidates[0] is compose_calls[1]
     queued = store.list_publication_generations()
     assert len(queued) == 1
     assert queued[0].publication_id == aware.publication_id
     assert store.get_publication_generation(free.publication_id) is None
 
     assert daemon._publish_next_generation(publisher) is True
+    assert len(compose_calls) == 3
     exposed = store.get_publication_generation(aware.publication_id)
     assert exposed is not None
     assert exposed.state.value == "exposed"
@@ -580,7 +600,7 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
     class Publisher:
         def __init__(self) -> None:
             self.publish_calls: list[object] = []
-            self.retry_calls: list[tuple[object, object, object]] = []
+            self.enqueue_calls: list[tuple[object, object]] = []
 
         def compose(self, source: object, *, task_id: str, **kwargs: object):
             return session_module.compose_publication_generation(
@@ -594,14 +614,12 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
             self.publish_calls.append(args)
             return PublicationResult(PublicationStatus.blocked)
 
-        def retry_publication(
+        def _enqueue_precomposed_repair(
             self,
             publication_id: object,
-            source: object,
-            *,
-            compose_kwargs: object,
+            generation: object,
         ) -> PublicationResult:
-            self.retry_calls.append((publication_id, source, compose_kwargs))
+            self.enqueue_calls.append((publication_id, generation))
             if publication_id == older.publication_id:
                 return PublicationResult(PublicationStatus.blocked)
             return PublicationResult(
@@ -628,8 +646,9 @@ def test_daemon_restart_rekeys_later_staging_after_unrelated_blocked(
 
     assert daemon._publish_next_generation(publisher) is True
     assert publisher.publish_calls == []
-    expected_retry_ids = [later_free.publication_id]
-    assert [call[0] for call in publisher.retry_calls] == expected_retry_ids
+    expected_enqueue_ids = [later_free.publication_id]
+    assert [call[0] for call in publisher.enqueue_calls] == expected_enqueue_ids
+    assert publisher.enqueue_calls[0][1].publication_id == later_aware.publication_id
     expected_source_ids = (
         [older.publication_id, later_free.publication_id]
         if older_reason == "integrity"

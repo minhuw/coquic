@@ -674,10 +674,12 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
     class Publisher:
         def __init__(self):
             self.publish_calls: list[dict[str, object]] = []
-            self.retry_calls: list[dict[str, object]] = []
+            self.enqueue_calls: list[dict[str, object]] = []
+            self.composed_generation = None
 
         def compose(self, _source, *, task_id, **_kwargs):
-            return _worker_composed_generation(task_id)
+            self.composed_generation = _worker_composed_generation(task_id)
+            return self.composed_generation
 
         def publish(self, publication_id, *, source, compose_kwargs):
             self.publish_calls.append(
@@ -694,12 +696,11 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
                 phase="authenticate",
             )
 
-        def retry_publication(self, publication_id, source, *, compose_kwargs):
-            self.retry_calls.append(
+        def _enqueue_precomposed_repair(self, publication_id, generation):
+            self.enqueue_calls.append(
                 {
                     "publication_id": publication_id,
-                    "source": source,
-                    "compose_kwargs": compose_kwargs,
+                    "generation": generation,
                 }
             )
             return PublicationResult(
@@ -716,17 +717,14 @@ def test_publication_worker_reconciles_credential_free_staging_identity(
 
     assert daemon._publish_next_generation(publisher) is True
     assert len(publisher.publish_calls) == 1
-    assert len(publisher.retry_calls) == 1
+    assert len(publisher.enqueue_calls) == 1
+    assert publisher.enqueue_calls[0]["generation"] is publisher.composed_generation
     expected_sources = (
         config.d1_token_path,
         config.r2_access_key_id_path,
         config.r2_secret_access_key_path,
     )
     assert publisher.publish_calls[0]["compose_kwargs"] == {
-        "credential_sources": expected_sources,
-        "staging_root": config.staging_root,
-    }
-    assert publisher.retry_calls[0]["compose_kwargs"] == {
         "credential_sources": expected_sources,
         "staging_root": config.staging_root,
     }
@@ -755,17 +753,19 @@ def test_publication_worker_reconciles_blocked_identity_after_restart(
     class Publisher:
         def __init__(self):
             self.publish_calls = 0
-            self.retry_calls: list[object] = []
+            self.enqueue_calls: list[object] = []
+            self.composed_generation = None
 
         def compose(self, _source, *, task_id, **_kwargs):
-            return _worker_composed_generation(task_id)
+            self.composed_generation = _worker_composed_generation(task_id)
+            return self.composed_generation
 
         def publish(self, *_args, **_kwargs):
             self.publish_calls += 1
             return PublicationResult(PublicationStatus.blocked)
 
-        def retry_publication(self, publication_id, source, *, compose_kwargs):
-            self.retry_calls.append((publication_id, source, compose_kwargs))
+        def _enqueue_precomposed_repair(self, publication_id, generation):
+            self.enqueue_calls.append((publication_id, generation))
             return PublicationResult(
                 PublicationStatus.queued,
                 publication_id="pub-repaired-restart",
@@ -780,7 +780,8 @@ def test_publication_worker_reconciles_blocked_identity_after_restart(
 
     assert daemon._publish_next_generation(publisher) is True
     assert publisher.publish_calls == 0
-    assert len(publisher.retry_calls) == 1
+    assert len(publisher.enqueue_calls) == 1
+    assert publisher.enqueue_calls[0][1] is publisher.composed_generation
 
 
 def test_terminal_publication_gate_retains_state_until_exposed(monkeypatch):

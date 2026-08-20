@@ -1042,16 +1042,12 @@ class StewardDaemon:
         # credential-aware composition proves a different canonical
         # generation.  This check is transport-free and avoids replaying
         # an unchanged row's hide reconciliation against the provider.
-        if not isinstance(candidate, ComposedPublicationGeneration):
+        if type(candidate) is not ComposedPublicationGeneration:
             return False
         if candidate.task_id != task_id or candidate.publication_id == publication_id:
             return False
         try:
-            result = publisher.retry_publication(
-                publication_id,
-                source,
-                compose_kwargs=compose_kwargs,
-            )
+            result = publisher._enqueue_precomposed_repair(publication_id, candidate)
         except Exception as exc:
             self._log(
                 "publication generation reconciliation failed "

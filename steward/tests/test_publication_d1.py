@@ -2428,3 +2428,35 @@ def test_malformed_nested_error_envelope_is_rejected() -> None:
     with pytest.raises(D1Error) as error:
         d1.stage(publication("publication-malformed-envelope"))
     assert error.value.code == D1ErrorCode.malformed_response
+
+
+def test_overhead_digest_and_error_mapping_remain_d1_owned() -> None:
+    overhead = {
+        "date": "2026-07-28",
+        "model": "gpt-overhead",
+        "ownerClass": "Steward overhead",
+        "tokens": {
+            "inputTokens": 5,
+            "cachedInputTokens": 1,
+            "uncachedInputTokens": 4,
+            "outputTokens": 3,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 8,
+        },
+        "cost": {
+            "uncachedInputMicroUsd": 4,
+            "cachedInputMicroUsd": 2,
+            "outputMicroUsd": 3,
+            "totalMicroUsd": 9,
+        },
+        "coverage": {
+            "status": "Complete",
+            "coveredInvocations": 1,
+            "expectedInvocations": 1,
+        },
+    }
+
+    assert _overhead_digest((_overhead_row(overhead),)) == "f3bb1a23bb9decd48cafc0ee510f43e4c88b39a66db06dd9261ecae2cbc5e8a5"
+    with pytest.raises(D1Error) as error:
+        _overhead_digest((overhead,), supplied="0" * 64)
+    assert error.value.code == D1ErrorCode.digest_mismatch

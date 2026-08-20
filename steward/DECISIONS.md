@@ -16,6 +16,15 @@ canonical bytes, digests, redaction, mutation detection, limits, and bounded
 failure categories while rejecting unsupported values without executing their
 methods.
 
+Publication-envelope validation and both metadata digests belong to the
+transport-neutral envelope contract. The contract preserves schema 2.0,
+allowlists, detached output, replacement semantics, and the six bounded
+categories (`invalid_request`, `private_value`, `generation_conflict`,
+`generation_state`, `count_mismatch`, and `digest_mismatch`). D1 maps those
+categories at its pre-transport boundary; it retains provider-specific errors
+and the independently owned Steward-overhead math and digest, whose canonical
+bytes intentionally have no trailing newline.
+
 Later architecture plans share ownership of this decision log.
 
 ## Explicit Store initialization

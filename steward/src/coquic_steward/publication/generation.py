@@ -22,7 +22,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, TypeAlias
 
-from .d1 import D1Error, _usage_metadata_digest, _validate_payload
+from .envelope import (
+    EnvelopeError,
+    publication_metadata_digest,
+    usage_metadata_digest,
+    validate_publication_envelope,
+)
 from .atif import AtifSource
 from .media import inspect_media
 from .models import (
@@ -1672,7 +1677,7 @@ def _usage_payload(
         "prices": [prices_by_digest[key] for key in sorted(prices_by_digest)],
         "globals": sorted(global_rows, key=lambda item: item["globalId"]),
     }
-    usage["generation"]["metadataDigest"] = _usage_metadata_digest(
+    usage["generation"]["metadataDigest"] = usage_metadata_digest(
         {"publicationId": publication_id, "taskId": task_id, "usage": usage}
     )
     return usage
@@ -1953,8 +1958,7 @@ def _build_generation(
         "artifacts": sorted(artifact_rows, key=lambda row: (row["runId"], row["logicalPath"], row["artifactId"])),
         "usage": usage_payload,
     }
-    metadata = {key: payload[key] for key in ("publicationId", "taskId", "task", "pipelines", "runs", "events", "artifacts", "usage")}
-    payload["generation"]["metadataDigest"] = hashlib.sha256(_canonical(metadata)).hexdigest()
+    payload["generation"]["metadataDigest"] = publication_metadata_digest(payload)
     string_failure = _inspect_public_strings(
         payload,
         credential_sources=credential_sources,
@@ -1968,12 +1972,12 @@ def _build_generation(
     if string_failure is not None:
         return _failure(string_failure)
     try:
-        validated = _validate_payload(payload)
+        validated = validate_publication_envelope(payload)
         # Validate detached rows against exact bytes too; this catches any
         # accidental divergence before handing the envelope to transport.
         if validated != payload:
             payload = validated
-    except (D1Error, PublicationError, TypeError, ValueError, KeyError, RecursionError):
+    except (EnvelopeError, PublicationError, TypeError, ValueError, KeyError, RecursionError):
         return _failure(ReasonCode.invalid_metadata)
     if changed():
         return _failure(ReasonCode.changing)

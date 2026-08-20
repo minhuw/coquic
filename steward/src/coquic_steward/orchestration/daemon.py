@@ -44,7 +44,7 @@ from ..core.models import (
 )
 from ..execution.executor import StewardExecutor
 from ..storage.sqlite import TaskLedgerOwnershipError
-from ..execution.container import bind_deployment_identity, deployment_runtime_factory
+from ..execution.container import bind_deployment_identity
 from ..execution.session import (
     FreshPlannerSession,
     InvocationStatus,
@@ -54,7 +54,7 @@ from ..execution.session import (
     _write_publication_snapshot,
     enqueue_materialized_publication,
     load_publication_snapshot,
-    runtime_factory_for_config,
+    session_supervisor_for_config,
     planner_session_for_config,
 )
 from ..execution.task_archive import TaskArchiveWriter
@@ -270,16 +270,8 @@ class StewardDaemon:
         )
         self._resource_pressure_restored = False
         self.session_supervisor = session_supervisor
-        if self.session_supervisor is None and config.task_image_digest:
-            self.session_supervisor = SessionSupervisor(
-                config,
-                store,
-                runtime_factory=deployment_runtime_factory(
-                    config, runtime_factory_for_config(config)
-                ),
-                image_digest=config.task_image_digest,
-                codex_identity=config.codex_identity or config.codex_bin,
-            )
+        if self.session_supervisor is None:
+            self.session_supervisor = session_supervisor_for_config(config, store)
         self.planner_session = planner_session
         self.executor = StewardExecutor(
             config,

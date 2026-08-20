@@ -19,13 +19,11 @@ from .orchestration import (
     acquire_daemon_lock,
 )
 from .execution.executor import default_worker_for_kind
-from .execution.container import bind_deployment_identity, deployment_runtime_factory
+from .execution.container import bind_deployment_identity
 from .execution.session import (
     FreshPlannerSession,
-    SessionSupervisor,
     planner_session_for_config,
     publication_graph_for_task,
-    runtime_factory_for_config,
 )
 from .core.lifecycle import ShutdownResult
 from .core.models import (
@@ -113,24 +111,6 @@ def _context() -> tuple[TaskStore, StewardConfig]:
             **{**config.__dict__, "local_codex_test_harness": True}
         )
     return TaskStore.open(config.db_path), config
-
-
-def _configured_supervisor(
-    config: StewardConfig, store: TaskStore
-) -> SessionSupervisor | None:
-    """Build the production session boundary for a locked task image."""
-
-    if not config.task_image_digest:
-        return None
-    return SessionSupervisor(
-        config,
-        store,
-        runtime_factory=deployment_runtime_factory(
-            config, runtime_factory_for_config(config)
-        ),
-        image_digest=config.task_image_digest,
-        codex_identity=config.codex_identity or config.codex_bin,
-    )
 
 
 def _configured_planner_session(config: StewardConfig) -> FreshPlannerSession:
@@ -476,11 +456,7 @@ def run(task_id: str) -> None:
     store, config = _context()
     try:
         with acquire_daemon_lock(config):
-            daemon_ = StewardDaemon(
-                config,
-                store,
-                session_supervisor=_configured_supervisor(config, store),
-            )
+            daemon_ = StewardDaemon(config, store)
             shutdown_result: ShutdownResult | None = None
             shutdown_error: BaseException | None = None
             shutdown_incomplete = False

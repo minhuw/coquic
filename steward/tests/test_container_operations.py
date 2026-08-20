@@ -30,7 +30,10 @@ from coquic_steward.execution.container_config import (
 )
 from coquic_steward.execution.container_config import ValidationContainerConfig
 from coquic_steward.execution.executor import StewardExecutor
-from coquic_steward.execution.session import SessionSupervisor
+from coquic_steward.execution.session import (
+    SessionSupervisor,
+    session_supervisor_for_config,
+)
 from coquic_steward.execution.validation import (
     MAX_VALIDATION_OUTPUT_BYTES,
     _docker_validation_runner,
@@ -911,7 +914,7 @@ def test_deployment_runtime_identity_requires_an_exact_release(tmp_path: Path) -
         bind_deployment_identity(runtime, config)
 
 
-def test_production_cli_binds_task_and_planner_deployment_labels(
+def test_production_session_factory_binds_task_and_planner_deployment_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -919,6 +922,7 @@ def test_production_cli_binds_task_and_planner_deployment_labels(
     repository.mkdir(parents=True)
     config = StewardConfig(
         repo_root=repository,
+        codex_identity="codex-production",
         task_image_digest="sha256:" + "a" * 64,
         deployment=_deployment(home, release_id="release-cli"),
     )
@@ -928,18 +932,28 @@ def test_production_cli_binds_task_and_planner_deployment_labels(
         lambda _root, _gid: None,
     )
     store = TaskStore.create(config.db_path)
-    supervisor = cli_module._configured_supervisor(config, store)
+    supervisor = session_supervisor_for_config(config, store)
     assert supervisor is not None and supervisor.runtime_factory is not None
+    assert supervisor.image_digest == config.task_image_digest
+    assert supervisor.codex_identity == "codex-production"
+    assert session_supervisor_for_config(
+        replace(config, task_image_digest=None), store
+    ) is None
     task_runtime = supervisor.runtime_factory(
         SimpleNamespace(id="task-cli", worktree_path=repository)
     )
     planner = cli_module._configured_planner_session(config)
     planner_runtime = planner.invoker.runtime
 
+    assert task_runtime.config.labels["coquic.steward.codex"] == "codex-production"
     epoch_id = config.ensure_epoch()["epochId"]
     for runtime in (task_runtime, planner_runtime):
         assert runtime.config.labels["coquic.steward.release"] == "release-cli"
         assert runtime.config.labels["coquic.steward.epoch"] == epoch_id
+        assert runtime.config.limits.pids == config.deployment.max_pids
+        assert runtime.config.limits.memory_bytes == config.deployment.max_memory_bytes
+        assert runtime.config.limits.log_max_bytes == config.deployment.max_log_bytes
+        assert runtime.config.limits.scratch_bytes == config.deployment.max_scratch_bytes
 
 
 def test_release_and_pressure_facts_are_private(tmp_path: Path) -> None:

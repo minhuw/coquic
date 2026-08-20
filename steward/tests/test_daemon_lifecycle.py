@@ -3912,6 +3912,75 @@ def test_enabled_nested_container_config_drives_runtime_fields(config):
         )
 
 
+@pytest.mark.parametrize(
+    "container_enabled,digest,harness,injected,runner,expected",
+    [
+        (False, None, True, False, False, "local"),
+        (False, None, False, False, False, "rejected"),
+        (False, IMAGE, True, False, False, "local"),
+        (True, None, True, False, False, "rejected"),
+        (True, IMAGE, False, False, False, "supervisor"),
+        (True, None, False, True, False, "injected"),
+        (True, None, False, False, True, "runner"),
+    ],
+)
+def test_executor_task_session_eligibility(
+    config,
+    container_enabled,
+    digest,
+    harness,
+    injected,
+    runner,
+    expected,
+):
+    state = config.repo_root.parent / "container-state"
+    state.mkdir()
+    key = config.repo_root.parent / "codex-api-key"
+    key.write_text("fake\n", encoding="utf-8")
+    key.chmod(0o600)
+    container = StewardContainerConfig(
+        enabled=container_enabled,
+        image="nested-task-image",
+        image_digest=digest,
+        repository_host_path=config.repo_root if container_enabled else None,
+        state_host_path=state if container_enabled else None,
+        codex_api_key_path=key if container_enabled else None,
+        docker_bin="/bin/true",
+    )
+    configured = replace(
+        config,
+        container=container,
+        task_image_digest=digest if not container_enabled else None,
+        local_codex_test_harness=harness,
+    )
+    store = TaskStore.create(configured.db_path)
+    kwargs = {}
+    if injected:
+        kwargs["session_supervisor"] = SessionSupervisor(
+            configured, store, require_boundary=False
+        )
+    elif runner:
+        kwargs["runner"] = object()
+
+    if expected == "rejected":
+        error = "task_image_digest" if container_enabled else "task-container"
+        with pytest.raises(ValueError, match=error):
+            StewardExecutor(configured, store, **kwargs)
+        return
+
+    executor = StewardExecutor(configured, store, **kwargs)
+    if expected == "supervisor":
+        assert executor.session_supervisor is not None
+    elif expected == "injected":
+        assert executor.session_supervisor is kwargs["session_supervisor"]
+    elif expected == "runner":
+        assert executor.session_supervisor is None
+        assert executor.runner is kwargs["runner"]
+    else:
+        assert executor.session_supervisor is None
+        assert executor.runner is not None
+
+
 def test_sigint_sigterm_second_signal_stops_not_removes_restart_state(config):
     store = TaskStore.create(config.db_path)
     task, _, run = _interrupted_run(config, store)

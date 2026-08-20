@@ -47,6 +47,7 @@ from .container import (
     ExecIdentity,
     TaskContainerRuntime,
     PlannerContainerRuntime,
+    deployment_runtime_factory,
 )
 from .container_config import PlannerContainerConfig, TaskContainerConfig, TaskRole
 from .publication_graph import assemble_publication_graph
@@ -2225,6 +2226,24 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
         )
 
     return build
+
+
+def session_supervisor_for_config(
+    config: StewardConfig, store: TaskStore
+) -> SessionSupervisor | None:
+    """Build the automatic task-session boundary when a digest is available."""
+
+    if not config.task_image_digest:
+        return None
+    return SessionSupervisor(
+        config,
+        store,
+        runtime_factory=deployment_runtime_factory(
+            config, runtime_factory_for_config(config)
+        ),
+        image_digest=config.task_image_digest,
+        codex_identity=config.codex_identity or config.codex_bin,
+    )
 
 
 def worktree_checkpoint(config: StewardConfig, path: Path) -> str:

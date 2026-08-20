@@ -27,10 +27,6 @@ from coquic_steward.storage import TaskStore
 
 def _task_context(repo, monkeypatch):
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(
-        "coquic_steward.cli._configured_supervisor",
-        lambda _config, _store: None,
-    )
     config = load_config()
     store = TaskStore.create(config.db_path)
     task, _ = store.add_task(

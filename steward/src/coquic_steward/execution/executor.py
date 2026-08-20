@@ -73,7 +73,7 @@ from .session import (
     InvocationStatus,
     SessionResult,
     SessionSupervisor,
-    runtime_factory_for_config,
+    session_supervisor_for_config,
     worktree_checkpoint,
 )
 from .container_config import TaskRole
@@ -322,13 +322,11 @@ class StewardExecutor:
             and runner is None
             and config.container.enabled
         ):
-            session_supervisor = SessionSupervisor(
-                config,
-                store,
-                runtime_factory=runtime_factory_for_config(config),
-                image_digest=config.task_image_digest,
-                codex_identity=config.codex_identity or config.codex_bin,
-            )
+            session_supervisor = session_supervisor_for_config(config, store)
+            if session_supervisor is None:
+                raise ValueError(
+                    "task_image_digest must be configured for production execution"
+                )
         if (
             session_supervisor is None
             and runner is None

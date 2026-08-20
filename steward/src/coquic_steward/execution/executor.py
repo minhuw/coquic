@@ -293,29 +293,6 @@ class _SessionRunnerAdapter:
             },
         )
 
-    def run_review(
-        self,
-        task: TaskRecord,
-        prompt: str,
-        cwd: Path,
-        *,
-        name: str = "reviewer",
-        output_schema: Path,
-    ) -> WorkerResult:
-        return self.run(
-            task,
-            prompt,
-            cwd,
-            name=name,
-            output_schema=output_schema,
-            stage=CodexStage.review,
-        )
-
-    def reconcile_tool_changes(
-        self, transcript_path: Path, *, final_patch_path: Path | None = None
-    ) -> dict[str, object]:
-        return {"state": "container-boundary", "transcript_path": str(transcript_path)}
-
 
 class StewardExecutor:
     _durable_locks: dict[str, threading.RLock] = {}

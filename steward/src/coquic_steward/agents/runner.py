@@ -1074,6 +1074,7 @@ def _communicate_streaming(
                 timeout_seconds,
                 termination,
                 PostEofWait.unbounded(),
+                suppress_input_errors=False,
             )
             reader_error = outcome.reader_error
             timed_out = outcome.timed_out

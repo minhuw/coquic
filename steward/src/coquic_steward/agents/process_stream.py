@@ -24,6 +24,7 @@ _STREAM_CHUNK_SIZE = 64 * 1024
 _HANDOFF_WAIT_SECONDS = 0.05
 _READER_POLL_SECONDS = 0.01
 _INPUT_WRITE_MINIMUM_SECONDS = 0.1
+_TERMINATION_POLL_SECONDS = 0.01
 
 
 class _Pipe(Protocol):
@@ -141,24 +142,39 @@ class ExactTerminationStrategy:
                 return process.wait(), False
         except Exception:
             pass
+
+        signal_error: Exception | None = None
         try:
             process.send_signal(signal.SIGTERM)
-        except Exception:
+        except OSError:
+            # The process may have exited between poll and signal delivery.
             pass
+        except Exception as error:
+            signal_error = error
+
         try:
-            return process.wait(timeout=self.grace_seconds), False
+            exit_code = process.wait(timeout=self.grace_seconds)
         except (subprocess.TimeoutExpired, TimeoutError):
             try:
                 process.kill()
-            except Exception:
-                pass
-            return process.wait(), True
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
-            return process.wait(), True
+            except ProcessLookupError:
+                if process.poll() is not None:
+                    return process.wait(), True
+                raise
+            except Exception as error:
+                # Do not fall through to an untimed wait when escalation
+                # itself failed.  Surface the boundary failure instead.
+                if process.poll() is not None:
+                    process.wait()
+                raise error from signal_error
+            exit_code = process.wait()
+            if signal_error is not None:
+                raise signal_error
+            return exit_code, True
+
+        if signal_error is not None:
+            raise signal_error
+        return exit_code, False
 
 
 @dataclass(frozen=True)
@@ -168,12 +184,6 @@ class GroupTerminationStrategy:
     grace_seconds: float = 5.0
 
     def terminate(self, process: _Process) -> tuple[int, bool]:
-        try:
-            if process.poll() is not None:
-                return process.wait(), False
-        except Exception:
-            pass
-
         pid = getattr(process, "pid", None)
         try:
             if pid is None:
@@ -185,25 +195,67 @@ class GroupTerminationStrategy:
             except Exception:
                 pass
 
-        try:
-            return process.wait(timeout=self.grace_seconds), False
-        except (subprocess.TimeoutExpired, TimeoutError):
+        if pid is None:
             try:
-                if pid is None:
-                    raise OSError("process has no process-group identity")
-                os.killpg(pid, signal.SIGKILL)
-            except Exception:
+                return process.wait(timeout=self.grace_seconds), False
+            except (subprocess.TimeoutExpired, TimeoutError):
                 try:
                     process.kill()
-                except Exception:
+                except Exception as error:
+                    if process.poll() is not None:
+                        return process.wait(), True
+                    raise error
+                return process.wait(), True
+
+        deadline = time.monotonic() + self.grace_seconds
+        while True:
+            if process.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    process.wait(timeout=min(remaining, _TERMINATION_POLL_SECONDS))
+                except (subprocess.TimeoutExpired, TimeoutError):
                     pass
-            return process.wait(), True
+            if not _process_group_exists(pid):
+                return process.wait(), False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_TERMINATION_POLL_SECONDS, remaining))
+
+        escalation_error: Exception | None = None
+        try:
+            if pid is None:
+                raise OSError("process has no process-group identity")
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except Exception as error:
+                    escalation_error = error
         except Exception:
             try:
                 process.kill()
-            except Exception:
-                pass
-            return process.wait(), True
+            except Exception as error:
+                escalation_error = error
+
+        if escalation_error is not None:
+            if process.poll() is not None:
+                return process.wait(), True
+            raise escalation_error
+        return process.wait(), True
+
+
+def _process_group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 # Explicit aliases make the two process-boundary policies easy to discover.
@@ -229,6 +281,8 @@ def drain_process(
     timeout_seconds: float,
     terminate: TerminationStrategy,
     post_eof_wait: PostEofWait,
+    *,
+    suppress_input_errors: bool = False,
 ) -> DrainOutcome:
     """Drain a process and reap it before returning or exposing an error.
 
@@ -253,7 +307,12 @@ def drain_process(
     )
     try:
         try:
-            _write_input(process.stdin, input_bytes, deadline=input_deadline)
+            _write_input(
+                process.stdin,
+                input_bytes,
+                deadline=input_deadline,
+                suppress_errors=suppress_input_errors,
+            )
         except Exception:
             # Input setup failures are outside the returned reader-error
             # contract, but the child must still be reaped before propagating.
@@ -345,6 +404,7 @@ def _write_input(
     data: bytes,
     *,
     deadline: float,
+    suppress_errors: bool,
 ) -> None:
     if stream is None:
         return
@@ -386,7 +446,8 @@ def _write_input(
     except TimeoutError:
         raise
     except (BrokenPipeError, OSError):
-        return
+        if not suppress_errors:
+            raise
     finally:
         try:
             stream.close()
@@ -426,36 +487,32 @@ def _wait_reaped(process: _Process) -> int:
 
 def _reap_after_error(
     process: _Process,
-    terminate: TerminationStrategy | Callable[[_Process], tuple[int, bool]],
+    terminate: TerminationStrategy,
 ) -> tuple[int, bool]:
     try:
-        return _invoke_termination(terminate, process)
-    except Exception:
-        # Preserve the original adapter error while making a best effort to
-        # close the process boundary if a custom termination implementation
-        # itself fails.
+        return terminate.terminate(process)
+    except Exception as termination_error:
+        # Preserve the original adapter error while making a bounded best
+        # effort to close the process boundary.  If the fallback escalation
+        # fails, do not wait indefinitely for a process that is still live.
         try:
             process.kill()
-        except Exception:
-            pass
+        except ProcessLookupError:
+            if process.poll() is not None:
+                return process.wait(), True
+            raise termination_error
+        except Exception as kill_error:
+            if process.poll() is not None:
+                process.wait()
+            raise kill_error from termination_error
         return process.wait(), True
-
-
-def _invoke_termination(
-    terminate: TerminationStrategy | Callable[[_Process], tuple[int, bool]],
-    process: _Process,
-) -> tuple[int, bool]:
-    method = getattr(terminate, "terminate", None)
-    if method is not None:
-        return method(process)
-    return terminate(process)
 
 
 def _terminate_after_deadline(
     process: _Process,
-    terminate: TerminationStrategy | Callable[[_Process], tuple[int, bool]],
+    terminate: TerminationStrategy,
 ) -> tuple[int, bool]:
-    return _invoke_termination(terminate, process)
+    return terminate.terminate(process)
 
 
 def _wait_after_eof(

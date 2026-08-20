@@ -236,6 +236,7 @@ def stream_process(
         timeout_seconds,
         ExactTerminationStrategy(grace_seconds=interrupt_grace_seconds),
         PostEofWait.bounded(),
+        suppress_input_errors=True,
     )
     if outcome.reader_error is not None:
         raise outcome.reader_error

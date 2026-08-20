@@ -150,6 +150,7 @@ from ..publication.outbox import (
     PublicationReceipt,
     PublicationState,
     ReceiptClass,
+    _PERSISTED_REASON_VALUES,
     allowed_transition,
     transition_state,
 )
@@ -161,48 +162,9 @@ _PRIVATE_RECEIPT_KEY_RE = re.compile(
     r"^v1/originals/(?P<task>[A-Za-z0-9][A-Za-z0-9._-]{0,127})/"
     r"(?P<run>[A-Za-z0-9][A-Za-z0-9._-]{0,127})/sha256/(?P<digest>[0-9a-f]{64})\.jsonl$"
 )
-_PUBLICATION_REASON_VALUES = frozenset(
-    {
-        "missing",
-        "running",
-        "partial",
-        "invalid_identifier",
-        "invalid_path",
-        "invalid_media_type",
-        "uninspectable_binary",
-        "invalid_digest",
-        "invalid_metadata",
-        "symlink",
-        "non_regular",
-        "hardlink",
-        "oversized",
-        "size_mismatch",
-        "digest_mismatch",
-        "changing",
-        "invalid_utf8",
-        "invalid_jsonl",
-        "source_finding",
-        "patch_finding",
-        "staging_unsafe",
-        "scanner_failure",
-        "ocr_failure",
-        "unsafe_content",
-        "irreparable",
-        "network",
-        "quota",
-        "authentication",
-        "permission",
-        "timeout",
-        "provider",
-        "integrity",
-        "lease_expired",
-        "retry_exhausted",
-        "cleanup_failed",
-        "operator_blocked",
-    }
-)
+_PERSISTED_REASON_SET = frozenset(_PERSISTED_REASON_VALUES)
 _PUBLICATION_HIDE_REASONS = frozenset(
-    _PUBLICATION_REASON_VALUES
+    _PERSISTED_REASON_SET
     - {
         "network",
         "quota",
@@ -6644,7 +6606,7 @@ def _publication_reason(value: object | None) -> str | None:
     if not isinstance(value, str):
         raise OutboxValidationError("invalid_metadata")
     reason = value
-    if reason not in _PUBLICATION_REASON_VALUES:
+    if reason not in _PERSISTED_REASON_SET:
         raise OutboxValidationError("invalid_metadata")
     return reason
 

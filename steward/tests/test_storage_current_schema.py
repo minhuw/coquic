@@ -14,9 +14,11 @@ import coquic_steward.storage.sqlite as sqlite_module
 from coquic_steward.execution.task_archive import TaskArchive
 from coquic_steward.publication.outbox import (
     GenerationIdentity,
+    OutboxValidationError,
     PublicationGeneration,
     PublicationRetryPolicy,
     PublicationState,
+    _PERSISTED_REASON_VALUES,
 )
 from coquic_steward.storage import SQLiteStoreLifecycleError, StoreRecoveryResult, TaskStore
 from coquic_steward.storage.sqlite import (
@@ -209,6 +211,16 @@ def test_current_schema_oracle_is_complete_and_seeded(tmp_path: Path) -> None:
             "workflow_run_attempt",
             "updated_at",
         ]
+
+
+def test_sqlite_reason_vocabulary_matches_outbox() -> None:
+    assert sqlite_module._PERSISTED_REASON_SET == frozenset(_PERSISTED_REASON_VALUES)
+
+    for reason in _PERSISTED_REASON_VALUES:
+        assert sqlite_module._publication_reason(reason) == reason
+
+    with pytest.raises(OutboxValidationError):
+        sqlite_module._publication_reason("arbitrary")
 
 
 def test_create_and_open_bind_the_immutable_task_epoch_and_callback(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+from coquic_steward.publication.models import ReasonCode
 from coquic_steward.publication.outbox import (
     CleanupIntent,
     CleanupState,
@@ -24,6 +25,7 @@ from coquic_steward.publication.outbox import (
     PublicationRetryPolicy,
     PublicationState,
     ReceiptClass,
+    _PERSISTED_REASON_VALUES,
     allowed_transition,
     deterministic_publication_id,
 )
@@ -55,6 +57,28 @@ def test_retry_policy_counts_initial_claim_and_retries(
 def test_retry_policy_rejects_invalid_retry_budgets(value: object) -> None:
     with pytest.raises(OutboxValidationError):
         PublicationRetryPolicy(value)  # type: ignore[arg-type]
+
+
+def test_persisted_reason_vocabulary_is_canonical() -> None:
+    public_values = tuple(item.value for item in ReasonCode)
+    operational_values = (
+        "network",
+        "quota",
+        "authentication",
+        "permission",
+        "timeout",
+        "provider",
+        "integrity",
+        "lease_expired",
+        "retry_exhausted",
+        "cleanup_failed",
+        "operator_blocked",
+    )
+
+    assert len(_PERSISTED_REASON_VALUES) == 36
+    assert len(set(_PERSISTED_REASON_VALUES)) == len(_PERSISTED_REASON_VALUES)
+    assert _PERSISTED_REASON_VALUES[: len(public_values)] == public_values
+    assert _PERSISTED_REASON_VALUES[len(public_values) :] == operational_values
 
 
 EXPECTED_LEGAL_EDGES = frozenset(
@@ -435,6 +459,15 @@ def test_active_transitions_reject_lease_owner_replacement() -> None:
     )
     assert uploading.lease_owner == "worker-1"
     assert staged.lease_owner == "worker-1"
+
+
+def test_every_persisted_reason_is_accepted() -> None:
+    for reason in _PERSISTED_REASON_VALUES:
+        blocked = _generation(state="blocked", reason=reason)
+        assert blocked.reason == reason
+
+    with pytest.raises(OutboxValidationError):
+        _generation(state="blocked", reason="arbitrary")
 
 
 def test_retry_and_blocked_recovery_are_bounded() -> None:

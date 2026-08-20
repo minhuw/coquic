@@ -18,7 +18,11 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from ..publication.outbox import GenerationIdentity, OutboxValidationError
+from ..publication.outbox import (
+    GenerationIdentity,
+    OutboxValidationError,
+    _PERSISTED_REASON_VALUES,
+)
 
 
 ACTIVE_STATUS_VALUES = ("queued", "running", "reviewing", "integrating")
@@ -27,46 +31,8 @@ _PUBLICATION_TIMESTAMP_GLOB = (
     "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T"
     "[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z"
 )
-_PUBLICATION_SAFE_REASONS = (
-    "missing",
-    "running",
-    "partial",
-    "invalid_identifier",
-    "invalid_path",
-    "invalid_media_type",
-    "uninspectable_binary",
-    "invalid_digest",
-    "invalid_metadata",
-    "symlink",
-    "non_regular",
-    "hardlink",
-    "oversized",
-    "size_mismatch",
-    "digest_mismatch",
-    "changing",
-    "invalid_utf8",
-    "invalid_jsonl",
-    "source_finding",
-    "patch_finding",
-    "staging_unsafe",
-    "scanner_failure",
-    "ocr_failure",
-    "unsafe_content",
-    "irreparable",
-    "network",
-    "quota",
-    "authentication",
-    "permission",
-    "timeout",
-    "provider",
-    "integrity",
-    "lease_expired",
-    "retry_exhausted",
-    "cleanup_failed",
-    "operator_blocked",
-)
 _PUBLICATION_SAFE_REASON_SQL = ",".join(
-    f"'{value}'" for value in _PUBLICATION_SAFE_REASONS
+    f"'{value}'" for value in _PERSISTED_REASON_VALUES
 )
 
 

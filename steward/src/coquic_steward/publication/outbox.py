@@ -150,22 +150,22 @@ class PublicationOperationStatus(StrEnum):
     precondition = "precondition"
 
 
-_SAFE_REASON_VALUES: Final[frozenset[str]] = frozenset(
-    {item.value for item in ReasonCode}
-    | {
-        "network",
-        "quota",
-        "authentication",
-        "permission",
-        "timeout",
-        "provider",
-        "integrity",
-        "lease_expired",
-        "retry_exhausted",
-        "cleanup_failed",
-        "operator_blocked",
-    }
+_PERSISTED_REASON_VALUES: Final[tuple[str, ...]] = tuple(
+    item.value for item in ReasonCode
+) + (
+    "network",
+    "quota",
+    "authentication",
+    "permission",
+    "timeout",
+    "provider",
+    "integrity",
+    "lease_expired",
+    "retry_exhausted",
+    "cleanup_failed",
+    "operator_blocked",
 )
+_SAFE_REASON_VALUES: Final[frozenset[str]] = frozenset(_PERSISTED_REASON_VALUES)
 
 
 _LEGAL_TRANSITIONS: Final[dict[PublicationState, frozenset[PublicationState]]] = {

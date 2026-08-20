@@ -186,20 +186,6 @@ class TelemetryAggregate:
             "total_tokens": self.total_tokens,
         }
 
-    def add(self, other: "TelemetryAggregate") -> "TelemetryAggregate":
-        return TelemetryAggregate(
-            completed_turns=self.completed_turns + other.completed_turns,
-            input_tokens=self.input_tokens + other.input_tokens,
-            cached_input_tokens=self.cached_input_tokens + other.cached_input_tokens,
-            uncached_input_tokens=self.uncached_input_tokens
-            + other.uncached_input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            reasoning_output_tokens=self.reasoning_output_tokens
-            + other.reasoning_output_tokens,
-            total_tokens=self.total_tokens + other.total_tokens,
-        )
-
-
 @dataclass(frozen=True)
 class PriceEntry:
     entry_id: str
@@ -377,56 +363,6 @@ class CostEstimate:
         if self.catalog_digest is not None:
             result["catalog_digest"] = self.catalog_digest
         return result
-
-
-@dataclass(frozen=True)
-class TelemetryTiming:
-    started_at: datetime
-    completed_at: datetime
-    duration_ms: int
-    first_agent_message_completed_ms: int | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "started_at": _format_utc(self.started_at),
-            "completed_at": _format_utc(self.completed_at),
-            "duration_ms": self.duration_ms,
-            "first_agent_message_completed_ms": self.first_agent_message_completed_ms,
-        }
-
-
-@dataclass(frozen=True)
-class TelemetryCoverage:
-    completeness: TelemetryCompleteness
-    issues: tuple[dict[str, object], ...] = ()
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "completeness": self.completeness.value,
-            "issues": [dict(issue) for issue in self.issues],
-        }
-
-
-@dataclass(frozen=True)
-class TelemetryInvocation:
-    """Validated invocation envelope for consumers that need a typed model."""
-
-    payload: dict[str, object]
-
-    @classmethod
-    def from_dict(cls, value: object) -> "TelemetryInvocation":
-        return cls(validate_sidecar(value))
-
-    @property
-    def invocation_id(self) -> str:
-        return str(self.payload["invocation_id"])
-
-    @property
-    def aggregate(self) -> TelemetryAggregate:
-        return TelemetryAggregate.from_dict(self.payload["aggregate"])
-
-    def to_dict(self) -> dict[str, object]:
-        return json.loads(json.dumps(self.payload))
 
 
 def estimate_cost(
@@ -798,100 +734,6 @@ def telemetry_sidecar_path(transcript_path: Path) -> Path:
     return Path(transcript_path).with_name("telemetry.json")
 
 
-def aggregate_sidecars(values: Iterable[dict[str, object]]) -> dict[str, object]:
-    """Merge validated sidecars, deduplicating invocation IDs."""
-
-    selected: dict[str, dict[str, object]] = {}
-    for value in values:
-        selected.setdefault(str(value["invocation_id"]), value)
-    ordered = sorted(selected.values(), key=lambda item: (item["started_at"], item["invocation_id"]))
-    aggregate = TelemetryAggregate()
-    turns: list[dict[str, int]] = []
-    issues: Counter[str] = Counter()
-    complete = True
-    for value in ordered:
-        aggregate = aggregate.add(TelemetryAggregate.from_dict(value["aggregate"]))
-        for turn in value["turns"]:
-            if len(turns) < 100:
-                turns.append(dict(turn))
-        if value["completeness"] != TelemetryCompleteness.complete.value:
-            complete = False
-        for issue in value["issues"]:
-            issues[str(issue["category"])] += int(issue["count"])
-    return {
-        "availability": "available" if ordered else "not_produced",
-        "provenance": TELEMETRY_PROVENANCE,
-        "invocation_count": len(ordered),
-        "configured_model": _common_value(ordered, "configured_model"),
-        "reasoning_effort": _common_value(ordered, "reasoning_effort"),
-        "billing_mode": _common_value(ordered, "billing_mode") or BillingMode.unknown.value,
-        "started_at": ordered[0]["started_at"] if ordered else None,
-        "completed_at": ordered[-1]["completed_at"] if ordered else None,
-        "duration_ms": sum(int(value["duration_ms"]) for value in ordered),
-        "aggregate": aggregate.to_dict(),
-        "turns": turns,
-        "turns_truncated": sum(len(value["turns"]) for value in ordered) > len(turns),
-        "completeness": "complete" if complete and ordered else ("unavailable" if not ordered else "partial"),
-        "issues": _issues_payload(issues),
-        "cost": _merge_costs(ordered),
-        "unavailable": _unavailable_descriptors(),
-    }
-
-
-def _merge_costs(values: list[dict[str, object]]) -> dict[str, object]:
-    estimates = [item["cost"] for item in values if isinstance(item.get("cost"), dict)]
-    usable = [item for item in estimates if item.get("status") == CostStatus.estimated.value]
-    if not values:
-        return {"status": CostStatus.unavailable.value, "reason": "no_telemetry"}
-    if len(usable) != len(values):
-        reasons = {
-            str(item.get("reason"))
-            for item in estimates
-            if item.get("status") == CostStatus.unavailable.value
-            and isinstance(item.get("reason"), str)
-        }
-        return {
-            "status": CostStatus.unavailable.value,
-            "reason": next(iter(reasons)) if len(reasons) == 1 else "incomplete_cost_basis",
-        }
-    total = sum(int(item.get("micro_usd", 0)) for item in usable)
-    result: dict[str, object] = {"status": CostStatus.estimated.value, "micro_usd": total}
-    component_keys = (
-        "uncached_input_micro_usd",
-        "cached_input_micro_usd",
-        "output_micro_usd",
-    )
-    if all(all(key in item for key in component_keys) for item in usable):
-        for key in component_keys:
-            result[key] = sum(int(item[key]) for item in usable)
-    entries = [item.get("price_entry") for item in usable if isinstance(item.get("price_entry"), dict)]
-    if len(entries) == 1:
-        result["price_entry"] = entries[0]
-    elif entries:
-        result["price_entries"] = entries[:32]
-    digests = sorted(
-        {
-            str(item["catalog_digest"])
-            for item in usable
-            if isinstance(item.get("catalog_digest"), str)
-        }
-    )
-    if len(digests) == 1:
-        result["catalog_digest"] = digests[0]
-    elif digests:
-        result["catalog_digests"] = digests[:32]
-    return result
-
-
-def _unavailable_descriptors() -> dict[str, dict[str, str]]:
-    reason = "not_exposed_by_codex_exec"
-    return {
-        "model_requests": {"availability": "unavailable", "reason": reason},
-        "ttft_ms": {"availability": "unavailable", "reason": reason},
-        "output_tokens_per_second": {"availability": "unavailable", "reason": reason},
-    }
-
-
 def _parse_price_entry(value: object) -> PriceEntry:
     if not isinstance(value, dict):
         raise ValueError("price entry")
@@ -1066,13 +908,6 @@ def _is_agent_message(event: dict[str, object]) -> bool:
     return isinstance(item, dict) and item.get("type") == "agent_message"
 
 
-def _common_value(values: list[dict[str, object]], key: str) -> object:
-    if not values:
-        return None
-    selected = {value.get(key) for value in values}
-    return next(iter(selected)) if len(selected) == 1 else None
-
-
 def _bounded_text(value: object, limit: int) -> str:
     text = str(value)
     encoded = text.encode("utf-8")
@@ -1158,12 +993,8 @@ __all__ = [
     "TELEMETRY_SCHEMA_VERSION",
     "TelemetryAggregate",
     "TelemetryCompleteness",
-    "TelemetryCoverage",
-    "TelemetryInvocation",
     "TelemetryRecorder",
-    "TelemetryTiming",
     "TelemetryTurn",
-    "aggregate_sidecars",
     "estimate_cost",
     "load_sidecar",
     "telemetry_sidecar_path",

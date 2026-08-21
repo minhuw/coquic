@@ -15,6 +15,7 @@ from ..agents.catalog import (
     RemoteWriteAuthorityKey,
     RemoteWriteIdentity,
 )
+from ..core.models import EffectActionKind, EffectProposal
 from ..core.models import (
     Priority,
     ProjectSignals,
@@ -450,6 +451,22 @@ def _task_spec_from_proposal(
     if canonical_remote_write is not None:
         title = canonical_remote_write.title.strip()
         prompt = canonical_remote_write.prompt.strip()
+        identity_pair = _remote_write_identity_for_proposal(proposed, signals)
+        if identity_pair is not None:
+            _key, identity = identity_pair
+            proposal = EffectProposal(
+                action=EffectActionKind.remote_write,
+                action_id=f"remote-write:{identity.source_id}:{identity.worker.value}",
+                target=identity.repository,
+                payload={
+                    "provider": identity.provider,
+                    "kind": identity.kind,
+                    "source_id": identity.source_id,
+                    "worker": identity.worker.value,
+                },
+                reason="remote worker output requires a validated local proposal",
+            )
+            metadata["effect_proposal"] = proposal.as_dict()
     elif proposed.kind == TaskKind.feature:
         selected = _selected_signal_items(proposed, signals.items)
         identity = (
@@ -537,7 +554,7 @@ def _canonical_feature_task(identity: tuple[int, str]) -> tuple[str, str]:
     number, url = identity
     return (
         f"Implement GitHub feature issue #{number}",
-        f"Implement GitHub issue #{number} ({url}) as a local-only patch. "
+        f"Implement GitHub issue #{number} ({url}) as a local patch. "
         "Keep the change focused on the selected issue and add focused tests or "
         "validation. Do not comment on, label, close, or otherwise mutate GitHub "
         "issues, and do not commit or push.",

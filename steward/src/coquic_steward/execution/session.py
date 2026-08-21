@@ -76,10 +76,6 @@ class InvocationStatus(StrEnum):
     unavailable = "unavailable"
 
 
-class DryRunAdmissionError(RuntimeError):
-    """Raised when a dry-run task reaches a write-capable session boundary."""
-
-
 def _task_is_dry_run(task: TaskRecord) -> bool:
     metadata = getattr(getattr(task, "spec", None), "metadata", None)
     if not isinstance(metadata, Mapping):
@@ -293,15 +289,6 @@ def enqueue_materialized_publication(
     """Queue one completed, fully materialized run without transport I/O."""
 
     publication = getattr(config, "publication", None)
-    if _global_dry_run(config) or _task_is_dry_run(task):
-        return None
-    if isinstance(store, TaskStore):
-        try:
-            if store.task_execution_mode(task.id) is not ExecutionMode.live:
-                return None
-        except Exception:
-            # A missing or unreadable Store latch is not publication authority.
-            return None
     if not getattr(publication, "enabled", False):
         return None
     if run.completed_at is None or str(run.state) == "running":
@@ -334,6 +321,28 @@ def enqueue_materialized_publication(
             # later daemon restart must never rebuild from mutable task state.
             if not _write_publication_snapshot(config, task.id, run_id, graph):
                 return None
+        if isinstance(store, TaskStore):
+            if _global_dry_run(config):
+                # Tighten the persisted latch before asking the Store to
+                # authorize the enqueue.  This handles callers that retained
+                # a live Store instance while the daemon switched to dry-run.
+                store.resolve_task_execution_mode(task.id, True)
+            decision = store.effect_decision(
+                task.id,
+                action="publication.enqueue",
+                action_id=f"publication-enqueue:{task.id}:{run_id}",
+                target=task.id,
+                payload={
+                    "run_id": run_id,
+                    "publication_id": outcome.publication_id,
+                    "metadata_digest": outcome.metadata_digest,
+                },
+                reason="dry-run publication enqueue is proposed locally",
+            )
+            if not decision.allowed:
+                return decision.proposal
+        elif _global_dry_run(config) or _task_is_dry_run(task):
+            return None
         return store.enqueue_publication(outcome.to_outbox())
     except Exception:
         # A completion hook must not alter the session result.  The daemon's
@@ -1044,10 +1053,6 @@ class SessionSupervisor:
         run_id: str | None = None,
     ) -> SessionResult:
         task = self.store.get(task_id)
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
-            raise DryRunAdmissionError(
-                f"task {task_id} is paused by dry-run admission"
-            )
         selected_role = _normalize_role(role)
         api_key = self._configured_api_key(api_key)
         self.store.validate_execution_ownership(
@@ -1124,11 +1129,6 @@ class SessionSupervisor:
             session = self.store.get_session(predecessor.session_id)
         except KeyError as exc:
             return ResumeResult(ResumeCategory.unavailable_store, evidence={"error": str(exc)})
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
-            return ResumeResult(
-                ResumeCategory.rejected,
-                evidence={"reason": "dry-run admission paused"},
-            )
         api_key = self._configured_api_key(api_key)
         if predecessor.state != CodexRunState.interrupted.value:
             return ResumeResult(ResumeCategory.rejected, evidence={"reason": "predecessor is not interrupted"})
@@ -1424,11 +1424,6 @@ class SessionSupervisor:
 
         predecessor = self.store.get_run(predecessor_run_id)
         task = self.store.get(predecessor.task_id)
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
-            return ResumeResult(
-                ResumeCategory.rejected,
-                evidence={"reason": "dry-run admission paused"},
-            )
         api_key = self._configured_api_key(api_key)
         self.store.validate_execution_ownership(
             predecessor.task_id,

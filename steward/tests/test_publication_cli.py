@@ -208,7 +208,7 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
         "_context",
         lambda **kwargs: (
             context_calls.append(dict(kwargs))
-            or (Store(), StewardConfig(repo_root=Path.cwd()))
+            or (Store(), StewardConfig(repo_root=Path.cwd(), dry_run=False))
         ),
     )
     status = CliRunner().invoke(app, ["publication", "status"])
@@ -321,7 +321,7 @@ def test_retry_result_carries_confirmed_hide_and_cli_closes_d1(tmp_path: Path, m
     staging_root = tmp_path / "publication-staging"
     staging_root.mkdir(mode=0o700)
     config = replace(
-        StewardConfig(repo_root=Path.cwd()),
+        StewardConfig(repo_root=Path.cwd(), dry_run=False),
         publication=SimpleNamespace(
             d1_token_path=None,
             r2_access_key_id_path=None,
@@ -424,7 +424,7 @@ def test_retry_missing_publication_configuration_is_bounded(monkeypatch) -> None
                 fence=SimpleNamespace(state="pending"),
             )
 
-    config = StewardConfig(repo_root=Path.cwd())
+    config = StewardConfig(repo_root=Path.cwd(), dry_run=False)
     monkeypatch.setattr(cli, "_context", lambda: (Store(), config))
     monkeypatch.setattr(cli, "_current_publication_source", lambda *_args: {"fresh": True})
 

@@ -29,6 +29,7 @@ from .core.lifecycle import ShutdownResult
 from .core.models import (
     Priority,
     Risk,
+    ExecutionMode,
     TaskKind,
     TaskSpec,
     TaskStatus,
@@ -155,6 +156,8 @@ def _current_publication_source(
 def _build_cli_hide_publisher(
     config: StewardConfig, store: TaskStore
 ) -> tuple[CloudPublisher, D1PublicationClient] | None:
+    if _publication_mutation_blocked(config):
+        return None
     publication: StewardPublicationConfig = config.publication
     if not publication.enabled:
         return None
@@ -187,7 +190,7 @@ def _build_cli_hide_publisher(
 
 def _build_cli_retry_publisher(
     config: StewardConfig, store: TaskStore
-) -> tuple[CloudPublisher, D1PublicationClient | None]:
+) -> tuple[CloudPublisher, D1PublicationClient | None] | None:
     """Build retry's local coordinator and optional configured D1 client.
 
     A changed clean generation is a local outbox operation and must retain the
@@ -195,6 +198,8 @@ def _build_cli_retry_publisher(
     fail closed through ``CloudPublisher.hide_task`` when no D1 client exists.
     """
 
+    if _publication_mutation_blocked(config):
+        return None
     built = _build_cli_hide_publisher(config, store)
     if built is not None:
         return built
@@ -339,6 +344,23 @@ def publication_retry(publication_id: str) -> None:
             }
         )
         raise typer.Exit(1)
+    if isinstance(store, TaskStore):
+        try:
+            task_mode = store.task_execution_mode(generation.task_id)
+        except (AttributeError, KeyError, ValueError):
+            task_mode = None
+    else:
+        task_mode = ExecutionMode.live
+    if task_mode is not ExecutionMode.live:
+        _emit_publication(
+            {
+                "status": PublicationStatus.blocked.value,
+                "publicationId": _safe_publication_id(publication_id),
+                "reason": "dry_run",
+                "reasonCodes": ["dry_run"],
+            }
+        )
+        raise typer.Exit(1)
     source = _current_publication_source(config, store, generation)
     built = _build_cli_retry_publisher(config, store)
     publisher, client = built
@@ -392,6 +414,23 @@ def publication_hide(
         raise typer.BadParameter("unsupported reason", param_hint="--reason")
     store, config = _context()
     if _publication_mutation_blocked(config):
+        _emit_publication(
+            {
+                "status": PublicationHideStatus.blocked.value,
+                "taskId": _safe_publication_id(task_id),
+                "publicationId": None,
+                "reason": "dry_run",
+            }
+        )
+        raise typer.Exit(1)
+    if isinstance(store, TaskStore):
+        try:
+            task_mode = store.task_execution_mode(task_id)
+        except (AttributeError, KeyError, ValueError):
+            task_mode = None
+    else:
+        task_mode = ExecutionMode.live
+    if task_mode is not ExecutionMode.live:
         _emit_publication(
             {
                 "status": PublicationHideStatus.blocked.value,

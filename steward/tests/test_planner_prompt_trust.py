@@ -319,7 +319,7 @@ def test_feature_task_uses_canonical_instructions_and_retains_raw_evidence() -> 
     assert spec.worker == WorkerKind.feature_implementer
     assert spec.title == "Implement GitHub feature issue #42"
     assert spec.prompt == (
-        f"Implement GitHub issue #42 ({ISSUE_URL}) as a local-only patch. "
+        f"Implement GitHub issue #42 ({ISSUE_URL}) as a local patch. "
         "Keep the change focused on the selected issue and add focused tests or "
         "validation. Do not comment on, label, close, or otherwise mutate GitHub "
         "issues, and do not commit or push."

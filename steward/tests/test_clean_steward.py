@@ -36,7 +36,6 @@ from coquic_steward.core.config import (
 from coquic_steward.core.lifecycle import InvalidTaskTransition
 from coquic_steward.core.models import (
     DaemonRuntime,
-    IntegrationMode,
     Priority,
     ProjectSignals,
     Risk,
@@ -214,7 +213,7 @@ def _durable_push_setup(
     monkeypatch,
     *,
     issue_numbers: tuple[int, ...] = (),
-    local_only: bool = False,
+    dry_run: bool = False,
     frozen_paths: tuple[str, ...] = (),
     max_main_pushes_per_day: int | None = None,
 ):
@@ -236,8 +235,7 @@ def _durable_push_setup(
             **config.__dict__,
             "codex_bin": str(fake),
             "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": local_only,
+            "dry_run": dry_run,
             "limits": (
                 StewardLimits(
                     **{
@@ -258,7 +256,7 @@ def _durable_push_setup(
         }
     )
     config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
+    store = TaskStore.create(config.db_path, dry_run=dry_run)
     selected = [
         {
             "kind": "github-issues.feature-request",
@@ -318,8 +316,7 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.private_root == coquic_home / "private"
     assert config.transcripts_dir == config.state_dir / "transcripts"
     assert config.dry_run is True
-    assert config.integration_mode == "local-only"
-    assert config.local_only is True
+    assert config.dry_run_enabled is True
     assert config.enabled_signals == (
         "github-actions:ci",
         "github-actions:test",
@@ -508,25 +505,6 @@ validation_timeout_minutes = 9
     config = load_config(repo_root=repo, config_path=config_path)
 
     assert config.limits.validation_timeout_minutes == 9
-
-@pytest.mark.parametrize(
-    ("key", "value", "message"),
-    (
-        ("integration_mode", '"push-main"', "integration_mode is no longer accepted"),
-        ("local_only", "false", "local_only is no longer accepted"),
-    ),
-)
-def test_config_rejects_legacy_admission_keys(
-    repo: Path, key: str, value: str, message: str
-) -> None:
-    config_path = repo / "steward.toml"
-    config_path.write_text(
-        f"[steward]\ngithub_repository = \"minhuw/coquic\"\n{key} = {value}\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match=message):
-        load_config(repo_root=repo, config_path=config_path)
 
 def test_config_resolves_codex_bin_from_path(
     repo: Path, tmp_path: Path, monkeypatch
@@ -1357,11 +1335,9 @@ def test_store_preserves_failed_signal_coverage_for_dry_run_task(
         signal_row.updated_at = old.isoformat()
         task_row.updated_at = old.isoformat()
 
-    assert store.requeue_failed_signal_items() == 0
-    assert [item.id for item in store.list_signal_items(status=SignalItemStatus.planned)] == [
-        signal.id
-    ]
-    assert store.pending_signal_items() == []
+    assert store.requeue_failed_signal_items() == 1
+    assert store.list_signal_items(status=SignalItemStatus.planned) == []
+    assert [item.id for item in store.pending_signal_items()] == [signal.id]
 
 
 def test_store_skips_failed_signal_requeue_with_duplicate_pending(
@@ -1866,7 +1842,7 @@ def test_daemon_preflights_push_main_remote(
         **{
             **config.__dict__,
             "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
+            "dry_run": False,
         }
     )
     config.ensure_dirs()
@@ -1899,7 +1875,7 @@ def test_daemon_preflight_rejects_divergent_local_main(
         **{
             **config.__dict__,
             "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
+            "dry_run": False,
         }
     )
 
@@ -1919,7 +1895,7 @@ def test_daemon_preflight_fails_before_tick_for_push_main(
         **{
             **config.__dict__,
             "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
+            "dry_run": False,
         }
     )
     config.ensure_dirs()
@@ -1937,14 +1913,13 @@ def test_daemon_preflight_skips_when_external_writes_disabled(
     config = config.__class__(
         **{
             **config.__dict__,
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": True,
+            "dry_run": True,
         }
     )
     config.ensure_dirs()
 
     def fail_run_command(*_args, **_kwargs):
-        raise AssertionError("preflight should not run in local_only mode")
+        raise AssertionError("preflight should not run in dry-run mode")
 
     monkeypatch.setattr(
         "coquic_steward.orchestration.preflight.run_command", fail_run_command
@@ -4711,8 +4686,8 @@ def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
 
     prompt = render_worker_prompt(task, config)
 
-    assert "Stop at a validated local patch" in prompt
-    assert "Do not commit, push, trigger GitHub workflows" in prompt
+    assert "External writes are denied at the trusted effect boundary" in prompt
+    assert "bounded, validated proposals" in prompt
     assert "Authoritative source context:" in prompt
     assert "cpp/use-after-free" in prompt
     assert "src/main.cpp" in prompt
@@ -5109,8 +5084,7 @@ def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
         **{
             **config.__dict__,
             "git_remote": "origin",
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": False,
+            "dry_run": False,
         }
     )
     store = TaskStore.create(push_config.db_path)
@@ -5959,12 +5933,11 @@ def test_executor_push_main_uses_durable_commit_phase(
         **{
             **config.__dict__,
             "codex_bin": str(fake),
-            "integration_mode": IntegrationMode.push_main.value,
-            "local_only": True,
+            "dry_run": True,
         }
     )
     config.ensure_dirs()
-    store = TaskStore.create(config.db_path)
+    store = TaskStore.create(config.db_path, dry_run=config.dry_run)
     task, _ = store.add_task(
         TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
     )
@@ -5982,11 +5955,11 @@ def test_executor_push_main_uses_durable_commit_phase(
         for item in store.list_tasks()
     )
 
-def test_durable_local_only_commit_does_not_push_remote(
+def test_durable_dry_run_commit_proposes_remote_push(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
     config, store, source, integration, executor = _durable_push_setup(
-        config, tmp_path, monkeypatch, local_only=True
+        config, tmp_path, monkeypatch, dry_run=True
     )
     assert _drive_durable(executor, integration.id)
     assert store.get(integration.id).status == TaskStatus.succeeded

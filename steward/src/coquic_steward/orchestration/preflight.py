@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.config import StewardConfig
-from ..core.models import IntegrationMode
 from ..core.subprocesses import CommandResult, run_command
 from ..control_loop import ArchiveError, ControlLoopArchive
 
@@ -125,12 +124,7 @@ def run_preflight(
         _validate_task_image_identity(inspect.stdout, container.runtime_protocol)
         checks.extend(("docker", "task-image"))
 
-    if (
-        check_remote_push
-        and not _dry_run_enabled(config)
-        and config.integration_mode == IntegrationMode.push_main.value
-        and not config.local_only
-    ):
+    if check_remote_push and not _dry_run_enabled(config):
         preflight_remote_push(config)
         checks.append("remote-push")
     return PreflightReport(tuple(checks), tuple(warnings))
@@ -302,11 +296,7 @@ def _validate_container_host_mapping(config: StewardConfig) -> None:
 
 
 def preflight_remote_push(config: StewardConfig) -> bool:
-    if (
-        _dry_run_enabled(config)
-        or config.integration_mode != IntegrationMode.push_main.value
-        or config.local_only
-    ):
+    if _dry_run_enabled(config):
         return False
     fetch = run_command(
         ["git", "fetch", "--quiet", config.git_remote, config.main_branch],
@@ -407,8 +397,7 @@ def _preflight_error(
             part
             for part in (
                 (
-                    "remote push preflight failed: Steward is configured for "
-                    f"{IntegrationMode.push_main.value!r} but cannot verify write "
+                    "remote push preflight failed: live Steward cannot verify write "
                     f"access to {config.git_remote}/{config.main_branch}."
                 ),
                 f"step: {step}",

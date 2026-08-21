@@ -44,6 +44,7 @@ def coquic_home(tmp_path: Path, monkeypatch) -> Path:
 def config(repo: Path) -> StewardConfig:
     cfg = StewardConfig(
         repo_root=repo,
+        dry_run=True,
         limits=StewardLimits(worker_timeout_minutes=1),
         local_codex_test_harness=True,
     )

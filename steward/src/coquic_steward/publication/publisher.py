@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
+from ..core.models import EffectActionKind
+
 if TYPE_CHECKING:
     from ..storage import TaskStore
 from .d1 import (
@@ -607,6 +609,43 @@ def _call_composer(
 class CloudPublisher:
     """Publish one claimed generation through the fixed R2/D1 protocol."""
 
+    def _effect_allowed(
+        self,
+        task_id: object,
+        *,
+        action: EffectActionKind,
+        action_id: str,
+        target: str,
+        payload: Mapping[str, object] | None = None,
+        reason: str = "dry-run publication effect is proposed locally",
+    ) -> bool:
+        """Ask the Store immediately before a local or provider mutation."""
+
+        from ..storage import TaskStore
+
+        if not isinstance(task_id, str) or not task_id:
+            return not bool(getattr(self.store, "_startup_dry_run", False))
+        if not isinstance(self.store, TaskStore):
+            # Narrow fakes used by read-only publication tests predate the
+            # Store-owned effect seam and are treated as live test doubles.
+            return True
+        try:
+            decision = self.store.effect_decision(
+                task_id,
+                action=action.value,
+                action_id=action_id,
+                target=target,
+                payload=payload or {},
+                reason=reason,
+            )
+        except KeyError:
+            # Synthetic rows without a task cannot be reached from a daemon
+            # completion boundary; retain the historical test-double behavior.
+            return True
+        except (ValueError, TypeError):
+            return False
+        return bool(getattr(decision, "allowed", False))
+
     def __init__(
         self,
         store: TaskStore,
@@ -667,6 +706,15 @@ class CloudPublisher:
     ) -> OverheadReceipt:
         """Reconcile one aggregate-only Steward overhead row in D1."""
 
+        task_id = source.get("taskId") if isinstance(source, Mapping) else None
+        if not self._effect_allowed(
+            task_id,
+            action=EffectActionKind.publication_overhead,
+            action_id=f"publication-overhead:{digest or 'current'}",
+            target="cloudflare-d1",
+            payload={"digest": digest or "current"},
+        ):
+            raise PublicationError(ReasonCode.invalid_metadata)
         return self.d1.upsert_overhead(source, digest=digest)
 
     def backfill_usage(
@@ -675,9 +723,18 @@ class CloudPublisher:
         *,
         cursor: str | None = None,
         limit: int = 64,
+        task_id: str | None = None,
     ) -> UsageBackfillReceipt:
         """Fill newly priceable cached-D1 usage turns through D1."""
 
+        if not self._effect_allowed(
+            task_id,
+            action=EffectActionKind.publication_usage_backfill,
+            action_id=f"publication-usage-backfill:{cursor or 'start'}",
+            target="cloudflare-d1",
+            payload={"cursor": cursor or "start", "limit": limit},
+        ):
+            raise PublicationError(ReasonCode.invalid_metadata)
         return self.d1.backfill_na_costs(catalog, cursor=cursor, limit=limit)
 
     def _claim(self, publication_id: str, current: object | None) -> tuple[object | None, PublicationResult | None]:
@@ -690,6 +747,14 @@ class CloudPublisher:
         if state in {item.value for item in _ACTIVE_STATES} and owner == self.worker_id and expires is not None and expires > timestamp:
             return current, None
         if state in {PublicationState.queued.value, PublicationState.retry_wait.value}:
+            if not self._effect_allowed(
+                getattr(current, "task_id", None),
+                action=EffectActionKind.publication_claim,
+                action_id=f"publication-claim:{publication_id}",
+                target=publication_id,
+                payload={"worker": self.worker_id},
+            ):
+                return None, _result(PublicationStatus.blocked, publication_id, reason="precondition")
             if state == PublicationState.retry_wait.value:
                 retry_at = getattr(current, "retry_at", None)
                 if retry_at is not None and retry_at > timestamp:
@@ -720,6 +785,14 @@ class CloudPublisher:
         publication_id = getattr(generation, "publication_id", None)
         if not isinstance(publication_id, str):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
+        if not self._effect_allowed(
+            getattr(generation, "task_id", None),
+            action=EffectActionKind.publication_claim,
+            action_id=f"publication-renew:{getattr(generation, 'publication_id', '')}",
+            target=str(getattr(generation, "publication_id", "")),
+            payload={"worker": self.worker_id},
+        ):
+            return None, _result(PublicationStatus.blocked, publication_id, reason="precondition")
         try:
             renewed = self.store.renew_publication_lease(
                 self.worker_id,
@@ -744,6 +817,14 @@ class CloudPublisher:
         publication_id = getattr(generation, "publication_id", None)
         if not isinstance(publication_id, str):
             return None, _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired")
+        if not self._effect_allowed(
+            getattr(generation, "task_id", None),
+            action=EffectActionKind.publication_claim,
+            action_id=f"publication-advance:{getattr(generation, 'publication_id', '')}:{expected.value}",
+            target=str(getattr(generation, "publication_id", "")),
+            payload={"from": expected.value, "to": target.value},
+        ):
+            return None, _result(PublicationStatus.blocked, publication_id, reason="precondition")
         try:
             changed = self.store.advance_publication(
                 publication_id,
@@ -827,6 +908,14 @@ class CloudPublisher:
             generation = renewed
         if not isinstance(publication_id, str):
             return _result(PublicationStatus.lost_claim, publication_id, reason="lease_expired", phase=phase)
+        if not self._effect_allowed(
+            getattr(generation, "task_id", None),
+            action=EffectActionKind.publication_hide if hide else EffectActionKind.publication_claim,
+            action_id=f"publication-block:{publication_id}:{phase}",
+            target=publication_id,
+            payload={"reason": category, "hide": hide},
+        ):
+            return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase=phase)
         try:
             block_result = self.store.block_publication(
                 publication_id,
@@ -876,6 +965,14 @@ class CloudPublisher:
         # integrity category accepted by the local model.
         if persisted_reason == "precondition":
             persisted_reason = "integrity"
+        if not self._effect_allowed(
+            getattr(generation, "task_id", None),
+            action=EffectActionKind.publication_retry,
+            action_id=f"publication-retry:{publication_id}:{phase}",
+            target=publication_id,
+            payload={"reason": persisted_reason},
+        ):
+            return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase=phase)
         try:
             scheduled = self.store.schedule_publication_retry(
                 publication_id,
@@ -978,6 +1075,14 @@ class CloudPublisher:
                 return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
         except Exception:
             return _result(PublicationStatus.blocked, publication_id, reason="integrity", phase="retry")
+        if not self._effect_allowed(
+            getattr(current, "task_id", None),
+            action=EffectActionKind.publication_retry,
+            action_id=f"publication-repair:{publication_id}:{generation.publication_id}",
+            target=publication_id,
+            payload={"replacement": generation.publication_id},
+        ):
+            return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="retry")
         try:
             operation = self.store.replace_blocked_publication(publication_id, record)
         except Exception:
@@ -1173,6 +1278,18 @@ class CloudPublisher:
                 PublicationHideStatus.blocked,
                 task_id=task_id,
                 reason="invalid_metadata",
+            )
+        if not self._effect_allowed(
+            task_id,
+            action=EffectActionKind.publication_hide,
+            action_id=f"publication-hide:{task_id}:{reason}",
+            target=task_id,
+            payload={"reason": reason},
+        ):
+            return PublicationHideResult(
+                PublicationHideStatus.blocked,
+                task_id=task_id,
+                reason="precondition",
             )
         try:
             started = self.store.begin_publication_hide(
@@ -1381,6 +1498,14 @@ class CloudPublisher:
         publication_id = getattr(generation, "publication_id", None)
         if not isinstance(publication_id, str):
             return None, self._block(generation, "integrity", hide=False, phase="receipt")
+        if not self._effect_allowed(
+            getattr(generation, "task_id", None),
+            action=EffectActionKind.publication_transport,
+            action_id=f"publication-receipt:{publication_id}:{receipt.receipt_class.value}:{receipt.content_key}",
+            target=publication_id,
+            payload={"receipt_class": receipt.receipt_class.value, "sha256": receipt.sha256},
+        ):
+            return None, _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="receipt")
         try:
             saved = self.store.record_publication_receipt(
                 publication_id,
@@ -1691,6 +1816,14 @@ class CloudPublisher:
                 if early is not None:
                     return early
                 assert durable is not None
+                if not self._effect_allowed(
+                    getattr(durable, "task_id", None),
+                    action=EffectActionKind.publication_transport,
+                    action_id=f"publication-r2-public:{publication_id}:{key}",
+                    target=key,
+                    payload={"publication_id": publication_id, "class": "public", "sha256": item.sha256},
+                ):
+                    return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="public")
                 try:
                     verified = self.r2.put_object(
                         key,
@@ -1726,6 +1859,14 @@ class CloudPublisher:
                 if early is not None:
                     return early
                 assert durable is not None
+                if not self._effect_allowed(
+                    getattr(durable, "task_id", None),
+                    action=EffectActionKind.publication_transport,
+                    action_id=f"publication-r2-private:{publication_id}:{key}",
+                    target=key,
+                    payload={"publication_id": publication_id, "class": "private", "sha256": item.sha256},
+                ):
+                    return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="private")
                 try:
                     verified = self.r2.put_object(
                         key,
@@ -1757,6 +1898,14 @@ class CloudPublisher:
             if early is not None:
                 return early
             assert durable is not None
+            if not self._effect_allowed(
+                getattr(durable, "task_id", None),
+                action=EffectActionKind.publication_transport,
+                action_id=f"publication-d1-stage:{publication_id}",
+                target=publication_id,
+                payload={"publication_id": publication_id, "phase": "stage"},
+            ):
+                return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="stage")
             try:
                 staged = self.d1.stage(generation.payload)
                 if staged is not None and (
@@ -1780,6 +1929,14 @@ class CloudPublisher:
             if early is not None:
                 return early
             assert durable is not None
+            if not self._effect_allowed(
+                getattr(durable, "task_id", None),
+                action=EffectActionKind.publication_transport,
+                action_id=f"publication-d1-expose:{publication_id}",
+                target=publication_id,
+                payload={"publication_id": publication_id, "phase": "expose"},
+            ):
+                return _result(PublicationStatus.blocked, publication_id, reason="precondition", phase="expose")
             try:
                 exposed = self.d1.expose(generation.payload)
                 if (

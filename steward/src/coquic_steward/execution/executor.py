@@ -18,12 +18,13 @@ from typing import Any
 
 from ..agents import (
     CodexRunner,
+    agent_for_worker,
     render_implementation_plan_prompt,
     render_worker_prompt,
 )
 from ..core.config import StewardConfig
 from ..core.models import (
-    IntegrationMode,
+    EffectActionKind,
     ExecutionMode,
     CodexStage,
     TaskRecord,
@@ -320,6 +321,9 @@ class StewardExecutor:
     ):
         self.config = config
         self.store = store
+        # Direct executor users still pass through the same startup latch as
+        # the daemon; detached task metadata never selects effect authority.
+        self.store.set_startup_execution_mode(config.dry_run)
         if session_supervisor is not None and runner is not None:
             raise ValueError("provide either session_supervisor or runner, not both")
         if (
@@ -362,30 +366,8 @@ class StewardExecutor:
 
         # Store admission is acquired before the per-task executor lock so
         # every caller follows one lock order.  The fence remains held through
-        # the phase effect and its durable cursor update.  Latch tightening
-        # therefore either wins before this phase or waits until it has
-        # completed; a post-effect recheck cannot provide that guarantee.
-        with self.store.phase_admission(task_id) as admitted:
-            if not admitted:
-                execution = self.store.get_execution(task_id)
-                pipeline_id = execution.owning_pipeline_id
-                if pipeline_id is None:
-                    raise TaskLedgerOwnershipError(
-                        "task execution has no owning pipeline"
-                    )
-                phase = self._pipeline_cursor(task_id, pipeline_id)
-                return AdvanceResult(
-                    task_id,
-                    pipeline_id,
-                    phase,
-                    None,
-                    "paused",
-                    progressed=False,
-                    evidence={
-                        "execution_mode": ExecutionMode.dry_run.value,
-                        "reason": "dry-run admission paused",
-                    },
-                )
+        # local phase work and any immediate effect decision.
+        with self.store.phase_admission(task_id):
             lock = self._durable_lock(task_id)
             if not lock.acquire(blocking=False):
                 execution = self.store.get_execution(task_id)
@@ -521,9 +503,11 @@ class StewardExecutor:
                 expected_tree=output_tree,
                 phase=coarse_phase(PipelineCursorPhase.validation),
             )
+            proposal: dict[str, object] | None = None
             if patch == sha256(b"").hexdigest() or not self.worktrees.has_changes(
                 worktree
             ):
+                proposal = self._remote_write_proposal(task, pipeline)
                 self.store.finish_task(
                     task.id,
                     TaskStatus.no_changes,
@@ -532,6 +516,9 @@ class StewardExecutor:
                 next_phase = PipelineCursorPhase.ready_to_seal
             else:
                 next_phase = PipelineCursorPhase.validation
+            evidence = {"recovered_run_id": result.run_id}
+            if proposal is not None:
+                evidence["proposal"] = proposal
             adopted = self._phase_finish(
                 task,
                 pipeline,
@@ -539,7 +526,7 @@ class StewardExecutor:
                 next_phase,
                 output_identity=output_tree,
                 patch_identity=patch,
-                evidence={"recovered_run_id": result.run_id},
+                evidence=evidence,
             )
         elif phase == PipelineCursorPhase.review and role in {"review", "reviewer"}:
             review = parse_review(worker.final_message)
@@ -1032,6 +1019,10 @@ class StewardExecutor:
                 return self._block_pipeline(
                     task, pipeline, "repair implementation made no progress"
                 )
+            proposal = self._remote_write_proposal(task, pipeline)
+            evidence = {"no_changes": True, "output_tree": output_tree}
+            if proposal is not None:
+                evidence["proposal"] = proposal
             self.store.finish_task(task.id, TaskStatus.no_changes, "implementation produced no changes")
             return self._phase_finish(
                 task,
@@ -1039,7 +1030,7 @@ class StewardExecutor:
                 phase,
                 PipelineCursorPhase.ready_to_seal,
                 output_identity=output_tree,
-                evidence={"no_changes": True, "output_tree": output_tree},
+                evidence=evidence,
             )
         return self._phase_finish(
             task,
@@ -1315,11 +1306,18 @@ class StewardExecutor:
         self._phase_start(task, pipeline, phase, payload={"expected_tree": expected_tree, "message": message})
         sha = self.worktrees.commit_all(worktree, message["subject"], message["body"], expected_tree=expected_tree)
         if sha is None:
+            proposal = self._remote_write_proposal(task, pipeline)
+            evidence = {"no_changes": True, "tree": expected_tree}
+            if proposal is not None:
+                evidence["proposal"] = proposal
             self.store.finish_task(task.id, TaskStatus.no_changes, "accepted tree already committed")
-            return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence={"no_changes": True, "tree": expected_tree})
+            return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.ready_to_seal, evidence=evidence)
         self.store.add_event(task.id, "pipeline.commit", sha, {"pipeline_id": pipeline.id, "action_id": action, "commit": sha, "tree": expected_tree})
         self._archive_write(task, pipeline, "commit.json", {"commit": sha, "tree": expected_tree, "message": message})
-        next_phase = PipelineCursorPhase.ready_to_seal if self.config.local_only or self.config.integration_mode != IntegrationMode.push_main.value else PipelineCursorPhase.push
+        # Push is a semantic effect phase.  Dry-run reaches it so the trusted
+        # boundary can persist proposal evidence instead of skipping local
+        # commit work.
+        next_phase = PipelineCursorPhase.push
         return self._phase_finish(task, pipeline, phase, next_phase, evidence={"commit": sha, "tree": expected_tree})
 
     def _durable_push(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
@@ -1370,7 +1368,39 @@ class StewardExecutor:
                 )
                 return self._block_pipeline(task, pipeline, summary)
             try:
-                result = self.worktrees.push_head_to_main(worktree)
+                with self.store.effect_admission(
+                    task.id,
+                    action=EffectActionKind.git_push.value,
+                    action_id=action,
+                    target=f"{self.config.git_remote}/{self.config.main_branch}",
+                    payload={"commit": commit, "task_id": task.id},
+                    reason="dry-run Git push is proposed locally",
+                ) as decision:
+                    if not decision.allowed:
+                        proposal = decision.proposal
+                        evidence = {
+                            "commit": commit,
+                            "proposal": proposal.as_dict() if proposal is not None else None,
+                        }
+                        self.store.add_event(
+                            task.id,
+                            "pipeline.push.proposed",
+                            "Git push proposed by dry-run",
+                            {"pipeline_id": pipeline.id, **evidence},
+                        )
+                        self.store.finish_task(
+                            task.id,
+                            TaskStatus.succeeded,
+                            "local commit ready with proposed push",
+                        )
+                        return self._phase_finish(
+                            task,
+                            pipeline,
+                            phase,
+                            PipelineCursorPhase.ready_to_seal,
+                            evidence=evidence,
+                        )
+                    result = self.worktrees.push_head_to_main(worktree)
                 self.store.add_event(
                     task.id,
                     "main.pushed",
@@ -1926,13 +1956,21 @@ class StewardExecutor:
         return selected
 
     def _latest_main_identity(self, worktree: Path) -> str | None:
-        if self.config.integration_mode == IntegrationMode.push_main.value and not self.config.local_only:
-            fetched = run_command(["git", "fetch", self.config.git_remote, self.config.main_branch], cwd=worktree)
-            if not fetched.ok:
-                raise RuntimeError(fetched.stderr[-2_000:] or "git fetch failed")
-            result = run_command(["git", "rev-parse", f"{self.config.git_remote}/{self.config.main_branch}"], cwd=worktree)
-        else:
-            result = run_command(["git", "rev-parse", self.config.main_branch], cwd=worktree)
+        # Remote ancestry is a read.  Live integration refreshes it when the
+        # configured remote exists; local dry-run repositories may have no
+        # remote at all and fall back to their local main ref.
+        if not self.config.dry_run:
+            fetched = run_command(
+                ["git", "fetch", self.config.git_remote, self.config.main_branch],
+                cwd=worktree,
+            )
+            if fetched.ok:
+                result = run_command(
+                    ["git", "rev-parse", f"{self.config.git_remote}/{self.config.main_branch}"],
+                    cwd=worktree,
+                )
+                return result.stdout.strip() if result.ok else None
+        result = run_command(["git", "rev-parse", self.config.main_branch], cwd=worktree)
         return result.stdout.strip() if result.ok else None
 
     def _prepare_base_change_child(
@@ -2449,7 +2487,7 @@ class StewardExecutor:
             task.branch_name
         ):
             return True
-        return task.summary.startswith("local-only integration commit ") or (
+        return task.summary.startswith("integration commit ") or (
             TaskStatus(task.status) == TaskStatus.failed
             and task.summary == "push failed"
         )
@@ -2472,6 +2510,23 @@ class StewardExecutor:
 
 
 
+
+    def _remote_write_proposal(self, task: TaskRecord, pipeline: Any) -> dict[str, object] | None:
+        """Persist bounded evidence when a provider-write worker has no local patch."""
+
+        agent = agent_for_worker(task.spec.worker)
+        if not agent.remote_writes:
+            return None
+        decision = self.store.effect_decision(
+            task.id,
+            action=EffectActionKind.remote_write.value,
+            action_id=f"remote-write:{task.id}:{pipeline.id}",
+            target=self.config.github_repository,
+            payload={"worker": str(task.spec.worker), "task_id": task.id},
+            reason="remote worker output requires a validated local proposal",
+        )
+        proposal = decision.proposal
+        return proposal.as_dict() if proposal is not None else None
 
     def _source_task_for_integration(self, task: TaskRecord) -> TaskRecord | None:
         source_task_id = task.spec.metadata.get("source_task_id")
@@ -2651,6 +2706,27 @@ class StewardExecutor:
             f"`{self.config.main_branch}`.\n\n"
             f"Source task: {source.id}"
         )
+        comment_decision = self.store.effect_decision(
+            task.id,
+            action=EffectActionKind.github_issue_comment.value,
+            action_id=f"github-issue-comment:{source.id}:{number}:{sha}",
+            target=f"{self.config.github_repository}#{number}",
+            payload={"issue_number": number, "commit": sha},
+            reason="dry-run GitHub issue comment is proposed locally",
+        )
+        if not comment_decision.allowed:
+            proposal = comment_decision.proposal
+            transcript.write(
+                "issue_comment_proposed",
+                json.dumps(proposal.as_dict() if proposal is not None else {}, sort_keys=True),
+            )
+            self.store.add_event(
+                source.id,
+                "github.issue_comment_proposed",
+                str(number),
+                {"integration_task_id": task.id, "proposal": proposal.as_dict() if proposal is not None else None},
+            )
+            return
         comment = run_command(
             [
                 "gh",
@@ -2668,6 +2744,27 @@ class StewardExecutor:
         if not comment.ok:
             self._record_feature_issue_update_failure(
                 task, source, number, "comment", comment.stderr, transcript
+            )
+            return
+        close_decision = self.store.effect_decision(
+            task.id,
+            action=EffectActionKind.github_issue_close.value,
+            action_id=f"github-issue-close:{source.id}:{number}:{sha}",
+            target=f"{self.config.github_repository}#{number}",
+            payload={"issue_number": number, "commit": sha},
+            reason="dry-run GitHub issue close is proposed locally",
+        )
+        if not close_decision.allowed:
+            proposal = close_decision.proposal
+            transcript.write(
+                "issue_close_proposed",
+                json.dumps(proposal.as_dict() if proposal is not None else {}, sort_keys=True),
+            )
+            self.store.add_event(
+                source.id,
+                "github.issue_close_proposed",
+                str(number),
+                {"integration_task_id": task.id, "proposal": proposal.as_dict() if proposal is not None else None},
             )
             return
         close = run_command(

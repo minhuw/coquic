@@ -591,15 +591,125 @@ class SQLiteTaskStore:
 
     @contextmanager
     def phase_admission(self, task_id: str) -> Iterator[bool]:
-        """Hold one task's Store authority while its phase is allowed to run."""
+        """Hold the Store authority across local phase work and effect checks.
+
+        Dry-run is not an execution pause.  The lock keeps a phase and its
+        immediately-following effect decision atomic; semantic effect methods
+        below are the only places that decide whether a mutation may escape.
+        """
 
         guard = _execution_admission_guard(self.path, task_id)
         with guard.locked():
-            try:
-                mode = self.task_execution_mode(task_id)
-            except ValueError:
-                mode = ExecutionMode.dry_run
-            yield mode is ExecutionMode.live
+            # Validate the row even though both live and dry-run tasks execute
+            # local analysis, validation, worktree changes, and commits.
+            self.task_execution_mode(task_id)
+            yield True
+
+    def effect_decision(
+        self,
+        task_id: str,
+        *,
+        action: str,
+        action_id: str,
+        target: str,
+        payload: Mapping[str, object] | None = None,
+        reason: str = "dry-run",
+    ) -> object:
+        """Resolve one effect from the persisted task latch immediately before it.
+
+        The per-task file lock and SQLite transaction make the persisted latch
+        authoritative even when a second Store instance tightens it between
+        phase snapshots.  Dry-run decisions are returned as bounded proposals;
+        callers must not invoke the external operation in that case.
+        """
+
+        from ..core.models import decide_effect
+
+        guard = _execution_admission_guard(self.path, task_id)
+        with guard.locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.get(TaskRow, task_id)
+                    if row is None:
+                        raise KeyError(task_id)
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    mode = execution_mode_from_metadata(metadata)
+                    startup_mode = execution_mode_for_dry_run(self._startup_dry_run)
+                    resolved = resolve_execution_mode(mode, startup_mode)
+                    if resolved is not mode:
+                        metadata = preserve_execution_mode(metadata, resolved=resolved)
+                        row.metadata_json = _dump_metadata(metadata, self.path_codec)
+                        mode = resolved
+                    decision = decide_effect(
+                        mode,
+                        action=action,
+                        action_id=action_id,
+                        target=target,
+                        payload=payload,
+                        reason=reason,
+                    )
+                    if decision.proposal is not None:
+                        proposal = decision.proposal
+                        duplicate = False
+                        for data_json in session.scalars(
+                            select(EventRow.data_json).where(
+                                EventRow.task_id == task_id,
+                                EventRow.kind == "effect.proposed",
+                            )
+                        ).all():
+                            try:
+                                existing = json.loads(data_json or "{}")
+                            except (TypeError, json.JSONDecodeError):
+                                existing = {}
+                            if isinstance(existing, dict) and existing.get("proposalId") == proposal.identity:
+                                duplicate = True
+                                break
+                        if not duplicate:
+                            event = Event(
+                                task_id=task_id,
+                                kind="effect.proposed",
+                                message=proposal.action.value,
+                                data=proposal.as_dict(),
+                            )
+                            session.add(event_to_row(event, path_codec=self.path_codec))
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+        if decision.proposal is not None:
+            self._notify_change()
+        return decision
+
+    @contextmanager
+    def effect_admission(
+        self,
+        task_id: str,
+        *,
+        action: str,
+        action_id: str,
+        target: str,
+        payload: Mapping[str, object] | None = None,
+        reason: str = "dry-run",
+    ) -> Iterator[object]:
+        """Hold the task latch lock across the decision and the effect call."""
+
+        guard = _execution_admission_guard(self.path, task_id)
+        with guard.locked():
+            yield self.effect_decision(
+                task_id,
+                action=action,
+                action_id=action_id,
+                target=target,
+                payload=payload,
+                reason=reason,
+            )
+
+    # Descriptive aliases keep the Store-owned seam discoverable to callers.
+    check_effect = effect_decision
+    authorize_effect = effect_decision
+    resolve_effect = effect_decision
+    effect_scope = effect_admission
 
     def resolve_task_execution_mode(
         self, task_id: str, startup: bool | ExecutionMode | str
@@ -639,6 +749,9 @@ class SQLiteTaskStore:
     def recover(self) -> StoreRecoveryResult:
         """Recover same-version publication leases and derived health once."""
 
+        if self._startup_dry_run:
+            # Evaluation must not rewrite pre-existing live publication rows.
+            return StoreRecoveryResult()
         timestamp = _publication_now(None)
         connection = self.engine.connect()
         expired_leases = 0
@@ -5626,7 +5739,6 @@ class SQLiteTaskStore:
                 session,
                 statuses=active_statuses,
                 integration=False,
-                live_only=True,
             )
             source_queued = _count_tasks(
                 session,
@@ -5637,7 +5749,6 @@ class SQLiteTaskStore:
                 session,
                 statuses=active_statuses,
                 integration=True,
-                live_only=True,
             )
             integration_queued = _count_tasks(
                 session,
@@ -5835,8 +5946,6 @@ class SQLiteTaskStore:
             rows = session.execute(statement).all()
             requeued = 0
             for signal_row, task_row in rows:
-                if _task_row_is_dry_run(task_row):
-                    continue
                 planned_at = signal_row.planned_at or signal_row.updated_at
                 retry_from = max(
                     datetime.fromisoformat(planned_at),
@@ -6296,21 +6405,17 @@ class SQLiteTaskStore:
                 session,
                 statuses=active_statuses,
                 integration=False,
-                live_only=True,
             )
             integration_active = _count_tasks(
                 session,
                 statuses=active_statuses,
                 integration=True,
-                live_only=True,
             )
-            live_latch = _live_task_latch()
             integration_rows = session.scalars(
                 _task_query()
                 .where(
                     TaskRow.status == TaskStatus.queued.value,
                     TaskRow.worker == integration_worker,
-                    live_latch,
                 )
                 .order_by(*_queued_dispatch_order())
                 .limit(integration_limit)
@@ -6320,14 +6425,13 @@ class SQLiteTaskStore:
                 .where(
                     TaskRow.status == TaskStatus.queued.value,
                     TaskRow.worker != integration_worker,
-                    live_latch,
                 )
                 .order_by(*_queued_dispatch_order())
                 .limit(source_limit)
             ).all()
             resumable_rows = session.scalars(
                 _task_query()
-                .where(TaskRow.status.in_(active_statuses), live_latch)
+                .where(TaskRow.status.in_(active_statuses))
                 .order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
                 .limit(resumable_limit)
             ).all()
@@ -6367,7 +6471,6 @@ class SQLiteTaskStore:
                     .select_from(TaskRow)
                     .where(
                         TaskRow.status.in_(ACTIVE_STATUSES),
-                        _live_task_latch(),
                     )
                 )
                 or 0
@@ -6383,7 +6486,6 @@ class SQLiteTaskStore:
                     TaskStatus.integrating.value,
                 ],
                 integration=False,
-                live_only=True,
             )
 
     def events(self, task_id: str, *, limit: int | None = None) -> list[Event]:

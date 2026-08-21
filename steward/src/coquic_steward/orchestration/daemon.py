@@ -505,112 +505,14 @@ class StewardDaemon:
             pass
         return True
 
-    def _record_dry_run_pause(self, task: TaskRecord) -> None:
-        """Leave one bounded local fact without replaying a task."""
-
-        try:
-            if any(
-                event.kind == "task.dry_run_paused"
-                for event in self.store.events(task.id, limit=20)
-            ):
-                return
-            self.store.add_event(
-                task.id,
-                "task.dry_run_paused",
-                "dry-run task admission paused",
-                {"execution_mode": ExecutionMode.dry_run.value},
-            )
-        except Exception:
-            # A pause event is evidence, not an execution prerequisite.
-            pass
-
     def _task_admission_allowed(self, task: TaskRecord) -> bool:
-        if _global_dry_run(self.config):
-            self._record_dry_run_pause(task)
-            return False
+        """Allow local work in either mode; effects are checked at their seams."""
+
         try:
             mode = self.store.task_execution_mode(task.id)
         except (AttributeError, KeyError, ValueError):
-            mode = None
-        if mode is not ExecutionMode.live:
-            self._record_dry_run_pause(task)
             return False
-        return True
-
-    def _reconcile_dry_run_task(self, task: TaskRecord) -> ReconciliationOutcome:
-        """Stop persisted task wrappers before leaving a task paused."""
-
-        failures: list[dict[str, object]] = []
-        try:
-            runs = self.store.list_runs(task.id)
-        except (AttributeError, KeyError) as exc:
-            failures.append({"error": exc.__class__.__name__})
-            runs = []
-
-        for run in runs:
-            if str(getattr(run, "state", "")) != "running":
-                continue
-            run_id = str(getattr(run, "id", ""))
-            if not run_id:
-                failures.append({"error": "missing_run_id"})
-                continue
-            if self.session_supervisor is None:
-                failures.append({"run_id": run_id, "error": "missing_boundary"})
-                continue
-            try:
-                inspection = self.session_supervisor.inspect(run_id)
-            except Exception as exc:
-                failures.append({"run_id": run_id, "error": exc.__class__.__name__})
-                continue
-            live = getattr(inspection, "live", None)
-            try:
-                if live is True:
-                    self.session_supervisor.interrupt(run_id)
-                    verification = self.session_supervisor.inspect(run_id)
-                    if not _inspection_confirms_stopped(verification):
-                        failures.append(
-                            {"run_id": run_id, "error": "stop_not_confirmed"}
-                        )
-                        continue
-                    # A custom boundary may acknowledge termination without
-                    # updating the ledger itself. Preserve restart evidence only
-                    # after the boundary has positively confirmed termination.
-                    if str(self.store.get_run(run_id).state) == "running":
-                        self.store.mark_run_interrupted(
-                            run_id,
-                            reason="dry-run admission paused during daemon restart",
-                        )
-                elif live is False:
-                    if not _inspection_confirms_stopped(inspection):
-                        failures.append(
-                            {"run_id": run_id, "error": "stop_not_confirmed"}
-                        )
-                        continue
-                    self.store.mark_run_interrupted(
-                        run_id,
-                        reason="wrapper was not live during dry-run restart",
-                    )
-                else:
-                    failures.append({"run_id": run_id, "error": "liveness_unknown"})
-            except Exception as exc:
-                failures.append({"run_id": run_id, "error": exc.__class__.__name__})
-
-        self._adopted_runs.pop(task.id, None)
-        if failures:
-            self._record_dry_run_pause(task)
-            return ReconciliationOutcome(
-                task.id,
-                ReconciliationDisposition.blocked,
-                "dry-run task wrapper could not be stopped",
-                evidence={"execution_mode": ExecutionMode.dry_run.value, "failures": failures},
-            )
-        self._record_dry_run_pause(task)
-        return ReconciliationOutcome(
-            task.id,
-            ReconciliationDisposition.unchanged,
-            "dry-run task admission paused",
-            evidence={"execution_mode": ExecutionMode.dry_run.value},
-        )
+        return mode in {ExecutionMode.live, ExecutionMode.dry_run}
 
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Validate and recover durable ownership before dispatch is allowed."""
@@ -624,11 +526,7 @@ class StewardDaemon:
                 self.runtime.state = DaemonRuntimeState.active
             try:
                 with use_subprocess_owner(self._subprocess_owner):
-                    remote_push_ready = (
-                        False
-                        if _global_dry_run(self.config)
-                        else preflight_remote_push(self.config)
-                    )
+                    remote_push_ready = preflight_remote_push(self.config)
                     report = run_preflight(
                         self.config, self.store, check_remote_push=False
                     )
@@ -642,16 +540,13 @@ class StewardDaemon:
                         f"remote={self.config.git_remote} branch={self.config.main_branch}"
                     )
                 self._preflight_report = report
-                if not _global_dry_run(self.config):
-                    self.store.recover()
+                self.store.recover()
                 self._prepare_planner_session()
                 self._restore_resource_pressure()
 
                 outcomes: list[ReconciliationOutcome] = []
-                if not _global_dry_run(self.config):
-                    self.executor.retry_validation_cleanup_pending()
-                if not _global_dry_run(self.config):
-                    self._reconcile_docker_resources()
+                self.executor.retry_validation_cleanup_pending()
+                self._reconcile_docker_resources()
                 self._startup_reconcile_control_loop()
                 tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
                 for task in tasks:
@@ -689,16 +584,6 @@ class StewardDaemon:
                 self._reconciliation = outcomes
                 if self._shutdown_event.is_set():
                     return tuple(outcomes)
-                if any(
-                    outcome.disposition is ReconciliationDisposition.blocked
-                    and outcome.evidence.get("execution_mode")
-                    == ExecutionMode.dry_run.value
-                    for outcome in outcomes
-                ):
-                    raise RuntimeError(
-                        "dry-run startup blocked until persisted wrappers are stopped"
-                    )
-
                 claim_attempted = True
                 self.store.claim_daemon_instance(
                     self.runtime.instance_id,
@@ -724,11 +609,8 @@ class StewardDaemon:
                         "control-loop runtime start lag "
                         f"error={exc.__class__.__name__}"
                     )
-                if not _global_dry_run(self.config):
-                    self._enqueue_materialized_publications()
-                    self._start_publication_worker()
-                else:
-                    self._log("dry-run publication admission paused")
+                self._enqueue_materialized_publications()
+                self._start_publication_worker()
                 self._startup_complete = True
                 return tuple(outcomes)
             except BaseException:
@@ -1100,9 +982,11 @@ class StewardDaemon:
             self._publication_previous_callback = None
             return True
 
-    def _build_publication_publisher(self) -> CloudPublisher:
-        """Construct transport clients on the publication worker thread only."""
+    def _build_publication_publisher(self) -> CloudPublisher | None:
+        """Construct transport clients only for a live publication worker."""
 
+        if _global_dry_run(self.config):
+            return None
         publication = self.config.publication
         r2: object | None = None
         d1: object | None = None
@@ -1517,6 +1401,8 @@ class StewardDaemon:
                 if publisher is None:
                     try:
                         publisher = self._build_publication_publisher()
+                        if publisher is None:
+                            break
                         transport_cancellation = _PublicationTransportCancellation(
                             publisher.r2,
                             publisher.d1,
@@ -1611,10 +1497,8 @@ class StewardDaemon:
     stop_publication_worker = _stop_publication_worker
 
     def _enqueue_materialized_publications(self) -> None:
-        """Recover completion notifications missed before a daemon restart."""
+        """Compose completion evidence without crossing the publication boundary."""
 
-        if _global_dry_run(self.config):
-            return
         if not getattr(self.config.publication, "enabled", False):
             return
         tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
@@ -1626,6 +1510,12 @@ class StewardDaemon:
                 continue
             materialized.extend((task, run) for run in runs)
         for task, run in materialized:
+            if _global_dry_run(self.config):
+                try:
+                    if self.store.task_execution_mode(task.id) is ExecutionMode.live:
+                        continue
+                except (AttributeError, KeyError, ValueError):
+                    continue
             enqueue_materialized_publication(self.config, self.store, task, run)
 
     reconcile_startup = startup_reconcile
@@ -1633,9 +1523,6 @@ class StewardDaemon:
 
     def _reconcile_task(self, task: TaskRecord) -> ReconciliationOutcome:
         """Reconcile archive, ledger, process, Git, and cleanup identities."""
-
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
-            return self._reconcile_dry_run_task(task)
 
         try:
             execution = self.store.get_execution(task.id)
@@ -1752,7 +1639,7 @@ class StewardDaemon:
                     ReconciliationDisposition.adopted,
                     "matching live wrapper adopted",
                     run_id=run.id,
-                    container_id=getattr(inspection.container, "container_id", None),
+                    container_id=getattr(getattr(inspection, "container", None), "container_id", None),
                 )
             if not _inspection_confirms_stopped(inspection):
                 return ReconciliationOutcome(
@@ -1927,7 +1814,7 @@ class StewardDaemon:
                 if conflict is not None:
                     return conflict, evidence
                 evidence["commit"] = "matched"
-                if self.config.integration_mode == "push-main" and not self.config.local_only:
+                if not self.config.dry_run:
                     evidence["remote"] = "matched"
             manifest = task_dir / "manifest.json"
             if manifest.exists() and not archive.verify(task.id):
@@ -2070,12 +1957,7 @@ class StewardDaemon:
                         "reconciled": True,
                     },
                 )
-            next_phase = (
-                PipelineCursorPhase.push
-                if self.config.integration_mode == "push-main"
-                and not self.config.local_only
-                else PipelineCursorPhase.ready_to_seal
-            )
+            next_phase = PipelineCursorPhase.push
         self.executor._phase_finish(
             task,
             pipeline,
@@ -2254,7 +2136,7 @@ class StewardDaemon:
             and event.data.get("commit") == commit
             for event in events
         )
-        if pushed and self.config.integration_mode == "push-main" and not self.config.local_only:
+        if pushed and not self.config.dry_run:
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
             fetched = run_command(
                 ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
@@ -3181,7 +3063,8 @@ class StewardDaemon:
         """Require the final durable generation and all verified receipts."""
 
         if _global_dry_run(self.config) or _task_is_dry_run(task):
-            self._record_dry_run_pause(task)
+            # A dry-run publication has no exposed generation; leave the
+            # terminal archive pending rather than creating local cleanup rows.
             return False
         if not getattr(getattr(self.config, "publication", None), "enabled", False):
             return True
@@ -3495,9 +3378,6 @@ class StewardDaemon:
         """Seal immutable evidence, then converge terminal-only cleanup."""
 
         task = self.store.get(task_id)
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
-            self._record_dry_run_pause(task)
-            return False
         if not TaskStatus(task.status).terminal:
             return False
         try:
@@ -4078,11 +3958,7 @@ class StewardDaemon:
                 f"max_dispatch={max_dispatch or '-'}"
             )
             if plan:
-                requeued = (
-                    0
-                    if _global_dry_run(self.config)
-                    else self.store.requeue_failed_signal_items()
-                )
+                requeued = self.store.requeue_failed_signal_items()
                 if requeued:
                     self.store.add_event(
                         DAEMON_EVENT_TASK_ID,
@@ -4106,9 +3982,7 @@ class StewardDaemon:
                 else:
                     self._log("resource pressure: planner admission paused")
             if dispatch:
-                if _global_dry_run(self.config):
-                    self._log("dry-run task admission paused")
-                elif self.admission_allowed():
+                if self.admission_allowed():
                     self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
                 else:
                     self._log("resource pressure: task admission paused")
@@ -4134,10 +4008,6 @@ class StewardDaemon:
         plan: bool,
         max_dispatch: int | None,
     ) -> None:
-        if _global_dry_run(self.config):
-            for task in self.store.queued_tasks(limit=max_dispatch):
-                self._record_dry_run_pause(task)
-            return
         with self._worker_pool_lock:
             concurrent_pool = self._worker_pool
         if concurrent_pool is not None:
@@ -4256,10 +4126,6 @@ class StewardDaemon:
     ) -> None:
         capacity = max_dispatch if max_dispatch is not None else self.config.limits.max_active_tasks
         capacity = max(0, capacity)
-        if _global_dry_run(self.config):
-            for task in self.store.queued_tasks(limit=capacity):
-                self._record_dry_run_pause(task)
-            return
         with self._worker_pool_lock:
             for task_id, future in list(self._active_futures.items()):
                 if future.done():
@@ -4359,10 +4225,7 @@ class StewardDaemon:
                 current = self.store.get(task_id)
                 if not self._task_admission_allowed(current):
                     return False
-                with self.store.phase_admission(task_id) as admitted:
-                    if not admitted:
-                        self._record_dry_run_pause(current)
-                        return False
+                with self.store.phase_admission(task_id):
                     with use_subprocess_owner(self._subprocess_owner):
                         outcome = self.executor.advance_once(task_id)
             except Exception as exc:

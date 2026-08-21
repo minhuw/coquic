@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from ..core.config import StewardConfig
-from ..core.models import IntegrationMode, TaskRecord
+from ..core.models import TaskRecord
 from ..core.subprocesses import CommandResult, run_command
 
 
@@ -198,10 +198,9 @@ class Worktrees:
         )
 
     def _new_worktree_base(self) -> str:
-        if (
-            self.config.integration_mode != IntegrationMode.push_main.value
-            or self.config.local_only
-        ):
+        # Dry-run still provisions an ordinary local worktree.  A configured
+        # live run refreshes the remote-read base before integration.
+        if self.config.dry_run:
             return self.config.main_branch
         run_command(
             ["git", "fetch", self.config.git_remote, self.config.main_branch],
@@ -462,6 +461,8 @@ class Worktrees:
         return sha
 
     def push_head_to_main(self, path: Path) -> CommandResult:
+        if self.config.dry_run:
+            raise RuntimeError("git push requires a live effect decision")
         return run_command(
             ["git", "push", self.config.git_remote, f"HEAD:{self.config.main_branch}"],
             cwd=path,

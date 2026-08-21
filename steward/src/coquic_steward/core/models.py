@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -195,21 +200,210 @@ class Risk(StrEnum):
     high = "high"
 
 
-class IntegrationMode(StrEnum):
-    local_only = "local-only"
-    push_main = "push-main"
-
-
 class ExecutionMode(StrEnum):
-    """Durable task admission authority.
-
-    The value is deliberately distinct from ``IntegrationMode``.  Integration
-    controls the old local/push adapter, while this latch controls whether a
-    task may cross the execution boundary at all.
-    """
+    """Durable task admission authority."""
 
     dry_run = "dry-run"
     live = "live"
+
+
+class EffectActionKind(StrEnum):
+    """Closed set of Steward-owned effects that may cross the local boundary."""
+
+    git_push = "git.push"
+    github_issue_comment = "github.issue.comment"
+    github_issue_close = "github.issue.close"
+    publication_enqueue = "publication.enqueue"
+    publication_claim = "publication.claim"
+    publication_retry = "publication.retry"
+    publication_hide = "publication.hide"
+    publication_transport = "publication.transport"
+    publication_overhead = "publication.overhead"
+    publication_usage_backfill = "publication.usage-backfill"
+    remote_write = "remote.write"
+
+
+# Short aliases make the typed effect vocabulary convenient to import without
+# creating a second model or policy surface.
+EffectKind = EffectActionKind
+ActionKind = EffectActionKind
+
+
+_EFFECT_KEY_LIMIT = 64
+_EFFECT_TEXT_LIMIT = 512
+_EFFECT_PAYLOAD_LIMIT = 4096
+_EFFECT_SENSITIVE_KEY_PARTS = (
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "raw",
+    "command",
+    "argv",
+    "path",
+)
+_ABSOLUTE_PATH_RE = re.compile(r"^(?:/|~[/\\]|[A-Za-z]:[/\\])")
+
+
+def _bounded_effect_value(value: object, *, depth: int = 0) -> object:
+    """Validate the small JSON vocabulary allowed in proposal evidence."""
+
+    if depth > 4:
+        raise ValueError("effect proposal payload is too deeply nested")
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("effect proposal numbers must be finite")
+        return value
+    if isinstance(value, str):
+        if len(value) > _EFFECT_TEXT_LIMIT or any(
+            character in value for character in "\x00\r\n"
+        ):
+            raise ValueError("effect proposal text is too large or contains controls")
+        if _ABSOLUTE_PATH_RE.match(value):
+            raise ValueError("effect proposal cannot contain a private path")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > 32:
+            raise ValueError("effect proposal payload has too many fields")
+        normalized: dict[str, object] = {}
+        for key, child in value.items():
+            if not isinstance(key, str) or not key or len(key) > _EFFECT_KEY_LIMIT:
+                raise ValueError("effect proposal payload key is invalid")
+            key_name = key.lower().replace("-", "_")
+            if any(part in key_name for part in _EFFECT_SENSITIVE_KEY_PARTS):
+                raise ValueError("effect proposal payload contains sensitive data")
+            normalized[key] = _bounded_effect_value(child, depth=depth + 1)
+        return normalized
+    if isinstance(value, (list, tuple)):
+        if len(value) > 32:
+            raise ValueError("effect proposal payload has too many items")
+        return [_bounded_effect_value(child, depth=depth + 1) for child in value]
+    raise ValueError("effect proposal payload contains an unsupported value")
+
+
+def _effect_identity(
+    action: EffectActionKind,
+    action_id: str,
+    target: str,
+    payload: Mapping[str, object],
+) -> str:
+    encoded = json.dumps(
+        {
+            "action": action.value,
+            "actionId": action_id,
+            "target": target,
+            "payload": payload,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "proposal-" + hashlib.sha256(encoded).hexdigest()
+
+
+class EffectProposal(BaseModel):
+    """Bounded local evidence for an effect denied by dry-run admission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action: EffectActionKind
+    action_id: str = Field(min_length=1, max_length=160)
+    target: str = Field(min_length=1, max_length=256)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    reason: str = Field(min_length=1, max_length=256)
+    proposal_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "EffectProposal":
+        for value in (self.action_id, self.target, self.reason):
+            if any(character in value for character in "\x00\r\n"):
+                raise ValueError("effect proposal text contains controls")
+        if _ABSOLUTE_PATH_RE.match(self.target):
+            raise ValueError("effect proposal target cannot be a private path")
+        bounded = _bounded_effect_value(self.payload)
+        if not isinstance(bounded, dict):
+            raise ValueError("effect proposal payload must be an object")
+        encoded = json.dumps(bounded, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        if len(encoded) > _EFFECT_PAYLOAD_LIMIT:
+            raise ValueError("effect proposal payload is too large")
+        object.__setattr__(self, "payload", bounded)
+        expected = _effect_identity(self.action, self.action_id, self.target, bounded)
+        if self.proposal_id is not None and self.proposal_id != expected:
+            raise ValueError("effect proposal identity does not match its contents")
+        object.__setattr__(self, "proposal_id", expected)
+        return self
+
+    @property
+    def identity(self) -> str:
+        return self.proposal_id or ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "proposalId": self.identity,
+            "action": self.action.value,
+            "actionId": self.action_id,
+            "target": self.target,
+            "payload": dict(self.payload),
+            "reason": self.reason,
+        }
+
+
+ActionProposal = EffectProposal
+Proposal = EffectProposal
+
+
+class EffectDecisionKind(StrEnum):
+    allow = "allow"
+    proposal_required = "proposal-required"
+
+
+@dataclass(frozen=True, slots=True)
+class EffectDecision:
+    """The trusted result immediately before a Steward-owned effect."""
+
+    kind: EffectDecisionKind
+    proposal: EffectProposal | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.kind is EffectDecisionKind.allow
+
+    @property
+    def proposal_required(self) -> bool:
+        return self.kind is EffectDecisionKind.proposal_required
+
+
+def decide_effect(
+    mode: ExecutionMode | str,
+    *,
+    action: EffectActionKind | str,
+    action_id: str,
+    target: str,
+    payload: Mapping[str, object] | None = None,
+    reason: str = "dry-run",
+) -> EffectDecision:
+    """Convert a Store-resolved mode into an allow or bounded proposal."""
+
+    resolved = coerce_execution_mode(mode)
+    if resolved is None:
+        raise ValueError("effect mode is required")
+    selected_action = EffectActionKind(action)
+    if resolved is ExecutionMode.live:
+        return EffectDecision(EffectDecisionKind.allow)
+    proposal = EffectProposal(
+        action=selected_action,
+        action_id=action_id,
+        target=target,
+        payload=dict(payload or {}),
+        reason=reason,
+    )
+    return EffectDecision(EffectDecisionKind.proposal_required, proposal)
 
 
 # Compatibility spelling for callers that name the latch by its task scope.

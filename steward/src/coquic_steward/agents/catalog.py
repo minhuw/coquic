@@ -7,7 +7,6 @@ from types import MappingProxyType
 
 from ..core.config import StewardConfig
 from ..core.models import (
-    IntegrationMode,
     Priority,
     Risk,
     TaskRecord,
@@ -595,18 +594,12 @@ def _has_source_signal_kind(task: TaskRecord, kind: str) -> bool:
 def _render_execution_boundary(task: TaskRecord, config: StewardConfig) -> str:
     if TaskKind(task.spec.kind) != TaskKind.code_quality:
         return ""
-    if config.integration_mode == IntegrationMode.push_main.value:
-        return (
-            "Steward owns final integration. You may use remote scanner APIs only to "
-            "re-check the selected source-context findings, but do not commit or push "
-            "manually. Produce source changes in the "
-            "worktree and let Steward review, validate, commit, push, and re-check."
-        )
     return (
-        "Stop at a validated local patch. Do not commit, push, trigger GitHub workflows, "
-        "dismiss scanner alerts, or change scanner configuration. Fix only the selected "
-        "source-context findings in the worktree, run local validation, and report what "
-        "remote re-check remains."
+        "Remote reads may verify only the selected source-context findings. External "
+        "writes are denied at the trusted effect boundary and must be represented by "
+        "bounded, validated proposals rather than prompt instructions. Produce source "
+        "changes in the worktree, run local validation, and leave integration effects "
+        "to Steward's code-owned boundary."
     )
 
 

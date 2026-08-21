@@ -13,10 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .models import CodexStage, IntegrationMode
-
-
-VALID_INTEGRATION_MODES = {mode.value for mode in IntegrationMode}
+from .models import CodexStage
 DEFAULT_ENABLED_SIGNALS = (
     "github-actions:ci",
     "github-actions:test",
@@ -710,14 +707,11 @@ class StewardConfig:
     validation_runtime: str = "validation-container-v1"
     runtime_protocol: str = "task-container-v1"
     local_codex_test_harness: bool = False
-    # ``dry_run`` is the only public admission setting.  The two following
-    # fields are a frozen, internal adapter for pre-Plan-014 integration code;
-    # they are intentionally not accepted by the TOML loader.
-    dry_run: bool | None = None
-    integration_mode: str = IntegrationMode.local_only.value
-    local_only: bool = False
+    # Dry-run is the single public policy.  The loader selects the safe local
+    # evaluation default; direct callers must choose their mode explicitly when
+    # they need live external effects.  The Store rechecks it at every seam.
+    dry_run: bool = True
     git_remote: str = "origin"
-    _policy_explicit: bool | None = field(default=None, repr=False, compare=False)
     main_branch: str = "main"
     github_repository: str = "minhuw/coquic"
     enabled_signals: tuple[str, ...] = DEFAULT_ENABLED_SIGNALS
@@ -732,21 +726,8 @@ class StewardConfig:
     shutdown_grace_seconds: float = 30.0
 
     def __post_init__(self) -> None:
-        requested_dry_run = self.dry_run
-        policy_explicit = self._policy_explicit
-        if requested_dry_run is None:
-            if self.integration_mode == IntegrationMode.push_main.value and not self.local_only:
-                requested_dry_run = False
-            else:
-                requested_dry_run = True
-        elif not isinstance(requested_dry_run, bool):
+        if not isinstance(self.dry_run, bool):
             raise ValueError("dry_run must be a boolean")
-        if policy_explicit is None:
-            policy_explicit = self.dry_run is not None
-        object.__setattr__(self, "dry_run", requested_dry_run)
-        object.__setattr__(self, "_policy_explicit", bool(policy_explicit))
-        if policy_explicit and self.integration_mode == IntegrationMode.local_only.value:
-            object.__setattr__(self, "local_only", bool(requested_dry_run))
         if self.deployment.enabled and self.deployment.stop_grace_seconds <= self.shutdown_grace_seconds:
             raise ValueError(
                 "deployment.stop_grace_seconds must exceed shutdown_grace_seconds"
@@ -775,15 +756,6 @@ class StewardConfig:
             object.__setattr__(
                 self, "runtime_protocol", self.container.runtime_protocol
             )
-        if not isinstance(self.dry_run, bool):
-            raise ValueError("dry_run must be a boolean")
-        if self.integration_mode not in VALID_INTEGRATION_MODES:
-            choices = ", ".join(sorted(VALID_INTEGRATION_MODES))
-            raise ValueError(
-                f"invalid internal integration mode {self.integration_mode!r}; expected {choices}"
-            )
-        if not isinstance(self.local_only, bool):
-            raise ValueError("internal local_only must be a boolean")
         _validate_github_repository(self.github_repository)
         if isinstance(self.shutdown_grace_seconds, bool) or not isinstance(
             self.shutdown_grace_seconds, (int, float)
@@ -817,9 +789,9 @@ class StewardConfig:
 
     @property
     def dry_run_enabled(self) -> bool:
-        """Whether the public startup policy is actively enforcing dry-run."""
+        """Whether the global startup policy is enforcing dry-run."""
 
-        return bool(self._policy_explicit and self.dry_run)
+        return self.dry_run
 
     @property
     def codex_api_key_path(self) -> Path | None:
@@ -1050,22 +1022,6 @@ def load_config(
         raise ValueError("steward configuration must be a table")
     if "cloud_publication" in steward:
         raise ValueError("unknown configuration section: steward.cloud_publication")
-    if "integration_mode" in steward:
-        value = steward.get("integration_mode")
-        if value == IntegrationMode.local_only.value:
-            hint = "use dry_run = true for the old local-only behavior"
-        elif value == IntegrationMode.push_main.value:
-            hint = "choose live integration explicitly with dry_run = false"
-        else:
-            hint = "choose dry_run = true or dry_run = false"
-        raise ValueError(
-            "steward.integration_mode is no longer accepted; " + hint
-        )
-    if "local_only" in steward:
-        raise ValueError(
-            "steward.local_only is no longer accepted; "
-            "use dry_run = true, or dry_run = false for explicit live operation"
-        )
     for section_name, section_value in steward.items():
         if isinstance(section_value, dict) and section_name not in _KNOWN_STEWARD_SECTIONS:
             raise ValueError(f"unknown configuration section: steward.{section_name}")
@@ -1146,15 +1102,7 @@ def load_config(
             steward.get("local_codex_test_harness", False)
         ),
         dry_run=_strict_bool(steward.get("dry_run", True), "dry_run"),
-        # Keep the legacy integration behavior as an internal adapter only.
-        integration_mode=(
-            IntegrationMode.local_only.value
-            if _strict_bool(steward.get("dry_run", True), "dry_run")
-            else IntegrationMode.push_main.value
-        ),
-        local_only=_strict_bool(steward.get("dry_run", True), "dry_run"),
         git_remote=str(steward.get("git_remote", "origin")),
-        _policy_explicit=True,
         main_branch=str(steward.get("main_branch", "main")),
         github_repository=str(steward.get("github_repository", "minhuw/coquic")),
         enabled_signals=enabled_signals,

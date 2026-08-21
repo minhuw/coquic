@@ -31,8 +31,6 @@ from ..core.models import (
     CodexStage,
     TaskRecord,
     TaskRun,
-    TaskStatus,
-    WorkerResult,
 )
 from ..core.subprocesses import run_command
 from ..publication.atif import AtifSource
@@ -1735,91 +1733,6 @@ class SessionSupervisor:
         self._runtimes.pop(task_id, None)
         self._invokers.pop(task_id, None)
 
-    def run(
-        self,
-        task: TaskRecord,
-        prompt: str,
-        cwd: Path,
-        *,
-        name: str = "planner",
-        output_schema: Path | None = None,
-        resume_session: str | None = None,
-        stage: CodexStage = CodexStage.signal_planner,
-        sandbox: str | None = None,
-        run_id: str | None = None,
-    ) -> WorkerResult:
-        """Run a daemon planner turn through the injected invocation boundary."""
-
-        if resume_session is not None:
-            raise ValueError("planner turns never use ordinary session resume")
-        task = self._ensure_planner_task(task)
-        runtime, _ = self._boundary_for(task)
-        effective_cwd = runtime.config.worktree if runtime is not None else cwd
-        checkpoint_id = worktree_checkpoint(self.config, effective_cwd)
-        execution = self.store.get_execution(task.id)
-        pipeline_id = execution.owning_pipeline_id
-        if pipeline_id is None:
-            raise TaskLedgerOwnershipError(
-                "planner task execution has no owning pipeline"
-            )
-        settings = self.config.codex_settings(stage)
-        result = self.start(
-            task.id,
-            pipeline_id,
-            role=TaskRole.planner,
-            prompt=prompt,
-            cwd=effective_cwd,
-            model=settings.model,
-            reasoning_effort=settings.reasoning_effort,
-            output_schema=output_schema,
-            stage=stage,
-            sandbox=sandbox or self.config.codex_sandbox,
-            checkpoint_id=checkpoint_id,
-            run_id=run_id,
-        )
-        message = (
-            result.last_message_path.read_text(encoding="utf-8")
-            if result.last_message_path.exists()
-            else ""
-        )
-        return WorkerResult(
-            completed=result.status is InvocationStatus.succeeded,
-            command=[self.config.codex_bin, "exec", "--json"],
-            cwd=effective_cwd,
-            exit_code=result.exit_code,
-            transcript_path=result.transcript_path,
-            last_message_path=result.last_message_path,
-            final_message=message,
-            thread_id=None,
-            session_id=result.session_id,
-            run_id=result.run_id,
-            pipeline_id=result.pipeline_id,
-            stage=stage,
-            model=settings.model,
-            reasoning_effort=settings.reasoning_effort,
-            diagnostics=result.diagnostics or {},
-        )
-
-    def _ensure_planner_task(self, requested: TaskRecord) -> TaskRecord:
-        try:
-            task = self.store.get(requested.id)
-        except KeyError:
-            task, created = self.store.add_task(requested.spec)
-            if not created:
-                raise RuntimeError("planner task allocation was ambiguous")
-            task.status = TaskStatus.succeeded
-        if task.spec.source != "planner":
-            raise ValueError("planner task identity belongs to a non-planner task")
-        if task.worktree_path is None:
-            task.worktree_path = requested.worktree_path
-        elif (
-            requested.worktree_path is not None
-            and task.worktree_path.resolve() != requested.worktree_path.resolve()
-        ):
-            raise ValueError("planner task worktree identity changed")
-        self.store.save(task)
-        return self.store.get(task.id)
-
     def _allocate(
         self,
         task: TaskRecord,
@@ -2172,20 +2085,6 @@ def runtime_factory_for_config(config: StewardConfig) -> Callable[[TaskRecord], 
     def build(task: TaskRecord) -> TaskContainerRuntime:
         if task.worktree_path is None:
             raise ValueError("task worktree must exist before creating its container")
-        if task.id == "steward-planner" and not task.worktree_path.exists():
-            task.worktree_path.parent.mkdir(parents=True, exist_ok=True)
-            run_command(
-                [
-                    "git",
-                    "worktree",
-                    "add",
-                    "--detach",
-                    str(task.worktree_path),
-                    "HEAD",
-                ],
-                cwd=config.repo_root,
-                check=True,
-            )
         worktree = task.worktree_path.resolve()
         linked_git = worktree / ".git"
         if linked_git.is_file():

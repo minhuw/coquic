@@ -1,0 +1,66 @@
+name: Site V2
+
+on:
+  pull_request:
+    paths:
+      - 'site-v2/**'
+      - 'steward/**'
+      - 'contracts/steward-cloud/**'
+      - 'scripts/test_steward_site_greenfield.py'
+      - 'flake.nix'
+      - 'DESIGN.md'
+      - '.github/workflows/site-v2.yml'
+  push:
+    paths:
+      - 'site-v2/**'
+      - 'steward/**'
+      - 'contracts/steward-cloud/**'
+      - 'scripts/test_steward_site_greenfield.py'
+      - 'flake.nix'
+      - 'DESIGN.md'
+      - '.github/workflows/site-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site-v2-quality:
+    name: Site V2 cloud publication quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+      - name: Install Site V2 dependencies
+        run: nix develop -c npm --prefix site-v2 ci
+      - name: Steward-to-Site greenfield contract
+        run: nix develop -c uv run --project steward python scripts/test_steward_site_greenfield.py
+      - name: Install Site V2 Playwright Chromium
+        run: nix develop -c npm --prefix site-v2 exec -- playwright install --with-deps chromium
+      - name: Contract validation
+        run: nix develop -c uv run --project site-v2 python site-v2/scripts/validate_contracts.py
+      - name: Cloud publication unit tests
+        run: nix develop -c npm --prefix site-v2 run test:unit
+      - name: Typecheck and build
+        run: |
+          nix develop -c npm --prefix site-v2 run typecheck
+          nix develop -c npm --prefix site-v2 run build
+      - name: Steward cloud publication smoke
+        run: nix develop -c npm --prefix site-v2 run test:steward
+      - name: Steward trajectory browser proof
+        run: nix develop -c npm --prefix site-v2 run test:visual -- tests/steward.spec.ts --workers=1
+      - name: Upload Site V2 Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-v2-playwright-artifacts
+          if-no-files-found: ignore
+          path: |
+            site-v2/test-results/**
+            site-v2/playwright-report/**
+      - name: Deployment path smoke
+        run: nix develop -c npm --prefix site-v2 run test:deploy

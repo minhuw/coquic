@@ -1254,7 +1254,14 @@ class StewardExecutor:
                     pipeline,
                     "integration patch differs from the accepted patch",
                 )
-            remote_tip = self._latest_main_identity(worktree)
+            task_dry_run = self.store.task_execution_mode(task.id) is ExecutionMode.dry_run
+            remote_tip = self._latest_main_identity(worktree, dry_run=task_dry_run)
+            if not task_dry_run and remote_tip is None:
+                return self._block_pipeline(
+                    task,
+                    pipeline,
+                    "latest main could not be refreshed",
+                )
             base = pipeline.base_identity or self.worktrees.base_commit(worktree)
             if remote_tip and remote_tip != base:
                 accepted_patch = self._accepted_patch(task, pipeline)
@@ -1320,6 +1327,95 @@ class StewardExecutor:
         next_phase = PipelineCursorPhase.push
         return self._phase_finish(task, pipeline, phase, next_phase, evidence={"commit": sha, "tree": expected_tree})
 
+    @contextmanager
+    def _push_effect_admission(
+        self,
+        task: TaskRecord,
+        pipeline: Any,
+        commit: str,
+    ):
+        """Hold the Store-owned push admission across the guarded action."""
+
+        action = f"git-push:{bounded_fingerprint(task.id, pipeline.id, PipelineCursorPhase.push.value, limit=64)}"
+        with self.store.effect_admission(
+            task.id,
+            action=EffectActionKind.git_push.value,
+            action_id=action,
+            target=f"{self.config.git_remote}/{self.config.main_branch}",
+            payload={"commit": commit, "task_id": task.id},
+            reason="dry-run Git push is proposed locally",
+        ) as decision:
+            yield decision
+
+    def _record_push_proposal(
+        self,
+        task: TaskRecord,
+        pipeline: Any,
+        commit: str,
+        decision: object,
+    ) -> dict[str, object]:
+        """Persist one stable push proposal event and return its evidence."""
+
+        proposal = getattr(decision, "proposal", None)
+        evidence: dict[str, object] = {
+            "commit": commit,
+            "proposal": proposal.as_dict() if proposal is not None else None,
+        }
+        proposal_id = (
+            proposal.identity if proposal is not None else None
+        )
+        already_recorded = False
+        for event in self.store.events(task.id):
+            if event.kind != "pipeline.push.proposed":
+                continue
+            previous = event.data.get("proposal")
+            if isinstance(previous, dict) and previous.get("proposalId") == proposal_id:
+                already_recorded = True
+                break
+        if not already_recorded:
+            self.store.add_event(
+                task.id,
+                "pipeline.push.proposed",
+                "Git push proposed by dry-run",
+                {"pipeline_id": pipeline.id, **evidence},
+            )
+        return evidence
+
+    def _record_dry_run_feature_issue_proposals(
+        self,
+        task: TaskRecord,
+        source: TaskRecord | None,
+        commit: str,
+    ) -> None:
+        """Record post-push GitHub intent without claiming a push occurred."""
+
+        if source is None:
+            return
+        try:
+            current = self.store.get(task.id)
+            transcript = IntegrationTranscript(
+                self.config.transcripts_dir
+                / current.id
+                / "integration"
+                / "transcript.txt"
+            )
+            current.transcript_path = transcript.path
+            self.store.save(current)
+            transcript.write(
+                "start",
+                f"Dry-run push proposal {current.id} for source task {source.id}",
+            )
+            self._update_feature_issues_after_push(
+                current, source, commit, transcript
+            )
+        except Exception as exc:
+            self.store.add_event(
+                task.id,
+                "github.issue_update_failed",
+                str(exc).strip()[-2_000:] or exc.__class__.__name__,
+                {"integration_task_id": task.id, "step": "proposal"},
+            )
+
     def _durable_push(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
         phase = PipelineCursorPhase.push
         worktree = self._require_worktree(task)
@@ -1342,51 +1438,14 @@ class StewardExecutor:
 
         push_error: RuntimeError | None = None
         with _integration_lock(self.config.state_dir):
-            today = utc_now().astimezone(timezone.utc).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            push_count = (
-                self.store.count_events_since("main.pushed", today)
-                + self.store.count_events_since(
-                    "pipeline.push.ambiguous_resolved", today
-                )
-            )
-
-            if push_count >= self.config.limits.max_main_pushes_per_day:
-                summary = "main push budget reached"
-                self.store.add_event(
-                    task.id,
-                    "pipeline.push.blocked",
-                    summary,
-                    {
-                        "pipeline_id": pipeline.id,
-                        "attempt": attempt,
-                        "count": push_count,
-                        "limit": self.config.limits.max_main_pushes_per_day,
-                        "day": today.date().isoformat(),
-                    },
-                )
-                return self._block_pipeline(task, pipeline, summary)
             try:
-                with self.store.effect_admission(
-                    task.id,
-                    action=EffectActionKind.git_push.value,
-                    action_id=action,
-                    target=f"{self.config.git_remote}/{self.config.main_branch}",
-                    payload={"commit": commit, "task_id": task.id},
-                    reason="dry-run Git push is proposed locally",
-                ) as decision:
+                with self._push_effect_admission(task, pipeline, commit) as decision:
                     if not decision.allowed:
-                        proposal = decision.proposal
-                        evidence = {
-                            "commit": commit,
-                            "proposal": proposal.as_dict() if proposal is not None else None,
-                        }
-                        self.store.add_event(
-                            task.id,
-                            "pipeline.push.proposed",
-                            "Git push proposed by dry-run",
-                            {"pipeline_id": pipeline.id, **evidence},
+                        evidence = self._record_push_proposal(
+                            task, pipeline, commit, decision
+                        )
+                        self._record_dry_run_feature_issue_proposals(
+                            task, source, commit
                         )
                         self.store.finish_task(
                             task.id,
@@ -1400,6 +1459,31 @@ class StewardExecutor:
                             PipelineCursorPhase.ready_to_seal,
                             evidence=evidence,
                         )
+
+                    today = utc_now().astimezone(timezone.utc).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                    push_count = (
+                        self.store.count_events_since("main.pushed", today)
+                        + self.store.count_events_since(
+                            "pipeline.push.ambiguous_resolved", today
+                        )
+                    )
+                    if push_count >= self.config.limits.max_main_pushes_per_day:
+                        summary = "main push budget reached"
+                        self.store.add_event(
+                            task.id,
+                            "pipeline.push.blocked",
+                            summary,
+                            {
+                                "pipeline_id": pipeline.id,
+                                "attempt": attempt,
+                                "count": push_count,
+                                "limit": self.config.limits.max_main_pushes_per_day,
+                                "day": today.date().isoformat(),
+                            },
+                        )
+                        return self._block_pipeline(task, pipeline, summary)
                     result = self.worktrees.push_head_to_main(worktree)
                 self.store.add_event(
                     task.id,
@@ -1449,7 +1533,10 @@ class StewardExecutor:
                 return self._phase_finish(task, pipeline, phase, phase, evidence={"retry": attempt + 1, "detail": detail})
             if _is_non_fast_forward_push_failure(detail):
                 with _integration_lock(self.config.state_dir):
-                    latest_main = self._latest_main_identity(worktree)
+                    task_dry_run = self.store.task_execution_mode(task.id) is ExecutionMode.dry_run
+                    latest_main = self._latest_main_identity(
+                        worktree, dry_run=task_dry_run
+                    )
                     if latest_main is None:
                         return self._block_pipeline(
                             task, pipeline, "push race could not resolve latest main"
@@ -1955,21 +2042,26 @@ class StewardExecutor:
                     selected = value
         return selected
 
-    def _latest_main_identity(self, worktree: Path) -> str | None:
-        # Remote ancestry is a read.  Live integration refreshes it when the
-        # configured remote exists; local dry-run repositories may have no
-        # remote at all and fall back to their local main ref.
-        if not self.config.dry_run:
+    def _latest_main_identity(
+        self, worktree: Path, *, dry_run: bool | None = None
+    ) -> str | None:
+        # Remote ancestry is a read.  Live integration must refresh it and
+        # fails closed when that refresh cannot establish remote identity;
+        # dry-run repositories may have no remote and use local main.
+        if dry_run is None:
+            dry_run = self.config.dry_run
+        if not dry_run:
             fetched = run_command(
                 ["git", "fetch", self.config.git_remote, self.config.main_branch],
                 cwd=worktree,
             )
-            if fetched.ok:
-                result = run_command(
-                    ["git", "rev-parse", f"{self.config.git_remote}/{self.config.main_branch}"],
-                    cwd=worktree,
-                )
-                return result.stdout.strip() if result.ok else None
+            if not fetched.ok:
+                return None
+            result = run_command(
+                ["git", "rev-parse", f"{self.config.git_remote}/{self.config.main_branch}"],
+                cwd=worktree,
+            )
+            return result.stdout.strip() if result.ok else None
         result = run_command(["git", "rev-parse", self.config.main_branch], cwd=worktree)
         return result.stdout.strip() if result.ok else None
 
@@ -2706,81 +2798,85 @@ class StewardExecutor:
             f"`{self.config.main_branch}`.\n\n"
             f"Source task: {source.id}"
         )
-        comment_decision = self.store.effect_decision(
+        comment_failed = False
+        with self.store.effect_admission(
             task.id,
             action=EffectActionKind.github_issue_comment.value,
-            action_id=f"github-issue-comment:{source.id}:{number}:{sha}",
+            action_id=f"github-issue-comment:{bounded_fingerprint(source.id, number, sha, limit=64)}",
             target=f"{self.config.github_repository}#{number}",
             payload={"issue_number": number, "commit": sha},
             reason="dry-run GitHub issue comment is proposed locally",
-        )
-        if not comment_decision.allowed:
-            proposal = comment_decision.proposal
-            transcript.write(
-                "issue_comment_proposed",
-                json.dumps(proposal.as_dict() if proposal is not None else {}, sort_keys=True),
-            )
-            self.store.add_event(
-                source.id,
-                "github.issue_comment_proposed",
-                str(number),
-                {"integration_task_id": task.id, "proposal": proposal.as_dict() if proposal is not None else None},
-            )
+        ) as comment_decision:
+            if not comment_decision.allowed:
+                proposal = comment_decision.proposal
+                transcript.write(
+                    "issue_comment_proposed",
+                    json.dumps(proposal.as_dict() if proposal is not None else {}, sort_keys=True),
+                )
+                self.store.add_event(
+                    source.id,
+                    "github.issue_comment_proposed",
+                    str(number),
+                    {"integration_task_id": task.id, "proposal": proposal.as_dict() if proposal is not None else None},
+                )
+            else:
+                comment = run_command(
+                    [
+                        "gh",
+                        "issue",
+                        "comment",
+                        str(number),
+                        "-R",
+                        self.config.github_repository,
+                        "--body",
+                        body,
+                    ],
+                    cwd=self.config.repo_root,
+                    timeout=30,
+                )
+                if not comment.ok:
+                    self._record_feature_issue_update_failure(
+                        task, source, number, "comment", comment.stderr, transcript
+                    )
+                    comment_failed = True
+        if comment_failed:
             return
-        comment = run_command(
-            [
-                "gh",
-                "issue",
-                "comment",
-                str(number),
-                "-R",
-                self.config.github_repository,
-                "--body",
-                body,
-            ],
-            cwd=self.config.repo_root,
-            timeout=30,
-        )
-        if not comment.ok:
-            self._record_feature_issue_update_failure(
-                task, source, number, "comment", comment.stderr, transcript
-            )
-            return
-        close_decision = self.store.effect_decision(
+
+        with self.store.effect_admission(
             task.id,
             action=EffectActionKind.github_issue_close.value,
-            action_id=f"github-issue-close:{source.id}:{number}:{sha}",
+            action_id=f"github-issue-close:{bounded_fingerprint(source.id, number, sha, limit=64)}",
             target=f"{self.config.github_repository}#{number}",
             payload={"issue_number": number, "commit": sha},
             reason="dry-run GitHub issue close is proposed locally",
-        )
-        if not close_decision.allowed:
-            proposal = close_decision.proposal
-            transcript.write(
-                "issue_close_proposed",
-                json.dumps(proposal.as_dict() if proposal is not None else {}, sort_keys=True),
+        ) as close_decision:
+            if not close_decision.allowed:
+                proposal = close_decision.proposal
+                transcript.write(
+                    "issue_close_proposed",
+                    json.dumps(proposal.as_dict() if proposal is not None else {}, sort_keys=True),
+                )
+                self.store.add_event(
+                    source.id,
+                    "github.issue_close_proposed",
+                    str(number),
+                    {"integration_task_id": task.id, "proposal": proposal.as_dict() if proposal is not None else None},
+                )
+                return
+            close = run_command(
+                [
+                    "gh",
+                    "issue",
+                    "close",
+                    str(number),
+                    "-R",
+                    self.config.github_repository,
+                    "--reason",
+                    "completed",
+                ],
+                cwd=self.config.repo_root,
+                timeout=30,
             )
-            self.store.add_event(
-                source.id,
-                "github.issue_close_proposed",
-                str(number),
-                {"integration_task_id": task.id, "proposal": proposal.as_dict() if proposal is not None else None},
-            )
-            return
-        close = run_command(
-            [
-                "gh",
-                "issue",
-                "close",
-                str(number),
-                "-R",
-                self.config.github_repository,
-                "--reason",
-                "completed",
-            ],
-            cwd=self.config.repo_root,
-            timeout=30,
-        )
         if not close.ok:
             self._record_feature_issue_update_failure(
                 task, source, number, "close", close.stderr, transcript

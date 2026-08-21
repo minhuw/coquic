@@ -150,6 +150,7 @@ PUBLICATION_RETRY_INTERVAL_SECONDS = 5.0
 PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
 PLANNER_TERMINAL_CONTEXT_LIMIT = 200
 GLOBAL_ACTIVE_TASK_ADMISSION_CAP = 16
+_BUILTIN_DOCKER_RECONCILE = DockerResourceManager.reconcile
 
 
 def _global_dry_run(config: StewardConfig | object) -> bool:
@@ -452,6 +453,51 @@ class StewardDaemon:
     def _reconcile_docker_resources(self) -> OwnedDockerUsage | None:
         if self._docker_resources is None:
             return None
+        if _global_dry_run(self.config):
+            # A custom lifecycle adapter owns its own read-only policy; retain
+            # that adapter contract while the built-in manager stays guarded.
+            if (
+                type(self._docker_resources).reconcile
+                is not _BUILTIN_DOCKER_RECONCILE
+            ):
+                result = self._docker_resources.reconcile(
+                    self.store, self.config.deployment
+                )
+                usage = result.get("usage") if isinstance(result, Mapping) else None
+                return usage if isinstance(usage, OwnedDockerUsage) else None
+            # Keep the lifecycle manager's release journal and exact Docker
+            # accounting, but do not call its destructive reconcile path.
+            try:
+                self._docker_resources.deployment_id = (
+                    self.config.deployment.compose_project
+                )
+                release_images, _in_flight = (
+                    self._docker_resources._record_deployment_releases(
+                        self.store, self.config.deployment
+                    )
+                )
+                known_images = frozenset(
+                    image_id
+                    for image_ids in release_images.values()
+                    for image_id in image_ids
+                )
+                self._docker_resources._known_image_ids = known_images
+                usage, references, _images, _active, complete = (
+                    self._docker_resources._snapshot(known_images)
+                )
+                if not complete or usage.ambiguous:
+                    self._resource_reconciliation_failed = True
+                    return OwnedDockerUsage(ambiguous=True)
+                self.store.replace_container_references(references)
+                self._resource_reconciliation_failed = False
+                return usage
+            except Exception as exc:
+                self._resource_reconciliation_failed = True
+                self._log(
+                    "owned Docker observation failed "
+                    f"error={exc.__class__.__name__}"
+                )
+                return OwnedDockerUsage(ambiguous=True)
         try:
             result = self._docker_resources.reconcile(self.store, self.config.deployment)
             self._resource_reconciliation_failed = False
@@ -1987,6 +2033,37 @@ class StewardDaemon:
             ),
             None,
         )
+        if commit:
+            try:
+                mode = self.store.task_execution_mode(task.id)
+            except (AttributeError, KeyError, ValueError):
+                mode = None
+            if mode is None:
+                self._release_phase_action(
+                    task.id, pipeline.id, "push", action
+                )
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.blocked,
+                    "task execution mode unavailable during push recovery",
+                    evidence={"phase": "push"},
+                )
+            if mode is ExecutionMode.dry_run:
+                with self.executor._push_effect_admission(
+                    task, pipeline, commit
+                ) as decision:
+                    proposal_evidence = self.executor._record_push_proposal(
+                        task, pipeline, commit, decision
+                    )
+                self._release_phase_action(
+                    task.id, pipeline.id, "push", action
+                )
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.interrupted,
+                    "dry-run push proposal persisted for idempotent retry",
+                    evidence={"phase": "push", **proposal_evidence},
+                )
         worktree = Path(task.worktree_path) if task.worktree_path else None
         if commit and worktree is not None and worktree.is_dir():
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
@@ -2136,7 +2213,13 @@ class StewardDaemon:
             and event.data.get("commit") == commit
             for event in events
         )
-        if pushed and not self.config.dry_run:
+        try:
+            mode = self.store.task_execution_mode(task.id)
+        except (AttributeError, KeyError, ValueError):
+            mode = None
+        if pushed and mode is None:
+            return "task execution mode unavailable for push reconciliation"
+        if pushed and mode is ExecutionMode.live:
             remote = f"{self.config.git_remote}/{self.config.main_branch}"
             fetched = run_command(
                 ["git", "fetch", "--quiet", self.config.git_remote, self.config.main_branch],
@@ -3395,8 +3478,31 @@ class StewardDaemon:
                 raise TaskLedgerOwnershipError("task execution owner is invalid")
         except (KeyError, TaskLedgerOwnershipError):
             return False
-        cleanup_state = self.store.cleanup_obligation_state(task.id)
         events = self.store.events(task.id)
+        try:
+            mode = self.store.task_execution_mode(task.id)
+        except (AttributeError, KeyError, ValueError):
+            mode = None
+        proposed_effects = [
+            event for event in events if event.kind == "effect.proposed"
+        ]
+        if mode is ExecutionMode.dry_run and proposed_effects:
+            if not any(
+                event.kind == "cleanup_blocked"
+                and event.data.get("reason") == "dry_run_pending_finalization"
+                for event in events
+            ):
+                self.store.add_event(
+                    task.id,
+                    "cleanup_blocked",
+                    "dry-run external proposals remain pending Plan 015 finalization",
+                    {
+                        "reason": "dry_run_pending_finalization",
+                        "proposal_count": len(proposed_effects),
+                    },
+                )
+            return False
+        cleanup_state = self.store.cleanup_obligation_state(task.id)
         existing_intent = self._cleanup_intent_for_task(task.id)
         existing_state = existing_intent.state if existing_intent is not None else None
         if existing_state is CleanupState.completed:

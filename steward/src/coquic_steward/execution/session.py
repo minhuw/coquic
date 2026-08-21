@@ -25,6 +25,7 @@ from ..agents.invocation import (
     stream_process,
 )
 from ..core.config import StewardConfig
+from ..core.lifecycle import bounded_fingerprint
 from ..core.models import (
     CodexRunState,
     CodexSession,
@@ -327,10 +328,11 @@ def enqueue_materialized_publication(
                 # authorize the enqueue.  This handles callers that retained
                 # a live Store instance while the daemon switched to dry-run.
                 store.resolve_task_execution_mode(task.id, True)
-            decision = store.effect_decision(
+            action_id = f"publication-enqueue:{bounded_fingerprint(task.id, run_id, limit=64)}"
+            with store.effect_admission(
                 task.id,
                 action="publication.enqueue",
-                action_id=f"publication-enqueue:{task.id}:{run_id}",
+                action_id=action_id,
                 target=task.id,
                 payload={
                     "run_id": run_id,
@@ -338,9 +340,10 @@ def enqueue_materialized_publication(
                     "metadata_digest": outcome.metadata_digest,
                 },
                 reason="dry-run publication enqueue is proposed locally",
-            )
-            if not decision.allowed:
-                return decision.proposal
+            ) as decision:
+                if not decision.allowed:
+                    return decision.proposal
+                return store.enqueue_publication(outcome.to_outbox())
         elif _global_dry_run(config) or _task_is_dry_run(task):
             return None
         return store.enqueue_publication(outcome.to_outbox())

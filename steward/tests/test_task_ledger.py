@@ -11,6 +11,7 @@ import pytest
 from coquic_steward.core.config import StewardConfig, load_config
 from coquic_steward.core.models import (
     PipelineCursorPhase,
+    PipelinePhase,
     TaskKind,
     TaskSpec,
     TaskStatus,
@@ -202,6 +203,105 @@ def test_stale_pipeline_cannot_reclaim_execution_owner(
     assert store.get_execution(task.id).owning_pipeline_id == child.id
     assert store.list_pipelines(task.id) == before
     assert store.list_sessions(task.id, pipeline_id=parent.id) == []
+
+
+def test_pipeline_identity_update_persists_mirrors_and_reopens(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="identity", prompt="p")
+    )
+    pipeline = store.list_pipelines(task.id)[0]
+    worktree = (config.db_path.parent / "worktrees" / task.id).resolve()
+
+    updated = store.update_pipeline_identity(
+        pipeline.id,
+        base_identity="base-identity",
+        input_identity="input-identity",
+        output_identity="output-identity",
+        patch_identity="patch-identity",
+        phase=PipelinePhase.validation,
+        expected_tree="expected-tree",
+        worktree_path=worktree,
+    )
+
+    assert updated.base_identity == "base-identity"
+    assert updated.input_identity == "input-identity"
+    assert updated.output_identity == "output-identity"
+    assert updated.patch_identity == "patch-identity"
+    assert updated.phase == PipelinePhase.validation.value
+    execution = store.get_execution(task.id)
+    assert execution.base_commit == "base-identity"
+    assert execution.expected_tree == "expected-tree"
+    assert execution.worktree_path == worktree
+    assert execution.current_phase == PipelinePhase.planning.value
+    assert execution.updated_at == updated.updated_at
+    with sqlite3.connect(config.db_path) as connection:
+        assert connection.execute(
+            "SELECT worktree_path FROM task_executions WHERE id = ?",
+            (execution.id,),
+        ).fetchone()[0] == f"worktrees/{task.id}"
+
+    updated_again = store.update_pipeline_identity(
+        pipeline.id,
+        output_identity="output-identity-2",
+        expected_tree=None,
+    )
+    assert updated_again.output_identity == "output-identity-2"
+    assert updated_again.input_identity == updated.input_identity
+    assert store.get_execution(task.id).expected_tree == execution.expected_tree
+
+    before_pipeline = store.get_pipeline(pipeline.id)
+    before_execution = store.get_execution(task.id)
+    assert store.update_pipeline_identity(
+        pipeline.id,
+        input_identity=None,
+        expected_tree=None,
+        worktree_path=None,
+    ) == before_pipeline
+    assert store.get_execution(task.id) == before_execution
+
+    reopened = TaskStore.open(config.db_path)
+    try:
+        assert reopened.get_pipeline(pipeline.id) == updated_again
+        reopened_execution = reopened.get_execution(task.id)
+        assert reopened_execution.base_commit == execution.base_commit
+        assert reopened_execution.expected_tree == execution.expected_tree
+        assert reopened_execution.worktree_path == execution.worktree_path
+        assert reopened_execution.current_phase == execution.current_phase
+    finally:
+        reopened.engine.dispose()
+
+
+def test_pipeline_identity_update_rejects_stale_owner_without_partial_write(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="owner", prompt="p")
+    )
+    parent = store.list_pipelines(task.id)[0]
+    store.create_pipeline(
+        task.id,
+        execution_id=parent.execution_id,
+        trigger="validation-repair",
+        parent_pipeline_id=parent.id,
+    )
+    before_pipeline = store.get_pipeline(parent.id)
+    before_execution = store.get_execution(task.id)
+
+    with pytest.raises(TaskLedgerOwnershipError, match="current execution owner"):
+        store.update_pipeline_identity(
+            parent.id,
+            base_identity="should-not-persist",
+            output_identity="should-not-persist",
+            expected_tree="should-not-persist",
+            worktree_path=config.db_path.parent / "worktrees" / task.id,
+        )
+
+    assert store.get_pipeline(parent.id) == before_pipeline
+    assert store.get_execution(task.id) == before_execution
 
 
 def test_terminal_finalization_persists_provider_and_checkpoint_atomically(

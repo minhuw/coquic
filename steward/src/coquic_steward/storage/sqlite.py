@@ -1221,6 +1221,64 @@ class SQLiteTaskStore:
             execution.updated_at = now
         return self.get_pipeline(pipeline_id)
 
+    def update_pipeline_identity(
+        self,
+        pipeline_id: str,
+        *,
+        base_identity: str | None = None,
+        input_identity: str | None = None,
+        output_identity: str | None = None,
+        patch_identity: str | None = None,
+        phase: PipelinePhase | str | None = None,
+        expected_tree: str | None = None,
+        worktree_path: Path | None = None,
+    ) -> TaskPipeline:
+        """Persist pipeline identities and their execution mirrors atomically."""
+
+        with Session(self.engine) as session, session.begin():
+            row = session.get(TaskPipelineRow, pipeline_id)
+            if row is None:
+                raise KeyError(pipeline_id)
+            execution, _ = self._require_execution_owner(
+                session,
+                row.task_id,
+                execution_id=row.execution_id,
+                pipeline_id=row.id,
+            )
+            if not any(
+                value is not None
+                for value in (
+                    base_identity,
+                    input_identity,
+                    output_identity,
+                    patch_identity,
+                    phase,
+                    expected_tree,
+                    worktree_path,
+                )
+            ):
+                return row_to_pipeline(row)
+
+            now = utc_now().isoformat()
+            if base_identity is not None:
+                row.base_identity = base_identity
+                execution.base_commit = base_identity
+            if input_identity is not None:
+                row.input_identity = input_identity
+            if output_identity is not None:
+                row.output_identity = output_identity
+            if patch_identity is not None:
+                row.patch_identity = patch_identity
+            if phase is not None:
+                row.phase = str(phase)
+            if expected_tree is not None:
+                execution.expected_tree = expected_tree
+            if worktree_path is not None:
+                execution.worktree_path = self.path_codec.dump(worktree_path)
+            row.updated_at = now
+            execution.updated_at = now
+        return self.get_pipeline(pipeline_id)
+
     def create_session(
         self,
         task_id: str,

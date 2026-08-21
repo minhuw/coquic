@@ -485,8 +485,8 @@ class StewardExecutor:
             self.store.finish_iteration_worker(task.id, iteration, worker)
             worktree = self._require_worktree(task)
             base, output_tree, patch = self.worktrees.snapshot(worktree)
-            self._set_identity(
-                pipeline,
+            pipeline = self.store.update_pipeline_identity(
+                pipeline.id,
                 base_identity=base,
                 input_identity=pipeline.input_identity or base,
                 output_identity=output_tree,
@@ -780,8 +780,8 @@ class StewardExecutor:
         task.worktree_path = worktree
         task.branch_name = branch
         self.store.save(task)
-        self._set_identity(
-            pipeline,
+        pipeline = self.store.update_pipeline_identity(
+            pipeline.id,
             base_identity=pipeline.base_identity or base,
             input_identity=pipeline.input_identity or tree,
             output_identity=tree,
@@ -980,8 +980,8 @@ class StewardExecutor:
         if not result.completed:
             return self._block_pipeline(task, pipeline, result.final_message or "implementation failed")
         base, output_tree, patch = self.worktrees.snapshot(worktree)
-        self._set_identity(
-            pipeline,
+        pipeline = self.store.update_pipeline_identity(
+            pipeline.id,
             base_identity=base,
             input_identity=pipeline.input_identity or base,
             output_identity=output_tree,
@@ -1086,8 +1086,8 @@ class StewardExecutor:
         task.patch_path = patch_path
         task.validations.extend(validations)
         self.store.save(task)
-        self._set_identity(
-            pipeline,
+        pipeline = self.store.update_pipeline_identity(
+            pipeline.id,
             base_identity=base,
             output_identity=output_tree,
             patch_identity=patch,
@@ -1254,7 +1254,12 @@ class StewardExecutor:
                 if isinstance(child, AdvanceResult):
                     return child
                 return AdvanceResult(task.id, child.id, PipelineCursorPhase.provisioned, PipelineCursorPhase.implementation, "child_pipeline", progressed=True, evidence={"base": base, "latest_main": remote_tip})
-            self._set_identity(pipeline, output_identity=tree, patch_identity=patch, phase=coarse_phase(PipelineCursorPhase.commit_message))
+            pipeline = self.store.update_pipeline_identity(
+                pipeline.id,
+                output_identity=tree,
+                patch_identity=patch,
+                phase=coarse_phase(PipelineCursorPhase.commit_message),
+            )
             return self._phase_finish(task, pipeline, phase, PipelineCursorPhase.commit_message, output_identity=tree, patch_identity=patch, evidence={"latest_main": remote_tip, "tree": tree, "patch_identity": patch})
 
     def _durable_commit_message(self, task: TaskRecord, pipeline: Any) -> AdvanceResult:
@@ -1579,74 +1584,6 @@ class StewardExecutor:
             if event.kind == "pipeline.phase.started" and event.data.get("pipeline_id") == pipeline_id and event.data.get("phase") == phase.value:
                 selected = event.data.get("action_id")
         return str(selected) if selected else None
-
-    def _set_identity(self, pipeline: Any, **values: Any) -> None:
-        """Update identity columns through the dependency ledger boundary.
-
-        Plan 002 deliberately keeps this method small; older test doubles do
-        not implement it, so event evidence remains the fallback.
-        """
-
-        allowed = {
-            "base_identity",
-            "input_identity",
-            "output_identity",
-            "patch_identity",
-            "expected_tree",
-            "worktree_path",
-            "phase",
-        }
-        selected = {key: value for key, value in values.items() if key in allowed and value is not None}
-        if not selected:
-            return
-        for key, value in selected.items():
-            try:
-                setattr(pipeline, key, value)
-            except Exception:
-                pass
-        engine = getattr(self.store, "engine", None)
-        if engine is None:
-            for key, value in selected.items():
-                try:
-                    setattr(pipeline, key, value)
-                except Exception:
-                    pass
-            return
-        assignments: list[str] = []
-        parameters: dict[str, Any] = {"pipeline_id": pipeline.id}
-        pipeline_selected = {
-            key: value
-            for key, value in selected.items()
-            if key not in {"worktree_path", "expected_tree"}
-        }
-        for key, value in pipeline_selected.items():
-            column = "phase" if key == "phase" else key
-            if key == "worktree_path":
-                value = str(value)
-            assignments.append(f"{column} = :{column}")
-            parameters[column] = str(value)
-        assignments.append("updated_at = :updated_at")
-        parameters["updated_at"] = utc_now().isoformat()
-        with engine.begin() as connection:
-            connection.exec_driver_sql(
-                f"UPDATE task_pipelines SET {', '.join(assignments)} WHERE id = :pipeline_id",
-                parameters,
-            )
-            if "base_identity" in selected or "expected_tree" in selected or "worktree_path" in selected:
-                execution = self.store.get_execution(pipeline.task_id)
-                execution_assignments = []
-                execution_parameters: dict[str, Any] = {"execution_id": execution.id}
-                for source, column in (("base_identity", "base_commit"), ("expected_tree", "expected_tree"), ("worktree_path", "worktree_path")):
-                    if source in selected:
-                        value = str(selected[source])
-                        execution_assignments.append(f"{column} = :{column}")
-                        execution_parameters[column] = value
-                execution_assignments.append("updated_at = :updated_at")
-                execution_parameters["updated_at"] = parameters["updated_at"]
-                connection.exec_driver_sql(
-                    f"UPDATE task_executions SET {', '.join(execution_assignments)} WHERE id = :execution_id",
-                    execution_parameters,
-                )
 
     def _budget_failure(
         self, task_id: str, phase: PipelineCursorPhase | None = None

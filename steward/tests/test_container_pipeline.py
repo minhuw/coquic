@@ -241,6 +241,20 @@ def test_implementation_validation_patch_tree_full_gate_is_recorded(config, monk
     assert pipeline.base_identity
     assert pipeline.output_identity
     assert pipeline.patch_identity
+    execution = store.get_execution(task.id)
+    assert execution.base_commit == pipeline.base_identity
+    assert execution.expected_tree == pipeline.output_identity
+    assert execution.worktree_path == store.get(task.id).worktree_path
+
+    reopened = TaskStore.open(config.db_path)
+    try:
+        reopened_pipeline = reopened.get_pipeline(pipeline.id)
+        reopened_execution = reopened.get_execution(task.id)
+        assert reopened_execution.base_commit == reopened_pipeline.base_identity
+        assert reopened_execution.expected_tree == reopened_pipeline.output_identity
+        assert reopened_execution.worktree_path == reopened.get(task.id).worktree_path
+    finally:
+        reopened.engine.dispose()
 
 
 def test_phase_transition_and_legacy_compatibility_are_bounded() -> None:

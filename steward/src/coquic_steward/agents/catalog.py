@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from ..core.config import StewardConfig
-from ..core.models import IntegrationMode, TaskRecord, TaskKind, WorkerKind
+from ..core.models import (
+    IntegrationMode,
+    Priority,
+    Risk,
+    TaskRecord,
+    TaskKind,
+    WorkerKind,
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,46 @@ class RemoteWriteAuthority:
 
     canonicalizer_name: str
     canonicalizer: RemoteWriteCanonicalizer
+
+
+@dataclass(frozen=True)
+class PlannerDispatchPolicy:
+    """The code-authored values accepted by the planner boundary."""
+
+    kinds: tuple[TaskKind, ...]
+    workers: tuple[WorkerKind, ...]
+    priorities: tuple[Priority, ...]
+    risks: tuple[Risk, ...]
+
+
+PLANNER_DISPATCH_POLICY = PlannerDispatchPolicy(
+    kinds=(
+        TaskKind.code_quality,
+        TaskKind.feature,
+        TaskKind.interop,
+        TaskKind.ci,
+        TaskKind.rfc_audit,
+        TaskKind.health,
+        TaskKind.custom,
+    ),
+    workers=(
+        WorkerKind.interop_doctor,
+        WorkerKind.code_quality_janitor,
+        WorkerKind.ci_doctor,
+        WorkerKind.rfc_auditor,
+        WorkerKind.feature_implementer,
+        WorkerKind.issue_implementer,
+        WorkerKind.work_item_creator,
+        WorkerKind.custom,
+    ),
+    priorities=(
+        Priority.low,
+        Priority.medium,
+        Priority.high,
+        Priority.urgent,
+    ),
+    risks=(Risk.low, Risk.medium, Risk.high),
+)
 
 
 # Keep this policy immutable.  New remote authority must be an explicit code

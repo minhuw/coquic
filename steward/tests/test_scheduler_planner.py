@@ -12,7 +12,11 @@ import threading
 import pytest
 from typer.testing import CliRunner
 
-from coquic_steward.agents.catalog import AGENTS, REMOTE_WRITE_AUTHORITY
+from coquic_steward.agents.catalog import (
+    AGENTS,
+    PLANNER_DISPATCH_POLICY,
+    REMOTE_WRITE_AUTHORITY,
+)
 from coquic_steward.cli import app
 from coquic_steward.core.models import (
     ProjectSignals,
@@ -30,7 +34,6 @@ from coquic_steward.execution.session import (
 )
 from coquic_steward.planning import PlannerRun, VerifiedPlan
 from coquic_steward.planning.verifier import (
-    PLANNABLE_WORKERS,
     ActiveTaskSummary,
     PlanVerifier,
     selected_signal_item_ids,
@@ -118,7 +121,7 @@ def test_zero_entry_remote_authority_rejects_remote_workers() -> None:
     remote_workers = [
         worker
         for worker, agent in AGENTS.items()
-        if worker in PLANNABLE_WORKERS and agent.remote_writes
+        if worker in PLANNER_DISPATCH_POLICY.workers and agent.remote_writes
     ]
     assert remote_workers
 

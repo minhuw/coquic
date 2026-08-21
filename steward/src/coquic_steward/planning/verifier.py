@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ..agents.catalog import (
     AGENTS,
+    PLANNER_DISPATCH_POLICY,
     REMOTE_WRITE_AUTHORITY,
     CanonicalRemoteWrite,
     RemoteWriteAuthorityKey,
@@ -25,18 +26,6 @@ from ..core.models import (
     TaskWorkflow,
     WorkerKind,
 )
-
-PLANNABLE_WORKERS = {
-    WorkerKind.interop_doctor,
-    WorkerKind.code_quality_janitor,
-    WorkerKind.ci_doctor,
-    WorkerKind.rfc_auditor,
-    WorkerKind.feature_implementer,
-    WorkerKind.issue_implementer,
-    WorkerKind.work_item_creator,
-    WorkerKind.custom,
-}
-
 
 class ActiveTaskSummary(BaseModel):
     id: str
@@ -383,8 +372,18 @@ def _verified_proposal_with_reason(
         return None, "invalid_evidence_id"
     if not _metadata_is_bounded(proposed.metadata):
         return None, "policy_metadata_too_large"
-    if proposed.worker not in PLANNABLE_WORKERS:
+    policy_kind = proposed.kind in PLANNER_DISPATCH_POLICY.kinds
+    policy_worker = proposed.worker in PLANNER_DISPATCH_POLICY.workers
+    policy_priority = proposed.priority in PLANNER_DISPATCH_POLICY.priorities
+    policy_risk = proposed.risk in PLANNER_DISPATCH_POLICY.risks
+    if not policy_kind:
+        return None, "policy_kind"
+    if not policy_worker:
         return None, "policy_worker"
+    if not policy_priority:
+        return None, "policy_priority"
+    if not policy_risk:
+        return None, "policy_risk"
     agent = AGENTS.get(proposed.worker)
     canonical_remote_write = None
     if agent is None:

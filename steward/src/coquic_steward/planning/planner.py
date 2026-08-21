@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..agents import CodexRunner
+from ..agents.catalog import PLANNER_DISPATCH_POLICY
 from ..execution.session import FreshPlannerSession
 from ..core.config import StewardConfig
 from ..core.output_schema import write_output_schema_file
@@ -258,27 +259,14 @@ def render_planner_prompt(
         "signal_items": [item.model_dump(mode="json") for item in signals.items],
         "signal_fetches": [fetch.model_dump(mode="json") for fetch in signals.fetches],
         "active_tasks": [task.model_dump(mode="json") for task in active_tasks],
-        "allowed_kinds": [
-            "code-quality",
-            "feature",
-            "interop",
-            "ci",
-            "rfc-audit",
-            "health",
-            "custom",
-        ],
+        "allowed_kinds": [kind.value for kind in PLANNER_DISPATCH_POLICY.kinds],
         "allowed_workers": [
-            "interop-doctor",
-            "code-quality-janitor",
-            "ci-doctor",
-            "rfc-auditor",
-            "feature-implementer",
-            "issue-implementer",
-            "work-item-creator",
-            "custom",
+            worker.value for worker in PLANNER_DISPATCH_POLICY.workers
         ],
-        "allowed_priorities": ["low", "medium", "high", "urgent"],
-        "allowed_risks": ["low", "medium", "high"],
+        "allowed_priorities": [
+            priority.value for priority in PLANNER_DISPATCH_POLICY.priorities
+        ],
+        "allowed_risks": [risk.value for risk in PLANNER_DISPATCH_POLICY.risks],
         "remote_integration_enabled": (
             config.integration_mode == IntegrationMode.push_main.value
         ),
@@ -334,35 +322,29 @@ PLANNER_OUTPUT_SCHEMA = {
                     "kind": {
                         "type": "string",
                         "enum": [
-                            "code-quality",
-                            "feature",
-                            "interop",
-                            "ci",
-                            "rfc-audit",
-                            "health",
-                            "custom",
+                            kind.value for kind in PLANNER_DISPATCH_POLICY.kinds
                         ],
                     },
                     "worker": {
                         "type": "string",
                         "enum": [
-                            "interop-doctor",
-                            "code-quality-janitor",
-                            "ci-doctor",
-                            "rfc-auditor",
-                            "feature-implementer",
-                            "issue-implementer",
-                            "work-item-creator",
-                            "custom",
+                            worker.value
+                            for worker in PLANNER_DISPATCH_POLICY.workers
                         ],
                     },
                     "title": {"type": "string"},
                     "prompt": {"type": "string"},
                     "priority": {
                         "type": "string",
-                        "enum": ["low", "medium", "high", "urgent"],
+                        "enum": [
+                            priority.value
+                            for priority in PLANNER_DISPATCH_POLICY.priorities
+                        ],
                     },
-                    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "risk": {
+                        "type": "string",
+                        "enum": [risk.value for risk in PLANNER_DISPATCH_POLICY.risks],
+                    },
                     "evidence": {
                         "type": "array",
                         "items": {"type": "string"},

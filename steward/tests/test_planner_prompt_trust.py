@@ -6,16 +6,24 @@ from pathlib import Path
 import pytest
 
 from coquic_steward.core.models import (
+    Priority,
     ProjectSignals,
+    Risk,
     SignalItem,
     TaskKind,
     WorkerKind,
 )
-from coquic_steward.agents.catalog import AGENTS, REMOTE_WRITE_AUTHORITY
+from coquic_steward.agents.catalog import (
+    AGENTS,
+    PLANNER_DISPATCH_POLICY,
+    REMOTE_WRITE_AUTHORITY,
+)
 from coquic_steward.core.config import StewardConfig
-from coquic_steward.planning.planner import render_planner_prompt
+from coquic_steward.planning.planner import (
+    PLANNER_OUTPUT_SCHEMA,
+    render_planner_prompt,
+)
 from coquic_steward.planning.verifier import (
-    PLANNABLE_WORKERS,
     ActiveTaskSummary,
     PlanVerifier,
 )
@@ -110,12 +118,125 @@ def test_remote_write_authority_map_starts_with_zero_entries() -> None:
     )
 
 
+def test_planner_dispatch_policy_drives_all_planner_surfaces() -> None:
+    policy = PLANNER_DISPATCH_POLICY
+    assert policy.kinds == (
+        TaskKind.code_quality,
+        TaskKind.feature,
+        TaskKind.interop,
+        TaskKind.ci,
+        TaskKind.rfc_audit,
+        TaskKind.health,
+        TaskKind.custom,
+    )
+    assert policy.workers == (
+        WorkerKind.interop_doctor,
+        WorkerKind.code_quality_janitor,
+        WorkerKind.ci_doctor,
+        WorkerKind.rfc_auditor,
+        WorkerKind.feature_implementer,
+        WorkerKind.issue_implementer,
+        WorkerKind.work_item_creator,
+        WorkerKind.custom,
+    )
+    assert policy.priorities == (
+        Priority.low,
+        Priority.medium,
+        Priority.high,
+        Priority.urgent,
+    )
+    assert policy.risks == (Risk.low, Risk.medium, Risk.high)
+    assert all(worker in AGENTS for worker in policy.workers)
+    assert set(AGENTS) - set(policy.workers) == {
+        WorkerKind.planner,
+        WorkerKind.integration_manager,
+        WorkerKind.reviewer,
+    }
+    assert TaskKind.integration not in policy.kinds
+
+    prompt = render_planner_prompt(
+        _signals(_feature_item()), [], StewardConfig(repo_root=Path.cwd())
+    )
+    payload = json.loads(
+        prompt.split("BEGIN UNTRUSTED SIGNAL DATA\n", 1)[1].split(
+            "\nEND UNTRUSTED SIGNAL DATA", 1
+        )[0]
+    )
+    assert payload["allowed_kinds"] == [kind.value for kind in policy.kinds]
+    assert payload["allowed_workers"] == [worker.value for worker in policy.workers]
+    assert payload["allowed_priorities"] == [
+        priority.value for priority in policy.priorities
+    ]
+    assert payload["allowed_risks"] == [risk.value for risk in policy.risks]
+
+    task_properties = PLANNER_OUTPUT_SCHEMA["properties"]["tasks"]["items"][
+        "properties"
+    ]
+    assert task_properties["kind"]["enum"] == [
+        kind.value for kind in policy.kinds
+    ]
+    assert task_properties["worker"]["enum"] == [
+        worker.value for worker in policy.workers
+    ]
+    assert task_properties["priority"]["enum"] == [
+        priority.value for priority in policy.priorities
+    ]
+    assert task_properties["risk"]["enum"] == [risk.value for risk in policy.risks]
+
+
+@pytest.mark.parametrize(
+    ("kind", "worker", "reason_code"),
+    [
+        ("integration", "custom", "policy_kind"),
+        ("custom", "planner", "policy_worker"),
+        ("custom", "integration-manager", "policy_worker"),
+        ("custom", "reviewer", "policy_worker"),
+    ],
+)
+def test_verifier_rejects_dispatch_values_outside_policy(
+    kind: str, worker: str, reason_code: str
+) -> None:
+    item = SignalItem(
+        id="wi-policy-boundary",
+        provider="synthetic",
+        kind="synthetic.alert",
+        fingerprint="policy-boundary",
+        title="Policy boundary",
+    )
+    result = PlanVerifier().verify_plan(
+        json.dumps(
+            {
+                "consumed_item_ids": [item.id],
+                "tasks": [
+                    {
+                        "dedupe_key": f"policy:{kind}:{worker}",
+                        "kind": kind,
+                        "worker": worker,
+                        "title": "Policy boundary proposal",
+                        "prompt": "Validate the policy boundary.",
+                        "priority": "medium",
+                        "risk": "low",
+                        "evidence": [item.id],
+                        "metadata": {"selected_signal_item_ids": [item.id]},
+                    }
+                ],
+            }
+        ),
+        _signals(item),
+        [],
+    )
+
+    assert result.planned == []
+    assert result.consumed_item_ids == []
+    assert result.dispositions[0].reason_code == reason_code
+
+
 @pytest.mark.parametrize(
     "worker",
     [
         worker
         for worker, agent in AGENTS.items()
-        if worker in PLANNABLE_WORKERS and agent.remote_writes
+        if worker in PLANNER_DISPATCH_POLICY.workers and agent.remote_writes
     ],
     ids=lambda worker: worker.value,
 )

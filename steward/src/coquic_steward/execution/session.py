@@ -639,6 +639,7 @@ class InspectionResult:
     live: bool
     container: ContainerInspection | None = None
     identity: ExecIdentity | None = None
+    confirmed_stopped: bool = False
 
 
 @dataclass(frozen=True)
@@ -1656,7 +1657,7 @@ class SessionSupervisor:
         if active is None:
             run = self.store.get_run(run_id)
             if run.state != CodexRunState.running.value:
-                return InspectionResult(run_id, False)
+                return InspectionResult(run_id, False, confirmed_stopped=True)
             try:
                 runtime, identity = self._persisted_boundary(run)
             except (KeyError, ValueError, ContainerBoundaryError):
@@ -1665,23 +1666,36 @@ class SessionSupervisor:
             try:
                 container = runtime.inspect()
             except ContainerBoundaryError:
-                container = None
+                return InspectionResult(run_id, False, container=container, identity=identity)
         if active is None:
-            live = bool(
-                runtime is not None
-                and identity is not None
-                and container is not None
-                and container.running
-                and runtime.exec_is_live(identity)
+            if runtime is None or identity is None or container is None:
+                return InspectionResult(run_id, False, container, identity)
+            if not container.running:
+                return InspectionResult(
+                    run_id, False, container, identity, confirmed_stopped=True
+                )
+            try:
+                live = runtime.exec_is_live(identity)
+            except ContainerBoundaryError:
+                return InspectionResult(run_id, False, container, identity)
+            return InspectionResult(
+                run_id,
+                bool(live),
+                container,
+                identity,
+                confirmed_stopped=live is False,
             )
-            return InspectionResult(run_id, live, container, identity)
         process = active.process
-        live = bool(
-            identity is not None
-            and process is not None
-            and process.poll() is None
+        if identity is None or process is None:
+            return InspectionResult(run_id, False, container, identity)
+        live = process.poll() is None
+        return InspectionResult(
+            run_id,
+            live,
+            container,
+            identity,
+            confirmed_stopped=live is False,
         )
-        return InspectionResult(run_id, live, container, identity)
 
     def _persisted_boundary(
         self, run: TaskRun

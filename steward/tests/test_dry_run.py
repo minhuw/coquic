@@ -135,9 +135,9 @@ def test_planner_allocation_preserves_preview_signal_coverage(tmp_path: Path) ->
     assert store.list_signal_items(status="planned")[0].planned_task_id == record.id
 
 
-def test_dry_run_reconciliation_interrupts_existing_wrapper(
+def _dry_run_running_wrapper(
     repo: Path, tmp_path: Path
-) -> None:
+) -> tuple[StewardConfig, TaskStore, object, object]:
     config = StewardConfig(
         repo_root=repo,
         dry_run=True,
@@ -164,17 +164,26 @@ def test_dry_run_reconciliation_interrupts_existing_wrapper(
         session.id,
         role="implementation",
     )
+    return config, store, task, run
+
+
+def test_dry_run_reconciliation_interrupts_existing_wrapper(
+    repo: Path, tmp_path: Path
+) -> None:
+    config, store, task, run = _dry_run_running_wrapper(repo, tmp_path)
 
     class Boundary(SessionSupervisor):
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []
+            self.stopped = False
 
         def inspect(self, run_id: str):
             self.calls.append(("inspect", run_id))
-            return SimpleNamespace(live=True)
+            return SimpleNamespace(live=not self.stopped)
 
         def interrupt(self, run_id: str, **_kwargs):
             self.calls.append(("interrupt", run_id))
+            self.stopped = True
             return store.mark_run_interrupted(run_id, reason="dry-run test")
 
     boundary = Boundary()
@@ -183,8 +192,122 @@ def test_dry_run_reconciliation_interrupts_existing_wrapper(
     outcome = daemon.startup_reconcile()[0]
 
     assert outcome.disposition.value == "unchanged"
-    assert boundary.calls == [("inspect", run.id), ("interrupt", run.id)]
+    assert boundary.calls == [
+        ("inspect", run.id),
+        ("interrupt", run.id),
+        ("inspect", run.id),
+    ]
     assert store.get_run(run.id).state == "interrupted"
+
+
+def test_dry_run_wrapper_boundary_failure_aborts_startup(
+    repo: Path, tmp_path: Path
+) -> None:
+    config, store, task, run = _dry_run_running_wrapper(repo, tmp_path)
+
+    class Boundary(SessionSupervisor):
+        def __init__(self) -> None:
+            self.interrupt_calls = 0
+
+        def inspect(self, _run_id: str):
+            raise RuntimeError("transient boundary failure")
+
+        def interrupt(self, _run_id: str, **_kwargs):
+            self.interrupt_calls += 1
+            raise AssertionError("ambiguous wrapper must not be interrupted")
+
+    boundary = Boundary()
+    daemon = StewardDaemon(config, store, session_supervisor=boundary)
+
+    with pytest.raises(RuntimeError, match="wrappers are stopped"):
+        daemon.startup_reconcile()
+
+    assert store.get_run(run.id).state == "running"
+    assert boundary.interrupt_calls == 0
+    assert daemon._startup_complete is False
+    assert daemon.lifecycle_state.value != "running"
+    assert daemon._reconciliation[0].disposition.value == "blocked"
+
+
+def test_dry_run_wrapper_interruption_failure_aborts_startup(
+    repo: Path, tmp_path: Path
+) -> None:
+    config, store, _task, run = _dry_run_running_wrapper(repo, tmp_path)
+
+    class Boundary(SessionSupervisor):
+        def __init__(self, config: StewardConfig, store: TaskStore) -> None:
+            self.config = config
+            self.store = store
+
+        def inspect(self, _run_id: str):
+            return SimpleNamespace(live=True)
+
+        def interrupt(self, _run_id: str, **_kwargs):
+            raise RuntimeError("interrupt failed")
+
+    daemon = StewardDaemon(
+        config, store, session_supervisor=Boundary(config, store)
+    )
+
+    with pytest.raises(RuntimeError, match="wrappers are stopped"):
+        daemon.startup_reconcile()
+
+    assert store.get_run(run.id).state == "running"
+    assert daemon._startup_complete is False
+
+
+def test_dry_run_inconclusive_wrapper_probe_is_not_marked_interrupted(
+    repo: Path, tmp_path: Path
+) -> None:
+    config, store, _task, run = _dry_run_running_wrapper(repo, tmp_path)
+
+    class Boundary(SessionSupervisor):
+        def __init__(self, config: StewardConfig, store: TaskStore) -> None:
+            self.config = config
+            self.store = store
+
+        def inspect(self, _run_id: str):
+            return SimpleNamespace(live=False, confirmed_stopped=False)
+
+        def interrupt(self, _run_id: str, **_kwargs):
+            raise AssertionError("inconclusive probe must not interrupt")
+
+    daemon = StewardDaemon(
+        config, store, session_supervisor=Boundary(config, store)
+    )
+
+    with pytest.raises(RuntimeError, match="wrappers are stopped"):
+        daemon.startup_reconcile()
+
+    assert store.get_run(run.id).state == "running"
+
+
+def test_dry_run_admission_fence_pauses_direct_executor(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    config = StewardConfig(
+        repo_root=repo,
+        dry_run=False,
+        local_codex_test_harness=True,
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    task, _ = store.add_task(_spec())
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(
+        daemon.executor,
+        "_advance_once_locked",
+        lambda *_args, **_kwargs: pytest.fail("dry-run entered the executor"),
+    )
+
+    TaskStore.open(tmp_path / "steward.sqlite", dry_run=True)
+    outcome = daemon.executor.advance_once(task.id)
+
+    assert outcome.status == "paused"
+    assert outcome.progressed is False
+    assert not any(
+        event.kind == "pipeline.phase.started" for event in store.events(task.id)
+    )
 
 
 def test_dry_run_active_rows_do_not_consume_live_capacity(tmp_path: Path) -> None:
@@ -274,6 +397,38 @@ def test_dry_run_dispatch_and_publication_are_paused(
     run = SimpleNamespace(id="run-preview", state="succeeded", completed_at=object())
     assert enqueue_materialized_publication(publication_config, store, task, run) is None
     assert queued == []
+
+
+def test_phase_admission_rechecks_tightened_latch_before_executor(
+    repo: Path, tmp_path: Path
+) -> None:
+    config = StewardConfig(
+        repo_root=repo,
+        dry_run=False,
+        local_codex_test_harness=True,
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    task, _ = store.add_task(_spec())
+    daemon = StewardDaemon(config, store)
+    original_get = store.get
+    reads = 0
+
+    def racing_get(task_id: str):
+        nonlocal reads
+        record = original_get(task_id)
+        reads += 1
+        if reads == 2:
+            store.resolve_task_execution_mode(task_id, True)
+        return record
+
+    store.get = racing_get
+    calls: list[str] = []
+    daemon.executor.advance_once = lambda task_id: calls.append(task_id)
+
+    assert daemon.drive_selected_task(task.id) is False
+    assert calls == []
+    assert store.task_execution_mode(task.id) is ExecutionMode.dry_run
 
 
 def test_phase_boundary_rechecks_tightened_latch(

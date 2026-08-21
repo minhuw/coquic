@@ -174,6 +174,16 @@ def _task_is_dry_run(task: TaskRecord) -> bool:
     return _task_execution_mode(task) is ExecutionMode.dry_run
 
 
+def _inspection_confirms_stopped(inspection: object) -> bool:
+    """Require a positive stop result when the boundary exposes confidence."""
+
+    live = getattr(inspection, "live", None)
+    if live is not False:
+        return False
+    confirmed = getattr(inspection, "confirmed_stopped", None)
+    return True if confirmed is None else bool(confirmed)
+
+
 _ACTIVE_TASK_STATUSES = tuple(ACTIVE_STATUSES)
 _RESUMABLE_TASK_STATUSES = tuple(
     status for status in ACTIVE_STATUSES if status != TaskStatus.queued
@@ -515,7 +525,14 @@ class StewardDaemon:
             pass
 
     def _task_admission_allowed(self, task: TaskRecord) -> bool:
-        if _global_dry_run(self.config) or _task_is_dry_run(task):
+        if _global_dry_run(self.config):
+            self._record_dry_run_pause(task)
+            return False
+        try:
+            mode = self.store.task_execution_mode(task.id)
+        except (AttributeError, KeyError, ValueError):
+            mode = None
+        if mode is not ExecutionMode.live:
             self._record_dry_run_pause(task)
             return False
         return True
@@ -538,37 +555,43 @@ class StewardDaemon:
                 failures.append({"error": "missing_run_id"})
                 continue
             if self.session_supervisor is None:
-                try:
-                    self.store.mark_run_interrupted(
-                        run_id,
-                        reason="dry-run admission paused during daemon restart",
-                    )
-                except Exception as exc:
-                    failures.append(
-                        {"run_id": run_id, "error": exc.__class__.__name__}
-                    )
+                failures.append({"run_id": run_id, "error": "missing_boundary"})
                 continue
             try:
                 inspection = self.session_supervisor.inspect(run_id)
             except Exception as exc:
                 failures.append({"run_id": run_id, "error": exc.__class__.__name__})
                 continue
+            live = getattr(inspection, "live", None)
             try:
-                if getattr(inspection, "live", False):
+                if live is True:
                     self.session_supervisor.interrupt(run_id)
+                    verification = self.session_supervisor.inspect(run_id)
+                    if not _inspection_confirms_stopped(verification):
+                        failures.append(
+                            {"run_id": run_id, "error": "stop_not_confirmed"}
+                        )
+                        continue
                     # A custom boundary may acknowledge termination without
-                    # updating the ledger itself. Preserve the restart evidence
-                    # after the boundary has returned successfully.
+                    # updating the ledger itself. Preserve restart evidence only
+                    # after the boundary has positively confirmed termination.
                     if str(self.store.get_run(run_id).state) == "running":
                         self.store.mark_run_interrupted(
                             run_id,
                             reason="dry-run admission paused during daemon restart",
                         )
-                else:
+                elif live is False:
+                    if not _inspection_confirms_stopped(inspection):
+                        failures.append(
+                            {"run_id": run_id, "error": "stop_not_confirmed"}
+                        )
+                        continue
                     self.store.mark_run_interrupted(
                         run_id,
                         reason="wrapper was not live during dry-run restart",
                     )
+                else:
+                    failures.append({"run_id": run_id, "error": "liveness_unknown"})
             except Exception as exc:
                 failures.append({"run_id": run_id, "error": exc.__class__.__name__})
 
@@ -666,6 +689,15 @@ class StewardDaemon:
                 self._reconciliation = outcomes
                 if self._shutdown_event.is_set():
                     return tuple(outcomes)
+                if any(
+                    outcome.disposition is ReconciliationDisposition.blocked
+                    and outcome.evidence.get("execution_mode")
+                    == ExecutionMode.dry_run.value
+                    for outcome in outcomes
+                ):
+                    raise RuntimeError(
+                        "dry-run startup blocked until persisted wrappers are stopped"
+                    )
 
                 claim_attempted = True
                 self.store.claim_daemon_instance(
@@ -4311,8 +4343,12 @@ class StewardDaemon:
                 current = self.store.get(task_id)
                 if not self._task_admission_allowed(current):
                     return False
-                with use_subprocess_owner(self._subprocess_owner):
-                    outcome = self.executor.advance_once(task_id)
+                with self.store.phase_admission(task_id) as admitted:
+                    if not admitted:
+                        self._record_dry_run_pause(current)
+                        return False
+                    with use_subprocess_owner(self._subprocess_owner):
+                        outcome = self.executor.advance_once(task_id)
             except Exception as exc:
                 if isinstance(exc, TaskLedgerOwnershipError):
                     return False

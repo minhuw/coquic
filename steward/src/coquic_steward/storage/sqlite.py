@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -7,8 +8,10 @@ import re
 import secrets
 import sqlite3
 import stat
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -219,6 +222,66 @@ _STORE_RECEIPT_SUFFIX = ".json"
 _STORE_RECEIPT_STATES = frozenset({"creating", "committed"})
 
 
+class _ExecutionAdmissionGuard:
+    """Coordinate task admission across Store instances and processes."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        self._lock.acquire()
+        depth = int(getattr(self._local, "depth", 0))
+        try:
+            if depth == 0:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                handle = self.path.open("a+", encoding="ascii")
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                except BaseException:
+                    handle.close()
+                    raise
+                self._local.handle = handle
+            self._local.depth = depth + 1
+            yield
+        finally:
+            next_depth = int(getattr(self._local, "depth", 1)) - 1
+            if next_depth <= 0:
+                self._local.depth = 0
+                handle = getattr(self._local, "handle", None)
+                try:
+                    if handle is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    if handle is not None:
+                        handle.close()
+                    try:
+                        del self._local.handle
+                    except AttributeError:
+                        pass
+            else:
+                self._local.depth = next_depth
+            self._lock.release()
+
+
+_execution_admission_guards: dict[Path, _ExecutionAdmissionGuard] = {}
+_execution_admission_guards_lock = threading.Lock()
+
+
+def _execution_admission_guard(database: Path) -> _ExecutionAdmissionGuard:
+    key = database.expanduser().resolve()
+    with _execution_admission_guards_lock:
+        guard = _execution_admission_guards.get(key)
+        if guard is None:
+            guard = _ExecutionAdmissionGuard(
+                key.parent / ".steward-admission" / f"{key.name}.lock"
+            )
+            _execution_admission_guards[key] = guard
+        return guard
+
+
 @dataclass(frozen=True, slots=True)
 class _StoreCreationReceipt:
     epoch_id: str
@@ -407,27 +470,29 @@ class SQLiteTaskStore:
             if startup is None:
                 raise TypeError("startup execution mode is required")
             selected_dry_run = startup is ExecutionMode.dry_run
-        self._startup_dry_run = selected_dry_run
-        changed = 0
-        with Session(self.engine) as session:
-            session.execute(text("BEGIN IMMEDIATE"))
-            try:
-                rows = session.scalars(select(TaskRow)).all()
-                for row in rows:
-                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
-                    current = execution_mode_from_metadata(metadata)
-                    resolved = resolve_execution_mode(current, startup)
-                    if current is resolved and metadata.get(EXECUTION_MODE_METADATA_KEY) == resolved.value:
-                        continue
-                    row.metadata_json = _dump_metadata(
-                        preserve_execution_mode(metadata, resolved=resolved),
-                        self.path_codec,
-                    )
-                    changed += 1
-                session.commit()
-            except Exception:
-                session.rollback()
-                raise
+        guard = _execution_admission_guard(self.path)
+        with guard.locked():
+            self._startup_dry_run = selected_dry_run
+            changed = 0
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    rows = session.scalars(select(TaskRow)).all()
+                    for row in rows:
+                        metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                        current = execution_mode_from_metadata(metadata)
+                        resolved = resolve_execution_mode(current, startup)
+                        if current is resolved and metadata.get(EXECUTION_MODE_METADATA_KEY) == resolved.value:
+                            continue
+                        row.metadata_json = _dump_metadata(
+                            preserve_execution_mode(metadata, resolved=resolved),
+                            self.path_codec,
+                        )
+                        changed += 1
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
         if changed:
             self._notify_change()
         return changed
@@ -440,12 +505,28 @@ class SQLiteTaskStore:
     def task_execution_mode(self, task_id: str) -> ExecutionMode | None:
         """Return the persisted task latch without inferring a caller mode."""
 
-        task = self.get(task_id)
-        return coerce_execution_mode(
-            task.spec.metadata.get(EXECUTION_MODE_METADATA_KEY)
-        )
+        # Read the persisted JSON directly so a detached TaskRecord never
+        # becomes execution authority.
+        with Session(self.engine) as session:
+            row = session.get(TaskRow, task_id)
+            if row is None:
+                raise KeyError(task_id)
+            metadata = _metadata_dict(row.metadata_json, self.path_codec)
+        return execution_mode_from_metadata(metadata)
 
     get_task_execution_mode = task_execution_mode
+
+    @contextmanager
+    def phase_admission(self, task_id: str) -> Iterator[bool]:
+        """Hold Store authority while one executor phase is allowed to run."""
+
+        guard = _execution_admission_guard(self.path)
+        with guard.locked():
+            try:
+                mode = self.task_execution_mode(task_id)
+            except ValueError:
+                mode = ExecutionMode.dry_run
+            yield mode is ExecutionMode.live
 
     def resolve_task_execution_mode(
         self, task_id: str, startup: bool | ExecutionMode | str
@@ -458,25 +539,27 @@ class SQLiteTaskStore:
             startup_mode = coerce_execution_mode(startup)
             if startup_mode is None:
                 raise TypeError("startup execution mode is required")
-        with Session(self.engine) as session:
-            session.execute(text("BEGIN IMMEDIATE"))
-            try:
-                row = session.scalar(_task_query().where(TaskRow.id == task_id))
-                if row is None:
-                    raise KeyError(task_id)
-                metadata = _metadata_dict(row.metadata_json, self.path_codec)
-                resolved = resolve_execution_mode(
-                    execution_mode_from_metadata(metadata), startup_mode
-                )
-                row.metadata_json = _dump_metadata(
-                    preserve_execution_mode(metadata, resolved=resolved),
-                    self.path_codec,
-                )
-                session.commit()
-            except Exception:
-                session.rollback()
-                raise
-        self._startup_dry_run = startup_mode is ExecutionMode.dry_run
+        guard = _execution_admission_guard(self.path)
+        with guard.locked():
+            with Session(self.engine) as session:
+                session.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    row = session.scalar(_task_query().where(TaskRow.id == task_id))
+                    if row is None:
+                        raise KeyError(task_id)
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    resolved = resolve_execution_mode(
+                        execution_mode_from_metadata(metadata), startup_mode
+                    )
+                    row.metadata_json = _dump_metadata(
+                        preserve_execution_mode(metadata, resolved=resolved),
+                        self.path_codec,
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
+            self._startup_dry_run = startup_mode is ExecutionMode.dry_run
         self._notify_change()
         return resolved
 

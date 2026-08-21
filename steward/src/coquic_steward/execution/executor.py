@@ -24,6 +24,7 @@ from ..agents import (
 from ..core.config import StewardConfig
 from ..core.models import (
     IntegrationMode,
+    ExecutionMode,
     CodexStage,
     TaskRecord,
     TaskKind,
@@ -359,27 +360,53 @@ class StewardExecutor:
         first caller is still in progress; it never starts a duplicate run.
         """
 
-        lock = self._durable_lock(task_id)
-        if not lock.acquire(blocking=False):
-            execution = self.store.get_execution(task_id)
-            pipeline_id = execution.owning_pipeline_id
-            if pipeline_id is None:
-                raise TaskLedgerOwnershipError(
-                    "task execution has no owning pipeline"
+        # Store admission is acquired before the per-task executor lock so
+        # every caller follows one lock order.  The fence remains held through
+        # the phase effect and its durable cursor update.  Latch tightening
+        # therefore either wins before this phase or waits until it has
+        # completed; a post-effect recheck cannot provide that guarantee.
+        with self.store.phase_admission(task_id) as admitted:
+            if not admitted:
+                execution = self.store.get_execution(task_id)
+                pipeline_id = execution.owning_pipeline_id
+                if pipeline_id is None:
+                    raise TaskLedgerOwnershipError(
+                        "task execution has no owning pipeline"
+                    )
+                phase = self._pipeline_cursor(task_id, pipeline_id)
+                return AdvanceResult(
+                    task_id,
+                    pipeline_id,
+                    phase,
+                    None,
+                    "paused",
+                    progressed=False,
+                    evidence={
+                        "execution_mode": ExecutionMode.dry_run.value,
+                        "reason": "dry-run admission paused",
+                    },
                 )
-            phase = self._pipeline_cursor(task_id, pipeline_id)
-            return AdvanceResult(
-                task_id,
-                pipeline_id,
-                phase,
-                None,
-                "in_progress",
-                progressed=False,
-            )
-        try:
-            return self._advance_once_locked(task_id)
-        finally:
-            lock.release()
+            lock = self._durable_lock(task_id)
+            if not lock.acquire(blocking=False):
+                execution = self.store.get_execution(task_id)
+                pipeline_id = execution.owning_pipeline_id
+                if pipeline_id is None:
+                    raise TaskLedgerOwnershipError(
+                        "task execution has no owning pipeline"
+                    )
+                phase = self._pipeline_cursor(task_id, pipeline_id)
+                return AdvanceResult(
+                    task_id,
+                    pipeline_id,
+                    phase,
+                    None,
+                    "in_progress",
+                    progressed=False,
+                )
+            try:
+                return self._advance_once_locked(task_id)
+            finally:
+                lock.release()
 
     def reconcile_session_result(
         self,

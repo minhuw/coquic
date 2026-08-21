@@ -1196,12 +1196,8 @@ class ToolChangeCapture:
         return self.context_path
 
 
-ToolChangeRecorder = ToolChangeCapture
-HookCaptureContext = ToolChangeCapture
-
-# Public-mirror readers may import these contracts without reaching into the
-# capture implementation. These exports only describe the bounded evidence
-# layout; tool input and response payloads are validated but never persisted.
+# These exports describe the bounded evidence layout; tool inputs and response
+# payloads are validated but never persisted.
 TOOL_CHANGE_SCHEMA_VERSION = SCHEMA_VERSION
 TOOL_CHANGE_MAX_COMPLETED_RECORDS = MAX_COMPLETED_RECORDS
 TOOL_CHANGE_MAX_DURATION_MS = MAX_DURATION_MS
@@ -1435,10 +1431,8 @@ if __name__ == "__main__":  # pragma: no cover - exercised by Codex
 
 
 __all__ = [
-    "HookCaptureContext",
     "HookSummary",
     "ToolChangeCapture",
-    "ToolChangeRecorder",
     "ToolTimingRecord",
     "TOOL_CHANGE_ERROR_CATEGORIES",
     "TOOL_CHANGE_CREDENTIAL_VALUE_RE",

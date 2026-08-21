@@ -4304,14 +4304,16 @@ class StewardDaemon:
                 update={
                     "status": (
                         SignalFetchStatus.error
-                        if collection.error
+                        if collection.fetch.error
                         else SignalFetchStatus.ok
                     ),
                     "item_count": len(collection.items),
                     "new_item_count": 0,
                 }
             )
-            provider_config = self.config.signal_providers.get(collection.provider)
+            provider_config = self.config.signal_providers.get(
+                collection.fetch.provider
+            )
             saved_items, _signals, created_items = self.store.ingest_signal_collection(
                 fetch_run,
                 collection.items,
@@ -4328,24 +4330,24 @@ class StewardDaemon:
                 DAEMON_EVENT_TASK_ID,
                 "signals.fetched",
                 (
-                    f"{collection.provider}: {created_items} new of "
+                    f"{collection.fetch.provider}: {created_items} new of "
                     f"{len(saved_items)} item(s)"
                 ),
                 {
                     "fetch_run_id": fetch_run.id,
-                    "provider": collection.provider,
+                    "provider": collection.fetch.provider,
                     "item_count": len(saved_items),
                     "new_item_count": created_items,
                     "has_more": fetch_run.has_more,
-                    "error": collection.error,
+                    "error": collection.fetch.error,
                 },
             )
             self._log(
                 "signals fetched "
-                f"provider={collection.provider} "
+                f"provider={collection.fetch.provider} "
                 f"new={created_items} total={len(saved_items)} "
                 f"has_more={str(fetch_run.has_more).lower()} "
-                f"error={collection.error or '-'}"
+                f"error={collection.fetch.error or '-'}"
             )
 
     def _plan_until_idle(self, result: TickResult) -> None:

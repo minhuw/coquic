@@ -536,10 +536,10 @@ def daemon(
 def plan(enqueue: bool = False) -> None:
     store, config = _context()
     for collection in collect_signal_items(config):
-        provider_config = config.signal_providers.get(collection.provider)
         fetch = collection.fetch.model_copy(
             update={"item_count": len(collection.items), "new_item_count": 0}
         )
+        provider_config = config.signal_providers.get(fetch.provider)
         store.ingest_signal_collection(
             fetch,
             collection.items,

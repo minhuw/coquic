@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TypeAlias
 
 from ..core.config import StewardConfig
@@ -43,15 +42,8 @@ PROVIDER_TYPES: dict[str, type[_SignalProvider]] = {
 
 @dataclass(frozen=True)
 class SignalCollection:
-    provider: str
     fetch: SignalFetchRun
     items: list[SignalItem]
-    started_at: datetime
-    completed_at: datetime
-
-    @property
-    def error(self) -> str | None:
-        return self.fetch.error
 
 
 def signal_providers(names: tuple[str, ...]) -> list[_SignalProvider]:
@@ -88,19 +80,6 @@ def revalidate_signal_items(
         else:
             stale_reasons[item.id] = reason
     return actionable, stale_reasons
-
-
-def gather_signals(
-    config: StewardConfig,
-    providers: list[_SignalProvider] | None = None,
-) -> ProjectSignals:
-    collections = collect_signal_items(config, providers=providers)
-    return project_signals_from_items(
-        config,
-        [item for collection in collections for item in collection.items],
-        fetches=[collection.fetch for collection in collections],
-        enabled_signals=[collection.provider for collection in collections],
-    )
 
 
 def collect_signal_items(
@@ -146,13 +125,7 @@ def collect_signal_items(
             for item in items
         ]
         collections.append(
-            SignalCollection(
-                provider=provider.name,
-                fetch=fetch,
-                items=items,
-                started_at=started_at,
-                completed_at=completed_at,
-            )
+            SignalCollection(fetch=fetch, items=items)
         )
     return collections
 

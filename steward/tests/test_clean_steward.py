@@ -112,7 +112,7 @@ from coquic_steward.signals import (
     ProviderSignalResult,
     GitHubFeatureIssuesProvider,
     collect_signal_items,
-    gather_signals,
+    project_signals_from_items,
     revalidate_signal_items,
 )
 from coquic_steward.signals.collector import PROVIDER_TYPES
@@ -3799,7 +3799,13 @@ def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
                 ],
             )
 
-    signals = gather_signals(config, providers=[FakeProvider()])
+    collection = collect_signal_items(config, providers=[FakeProvider()])[0]
+    signals = project_signals_from_items(
+        config,
+        collection.items,
+        fetches=[collection.fetch],
+        enabled_signals=[collection.fetch.provider],
+    )
 
     assert signals.repository == config.github_repository
     assert [item.id for item in signals.items] == ["wi-fake-1"]
@@ -3819,7 +3825,7 @@ def test_signal_fetch_errors_are_not_signal_items(
 
     collection = collect_signal_items(config, providers=[FailingProvider()])[0]
 
-    assert collection.error == "dns failed"
+    assert collection.fetch.error == "dns failed"
     assert collection.items == []
 
 def test_signal_registry_exposes_only_concrete_github_actions_providers() -> None:
@@ -3876,7 +3882,6 @@ def test_collect_signal_items_fetches_github_actions_alias_by_name(
     assert "--status" not in args
     assert args[args.index("--limit") + 1] == "1"
     assert captured["cwd"] == config.repo_root
-    assert collection.provider == "github-actions:ci"
     assert collection.fetch.provider == "github-actions:ci"
     assert collection.fetch.item_count == 1
     assert collection.items[0].provider == "github-actions:ci"
@@ -3913,9 +3918,11 @@ def test_github_actions_signal_ignores_latest_non_failure(
         "coquic_steward.signals.providers.run_command", fake_run_command
     )
 
-    signals = gather_signals(config, providers=[GitHubActionsCiProvider()])
+    collection = collect_signal_items(
+        config, providers=[GitHubActionsCiProvider()]
+    )[0]
 
-    assert signals.items == []
+    assert collection.items == []
 
 def test_revalidate_signal_items_filters_stale_sources(
     config: StewardConfig, monkeypatch
@@ -4143,15 +4150,17 @@ def test_github_actions_interop_signal_filters_workflow(
         fake_run_command,
     )
 
-    signals = gather_signals(config, providers=[GitHubActionsInteropProvider()])
+    collection = collect_signal_items(
+        config, providers=[GitHubActionsInteropProvider()]
+    )[0]
 
     args = captured["args"]
     assert isinstance(args, list)
     assert args[args.index("--workflow") + 1] == "interop.yml"
     assert "--status" not in args
     assert captured["cwd"] == config.repo_root
-    assert len(signals.items) == 1
-    item = signals.items[0]
+    assert len(collection.items) == 1
+    item = collection.items[0]
     assert item.provider == "github-actions:interop"
     assert item.id.startswith("wi-github-actions-interop-interop-failure-")
     assert item.kind == "github-actions.interop-failure"
@@ -4196,12 +4205,14 @@ def test_github_actions_ci_signal_includes_worker_context(
         fake_run_command,
     )
 
-    signals = gather_signals(config, providers=[GitHubActionsCiProvider()])
+    collection = collect_signal_items(
+        config, providers=[GitHubActionsCiProvider()]
+    )[0]
 
     args = captured["args"]
     assert isinstance(args, list)
     assert args[args.index("--workflow") + 1] == "ci.yml"
-    item = signals.items[0]
+    item = collection.items[0]
     assert item.provider == "github-actions:ci"
     assert item.kind == "github-actions.ci-failure"
     assert item.payload["workflow_file"] == "ci.yml"
@@ -4241,18 +4252,20 @@ def test_github_actions_perf_signal_is_separate_provider(
         fake_run_command,
     )
 
-    signals = gather_signals(config, providers=[GitHubActionsPerfProvider()])
+    collection = collect_signal_items(
+        config, providers=[GitHubActionsPerfProvider()]
+    )[0]
 
     args = captured["args"]
     assert isinstance(args, list)
     assert args[args.index("--workflow") + 1] == "perf.yml"
-    assert signals.enabled_signals == ["github-actions:perf"]
-    assert signals.items[0].provider == "github-actions:perf"
-    assert signals.items[0].id.startswith("wi-github-actions-perf-perf-failure-")
-    assert signals.items[0].kind == "github-actions.perf-failure"
-    assert signals.items[0].payload["run_id"] == "456"
+    assert collection.fetch.provider == "github-actions:perf"
+    assert collection.items[0].provider == "github-actions:perf"
+    assert collection.items[0].id.startswith("wi-github-actions-perf-perf-failure-")
+    assert collection.items[0].kind == "github-actions.perf-failure"
+    assert collection.items[0].payload["run_id"] == "456"
     assert (
-        signals.items[0].payload["worker_context"]["workflow_file"]
+        collection.items[0].payload["worker_context"]["workflow_file"]
         == "perf.yml"
     )
 
@@ -4306,7 +4319,9 @@ def test_github_feature_issue_signal_fetches_open_feature_issues(
         fake_run_command,
     )
 
-    signals = gather_signals(config, providers=[GitHubFeatureIssuesProvider()])
+    collection = collect_signal_items(
+        config, providers=[GitHubFeatureIssuesProvider()]
+    )[0]
 
     assert [call[:3] for call in calls] == [
         ["gh", "search", "issues"],
@@ -4323,10 +4338,10 @@ def test_github_feature_issue_signal_fetches_open_feature_issues(
         "steward:enhancement",
         "steward:feature",
     ]
-    assert signals.enabled_signals == ["github-issues:features"]
-    assert signals.summary == "GitHub issues sampled 1 open feature request(s): #42"
-    assert len(signals.items) == 1
-    item = signals.items[0]
+    assert collection.fetch.provider == "github-issues:features"
+    assert collection.fetch.summary == "GitHub issues sampled 1 open feature request(s): #42"
+    assert len(collection.items) == 1
+    item = collection.items[0]
     assert item.id.startswith("wi-github-issues-features-feature-request-")
     assert item.provider == "github-issues:features"
     assert item.kind == "github-issues.feature-request"
@@ -4457,13 +4472,13 @@ def test_codacy_signal_uses_public_issue_search_without_token(
         fake_open_codacy_request,
     )
 
-    signals = gather_signals(config, providers=[CodacyProvider()])
+    collection = collect_signal_items(config, providers=[CodacyProvider()])[0]
 
     assert captured["method"] == "POST"
     assert captured["api-token"] is None
     assert captured["url"].endswith("/issues/search?limit=12")
-    assert len(signals.items) == 1
-    item = signals.items[0]
+    assert len(collection.items) == 1
+    item = collection.items[0]
     assert item.id.startswith("wi-codacy-issue-")
     assert item.provider == "codacy"
     assert item.kind == "codacy.issue"
@@ -4508,12 +4523,12 @@ def test_codacy_signal_falls_back_to_public_analysis(
         fake_open_codacy_request,
     )
 
-    signals = gather_signals(config, providers=[CodacyProvider()])
+    collection = collect_signal_items(config, providers=[CodacyProvider()])[0]
 
     assert len(urls) == 2
-    assert signals.summary == "Codacy issuesCount=2"
-    assert signals.items == []
-    assert signals.fetches[0].has_more is True
+    assert collection.fetch.summary == "Codacy issuesCount=2"
+    assert collection.items == []
+    assert collection.fetch.has_more is True
 
 def test_codacy_signal_uses_tokened_issue_search(
     config: StewardConfig, monkeypatch
@@ -4545,12 +4560,12 @@ def test_codacy_signal_uses_tokened_issue_search(
         fake_open_codacy_request,
     )
 
-    signals = gather_signals(config, providers=[CodacyProvider()])
+    collection = collect_signal_items(config, providers=[CodacyProvider()])[0]
 
     assert captured["method"] == "POST"
     assert captured["api-token"] == "token"
-    assert len(signals.items) == 1
-    item = signals.items[0]
+    assert len(collection.items) == 1
+    item = collection.items[0]
     assert item.id.startswith("wi-codacy-issue-")
     assert item.provider == "codacy"
     assert item.kind == "codacy.issue"
@@ -4590,12 +4605,12 @@ def test_codacy_signal_records_error_after_non_2xx_issue_search(
         fake_codacy_opener,
     )
 
-    signals = gather_signals(config, providers=[CodacyProvider()])
+    collection = collect_signal_items(config, providers=[CodacyProvider()])[0]
 
-    assert signals.fetches[0].error == (
+    assert collection.fetch.error == (
         "HTTP Error 403: Forbidden; fallback: HTTP Error 403: Forbidden"
     )
-    assert signals.items == []
+    assert collection.items == []
 
 def test_collect_signal_items_persists_provider_items(config: StewardConfig) -> None:
     class WorkItemProvider(CodacyProvider):

@@ -13,6 +13,7 @@ from coquic_steward.control_loop import (
     LedgerConflictError,
     ProposalDisposition,
     Wakeup,
+    timestamp,
 )
 from coquic_steward.core.models import (
     SignalFetchRun,
@@ -83,6 +84,71 @@ def test_blank_direct_ledger_rejects_without_schema_side_effect(tmp_path: Path) 
             "SELECT name FROM sqlite_master WHERE name LIKE 'control_loop_%'"
         ).fetchall()
     assert objects == []
+
+
+def test_record_wakeup_uses_caller_transaction(tmp_path: Path) -> None:
+    store = TaskStore.create(tmp_path / "steward.sqlite")
+    ledger = store.control_loop
+    wakeup = Wakeup(wakeupId="wakeup-caller-transaction", reason="manual")
+
+    with sqlite3.connect(ledger.path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN IMMEDIATE")
+        ledger.record_wakeup(wakeup, connection=connection)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_wakeups"
+        ).fetchone()[0] == 1
+        connection.rollback()
+
+    with sqlite3.connect(ledger.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_wakeups"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_events"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_outbox"
+        ).fetchone()[0] == 0
+
+
+def test_store_wakeup_preserves_data_and_extracts_input_ids(config) -> None:
+    store = TaskStore.create(config.db_path)
+    wakeup = store.request_wakeup(
+        "signal.fetch",
+        {
+            "providers": ["synthetic-provider"],
+            "signal_ids": ["signal-a", 7, "signal-b"],
+            "input_signal_ids": ["fallback"],
+        },
+    )
+
+    with sqlite3.connect(store.path) as connection:
+        scheduler = connection.execute(
+            "SELECT id,reason,data_json FROM scheduler_wakeups WHERE id=?",
+            (wakeup.id,),
+        ).fetchone()
+        control = connection.execute(
+            "SELECT wakeup_id,reason,created_at,input_signal_ids_json "
+            "FROM control_loop_wakeups WHERE wakeup_id=?",
+            (wakeup.id,),
+        ).fetchone()
+        event = connection.execute(
+            "SELECT payload_json FROM control_loop_events "
+            "WHERE kind='scheduler.wakeup'"
+        ).fetchone()
+
+    assert scheduler[0] == wakeup.id
+    assert scheduler[1] == "signal.fetch"
+    assert json.loads(scheduler[2]) == wakeup.data
+    assert control[0] == scheduler[0]
+    assert control[1] == scheduler[1]
+    assert control[2] == timestamp(wakeup.created_at)
+    assert json.loads(control[3]) == ["signal-a", "signal-b"]
+    assert json.loads(event[0])["wakeup"]["inputSignalIds"] == [
+        "signal-a",
+        "signal-b",
+    ]
 
 
 def test_fetch_retains_repeated_observations_and_deduplicates_signal(tmp_path: Path) -> None:
@@ -339,6 +405,37 @@ def test_signal_collection_rolls_back_legacy_and_control_rows_together(
             "control_loop_fetches",
             "control_loop_observations",
             "control_loop_signals",
+            "control_loop_events",
+            "control_loop_outbox",
+            "control_loop_wakeups",
+            "signal_fetch_runs",
+            "signal_items",
+            "scheduler_wakeups",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_signal_collection_rolls_back_when_control_wakeup_insertion_fails(
+    config, monkeypatch
+) -> None:
+    store = TaskStore.create(config.db_path)
+    item = _item("observation-wakeup-atomic", "wakeup-atomic-fingerprint")
+
+    def fail_control_wakeup(*_args, **_kwargs):
+        raise RuntimeError("injected control wakeup failure")
+
+    monkeypatch.setattr(store.control_loop, "record_wakeup", fail_control_wakeup)
+    with pytest.raises(RuntimeError, match="injected control wakeup failure"):
+        store.ingest_signal_collection(_fetch("fetch-wakeup-atomic"), [item])
+
+    with sqlite3.connect(store.path) as connection:
+        for table in (
+            "control_loop_fetches",
+            "control_loop_observations",
+            "control_loop_signals",
+            "control_loop_events",
+            "control_loop_outbox",
+            "control_loop_wakeups",
             "signal_fetch_runs",
             "signal_items",
             "scheduler_wakeups",
@@ -350,28 +447,43 @@ def test_signal_collection_exact_replay_is_idempotent_across_both_ledgers(
     config,
 ) -> None:
     store = TaskStore.create(config.db_path)
-    item = _item("observation-ingest-replay", "ingest-replay-fingerprint")
+    items = [
+        _item("observation-ingest-replay-1", "ingest-replay-fingerprint-1"),
+        _item("observation-ingest-replay-2", "ingest-replay-fingerprint-2"),
+    ]
     fetch = _fetch("fetch-ingest-replay")
 
     first_items, first_signals, first_created = store.ingest_signal_collection(
-        fetch, [item]
+        fetch, items
     )
+    with sqlite3.connect(store.path) as connection:
+        first_counts = {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "signal_items",
+                "control_loop_observations",
+                "scheduler_wakeups",
+                "control_loop_wakeups",
+                "control_loop_events",
+                "control_loop_outbox",
+            )
+        }
     second_items, second_signals, second_created = store.ingest_signal_collection(
-        fetch, [item]
+        fetch, items
     )
 
-    assert first_created == 1
+    assert first_created == 2
     assert second_created == 0
-    assert first_items[0].id == second_items[0].id
-    assert first_signals[0].signal_id == second_signals[0].signal_id
+    assert [item.id for item in first_items] == [item.id for item in second_items]
+    assert [signal.signal_id for signal in first_signals] == [
+        signal.signal_id for signal in second_signals
+    ]
     with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM signal_items").fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT COUNT(*) FROM control_loop_observations"
-        ).fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT COUNT(*) FROM scheduler_wakeups"
-        ).fetchone()[0] == 1
+        second_counts = {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in first_counts
+        }
+    assert second_counts == first_counts
 
 
 def test_retry_state_rolls_back_when_planner_completion_fails(tmp_path: Path) -> None:
@@ -405,23 +517,25 @@ def test_events_at_requires_ordered_unique_sequences_and_preserves_compatibility
     tmp_path: Path,
 ) -> None:
     ledger = _ledger(tmp_path)
+    first_sequence = len(ledger.list_events())
     with ledger.transaction() as connection:
         for ordinal in range(3):
             ledger._event(connection, "synthetic.event", {"ordinal": ordinal}, occurred_at=NOW)
+    sequences = list(range(first_sequence, first_sequence + 3))
 
     assert ledger.events_at([]) == {}
-    events = ledger.events_at([0, 1, 2])
-    assert list(events) == [0, 1, 2]
-    assert [event.sequence for event in events.values()] == [0, 1, 2]
-    assert ledger.event_at(1) == events[1]
+    events = ledger.events_at(sequences)
+    assert list(events) == sequences
+    assert [event.sequence for event in events.values()] == sequences
+    assert ledger.event_at(sequences[1]) == events[sequences[1]]
     assert ledger.event_at(99) is None
 
     with pytest.raises(LedgerConflictError, match="missing"):
-        ledger.events_at([0, 3])
+        ledger.events_at([sequences[0], sequences[-1] + 1])
     with pytest.raises(LedgerConflictError, match="duplicate"):
-        ledger.events_at([0, 1, 1])
+        ledger.events_at([sequences[0], sequences[1], sequences[1]])
     with pytest.raises(LedgerConflictError, match="out of order"):
-        ledger.events_at([1, 0])
+        ledger.events_at([sequences[1], sequences[0]])
 
 
 def test_events_at_uses_one_connection_and_bounded_chunks(

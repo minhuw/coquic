@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -946,12 +947,42 @@ def test_store_records_scheduler_wakeups_for_actionable_changes(
     assert wakeups[0].data["task_id"] == task.id
     assert wakeups[1].data["signal_item_id"] == item.id
 
+    with sqlite3.connect(store.path) as connection:
+        control_wakeups = {
+            row[0]: row[1:]
+            for row in connection.execute(
+                "SELECT wakeup_id,reason,status,consumed_at,input_signal_ids_json "
+                "FROM control_loop_wakeups"
+            )
+        }
+        assert set(control_wakeups) == {wakeup.id for wakeup in wakeups}
+        assert {
+            wakeup_id: (reason, status, consumed_at, json.loads(input_ids))
+            for wakeup_id, (reason, status, consumed_at, input_ids) in control_wakeups.items()
+        } == {
+            wakeups[0].id: ("task.created", "pending", None, []),
+            wakeups[1].id: ("signal.pending", "pending", None, []),
+        }
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_events WHERE kind='scheduler.wakeup'"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM control_loop_outbox"
+        ).fetchone()[0] >= 2
+
     assert store.consume_wakeups([wakeup.id for wakeup in wakeups]) == 2
     assert store.pending_wakeups() == []
     assert [wakeup.status for wakeup in store.recent_wakeups()] == [
         SchedulerWakeupStatus.consumed,
         SchedulerWakeupStatus.consumed,
     ]
+    with sqlite3.connect(store.path) as connection:
+        assert [
+            row[0]
+            for row in connection.execute(
+                "SELECT status FROM control_loop_wakeups ORDER BY wakeup_id"
+            )
+        ] == ["pending", "pending"]
 
 def test_store_suppresses_recent_duplicate_signal_fingerprints(
     config: StewardConfig,

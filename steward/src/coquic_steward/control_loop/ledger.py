@@ -411,8 +411,13 @@ class ControlLoopLedger:
         )
         self._event(db, EventKind.wakeup.value, {"wakeup": payload})
 
-    def record_wakeup(self, wakeup: Wakeup) -> Wakeup:
-        with self.transaction() as db:
+    def record_wakeup(
+        self,
+        wakeup: Wakeup,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> Wakeup:
+        with self.transaction(connection) as db:
             self._insert_wakeup(db, wakeup)
         return wakeup
 

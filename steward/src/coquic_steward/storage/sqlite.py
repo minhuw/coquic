@@ -131,6 +131,7 @@ from .schema import (
 from ..control_loop import (
     ControlLoopLedger,
     ProposalDisposition as ControlProposalDisposition,
+    Wakeup as ControlWakeup,
 )
 from ..publication.outbox import (
     CleanupIntent,
@@ -2305,6 +2306,31 @@ class SQLiteTaskStore:
     def control_loop_ledger(self) -> ControlLoopLedger:
         return self._control_loop
 
+    def _record_wakeup_in_session(
+        self, session: Session, wakeup: SchedulerWakeup
+    ) -> None:
+        session.add(scheduler_wakeup_to_row(wakeup, path_codec=self.path_codec))
+        session.flush()
+        raw_connection = session.connection().connection.driver_connection
+        raw_connection.row_factory = sqlite3.Row
+        data = wakeup.data
+        input_signal_values = data.get(
+            "signal_ids", data.get("input_signal_ids", [])
+        )
+        input_signal_ids = [
+            value for value in input_signal_values if isinstance(value, str)
+        ]
+        self.control_loop.record_wakeup(
+            ControlWakeup(
+                wakeupId=wakeup.id,
+                reason=wakeup.reason,
+                status="pending",
+                createdAt=wakeup.created_at,
+                inputSignalIds=input_signal_ids,
+            ),
+            connection=raw_connection,
+        )
+
     def ingest_signal_collection(
         self,
         fetch: SignalFetchRun,
@@ -2323,10 +2349,12 @@ class SQLiteTaskStore:
             try:
                 existing_fetch = session.get(SignalFetchRunRow, fetch.id)
                 if existing_fetch is None:
-                    saved_items, created_items = self._add_signal_items_in_session(
-                        session,
-                        items,
-                        suppression_hours=suppression_hours,
+                    saved_items, created_items, new_wakeups = (
+                        self._add_signal_items_in_session(
+                            session,
+                            items,
+                            suppression_hours=suppression_hours,
+                        )
                     )
                     fetch_run = fetch.model_copy(
                         update={
@@ -2337,6 +2365,7 @@ class SQLiteTaskStore:
                 else:
                     fetch_run = row_to_signal_fetch_run(existing_fetch)
                     saved_items = []
+                    new_wakeups = []
                     for item in items:
                         workflow_identity = signal_workflow_identity(item)
                         row = _matching_signal_row(
@@ -2359,6 +2388,8 @@ class SQLiteTaskStore:
                     wakeup=wakeup,
                     connection=raw_connection,
                 )
+                for new_wakeup in new_wakeups:
+                    self._record_wakeup_in_session(session, new_wakeup)
                 if existing_fetch is None:
                     self.add_signal_fetch_run(fetch_run, _session=session)
                 session.commit()
@@ -2374,8 +2405,9 @@ class SQLiteTaskStore:
         items: list[SignalItem],
         *,
         suppression_hours: int,
-    ) -> tuple[list[SignalItem], int]:
+    ) -> tuple[list[SignalItem], int, list[SchedulerWakeup]]:
         saved: list[SignalItem] = []
+        new_wakeups: list[SchedulerWakeup] = []
         created = 0
         for source in items:
             now = utc_now()
@@ -2409,22 +2441,19 @@ class SQLiteTaskStore:
                         workflow_identity=workflow_identity,
                     )
                 )
-                session.add(
-                    scheduler_wakeup_to_row(
-                        SchedulerWakeup(
-                            reason="signal.pending",
-                            data={
-                                "signal_item_id": item.id,
-                                "provider": item.provider,
-                            },
-                        ),
-                        path_codec=self.path_codec,
+                new_wakeups.append(
+                    SchedulerWakeup(
+                        reason="signal.pending",
+                        data={
+                            "signal_item_id": item.id,
+                            "provider": item.provider,
+                        },
                     )
                 )
                 saved_item = item
                 created += 1
             saved.append(saved_item)
-        return saved, created
+        return saved, created, new_wakeups
 
     def commit_planner_decision(
         self,
@@ -2687,7 +2716,7 @@ class SQLiteTaskStore:
     ) -> SchedulerWakeup:
         wakeup = SchedulerWakeup(reason=reason, data=data or {})
         with Session(self.engine) as session, session.begin():
-            session.add(scheduler_wakeup_to_row(wakeup, path_codec=self.path_codec))
+            self._record_wakeup_in_session(session, wakeup)
         self._notify_change()
         return wakeup
 

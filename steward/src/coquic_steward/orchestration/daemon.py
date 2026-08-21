@@ -108,7 +108,6 @@ from ..control_loop import (
     Cycle as ControlLoopCycle,
     PlannerRun as ControlPlannerRun,
     ProposalDisposition as ControlProposalDisposition,
-    Wakeup as ControlWakeup,
     new_id as new_control_loop_id,
     timestamp as control_timestamp,
 )
@@ -3863,7 +3862,6 @@ class StewardDaemon:
         try:
             self._poll_adopted_runs()
             wakeups = self.store.pending_wakeups(limit=200)
-            self._record_control_loop_wakeups(wakeups)
             if wakeups:
                 self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
             explicit_fetch_providers = _fetch_providers_from_wakeups(
@@ -3922,32 +3920,6 @@ class StewardDaemon:
             self._complete_cycle(result, reason)
             self._drain_control_loop_once()
         return result
-
-    def _record_control_loop_wakeups(self, wakeups: list[object]) -> None:
-        ledger = self._control_loop_ledger
-        for wakeup in wakeups:
-            try:
-                data = getattr(wakeup, "data", {}) or {}
-                input_ids = [
-                    str(value)
-                    for value in data.get("signal_ids", data.get("input_signal_ids", []))
-                    if isinstance(value, str)
-                ]
-                ledger.record_wakeup(
-                    ControlWakeup(
-                        wakeupId=wakeup.id,
-                        reason=wakeup.reason,
-                        status="pending",
-                        createdAt=wakeup.created_at,
-                        inputSignalIds=input_ids,
-                    )
-                )
-            except Exception as exc:
-                self._log(f"control-loop wakeup lag id={getattr(wakeup, 'id', '-') } error={exc.__class__.__name__}")
-        self._control_loop_wakeup.set()
-        publication_wakeup = getattr(self, "_publication_wakeup", None)
-        if publication_wakeup is not None:
-            publication_wakeup.set()
 
     def _dispatch_queued(
         self,

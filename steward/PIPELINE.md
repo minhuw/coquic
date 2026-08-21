@@ -20,9 +20,18 @@ planning, implementation, review, formality, and commit-message action starts a
 fresh Plan 003 session. Ordinary repair paths never resume a provider session.
 
 Before an external boundary Steward stores task, pipeline, phase, action, base,
-input tree, and expected identity. After the boundary it stores the result,
-output tree, patch digest, and next cursor. Duplicate `advance_once()` calls
-adopt a finished action or report `in_progress`; they do not repeat effects.
+input tree, and expected identity. Each task also carries a Store-owned
+`execution_mode` latch in its existing metadata JSON; missing latches adopt the
+startup `dry_run` setting, live may tighten to dry-run, and a later live startup
+never unlocks dry-run. After the boundary it stores the result, output tree,
+patch digest, and next cursor. Duplicate `advance_once()` calls adopt a
+finished action or report `in_progress`; they do not repeat effects.
+
+During this migration slice, dry-run admission is fail-closed: dry-run tasks
+remain recoverable but are not advanced. Planner-selected signals stay
+atomically preview-covered by their task, without external completion or
+automatic replanning. Publication recovery, workers, and new outbox enqueue are
+also paused, while existing outbox rows remain untouched.
 
 ## Review Formality
 

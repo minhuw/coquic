@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Mapping, NamedTuple
 
 from ..core.models import (
     CodexSession,
@@ -20,6 +20,9 @@ from ..core.models import (
     TaskRecord,
     TaskSpec,
     ValidationResult,
+    EXECUTION_MODE_METADATA_KEY,
+    ExecutionMode,
+    coerce_execution_mode,
 )
 from .schema import (
     CodexSessionRow,
@@ -128,9 +131,47 @@ class PathCodec:
         return key in self._PATH_KEYS or key.endswith("_path") or key.endswith("_paths")
 
 
+def _validated_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Copy task metadata and validate the Store-reserved admission latch."""
+
+    copied = dict(metadata)
+    if EXECUTION_MODE_METADATA_KEY in copied:
+        coerce_execution_mode(copied[EXECUTION_MODE_METADATA_KEY])
+    return copied
+
+
+def execution_mode_from_metadata(metadata: Mapping[str, Any]) -> ExecutionMode | None:
+    """Read the reserved mode without granting metadata ownership."""
+
+    return coerce_execution_mode(metadata.get(EXECUTION_MODE_METADATA_KEY))
+
+
+def preserve_execution_mode(
+    metadata: dict[str, Any],
+    *,
+    existing: ExecutionMode | str | None = None,
+    resolved: ExecutionMode | str | None = None,
+) -> dict[str, Any]:
+    """Return metadata whose reserved mode cannot be downgraded by a caller."""
+
+    copied = _validated_metadata(metadata)
+    persisted = coerce_execution_mode(existing)
+    selected = coerce_execution_mode(resolved)
+    if persisted is ExecutionMode.dry_run:
+        selected = persisted
+    elif selected is None:
+        selected = persisted
+    if selected is None:
+        copied.pop(EXECUTION_MODE_METADATA_KEY, None)
+    else:
+        copied[EXECUTION_MODE_METADATA_KEY] = selected.value
+    return copied
+
+
 def task_to_row(
     record: TaskRecord, *, dedupe_key: str | None = None, path_codec: PathCodec
 ) -> TaskRow:
+    metadata = _validated_metadata(record.spec.metadata)
     return TaskRow(
         id=record.id,
         kind=str(record.spec.kind),
@@ -142,7 +183,7 @@ def task_to_row(
         risk=str(record.spec.risk),
         source=record.spec.source,
         allow_main_write=record.spec.allow_main_write,
-        metadata_json=_dump_json(record.spec.metadata, path_codec=path_codec),
+        metadata_json=_dump_json(metadata, path_codec=path_codec),
         dedupe_key=dedupe_key or _dedupe_key(record),
         status=str(record.status),
         summary=record.summary,
@@ -160,7 +201,13 @@ def task_to_row(
     )
 
 
-def update_task_row(row: TaskRow, record: TaskRecord, *, path_codec: PathCodec) -> None:
+def update_task_row(
+    row: TaskRow,
+    record: TaskRecord,
+    *,
+    path_codec: PathCodec,
+    execution_mode: ExecutionMode | str | None = None,
+) -> None:
     row.kind = str(record.spec.kind)
     row.workflow = str(record.spec.workflow)
     row.worker = str(record.spec.worker)
@@ -170,8 +217,14 @@ def update_task_row(row: TaskRow, record: TaskRecord, *, path_codec: PathCodec) 
     row.risk = str(record.spec.risk)
     row.source = record.spec.source
     row.allow_main_write = record.spec.allow_main_write
-    row.metadata_json = _dump_json(record.spec.metadata, path_codec=path_codec)
-    row.dedupe_key = _dedupe_key(record)
+    current = _loads_dict(row.metadata_json, path_codec=path_codec)
+    metadata = preserve_execution_mode(
+        record.spec.metadata,
+        existing=execution_mode_from_metadata(current),
+        resolved=execution_mode,
+    )
+    row.metadata_json = _dump_json(metadata, path_codec=path_codec)
+    row.dedupe_key = str(metadata.get("dedupe_key")) if metadata.get("dedupe_key") is not None else None
     row.created_at = _dump_datetime(record.created_at)
     row.updated_at = _dump_datetime(record.updated_at)
     row.worktree_path = path_codec.dump(record.worktree_path)

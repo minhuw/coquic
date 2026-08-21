@@ -31,6 +31,13 @@ class StewardPreflightError(RuntimeError):
     pass
 
 
+def _dry_run_enabled(config: StewardConfig) -> bool:
+    active = getattr(config, "dry_run_enabled", None)
+    if active is not None:
+        return bool(active)
+    return bool(getattr(config, "dry_run", False))
+
+
 @dataclass(frozen=True)
 class PreflightReport:
     """Bounded launch checks; values never include subprocess output."""
@@ -120,6 +127,7 @@ def run_preflight(
 
     if (
         check_remote_push
+        and not _dry_run_enabled(config)
         and config.integration_mode == IntegrationMode.push_main.value
         and not config.local_only
     ):
@@ -295,7 +303,8 @@ def _validate_container_host_mapping(config: StewardConfig) -> None:
 
 def preflight_remote_push(config: StewardConfig) -> bool:
     if (
-        config.integration_mode != IntegrationMode.push_main.value
+        _dry_run_enabled(config)
+        or config.integration_mode != IntegrationMode.push_main.value
         or config.local_only
     ):
         return False

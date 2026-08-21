@@ -200,6 +200,66 @@ class IntegrationMode(StrEnum):
     push_main = "push-main"
 
 
+class ExecutionMode(StrEnum):
+    """Durable task admission authority.
+
+    The value is deliberately distinct from ``IntegrationMode``.  Integration
+    controls the old local/push adapter, while this latch controls whether a
+    task may cross the execution boundary at all.
+    """
+
+    dry_run = "dry-run"
+    live = "live"
+
+
+# Compatibility spelling for callers that name the latch by its task scope.
+TaskExecutionMode = ExecutionMode
+EXECUTION_MODE_METADATA_KEY = "execution_mode"
+TASK_EXECUTION_MODE_METADATA_KEY = EXECUTION_MODE_METADATA_KEY
+EXECUTION_MODE_KEY = EXECUTION_MODE_METADATA_KEY
+
+
+def execution_mode_for_dry_run(dry_run: bool) -> ExecutionMode:
+    """Return the Store-owned mode corresponding to startup configuration."""
+
+    if isinstance(dry_run, bool):
+        return ExecutionMode.dry_run if dry_run else ExecutionMode.live
+    raise TypeError("dry_run must be a bool")
+
+
+def coerce_execution_mode(value: object) -> ExecutionMode | None:
+    """Normalize a persisted mode, returning ``None`` for an absent latch."""
+
+    if value is None:
+        return None
+    if isinstance(value, ExecutionMode):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("_", "-")
+        if normalized in {"dry-run", "dryrun"}:
+            return ExecutionMode.dry_run
+        if normalized == "live":
+            return ExecutionMode.live
+    raise ValueError(f"invalid execution_mode {value!r}")
+
+
+def resolve_execution_mode(
+    existing: ExecutionMode | str | None,
+    startup: ExecutionMode | str,
+) -> ExecutionMode:
+    """Resolve one monotonic latch at a Store startup boundary."""
+
+    configured = coerce_execution_mode(startup)
+    if configured is None:
+        raise ValueError("startup execution mode is required")
+    current = coerce_execution_mode(existing)
+    if current is ExecutionMode.dry_run:
+        return current
+    if current is ExecutionMode.live and configured is ExecutionMode.live:
+        return current
+    return configured
+
+
 class CodexStage(StrEnum):
     signal_planner = "signal_planner"
     implementation_plan = "implementation_plan"

@@ -11,8 +11,8 @@ daemon_image = "coquic-steward-daemon"
 validation_image = "coquic-steward-validation"
 # validation_image_digest = "sha256:<64 lowercase hex characters>"
 runtime_protocol = "task-container-v1"
-integration_mode = "local-only"
-local_only = false
+# Startup is fail-closed. Restart Steward after changing this setting.
+dry_run = true
 shutdown_grace_seconds = 30
 # Resume launch attempts are deliberately fixed at two; ordinary role changes
 # always allocate a fresh session.

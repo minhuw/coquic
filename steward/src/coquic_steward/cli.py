@@ -110,7 +110,16 @@ def _context() -> tuple[TaskStore, StewardConfig]:
         config = config.__class__(
             **{**config.__dict__, "local_codex_test_harness": True}
         )
-    return TaskStore.open(config.db_path), config
+    return TaskStore.open(
+        config.db_path, dry_run=_publication_mutation_blocked(config)
+    ), config
+
+
+def _publication_mutation_blocked(config: StewardConfig) -> bool:
+    active = getattr(config, "dry_run_enabled", None)
+    if active is not None:
+        return bool(active)
+    return bool(getattr(config, "dry_run", False))
 
 
 def _configured_planner_session(config: StewardConfig) -> FreshPlannerSession:
@@ -301,6 +310,16 @@ def publication_retry(publication_id: str) -> None:
     """Rebuild current evidence and enqueue a changed generation."""
 
     store, config = _context()
+    if _publication_mutation_blocked(config):
+        _emit_publication(
+            {
+                "status": PublicationStatus.blocked.value,
+                "publicationId": _safe_publication_id(publication_id),
+                "reason": "dry_run",
+                "reasonCodes": ["dry_run"],
+            }
+        )
+        raise typer.Exit(1)
     try:
         generation = store.get_publication_generation(publication_id)
     except Exception:
@@ -367,6 +386,16 @@ def publication_hide(
     if reason not in _PUBLICATION_HIDE_REASONS:
         raise typer.BadParameter("unsupported reason", param_hint="--reason")
     store, config = _context()
+    if _publication_mutation_blocked(config):
+        _emit_publication(
+            {
+                "status": PublicationHideStatus.blocked.value,
+                "taskId": _safe_publication_id(task_id),
+                "publicationId": None,
+                "reason": "dry_run",
+            }
+        )
+        raise typer.Exit(1)
     built = _build_cli_hide_publisher(config, store)
     if built is None:
         _emit_publication(
@@ -414,10 +443,14 @@ def init() -> None:
     try:
         with acquire_daemon_lock(config):
             if os.path.lexists(config.db_path):
-                store = TaskStore.open(config.db_path)
+                store = TaskStore.open(
+                    config.db_path, dry_run=_publication_mutation_blocked(config)
+                )
                 outcome = "already initialized"
             else:
-                store = TaskStore.create(config.db_path)
+                store = TaskStore.create(
+                    config.db_path, dry_run=_publication_mutation_blocked(config)
+                )
                 outcome = "initialized"
     except DaemonAlreadyRunning as exc:
         typer.echo(f"Steward daemon already running: {exc.lock_path}", err=True)
@@ -742,7 +775,9 @@ def health() -> None:
     persisted_pressure: dict[str, object] | None = None
     container_counts = {"owned": 0, "active": 0, "cleanupPending": 0, "unknown": 0}
     try:
-        store = TaskStore.open(config.db_path)
+        store = TaskStore.open(
+            config.db_path, dry_run=_publication_mutation_blocked(config)
+        )
         active_tasks = int(store.active_count())
         for task in store.list_tasks(limit=10_000):
             events = store.events(task.id, limit=200)

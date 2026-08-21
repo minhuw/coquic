@@ -50,6 +50,8 @@ from ..core.models import (
     CodexSession,
     Event,
     ExecutionState,
+    ExecutionMode,
+    EXECUTION_MODE_METADATA_KEY,
     SchedulerWakeup,
     SchedulerWakeupStatus,
     SignalFetchRun,
@@ -66,6 +68,9 @@ from ..core.models import (
     TaskRun,
     TaskSpec,
     TaskStatus,
+    coerce_execution_mode,
+    execution_mode_for_dry_run,
+    resolve_execution_mode,
     ValidationResult,
     WorktreeCheckpoint,
     new_execution_id,
@@ -96,6 +101,8 @@ from .mappers import (
     row_to_iteration,
     row_to_plan_run,
     row_to_task,
+    execution_mode_from_metadata,
+    preserve_execution_mode,
     scheduler_wakeup_to_row,
     pipeline_to_row,
     run_to_row,
@@ -275,6 +282,7 @@ class SQLiteTaskStore:
         path: Path | str,
         *,
         on_change: Callable[[], None] | None = None,
+        dry_run: bool | None = None,
     ) -> "SQLiteTaskStore":
         """Create and durably publish one exact current Store database.
 
@@ -322,7 +330,12 @@ class SQLiteTaskStore:
                     # the creator that won the link race.
                     _fsync_directory(database.parent)
                     _commit_store_receipt(database, epoch_id)
-                    return cls._open_validated(database, epoch_id, on_change)
+                    store = cls._open_validated(
+                        database, epoch_id, on_change, dry_run=dry_run
+                    )
+                    if dry_run is not None:
+                        store.resolve_execution_modes(dry_run)
+                    return store
                 _fsync_directory(database.parent)
             except BaseException:
                 if not publication_conflict:
@@ -335,7 +348,7 @@ class SQLiteTaskStore:
                     )
                 raise
             _commit_store_receipt(database, epoch_id)
-            return cls.open(database, on_change=on_change)
+            return cls.open(database, on_change=on_change, dry_run=dry_run)
         finally:
             if not keep_temporary:
                 _remove_factory_temporary(temporary)
@@ -346,14 +359,20 @@ class SQLiteTaskStore:
         path: Path | str,
         *,
         on_change: Callable[[], None] | None = None,
+        dry_run: bool | None = None,
     ) -> "SQLiteTaskStore":
-        """Open an exact current Store without recovery or application writes."""
+        """Open an exact current Store, optionally resolving task admission."""
 
         database = Path(path).expanduser()
         epoch = _read_task_epoch(database.parent / "tasks")
         epoch_id = epoch["epochId"]
         cls._validate_current_database(database, epoch_id)
-        return cls._open_validated(database, epoch_id, on_change)
+        store = cls._open_validated(
+            database, epoch_id, on_change, dry_run=dry_run
+        )
+        if dry_run is not None:
+            store.resolve_execution_modes(dry_run)
+        return store
 
     @classmethod
     def _open_validated(
@@ -361,10 +380,105 @@ class SQLiteTaskStore:
         database: Path,
         epoch_id: str,
         on_change: Callable[[], None] | None,
+        *,
+        dry_run: bool | None = None,
     ) -> "SQLiteTaskStore":
-        store = cls._blank_store(database, on_change=on_change, wal=False)
+        store = cls._blank_store(
+            database, on_change=on_change, wal=False, dry_run=dry_run
+        )
         store._control_loop = _bind_existing_control_loop(database, epoch_id)
         return store
+
+    def resolve_execution_modes(
+        self, dry_run: bool | ExecutionMode | str
+    ) -> int:
+        """Adopt and monotonically tighten every task admission latch.
+
+        The latch lives in task metadata so this operation deliberately avoids
+        schema/catalog changes.  A live startup may not unlock an existing
+        dry-run task; a dry-run startup may tighten a live task.
+        """
+
+        if isinstance(dry_run, bool):
+            startup = execution_mode_for_dry_run(dry_run)
+            selected_dry_run = dry_run
+        else:
+            startup = coerce_execution_mode(dry_run)
+            if startup is None:
+                raise TypeError("startup execution mode is required")
+            selected_dry_run = startup is ExecutionMode.dry_run
+        self._startup_dry_run = selected_dry_run
+        changed = 0
+        with Session(self.engine) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                rows = session.scalars(select(TaskRow)).all()
+                for row in rows:
+                    metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                    current = execution_mode_from_metadata(metadata)
+                    resolved = resolve_execution_mode(current, startup)
+                    if current is resolved and metadata.get(EXECUTION_MODE_METADATA_KEY) == resolved.value:
+                        continue
+                    row.metadata_json = _dump_metadata(
+                        preserve_execution_mode(metadata, resolved=resolved),
+                        self.path_codec,
+                    )
+                    changed += 1
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+        if changed:
+            self._notify_change()
+        return changed
+
+    # Explicit aliases make the authority discoverable without exposing a
+    # second persistence path.
+    set_startup_execution_mode = resolve_execution_modes
+    resolve_task_execution_modes = resolve_execution_modes
+
+    def task_execution_mode(self, task_id: str) -> ExecutionMode | None:
+        """Return the persisted task latch without inferring a caller mode."""
+
+        task = self.get(task_id)
+        return coerce_execution_mode(
+            task.spec.metadata.get(EXECUTION_MODE_METADATA_KEY)
+        )
+
+    get_task_execution_mode = task_execution_mode
+
+    def resolve_task_execution_mode(
+        self, task_id: str, startup: bool | ExecutionMode | str
+    ) -> ExecutionMode:
+        """Resolve one task latch atomically at the configured startup mode."""
+
+        if isinstance(startup, bool):
+            startup_mode = execution_mode_for_dry_run(startup)
+        else:
+            startup_mode = coerce_execution_mode(startup)
+            if startup_mode is None:
+                raise TypeError("startup execution mode is required")
+        with Session(self.engine) as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                row = session.scalar(_task_query().where(TaskRow.id == task_id))
+                if row is None:
+                    raise KeyError(task_id)
+                metadata = _metadata_dict(row.metadata_json, self.path_codec)
+                resolved = resolve_execution_mode(
+                    execution_mode_from_metadata(metadata), startup_mode
+                )
+                row.metadata_json = _dump_metadata(
+                    preserve_execution_mode(metadata, resolved=resolved),
+                    self.path_codec,
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+        self._startup_dry_run = startup_mode is ExecutionMode.dry_run
+        self._notify_change()
+        return resolved
 
     def recover(self) -> StoreRecoveryResult:
         """Recover same-version publication leases and derived health once."""
@@ -426,8 +540,10 @@ class SQLiteTaskStore:
         *,
         on_change: Callable[[], None] | None,
         wal: bool,
+        dry_run: bool | None = None,
     ) -> "SQLiteTaskStore":
         store = cls.__new__(cls)
+        store._startup_dry_run = bool(dry_run) if dry_run is not None else False
         store.path = database
         store.on_change = on_change
         store.path_codec = PathCodec(database.parent)
@@ -655,7 +771,10 @@ class SQLiteTaskStore:
             if existing is not None:
                 return existing, False
             metadata["dedupe_key"] = dedupe_key
-            spec = spec.model_copy(update={"metadata": metadata}, deep=True)
+        metadata[EXECUTION_MODE_METADATA_KEY] = execution_mode_for_dry_run(
+            self._startup_dry_run
+        ).value
+        spec = spec.model_copy(update={"metadata": metadata}, deep=True)
         record = TaskRecord(spec=spec)
         row = task_to_row(record, dedupe_key=dedupe_key, path_codec=self.path_codec)
         event_row = event_to_row(
@@ -2102,7 +2221,12 @@ class SQLiteTaskStore:
             self._require_execution_owner(session, record.id)
             row.validations.clear()
             session.flush()
-            update_task_row(row, record, path_codec=self.path_codec)
+            update_task_row(
+                row,
+                record,
+                path_codec=self.path_codec,
+                execution_mode=execution_mode_for_dry_run(self._startup_dry_run),
+            )
         self._notify_change()
 
     def update_status(
@@ -2472,6 +2596,13 @@ class SQLiteTaskStore:
             try:
                 task_ids_by_dedupe: dict[str, str] = {}
                 for spec, dedupe_key in planned:
+                    selected_ids = list(
+                        dict.fromkeys(
+                            item_id
+                            for item_id in selected_item_ids_by_dedupe.get(dedupe_key, [])
+                            if isinstance(item_id, str)
+                        )
+                    )
                     existing_row = session.scalar(
                         select(TaskRow).where(
                             TaskRow.dedupe_key == dedupe_key,
@@ -2479,12 +2610,50 @@ class SQLiteTaskStore:
                         )
                     )
                     if existing_row is not None:
+                        existing_metadata = _metadata_dict(
+                            existing_row.metadata_json, self.path_codec
+                        )
+                        if selected_ids:
+                            existing_metadata["selected_signal_item_ids"] = list(
+                                dict.fromkeys(
+                                    [
+                                        *(
+                                            existing_metadata.get(
+                                                "selected_signal_item_ids", []
+                                            )
+                                            if isinstance(
+                                                existing_metadata.get(
+                                                    "selected_signal_item_ids"
+                                                ),
+                                                list,
+                                            )
+                                            else []
+                                        ),
+                                        *selected_ids,
+                                    ]
+                                )
+                            )
+                        existing_mode = resolve_execution_mode(
+                            execution_mode_from_metadata(existing_metadata),
+                            execution_mode_for_dry_run(self._startup_dry_run),
+                        )
+                        existing_row.metadata_json = _dump_metadata(
+                            preserve_execution_mode(
+                                existing_metadata, resolved=existing_mode
+                            ),
+                            self.path_codec,
+                        )
                         existing = row_to_task(existing_row, path_codec=self.path_codec)
                         selected_records.append((existing, False))
                         task_ids_by_dedupe[dedupe_key] = existing.id
                         continue
                     metadata = dict(spec.metadata)
                     metadata["dedupe_key"] = dedupe_key
+                    if selected_ids:
+                        metadata["selected_signal_item_ids"] = selected_ids
+                    metadata[EXECUTION_MODE_METADATA_KEY] = execution_mode_for_dry_run(
+                        self._startup_dry_run
+                    ).value
                     stored_spec = spec.model_copy(update={"metadata": metadata}, deep=True)
                     record = TaskRecord(spec=stored_spec)
                     now = utc_now()
@@ -5942,11 +6111,16 @@ class SQLiteTaskStore:
                 statuses=active_statuses,
                 integration=True,
             )
+            live_latch = or_(
+                TaskRow.metadata_json.contains('"execution_mode": "live"'),
+                TaskRow.metadata_json.contains('"execution_mode":"live"'),
+            )
             integration_rows = session.scalars(
                 _task_query()
                 .where(
                     TaskRow.status == TaskStatus.queued.value,
                     TaskRow.worker == integration_worker,
+                    live_latch,
                 )
                 .order_by(*_queued_dispatch_order())
                 .limit(integration_limit)
@@ -5956,13 +6130,14 @@ class SQLiteTaskStore:
                 .where(
                     TaskRow.status == TaskStatus.queued.value,
                     TaskRow.worker != integration_worker,
+                    live_latch,
                 )
                 .order_by(*_queued_dispatch_order())
                 .limit(source_limit)
             ).all()
             resumable_rows = session.scalars(
                 _task_query()
-                .where(TaskRow.status.in_(active_statuses))
+                .where(TaskRow.status.in_(active_statuses), live_latch)
                 .order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
                 .limit(resumable_limit)
             ).all()
@@ -6432,6 +6607,22 @@ def _run_fields(fields: dict[str, object]) -> dict[str, object]:
         ),
         "run",
     )
+
+
+def _metadata_dict(value: str | None, path_codec: PathCodec) -> dict[str, object]:
+    try:
+        loaded = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("task metadata is not valid JSON") from exc
+    if not isinstance(loaded, dict):
+        return {}
+    decoded = path_codec.load_json(loaded)
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _dump_metadata(metadata: dict[str, object], path_codec: PathCodec) -> str:
+    dumped = path_codec.dump_json(metadata)
+    return json.dumps(dumped, sort_keys=True)
 
 
 def _task_query() -> Select[tuple[TaskRow]]:

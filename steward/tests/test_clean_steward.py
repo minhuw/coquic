@@ -317,8 +317,9 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.tasks_dir == coquic_home / "tasks"
     assert config.private_root == coquic_home / "private"
     assert config.transcripts_dir == config.state_dir / "transcripts"
+    assert config.dry_run is True
     assert config.integration_mode == "local-only"
-    assert config.local_only is False
+    assert config.local_only is True
     assert config.enabled_signals == (
         "github-actions:ci",
         "github-actions:test",
@@ -508,22 +509,24 @@ validation_timeout_minutes = 9
 
     assert config.limits.validation_timeout_minutes == 9
 
-def test_config_reads_local_only(repo: Path) -> None:
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    (
+        ("integration_mode", '"push-main"', "integration_mode is no longer accepted"),
+        ("local_only", "false", "local_only is no longer accepted"),
+    ),
+)
+def test_config_rejects_legacy_admission_keys(
+    repo: Path, key: str, value: str, message: str
+) -> None:
     config_path = repo / "steward.toml"
     config_path.write_text(
-        """
-[steward]
-github_repository = "minhuw/coquic"
-integration_mode = "push-main"
-local_only = false
-""",
+        f"[steward]\ngithub_repository = \"minhuw/coquic\"\n{key} = {value}\n",
         encoding="utf-8",
     )
 
-    config = load_config(repo_root=repo, config_path=config_path)
-
-    assert config.integration_mode == IntegrationMode.push_main.value
-    assert config.local_only is False
+    with pytest.raises(ValueError, match=message):
+        load_config(repo_root=repo, config_path=config_path)
 
 def test_config_resolves_codex_bin_from_path(
     repo: Path, tmp_path: Path, monkeypatch
@@ -6957,7 +6960,7 @@ def test_cli_daemon_exits_when_push_preflight_fails(
     (coquic_home / "steward.toml").write_text(
         """
 [steward]
-integration_mode = "push-main"
+dry_run = false
 git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"
@@ -7109,6 +7112,7 @@ def test_store_persists_state_artifact_paths_relative(config: StewardConfig) -> 
         assert row.last_message_path == f"steward/transcripts/{task.id}/worker/last-message.md"
         assert row.patch_path == f"steward/patches/{task.id}/iteration-0.patch"
         assert json.loads(row.metadata_json) == {
+            "execution_mode": "live",
             "note": "patches/looks-like-text",
             "source_patch_path": f"steward/patches/{task.id}/iteration-0.patch",
             "source_worktree_path": f"worktrees/{task.id}",

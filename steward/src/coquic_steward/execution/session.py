@@ -28,6 +28,9 @@ from ..core.config import StewardConfig
 from ..core.models import (
     CodexRunState,
     CodexSession,
+    ExecutionMode,
+    EXECUTION_MODE_METADATA_KEY,
+    coerce_execution_mode,
     CodexStage,
     TaskRecord,
     TaskRun,
@@ -71,6 +74,28 @@ class InvocationStatus(StrEnum):
     interrupted = "interrupted"
     forced = "forced"
     unavailable = "unavailable"
+
+
+class DryRunAdmissionError(RuntimeError):
+    """Raised when a dry-run task reaches a write-capable session boundary."""
+
+
+def _task_is_dry_run(task: TaskRecord) -> bool:
+    metadata = getattr(getattr(task, "spec", None), "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return False
+    try:
+        mode = coerce_execution_mode(metadata.get(EXECUTION_MODE_METADATA_KEY))
+    except ValueError:
+        mode = ExecutionMode.dry_run
+    return mode is ExecutionMode.dry_run
+
+
+def _global_dry_run(config: StewardConfig | object) -> bool:
+    active = getattr(config, "dry_run_enabled", None)
+    if active is not None:
+        return bool(active)
+    return bool(getattr(config, "dry_run", False))
 
 
 def publication_graph_for_task(
@@ -268,6 +293,8 @@ def enqueue_materialized_publication(
     """Queue one completed, fully materialized run without transport I/O."""
 
     publication = getattr(config, "publication", None)
+    if _global_dry_run(config) or _task_is_dry_run(task):
+        return None
     if not getattr(publication, "enabled", False):
         return None
     if run.completed_at is None or str(run.state) == "running":
@@ -1008,9 +1035,13 @@ class SessionSupervisor:
         sandbox: str | None = None,
         run_id: str | None = None,
     ) -> SessionResult:
+        task = self.store.get(task_id)
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
+            raise DryRunAdmissionError(
+                f"task {task_id} is paused by dry-run admission"
+            )
         selected_role = _normalize_role(role)
         api_key = self._configured_api_key(api_key)
-        task = self.store.get(task_id)
         self.store.validate_execution_ownership(
             task_id,
             pipeline_id=pipeline_id,
@@ -1079,12 +1110,18 @@ class SessionSupervisor:
         output_schema: Path | None = None,
         timeout_seconds: float | None = None,
     ) -> ResumeResult:
-        api_key = self._configured_api_key(api_key)
         try:
             predecessor = self.store.get_run(predecessor_run_id)
+            task = self.store.get(predecessor.task_id)
             session = self.store.get_session(predecessor.session_id)
         except KeyError as exc:
             return ResumeResult(ResumeCategory.unavailable_store, evidence={"error": str(exc)})
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
+            return ResumeResult(
+                ResumeCategory.rejected,
+                evidence={"reason": "dry-run admission paused"},
+            )
+        api_key = self._configured_api_key(api_key)
         if predecessor.state != CodexRunState.interrupted.value:
             return ResumeResult(ResumeCategory.rejected, evidence={"reason": "predecessor is not interrupted"})
         if predecessor.role not in {"planner", "planning", "implementation", "reviewer", "review"}:
@@ -1238,7 +1275,6 @@ class SessionSupervisor:
             session_id=session.id,
             run_id=run.id,
         )
-        task = self.store.get(predecessor.task_id)
         runtime, invoker = self._boundary_for(task)
         result = self._execute(
             task,
@@ -1378,8 +1414,14 @@ class SessionSupervisor:
     ) -> ResumeResult:
         """Build an evidence-rich fresh session after resume is unavailable."""
 
-        api_key = self._configured_api_key(api_key)
         predecessor = self.store.get_run(predecessor_run_id)
+        task = self.store.get(predecessor.task_id)
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
+            return ResumeResult(
+                ResumeCategory.rejected,
+                evidence={"reason": "dry-run admission paused"},
+            )
+        api_key = self._configured_api_key(api_key)
         self.store.validate_execution_ownership(
             predecessor.task_id,
             pipeline_id=predecessor.pipeline_id,

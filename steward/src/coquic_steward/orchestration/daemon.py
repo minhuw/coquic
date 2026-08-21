@@ -30,6 +30,8 @@ from ..core.models import (
     DaemonCycleSummary,
     DaemonRuntime,
     DaemonRuntimeState,
+    ExecutionMode,
+    EXECUTION_MODE_METADATA_KEY,
     OwnedDockerUsage,
     PipelineCursorPhase,
     ResourcePressure,
@@ -41,6 +43,7 @@ from ..core.models import (
     TERMINAL_STATUSES,
     utc_now,
     WorkerKind,
+    coerce_execution_mode,
 )
 from ..execution.executor import StewardExecutor
 from ..storage.sqlite import TaskLedgerOwnershipError
@@ -148,6 +151,29 @@ PUBLICATION_JOIN_TIMEOUT_SECONDS = 1.0
 PLANNER_TERMINAL_CONTEXT_LIMIT = 200
 GLOBAL_ACTIVE_TASK_ADMISSION_CAP = 16
 
+
+def _global_dry_run(config: StewardConfig | object) -> bool:
+    active = getattr(config, "dry_run_enabled", None)
+    if active is not None:
+        return bool(active)
+    return bool(getattr(config, "dry_run", False))
+
+
+def _task_execution_mode(task: TaskRecord) -> ExecutionMode | None:
+    metadata = getattr(getattr(task, "spec", None), "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    try:
+        return coerce_execution_mode(metadata.get(EXECUTION_MODE_METADATA_KEY))
+    except ValueError:
+        # Unknown caller metadata is never treated as permission to execute.
+        return ExecutionMode.dry_run
+
+
+def _task_is_dry_run(task: TaskRecord) -> bool:
+    return _task_execution_mode(task) is ExecutionMode.dry_run
+
+
 _ACTIVE_TASK_STATUSES = tuple(ACTIVE_STATUSES)
 _RESUMABLE_TASK_STATUSES = tuple(
     status for status in ACTIVE_STATUSES if status != TaskStatus.queued
@@ -194,6 +220,10 @@ class StewardDaemon:
             raise TypeError("planner_session must be a FreshPlannerSession")
         self.config = config
         self.store = store
+        # The daemon is the startup authority.  Low-level Store callers may
+        # still use the legacy live default, but a configured global policy is
+        # attached before any task is reconciled or dispatched.
+        self.store.set_startup_execution_mode(_global_dry_run(self.config))
         self.logger = logger
         self._lifecycle_lock = threading.RLock()
         self._shutdown_event = threading.Event()
@@ -465,6 +495,31 @@ class StewardDaemon:
             pass
         return True
 
+    def _record_dry_run_pause(self, task: TaskRecord) -> None:
+        """Leave one bounded local fact without replaying a task."""
+
+        try:
+            if any(
+                event.kind == "task.dry_run_paused"
+                for event in self.store.events(task.id, limit=20)
+            ):
+                return
+            self.store.add_event(
+                task.id,
+                "task.dry_run_paused",
+                "dry-run task admission paused",
+                {"execution_mode": ExecutionMode.dry_run.value},
+            )
+        except Exception:
+            # A pause event is evidence, not an execution prerequisite.
+            pass
+
+    def _task_admission_allowed(self, task: TaskRecord) -> bool:
+        if _task_is_dry_run(task):
+            self._record_dry_run_pause(task)
+            return False
+        return True
+
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Validate and recover durable ownership before dispatch is allowed."""
 
@@ -477,7 +532,11 @@ class StewardDaemon:
                 self.runtime.state = DaemonRuntimeState.active
             try:
                 with use_subprocess_owner(self._subprocess_owner):
-                    remote_push_ready = preflight_remote_push(self.config)
+                    remote_push_ready = (
+                        False
+                        if _global_dry_run(self.config)
+                        else preflight_remote_push(self.config)
+                    )
                     report = run_preflight(
                         self.config, self.store, check_remote_push=False
                     )
@@ -491,13 +550,16 @@ class StewardDaemon:
                         f"remote={self.config.git_remote} branch={self.config.main_branch}"
                     )
                 self._preflight_report = report
-                self.store.recover()
+                if not _global_dry_run(self.config):
+                    self.store.recover()
                 self._prepare_planner_session()
                 self._restore_resource_pressure()
 
                 outcomes: list[ReconciliationOutcome] = []
-                self.executor.retry_validation_cleanup_pending()
-                self._reconcile_docker_resources()
+                if not _global_dry_run(self.config):
+                    self.executor.retry_validation_cleanup_pending()
+                if not _global_dry_run(self.config):
+                    self._reconcile_docker_resources()
                 self._startup_reconcile_control_loop()
                 tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
                 for task in tasks:
@@ -561,8 +623,11 @@ class StewardDaemon:
                         "control-loop runtime start lag "
                         f"error={exc.__class__.__name__}"
                     )
-                self._enqueue_materialized_publications()
-                self._start_publication_worker()
+                if not _global_dry_run(self.config):
+                    self._enqueue_materialized_publications()
+                    self._start_publication_worker()
+                else:
+                    self._log("dry-run publication admission paused")
                 self._startup_complete = True
                 return tuple(outcomes)
             except BaseException:
@@ -889,6 +954,8 @@ class StewardDaemon:
     def _install_publication_change_callback(self) -> None:
         """Wake the publication worker after every committed local mutation."""
 
+        if _global_dry_run(self.config):
+            return
         if not getattr(self.config.publication, "enabled", False):
             return
         with self._publication_lock:
@@ -1224,6 +1291,9 @@ class StewardDaemon:
         return progressed, True
 
     def _publish_next_generation(self, publisher: CloudPublisher) -> bool:
+        if _global_dry_run(getattr(self, "config", None)):
+            self._log("dry-run publication worker paused")
+            return False
         hide_progress, hides_seen = self._drain_pending_publication_hides(publisher)
         if hides_seen:
             # Do not claim or expose a queued generation while any pending hide
@@ -1376,6 +1446,8 @@ class StewardDaemon:
     def _start_publication_worker(self) -> None:
         """Start the one daemon-owned publication worker when enabled."""
 
+        if _global_dry_run(self.config):
+            return
         if not getattr(self.config.publication, "enabled", False):
             return
         self._install_publication_change_callback()
@@ -1440,6 +1512,8 @@ class StewardDaemon:
     def _enqueue_materialized_publications(self) -> None:
         """Recover completion notifications missed before a daemon restart."""
 
+        if _global_dry_run(self.config):
+            return
         if not getattr(self.config.publication, "enabled", False):
             return
         tasks = sorted(list(self.store.iter_tasks()), key=lambda item: item.id)
@@ -1458,6 +1532,14 @@ class StewardDaemon:
 
     def _reconcile_task(self, task: TaskRecord) -> ReconciliationOutcome:
         """Reconcile archive, ledger, process, Git, and cleanup identities."""
+
+        if not self._task_admission_allowed(task):
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.unchanged,
+                "dry-run task admission paused",
+                evidence={"execution_mode": ExecutionMode.dry_run.value},
+            )
 
         try:
             execution = self.store.get_execution(task.id)
@@ -2986,6 +3068,9 @@ class StewardDaemon:
     def _terminal_publication_gate(self, task: TaskRecord) -> bool:
         """Require the final durable generation and all verified receipts."""
 
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
+            self._record_dry_run_pause(task)
+            return False
         if not getattr(getattr(self.config, "publication", None), "enabled", False):
             return True
         run = self._terminal_publication_run(task.id)
@@ -3298,6 +3383,9 @@ class StewardDaemon:
         """Seal immutable evidence, then converge terminal-only cleanup."""
 
         task = self.store.get(task_id)
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
+            self._record_dry_run_pause(task)
+            return False
         if not TaskStatus(task.status).terminal:
             return False
         try:
@@ -3902,7 +3990,9 @@ class StewardDaemon:
                 else:
                     self._log("resource pressure: planner admission paused")
             if dispatch:
-                if self.admission_allowed():
+                if _global_dry_run(self.config):
+                    self._log("dry-run task admission paused")
+                elif self.admission_allowed():
                     self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
                 else:
                     self._log("resource pressure: task admission paused")
@@ -3928,6 +4018,10 @@ class StewardDaemon:
         plan: bool,
         max_dispatch: int | None,
     ) -> None:
+        if _global_dry_run(self.config):
+            for task in self.store.queued_tasks(limit=max_dispatch):
+                self._record_dry_run_pause(task)
+            return
         with self._worker_pool_lock:
             concurrent_pool = self._worker_pool
         if concurrent_pool is not None:
@@ -3973,6 +4067,9 @@ class StewardDaemon:
                 source_attempts += 1
                 source_capacity -= 1
             seen.add(task.id)
+            if not self._task_admission_allowed(task):
+                result.skipped += 1
+                continue
             self._log(f"dispatch start {task.id} {_task_label(task)}")
             try:
                 task_ok = self.drive_selected_task(task.id)
@@ -4043,6 +4140,10 @@ class StewardDaemon:
     ) -> None:
         capacity = max_dispatch if max_dispatch is not None else self.config.limits.max_active_tasks
         capacity = max(0, capacity)
+        if _global_dry_run(self.config):
+            for task in self.store.queued_tasks(limit=capacity):
+                self._record_dry_run_pause(task)
+            return
         with self._worker_pool_lock:
             for task_id, future in list(self._active_futures.items()):
                 if future.done():
@@ -4063,6 +4164,8 @@ class StewardDaemon:
         seen = active_future_ids
         for task in [*snapshot.queued_tasks, *snapshot.resumable_tasks]:
             if budget <= 0 or task.id in seen:
+                continue
+            if not self._task_admission_allowed(task):
                 continue
             queued = TaskStatus(task.status) == TaskStatus.queued
             if queued:
@@ -4120,7 +4223,10 @@ class StewardDaemon:
 
         integration = False
         try:
-            integration = _is_integration_manager_task(self.store.get(task_id))
+            selected = self.store.get(task_id)
+            if not self._task_admission_allowed(selected):
+                return False
+            integration = _is_integration_manager_task(selected)
         except KeyError:
             return False
         while not self._shutdown_event.is_set():
@@ -4266,6 +4372,8 @@ class StewardDaemon:
             try:
                 task = self.store.get(task_id)
             except KeyError:
+                return False
+            if not self._task_admission_allowed(task):
                 return False
             if TaskStatus(task.status).terminal:
                 return False

@@ -40,8 +40,13 @@ uv run --project steward coquic-steward diagnostics
 
 The daemon performs local preflight, verifies the shared post-2.0 archive epoch,
 reconciles durable task identities, repairs control-loop archive lag, and only
-then dispatches work. A visible archive conflict sets `planning_blocked` while
-queued and active task pipelines remain runnable.
+then admits work. `dry_run = true` is the fail-closed default. It is a
+startup-only setting: changing it requires a restart, and legacy integration settings are rejected with migration guidance.
+
+In dry-run mode, task execution and publication mutations are paused while
+local evidence remains inspectable and recoverable. Existing outbox rows are
+left untouched, and publication `status`/`list` commands remain read-only.
+Set `dry_run = false` only when explicit live operation is intended.
 
 ## Control-loop archive
 
@@ -126,9 +131,12 @@ planner may consume a signal only when a verified task or an explicit no-work
 decision covers it; invalid, rejected, capacity-skipped, failed, and
 interrupted work leaves it pending.
 
-Tasks are queued through the CLI or planner and are advanced by the daemon.
-Use `enqueue`, `run`, `timeline`, and `status` for local operations. Commits,
-pushes, issue comments, and external publication remain daemon or human
+Tasks are queued through the CLI or planner and are admitted by the daemon.
+Each task receives a Store-owned monotonic execution latch. Dry-run tasks stay
+recoverable but are not advanced during this migration slice; selected signals
+remain preview-covered by their task and are not automatically replanned. Use
+`enqueue`, `run`, `timeline`, and `status` for local operations. Commits, pushes,
+issue comments, and external publication remain daemon or human
 responsibilities; Codex workers do not perform those actions directly.
 
 ## State layout

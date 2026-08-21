@@ -15,6 +15,7 @@ def test_steward_example_config_loads_with_publication_settings(repo: Path) -> N
     config = load_config(repo_root=repo, config_path=example)
 
     assert config.scheduler_wait_interval_sec == 1.0
+    assert config.dry_run is True
     assert config.control_loop_dir == config.coquic_home / "control-loop"
     assert config.tasks_dir == config.coquic_home / "tasks"
     assert config.publication.enabled is False

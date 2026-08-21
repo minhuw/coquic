@@ -467,7 +467,7 @@ def init() -> None:
         raise typer.Exit(1) from exc
     finally:
         if store is not None:
-            store.engine.dispose()
+            store._finalize_exact_store()
     typer.echo(f"Steward store {outcome}: {config.db_path}")
 
 

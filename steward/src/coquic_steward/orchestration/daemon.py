@@ -1754,6 +1754,14 @@ class StewardDaemon:
                     run_id=run.id,
                     container_id=getattr(inspection.container, "container_id", None),
                 )
+            if not _inspection_confirms_stopped(inspection):
+                return ReconciliationOutcome(
+                    task.id,
+                    ReconciliationDisposition.blocked,
+                    "run liveness could not be confirmed stopped",
+                    run_id=run.id,
+                    evidence={"error": "liveness_unknown"},
+                )
             try:
                 self.store.mark_run_interrupted(
                     run.id,
@@ -2437,6 +2445,14 @@ class StewardDaemon:
                         ReconciliationDisposition.adopted,
                         "matching live recovery wrapper adopted",
                         run_id=successor.id,
+                    )
+                if not _inspection_confirms_stopped(inspection):
+                    return ReconciliationOutcome(
+                        task.id,
+                        ReconciliationDisposition.blocked,
+                        "recovery run liveness could not be confirmed stopped",
+                        run_id=successor.id,
+                        evidence={"error": "liveness_unknown"},
                     )
                 try:
                     self.store.mark_run_interrupted(

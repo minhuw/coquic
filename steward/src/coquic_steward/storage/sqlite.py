@@ -11,7 +11,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -266,19 +266,27 @@ class _ExecutionAdmissionGuard:
             self._lock.release()
 
 
-_execution_admission_guards: dict[Path, _ExecutionAdmissionGuard] = {}
+_execution_admission_guards: dict[tuple[Path, str], _ExecutionAdmissionGuard] = {}
 _execution_admission_guards_lock = threading.Lock()
 
 
-def _execution_admission_guard(database: Path) -> _ExecutionAdmissionGuard:
+def _execution_admission_guard(
+    database: Path, task_id: str
+) -> _ExecutionAdmissionGuard:
     key = database.expanduser().resolve()
+    guard_key = (key, task_id)
     with _execution_admission_guards_lock:
-        guard = _execution_admission_guards.get(key)
+        guard = _execution_admission_guards.get(guard_key)
         if guard is None:
+            if task_id:
+                digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()
+                name = f"{key.name}-{digest}.lock"
+            else:
+                name = f"{key.name}.lock"
             guard = _ExecutionAdmissionGuard(
-                key.parent / ".steward-admission" / f"{key.name}.lock"
+                key.parent / ".steward-admission" / name
             )
-            _execution_admission_guards[key] = guard
+            _execution_admission_guards[guard_key] = guard
         return guard
 
 
@@ -287,6 +295,13 @@ class _StoreCreationReceipt:
     epoch_id: str
     database_name: str
     state: str
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreSidecarSnapshot:
+    data: bytes
+    mode: int
+    mtime_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,7 +465,29 @@ class SQLiteTaskStore:
             database, on_change=on_change, wal=False, dry_run=dry_run
         )
         store._control_loop = _bind_existing_control_loop(database, epoch_id)
+        store._sidecar_snapshot = _snapshot_store_sidecars(database)
+        store._database_snapshot_digest = hashlib.sha256(
+            database.read_bytes()
+        ).digest()
         return store
+
+    def _finalize_exact_store(self) -> None:
+        """Close an initialized Store while retaining required WAL sidecars."""
+
+        snapshots = getattr(self, "_sidecar_snapshot", {})
+        self.engine.dispose()
+        database_changed = (
+            self._database_snapshot_digest is not None
+            and hashlib.sha256(self.path.read_bytes()).digest()
+            != self._database_snapshot_digest
+        )
+        sidecars = _database_publication_paths(self.path)[1:]
+        if database_changed or not all(os.path.lexists(sidecar) for sidecar in sidecars):
+            self._durabilize_database(self.path)
+        if not database_changed:
+            _restore_store_sidecars(self.path, snapshots)
+        epoch_id = _read_task_epoch(self.path.parent / "tasks")["epochId"]
+        self._validate_current_database(self.path, epoch_id)
 
     def resolve_execution_modes(
         self, dry_run: bool | ExecutionMode | str
@@ -470,8 +507,13 @@ class SQLiteTaskStore:
             if startup is None:
                 raise TypeError("startup execution mode is required")
             selected_dry_run = startup is ExecutionMode.dry_run
-        guard = _execution_admission_guard(self.path)
-        with guard.locked():
+        with Session(self.engine) as session:
+            task_ids = sorted(session.scalars(select(TaskRow.id)).all())
+        with ExitStack() as admission_locks:
+            for task_id in task_ids:
+                admission_locks.enter_context(
+                    _execution_admission_guard(self.path, task_id).locked()
+                )
             self._startup_dry_run = selected_dry_run
             changed = 0
             with Session(self.engine) as session:
@@ -518,9 +560,9 @@ class SQLiteTaskStore:
 
     @contextmanager
     def phase_admission(self, task_id: str) -> Iterator[bool]:
-        """Hold Store authority while one executor phase is allowed to run."""
+        """Hold one task's Store authority while its phase is allowed to run."""
 
-        guard = _execution_admission_guard(self.path)
+        guard = _execution_admission_guard(self.path, task_id)
         with guard.locked():
             try:
                 mode = self.task_execution_mode(task_id)
@@ -539,7 +581,7 @@ class SQLiteTaskStore:
             startup_mode = coerce_execution_mode(startup)
             if startup_mode is None:
                 raise TypeError("startup execution mode is required")
-        guard = _execution_admission_guard(self.path)
+        guard = _execution_admission_guard(self.path, task_id)
         with guard.locked():
             with Session(self.engine) as session:
                 session.execute(text("BEGIN IMMEDIATE"))
@@ -630,6 +672,8 @@ class SQLiteTaskStore:
         store.path = database
         store.on_change = on_change
         store.path_codec = PathCodec(database.parent)
+        store._database_snapshot_digest = None
+        store._sidecar_snapshot = {}
         store.engine = create_engine(f"sqlite:///{database}", future=True)
         event.listen(
             store.engine,
@@ -7531,6 +7575,58 @@ def _database_publication_paths(database: Path) -> tuple[Path, Path, Path]:
         database.with_name(database.name + "-wal"),
         database.with_name(database.name + "-shm"),
     )
+
+
+def _snapshot_store_sidecars(
+    database: Path,
+) -> dict[str, _StoreSidecarSnapshot]:
+    snapshots: dict[str, _StoreSidecarSnapshot] = {}
+    for suffix in ("-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        _require_regular_file(sidecar, "Store WAL sidecar")
+        metadata = os.stat(sidecar)
+        snapshots[suffix] = _StoreSidecarSnapshot(
+            data=sidecar.read_bytes(),
+            mode=stat.S_IMODE(metadata.st_mode),
+            mtime_ns=metadata.st_mtime_ns,
+        )
+    return snapshots
+
+
+def _restore_store_sidecars(
+    database: Path,
+    snapshots: Mapping[str, _StoreSidecarSnapshot],
+) -> None:
+    restored = False
+    for suffix in ("-wal", "-shm"):
+        snapshot = snapshots.get(suffix)
+        if snapshot is None:
+            continue
+        # A non-empty WAL may contain application changes that were already
+        # checkpointed into the database while the Store was closed.  The
+        # empty WAL produced by a clean initialized Store is safe to restore;
+        # otherwise the freshly materialized sidecar remains authoritative.
+        if suffix == "-wal" and snapshot.data:
+            continue
+        sidecar = database.with_name(database.name + suffix)
+        _require_regular_file(sidecar, "Store WAL sidecar")
+        if sidecar.read_bytes() != snapshot.data:
+            temporary = sidecar.with_name(
+                f".{sidecar.name}.restore-{secrets.token_hex(8)}"
+            )
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(snapshot.data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(temporary, snapshot.mode)
+                os.replace(temporary, sidecar)
+            finally:
+                temporary.unlink(missing_ok=True)
+        os.utime(sidecar, ns=(snapshot.mtime_ns, snapshot.mtime_ns))
+        restored = True
+    if restored:
+        _fsync_directory(database.parent)
 
 
 def _valid_store_database_name(value: object) -> bool:

@@ -19,6 +19,12 @@ from coquic_steward.core.models import (
     WorkerKind,
 )
 from coquic_steward.execution.session import enqueue_materialized_publication
+from coquic_steward.execution.session import SessionSupervisor
+from coquic_steward.publication.outbox import (
+    GenerationIdentity,
+    PublicationGeneration,
+    PublicationOperationStatus,
+)
 from coquic_steward.orchestration.daemon import StewardDaemon
 from coquic_steward.storage import TaskStore
 from coquic_steward.storage.schema import TaskRow
@@ -129,6 +135,116 @@ def test_planner_allocation_preserves_preview_signal_coverage(tmp_path: Path) ->
     assert store.list_signal_items(status="planned")[0].planned_task_id == record.id
 
 
+def test_dry_run_reconciliation_interrupts_existing_wrapper(
+    repo: Path, tmp_path: Path
+) -> None:
+    config = StewardConfig(
+        repo_root=repo,
+        dry_run=True,
+        local_codex_test_harness=True,
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=True)
+    task, _ = store.add_task(_spec())
+    pipeline = store.list_pipelines(task.id)[0]
+    session = store.create_session(
+        task.id,
+        pipeline.id,
+        session_id="session-dry-run-wrapper",
+        private_home_path=tmp_path / "private",
+        private_home_relative_path="task/session",
+        image_digest="image",
+        codex_identity="codex",
+        cwd=repo,
+        owner_role="implementation",
+    )
+    run = store.create_run(
+        task.id,
+        pipeline.id,
+        session.id,
+        role="implementation",
+    )
+
+    class Boundary(SessionSupervisor):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def inspect(self, run_id: str):
+            self.calls.append(("inspect", run_id))
+            return SimpleNamespace(live=True)
+
+        def interrupt(self, run_id: str, **_kwargs):
+            self.calls.append(("interrupt", run_id))
+            return store.mark_run_interrupted(run_id, reason="dry-run test")
+
+    boundary = Boundary()
+    daemon = StewardDaemon(config, store, session_supervisor=boundary)
+
+    outcome = daemon.startup_reconcile()[0]
+
+    assert outcome.disposition.value == "unchanged"
+    assert boundary.calls == [("inspect", run.id), ("interrupt", run.id)]
+    assert store.get_run(run.id).state == "interrupted"
+
+
+def test_dry_run_active_rows_do_not_consume_live_capacity(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database, dry_run=False)
+    running, _ = store.add_task(_spec(title="running"))
+    store.start_worker(running.id, "running")
+
+    TaskStore.open(database, dry_run=True)
+    live_store = TaskStore.open(database, dry_run=False)
+    queued, _ = live_store.add_task(_spec(title="queued"))
+
+    snapshot = live_store.dispatch_snapshot(
+        source_limit=10,
+        integration_limit=1,
+        resumable_limit=10,
+    )
+
+    assert live_store.active_count() == 1
+    assert live_store.source_active_count() == 0
+    assert snapshot.source_active_count == 0
+    assert [task.id for task in snapshot.queued_tasks] == [queued.id]
+
+
+def test_publication_enqueue_rechecks_persisted_latch(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database, dry_run=False)
+    task, _ = store.add_task(_spec())
+    identity = GenerationIdentity(task.id, "boundary-stale")
+    generation = PublicationGeneration(
+        publication_id=identity.publication_id,
+        task_id=task.id,
+        run_id="run-stale",
+        generation_boundary=identity.stable_boundary,
+        metadata_digest="a" * 64,
+        idempotency_key=identity.idempotency_key,
+    )
+
+    TaskStore.open(database, dry_run=True)
+    result = store.enqueue_publication(generation)
+
+    assert result.status is PublicationOperationStatus.precondition
+    assert store.get_publication_generation(generation.publication_id) is None
+
+
+def test_session_publication_uses_current_store_latch(tmp_path: Path) -> None:
+    database = tmp_path / "steward.sqlite"
+    store = TaskStore.create(database, dry_run=False)
+    task, _ = store.add_task(_spec())
+    stale_task = store.get(task.id)
+    restarted = TaskStore.open(database, dry_run=True)
+    config = SimpleNamespace(
+        dry_run=False,
+        publication=SimpleNamespace(enabled=True),
+    )
+    run = SimpleNamespace(id="run-stale", state="succeeded", completed_at=object())
+
+    assert enqueue_materialized_publication(config, restarted, stale_task, run) is None
+
+
 def test_dry_run_dispatch_and_publication_are_paused(
     repo: Path, tmp_path: Path, monkeypatch
 ) -> None:
@@ -158,6 +274,36 @@ def test_dry_run_dispatch_and_publication_are_paused(
     run = SimpleNamespace(id="run-preview", state="succeeded", completed_at=object())
     assert enqueue_materialized_publication(publication_config, store, task, run) is None
     assert queued == []
+
+
+def test_phase_boundary_rechecks_tightened_latch(
+    repo: Path, tmp_path: Path
+) -> None:
+    config = StewardConfig(
+        repo_root=repo,
+        dry_run=False,
+        local_codex_test_harness=True,
+    )
+    config.ensure_dirs()
+    store = TaskStore.create(tmp_path / "steward.sqlite", dry_run=False)
+    task, _ = store.add_task(_spec())
+    daemon = StewardDaemon(config, store)
+    calls: list[str] = []
+
+    def advance(task_id: str):
+        calls.append(task_id)
+        store.resolve_task_execution_mode(task_id, True)
+        return SimpleNamespace(
+            status="in_progress",
+            progressed=True,
+            next_phase="next",
+        )
+
+    daemon.executor.advance_once = advance
+
+    assert daemon.drive_selected_task(task.id) is False
+    assert calls == [task.id]
+    assert store.task_execution_mode(task.id) is ExecutionMode.dry_run
 
 
 def test_dry_run_publication_cli_does_not_construct_mutator(monkeypatch) -> None:

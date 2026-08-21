@@ -102,7 +102,7 @@ _PUBLICATION_SAFE_REASONS = _PUBLICATION_HIDE_REASONS | frozenset(
 _PUBLICATION_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-def _context() -> tuple[TaskStore, StewardConfig]:
+def _context(*, resolve_execution_modes: bool = True) -> tuple[TaskStore, StewardConfig]:
     config = load_config()
     # A repository with no explicit container section is the historical local
     # CLI fixture. Production launches opt into the strict container boundary.
@@ -110,9 +110,14 @@ def _context() -> tuple[TaskStore, StewardConfig]:
         config = config.__class__(
             **{**config.__dict__, "local_codex_test_harness": True}
         )
-    return TaskStore.open(
-        config.db_path, dry_run=_publication_mutation_blocked(config)
-    ), config
+    if resolve_execution_modes:
+        store = TaskStore.open(
+            config.db_path, dry_run=_publication_mutation_blocked(config)
+        )
+    else:
+        # Inspection commands must not silently become a startup boundary.
+        store = TaskStore.open(config.db_path)
+    return store, config
 
 
 def _publication_mutation_blocked(config: StewardConfig) -> bool:
@@ -260,7 +265,7 @@ def _publication_hide_result_output(
 def publication_status() -> None:
     """Print bounded publication health facts."""
 
-    store, _ = _context()
+    store, _ = _context(resolve_execution_modes=False)
     try:
         _emit_publication(publication_health_view(store))
     except Exception:
@@ -291,7 +296,7 @@ def publication_list(
 ) -> None:
     """Print bounded publication generation summaries."""
 
-    store, _ = _context()
+    store, _ = _context(resolve_execution_modes=False)
     try:
         _emit_publication(publication_generation_views(store, limit=limit))
     except Exception:

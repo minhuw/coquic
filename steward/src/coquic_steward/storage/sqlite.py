@@ -3232,6 +3232,25 @@ class SQLiteTaskStore:
         saved = value
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
+            task_row = connection.exec_driver_sql(
+                "SELECT metadata_json FROM tasks WHERE id=:task_id",
+                {"task_id": value.task_id},
+            ).mappings().first()
+            if task_row is not None:
+                try:
+                    metadata = json.loads(task_row["metadata_json"] or "{}")
+                    mode = (
+                        execution_mode_from_metadata(metadata)
+                        if isinstance(metadata, dict)
+                        else None
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    mode = None
+                if mode is not ExecutionMode.live:
+                    connection.commit()
+                    return PublicationOperationResult(
+                        PublicationOperationStatus.precondition,
+                    )
             fence = _publication_hide_fence_from_connection(connection, value.task_id)
             if fence is not None:
                 # A confirmed remote hide remains a local fence until the
@@ -5439,6 +5458,7 @@ class SQLiteTaskStore:
                 session,
                 statuses=active_statuses,
                 integration=False,
+                live_only=True,
             )
             source_queued = _count_tasks(
                 session,
@@ -5449,6 +5469,7 @@ class SQLiteTaskStore:
                 session,
                 statuses=active_statuses,
                 integration=True,
+                live_only=True,
             )
             integration_queued = _count_tasks(
                 session,
@@ -5646,6 +5667,8 @@ class SQLiteTaskStore:
             rows = session.execute(statement).all()
             requeued = 0
             for signal_row, task_row in rows:
+                if _task_row_is_dry_run(task_row):
+                    continue
                 planned_at = signal_row.planned_at or signal_row.updated_at
                 retry_from = max(
                     datetime.fromisoformat(planned_at),
@@ -6105,16 +6128,15 @@ class SQLiteTaskStore:
                 session,
                 statuses=active_statuses,
                 integration=False,
+                live_only=True,
             )
             integration_active = _count_tasks(
                 session,
                 statuses=active_statuses,
                 integration=True,
+                live_only=True,
             )
-            live_latch = or_(
-                TaskRow.metadata_json.contains('"execution_mode": "live"'),
-                TaskRow.metadata_json.contains('"execution_mode":"live"'),
-            )
+            live_latch = _live_task_latch()
             integration_rows = session.scalars(
                 _task_query()
                 .where(
@@ -6175,7 +6197,10 @@ class SQLiteTaskStore:
                 session.scalar(
                     select(func.count())
                     .select_from(TaskRow)
-                    .where(TaskRow.status.in_(ACTIVE_STATUSES))
+                    .where(
+                        TaskRow.status.in_(ACTIVE_STATUSES),
+                        _live_task_latch(),
+                    )
                 )
                 or 0
             )
@@ -6190,6 +6215,7 @@ class SQLiteTaskStore:
                     TaskStatus.integrating.value,
                 ],
                 integration=False,
+                live_only=True,
             )
 
     def events(self, task_id: str, *, limit: int | None = None) -> list[Event]:
@@ -6629,6 +6655,30 @@ def _task_query() -> Select[tuple[TaskRow]]:
     return select(TaskRow).options(selectinload(TaskRow.validations))
 
 
+def _live_task_latch():
+    """Match only the Store-owned top-level live execution latch."""
+
+    return and_(
+        func.json_valid(TaskRow.metadata_json) == 1,
+        func.json_extract(TaskRow.metadata_json, "$.execution_mode")
+        == ExecutionMode.live.value,
+    )
+
+
+def _task_row_is_dry_run(task: TaskRow | None) -> bool:
+    """Treat a reserved dry-run latch as ongoing signal coverage."""
+
+    if task is None:
+        return False
+    try:
+        metadata = json.loads(task.metadata_json or "{}")
+        if not isinstance(metadata, dict):
+            return True
+        return execution_mode_from_metadata(metadata) is ExecutionMode.dry_run
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+
+
 def _queued_dispatch_order():
     return (
         case(
@@ -6699,13 +6749,19 @@ def _cleanup_pending_predicate():
 
 
 def _count_tasks(
-    session: Session, *, statuses: list[str], integration: bool
+    session: Session,
+    *,
+    statuses: list[str],
+    integration: bool,
+    live_only: bool = False,
 ) -> int:
     statement = select(func.count()).select_from(TaskRow).where(TaskRow.status.in_(statuses))
     if integration:
         statement = statement.where(TaskRow.worker == WorkerKind.integration_manager.value)
     else:
         statement = statement.where(TaskRow.worker != WorkerKind.integration_manager.value)
+    if live_only:
+        statement = statement.where(_live_task_latch())
     return session.scalar(statement) or 0
 
 

@@ -202,8 +202,14 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
                 ),
             ]
 
+    context_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        cli, "_context", lambda: (Store(), StewardConfig(repo_root=Path.cwd()))
+        cli,
+        "_context",
+        lambda **kwargs: (
+            context_calls.append(dict(kwargs))
+            or (Store(), StewardConfig(repo_root=Path.cwd()))
+        ),
     )
     status = CliRunner().invoke(app, ["publication", "status"])
     assert status.exit_code == 0, status.output
@@ -222,6 +228,10 @@ def test_status_and_list_are_bounded_and_public_safe(monkeypatch) -> None:
     assert payload["receiptClasses"] == ["private", "public"]
     assert "private/locator" not in listed.output
     assert "generationBoundary" not in listed.output
+    assert context_calls == [
+        {"resolve_execution_modes": False},
+        {"resolve_execution_modes": False},
+    ]
 
 
 def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:

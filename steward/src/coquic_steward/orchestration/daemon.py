@@ -515,10 +515,79 @@ class StewardDaemon:
             pass
 
     def _task_admission_allowed(self, task: TaskRecord) -> bool:
-        if _task_is_dry_run(task):
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
             self._record_dry_run_pause(task)
             return False
         return True
+
+    def _reconcile_dry_run_task(self, task: TaskRecord) -> ReconciliationOutcome:
+        """Stop persisted task wrappers before leaving a task paused."""
+
+        failures: list[dict[str, object]] = []
+        try:
+            runs = self.store.list_runs(task.id)
+        except (AttributeError, KeyError) as exc:
+            failures.append({"error": exc.__class__.__name__})
+            runs = []
+
+        for run in runs:
+            if str(getattr(run, "state", "")) != "running":
+                continue
+            run_id = str(getattr(run, "id", ""))
+            if not run_id:
+                failures.append({"error": "missing_run_id"})
+                continue
+            if self.session_supervisor is None:
+                try:
+                    self.store.mark_run_interrupted(
+                        run_id,
+                        reason="dry-run admission paused during daemon restart",
+                    )
+                except Exception as exc:
+                    failures.append(
+                        {"run_id": run_id, "error": exc.__class__.__name__}
+                    )
+                continue
+            try:
+                inspection = self.session_supervisor.inspect(run_id)
+            except Exception as exc:
+                failures.append({"run_id": run_id, "error": exc.__class__.__name__})
+                continue
+            try:
+                if getattr(inspection, "live", False):
+                    self.session_supervisor.interrupt(run_id)
+                    # A custom boundary may acknowledge termination without
+                    # updating the ledger itself. Preserve the restart evidence
+                    # after the boundary has returned successfully.
+                    if str(self.store.get_run(run_id).state) == "running":
+                        self.store.mark_run_interrupted(
+                            run_id,
+                            reason="dry-run admission paused during daemon restart",
+                        )
+                else:
+                    self.store.mark_run_interrupted(
+                        run_id,
+                        reason="wrapper was not live during dry-run restart",
+                    )
+            except Exception as exc:
+                failures.append({"run_id": run_id, "error": exc.__class__.__name__})
+
+        self._adopted_runs.pop(task.id, None)
+        if failures:
+            self._record_dry_run_pause(task)
+            return ReconciliationOutcome(
+                task.id,
+                ReconciliationDisposition.blocked,
+                "dry-run task wrapper could not be stopped",
+                evidence={"execution_mode": ExecutionMode.dry_run.value, "failures": failures},
+            )
+        self._record_dry_run_pause(task)
+        return ReconciliationOutcome(
+            task.id,
+            ReconciliationDisposition.unchanged,
+            "dry-run task admission paused",
+            evidence={"execution_mode": ExecutionMode.dry_run.value},
+        )
 
     def startup_reconcile(self) -> tuple[ReconciliationOutcome, ...]:
         """Validate and recover durable ownership before dispatch is allowed."""
@@ -1533,13 +1602,8 @@ class StewardDaemon:
     def _reconcile_task(self, task: TaskRecord) -> ReconciliationOutcome:
         """Reconcile archive, ledger, process, Git, and cleanup identities."""
 
-        if not self._task_admission_allowed(task):
-            return ReconciliationOutcome(
-                task.id,
-                ReconciliationDisposition.unchanged,
-                "dry-run task admission paused",
-                evidence={"execution_mode": ExecutionMode.dry_run.value},
-            )
+        if _global_dry_run(self.config) or _task_is_dry_run(task):
+            return self._reconcile_dry_run_task(task)
 
         try:
             execution = self.store.get_execution(task.id)
@@ -3966,7 +4030,11 @@ class StewardDaemon:
                 f"max_dispatch={max_dispatch or '-'}"
             )
             if plan:
-                requeued = self.store.requeue_failed_signal_items()
+                requeued = (
+                    0
+                    if _global_dry_run(self.config)
+                    else self.store.requeue_failed_signal_items()
+                )
                 if requeued:
                     self.store.add_event(
                         DAEMON_EVENT_TASK_ID,
@@ -4237,6 +4305,12 @@ class StewardDaemon:
             if serialized:
                 self._integration_lock.acquire()
             try:
+                # Re-read the Store-owned latch at every phase boundary. The
+                # selected TaskRecord is only a dispatch snapshot and may have
+                # become dry-run while the previous phase was completing.
+                current = self.store.get(task_id)
+                if not self._task_admission_allowed(current):
+                    return False
                 with use_subprocess_owner(self._subprocess_owner):
                     outcome = self.executor.advance_once(task_id)
             except Exception as exc:
@@ -4258,6 +4332,11 @@ class StewardDaemon:
             finally:
                 if serialized:
                     self._integration_lock.release()
+            try:
+                if not self._task_admission_allowed(self.store.get(task_id)):
+                    return False
+            except KeyError:
+                return False
             status = str(getattr(outcome, "status", ""))
             if status == "interrupted":
                 return False
@@ -4266,6 +4345,11 @@ class StewardDaemon:
                     status in {"ready_to_seal", "blocked"}
                     and not self._shutdown_event.is_set()
                 ):
+                    try:
+                        if not self._task_admission_allowed(self.store.get(task_id)):
+                            return False
+                    except KeyError:
+                        return False
                     self.finalize_terminal_task(task_id)
                 return status in {"ready_to_seal", "terminal"}
             if status == "in_progress":

@@ -1325,6 +1325,45 @@ def test_store_requeues_failed_planned_signal_after_retry_window(
     assert pending[0].planner_run_id is None
     assert pending[0].planned_task_id is None
 
+def test_store_preserves_failed_signal_coverage_for_dry_run_task(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore.create(config.db_path, dry_run=True)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    signal, created = ingest_test_signal(
+        store,
+        SignalItem(
+            id="wi-dry-run-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="dry-run-finding",
+            title="Open dry-run finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [signal.id], planner_run_id="planner-dry-run", task_id=task.id
+    )
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+    old = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, signal.id)
+        task_row = session.get(TaskRow, task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+        task_row.updated_at = old.isoformat()
+
+    assert store.requeue_failed_signal_items() == 0
+    assert [item.id for item in store.list_signal_items(status=SignalItemStatus.planned)] == [
+        signal.id
+    ]
+    assert store.pending_signal_items() == []
+
+
 def test_store_skips_failed_signal_requeue_with_duplicate_pending(
     config: StewardConfig,
 ) -> None:

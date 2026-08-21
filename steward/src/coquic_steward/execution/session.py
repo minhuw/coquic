@@ -295,6 +295,13 @@ def enqueue_materialized_publication(
     publication = getattr(config, "publication", None)
     if _global_dry_run(config) or _task_is_dry_run(task):
         return None
+    if isinstance(store, TaskStore):
+        try:
+            if store.task_execution_mode(task.id) is not ExecutionMode.live:
+                return None
+        except Exception:
+            # A missing or unreadable Store latch is not publication authority.
+            return None
     if not getattr(publication, "enabled", False):
         return None
     if run.completed_at is None or str(run.state) == "running":

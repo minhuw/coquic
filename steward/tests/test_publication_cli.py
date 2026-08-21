@@ -256,7 +256,7 @@ def test_retry_enqueues_changed_generation_and_refuses_unchanged() -> None:
     )
     result = publisher.retry_publication(current.publication_id, {"fresh": True})
     assert result.status is PublicationStatus.queued
-    assert replaced == [(current.publication_id, changed.outbox_record)]
+    assert replaced == [(current.publication_id, changed.to_outbox())]
 
     unchanged = _composed_generation(
         task_id=current.task_id,

@@ -730,7 +730,7 @@ def main() -> int:
                 store_path = temporary_root / "tasks.sqlite"
                 store = SQLiteTaskStore.create(store_path)
                 publication = require_generation(compose_for_transport(graph(), scanner_runner=clean_scanner))
-                queued = store.enqueue_publication(publication.outbox_record)
+                queued = store.enqueue_publication(publication.to_outbox())
                 if queued.status.value not in {"enqueued", "existing"}: raise RuntimeError("publication was not queued")
                 d1_provider = ThawingD1Provider(d1)
                 publisher = CloudPublisher(store, r2, d1_provider, worker_id="greenfield-worker", compose=TRANSPORT_COMPOSER, retry_policy=PublicationRetryPolicy())

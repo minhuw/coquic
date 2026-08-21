@@ -228,7 +228,7 @@ def test_terminal_publication_receipts_match_immutable_generation(
     assert isinstance(composed, PublicationGeneration)
     now = datetime.now(timezone.utc)
     durable = replace(
-        composed.outbox_record,
+        composed.to_outbox(),
         state="exposed",
         updated_at=now,
         exposed_at=now,
@@ -309,7 +309,7 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
 
     now = datetime.now(timezone.utc)
     durable = replace(
-        aware.outbox_record,
+        aware.to_outbox(),
         state="exposed",
         updated_at=now,
         exposed_at=now,
@@ -366,7 +366,7 @@ def test_terminal_verification_uses_daemon_credentials_for_canonical_identity(
     ]
 
     free_durable = replace(
-        free.outbox_record,
+        free.to_outbox(),
         state="exposed",
         updated_at=now,
         exposed_at=now,
@@ -915,13 +915,13 @@ def test_terminal_gate_rejects_exposed_active_snapshot_until_terminal_generation
         return values
 
     active = replace(
-        active_composed.outbox_record,
+        active_composed.to_outbox(),
         state="exposed",
         updated_at=now,
         exposed_at=now,
     )
     terminal = replace(
-        terminal_composed.outbox_record,
+        terminal_composed.to_outbox(),
         state="queued",
         updated_at=now,
     )

@@ -842,8 +842,7 @@ class PublicationGeneration:
     def identity(self) -> GenerationIdentity:
         return GenerationIdentity(self.task_id, self.generation_boundary)
 
-    @property
-    def outbox_record(self) -> outbox.PublicationGeneration:
+    def to_outbox(self) -> outbox.PublicationGeneration:
         """Return the exact durable outbox record represented by this envelope."""
 
         counts = self.generation.get("expectedCounts")
@@ -878,9 +877,6 @@ class PublicationGeneration:
             created_at=_timestamp_value(self.generation.get("createdAt")),
             updated_at=_timestamp_value(head_intent.get("updatedAt")),
         )
-
-    def to_outbox(self) -> outbox.PublicationGeneration:
-        return self.outbox_record
 
     def as_dict(self) -> dict[str, Any]:
         return _thaw(self.payload)

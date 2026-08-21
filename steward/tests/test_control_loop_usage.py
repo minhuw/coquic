@@ -10,7 +10,19 @@ import pytest
 
 from coquic_steward.agents.telemetry import PriceCatalog, PriceEntry
 from coquic_steward.control_loop import ControlLoopArchive, ControlLoopLedger
-from coquic_steward.control_loop.models import PlannerRun
+from coquic_steward.control_loop.models import (
+    PlannerRun,
+    StewardOverheadUsage,
+    UsageCosts,
+    UsageCoverage,
+    UsageTokens,
+)
+from coquic_steward.control_loop.usage_algebra import (
+    fill_usage_costs,
+    merge_usage_costs,
+    merge_usage_coverage,
+    merge_usage_tokens,
+)
 from coquic_steward.storage import TaskStore
 from coquic_steward.control_loop.usage import (
     STEWARD_OVERHEAD_OWNER,
@@ -184,6 +196,208 @@ def _run(
     completed = ledger.complete_planner_run(run_id, [], state=state)
     archive.publish_planner_run(completed, artifacts)
     return completed
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (
+            UsageTokens(
+                inputTokens=10,
+                cachedInputTokens=2,
+                uncachedInputTokens=8,
+                outputTokens=4,
+                totalTokens=14,
+            ),
+            UsageTokens(uncachedInputTokens=3),
+            UsageTokens(
+                inputTokens=10,
+                cachedInputTokens=2,
+                outputTokens=4,
+                totalTokens=14,
+            ),
+        ),
+        (
+            UsageTokens(outputTokens=None, reasoningOutputTokens=3),
+            UsageTokens(outputTokens=2),
+            UsageTokens(outputTokens=2),
+        ),
+        (
+            UsageTokens(),
+            UsageTokens(),
+            UsageTokens(),
+        ),
+    ],
+)
+def test_usage_algebra_merges_partial_tokens(
+    left: UsageTokens, right: UsageTokens, expected: UsageTokens
+) -> None:
+    assert merge_usage_tokens(left, right) == expected
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (
+            UsageCosts(
+                uncachedInputMicroUsd=4,
+                cachedInputMicroUsd=1,
+                outputMicroUsd=2,
+                totalMicroUsd=7,
+                status="Complete",
+            ),
+            UsageCosts(
+                uncachedInputMicroUsd=3,
+                cachedInputMicroUsd=2,
+                outputMicroUsd=1,
+                totalMicroUsd=6,
+                status="Complete",
+            ),
+            UsageCosts(
+                uncachedInputMicroUsd=7,
+                cachedInputMicroUsd=3,
+                outputMicroUsd=3,
+                totalMicroUsd=13,
+                status="Complete",
+            ),
+        ),
+        (
+            UsageCosts(totalMicroUsd=5, status="Partial"),
+            UsageCosts(outputMicroUsd=2, status="Partial"),
+            UsageCosts(outputMicroUsd=2, totalMicroUsd=5, status="Partial"),
+        ),
+        (UsageCosts(), UsageCosts(), UsageCosts()),
+    ],
+)
+def test_usage_algebra_merges_partial_costs(
+    left: UsageCosts, right: UsageCosts, expected: UsageCosts
+) -> None:
+    assert merge_usage_costs(left, right) == expected
+
+
+def test_usage_algebra_fill_preserves_left_values_and_partial_status() -> None:
+    left = UsageCosts(
+        uncachedInputMicroUsd=4,
+        totalMicroUsd=8,
+        status="Partial",
+    )
+    right = UsageCosts(
+        uncachedInputMicroUsd=99,
+        cachedInputMicroUsd=1,
+        outputMicroUsd=2,
+        totalMicroUsd=102,
+        status="Complete",
+    )
+
+    assert fill_usage_costs(left, right) == UsageCosts(
+        uncachedInputMicroUsd=4,
+        cachedInputMicroUsd=1,
+        outputMicroUsd=2,
+        totalMicroUsd=None,
+        status="Partial",
+    )
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (
+            UsageCoverage(coveredInvocations=1, expectedInvocations=1, status="Complete"),
+            UsageCoverage(coveredInvocations=1, expectedInvocations=1, status="Complete"),
+            UsageCoverage(coveredInvocations=2, expectedInvocations=2, status="Complete"),
+        ),
+        (
+            UsageCoverage(),
+            UsageCoverage(),
+            UsageCoverage(),
+        ),
+        (
+            UsageCoverage(coveredInvocations=0, expectedInvocations=1, status="N.A."),
+            UsageCoverage(coveredInvocations=1, expectedInvocations=1, status="Complete"),
+            UsageCoverage(coveredInvocations=1, expectedInvocations=2, status="Partial"),
+        ),
+    ],
+)
+def test_usage_algebra_merges_coverage(
+    left: UsageCoverage, right: UsageCoverage, expected: UsageCoverage
+) -> None:
+    assert merge_usage_coverage(left, right) == expected
+
+
+def test_incremental_and_rebuild_usage_algebra_match_for_partial_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, ledger = _archive(tmp_path)
+    first = _run(
+        archive,
+        ledger,
+        "planner-usage-partial-one",
+        {"result.json": b"{}\\n"},
+    )
+    second = _run(
+        archive,
+        ledger,
+        "planner-usage-partial-two",
+        {"result.json": b"{}\\n"},
+    )
+    rows = [
+        StewardOverheadUsage(
+            date="2026-07-24",
+            model="gpt-overhead",
+            tokens=UsageTokens(
+                inputTokens=10,
+                cachedInputTokens=2,
+                uncachedInputTokens=8,
+            ),
+            cost=UsageCosts(uncachedInputMicroUsd=4, status="Partial"),
+            coverage=UsageCoverage(
+                coveredInvocations=1,
+                expectedInvocations=2,
+                status="Partial",
+            ),
+        ),
+        StewardOverheadUsage(
+            date="2026-07-24",
+            model="gpt-overhead",
+            tokens=UsageTokens(
+                uncachedInputTokens=5,
+                outputTokens=3,
+                reasoningOutputTokens=1,
+                totalTokens=8,
+            ),
+            cost=UsageCosts(
+                cachedInputMicroUsd=1,
+                outputMicroUsd=2,
+                totalMicroUsd=3,
+                status="Partial",
+            ),
+            coverage=UsageCoverage(
+                coveredInvocations=1,
+                expectedInvocations=1,
+                status="Complete",
+            ),
+        ),
+    ]
+    original_rebuild = ledger._rebuild_overhead_usage
+    monkeypatch.setattr(ledger, "_rebuild_overhead_usage", lambda db: None)
+    ledger.record_overhead_usage(first.planner_run_id, [rows[0]], archive_digest="1" * 64)
+    ledger.record_overhead_usage(second.planner_run_id, [rows[1]], archive_digest="2" * 64)
+    incremental = ledger.list_overhead_usage()
+
+    monkeypatch.setattr(ledger, "_rebuild_overhead_usage", original_rebuild)
+    with ledger.transaction() as db:
+        ledger._rebuild_overhead_usage(db)
+    rebuilt = ledger.list_overhead_usage()
+
+    assert incremental == rebuilt
+    assert rebuilt[0].tokens.uncached_input_tokens is None
+    assert rebuilt[0].tokens.total_tokens is None
+    assert rebuilt[0].cost.total_micro_usd is None
+    assert rebuilt[0].coverage == UsageCoverage(
+        coveredInvocations=2,
+        expectedInvocations=3,
+        status="Partial",
+    )
 
 
 def test_reducer_groups_exact_utc_date_and_model_and_replays_idempotently(tmp_path: Path) -> None:

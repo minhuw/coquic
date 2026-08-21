@@ -41,6 +41,12 @@ from .models import (
     validate_id,
     validate_relative_path,
 )
+from .usage_algebra import (
+    fill_usage_costs,
+    merge_usage_costs,
+    merge_usage_coverage,
+    merge_usage_tokens,
+)
 
 
 class LedgerConflictError(RuntimeError):
@@ -819,7 +825,7 @@ class ControlLoopLedger:
                             ).fetchone()
                             if existing is None:
                                 continue
-                            merged_cost = _fill_usage_costs(
+                            merged_cost = fill_usage_costs(
                                 UsageCosts.model_validate(_loads(existing[0], {})), value.cost
                             )
                             db.execute(
@@ -856,9 +862,9 @@ class ControlLoopLedger:
                         date=value.date,
                         model=value.model,
                         ownerClass=value.owner_class,
-                        tokens=_merge_usage_tokens(old_tokens, value.tokens),
-                        cost=_merge_usage_costs(old_costs, value.cost),
-                        coverage=_merge_usage_coverage(old_coverage, value.coverage),
+                        tokens=merge_usage_tokens(old_tokens, value.tokens),
+                        cost=merge_usage_costs(old_costs, value.cost),
+                        coverage=merge_usage_coverage(old_coverage, value.coverage),
                     )
                 db.execute(
                     "INSERT INTO control_loop_overhead_usage(usage_date,model,owner_class,tokens_json,costs_json,coverage_json) "
@@ -912,9 +918,9 @@ class ControlLoopLedger:
                         date=value.date,
                         model=value.model,
                         ownerClass=value.owner_class,
-                        tokens=_merge_usage_tokens(previous.tokens, value.tokens),
-                        cost=_merge_usage_costs(previous.cost, value.cost),
-                        coverage=_merge_usage_coverage(previous.coverage, value.coverage),
+                        tokens=merge_usage_tokens(previous.tokens, value.tokens),
+                        cost=merge_usage_costs(previous.cost, value.cost),
+                        coverage=merge_usage_coverage(previous.coverage, value.coverage),
                     )
                 )
         db.execute("DELETE FROM control_loop_overhead_usage")
@@ -1221,107 +1227,6 @@ class ControlLoopLedger:
             return None
 
 
-def _merge_optional_numbers(left: int | None, right: int | None) -> int | None:
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return left + right
-
-
-def _merge_usage_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
-    return UsageTokens(
-        inputTokens=_merge_optional_numbers(left.input_tokens, right.input_tokens),
-        cachedInputTokens=_merge_optional_numbers(
-            left.cached_input_tokens, right.cached_input_tokens
-        ),
-        uncachedInputTokens=_merge_optional_numbers(
-            left.uncached_input_tokens, right.uncached_input_tokens
-        ),
-        outputTokens=_merge_optional_numbers(left.output_tokens, right.output_tokens),
-        reasoningOutputTokens=_merge_optional_numbers(
-            left.reasoning_output_tokens, right.reasoning_output_tokens
-        ),
-        totalTokens=_merge_optional_numbers(left.total_tokens, right.total_tokens),
-    )
-
-
-def _merge_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
-    components = {
-        "uncachedInputMicroUsd": _merge_optional_numbers(
-            left.uncached_input_micro_usd, right.uncached_input_micro_usd
-        ),
-        "cachedInputMicroUsd": _merge_optional_numbers(
-            left.cached_input_micro_usd, right.cached_input_micro_usd
-        ),
-        "outputMicroUsd": _merge_optional_numbers(
-            left.output_micro_usd, right.output_micro_usd
-        ),
-        "totalMicroUsd": _merge_optional_numbers(
-            left.total_micro_usd, right.total_micro_usd
-        ),
-    }
-    present = [components[key] is not None for key in (
-        "uncachedInputMicroUsd",
-        "cachedInputMicroUsd",
-        "outputMicroUsd",
-        "totalMicroUsd",
-    )]
-    if all(present) and left.status == right.status == "Complete":
-        status = "Complete"
-    elif any(present):
-        status = "Partial"
-    else:
-        status = "N.A."
-    return UsageCosts(status=status, **components)
-
-
-def _fill_usage_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
-    values = {
-        "uncachedInputMicroUsd": (
-            left.uncached_input_micro_usd
-            if left.uncached_input_micro_usd is not None
-            else right.uncached_input_micro_usd
-        ),
-        "cachedInputMicroUsd": (
-            left.cached_input_micro_usd
-            if left.cached_input_micro_usd is not None
-            else right.cached_input_micro_usd
-        ),
-        "outputMicroUsd": (
-            left.output_micro_usd
-            if left.output_micro_usd is not None
-            else right.output_micro_usd
-        ),
-        "totalMicroUsd": (
-            left.total_micro_usd
-            if left.total_micro_usd is not None
-            else right.total_micro_usd
-        ),
-    }
-    components = (
-        values["uncachedInputMicroUsd"],
-        values["cachedInputMicroUsd"],
-        values["outputMicroUsd"],
-    )
-    if values["totalMicroUsd"] is not None and all(item is not None for item in components):
-        if values["totalMicroUsd"] != sum(item for item in components if item is not None):
-            values["totalMicroUsd"] = None
-    present = [item is not None for item in values.values()]
-    if all(present):
-        # A catalog can fill an unavailable contribution without turning a
-        # partial capture into complete evidence.  Existing numeric costs are
-        # otherwise immutable and retain their original coverage status.
-        status = (
-            "Partial"
-            if left.status == "Partial" or right.status == "Partial"
-            else "Complete"
-        )
-    else:
-        status = "Partial" if any(present) else "N.A."
-    return UsageCosts(status=status, **values)
-
-
 def _fill_contribution_rows(
     previous: Iterable[StewardOverheadUsage],
     replacement: Iterable[StewardOverheadUsage],
@@ -1345,7 +1250,7 @@ def _fill_contribution_rows(
                     model=old.model,
                     ownerClass=old.owner_class,
                     tokens=old.tokens,
-                    cost=_fill_usage_costs(old.cost, new.cost),
+                    cost=fill_usage_costs(old.cost, new.cost),
                     coverage=old.coverage,
                 )
             )
@@ -1359,22 +1264,6 @@ def _fill_contribution_rows(
         )
     )
     return result
-
-
-def _merge_usage_coverage(left: UsageCoverage, right: UsageCoverage) -> UsageCoverage:
-    covered = left.covered_invocations + right.covered_invocations
-    expected = left.expected_invocations + right.expected_invocations
-    if expected == 0 or covered == 0:
-        status = "N.A."
-    elif covered == expected and left.status == right.status == "Complete":
-        status = "Complete"
-    else:
-        status = "Partial"
-    return UsageCoverage(
-        coveredInvocations=covered,
-        expectedInvocations=expected,
-        status=status,
-    )
 
 
 def _signal_fetch(value: SignalFetch | SignalFetchRun) -> SignalFetch:

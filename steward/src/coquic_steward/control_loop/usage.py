@@ -30,6 +30,11 @@ from .models import (
     UsageCoverage,
     UsageTokens,
 )
+from .usage_algebra import (
+    merge_usage_costs,
+    merge_usage_coverage,
+    merge_usage_tokens,
+)
 
 if TYPE_CHECKING:
     from .archive import ControlLoopArchive
@@ -92,95 +97,6 @@ def _parse_utc(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise UsageReductionError("telemetry start time has no timezone")
     return parsed.astimezone(timezone.utc)
-
-
-def _merge_optional(left: int | None, right: int | None) -> int | None:
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return left + right
-
-
-def _merge_tokens(left: UsageTokens, right: UsageTokens) -> UsageTokens:
-    values = {
-        "inputTokens": _merge_optional(left.input_tokens, right.input_tokens),
-        "cachedInputTokens": _merge_optional(
-            left.cached_input_tokens, right.cached_input_tokens
-        ),
-        "uncachedInputTokens": _merge_optional(
-            left.uncached_input_tokens, right.uncached_input_tokens
-        ),
-        "outputTokens": _merge_optional(left.output_tokens, right.output_tokens),
-        "reasoningOutputTokens": _merge_optional(
-            left.reasoning_output_tokens, right.reasoning_output_tokens
-        ),
-        "totalTokens": _merge_optional(left.total_tokens, right.total_tokens),
-    }
-    # A partial sidecar may carry only a subset of counters.  Preserve known
-    # subtotals without fabricating a reconciliation among unknown categories.
-    if values["inputTokens"] is not None and values["cachedInputTokens"] is not None:
-        expected = values["inputTokens"] - values["cachedInputTokens"]
-        if values["uncachedInputTokens"] != expected:
-            values["uncachedInputTokens"] = None
-    if values["outputTokens"] is not None and values["reasoningOutputTokens"] is not None:
-        if values["reasoningOutputTokens"] > values["outputTokens"]:
-            values["reasoningOutputTokens"] = None
-    if (
-        values["inputTokens"] is not None
-        and values["outputTokens"] is not None
-        and values["totalTokens"] is not None
-        and values["totalTokens"] != values["inputTokens"] + values["outputTokens"]
-    ):
-        values["totalTokens"] = None
-    return UsageTokens(**values)
-
-
-def _merge_costs(left: UsageCosts, right: UsageCosts) -> UsageCosts:
-    values = {
-        "uncachedInputMicroUsd": _merge_optional(
-            left.uncached_input_micro_usd, right.uncached_input_micro_usd
-        ),
-        "cachedInputMicroUsd": _merge_optional(
-            left.cached_input_micro_usd, right.cached_input_micro_usd
-        ),
-        "outputMicroUsd": _merge_optional(
-            left.output_micro_usd, right.output_micro_usd
-        ),
-        "totalMicroUsd": _merge_optional(left.total_micro_usd, right.total_micro_usd),
-    }
-    components = (
-        values["uncachedInputMicroUsd"],
-        values["cachedInputMicroUsd"],
-        values["outputMicroUsd"],
-    )
-    if values["totalMicroUsd"] is not None and all(item is not None for item in components):
-        if values["totalMicroUsd"] != sum(item for item in components if item is not None):
-            values["totalMicroUsd"] = None
-    present = [item is not None for item in values.values()]
-    if all(present) and left.status == right.status == "Complete":
-        status = "Complete"
-    elif any(present):
-        status = "Partial"
-    else:
-        status = "N.A."
-    return UsageCosts(status=status, **values)
-
-
-def _merge_coverage(left: UsageCoverage, right: UsageCoverage) -> UsageCoverage:
-    covered = left.covered_invocations + right.covered_invocations
-    expected = left.expected_invocations + right.expected_invocations
-    if expected == 0 or covered == 0:
-        status = "N.A."
-    elif covered == expected and left.status == right.status == "Complete":
-        status = "Complete"
-    else:
-        status = "Partial"
-    return UsageCoverage(
-        coveredInvocations=covered,
-        expectedInvocations=expected,
-        status=status,
-    )
 
 
 def _aggregate_tokens(value: Mapping[str, Any]) -> UsageTokens:
@@ -414,9 +330,9 @@ class StewardOverheadReducer:
                     date=row.date,
                     model=row.model,
                     ownerClass=STEWARD_OVERHEAD_OWNER,
-                    tokens=_merge_tokens(previous.tokens, row.tokens),
-                    cost=_merge_costs(previous.cost, row.cost),
-                    coverage=_merge_coverage(previous.coverage, row.coverage),
+                    tokens=merge_usage_tokens(previous.tokens, row.tokens),
+                    cost=merge_usage_costs(previous.cost, row.cost),
+                    coverage=merge_usage_coverage(previous.coverage, row.coverage),
                 )
         return UsageReduction(
             rows=tuple(grouped[key] for key in sorted(grouped)),
